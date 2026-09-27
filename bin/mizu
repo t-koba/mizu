@@ -1,0 +1,9 @@
+#!/usr/bin/env python3
+"""Source-tree and installed entry point; no Python package installation needed."""
+import pathlib
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+from mizu.cli import main
+
+raise SystemExit(main())

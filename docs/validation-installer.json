@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "check": "offline-source-installer-and-cli-lifecycle",
+  "status": "pass",
+  "checks": [
+    "core-only staging",
+    "source-manifest verification on activation",
+    "paths containing spaces",
+    "repeat-install configuration preservation",
+    "project import",
+    "static artifact",
+    "editor export",
+    "backup checkpoint",
+    "unarmed restore",
+    "restored status"
+  ],
+  "installed_pi": "not_run",
+  "rootless_podman": "not_run",
+  "live_provider": "not_run",
+  "note": "Earlier end-to-end attempts exceeded the outer command time limit. A complete observed rerun finished successfully. No product background job remains."
+}

@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "cli": "claude",
+  "version": "unpinned",
+  "version_basis": "No CLI version is pinned yet: pin after the first reviewed live gate (doctor + smoke --live --engine claude + read-only smoke side-effect review). Until then doctor checks presence, exit status and required flags only.",
+  "required_flags": ["-p", "--output-format", "--mcp-config", "--allowedTools", "--system-prompt"],
+  "forbidden_argv": ["--dangerously-skip-permissions", "--yolo"],
+  "protocol": "stream-json-events",
+  "completion_condition": "mizu_finish via required MCP bridge, then process exit",
+  "budget_hook": "shared daily admission per invocation (no per-request hook exists)",
+  "compatibility_basis": "Claude Code headless/MCP/permission docs inspected; installed-binary, headless auth refresh and live-provider gates remain separate. Allowed tools are enumerated per capability (mcp__mizu__mizu_*); wildcards and host tools are never passed."
+}

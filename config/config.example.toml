@@ -1,0 +1,145 @@
+# Mizu schema 1. Copy with `mizu configure`; edit only the private copy.
+# Runtime invariants are code. Grants and limits are operator policy.
+schema = 1
+data_dir = "~/.local/state/mizu"
+pi_dir = "pi"
+pi_command = ["pi"]
+codex_command = ["codex"]
+claude_command = ["claude"]
+timezone = "UTC"
+consult_profiles = ["primary", "alternate"]
+exclude = [".git", ".pi", ".env", ".env.*", ".venv", "node_modules", "__pycache__", ".pytest_cache"]
+
+[limits]
+daily_requests = 0                 # Fail closed. Set a deliberate positive limit.
+requests_per_run = 24
+tools_per_run = 64
+run_seconds = 1200
+command_seconds = 300
+idle_seconds = 15
+cooldown_seconds = 5
+default_wait_seconds = 1800
+maximum_wait_seconds = 86400
+max_failures = 3
+parallel_runs = 4
+parallel_consults = 2
+output_bytes = 262144
+file_bytes = 8388608
+snapshot_bytes = 268435456
+snapshot_files = 20000
+history_index = 128              # Published IDs retained in history.json; manifests stay on disk.
+prompt_snapshots = 6             # Recent anchored summaries offered to each work unit.
+free_disk_mb = 1024
+
+[sandbox]
+executable = "podman"             # Trusted container runtime: podman or docker (Podman/Desktop on macOS/Windows).
+image = ""                        # Local sha256:<64 hex> from build-sandbox.sh, or registry@sha256:...
+memory_mb = 2048
+cpus = 2
+pids = 256
+temporary_mb = 256
+file_mb = 128                     # Per-file limit, NOT a whole-workspace disk quota.
+selinux_label = true              # Linux-only :z relabeling of dedicated mounts.
+mode = "rootless"                 # rootless on every OS, or single on Linux hosts without subordinate-ID delegation.
+# Single mode only (Linux): operator-owned namespace wrapper argv (absolute paths),
+# explicit podman storage paths, and a delegated cgroup parent whose final
+# component must not end in .slice. cgroup_manager must be cgroupfs there.
+# namespace_helper = ["~/.local/share/mizu/current/scripts/idmap/mizu-userns"]
+# podman_root = "~/.local/share/mizu/containers/storage"
+# podman_runroot = "/run/user/1000/containers"
+# podman_tmpdir = "/run/user/1000/containers/tmp"
+# storage_driver = "overlay"
+# storage_options = ["overlay.ignore_chown_errors=true"]
+# cgroup_manager = "cgroupfs"
+# cgroup_parent = "user.slice/user-1000.slice/user@1000.service/mizucg"
+
+[profiles.primary]
+provider = ""                     # Exact Pi provider ID; no model is chosen implicitly.
+model = ""                        # Exact model ID, not a fuzzy name.
+thinking = "off"
+engine = "pi"                     # pi | codex | claude. Default pi; other engines use the same contract.
+
+[profiles.alternate]
+provider = ""
+model = ""
+thinking = "off"
+engine = "pi"
+
+# ChatGPT subscription through the pi engine (no new driver): run the vendor
+# login once (e.g. `pi` /login, subscription → ChatGPT), then set:
+#   provider = "openai-codex"
+#   model = "EXACT_MODEL_ID"
+#   engine = "pi"
+# Subscription quotas are account-level (shared 5h/weekly caps): prefer API
+# keys or enterprise tokens for unattended 24h runs.
+
+# [profiles.codex-exec]          # codex CLI driver (Phase 3 live gate required).
+# provider = "openai"            # Route label for usage groups; must match operator intent.
+# model = "EXACT_MODEL_ID"
+# engine = "codex"
+
+# [profiles.claude-sub]          # claude CLI driver (Phase 4 live gate required).
+# provider = "anthropic"
+# model = "EXACT_MODEL_ID"
+# engine = "claude"
+
+[web]
+hosts = []                       # Exact HTTPS host allowlist, rechecked on every redirect.
+feeds = []                       # RSS/Atom; optional discovery adapter below.
+search_command = []              # Trusted argv executable; JSON stdin/stdout, never a shell string.
+cache_seconds = 1800
+timeout_seconds = 20
+max_bytes = 524288
+
+[roles.worker]
+profile = "primary"
+policy = "policies/worker.md"
+workspace = "write"
+capabilities = ["files", "read", "diff", "exec", "experiment", "verify", "fetch", "search", "insights", "decide", "consult", "finish"]
+persistent = true
+daemon = true
+
+[roles.searcher]
+profile = "alternate"
+policy = "policies/searcher.md"
+workspace = "read"
+capabilities = ["files", "read", "search", "fetch", "experiment", "submit_insight", "finish"]
+interval_seconds = 1800
+
+[roles.reviewer]
+profile = "alternate"
+policy = "policies/reviewer.md"
+workspace = "read"
+capabilities = ["files", "read", "diff", "exec", "experiment", "submit_insight", "finish"]
+# on_change only skips unchanged snapshots; it combines with interval_seconds.
+on_change = true
+interval_seconds = 900
+
+[roles.reporter]
+profile = "primary"
+policy = "policies/reporter.md"
+workspace = "read"
+capabilities = ["files", "read", "diff", "insights", "report", "finish"]
+calendar = ["07:00", "19:00"]
+
+[roles.consult]
+profile = "alternate"
+policy = "policies/consult.md"
+workspace = "read"
+capabilities = ["files", "read", "finish"]
+
+# Enable these two on a separate candidate project, not on the deployed release.
+[roles.maintainer]
+profile = "primary"
+policy = "policies/maintainer.md"
+workspace = "write"
+capabilities = ["files", "read", "diff", "exec", "experiment", "verify", "insights", "decide", "consult", "finish"]
+persistent = true
+interval_seconds = 21600
+
+[roles.maintainer-searcher]
+profile = "alternate"
+policy = "policies/maintainer-searcher.md"
+workspace = "read"
+capabilities = ["files", "read", "search", "fetch", "experiment", "submit_insight", "finish"]
+interval_seconds = 21600

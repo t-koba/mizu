@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "cli": "codex",
+  "version": "unpinned",
+  "version_basis": "No CLI version is pinned yet: pin after the first reviewed live gate (doctor + smoke --live --engine codex + read-only smoke side-effect review). Until then doctor checks presence, exit status and required flags only.",
+  "required_flags": ["exec", "--json", "--sandbox", "--skip-git-repo-check", "--ephemeral"],
+  "forbidden_argv": ["--dangerously-bypass-approvals-and-sandbox", "--yolo", "danger-full-access"],
+  "protocol": "jsonl-events",
+  "completion_condition": "mizu_finish via required MCP bridge, then process exit",
+  "budget_hook": "shared daily admission per invocation (no per-request hook exists)",
+  "compatibility_basis": "Official Codex CLI docs inspected (non-interactive mode, MCP, config reference, approvals/security); installed-binary, headless auth refresh and live-provider gates remain separate."
+}
