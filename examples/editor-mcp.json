@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "mizu": {
+      "command": "python3",
+      "args": ["/opt/mizu/bin/mizu", "editor", "mcp", "--bundle", "/bundle", "--outbox", "/outbox"]
+    }
+  }
+}

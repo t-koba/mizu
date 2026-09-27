@@ -1,0 +1,84 @@
+{
+  "schema": 1,
+  "suite": "offline",
+  "ok": true,
+  "checks": [
+    {
+      "name": "python-syntax",
+      "status": "pass"
+    },
+    {
+      "name": "python-unit-and-contract-tests",
+      "status": "pass",
+      "seconds": 20.642,
+      "exit_code": 0
+    },
+    {
+      "name": "node-transport-and-extension-tests",
+      "status": "pass",
+      "seconds": 0.633,
+      "exit_code": 0
+    },
+    {
+      "name": "javascript-syntax:bridge-client.mjs",
+      "status": "pass",
+      "seconds": 0.17,
+      "exit_code": 0
+    },
+    {
+      "name": "javascript-syntax:register.mjs",
+      "status": "pass",
+      "seconds": 0.163,
+      "exit_code": 0
+    },
+    {
+      "name": "shell-syntax:build-sandbox.sh",
+      "status": "pass",
+      "seconds": 0.013,
+      "exit_code": 0
+    },
+    {
+      "name": "shell-syntax:editor-capsule.sh",
+      "status": "pass",
+      "seconds": 0.012,
+      "exit_code": 0
+    },
+    {
+      "name": "shell-syntax:install-node.sh",
+      "status": "pass",
+      "seconds": 0.011,
+      "exit_code": 0
+    },
+    {
+      "name": "shell-syntax:lock-pi.sh",
+      "status": "pass",
+      "seconds": 0.021,
+      "exit_code": 0
+    },
+    {
+      "name": "shell-syntax:setup.sh",
+      "status": "pass",
+      "seconds": 0.017,
+      "exit_code": 0
+    },
+    {
+      "name": "shell-syntax:system-deps.sh",
+      "status": "pass",
+      "seconds": 0.018,
+      "exit_code": 0
+    },
+    {
+      "name": "shell-syntax:test-install.sh",
+      "status": "pass",
+      "seconds": 0.014,
+      "exit_code": 0
+    }
+  ],
+  "not_run": [
+    "installed-Pi",
+    "rootless-Podman",
+    "live-provider",
+    "24-hour-soak",
+    "cross-distribution-deployment"
+  ]
+}

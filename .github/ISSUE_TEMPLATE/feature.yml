@@ -1,0 +1,19 @@
+name: Design proposal
+description: Explain the need and the smallest mechanism or policy change.
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Concrete problem and evidence
+    validations:
+      required: true
+  - type: textarea
+    id: design
+    attributes:
+      label: Proposed change, trust boundary and simpler alternatives
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation, migration and maintenance cost

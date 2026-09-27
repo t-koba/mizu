@@ -1,0 +1,36 @@
+name: Offline checks
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  core:
+    # Portable development plane: offline unit/contract checks on all three OSes.
+    # Linux-only production (rootless Podman, systemd) is never asserted here.
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest, windows-latest]
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Offline core and transport contracts
+        run: python scripts/check.py
+      - name: Core installer and CLI lifecycle
+        if: runner.os == 'Linux' && matrix.python == '3.13'
+        run: ./scripts/test-install.sh
+      - name: Source distribution build
+        if: runner.os == 'Linux' && matrix.python == '3.13'
+        run: python scripts/package.py --output dist

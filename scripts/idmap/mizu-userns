@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""Enter a single-ID user+mount namespace, then exec the payload.
+
+Constrained hosts (no subordinate UID/GID delegation) cannot run a
+multi-ID rootless runtime. This helper maps only the caller's own UID/GID
+(``0 -> self``) so an OCI runtime can operate unprivileged in "fake-rootful"
+mode: every container UID collapses to the invoking user, and per-container
+identity separation does not exist.
+
+Hard requirements, all enforced by the kernel (never silently downgraded):
+
+- The maps are written by the process that called unshare(), before exec.
+  A post-exec self-write is refused by the kernel.
+- Writes use O_WRONLY without truncation, in uid/setgroups/gid order.
+  Shell ``>`` redirection (O_TRUNC) and any other order fail here.
+- Exactly one extent of size 1 mapping the caller's own IDs. Anything else
+  is refused by the kernel; this helper never requests more.
+
+The helper grants no privilege: uid 0 inside the namespace is the invoking
+unprivileged user outside it. Network, mount, capability and seccomp
+confinement still come from the container runtime flags, which this helper
+never touches.
+"""
+import ctypes
+import os
+import sys
+
+CLONE_NEWUSERNS = 0x10000000
+CLONE_NEWNS = 0x00020000
+
+
+def write_map(path, data):
+    fd = os.open(path, os.O_WRONLY)
+    try:
+        os.write(fd, data)
+    finally:
+        os.close(fd)
+
+
+def main(argv):
+    if sys.platform != "linux":
+        sys.stderr.write("mizu-userns requires Linux user namespaces\n")
+        raise SystemExit(78)
+    me, mg = str(os.getuid()), str(os.getgid())
+    libc = ctypes.CDLL('libc.so.6', use_errno=True)
+    if libc.unshare(CLONE_NEWUSERNS | CLONE_NEWNS) != 0:
+        raise OSError(ctypes.get_errno(), 'unshare(user+mount) failed')
+    write_map('/proc/self/uid_map', ('0 %s 1' % me).encode())
+    write_map('/proc/self/setgroups', b'deny')
+    write_map('/proc/self/gid_map', ('0 %s 1' % mg).encode())
+    os.execvp(argv[0], argv)
+
+
+if __name__ == '__main__':
+    if len(sys.argv) < 2:
+        sys.stderr.write('usage: mizu-userns COMMAND [ARGS...]\n')
+        raise SystemExit(64)
+    main(sys.argv[1:])

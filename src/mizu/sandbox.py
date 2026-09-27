@@ -1,0 +1,254 @@
+"""One networkless container per command. No privileged fallback.
+
+The container interior is always Linux, so probes stay identical on every
+host. The host side speaks generic OCI CLI (`podman` or `docker` via
+`sandbox.executable`): only flags both runtimes accept are used, mounts use
+`-v` on Linux (where `:` is unambiguous and `:z` relabeling applies) and
+`--mount` elsewhere (where drive letters contain `:`).
+"""
+from __future__ import annotations
+
+import dataclasses
+import os
+import shutil
+import uuid
+from collections.abc import Callable, Sequence
+from pathlib import Path
+
+from . import platform as _platform
+from .config import Config
+from .errors import ConfigError, Denied
+from .fs import SCRIPT_MAX, digest, mkdir, now, write_json
+from .process import Result, environment, run
+
+#: Single-mode cgroup parents already prepared in this process.
+_PREPARED_SINGLE: set[str] = set()
+
+
+def runtime_base(config: Config) -> list[str]:
+    """Trusted container invocation prefix: optional namespace wrapper plus
+    storage/cgroup globals. Single mode keeps every path explicit so the
+    command works under minimal service environments as well."""
+    cfg = config.sandbox
+    argv = list(cfg.namespace_helper)
+    if cfg.namespace_helper and not (Path(argv[0]).is_file() and os.access(argv[0], os.X_OK)):
+        raise Denied("sandbox.namespace_helper is not executable: " + argv[0])
+    argv.append(cfg.executable)
+    if cfg.mode == "single":
+        argv.extend(["--root", cfg.podman_root, "--runroot", cfg.podman_runroot,
+                     "--tmpdir", cfg.podman_tmpdir, "--cgroup-manager", cfg.cgroup_manager])
+        if cfg.storage_driver:
+            argv.extend(["--storage-driver", cfg.storage_driver])
+        for opt in cfg.storage_options:
+            argv.extend(["--storage-opt", opt])
+    return argv
+
+
+def runtime_env(config: Config) -> dict[str, str]:
+    """Resolve helpers next to the configured runtime binary even when PATH
+    is minimal, as in user services."""
+    env = environment()
+    bindir = str(Path(config.sandbox.executable).parent)
+    path = env.get("PATH", os.defpath)
+    first = [p for p in (bindir, *[str(Path(h).parent) for h in config.sandbox.namespace_helper]) if p]
+    env["PATH"] = os.pathsep.join([*first, path]) if path else os.pathsep.join(first)
+    return env
+
+
+def bind_args(source: str, target: str, *, readonly: bool, selinux: bool, linux: bool) -> list[str]:
+    """Bind-mount spelling both runtimes accept. `-v` on Linux keeps `:z`
+    relabeling; `--mount` elsewhere avoids the `:` delimiter that Windows
+    drive letters contain. `linux` is explicit so tests cover both spellings
+    without mocking the host."""
+    if linux:
+        mode = ("ro" if readonly else "rw") + (",z" if selinux else "")
+        return ["--volume", f"{source}:{target}:{mode}"]
+    return ["--mount", f"type=bind,src={source},dst={target}" + (",readonly" if readonly else "")]
+
+
+def _is_podman(executable: str) -> bool:
+    return Path(executable).name == "podman"
+
+
+def remove_argv(config: Config, name: str) -> list[str] | None:
+    """Portable leftover removal. Podman accepts `--ignore` for the common
+    already-removed case; without it (Docker) removal needs an existence
+    check first, so this returns None and the caller lists before removing."""
+    if _is_podman(config.sandbox.executable):
+        return [*runtime_base(config), "rm", "--force", "--ignore", name]
+    return None
+
+
+def remove_leftover(config: Config, name: str, env: dict[str, str]) -> str | None:
+    """Remove one container by exact name without `--ignore`. Returns stderr
+    on failure, None on success or when already absent."""
+    listed = run([*runtime_base(config), "ps", "--all", "--filter", f"name={name}",
+                  "--format", "{{.ID}}"], timeout=15, maximum=8192, env=env)
+    if listed.exit_code != 0:
+        return listed.stderr
+    if not listed.stdout.split():
+        return None
+    removed = run([*runtime_base(config), "rm", "--force", name],
+                  timeout=15, maximum=8192, env=env)
+    if removed.exit_code != 0:
+        return removed.stderr
+    return None
+
+
+def ensure_single(config: Config) -> dict:
+    """Idempotently prepare single-mode host state: storage directories and
+    the delegated cgroup that carries cpu/memory/pids controllers. Anything
+    missing or unchangeable is a loud failure, never a silent downgrade."""
+    if not _platform.IS_LINUX:
+        raise Denied("Single mode requires Linux; use the default container mode elsewhere")
+    cfg = config.sandbox
+    parent = Path("/sys/fs/cgroup") / cfg.cgroup_parent
+    key = "|".join([*(str(getattr(cfg, k)) for k in ("podman_root", "podman_runroot", "podman_tmpdir")),
+                    str(parent)])
+    if key in _PREPARED_SINGLE:
+        return {"mode": "single", "prepared": [], "cgroup_parent": str(parent)}
+    made = []
+    for slot in ("podman_root", "podman_runroot", "podman_tmpdir"):
+        path = Path(getattr(cfg, slot))
+        if not path.is_dir():
+            mkdir(path)
+            made.append(str(path))
+    if not parent.is_dir():
+        try:
+            parent.mkdir(parents=False, exist_ok=False)
+        except OSError as exc:
+            raise Denied("Cannot create single-mode cgroup parent %s: %s. Create it from a delegated slice first."
+                         % (parent, exc)) from exc
+        made.append(str(parent))
+    try:
+        enabled = (parent / "cgroup.subtree_control").read_text().split()
+    except OSError as exc:
+        raise Denied("Cannot read cgroup controllers at %s: %s" % (parent, exc)) from exc
+    for controller in ("cpu", "memory", "pids"):
+        if controller not in enabled:
+            try:
+                with open(parent / "cgroup.subtree_control", "w") as handle:
+                    handle.write("+" + controller)
+            except OSError as exc:
+                raise Denied("Controller %s is not delegable at %s: %s" % (controller, parent, exc)) from exc
+    profile = Path(cfg.executable).parent / ".." / "share" / "containers" / "seccomp.json"
+    if not profile.is_file():
+        raise Denied("Single-mode seccomp profile is missing next to the podman binary")
+    _PREPARED_SINGLE.add(key)
+    return {"mode": "single", "prepared": made, "cgroup_parent": str(parent)}
+
+
+class Sandbox:
+    def __init__(self, config: Config, project: Path, role: str, run_dir: Path,
+                 *, cancel: Callable[[], bool] = lambda: False):
+        self.config, self.project, self.role, self.run_dir = config, project, role, run_dir
+        self.cancel = cancel
+        self.label = digest(str(project).encode())[:24]
+
+    def base(self) -> list[str]:
+        return runtime_base(self.config)
+
+    def argv(self, name: str, workspace: Path, script: str, *, writable: bool,
+             experiment: bool = False) -> list[str]:
+        cfg = self.config.sandbox
+        if not cfg.image:
+            raise ConfigError("Build and pin sandbox.image before running commands")
+        source = str(workspace.resolve())
+        linux = _platform.IS_LINUX
+        # `-v` splits on `:` and `--mount` on `,`; reject the delimiter in use
+        # (plus newline) so a path can never escape its mount. Allowing `:` off
+        # Linux keeps Windows drive letters working.
+        rejected = (":", "\n", ",") if linux else ("\n", ",")
+        if any(x in source for x in rejected):
+            raise ConfigError("Workspace path contains a container mount delimiter")
+        readonly = not writable or experiment
+        selinux = bool(cfg.selinux_label) and linux
+        # Shared hardened base; only user/cgroup mapping differs by mode.
+        command = [*self.base(), "run", "--rm", "--pull=never", "--name", name,
+                   "--label", f"io.mizu.project={self.label}",
+                   "--label", f"io.mizu.role={self.role}",
+                   "--label", f"io.mizu.run={self.run_dir.name}"]
+        if cfg.mode == "single":
+            ensure_single(self.config)
+            seccomp = str(Path(cfg.executable).parent / ".." / "share" / "containers" / "seccomp.json")
+            command += ["--runtime-flag", "root=" + str(Path(cfg.podman_runroot) / "crun"),
+                        "--cgroup-parent", cfg.cgroup_parent,
+                        "--security-opt", "seccomp=" + seccomp,
+                        "--uidmap", "0:0:1", "--gidmap", "0:0:1", "--user", "0:0"]
+        else:
+            command += ["--user", _platform.container_user()]
+        command += ["--network=none", "--read-only", "--cap-drop=ALL",
+                    "--security-opt=no-new-privileges",
+                    "--memory", f"{cfg.memory_mb}m", "--memory-swap", f"{cfg.memory_mb}m",
+                    "--cpus", str(cfg.cpus), "--pids-limit", str(cfg.pids),
+                    "--ulimit", f"fsize={cfg.file_mb * 1024 * 1024}:{cfg.file_mb * 1024 * 1024}",
+                    "--ulimit", "core=0:0", "--log-driver=none", "--init",
+                    "--tmpfs", f"/tmp:rw,nosuid,nodev,size={cfg.temporary_mb}m,mode=1777",
+                    "--env", "HOME=/tmp/home", "--env", "TMPDIR=/tmp",
+                    *bind_args(source, "/workspace", readonly=readonly,
+                               selinux=selinux, linux=linux)]
+        if experiment:
+            command.extend(["--tmpfs", f"/work:rw,nosuid,nodev,size={cfg.temporary_mb}m,mode=1777",
+                            "--workdir", "/work"])
+        else:
+            command.extend(["--workdir", "/workspace"])
+        command.extend(["--entrypoint", "/bin/sh", cfg.image, "-c", script])
+        return command
+
+    def execute(self, workspace: Path, script: str, *, writable: bool,
+                experiment: bool = False, timeout: int | None = None) -> dict:
+        if not isinstance(script, str) or not script.strip() or len(script.encode()) > SCRIPT_MAX:
+            raise Denied("Command must be nonempty and at most 64 KiB")
+        # Clamp an explicit timeout to the configured command deadline.
+        limit = self.config.limits.command_seconds
+        timeout = limit if timeout is None else min(timeout, limit)
+        operation = uuid.uuid4().hex
+        name = f"mizu-{self.label}-{operation[:12]}"
+        env = runtime_env(self.config)
+        record = {"id": operation, "kind": "experiment" if experiment else "command",
+                  "role": self.role, "created_at": now(), "script": script,
+                  "image": self.config.sandbox.image, "container": name,
+                  "network": "none", "writable": writable and not experiment}
+        write_json(self.run_dir / "commands" / f"{operation}.started.json", record)
+        try:
+            result = run(self.argv(name, workspace, script, writable=writable, experiment=experiment),
+                         timeout=timeout, maximum=self.config.limits.output_bytes, cancel=self.cancel, env=env)
+            record.update(dataclasses.asdict(result))
+        except OSError as exc:
+            record.update(dataclasses.asdict(Result(None, "", str(exc), "startup_error", 0)))
+        finally:
+            # Killing only the launcher is insufficient: remove the container itself.
+            ignored = remove_argv(self.config, name)
+            if ignored is not None:
+                cleanup = run(ignored, timeout=15, maximum=8192, env=env)
+                if cleanup.exit_code != 0:
+                    record["cleanup_error"] = cleanup.stderr
+            else:
+                error = remove_leftover(self.config, name, env)
+                if error:
+                    record["cleanup_error"] = error
+        record["finished_at"] = now()
+        write_json(self.run_dir / "commands" / f"{operation}.json", record)
+        if record.get("cleanup_error"):
+            raise Denied("Container cleanup failed; operator recovery is required")
+        return record
+
+
+def cleanup(config: Config, project: Path, role: str | None = None) -> dict:
+    label = digest(str(project).encode())[:24]
+    env = runtime_env(config)
+    argv = [*runtime_base(config), "ps", "--all", "--filter", f"label=io.mizu.project={label}"]
+    if role:
+        argv.extend(["--filter", f"label=io.mizu.role={role}"])
+    result = run([*argv, "--format", "{{.ID}}"], timeout=15, maximum=65536, env=env)
+    if result.exit_code != 0:
+        raise Denied(f"Cannot inspect leftover containers: {result.stderr}")
+    ids = result.stdout.split()
+    for cid in ids:
+        if not all(c in "0123456789abcdef" for c in cid):
+            raise Denied("Unexpected container identifier")
+    if ids:
+        result = run([*runtime_base(config), "rm", "--force", *ids], timeout=30, maximum=65536, env=env)
+        if result.exit_code != 0:
+            raise Denied(f"Container cleanup failed: {result.stderr}")
+    return {"removed": len(ids)}

@@ -1,0 +1,21 @@
+name: Bug report
+description: A reproducible defect; report vulnerabilities privately.
+body:
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and observed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal sanitized reproduction
+      description: Do not include credentials, private code, personal paths or model transcripts.
+    validations:
+      required: true
+  - type: textarea
+    id: versions
+    attributes:
+      label: Release and dependency versions
+      description: Include source/lock hashes, Python, Node, Pi, Podman and actual vs mocked validation.
