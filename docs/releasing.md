@@ -39,7 +39,7 @@ git commit -m 'Initial commit'
 The workflow pins third-party action commit SHAs, grants `contents: read`, avoids
 `pull_request_target`, and does not use provider secrets. Dependabot proposes
 updates; it does not auto-merge or change the deployed runtime. Action SHA pins
-and Pi compatibility pins should be refreshed through reviewed changes, not
+and engine dependency locks should be refreshed through reviewed changes, not
 silently replaced by `latest`.
 
 ## Build distribution
@@ -56,21 +56,22 @@ private state, caches or a vendored Node runtime. Files have a SHA256 manifest.
 do not check them into the source tree. Tar/gzip and zip timestamps and permissions are deterministic; an optional
 `SOURCE_DATE_EPOCH` changes the timestamp. SHA256 checks integrity, not publisher
 identity. Sign tags/artifacts through the maintainer's chosen release process if
-publisher authentication is required.
+publisher authentication is required. The build also writes `dist/SHA256SUMS`
+(checksums of the archives themselves); `dist/` is local build output, not source.
 
 An offline source archive can be generated without a dependency lock, but it is
 labelled accordingly. `--release` refuses that state. The initial generated
 source bundle is useful for inspection and real-machine validation; it is not a
 claim of byte-reproducible transitive npm resolution.
 
-## Version and compatibility changes
+## Current formats and dependency changes
 
-Version lives in `src/mizu/__init__.py` and product metadata. Keep data schema and
-bridge protocol explicit. Never reinterpret old snapshots silently. Back up
-before migrations. Tests must cover old inputs or the migration must refuse
-unsupported versions clearly. A rollback of application code is not a rollback
-of Git changes, data schemas, model charges or external effects.
+Version lives in `src/mizu/__init__.py` and product metadata. Internal records and bridge configuration have no generation numbers or
+compatibility readers. Current structure, bounds and integrity checks remain. Activation removes the
+replaced managed release after successful pointer and launcher updates.
 
 Model profiles do not change the product version. Changing the Pi dependency
 requires tagged API review, refreshed lock, installed-package validation, live
 probe and release notes. See `docs/extensions.md`.
+
+Distribution inventory is shared by installer and packager through src/mizu/distribution.py. Only config/config.example.toml is public configuration. Installation receipts record individual Python, Node, JavaScript and shell checks. Candidate-copy manifests must match staged contents before promotion. Windows link fallback retains a recovery link; fallback replacement has a gap and is not atomic. See completion-contracts.md for current data requirements.

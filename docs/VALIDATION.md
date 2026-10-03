@@ -1,65 +1,34 @@
-# 検証記録 — Mizu 0.1.0
+# 検証記録 — 現行ソース
 
-本ドキュメントは、本ソース配布物に対して実施済みの検証項目と、未実施の受入検査項目を明確に区別して記録したものです。ここに記載された内容は、実環境の各 Linux ディストリビューションでの動作保証、すべての LLM モデルでの互換性、セキュリティ監査の完了、あるいは本番環境向け SLA を保証するものではありません。
+2026-10-03の開発ソース検査です。稼働環境への反映、課金providerの推論、実OCI隔離の受入とは区別します。
 
-## 実施済みの検査項目
-
-| 検査項目 | 結果 | 検証範囲・対象 |
+| 検査 | 結果 | 範囲 |
 |---|---|---|
-| Python 単体・障害注入・契約テスト | **98件 成功** | ファイル操作、排他ロック、権限境界、予算管理、タスク再開、Pi 模擬RPC、MCP プロキシ、隔離 argv、バックアップ復元 など |
-| Node 通信・Pi 拡張登録の契約テスト | **15件 成功** | 実際の Unix ドメインソケット通信、改行コード (LF) / Unicode 透過性、キャンセル処理、制限値、拡張機能の登録、リクエスト受付フック |
-| Python / JavaScript / Bash 構文チェック | **成功** | `scripts/check.py` によるソースコード全体の構文解析 |
-| オフラインインストーラーの通しテスト | **成功** | core-only 配置、有効化時のソースマニフェスト照合、空白を含むパスへの配置、再実行時の既存設定保持 |
-| CLI の通しテスト (End-to-End) | **成功** | プロジェクト取り込み（import）、静的成果物生成、Editor エクスポート、バックアップ作成、unarmed での新規復元、ステータス表示 |
-| systemd ユニット定義の静的検証 | **7ファイル・終了コード0** | `systemd-analyze verify` による静的検証（サービスの実際のバックグラウンド起動ではありません） |
-| スナップショット機能のマイクロベンチマーク | **実施完了** | 下記の合成データを用いた検証（Pi、外部 API、Podman の性能測定ではありません） |
+| Python | **354件成功、失敗0、skip0** | Linux / Python 3.14.4。公開・耐久性・停止・保存・権限・予算・現行driverの模擬契約 |
+| Node | **18件成功、失敗0、skip0** | ローカルbridge通信、有限フレーム、構造化結果、拡張・ModelRuntimeの模擬契約 |
+| Python / JavaScript / Bash構文 | **成功** | scripts/check.py |
+| Pi 1.0.0 公開SDK | **成功** | 実SDK＋vendor faux provider。通常会話、分類、画像生成、仮想モデル、並列予約、拒否前のdispatch抑止、finish＋agent_settled |
+| Pi管理下launcher | **成功** | 実SDK・公開拡張登録・実bridge・模擬モデル。1 model_request、seal、利用量 |
+| Codex CLI 0.160.0 app-server | **成功** | 実実行物・実MCP・ローカル模擬Responses provider。1 turnに対し2 HTTP要求、seal・利用量・同一セッション再開 |
+| Claude Code 2.1.288 / Python SDK 0.2.163 | **成功** | 実SDK・実MCP・ローカル模擬Anthropic provider。初回1 queryに対し3 HTTP要求（再開queryは2要求）、terminal_reason・seal・利用量・同一セッション再開 |
+| オフライン導入・再導入・backup/restore | **成功** | core-only、設定保持、空白を含むパス、manifest、paused/unarmed復元 |
+| 配布package | **成功** | release tar/zipの内容・lock・manifest検証 |
+| 課金provider / 実OCI / rootless / OSサービス運用 | **未実施** | 模擬provider・OCI argv検査から成功を推測しない |
+| 24時間運転 / 実推論中の停止・再開 / 複数OS CI | **未取得** | ローカルLinuxの成功とは別の受入 |
 
-オフラインテストは Python 3.13.5、Node.js 22.16.0 環境で実行しました。なお、Node.js の契約テストが通過することと、Pi 本体の導入要件を満たすことは別問題です。**Pi v0.87.1 を導入して動作させるには Node.js 22.19.0 以上が必要**となります。Git はバージョン 2.47.3 で検証しました。CI 定義には Python 3.11 / 3.12 / 3.13 が含まれていますが、本配布時点ですべてのバージョンでのテストを実行済みとして扱うものではありません。
+旧CLI経路に対するテストを現行SDK/app-server契約に置き換えたため、従来の件数とは比較しません。single-writer、finish後拒否、検証ダイジェスト、restore unarmed、予算不確定時のunknownなどの不変条件は維持しています。
 
-インストーラーの通しテストにおいて、初期の試行ではテスト全体に設定されたタイムアウト制限に達した事例がありました。その後の計測可能な再実行では、バックアップ復元および最終状態の確認まで正常に完了しています。ただし、この結果をもって本番環境での24時間連続稼働テストの代替と見なすことはできません。
-
-機械可読なテスト結果ログ（JSON）:
-
-- [オフラインテスト記録](validation-offline.json)
-- [インストーラー・CLI テスト記録](validation-installer.json)
-- [systemd ユニット静的検査記録](validation-systemd.json)
-- [マイクロベンチマーク記録](validation-benchmark.json)
-
-## マイクロベンチマークの測定条件と結果
-
-合計 500 ファイル、各ファイル 4,096 バイト（総データ量 2,048,000 バイト）の合成データを用い、同一ツリーに対して 2 回のキャプチャ（スナップショット作成）を行った後、observer 領域への実体化（materialize）を実施しました。
-
-| 処理内容 | 観測実行時間 |
-|---|---:|
-| 初回キャプチャ（スナップショット作成） | 0.249755 秒 |
-| 変更なしでの2回目キャプチャ | 0.040801 秒 |
-| observer 領域への実体化 (materialize) | 0.232675 秒 |
-
-2 回のキャプチャ実行後、生成されたコンテンツオブジェクト（content object）の総数は 500 個のままであり、変更のないファイルが重複して作成されないことが確認されました。本測定はローカル環境における単一回の測定結果であり、OS のキャッシュ、ストレージ性能、CPU 負荷などの影響を受けます。本番環境でのスループット、モデルの応答速度、あるいは大規模リポジトリにおける優位性をそのまま示すものではありません。
-
-ベンチマークの再測定コマンド:
+機械可読receiptは再生成物で、コミットしません。実環境パス・認証値を公開fixtureへ含めず、再現コマンドには運用者の明示した実行物を渡します。
 
 ```sh
-python3 scripts/benchmark.py --files 500 --bytes-per-file 4096
+python3 scripts/check.py --report private-validation/offline.json
+python3 scripts/check-cli.py --codex /path/to/codex --claude-python /path/to/adapter/python3 --report private-validation/contracts.json
+node scripts/check-pi-sdk.mjs
+python3 scripts/check-model-adapters.py --codex /path/to/codex --claude-python /path/to/adapter/python3 --claude-cli /path/to/claude --report private-validation/mock-provider.json
+./scripts/test-install.sh
+python3 scripts/package.py --release --output dist
 ```
 
-## 本配布の時点では未実施の項目
+Pi依存は1.0.0のレビュー済みlockとnpm ciで固定し、Claude SDK依存は専用環境のhash付きrequirements.lockで固定します。doctorは機能を検査し、エンジンの旧バージョンを比較・拒否しません。外部のMCP wire識別子と実行物のバージョン証跡は保持します。
 
-**実際の Pi パッケージの npm インストールおよび拡張機能のロード、rootless Podman によるコンテナ実行、実際の LLM プロバイダー API への接続、systemd ユーザーサービスとしての実常駐稼働、24時間連続運転テスト、および複数ディストリビューションへの展開テストは未実施です。**
-
-Pi のバージョン付き公式資料と照合したアダプターを実装していますが、ソースコードの確認やモック RPC によるテストを、実際の Pi との完全な互換性実証と同列に扱うことはできません。実際の Pi、コンテナ環境、および LLM API を用いた受入検証手順については [テストドキュメント](testing.md) を参照してください。
-
-本ソース配布物には、正確な直接依存関係の指定と、推移的依存関係を含む完全な `package-lock.json` が含まれています。公開前にロックファイルの内容をレビューしてください。
-
-```sh
-./scripts/lock-pi.sh
-./scripts/setup.sh
-mizu doctor --sandbox
-mizu smoke --live
-```
-
-`smoke --live` は、実際に有料の API を使用することを明示したテスト操作です。API 認証情報、モデル ID、予算上限、および隔離用コンテナイメージを正しく設定してから実行してください。なお、`scripts/package.py --release` コマンドはロックファイルが未作成の状態ではリリースパッケージの作成を拒否します。初期配布物は `source-unlocked` として区別して管理してください。
-
-## 正式リリース（公開）の判定基準
-
-機密情報や非公開コードの混入がないことの確認、依存関係ロックファイルと各ライセンスのレビュー、実機環境におけるコンテナ隔離・API 接続・停止と復旧・バージョン更新と切り戻しの検証、および運用目的に合致した継続運転の受入テストをすべて完了した上で、公開リポジトリにおける正式リリースとして扱ってください。なお、本配布物の作成時点では GitHub リポジトリの作成や push は行われていません。
+運用者設定の `doctor --sandbox` と `smoke --live --engine ...` は別途明示実行します。smokeは予算を引き上げず、証跡を無視対象のprivate-validationへ保存します。候補や稼働環境を自動昇格しません。契約・信頼範囲・上限・失敗は [completion-contracts.md](completion-contracts.md)、上流API調査は [upstream.md](upstream.md) を参照してください。

@@ -11,14 +11,14 @@ concurrency:
 jobs:
   core:
     # Portable development plane: offline unit/contract checks on all three OSes.
-    # Linux-only production (rootless Podman, systemd) is never asserted here.
+    # Native service operation, live inference and OCI isolation are never asserted here.
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-latest, windows-latest]
-        python: ["3.11", "3.12", "3.13"]
+        python: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -27,7 +27,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Offline core and transport contracts
-        run: python scripts/check.py
+        run: python scripts/check.py --report private-validation/offline.json
       - name: Core installer and CLI lifecycle
         if: runner.os == 'Linux' && matrix.python == '3.13'
         run: ./scripts/test-install.sh

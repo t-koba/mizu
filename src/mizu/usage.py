@@ -1,183 +1,167 @@
-"""Usage facts: aggregate provider-reported token records into queryable sums.
+"""Bounded usage facts from run evidence, never pricing or a monetary limit.
 
-The mechanism collects only facts the harness already recorded in completed
-run records (`runs/*/result.json`, consultation answers in
-`runs/*/consultation.json`): provider, model, request counts, token amounts
-and timestamps. It never prices anything and never calls money a limit:
-whether a dashboard shows estimated cost, and at which operator-pinned rate,
-is presentation policy (see `docs/dashboard.md`). Provider `usage` shapes
-differ, so anything not recognized is surfaced as `other_tokens` /
-`unrecognized_keys` / `unknown_shapes` instead of being silently dropped or
-folded into the input/output sums.
-
-Nothing here is destructive: this module is read-only, and the raw per-run
-records stay on disk (prune never removes them). Grouped sums assume one
-rate per (day, provider, model); anything finer — for example time-of-day
-off-peak rates — uses `recent_entries`, which keep full per-run timestamps,
-or the raw `runs/*/result.json` records themselves.
+Logical model requests, turns and queries are distinct units.
+Completed/interrupted normal and child consultation records are canonical;
+parent consultation records refer to child runs. Unknown usage is explicit.
+Records are never rewritten. Corrupt individual records increment skipped.
 """
 from __future__ import annotations
 
 import datetime as dt
+import heapq
 
 from .fs import read_json
 
-SCHEMA = 1
-#: Most recent run records scanned per summary; older ones are flagged, not hidden.
 MAX_RUNS_SCANNED = 5000
-#: Per-run entries retained with full timestamps (time-of-day rates need these).
 MAX_RECENT_ENTRIES = 200
-#: Distinct unrecognized usage keys retained per group for transparency.
 MAX_UNKNOWN_KEYS = 20
+_FIELDS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "other_tokens")
+_KEYS = {
+    "pi": {"input": "input_tokens", "output": "output_tokens", "cacheRead": "cache_read_tokens", "cacheWrite": "cache_write_tokens"},
+    "codex": {"input_tokens": "input_tokens", "output_tokens": "output_tokens", "cached_input_tokens": "cache_read_tokens"},
+    "claude": {"inputTokens": "input_tokens", "outputTokens": "output_tokens", "cacheReadInputTokens": "cache_read_tokens", "cacheCreationInputTokens": "cache_write_tokens"},
+}
+_CANONICAL = {name:name for name in _FIELDS}
+_METADATA = {"model", "cost", "cost_estimate_usd", "reasoning", "reasoning_output_tokens", "cacheWrite1h", "totalTokens"}
 
-_INPUT_KEYS = {"input", "inputtokens", "prompttokens"}
-_OUTPUT_KEYS = {"output", "outputtokens", "completiontokens"}
 
-
-def _flat(name: str) -> str:
-    return name.lower().replace("_", "")
-
-
-def normalize(entry) -> dict:
-    """Split one provider usage record into input/output/other token counts."""
+def normalize(entry, engine: str = "unknown") -> dict:
+    found = dict.fromkeys(_FIELDS, 0)
     if not isinstance(entry, dict):
-        return {"input_tokens": 0, "output_tokens": 0, "other_tokens": 0,
-                "unrecognized_keys": [], "unknown_shape": True}
-    found = {"input_tokens": 0, "output_tokens": 0, "other_tokens": 0}
+        return {**found, "unrecognized_keys": [], "unknown_shape": True}
+    fields = _KEYS.get(engine, _CANONICAL)
+    recognized = invalid = False
     unknown = []
     for key, value in entry.items():
-        if type(value) is bool or not isinstance(value, (int, float)):
-            continue
-        amount = int(value)
-        flat = _flat(str(key))
-        if flat in _INPUT_KEYS:
-            found["input_tokens"] += amount
-        elif flat in _OUTPUT_KEYS:
-            found["output_tokens"] += amount
-        else:
-            found["other_tokens"] += amount
-            if key not in unknown:
+        field = fields.get(key)
+        if field:
+            if type(value) is not int or not 0 <= value <= 2**63-1:
+                invalid = True
                 unknown.append(str(key))
-    return {**found, "unrecognized_keys": sorted(unknown)[:MAX_UNKNOWN_KEYS],
-            "unknown_shape": False}
+            else:
+                found[field] = value
+                recognized = True
+        elif key not in _METADATA:
+            unknown.append(str(key))
+    return {**found, "unrecognized_keys": sorted(set(unknown))[:MAX_UNKNOWN_KEYS],
+            "unknown_shape": invalid or not recognized}
 
 
-def _day(record: dict, path) -> str:
-    finished = record.get("finished_at")
-    if isinstance(finished, str) and len(finished) >= 10:
-        return finished[:10]
+def record_time(value) -> float:
+    """Aware ISO-8601 evidence time; malformed/naive values sort oldest."""
     try:
-        return dt.datetime.fromtimestamp(path.stat().st_mtime, dt.timezone.utc).date().isoformat()
+        if not isinstance(value, str) or len(value) > 64:
+            return 0.0
+        parsed = dt.datetime.fromisoformat(value)
+        return parsed.timestamp() if parsed.tzinfo is not None else 0.0
+    except (ValueError, OverflowError, OSError):
+        return 0.0
+
+
+def _mtime(path):
+    try:
+        return path.stat().st_mtime
     except OSError:
-        return "unknown"
+        return 0.0
+
+
+def _day(record, path):
+    try:
+        return dt.datetime.fromisoformat(record["finished_at"]).astimezone(dt.timezone.utc).date().isoformat()
+    except (KeyError, ValueError, TypeError):
+        return dt.datetime.fromtimestamp(_mtime(path), dt.timezone.utc).date().isoformat()
 
 
 def summarize(project) -> dict:
-    """Sum recorded usage grouped by (day, provider, model). Read-only.
-
-    Also retains per-run entries with full timestamps so presentation policy
-    can apply finer rate structures (e.g. time-of-day off-peak pricing)
-    without returning to raw files. Scans the most recent run records up to
-    `MAX_RUNS_SCANNED` and keeps the newest `MAX_RECENT_ENTRIES` entries;
-    when more exist the summary is partial and `truncated` is true. Never
-    raises for a malformed single record: it is counted in
-    `skipped_records` instead.
-    """
-    def mtime(path) -> float:
-        try:
-            return path.stat().st_mtime
-        except OSError:
-            return 0.0
-    candidates = sorted((project.root / "runs").glob("*"), key=mtime)
-    groups: dict[tuple, dict] = {}
-    entries: list[dict] = []
-    scanned = skipped = unknown_shapes = 0
+    candidates = heapq.nlargest(MAX_RUNS_SCANNED + 1, (p for p in (project.root / "runs").glob("*")
+                                if p.is_dir() and not p.is_symlink()), key=lambda p: (_mtime(p), p.name))
     truncated = len(candidates) > MAX_RUNS_SCANNED
-    for run_dir in candidates[-MAX_RUNS_SCANNED:]:
-        if not run_dir.is_dir() or run_dir.is_symlink():
-            continue
-        for name in ("result.json", "consultation.json"):
+    groups, entries = {}, []
+    scanned = skipped = unknown_shapes = entry_count = 0
+    for run_dir in candidates[:MAX_RUNS_SCANNED]:
+        jobs = []
+        canonical_found = False
+        for name in ("result.json", "consultation.json", "error.json"):
             target = run_dir / name
             try:
-                if target.is_file() and target.stat().st_size > 1048576:
-                    skipped += 1  # Harness records are KBs; never parse megabytes.
+                if target.is_symlink():
+                    skipped += 1
                     continue
-                record = read_json(target, None)
+                if not target.is_file():
+                    continue
+                if target.stat().st_size > 1048576:
+                    skipped += 1
+                    continue
+                record = read_json(target)
                 if not isinstance(record, dict):
+                    skipped += 1
                     continue
-                if name == "result.json":
-                    if record.get("status") != "completed" or not isinstance(record.get("model"), dict):
+                if isinstance(record.get("model"), dict):
+                    if canonical_found:
                         continue
-                    jobs = [(run_dir.name, record.get("role", "unknown"),
-                             _day(record, run_dir / name), record["model"])]
+                    canonical_found = True
+                    jobs.append((run_dir.name, record, record["model"]))
                 else:
-                    answers = record.get("answers")
-                    if not isinstance(answers, list):
-                        continue
-                    jobs = [(f"{run_dir.name}/consult-{i}", "consult",
-                             _day(record, run_dir / name), a["model"])
-                            for i, a in enumerate(answers)
-                            if isinstance(a, dict) and isinstance(a.get("model"), dict)]
-                for run_id, role, day, model in jobs:
-                    provider = str(model.get("provider", "unknown"))
-                    model_id = str(model.get("model", "unknown"))
-                    engine = str(model.get("engine", "unknown"))
-                    key = (day, provider, model_id)
-                    group = groups.setdefault(key, {"day": day, "provider": provider, "model": model_id,
-                                                    "engines": [],
-                                                    "runs": 0, "requests": 0, "input_tokens": 0,
-                                                    "output_tokens": 0, "other_tokens": 0,
-                                                    "unrecognized_keys": [], "unknown_shapes": 0})
-                    if engine not in group["engines"]:
-                        group["engines"].append(engine)
-                        group["engines"].sort()
-                    entry = {"run": run_id, "role": role, "day": day,
-                             "finished_at": record.get("finished_at"),
-                             "engine": str(model.get("engine", "unknown")),
-                             "started_at": None,  # Filled below, only for retained entries.
-                             "provider": provider, "model": model_id,
-                             "requests": 0, "input_tokens": 0, "output_tokens": 0,
-                             "other_tokens": 0, "unknown_shapes": 0}
-                    group["runs"] += 1
-                    requests = model.get("requests")
-                    if isinstance(requests, int) and requests > 0:
-                        group["requests"] += requests
-                        entry["requests"] = requests
-                    usages = model.get("usage")
-                    if not isinstance(usages, list):
-                        usages = []
-                    for item in usages:
-                        part = normalize(item)
-                        for field in ("input_tokens", "output_tokens", "other_tokens"):
-                            group[field] += part[field]
-                            entry[field] += part[field]
-                        for key_name in part["unrecognized_keys"]:
-                            if key_name not in group["unrecognized_keys"] and \
-                                    len(group["unrecognized_keys"]) < MAX_UNKNOWN_KEYS:
-                                group["unrecognized_keys"].append(key_name)
-                        if part["unknown_shape"]:
-                            group["unknown_shapes"] += 1
-                            entry["unknown_shapes"] += 1
-                            unknown_shapes += 1
-                    entries.append(entry)
+                    continue
                 scanned += 1
-            except (ValueError, TypeError, AttributeError):
+            except (OSError, ValueError, TypeError, AttributeError):
                 skipped += 1
-    entries.sort(key=lambda e: (str(e.get("finished_at") or ""), str(e.get("run") or "")))
-    recent = entries[-MAX_RECENT_ENTRIES:]
-    for entry in recent:
-        # Consult entries have no started record; result entries read one file each.
-        if entry["started_at"] is None and "/" not in entry["run"]:
-            entry["started_at"] = read_json(
-                project.root / "runs" / entry["run"] / "started.json", {}).get("started_at")
+        for run_id, record, model in jobs:
+            day = _day(record, run_dir)
+            provider, model_id, engine = (str(model.get(k, "unknown")) for k in ("provider", "model", "engine"))
+            key = (day, provider, model_id)
+            group = groups.setdefault(key, {"day": day, "provider": provider, "model": model_id,
+                                          "engines": [], "runs": 0, "requests": 0,
+                                          "request_units": {}, "unknown_request_runs":0, **dict.fromkeys(_FIELDS, 0),
+                                          "unrecognized_keys": [], "unknown_shapes": 0, "unknown_usage_runs": 0})
+            if engine not in group["engines"]:
+                group["engines"].append(engine)
+                group["engines"].sort()
+            unit = model.get("request_unit", "unknown")
+            requests = model.get("requests", 0)
+            requests = requests if type(requests) is int and requests >= 0 else 0
+            entry = {"run": run_id, "role": record.get("role", "consult" if "consult" in run_id else "unknown"),
+                     "day": day, "finished_at": record.get("finished_at"), "started_at": None,
+                     "status": record.get("status", "unknown"), "engine": engine, "provider": provider,
+                     "model": model_id, "requests": requests, "request_unit": unit,
+                     **dict.fromkeys(_FIELDS, 0), "unknown_shapes": 0}
+            group["runs"] += 1
+            entry["requests_known"] = model.get("requests_known",True) is not False
+            if not entry["requests_known"]:group["unknown_request_runs"] += 1
+            group["requests"] += requests
+            group["request_units"][str(unit)] = group["request_units"].get(str(unit), 0) + requests
+            usages = model.get("usage")
+            parts = [normalize(item, engine) for item in usages] if isinstance(usages, list) else []
+            known = bool(parts) and model.get("usage_known", True) and not any(p["unknown_shape"] for p in parts)
+            entry["usage_known"] = bool(known)
+            if not known:
+                group["unknown_usage_runs"] += 1
+            for part in parts:
+                for field in _FIELDS:
+                    group[field] += part[field]
+                    entry[field] += part[field]
+                group["unrecognized_keys"] = sorted(set(group["unrecognized_keys"] + part["unrecognized_keys"]))[:MAX_UNKNOWN_KEYS]
+                if part["unknown_shape"]:
+                    group["unknown_shapes"] += 1
+                    entry["unknown_shapes"] += 1
+                    unknown_shapes += 1
+            try:
+                if "/" not in run_id:
+                    started = read_json(run_dir / "started.json", {})
+                    entry["started_at"] = started.get("started_at") if isinstance(started, dict) else None
+            except (OSError, ValueError, TypeError, AttributeError):
+                skipped += 1
+            entry_count += 1
+            key = (record_time(entry.get("finished_at")), entry["run"])
+            value = (*key, entry_count, entry)
+            if len(entries) < MAX_RECENT_ENTRIES:
+                heapq.heappush(entries, value)
+            elif key > entries[0][:2]:
+                heapq.heapreplace(entries, value)
+    recent = [e[3] for e in sorted(entries)]
     ordered = sorted(groups.values(), key=lambda g: (g["day"], g["provider"], g["model"]))
-    totals = {"runs": sum(g["runs"] for g in ordered), "requests": sum(g["requests"] for g in ordered),
-              "input_tokens": sum(g["input_tokens"] for g in ordered),
-              "output_tokens": sum(g["output_tokens"] for g in ordered),
-              "other_tokens": sum(g["other_tokens"] for g in ordered)}
-    return {"schema": SCHEMA, "project": project.name, "groups": ordered, "totals": totals,
-            "recent_entries": recent,
-            "entries_truncated": len(entries) > MAX_RECENT_ENTRIES,
-            "scanned_records": scanned, "skipped_records": skipped,
-            "unknown_shapes": unknown_shapes, "truncated": truncated,
-            "note": "Provider-reported amounts grouped for presentation policy. Not a bill."}
+    totals = {field: sum(g[field] for g in ordered) for field in ("runs", "requests", *_FIELDS, "unknown_usage_runs", "unknown_request_runs")}
+    return {"project": project.name, "groups": ordered, "totals": totals,
+            "recent_entries": recent, "entries_truncated": entry_count > MAX_RECENT_ENTRIES,
+            "scanned_records": scanned, "skipped_records": skipped, "unknown_shapes": unknown_shapes,
+            "truncated": truncated, "note": "Provider-reported amounts; cached fields may be subsets of input. Not a bill."}

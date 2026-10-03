@@ -1,0 +1,13 @@
+{
+  "entrypoint": "launcher.py",
+  "api": "claude_agent_sdk.ClaudeSDKClient",
+  "exports": [
+    "ClaudeSDKClient.interrupt",
+    "ClaudeSDKClient.get_mcp_status",
+    "ResultMessage.terminal_reason",
+    "ResultMessage.model_usage"
+  ],
+  "completion": "terminal_reason completed + subtype success + no error + mizu seal",
+  "request_unit": "query",
+  "dependency_evidence": "requirements.lock"
+}

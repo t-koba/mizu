@@ -1,4 +1,9 @@
-"""One networkless container per command. No privileged fallback.
+"""One container per command. No privileged fallback.
+
+Network isolation is policy, not a hardcoded ban: `[sandbox] network` defaults
+to `none` and any other value is passed to the runtime explicitly, with the
+choice recorded per command. Read-only root, dropped capabilities,
+no-new-privileges, user mapping and seccomp floors stay fixed regardless.
 
 The container interior is always Linux, so probes stay identical on every
 host. The host side speaks generic OCI CLI (`podman` or `docker` via
@@ -10,9 +15,8 @@ from __future__ import annotations
 
 import dataclasses
 import os
-import shutil
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from pathlib import Path
 
 from . import platform as _platform
@@ -121,7 +125,7 @@ def ensure_single(config: Config) -> dict:
                          % (parent, exc)) from exc
         made.append(str(parent))
     try:
-        enabled = (parent / "cgroup.subtree_control").read_text().split()
+        enabled = (parent / "cgroup.subtree_control").read_text(encoding="utf-8").split()
     except OSError as exc:
         raise Denied("Cannot read cgroup controllers at %s: %s" % (parent, exc)) from exc
     for controller in ("cpu", "memory", "pids"):
@@ -148,22 +152,19 @@ class Sandbox:
     def base(self) -> list[str]:
         return runtime_base(self.config)
 
-    def argv(self, name: str, workspace: Path, script: str, *, writable: bool,
-             experiment: bool = False) -> list[str]:
+    def _validate_mount_paths(self, source: str, rejected: tuple[str, ...]) -> None:
         cfg = self.config.sandbox
-        if not cfg.image:
-            raise ConfigError("Build and pin sandbox.image before running commands")
-        source = str(workspace.resolve())
-        linux = _platform.IS_LINUX
-        # `-v` splits on `:` and `--mount` on `,`; reject the delimiter in use
-        # (plus newline) so a path can never escape its mount. Allowing `:` off
-        # Linux keeps Windows drive letters working.
-        rejected = (":", "\n", ",") if linux else ("\n", ",")
         if any(x in source for x in rejected):
             raise ConfigError("Workspace path contains a container mount delimiter")
-        readonly = not writable or experiment
-        selinux = bool(cfg.selinux_label) and linux
-        # Shared hardened base; only user/cgroup mapping differs by mode.
+        for mount in cfg.mounts:
+            if any(x in mount["source"] for x in rejected) or any(x in mount["target"] for x in rejected):
+                raise ConfigError("Operator mount contains a container mount delimiter")
+            if not Path(mount["source"]).exists():
+                raise ConfigError(f"Operator mount source is missing: {mount['source']}")
+
+    def _fixed_floor(self, name: str) -> list[str]:
+        """Non-negotiable hardening: labels, user mapping, caps, resources."""
+        cfg = self.config.sandbox
         command = [*self.base(), "run", "--rm", "--pull=never", "--name", name,
                    "--label", f"io.mizu.project={self.label}",
                    "--label", f"io.mizu.role={self.role}",
@@ -177,22 +178,55 @@ class Sandbox:
                         "--uidmap", "0:0:1", "--gidmap", "0:0:1", "--user", "0:0"]
         else:
             command += ["--user", _platform.container_user()]
-        command += ["--network=none", "--read-only", "--cap-drop=ALL",
+        command += ["--read-only", "--cap-drop=ALL",
                     "--security-opt=no-new-privileges",
                     "--memory", f"{cfg.memory_mb}m", "--memory-swap", f"{cfg.memory_mb}m",
                     "--cpus", str(cfg.cpus), "--pids-limit", str(cfg.pids),
                     "--ulimit", f"fsize={cfg.file_mb * 1024 * 1024}:{cfg.file_mb * 1024 * 1024}",
                     "--ulimit", "core=0:0", "--log-driver=none", "--init",
                     "--tmpfs", f"/tmp:rw,nosuid,nodev,size={cfg.temporary_mb}m,mode=1777",
-                    "--env", "HOME=/tmp/home", "--env", "TMPDIR=/tmp",
-                    *bind_args(source, "/workspace", readonly=readonly,
-                               selinux=selinux, linux=linux)]
+                    "--env", "HOME=/tmp/home", "--env", "TMPDIR=/tmp"]
+        return command
+
+    def argv(self, name: str, workspace: Path, script: str, *, writable: bool,
+             experiment: bool = False) -> list[str]:
+        """Build the container argv from fixed floors plus policy selections.
+
+        Schema/bounds: fixed floor (read-only root, cap-drop, no-new-privs,
+        seccomp, user mapping, resource bounds) is non-negotiable; policy
+        selections (network, entrypoint, mounts, env) come from `[sandbox]`
+        and are recorded per command. Trust: config only, never model input.
+        Retry: none (argv construction). Evidence: argv-adjacent record in
+        execute(). Failure: ConfigError for missing image/paths.
+        """
+        cfg = self.config.sandbox
+        if not cfg.image:
+            raise ConfigError("Build and pin sandbox.image before running commands")
+        source = str(workspace.resolve())
+        linux = _platform.IS_LINUX
+        # `-v` splits on `:` and `--mount` on `,`; reject the delimiter in use
+        # (plus newline) so a path can never escape its mount. Allowing `:` off
+        # Linux keeps Windows drive letters working.
+        rejected = (":", "\n", ",") if linux else ("\n", ",")
+        self._validate_mount_paths(source, rejected)
+        readonly = not writable or experiment
+        selinux = bool(cfg.selinux_label) and linux
+        # --- Fixed mechanism floor (never operator-selectable) ---
+        command = self._fixed_floor(name)
+        # --- Operator policy selections (explicit grants, recorded per run) ---
+        command += ["--network=" + cfg.network]
+        command += [arg for key, value in sorted(cfg.env.items()) for arg in ("--env", f"{key}={value}")]
+        command += bind_args(source, "/workspace", readonly=readonly,
+                             selinux=selinux, linux=linux)
+        for mount in cfg.mounts:
+            command += bind_args(mount["source"], mount["target"],
+                                 readonly=True, selinux=selinux, linux=linux)
         if experiment:
             command.extend(["--tmpfs", f"/work:rw,nosuid,nodev,size={cfg.temporary_mb}m,mode=1777",
                             "--workdir", "/work"])
         else:
             command.extend(["--workdir", "/workspace"])
-        command.extend(["--entrypoint", "/bin/sh", cfg.image, "-c", script])
+        command.extend(["--entrypoint", cfg.entrypoint, cfg.image, "-c", script])
         return command
 
     def execute(self, workspace: Path, script: str, *, writable: bool,
@@ -208,14 +242,18 @@ class Sandbox:
         record = {"id": operation, "kind": "experiment" if experiment else "command",
                   "role": self.role, "created_at": now(), "script": script,
                   "image": self.config.sandbox.image, "container": name,
-                  "network": "none", "writable": writable and not experiment}
+                  "network": self.config.sandbox.network, "writable": writable and not experiment,
+                  "entrypoint": self.config.sandbox.entrypoint,
+                  "mounts": [{"source": m["source"], "target": m["target"]}
+                             for m in self.config.sandbox.mounts],
+                  "env_keys": sorted(self.config.sandbox.env)}
         write_json(self.run_dir / "commands" / f"{operation}.started.json", record)
         try:
             result = run(self.argv(name, workspace, script, writable=writable, experiment=experiment),
                          timeout=timeout, maximum=self.config.limits.output_bytes, cancel=self.cancel, env=env)
             record.update(dataclasses.asdict(result))
         except OSError as exc:
-            record.update(dataclasses.asdict(Result(None, "", str(exc), "startup_error", 0)))
+            record.update(dataclasses.asdict(Result(None, "", str(exc), "process_error", 0)))
         finally:
             # Killing only the launcher is insufficient: remove the container itself.
             ignored = remove_argv(self.config, name)

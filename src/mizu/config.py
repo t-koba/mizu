@@ -5,22 +5,17 @@ import dataclasses
 import os
 import re
 import tomllib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .errors import ConfigError
 from .fs import ID
-
 CAPABILITIES = frozenset({"diff", "files", "read", "exec", "experiment", "verify", "fetch",
                           "search", "insights", "decide", "submit_insight", "consult",
                           "report", "finish"})
-#: Inference engines selectable per profile. `pi` is the default and preserves
-#: existing behavior; `codex`/`claude` route through the generic driver
-#: registry with the same work-unit contract (see ADR-007).
 ENGINES = ("pi", "codex", "claude")
-#: Accepted Pi thinking levels for the pinned interface (see adapters/pi/compatibility.json).
-THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
+MAX_RESOURCES = 64
 #: Protocol wait bound mirrored in protocol.finish.wait_seconds; keep both at 86400.
 MAX_WAIT_SECONDS = 86400
 
@@ -41,6 +36,9 @@ def resolve_timezone(name: str):
     name requires the database; a missing database is reported as such
     instead of blaming the key, and unknown keys are still refused.
     """
+    if name == "local":
+        from datetime import datetime
+        return datetime.now().astimezone().tzinfo
     from datetime import timezone as _utc
     try:
         return ZoneInfo(name)
@@ -100,6 +98,14 @@ def path_value(value: str, base: Path) -> Path:
     return (base / path).resolve() if not path.is_absolute() else path.resolve()
 
 
+def trusted_command(data: dict, key: str, default: str) -> tuple[str, ...]:
+    """Operator-owned argv array (never a shell string)."""
+    command = strings(data.get(key, [default]), key)
+    if not command or any(not s or "\n" in s for s in command):
+        raise ConfigError(f"{key} must be a nonempty argv array")
+    return command
+
+
 @dataclasses.dataclass(frozen=True)
 class Limits:
     daily_requests: int = 0
@@ -121,6 +127,14 @@ class Limits:
     history_index: int = 128
     prompt_snapshots: int = 6
     free_disk_mb: int = 1024
+    #: Operator-selected retention window (days) for budget day-files and
+    #: decided (non-deferred) proposals. 0 disables time-based reaping;
+    #: snapshots, runs, decisions and evidence are never reaped.
+    retention_days: int = 31
+    #: Operator-selected bound on pending proposals offered per prompt /
+    #: dashboard projection. Raw inbox/decisions stay on disk; the operator
+    #: review path (`mizu insight list`) uses a separate 1000-item bound.
+    pending_insights: int = 30
 
 
 @dataclasses.dataclass(frozen=True)
@@ -133,6 +147,20 @@ class Sandbox:
     temporary_mb: int = 256
     file_mb: int = 128
     selinux_label: bool = True
+    #: Container network selected by policy. `none` preserves the previous
+    #: behavior. Any other value is passed to the runtime as `--network=<value>`
+    #: (e.g. a managed bridge); enabling it accepts exfiltration risk, so it
+    #: is an explicit operator choice, never a default. Privilege, read-only
+    #: root, user mapping and seccomp floors stay fixed regardless of this knob.
+    network: str = "none"
+    #: Container entrypoint selected by policy (the image must provide it).
+    entrypoint: str = "/bin/sh"
+    #: Extra read-only host mounts selected by policy. Model code can read but
+    #: never write the host through these; system and harness paths are refused.
+    mounts: tuple = ()
+    #: Extra container environment selected by policy. Runtime vars and secret
+    #: names are refused; values are recorded by key only, never by content.
+    env: dict = dataclasses.field(default_factory=dict)
     mode: str = "rootless"
     namespace_helper: tuple[str, ...] = ()
     podman_root: str = ""
@@ -151,7 +179,7 @@ class Role:
     policy: Path
     workspace: str
     capabilities: tuple[str, ...]
-    persistent: bool = False
+    engine_tools: tuple[str, ...] = ()
     on_change: bool = False
     interval_seconds: int = 0
     calendar: tuple[str, ...] = ()
@@ -162,10 +190,7 @@ class Role:
 class Config:
     file: Path
     data: Path
-    pi_command: tuple[str, ...]
-    codex_command: tuple[str, ...]
-    claude_command: tuple[str, ...]
-    pi_dir: Path
+    engines: dict[str, dict]
     limits: Limits
     sandbox: Sandbox
     profiles: dict[str, dict]
@@ -175,54 +200,68 @@ class Config:
     web: dict
     exclude: tuple[str, ...]
 
-    def engine(self, profile: str) -> str:
+    def _raw_profile(self, profile: str) -> dict:
         try:
-            raw = self.profiles[profile]
+            return self.profiles[profile]
         except KeyError:
             raise ConfigError(f"Unknown model profile: {profile}") from None
-        engine = raw.get("engine", "pi")
+
+    def engine(self, profile: str) -> str:
+        raw = self._raw_profile(profile)
+        engine = raw["engine"]
         if engine not in ENGINES:
             raise ConfigError(f"Unknown inference engine for profile '{profile}'")
         return engine
 
     def model(self, profile: str) -> dict[str, str]:
-        try:
-            raw = self.profiles[profile]
-        except KeyError:
-            raise ConfigError(f"Unknown model profile: {profile}") from None
-        result = {key: expand(raw.get(key, "")) for key in ("provider", "model", "thinking")}
+        raw = self._raw_profile(profile)
+        result = {key: expand(raw[key]) for key in ("provider", "model")}
         if not result["provider"] or not result["model"]:
             raise ConfigError(f"Configure provider and model for profile '{profile}'")
         return result
+
+    def command(self, engine: str) -> tuple[str, ...]:
+        if engine not in self.engines:
+            raise ConfigError(f"Unknown engine environment: {engine}")
+        return self.engines[engine]["command"]
+
+    def agent_dir(self, engine: str) -> Path:
+        return self.engines[engine]["directory"]
+
+    def options(self, profile: str) -> dict:
+        return self._raw_profile(profile)["options"]
 
 
 def load(file: Path) -> Config:
     file = file.expanduser().resolve()
     try:
-        data = tomllib.loads(file.read_text())
+        data = tomllib.loads(file.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ConfigError(f"Cannot load configuration: {exc}") from exc
-    keys(data, {"schema", "data_dir", "pi_command", "codex_command", "claude_command",
-                "pi_dir", "timezone", "limits",
-                "sandbox", "profiles", "roles", "consult_profiles", "web", "exclude"}, "root")
-    if data.get("schema") != 1:
-        raise ConfigError("Only configuration schema = 1 is supported")
+    keys(data, {"data_dir", "engines", "timezone", "limits", "sandbox", "profiles",
+                "roles", "consult_profiles", "web", "exclude"}, "root")
+    engines = data.get("engines", {})
+    keys(engines, set(ENGINES), "engines")
+    environments = {}
+    for name, settings in engines.items():
+        keys(settings, {"command", "directory"}, f"engines.{name}")
+        environments[name] = {"command": trusted_command(settings, "command", name),
+                              "directory": path_value(string(settings.get("directory", name), "directory"), file.parent)}
     lim = data.get("limits", {})
     keys(lim, {f.name for f in dataclasses.fields(Limits)}, "limits")
+    # Meta-bounds on policy values so a config cannot request unbounded
+    # memory/files/prompts. Defaults are TOML-overridable fallbacks.
+    # daily_requests 0 disables (fail-closed); max_failures 0 disables the
+    # auto-pause brake only (budgets/deadlines still bound spend and time).
+    _LIMIT_RANGES = {"history_index": (8, 1000000), "prompt_snapshots": (1, 64),
+                     "retention_days": (0, 3650), "pending_insights": (1, 1000),
+                     "default_wait_seconds": (1, MAX_WAIT_SECONDS),
+                     "maximum_wait_seconds": (1, MAX_WAIT_SECONDS),
+                     "daily_requests": (0, 100000), "max_failures": (0, 1073741824),
+                     "free_disk_mb": (0, 1073741824)}
     for k, v in lim.items():
-        if k in ("history_index",):
-            number(v, f"limits.{k}", 8, 1000000)
-        elif k in ("prompt_snapshots",):
-            number(v, f"limits.{k}", 1, 64)
-        elif k in ("default_wait_seconds", "maximum_wait_seconds"):
-            number(v, f"limits.{k}", 1, MAX_WAIT_SECONDS)
-        elif k in ("daily_requests",):
-            # One admission ≈ one paid provider call; the bound keeps the
-            # day-file (count and bytes) proportional to real usage.
-            number(v, f"limits.{k}", 0, 100000)
-        else:
-            number(v, f"limits.{k}", 0 if k in ("daily_requests", "free_disk_mb") else 1,
-                   1073741824)
+        low, high = _LIMIT_RANGES.get(k, (1, 1073741824))
+        number(v, f"limits.{k}", low, high)
     limits = Limits(**lim)
     if limits.default_wait_seconds > limits.maximum_wait_seconds:
         raise ConfigError("default wait exceeds maximum wait")
@@ -236,6 +275,56 @@ def load(file: Path) -> Config:
     for k in ("executable", "image"):
         if k in sb:
             string(sb[k], f"sandbox.{k}")
+    network = string(sb.get("network", "none"), "sandbox.network")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:=-]*", network):
+        raise ConfigError("sandbox.network must be a runtime network name (default none)")
+    sb["network"] = network
+    entrypoint = string(sb.get("entrypoint", "/bin/sh"), "sandbox.entrypoint")
+    if not entrypoint.startswith("/") or re.search(r"\s", entrypoint) or "\x00" in entrypoint:
+        raise ConfigError("sandbox.entrypoint must be an absolute container path without whitespace")
+    sb["entrypoint"] = entrypoint
+    raw_mounts = sb.get("mounts", [])
+    if not isinstance(raw_mounts, list):
+        raise ConfigError("sandbox.mounts must be an array of tables")
+    mounts = []
+    for index, entry in enumerate(raw_mounts):
+        where = f"sandbox.mounts[{index}]"
+        if not isinstance(entry, dict):
+            raise ConfigError(f"{where} must be a table")
+        keys(entry, {"source", "target"}, where)
+        source = string(entry.get("source", ""), f"{where}.source")
+        target = string(entry.get("target", ""), f"{where}.target")
+        if not Path(source).is_absolute() or any(c in source for c in ("\x00", "\n", ",")):
+            raise ConfigError(f"{where}.source must be an absolute host path without delimiters")
+        if not target.startswith("/") or any(c in target for c in ("\x00", "\n", ",", "\\")) or ".." in PurePosixPath(target).parts:
+            raise ConfigError(f"{where}.target must be an absolute POSIX path without parent references")
+        normalized = "/" + "/".join(part for part in PurePosixPath(target).parts if part not in ("/", "//"))
+        reserved = ("/workspace", "/work", "/tmp", "/root", "/proc", "/sys", "/dev", "/run",
+                    "/bin", "/sbin", "/usr", "/lib", "/lib64", "/etc")
+        if normalized == "/" or any(normalized == p or normalized.startswith(p + "/") for p in reserved):
+            raise ConfigError(f"{where}.target must not overlay system or harness paths: {target}")
+        if any(normalized == m["target"] or normalized.startswith(m["target"] + "/") or
+               m["target"].startswith(normalized + "/") for m in mounts):
+            raise ConfigError(f"{where}.target overlaps another configured mount")
+        mounts.append({"source": source, "target": normalized})
+    sb["mounts"] = tuple(mounts)
+    raw_env = sb.get("env", {})
+    if not isinstance(raw_env, dict):
+        raise ConfigError("sandbox.env must be a table")
+    env = {}
+    for key, value in raw_env.items():
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            raise ConfigError(f"sandbox.env keys must look like ENV_VAR: {key}")
+        # Token-boundary match: KEY/SECRET/TOKEN as a full _-separated token.
+        # MONKEY_PATH, TOKENIZERS_* and KEYCLOAK_* stay allowed; HF_TOKEN and
+        # PUBLIC_KEY_PATH stay refused. Values are never inspected.
+        if key in ("HOME", "TMPDIR", "PATH") or re.search(r"(^|_)(KEY|SECRET|TOKEN)(_|$)", key):
+            raise ConfigError(f"sandbox.env must not shadow runtime vars or carry secrets: {key}. "
+                              "Keep credentials out of container environments.")
+        if not isinstance(value, str) or "\x00" in value or "\n" in value:
+            raise ConfigError(f"sandbox.env values must be single-line strings: {key}")
+        env[key] = value
+    sb["env"] = env
     if "selinux_label" in sb:
         boolean(sb["selinux_label"], "sandbox.selinux_label")
     if sb.get("mode", "rootless") not in ("rootless", "single"):
@@ -289,15 +378,43 @@ def load(file: Path) -> Config:
     for name, model in profiles.items():
         if not ID.fullmatch(name):
             raise ConfigError("Invalid profile name")
-        keys(model, {"provider", "model", "thinking", "engine"}, f"profiles.{name}")
-        for k, v in model.items():
-            string(v, f"profiles.{name}.{k}")
-        if any("\n" in v for v in model.values()):
-            raise ConfigError(f"Profile values must not contain newlines: {name}")
-        if model.get("thinking", "off") not in THINKING_LEVELS:
-            raise ConfigError(f"Invalid thinking level for {name}")
-        if model.get("engine", "pi") not in ENGINES:
-            raise ConfigError(f"Unknown inference engine for {name}")
+        keys(model, {"provider", "model", "engine", "session", "options", "resources", "mcp_servers"}, f"profiles.{name}")
+        for key in ("provider", "model", "engine", "session"):
+            value = string(model.get(key, ""), f"profiles.{name}.{key}")
+            if "\n" in value:
+                raise ConfigError(f"Profile values must not contain newlines: {name}")
+        if model.get("engine") not in environments:
+            raise ConfigError(f"Configure the engine environment for {name}")
+        if model.get("session") not in ("ephemeral", "persistent"):
+            raise ConfigError(f"profiles.{name}.session must be ephemeral or persistent")
+        for key in ("options", "mcp_servers"):
+            value = model.setdefault(key, {})
+            if not isinstance(value, dict):
+                raise ConfigError(f"profiles.{name}.{key} must be a table")
+            from .fs import canonical
+            if len(canonical(value)) > 262144:
+                raise ConfigError(f"profiles.{name}.{key} exceeds byte bound")
+        if "mizu" in model["mcp_servers"]:
+            raise ConfigError("mcp_servers.mizu is owned by the runtime")
+        if len(model['mcp_servers']) > 64:
+            raise ConfigError('mcp_servers accepts at most 64 explicit servers')
+        resources = model.setdefault("resources", [])
+        if not isinstance(resources, list) or len(resources) > MAX_RESOURCES:
+            raise ConfigError(f"resources must be an array of at most {MAX_RESOURCES} entries")
+        seen = set()
+        for entry in resources:
+            keys(entry, {"kind", "path", "sha256"}, "resource")
+            string(entry.get("kind", ""), "resource.kind")
+            raw_path = string(entry.get("path", ""), "resource.path")
+            joined = Path(os.path.expanduser(expand(raw_path)))
+            joined = joined if joined.is_absolute() else file.parent / joined
+            if joined.is_symlink() or not (joined.is_file() or joined.is_dir()):
+                raise ConfigError("Resource must be local content without symlinks")
+            entry["path"] = str(joined.resolve())
+            sha = string(entry.get("sha256", ""), "resource.sha256")
+            if not re.fullmatch(r"[0-9a-f]{64}", sha) or entry["path"] in seen:
+                raise ConfigError("Resource requires a unique path and SHA-256 digest")
+            seen.add(entry["path"])
     roles: dict[str, Role] = {}
     role_tables = data.get("roles", {})
     if not isinstance(role_tables, dict):
@@ -305,7 +422,7 @@ def load(file: Path) -> Config:
     for name, role in role_tables.items():
         if not ID.fullmatch(name):
             raise ConfigError("Invalid role name")
-        keys(role, {"profile", "policy", "workspace", "capabilities", "persistent", "on_change",
+        keys(role, {"profile", "policy", "workspace", "capabilities", "engine_tools", "on_change",
                     "interval_seconds", "calendar", "daemon"}, f"roles.{name}")
         profile = string(role.get("profile", ""), f"roles.{name}.profile")
         if profile not in profiles:
@@ -316,10 +433,18 @@ def load(file: Path) -> Config:
         caps = strings(role.get("capabilities", []), "capabilities")
         if set(caps) - CAPABILITIES or len(set(caps)) != len(caps):
             raise ConfigError(f"Invalid or duplicate capability in role {name}")
+        engine_tools = strings(role.get("engine_tools", []), "engine_tools")
+        if len(engine_tools) > 128 or len(set(engine_tools)) != len(engine_tools) or any(not tool or len(tool) > 256 for tool in engine_tools):
+            raise ConfigError("engine_tools must contain at most 128 unique bounded names")
+        if set(engine_tools) & {"bash", "powershell", "edit", "write", "read", "Bash", "Read", "Edit", "Write", "NotebookEdit", "Computer", "Glob", "Grep"}:
+            raise ConfigError("Native host tools bypass the OCI bridge; grant mizu operations instead")
         if "finish" not in caps:
             raise ConfigError(f"Role {name} requires the finish capability")
         if "verify" in caps and workspace != "write":
             raise ConfigError("verify requires a writable workspace")
+        if workspace == "write" and "verify" not in caps:
+            raise ConfigError(f"Writable role {name} requires the verify capability so "
+                              "completion can be bound to acceptance commands")
         policy = path_value(string(role.get("policy", ""), "policy"), file.parent)
         if not policy.is_file():
             raise ConfigError(f"Policy file not found: {policy}")
@@ -331,7 +456,7 @@ def load(file: Path) -> Config:
         if sum((bool(interval), bool(calendar), daemon)) > 1:
             raise ConfigError("Choose one scheduling method per role")
         roles[name] = Role(name, profile, policy, workspace, caps,
-                           boolean(role.get("persistent", False), "persistent"),
+                           strings(role.get("engine_tools", []), "engine_tools"),
                            boolean(role.get("on_change", False), "on_change"), interval, calendar, daemon)
     if not roles:
         raise ConfigError("At least one role is required")
@@ -341,24 +466,16 @@ def load(file: Path) -> Config:
     timezone = string(data.get("timezone", "UTC"), "timezone")
     resolve_timezone(timezone)
     web = data.get("web", {})
-    keys(web, {"hosts", "feeds", "cache_seconds", "timeout_seconds", "max_bytes", "search_command"}, "web")
+    keys(web, {"hosts", "feeds", "cache_seconds", "timeout_seconds", "max_bytes", "search_command",
+               "intranet"}, "web")
     web = {"hosts": [], "feeds": [], "cache_seconds": 1800, "timeout_seconds": 20,
-           "max_bytes": 524288, "search_command": [], **web}
+           "max_bytes": 524288, "search_command": [], "intranet": False, **web}
     for k in ("hosts", "feeds", "search_command"):
         strings(web[k], f"web.{k}")
     for k in ("cache_seconds", "timeout_seconds", "max_bytes"):
         number(web[k], f"web.{k}", 1, 16777216)
-    def trusted_command(data, key: str, default: str) -> tuple[str, ...]:
-        command = strings(data.get(key, [default]), key)
-        if not command or any(not s or "\n" in s for s in command):
-            raise ConfigError(f"{key} must be a nonempty argv array")
-        return command
-    command = trusted_command(data, "pi_command", "pi")
-    codex_command = trusted_command(data, "codex_command", "codex")
-    claude_command = trusted_command(data, "claude_command", "claude")
+    web["intranet"] = boolean(web["intranet"], "web.intranet")
     return Config(file, path_value(string(data.get("data_dir", "~/.local/state/mizu"), "data_dir"), file.parent),
-                  command, codex_command, claude_command,
-                  path_value(data.get("pi_dir", "pi"), file.parent), limits, sandbox,
-                  profiles, roles, consult, timezone, web,
+                  environments, limits, sandbox, profiles, roles, consult, timezone, web,
                   strings(data.get("exclude", [".git", ".pi", ".env", ".env.*", ".venv",
                                                 "node_modules", "__pycache__", ".pytest_cache"]), "exclude"))

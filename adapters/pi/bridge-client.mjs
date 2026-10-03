@@ -7,8 +7,8 @@ export function request(config, operation, args, signal) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(new Error("Cancelled"));
     let endpoint;
-    if (config.socket) endpoint = { path: config.socket };
-    else if (config.host && config.port) endpoint = { host: config.host, port: config.port };
+    if (config.transport === "unix" && typeof config.socket === "string" && config.socket) endpoint = { path: config.socket };
+    else if (config.transport === "tcp" && ["127.0.0.1", "::1"].includes(config.host) && Number.isInteger(config.port) && config.port > 0 && config.port < 65536) endpoint = { host: config.host, port: config.port };
     else return reject(new Error("Bridge endpoint is not configured"));
     let bytes = 0;
     let chunks = [];
@@ -33,14 +33,16 @@ export function request(config, operation, args, signal) {
     });
     socket.on("data", chunk => {
       bytes += chunk.length;
-      if (bytes > 2097152) return finish(new Error("Response exceeds byte limit"));
+      if (bytes > 1048576) return finish(new Error("Response exceeds byte limit"));
       chunks.push(chunk);
       if (!chunk.includes(10)) return;
       const buffer = Buffer.concat(chunks);
       const end = buffer.indexOf(10);
       try {
         const response = JSON.parse(buffer.subarray(0, end).toString("utf8"));
+        if (!response || typeof response !== "object" || typeof response.ok !== "boolean") return finish(new Error("Invalid bridge envelope"));
         if (!response.ok) return finish(new Error(response.error || "Tool refused"));
+        if (!response.result || typeof response.result !== "object" || Array.isArray(response.result)) return finish(new Error("Invalid bridge result"));
         finish(null, response.result);
       } catch (error) {
         finish(error);
@@ -49,7 +51,7 @@ export function request(config, operation, args, signal) {
   });
 }
 
-/** Rebuild the tiny schema subset with Pi's version-matched TypeBox instance. */
+/** Rebuild the tiny schema subset with Pi's public TypeBox instance. */
 export function typeSchema(Type, schema) {
   if (schema.enum) return Type.Union(schema.enum.map(value => Type.Literal(value)));
   if (schema.type === "string") return Type.String({ maxLength: schema.maxLength });

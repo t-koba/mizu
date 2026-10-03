@@ -21,9 +21,9 @@ def live(config: Config, profile: str | None = None, role_name: str = "consult")
     if role_name not in config.roles:
         raise ConfigError(f"Live probe role is not configured: {role_name}")
     role = config.roles[role_name]
-    if role.workspace != "read" or set(role.capabilities) - {"files", "read", "finish"}:
-        raise ConfigError(f"Live probe role {role_name} must be read-only with only files/read/finish")
-    role = dataclasses.replace(role, profile=profile or role.profile, persistent=False, workspace="read",
+    from .runtime import check_consult_role
+    check_consult_role(role_name, role)
+    role = dataclasses.replace(role, profile=profile or role.profile, workspace="read",
                                capabilities=("files", "read", "finish"), on_change=False)
     limits = dataclasses.replace(config.limits, requests_per_run=min(2, config.limits.requests_per_run),
                                  tools_per_run=min(5, config.limits.tools_per_run),
@@ -41,9 +41,10 @@ def live(config: Config, profile: str | None = None, role_name: str = "consult")
         goal = root / "goal.md"
         # Test-only probe vector, not operator policy.
         goal.write_text("Read probe.txt. Then call mizu_finish alone with outcome 'wait' and summary exactly the file contents. Do nothing else.")
+        evidence = config.data / "validation" / (name + ".project")
         try:
             project = initialize(config, name, source, goal, [role_name], [], armed=True)
-            result = Engine(config).run(project, role_name)
+            result = Engine(config, ephemeral=True).run(project, role_name)
             if result["finish"]["summary"].strip() != challenge:
                 raise Denied("Engine ran, but the live smoke did not return the requested evidence")
             engine = config.engine(role.profile)
@@ -51,7 +52,7 @@ def live(config: Config, profile: str | None = None, role_name: str = "consult")
                 "pi": ["trusted extension handshake", "exact model selection",
                        "provider-request admission", "custom tool round trip",
                        "finish followed by agent_settled"],
-                "codex": ["trusted argv with read-only sandbox", "isolated Codex home",
+                "codex": ["trusted argv with configured sandbox", "isolated Codex home",
                           "required MCP bridge", "shared budget admission",
                           "finish round trip"],
                 "claude": ["trusted argv with MCP-only allowlist", "per-run MCP config",
@@ -59,10 +60,14 @@ def live(config: Config, profile: str | None = None, role_name: str = "consult")
                            "finish round trip"],
             }[engine]
             report = {"status": "pass", "time": now(), "engine": engine, "checks": checks,
-                      "result": result}
+                      "result": result, "evidence": str(evidence)}
             write_json(config.data / "validation" / f"{name}.json", report)
             return report
+        except BaseException as exc:
+            write_json(config.data / "validation" / f"{name}.json", {"status": "fail", "time": now(), "error": str(exc), "evidence": str(evidence) if project else None})
+            raise
         finally:
             if project:
                 project.set_control(armed=False, paused=True)
-                shutil.rmtree(project.root)
+                mkdir(evidence.parent)
+                shutil.move(str(project.root), str(evidence))

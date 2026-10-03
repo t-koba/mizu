@@ -3,35 +3,48 @@
 ## Boundary first
 
 Mizu separates the control plane, the model process, the execution sandbox and
-published evidence. Role names are configuration, not a class hierarchy. The
-Python runtime executes capability-bearing work units. A Markdown policy
-explains which work to choose; it cannot grant capabilities or change limits.
+published evidence.
 
-The trusted computing base consists of the Linux kernel, the operator account,
-Python, the Mizu release, Node/Pi and their installed dependencies, Podman and
-the selected container images. Provider responses, repositories, search results,
-experiments and proposals are untrusted inputs. The trusted host adapter never
-executes a model-provided host command.
+Mechanism provides capability without prescribing behavior; policy defines
+intent and decisions. Keep mechanism minimal (KISS) and avoid embedding
+behavioral constraints, heuristics, or assumptions into code. Ask whether a
+change provides a capability or enforces a behavior; behavioral rules belong in
+operator policy, not mechanism.
+
+Role names are configuration, not a class hierarchy. The Python runtime executes
+capability-bearing work units. A Markdown policy explains which work to choose;
+it cannot grant capabilities or change limits.
+
+The trusted computing base consists of the host OS kernel, the operator account,
+Python, the Mizu release, Node/Pi/CLIs and their installed dependencies, the
+container runtime (Podman/Docker), and selected container images. Provider
+responses, repositories, search results, experiments, and proposals are untrusted
+inputs. The trusted host adapter never executes model-provided host commands.
 
 ## Components
 
 | Module | Responsibility | Does not decide |
 |---|---|---|
 | `config.py` | Strict typed TOML, grants, limits, profile resolution | Project priorities |
-| `drivers.py` | Engine routing by profile, shared invocation admission | Model/provider selection |
+| `drivers.py` | Engine routing by profile, shared logical admission | Model/provider selection |
 | `runtime.py` | Admission, locks, capability dispatch, publication | Which algorithm is best |
 | `pi.py`, `adapters/pi/` | Version-specific RPC and session transport | Model selection policy |
 | `codex.py`, `claude.py` | Trusted CLI argv, isolated per-run config, event parsing | Research quality, host-tool absence |
+| `mcp_loop.py` | Shared LF-framed JSON-RPC stdio loop for MCP servers | Tool semantics or protocol extensions |
 | `mcp_proxy.py` | stdio MCP-to-bridge proxy with no authority of its own | Tool semantics |
+| `protocol.py` | Tool schemas and strict parameter validation | Tool implementation semantics |
 | `sandbox.py`, `process.py` | Bounded execution, termination, cleanup | Experiment usefulness |
 | `snapshot.py` | Content objects, immutable manifests, published pointer | Semantic correctness |
 | `insights.py` | Submission identity, immutable proposals, decision history | Acceptance or rejection |
 | `web.py` | Allowed retrieval and external source receipts | Scientific truth |
 | `editor.py` | Snapshot export and read/propose MCP | Code editing |
 | `report.py` | Escaped static artifact (Markdown + evidence) with atomic latest pointer | Presentation, retention policy |
-| `dashboard.py` | Bounded static JSON of already-recorded facts with atomic latest pointer | Presentation, per-project panels |
-| `services.py` | Render systemd configuration | Implicitly start or arm |
+| `dashboard.py` | Bounded static JSON of recorded facts with atomic latest pointer | Presentation, per-project panels |
+| `services.py` | Render OS service definitions (systemd / launchd / Task Scheduler) | Implicitly start or arm |
 | `storage.py` | Paused backup, bounded restore, conservative pruning | Evidence retention policy |
+| `budget.py` | Shared UTC-day request budget and retention reaping | Monetary spending caps |
+| `usage.py` | Aggregated token usage facts from completed run records | Billing rates or currency pricing |
+| `doctor.py` | Platform, runtime, isolation, and budget health checks | Autonomous repair or bypasses |
 
 There is no long-lived daemon listening for work. Each run opens a short-lived
 private bridge channel — a Unix socket where the platform serves one,
@@ -41,19 +54,21 @@ JSON is the machine format; Markdown is the human policy/report format.
 
 ## Work-unit transaction
 
-1. Check arm/pause state, shared request budget, free disk and role eligibility.
+1. Check arm/pause state, shared request budget, free disk, and role eligibility.
 2. Acquire role lock; writers also acquire the workspace lock. Acquire a bounded
    global execution slot. Import any Editor proposals into private storage.
-3. Capture the published snapshot, goal digest, current wake generation and
+3. Capture the published snapshot, goal digest, current wake generation, and
    inbox generation. Observers get a materialized immutable code view.
-4. For command-capable real runs, check rootless Podman prerequisites and clean
+4. For command-capable real runs, check container runtime prerequisites and clean
    up leftover labelled containers. Record the run and active marker.
-5. Launch Pi from an empty control directory. Built-in tools, discovered
-   extensions, skills, templates, themes and project context are disabled.
-6. Require the trusted extension handshake and the exact configured provider
-   and model. Admit provider requests before dispatch. Enforce capability grants
-   and limits on every bridge operation.
-7. `finish` seals the work unit. Wait for Pi's `agent_settled`, not `agent_end`.
+5. Launch the managed Pi SDK, Codex app-server or official Claude SDK adapter.
+   Native options and hash-verified local resources come from the selected
+   profile. Host command tools cannot bypass the OCI bridge.
+6. Require the bridge handshake/MCP connection before sending input. Pi and
+   Codex verify the configured model/provider during startup. Grants apply to
+   every Mizu operation; extra native tools require `engine_tools`.
+7. `finish` seals the work unit. Pi additionally requires `agent_settled`,
+   Codex requires successful `turn/completed`, and Claude checks terminal_reason.
 8. A writer captures actual files again. Verification is retained as passing
    only when it applies to exactly the captured code. Write a prepared result,
    publish the immutable snapshot pointer, then finalize the run record.
@@ -66,7 +81,7 @@ prepared record as completed. The last published state remains readable while a
 writer is active. No rollback of uncommitted files happens automatically.
 
 Atomic replace plus fsync and locks provide local filesystem durability under
-normal Linux semantics. Use a local filesystem, not NFS/object-store/FUSE mounts
+standard local filesystem semantics. Use a local filesystem, not NFS/object-store/FUSE mounts
 with weaker locking/rename guarantees. Disk/host failure recovery is not a
 substitute for independent backups. Snapshots have hashes, not digital signatures.
 
@@ -79,11 +94,13 @@ the code digest. Symlinks, hardlinks and special files are not materialized as
 ordinary source. Plain-directory import refuses unsupported skipped entries;
 verification cannot pass if the captured tree contains them.
 
-The history index retains 128 published IDs; full manifests/objects remain on
+The history index retains published IDs up to the configured limit (default
+128, tunable 8–1000000 via `limits.history_index`); full manifests/objects remain on
 disk. Prompts carry a bounded, capability-gated projection: up to
 `limits.prompt_snapshots` recent anchored summaries with exact IDs and code
 digests, plus only the actionable context the role is granted to use.
-`pending_insights` is offered only to roles with `insights`/`decide`;
+`pending_insights` is offered only to roles with `insights`/`decide`, newest
+kept up to `limits.pending_insights`;
 `acceptance_commands` only to roles with `verify`. Exact snapshot references
 (`id`, `code_digest`, `state`, `verification`) are always pinned, never
 summarized. `diff` compares the anchored
@@ -104,8 +121,10 @@ created time, base snapshot, title and Markdown body. Reusing an ID with identic
 content is safe; changing content under that ID is rejected. Original proposals
 are immutable, decisions are separate, and decision changes append history.
 Deferral requires a revisit condition. Decided (non-deferred) proposals older
-than 31 days are reaped on ingest; their decisions persist in `decisions/` and
-`decision-history/`, so inbox scans stay bounded. Worker discretion applies to proposals,
+than `limits.retention_days` are reaped on ingest; their decisions persist in `decisions/` and
+`decision-history/`, so inbox scans stay bounded. The prompt offer keeps the
+newest `limits.pending_insights` proposals so recent evidence is never hidden
+behind the bound. Worker discretion applies to proposals,
 not to the operator's goal or prohibitions.
 
 Editor uploads are first atomically claimed into a private ingest directory;
@@ -116,7 +135,7 @@ arriving during that unit do not vanish behind an advanced cursor.
 
 ## Multiple models and recovery
 
-Profiles are exact provider/model/thinking triples. Persistent sessions are
+Profiles explicitly select engine/provider/model/session and native options. Persistent sessions are
 keyed by role, model, goal and policy/grants. A changed key opens fresh context;
 old sessions are kept for audit. No silent provider fallback or automatic replay
 is implemented. Operators can change profiles at a boundary, and Worker can
@@ -150,3 +169,5 @@ process but can reuse its durable session. Large monorepositories pay for a
 bounded tree scan per capture; tune exclusions and limits or split projects.
 Before adding caches, workers or a distributed queue, measure this cost on the
 actual repository and preserve the publication/security contracts.
+
+The updated publication/history, run, pagination and retention contracts are documented in [completion-contracts.md](completion-contracts.md).

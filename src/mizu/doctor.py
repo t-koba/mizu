@@ -9,13 +9,12 @@ import sys
 import tempfile
 from pathlib import Path
 
-from . import NODE_MINIMUM, PI_MINIMUM
 from . import platform as _platform
 from .budget import Budget
 from .config import Config, resolve_timezone
 from .drivers import command_for
 from .errors import ConfigError, Denied, MizuError
-from .fs import mkdir, read_json
+from .fs import digest, mkdir, read_json
 from .pi import credentials
 from .process import run
 from .sandbox import Sandbox, ensure_single, runtime_base, runtime_env
@@ -43,7 +42,7 @@ def container_runtime(config: Config) -> dict:
         raise Denied("Container runtime failed: " + versioned.stderr[-1000:])
     version = versioned.stdout.strip().splitlines()[0] if versioned.stdout.strip() else "unknown"
     if config.sandbox.mode == "single":
-        # Constrained-host legacy path: Linux user namespaces only.
+        # Constrained-host path: Linux user namespaces only.
         prepared = ensure_single(config)
         evidence = run([*config.sandbox.namespace_helper, "sh", "-c",
                         "cat /proc/self/uid_map; id -u"], timeout=10, maximum=1024)
@@ -57,7 +56,8 @@ def container_runtime(config: Config) -> dict:
         return {"mode": "single", "runtime": Path(executable).name,
                 "namespace_map": " ".join(lines[:3]), "host_uid": lines[1],
                 "prepared": prepared["prepared"], "version": version}
-    return {"mode": "container", "runtime": Path(executable).name, "version": version}
+    return {"mode": "container", "runtime": Path(executable).name, "version": version,
+            "host_unprivileged": True, "runtime_rootless": "not_verified"}
 
 
 def check(config: Config, *, sandbox: bool = False) -> dict:
@@ -77,49 +77,49 @@ def check(config: Config, *, sandbox: bool = False) -> dict:
     checked("service units", lambda: service_units())
     checked("proposal stores", lambda: proposal_stores(config))
     def node():
-        result = run(["node", "--version"], timeout=10, maximum=1024)
-        match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)\s*", result.stdout)
-        minimum = tuple(map(int, NODE_MINIMUM.split(".")))
-        if not match or tuple(map(int, match.groups())) < minimum:
-            raise ConfigError(f"Node >={NODE_MINIMUM} is required by the pinned Pi release")
+        result = run([*config.command('pi'), "--input-type=module", "-e",
+                      "import {createRequire} from 'node:module'; import {ReadableStream} from 'node:stream/web'; if(typeof createRequire!=='function'||typeof ReadableStream!=='function')process.exit(1); console.log('module and stream capabilities available')"], timeout=10, maximum=1024)
+        if result.exit_code:
+            raise ConfigError('Required Node module/stream capabilities missing')
         return result.stdout.strip()
-    def pi():
-        result = run([*config.pi_command, "--version"], timeout=30, maximum=8192)
-        match = re.search(r"(\d+)\.(\d+)\.(\d+)", result.stdout)
-        minimum = tuple(map(int, PI_MINIMUM.split(".")))
-        if result.exit_code != 0 or not match or tuple(map(int, match.groups())) < minimum:
-            raise ConfigError(f"Pi >={PI_MINIMUM} is required; found: " + (result.stdout + result.stderr)[-500:])
-        return result.stdout.strip()
-    def cli_engine(engine: str):
-        """Presence plus required-flag drift check for codex/claude (see adapters/*/compatibility.json)."""
-        compat = read_json(ROOT / "adapters" / engine / "compatibility.json", None)
-        if not isinstance(compat, dict) or not isinstance(compat.get("required_flags"), list):
-            raise ConfigError(f"Missing compatibility contract for engine: {engine}")
-        command = command_for(config, engine)
-        versioned = run([*command, "--version"], timeout=30, maximum=8192)
-        if versioned.exit_code != 0:
-            raise ConfigError(f"{engine} CLI is not runnable: " + (versioned.stdout + versioned.stderr)[-500:])
-        helped = run([*command, "--help"], timeout=30, maximum=262144)
-        if helped.exit_code != 0:
-            raise ConfigError(f"{engine} --help failed: " + (helped.stdout + helped.stderr)[-500:])
-        missing = [f for f in compat["required_flags"] if not help_has_flag(helped.stdout, f)]
+    def engine_contract(engine):
+        from .engine_config import adapter_contract
+        contract = adapter_contract(engine)
+        command = config.command(engine)
+        if engine == "codex":
+            result = run([*command, contract["command"][0], "--help"], timeout=30, maximum=262144)
+            flags = list(contract["required_flags"])
+            for item in contract.get("contracts", []):
+                flags.extend(item["required_flags"])
+            missing = [flag for flag in dict.fromkeys(flags) if not help_has_flag(result.stdout, flag)]
+            if result.exit_code or missing:
+                raise ConfigError("Codex app-server stdio capability missing: " + ", ".join(missing))
+            return {"request_unit": contract["request_unit"], "required_flags": sorted(set(flags)),
+                    "inference": "not_run"}
+        launcher = ROOT / "adapters" / engine / contract["entrypoint"]
+        result = run([*command, str(launcher), "--check-contract"], timeout=30, maximum=8192)
+        if result.exit_code:
+            raise ConfigError("Required engine SDK capabilities missing: " + result.stderr[-1000:])
+        try:
+            reported = json.loads(result.stdout.strip())
+        except (json.JSONDecodeError, UnicodeError) as exc:
+            raise ConfigError(f"Unreadable {engine} contract report: {exc}") from exc
+        verified = reported.get("exports", []) if isinstance(reported, dict) else []
+        missing = [name for name in contract["exports"] if name not in verified]
         if missing:
-            raise ConfigError(f"{engine} CLI drift: --help lacks required flags: {', '.join(missing)}; "
-                              f"installed: {versioned.stdout.strip()[-200:]}")
-        return {"version": versioned.stdout.strip()[-200:], "required_flags": compat["required_flags"]}
+            raise ConfigError(f"Adapter drift: {engine} contract declares missing exports: " + ", ".join(missing))
+        return {"request_unit": contract["request_unit"], "exports": sorted(set(verified)),
+                "inference": "not_run"}
     engines = {config.engine(p) for p in config.profiles}
     if "pi" in engines:
         checked("node", node)
-        checked("pi version", pi)
-    else:
-        checks.append({"name": "node", "status": "not_run", "details": "No profile uses the pi engine"})
-        checks.append({"name": "pi version", "status": "not_run", "details": "No profile uses the pi engine"})
-    for engine in ("codex", "claude"):
+    for engine in ("pi", "codex", "claude"):
         if engine in engines:
-            checked(f"{engine} CLI", lambda engine=engine: cli_engine(engine))
+            checked(f"{engine} adapter", lambda engine=engine: engine_contract(engine))
         else:
-            checks.append({"name": f"{engine} CLI", "status": "not_run",
-                           "details": f"No profile uses the {engine} engine"})
+            checks.append({"name": f"{engine} adapter", "status": "not_run", "details": "No profile uses this engine"})
+    from .engine_config import effective
+    checked("engine resources", lambda: [effective(config, role, role.profile)["resources"] for role in config.roles.values()])
     checked("container runtime prerequisites", lambda: container_runtime(config))
     def image():
         if not config.sandbox.image:
@@ -155,42 +155,47 @@ fi
                 capability_check = """test "$(grep '^CapEff:' /proc/self/status | awk '{print $2}')" = 0000000000000000
 test "$(grep '^Seccomp:' /proc/self/status | awk '{print $2}')" = 2
 """
+                net_enabled = config.sandbox.network != "none"
                 net_check = """python3 - <<'PROBE'
 import os, socket
-# A networkless namespace has no routable interface. Do not contact an external service.
-assert set(os.listdir('/sys/class/net')) <= {'lo'}
-print('isolation-probe-passed')
+# Operator-enabled network: only record the choice, probe nothing external.
+print('network-operator-enabled')
 PROBE
-"""
-                if single:
-                    script = """set -eu
-[ -r /workspace/probe.txt ]
-! (echo unsafe > /workspace/probe.txt) 2>/dev/null
-[ ! -S /run/podman/podman.sock ]
-[ ! -S /var/run/docker.sock ]
-test $(id -u) -eq 0
-""" + capability_check + secret_check + net_check
-                else:
-                    script = """set -eu
-[ -r /workspace/probe.txt ]
-! (echo unsafe > /workspace/probe.txt) 2>/dev/null
-[ ! -S /run/podman/podman.sock ]
-[ ! -S /var/run/docker.sock ]
-""" + secret_check + """python3 - <<'PROBE'
+""" if net_enabled else """python3 - <<'PROBE'
 import os, socket
-assert os.getuid() != 0
-assert not os.path.exists('/root/.ssh/id_rsa')
 # A networkless namespace has no routable interface. Do not contact an external service.
 assert set(os.listdir('/sys/class/net')) <= {'lo'}
 print('isolation-probe-passed')
 PROBE
 """
+                net_label = f"operator-enabled network ({config.sandbox.network})" if net_enabled else "networkless namespace"
+                resource_check = """python3 - <<'RESOURCE'
+import pathlib, json
+root = pathlib.Path('/sys/fs/cgroup')
+assert (root / 'cgroup.controllers').exists(), 'cgroup v2 resource evidence unavailable'
+def value(name):
+    return (root / name).read_text(encoding="utf-8").strip()
+evidence = {name: value(name) for name in ('memory.max', 'memory.swap.max', 'pids.max', 'cpu.max')}
+assert int(evidence['memory.max']) == MEMORY_LIMIT
+assert int(evidence['memory.swap.max']) == 0
+assert int(evidence['pids.max']) == PID_LIMIT
+quota, period = map(int, evidence['cpu.max'].split())
+assert abs(quota / period - CPU_LIMIT) < 0.001
+print(json.dumps({'resource_limits': evidence}, sort_keys=True))
+RESOURCE
+""".replace('MEMORY_LIMIT', str(config.sandbox.memory_mb * 1048576)).replace('PID_LIMIT', str(config.sandbox.pids)).replace('CPU_LIMIT', str(config.sandbox.cpus))
+                script = """set -eu
+[ -r /workspace/probe.txt ]
+! (echo unsafe > /workspace/probe.txt) 2>/dev/null
+[ ! -S /run/podman/podman.sock ]
+[ ! -S /var/run/docker.sock ]
+""" + ("test $(id -u) -eq 0\n" if single else "test $(id -u) -ne 0\n") + capability_check + secret_check + net_check + resource_check
                 record = engine.execute(work, script, writable=False, timeout=30)
                 if record.get("exit_code") != 0 or record.get("reason") != "exited":
                     raise Denied("Sandbox smoke failed: " + json.dumps(record))
-                if (work / "probe.txt").read_text() != "readable":
+                if (work / "probe.txt").read_text(encoding="utf-8") != "readable":
                     raise Denied("Read-only bind mount was writable")
-                return {"checks": ["readonly source", "nonroot user", "no inherited API secrets", "networkless namespace", "container cleanup"],
+                return {"checks": ["readonly source", "single-ID namespace user" if single else "nonroot container user", "zero effective capabilities", "seccomp filter active", "cgroup v2 memory/swap/pids/CPU limits", "no inherited API secrets", net_label, "container cleanup"],
                         "record": record}
         checked("real sandbox smoke", exercise)
     else:
@@ -216,7 +221,8 @@ def free_disk(config: Config) -> dict:
 
 
 def budget_file(config: Config) -> dict:
-    usage = Budget(config.data / "budget", config.limits.daily_requests).usage()
+    usage = Budget(config.data / "budget", config.limits.daily_requests,
+                   config.limits.retention_days).usage()
     if not isinstance(usage["used"], int) or usage["used"] < 0 or usage["used"] > max(usage["limit"], 0):
         raise ConfigError("Budget file is corrupt; inspect data/budget/<day>.json")
     return usage
@@ -276,64 +282,60 @@ def service_units(directory: Path | None = None, *, system: str | None = None) -
     name = system or _platform.SYSTEM
     directory = directory or _platform.service_dir(name)
     if name == "macos":
-        return _launchd_units(directory)
+        return _check_units(directory, "mizu-*.plist", name, "Plists", _launchd_executable)
     if name == "windows":
-        return _task_units(directory)
+        return _check_units(directory, "mizu-*.xml", name, "Tasks", _task_executable)
     if name != "linux":
         raise ConfigError(f"Unsupported service platform: {name}")
-    units = sorted(p.name for p in directory.glob("mizu-*") if p.suffix in (".service", ".timer")) \
-        if directory.is_dir() else []
+    return _check_units(directory, ("mizu-*.service", "mizu-*.timer"), name, "Units", _systemd_executable)
+
+
+def _check_units(directory: Path, patterns, system: str, noun: str,
+                 extract) -> dict:
+    """Shared unit loop: list, extract executable per unit, fail loudly.
+
+    Schema/bounds: `mizu-*` glob(s). Trust: local unit files.
+    Retry: none. Evidence: unit names. Failure: ConfigError names broken units.
+    `extract` maps unit path to an argv/command list (empty means broken).
+    """
+    if isinstance(patterns, str):
+        patterns = (patterns,)
+    units: list[str] = []
+    for pattern in patterns:
+        if directory.is_dir():
+            units.extend(p.name for p in directory.glob(pattern))
+    units = sorted(set(units))
     broken = []
     for unit in units:
         try:
-            text = (directory / unit).read_text().splitlines()
-            if unit.endswith(".timer"):
-                target = next(l for l in text if l.startswith("Unit=")).partition("=")[2]
-                if not (directory / target).exists():
-                    broken.append(unit)
-                continue
-            line = next(l for l in text if l.startswith("ExecStart="))
-            argv = shlex.split(line.partition("=")[2])
-            if not argv or not Path(argv[0]).exists():
+            argv = extract(directory / unit)
+            if not argv or not Path(argv[0] if isinstance(argv, list) else argv).exists():
                 broken.append(unit)
         except (OSError, ValueError, StopIteration):
             broken.append(unit)
+        except Exception:
+            broken.append(unit)
     if broken:
-        raise ConfigError("Units reference a missing executable: " + ", ".join(broken))
-    return {"system": name, "units": units}
+        raise ConfigError(f"{noun} reference a missing executable: " + ", ".join(broken))
+    return {"system": system, "units": units}
 
 
-def _launchd_units(directory: Path) -> dict:
+def _systemd_executable(path: Path):
+    text = path.read_text(encoding="utf-8").splitlines()
+    if path.name.endswith(".timer"):
+        target = next(l for l in text if l.startswith("Unit=")).partition("=")[2]
+        return [str(path.parent / target)] if (path.parent / target).exists() else []
+    line = next(l for l in text if l.startswith("ExecStart="))
+    return shlex.split(line.partition("=")[2])
+
+
+def _launchd_executable(path: Path):
     import plistlib
-    units = sorted(p.name for p in directory.glob("mizu-*") if p.suffix == ".plist") \
-        if directory.is_dir() else []
-    broken = []
-    for unit in units:
-        try:
-            data = plistlib.loads((directory / unit).read_bytes())
-            argv = data.get("ProgramArguments", [])
-            if not argv or not Path(argv[0]).exists():
-                broken.append(unit)
-        except (OSError, ValueError):
-            broken.append(unit)
-    if broken:
-        raise ConfigError("Plists reference a missing executable: " + ", ".join(broken))
-    return {"system": "macos", "units": units}
+    return plistlib.loads(path.read_bytes()).get("ProgramArguments", [])
 
 
-def _task_units(directory: Path) -> dict:
+def _task_executable(path: Path):
     import xml.etree.ElementTree as ET
-    units = sorted(p.name for p in directory.glob("mizu-*") if p.suffix == ".xml") \
-        if directory.is_dir() else []
-    broken = []
-    for unit in units:
-        try:
-            root = ET.fromstring((directory / unit).read_bytes())
-            command = root.findtext(".//{http://schemas.microsoft.com/windows/2004/02/mit/task}Command")
-            if not command or not Path(command).exists():
-                broken.append(unit)
-        except (OSError, ET.ParseError):
-            broken.append(unit)
-    if broken:
-        raise ConfigError("Tasks reference a missing executable: " + ", ".join(broken))
-    return {"system": "windows", "units": units}
+    command = ET.fromstring(path.read_bytes()).findtext(
+        ".//{http://schemas.microsoft.com/windows/2004/02/mit/task}Command")
+    return [command] if command else []

@@ -6,9 +6,10 @@ import time
 from unittest.mock import patch
 from support import Fixture, ScriptDriver
 from mizu.budget import Budget
+from mizu.config import load
 from mizu.errors import Busy, Cancelled, Denied, LimitExceeded, ProtocolError
 from mizu.fs import digest, lock, mkdir, read_json, write_json
-from mizu.project import initialize
+from mizu.project import Project, initialize
 from mizu.runtime import Engine, should_run
 
 
@@ -94,7 +95,7 @@ class SnapshotTests(Fixture):
             captured = store.capture_files(source)
             store.publish(store.create(captured, goal="g", state="s", run=None,
                                        outcome="continue", summary=f"w{n}"))
-        self.assertEqual(len(read_json(self.root / "hstore/history.json")), 8)
+        self.assertEqual(len(store.history(store.get()["id"], 100)), 8)
 
 
 class ContextTests(Fixture):
@@ -197,6 +198,18 @@ class EngineTests(Fixture):
             with self.assertRaises(ProtocolError):
                 Engine(self.config, driver=ScriptDriver(fails)).run(self.project, "worker")
         self.assertTrue(self.project.control()["paused"])
+
+    def test_zero_max_failures_never_auto_pauses(self):
+        self.file.write_text(self.file.read_text().replace("max_failures = 3", "max_failures = 0"))
+        config = load(self.file)
+        project = Project(config, "sample")
+        def fails(*_):
+            raise ProtocolError("failure")
+        for _ in range(4):
+            with self.assertRaises(ProtocolError):
+                Engine(config, driver=ScriptDriver(fails)).run(project, "worker")
+        self.assertFalse(project.control()["paused"])
+        self.assertEqual(read_json(project.root / "health" / "worker.json")["consecutive_failures"], 4)
 
     def test_arrival_during_work_is_not_marked_seen(self):
         def incoming(ctx, *_):

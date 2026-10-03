@@ -15,7 +15,7 @@ publishes them as static JSON:
   published_at}`. The entry file is completed first, so a failure never
   leaves a half-replaced pointer.
 
-Payload schema (v1, `src/mizu/dashboard.py`):
+Payload structure ( `src/mizu/dashboard.py`):
 
 | Field | Content |
 |---|---|
@@ -23,30 +23,18 @@ Payload schema (v1, `src/mizu/dashboard.py`):
 | `control` | `armed`, `paused`, short `reason`, `updated_at` |
 | `snapshot` | `id`, `code_digest`, `created_at`, `outcome`, `summary`, `state`, recorded `verification`, `goal_digest`, `wake_at` |
 | `needs_operator_input` | `true` exactly when the snapshot outcome is `blocked` |
-| `pending_insights` | Up to 30 pending proposals (`id`, `source`, `title`, `created_at`, `base_snapshot`, slim decision) |
-| `pending_count`, `answered_count` | Unanswered vs ever-decided proposals |
-| `recent_decisions` | Last 10 decisions (`id`, `action`, `created_at`, truncated reason) |
+| `pending_insights` | Newest pending proposals up to `[limits] pending_insights` (`id`, `source`, `title`, `created_at`, `base_snapshot`, slim decision) |
+| `pending_count`, `pending_total`, `pending_truncated`, `answered_count` | `pending_count` is bounded by `[limits] pending_insights` (counting newest undecided and deferred proposals); `answered_count` is the total count of decision records on disk. These are not mutually exclusive: deferred proposals remain pending and are counted in both |
+| `recent_decisions` | Latest 10 decisions selected by `created_at` (`id`, `action`, `created_at`, truncated reason) |
 | `health`, `active` | Per-role failure counters and in-flight markers |
 | `latest_artifact` | Copy of `artifacts/latest.json`, or null |
-| `budget` | `{used_requests, limit_requests, day, bytes}` — **request counts, not money** (`bytes` is the day-file size) |
-| `usage` | Token facts (see below): `totals`, last 31 day-groups, per-run `recent_entries` with full timestamps |
+| `budget` | `{used_requests, limit_requests, day, bytes, reaped}` — **request counts, not money**. `bytes` is the day-file size; `reaped` is the count of expired day-files collected under `retention_days` |
+| `usage` | Token facts: `totals`, `recent_groups` (trailing calendar days selected by `[limits] retention_days`; renamed from `groups`), and newest 200 per-run `recent_entries` with timestamps, provider, model, engine, and token breakdowns |
 
-`usage` groups assume one rate per (day, provider, model). Time-of-day
-off-peak rates (or any finer structure) must use `recent_entries` (newest
-200 runs: `run`, `finished_at`, `started_at`, provider, model, engine, token splits)
-or the raw `runs/*/result.json` records — the day-group sums alone cannot
-price those. Groups additionally list the `engines` observed for that
-(day, provider, model); request counts compare only within one engine
-(Pi counts provider requests, codex/claude count invocations). Raw records are never modified or deleted by this mechanism
-(prune removes only reproducible inputs and old artifact documents), so no
-information is irreversibly lost. Provider shapes that are not recognized
-stay visible as `other_tokens` / `unrecognized_keys` / `unknown_shapes`;
-partial scans are flagged with `truncated` / `entries_truncated` instead of
-being presented as complete. Whether a dashboard shows estimated cost, and
-at which operator-pinned rate table, is presentation policy, not mechanism.
+`usage` aggregates provider-reported token metrics across runs. In `usage.recent_groups` (renamed from `summarize()`'s `groups`), counts are summarized by `(day, provider, model)` alongside observed `engines` (Pi counts provider requests; codex/claude count driver invocations), retaining groups in the trailing `retention_days` calendar days. Finer-grained analysis (e.g. time-of-day pricing) can use `recent_entries` or raw `runs/*/result.json` files. Unrecognized fields and token shapes remain visible under `unrecognized_keys` / `unknown_shapes`; arbitrary numeric fields do not become tokens, and overflow scans are explicitly flagged with `truncated` / `entries_truncated`. Currency pricing and dashboard presentation remain operator policy.
 
-Bounds: pending 30, recent decisions 10, decision prose truncated to 500
-characters (flagged). No workspace file contents, no secrets, no model
+Bounds: `pending_insights` and `pending_count` follow `[limits] pending_insights`, `recent_decisions` selects the newest 10 records by timestamp, decision prose truncated to 500
+characters (flagged), `recent_groups` uses `[limits] retention_days` calendar days. No workspace file contents, no secrets, no model
 calls, no network. Typical payloads are tens of KiB.
 
 Trust: everything shown is recorded harness state plus agent-authored prose
@@ -56,7 +44,7 @@ code digest, not a whole-goal oracle.
 
 Retry/cancellation: collection is read-only and lock-free; publication is
 idempotent (same facts → same ID, pointer rewrite is atomic). Concurrent
-publishers serialize on atomic file replacement; every entry file stays
+publishers serialize on a publication lock; every entry file stays
 readable. Re-run the command to retry.
 
 Evidence and failure behavior: the dashboard is a disposable projection, not

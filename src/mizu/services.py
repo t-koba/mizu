@@ -11,17 +11,33 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
+import tempfile
+import plistlib
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from xml.sax.saxutils import escape as _escape
 
 from . import platform as _platform
 from .config import Config
 from .errors import Denied
-from .fs import atomic_write, identifier, mkdir, sync_dir
+from .fs import atomic_write, identifier, mkdir, sync_dir, digest, read_json, write_json, lock
 from .project import Project
 
 #: Definition file extensions each platform owns.
 SERVICE_EXTENSIONS = {"linux": (".service", ".timer"), "macos": (".plist",), "windows": (".xml",)}
+
+#: Fixed per-platform template floors (mechanism, not operator policy):
+#: restart delay avoids a tight crash loop, timer accuracy/jitter avoids
+#: thundering-herd wakeups, stop timeout bounds shutdown. Schedules
+#: (daemon/interval/calendar) stay operator policy; these floors keep the
+#: manager from busy-looping regardless of schedule choice.
+RESTART_SEC = 15
+ACCURACY_SEC = "10s"
+RANDOMIZED_DELAY_SEC = "15s"
+STOP_SEC = 45
+WINDOWS_RESTART_INTERVAL = "PT1M"
+WINDOWS_RESTART_COUNT = 999
 
 
 def quote(value: str) -> str:
@@ -36,34 +52,45 @@ def _xml(value: str) -> str:
     return _escape(value)
 
 
-def _render_systemd(config: Config, project: Project, executable: Path) -> dict[str, str]:
-    result = {}
+def _scheduled_roles(config: Config, project: Project, executable: Path):
+    """Yield (name, role, base, args) for roles with a schedule.
+
+    Schema/bounds: at most one of daemon/interval/calendar per role (enforced
+    at load). Trust: config only. Retry: none. Evidence: unit names.
+    Failure: none (unscheduled roles skipped).
+    """
     for name in project.roles:
         role = config.roles[name]
         if not (role.daemon or role.interval_seconds or role.calendar):
             continue
-        base = f"mizu-{identifier(project.name)}-{identifier(name)}"
+        base = f"mizu-{len(project.name)}-{identifier(project.name)}-{identifier(name)}"
         args = [str(executable.resolve()), "--config", str(config.file),
                 "daemon" if role.daemon else "run", project.name, "--role", name]
+        yield name, role, base, args
+
+
+def _render_systemd(config: Config, project: Project, executable: Path) -> dict[str, str]:
+    result = {}
+    for name, role, base, args in _scheduled_roles(config, project, executable):
         cleanup = [str(executable.resolve()), "--config", str(config.file),
                    "cleanup", project.name, "--role", name]
         service = ["[Unit]", f"Description=Mizu {project.name} / {name}", "After=network-online.target",
                    "", "[Service]", "Type=exec", "UMask=0077", "KillMode=control-group", "Delegate=yes",
-                   "TimeoutStopSec=45", "ExecStart=" + " ".join(map(quote, args)),
+                   f"TimeoutStopSec={STOP_SEC}", "ExecStart=" + " ".join(map(quote, args)),
                    "ExecStopPost=-" + " ".join(map(quote, cleanup)),
                    # These are expected operator/budget/lock outcomes, not service failures.
                    "SuccessExitStatus=69 75 76 77 78 130"]
         if role.daemon:
-            service.extend(["Restart=on-failure", "RestartSec=15", "", "[Install]", "WantedBy=default.target"])
+            service.extend(["Restart=on-failure", f"RestartSec={RESTART_SEC}", "", "[Install]", "WantedBy=default.target"])
         result[base + ".service"] = "\n".join(service) + "\n"
         if role.daemon:
             continue
         timer = ["[Unit]", f"Description=Mizu schedule for {project.name} / {name}", "", "[Timer]",
-                 f"Unit={base}.service", "Persistent=true", "AccuracySec=10s", "RandomizedDelaySec=15s"]
+                 f"Unit={base}.service", "Persistent=true", f"AccuracySec={ACCURACY_SEC}", f"RandomizedDelaySec={RANDOMIZED_DELAY_SEC}"]
         if role.interval_seconds:
             timer.extend(["OnBootSec=1min", f"OnUnitInactiveSec={role.interval_seconds}s"])
         else:
-            timer.extend(f"OnCalendar=*-*-* {t}:00 {config.timezone}" for t in role.calendar)
+            timer.extend(f"OnCalendar=*-*-* {t}:00" + ("" if config.timezone == "local" else " " + config.timezone) for t in role.calendar)
         timer.extend(["", "[Install]", "WantedBy=timers.target"])
         result[base + ".timer"] = "\n".join(timer) + "\n"
     return result
@@ -75,12 +102,9 @@ def _plist_args(args: list[str]) -> str:
 
 def _render_launchd(config: Config, project: Project, executable: Path) -> dict[str, str]:
     result = {}
-    resolved = str(executable.resolve())
-    for name in project.roles:
-        role = config.roles[name]
-        if not (role.daemon or role.interval_seconds or role.calendar):
-            continue
-        base = f"mizu-{identifier(project.name)}-{identifier(name)}"
+    entry = executable.resolve()
+    resolved = str(entry)
+    for name, role, base, _ in _scheduled_roles(config, project, executable):
         args = [resolved, "--config", str(config.file),
                 "daemon" if role.daemon else "run", project.name, "--role", name]
         body = [f"  <key>Label</key><string>{base}</string>",
@@ -105,38 +129,39 @@ def _render_launchd(config: Config, project: Project, executable: Path) -> dict[
 
 
 def _windows_arguments(args: list[str]) -> str:
-    parts = []
     for part in args:
         if any(c in part for c in ("\n", "\r", "\x00")):
             raise Denied("Newlines are not valid in service arguments")
-        parts.append(f'"{part}"' if " " in part else part)
-    return _escape(" ".join(parts))
+    return _escape(subprocess.list2cmdline(args))
 
 
 def _render_windows(config: Config, project: Project, executable: Path) -> dict[str, str]:
     result = {}
-    resolved = str(executable.resolve())
-    for name in project.roles:
-        role = config.roles[name]
-        if not (role.daemon or role.interval_seconds or role.calendar):
-            continue
-        base = f"mizu-{identifier(project.name)}-{identifier(name)}"
+    entry = executable.resolve()
+    if entry.suffix.lower() in (".cmd", ".bat"):
+        entry = entry.with_suffix("")
+        if not entry.is_file():
+            raise Denied("Windows service needs the Mizu Python entry point beside its command wrapper")
+    resolved = str(entry)
+    zone_suffix = "+00:00" if config.timezone == "UTC" else ""
+    for name, role, base, _ in _scheduled_roles(config, project, executable):
         args = [resolved, "--config", str(config.file),
                 "daemon" if role.daemon else "run", project.name, "--role", name]
-        command, arguments = _xml(args[0]), _windows_arguments(args[1:])
+        # Task Scheduler starts a real executable; mizu is a Python script.
+        command, arguments = _xml(sys.executable), _windows_arguments(args)
         if role.daemon:
             trigger = "<LogonTrigger><Enabled>true</Enabled></LogonTrigger>"
             settings = ("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"
-                        "<RestartOnFailure><Interval>PT15S</Interval><Count>999</Count></RestartOnFailure>")
+                        f"<RestartOnFailure><Interval>{WINDOWS_RESTART_INTERVAL}</Interval><Count>{WINDOWS_RESTART_COUNT}</Count></RestartOnFailure>")
         elif role.interval_seconds:
-            trigger = (f"<TimeTrigger><StartBoundary>2026-01-01T00:00:00</StartBoundary>"
+            trigger = (f"<TimeTrigger><StartBoundary>2026-01-01T00:00:00{zone_suffix}</StartBoundary>"
                        f"<Repetition><Interval>PT{role.interval_seconds}S</Interval>"
                        "<StopAtDurationEnd>false</StopAtDurationEnd></Repetition>"
                        "<Enabled>true</Enabled></TimeTrigger>")
             settings = "<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"
         else:
             trigger = "".join(
-                f"<CalendarTrigger><StartBoundary>2026-01-01T{t}:00</StartBoundary>"
+                f"<CalendarTrigger><StartBoundary>2026-01-01T{t}:00{zone_suffix}</StartBoundary>"
                 "<ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay>"
                 "<Enabled>true</Enabled></CalendarTrigger>" for t in role.calendar)
             settings = "<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"
@@ -147,7 +172,7 @@ def _render_windows(config: Config, project: Project, executable: Path) -> dict[
             f"  <Triggers>{trigger}</Triggers>\n"
             '  <Principals><Principal id="Author"><LogonType>InteractiveToken</LogonType>'
             "<RunLevel>LeastPrivilege</RunLevel></Principal></Principals>\n"
-            f"  <Settings>{settings}<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>"
+            f"  <Settings>{settings}<ExecutionTimeLimit>PT0S</ExecutionTimeLimit><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>"
             "<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries></Settings>\n"
             f'  <Actions Context="Author"><Exec><Command>{command}</Command>'
             f"<Arguments>{arguments}</Arguments></Exec></Actions>\n"
@@ -159,6 +184,15 @@ def render(config: Config, project: Project, executable: Path, *, system: str | 
     """Render service definitions for one platform. `system=` selects the
     spelling explicitly so tests cover all three on any host."""
     name = system or _platform.SYSTEM
+    if name in ("macos", "windows") and any(config.roles[r].calendar for r in project.roles):
+        supported = ("local", "UTC") if name == "windows" else ("local",)
+        if config.timezone not in supported:
+            raise Denied(f"{name} calendar supports {supported}; IANA schedules require Linux")
+    if name == "windows":
+        for r in project.roles:
+            interval = config.roles[r].interval_seconds
+            if interval and not 60 <= interval <= 31 * 86400:
+                raise Denied("Windows task repetition must be between 60 seconds and 31 days")
     if name == "macos":
         return _render_launchd(config, project, executable)
     if name == "windows":
@@ -187,34 +221,58 @@ def install(config: Config, project: Project, executable: Path, destination: Pat
     units = render(config, project, executable, system=name)
     if not units:
         raise Denied("No role has daemon/interval/calendar; nothing to install")
-    for unit, content in units.items():
-        atomic_write(directory / unit, content.encode())
-    # Remove stale definitions for roles that no longer have a schedule.
-    extensions = SERVICE_EXTENSIONS[name]
-    for stale in directory.glob(f"mizu-{project.name}-*"):
-        if stale.suffix not in extensions:
-            continue
-        if stale.name not in units:
-            stale.unlink()
-    sync_dir(directory)
-    verification = "skipped: systemd-analyze not available"
-    if name == "linux":
-        analyzer = shutil.which("systemd-analyze")
-        if analyzer is not None:
-            try:
-                result = subprocess.run(
-                    [analyzer, "verify", *(str(directory / unit) for unit in sorted(units))],
-                    capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
-            except (OSError, subprocess.SubprocessError) as exc:
-                raise Denied(f"Unit verification could not run: {exc}") from exc
-            if result.returncode != 0:
-                raise Denied("Generated units failed verification: " + result.stderr[-2000:])
-            verification = "pass"
+    owner = directory / (".mizu-" + digest(project.name.encode())[:24] + ".json")
+    verification = "not_run: native validator unavailable"
+    with lock(directory / ".mizu-services.lock"):
+        previous = read_json(owner, {})
+        if previous and (previous.get("project") != project.name or previous.get("system") != name):
+            raise Denied("Service ownership record conflicts")
+        owned = previous.get("files", {})
+        if not isinstance(owned, dict) or any(Path(unit).name != unit or "\\" in unit or unit in (".", "..") for unit in owned):
+            raise Denied("Invalid service ownership inventory")
+        for unit, sha in owned.items():
+            if Path(unit).name != unit or Path(unit).suffix not in SERVICE_EXTENSIONS[name]:
+                raise Denied("Invalid owned service path")
+            path = directory / unit
+            if path.is_symlink() or (path.exists() and digest(path.read_bytes()) != sha):
+                raise Denied("Owned service definition changed; review before replacing: " + unit)
+        for unit in units:
+            path = directory / unit
+            if (path.exists() or path.is_symlink()) and unit not in owned:
+                raise Denied("Refusing to overwrite an unowned definition: " + unit)
+        with tempfile.TemporaryDirectory(prefix=".mizu-services-", dir=directory) as tmp:
+            stage = Path(tmp)
+            for unit, content in units.items():
+                atomic_write(stage / unit, content.encode())
+            if name == "linux":
+                analyzer = shutil.which("systemd-analyze")
+                if analyzer:
+                    try:
+                        result = subprocess.run([analyzer, "verify", *(str(stage / u) for u in sorted(units))],
+                                                capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+                    except (OSError, subprocess.SubprocessError) as exc:
+                        raise Denied(f"Unit verification could not run: {exc}") from exc
+                    if result.returncode:
+                        raise Denied("Generated units failed verification: " + result.stderr[-2000:])
+                    verification = "pass"
+            else:
+                for content in units.values():
+                    plistlib.loads(content.encode()) if name == "macos" else ET.fromstring(content)
+                verification = "syntax-pass; native registration not_run"
+            for unit, content in units.items():
+                atomic_write(directory / unit, content.encode())
+            for stale in owned.keys() - units.keys():
+                (directory / stale).unlink(missing_ok=True)
+            write_json(owner, {"project": project.name, "system": name,
+                               "files": {u: digest(c.encode()) for u, c in units.items()},
+                               "timezone": config.timezone if name == "linux" or (name == "windows" and config.timezone == "UTC") else "OS local"})
+            sync_dir(directory)
     if name == "linux":
         start = [unit for unit in units if unit.endswith(".timer") or
                  (unit.endswith(".service") and unit[:-8] + ".timer" not in units)]
     else:
         start = sorted(units)
     return {"system": name, "directory": str(directory), "written": sorted(units), "enable_units": sorted(start),
-            "verification": verification if name == "linux" else "not_run: Linux only",
+            "verification": verification,
+            "timezone": config.timezone if name == "linux" or (name == "windows" and config.timezone == "UTC") else "OS local",
             "note": _ENABLE_NOTES[name]}

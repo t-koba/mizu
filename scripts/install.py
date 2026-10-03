@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import hashlib
 import json
 import os
 import shutil
@@ -15,30 +14,24 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-from mizu import NODE_MINIMUM, PI_MINIMUM, __version__
+from mizu import NODE_MINIMUM, __version__
 from mizu import platform as _platform
 from mizu.cli import configure
+from mizu.distribution import source_files as inventory
 from mizu.config import load
 from mizu.errors import Denied, MizuError
-from mizu.fs import atomic_write, canonical, digest, lock, mkdir, now, read_json, write_json
+from mizu.fs import canonical, digest, sync_dir, lock, mkdir, now, read_json, write_json
 
-IGNORE = {".git", "node_modules", "__pycache__", ".pytest_cache", ".ruff_cache", ".venv", "dist", "build", ".DS_Store"}
+
 
 
 def source_files():
-    for path in sorted(ROOT.rglob("*")):
-        relative = path.relative_to(ROOT)
-        if any(part in IGNORE for part in relative.parts) or path.name.startswith(".env") or path.name == "credentials.env":
-            continue
-        if path.is_symlink():
-            raise Denied("Release source must not contain symlinks: " + str(relative))
-        if path.is_file():
-            yield relative, path
+    yield from inventory(ROOT)
 
 
-def source_manifest():
-    return {str(relative): {"sha256": digest(path.read_bytes()), "executable": bool(path.stat().st_mode & 0o111)}
-            for relative, path in source_files()}
+def source_manifest(root=ROOT):
+    return {relative.as_posix(): {"sha256": digest(path.read_bytes()), "executable": bool(path.stat().st_mode & 0o111)}
+            for relative, path in inventory(root)}
 
 
 def verify_release(release: Path):
@@ -125,11 +118,31 @@ def active_service_units() -> list[str]:
     return [line.split()[0] for line in result.stdout.splitlines() if line.split()]
 
 
+def recover_link(destination: Path):
+    """Recover a managed link interrupted in the Windows replacement gap.
+
+    A live destination wins. Reserved recovery links belong to this installer;
+    a regular destination/recovery file is never removed automatically.
+    """
+    recovery=destination.parent/('.'+destination.name+'.recovery')
+    if not recovery.is_symlink():
+        if recovery.exists():raise Denied('Recovery record must be a managed symlink')
+        return
+    if destination.is_symlink():
+        recovery.unlink()
+    elif destination.exists():
+        raise Denied('Refusing recovery over an unrelated regular file')
+    else:
+        os.replace(recovery,destination)
+    sync_dir(destination.parent)
+
+
 def link_atomically(destination: Path, target: Path):
+    recover_link(destination)
     temporary = destination.parent / ("." + destination.name + ".next")
     temporary.unlink(missing_ok=True)
     try:
-        temporary.symlink_to(target)
+        temporary.symlink_to(target, target_is_directory=target.is_dir())
     except OSError as exc:
         raise Denied(f"Cannot create symlink {destination} (on Windows enable Developer Mode or run with symlink privilege): {exc}") from exc
     try:
@@ -139,8 +152,17 @@ def link_atomically(destination: Path, target: Path):
         # keeps the atomic path above; there the fallback never triggers.
         if not _platform.IS_WINDOWS or not destination.is_symlink():
             raise
+        old_target = os.readlink(destination)
+        backup = destination.parent / ("." + destination.name + ".recovery")
+        backup.unlink(missing_ok=True)
+        backup.symlink_to(old_target, target_is_directory=destination.is_dir())
         destination.unlink()
-        os.replace(temporary, destination)
+        try:
+            os.replace(temporary, destination)
+        except OSError:
+            os.replace(backup, destination)
+            raise
+        backup.unlink(missing_ok=True)
 
 
 def promote(args, release: Path):
@@ -161,6 +183,7 @@ def promote(args, release: Path):
             raise Denied("Refusing to replace an unrelated mizu command")
     with stopped(args.config):
         current = args.prefix / "current"
+        recover_link(current)
         old = current.resolve() if current.is_symlink() else None
         if current.exists() and not current.is_symlink():
             raise Denied("current must be a managed symlink")
@@ -169,8 +192,6 @@ def promote(args, release: Path):
         if old_mode and old_mode != new_mode and not getattr(args, "allow_mode_change", False):
             raise Denied(f"Release mode changes from {old_mode} to {new_mode}; "
                          "re-run with --allow-mode-change after review")
-        if old and old != release:
-            link_atomically(args.prefix / "previous", old)
         link_atomically(current, release)
         mkdir(args.bin_dir)
         launcher = args.bin_dir / "mizu"
@@ -178,9 +199,11 @@ def promote(args, release: Path):
             if not launcher.is_symlink() or prefix not in launcher.resolve().parents:
                 raise Denied("Refusing to replace an unrelated mizu command")
         link_atomically(launcher, current / "bin/mizu")
-    result = {"status": "promoted", "release": str(release), "previous": str(old) if old else None,
+        if old and old != release and old.parent == release.parent and not old.is_symlink():
+            shutil.rmtree(old)
+    result = {"status": "promoted", "release": str(release),
               "note": "Services remain stopped. Run doctor/smoke, then explicitly start and arm. "
-                      "Only code was switched; data, side effects and budgets are not rolled back."}
+                      "Only code was switched; data, side effects and budgets are unchanged."}
     if old_mode and old_mode != new_mode:
         result["mode_change"] = {"from": old_mode, "to": new_mode}
         result["note"] += " Agent runtime availability changed; re-run doctor and smoke before arming."
@@ -215,6 +238,9 @@ def stage(args):
                 target = temporary / relative
                 mkdir(target.parent)
                 shutil.copy2(source, target)
+            staged_manifest = source_manifest(temporary)
+            if staged_manifest != manifest:
+                raise Denied("Source changed while staging; retry from a stable candidate copy")
             pi_lock = None
             if not args.core_only:
                 adapter = temporary / "adapters/pi"
@@ -225,21 +251,17 @@ def stage(args):
                 command(["npm", "ci", *common, *scripts], cwd=adapter)
                 pi = adapter / "node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js"
                 result = subprocess.check_output([node, pi, "--version"], text=True, timeout=30).strip()
-                try:
-                    installed = tuple(map(int, result.split(".")))
-                except ValueError:
-                    installed = ()
-                if len(installed) != 3 or installed < tuple(map(int, PI_MINIMUM.split("."))):
-                    raise Denied(f"Installed Pi is below the minimum {PI_MINIMUM}: " + result)
+                command([node, str(adapter / "launcher.mjs"), "--check-contract"], cwd=adapter)
                 pi_lock = digest((adapter / "package-lock.json").read_bytes())
             # Offline source tests are a release gate. They do not claim live Pi/Podman validation.
-            command([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-q"], cwd=temporary, timeout=180)
+            command([sys.executable, "scripts/check.py", "--report", "installation-checks.json"], cwd=temporary, timeout=240)
+            checks = read_json(temporary / "installation-checks.json")
             write_json(temporary / "source-manifest.json", manifest)
-            write_json(temporary / "installation.json", {"schema": 1, "version": __version__, "source_sha256": sha,
+            write_json(temporary / "installation.json", {"version": __version__, "source_sha256": sha,
                         "installed_at": now(), "mode": "core-only" if args.core_only else "pi",
                         "pi_version": None if args.core_only else result, "pi_lock_sha256": pi_lock,
                         "node": node, "install_scripts_enabled": args.allow_install_scripts,
-                        "validation": "local-install-checks-passed", "live_validation": "not_run"})
+                        "validation": "local-install-checks-passed", "checks": checks["checks"], "live_validation": "not_run"})
             os.rename(temporary, release)
         finally:
             if temporary.exists():
@@ -250,7 +272,7 @@ def stage(args):
     if not args.config.exists() and activate:
         pi_command = None
         if not args.core_only:
-            pi_command = json.dumps([node, str(args.prefix / "current/adapters/pi/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js")])
+            pi_command = json.dumps([node])
         result["configuration"] = configure(args.config, pi_command)
     result["mode"] = "core-only; no agent runtime installed" if args.core_only else "Pi installed; live validation still required"
     return result
@@ -268,7 +290,6 @@ def main():
     group.add_argument("--stage-only", action="store_true", help="Stage a validated release without promoting it")
     group.add_argument("--activate", action="store_true", help="Promote after validation; existing services must be stopped")
     group.add_argument("--promote", metavar="RELEASE_DIRECTORY", type=Path, help="Promote an already-staged release directory")
-    group.add_argument("--rollback", action="store_true", help="Promote the previous release; code only, data is not rolled back")
     args = p.parse_args()
     for name in ("prefix", "bin_dir", "config"):
         setattr(args, name, getattr(args, name).expanduser().resolve())
@@ -277,12 +298,7 @@ def main():
     try:
         mkdir(args.prefix)
         with lock(args.prefix / ".install.lock", blocking=False):
-            if args.rollback:
-                previous = args.prefix / "previous"
-                if not previous.is_symlink():
-                    raise Denied("No previous release is available")
-                result = promote(args, previous.resolve())
-            elif args.promote:
+            if args.promote:
                 result = promote(args, args.promote)
             else:
                 result = stage(args)

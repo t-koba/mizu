@@ -19,13 +19,13 @@ from pathlib import Path
 
 from .config import keys, strings
 from .errors import Denied
-from .fs import atomic_write, identifier, lock, mkdir, now, read_json, sync_dir, write_json
-from .project import Project, check_verify, init_managed_repo
+from .fs import atomic_write, identifier, lock, mkdir, now, read_json, sync_dir, write_json, relative_parts
+from .project import Project, check_verify, init_managed_repo, read_goal
 from .snapshot import open_store
 
 #: Project members covered by backup/restore (plus backup.json on restore).
-MEMBERS = ("project.toml", "PROJECT.md", "control.json", "current.json", "history.json", "snapshots", "objects",
-           "inbox", "decisions", "decision-history", "runs", "sessions", "artifacts", "health", "observed",
+MEMBERS = ("project.toml", "PROJECT.md", "control.json", "current.json", "snapshots", "objects",
+           "inbox", "insight-ids", "histories", ".ingest", "decisions", "decision-history", "runs", "sessions", "artifacts", "health", "observed",
            "maintenance", "spool")
 
 
@@ -37,6 +37,8 @@ def quiescent(project: Project):
         stack.enter_context(lock(project.root / "locks" / "workspace.lock", blocking=False))
         for role in sorted(project.roles):
             stack.enter_context(lock(project.root / "locks" / f"run-{role}.lock", blocking=False))
+        stack.enter_context(lock(project.root / "locks" / "editor-ingest.lock", blocking=False))
+        stack.enter_context(lock(project.root / "locks" / "insights.lock", blocking=False))
         yield
 
 
@@ -57,42 +59,51 @@ def backup(project: Project, destination: Path, *, verify: bool = False) -> dict
         os.close(fd)
         temporary = Path(name)
         try:
-            with tarfile.open(temporary, "w:gz", format=tarfile.PAX_FORMAT) as archive:
-                # All members are regular files or directories; no symlink dereferencing.
-                # Regenerable render output (index.html) is not evidence: back it up never.
-                # Reproducible run inputs live under runs/ only; source trees may
-                # legitimately contain input/ or controller/ directories.
-                include = MEMBERS
-                def safe(info):
-                    parts = Path(info.name).parts
-                    if not (info.isfile() or info.isdir()):
-                        return None
-                    if "runs" in parts and ("input" in parts or "controller" in parts):
-                        return None
-                    if Path(info.name).name == "index.html":
-                        return None
-                    info.uid = info.gid = 0
-                    info.uname = info.gname = ""
-                    return info
-                for child in include:
-                    path = project.root / child
-                    if path.exists():
-                        archive.add(path, arcname=child, recursive=True, filter=safe)
-                metadata = json.dumps({"schema": 1, "checkpoint": checkpoint["id"],
-                                       "project": project.name, "credentials_included": False}).encode()
-                info = tarfile.TarInfo("backup.json")
-                info.size, info.mode = len(metadata), 0o600
-                archive.addfile(info, io.BytesIO(metadata))
-            with temporary.open("rb") as stream:
-                with contextlib.suppress(OSError):
-                    os.fsync(stream.fileno())
+            # fsync the writable handle before linking: fsync on a
+            # read-only descriptor fails on Windows, and durability must
+            # precede the link so the new name never points at unwritten data.
+            with temporary.open("w+b") as raw:
+                with tarfile.open(fileobj=raw, mode="w:gz", format=tarfile.PAX_FORMAT) as archive:
+                    # All members are regular files or directories; no symlink dereferencing.
+                    # Regenerable render output (index.html) is not evidence: back it up never.
+                    # Reproducible run inputs live under runs/ only; source trees may
+                    # legitimately contain input/ or controller/ directories.
+                    include = MEMBERS
+                    def safe(info):
+                        parts = Path(info.name).parts
+                        if not (info.isfile() or info.isdir()):
+                            return None
+                        if len(parts) >= 3 and parts[0] == "runs" and parts[2] in ("input", "controller"):
+                            return None
+                        if Path(info.name).name == "index.html":
+                            return None
+                        info.uid = info.gid = 0
+                        info.uname = info.gname = ""
+                        return info
+                    for child in include:
+                        path = project.root / child
+                        if path.exists():
+                            archive.add(path, arcname=child, recursive=True, filter=safe)
+                    metadata = json.dumps({"checkpoint": checkpoint["id"],
+                                           "project": project.name, "credentials_included": False}).encode()
+                    info = tarfile.TarInfo("backup.json")
+                    info.size, info.mode = len(metadata), 0o600
+                    archive.addfile(info, io.BytesIO(metadata))
+                raw.flush()
+                os.fsync(raw.fileno())
             try:
                 os.link(temporary, destination)
+            except FileExistsError:
+                raise Denied("Backup must be a new file outside the project tree") from None
             except (AttributeError, NotImplementedError, OSError):
-                # Windows hardlinks need privileges; fall back to an exclusive copy.
-                if destination.exists():
-                    raise Denied("Backup must be a new file outside the project tree")
-                shutil.copyfile(temporary, destination)
+                # Exclusive creation still refuses a concurrent destination.
+                try:
+                    with temporary.open("rb") as source, destination.open("xb") as output:
+                        shutil.copyfileobj(source, output)
+                        output.flush()
+                        os.fsync(output.fileno())
+                except FileExistsError:
+                    raise Denied("Backup must be a new file outside the project tree") from None
             sync_dir(destination.parent)
             if verify:
                 with tarfile.open(destination, "r|gz") as archive:
@@ -106,7 +117,21 @@ def backup(project: Project, destination: Path, *, verify: bool = False) -> dict
     return result
 
 
-def prune(project: Project, *, apply: bool = False, keep_artifacts: int = 30) -> dict:
+#: Default artifact retention for `prune --keep-artifacts` (operator-overridable
+#: via CLI; explicit 0 keeps all). The live pointer target is never a candidate.
+DEFAULT_KEEP_ARTIFACTS = 30
+
+
+def prune(project: Project, *, apply: bool = False, keep_artifacts: int = DEFAULT_KEEP_ARTIFACTS) -> dict:
+    """List (or apply) removal of reproducible inputs and old artifact docs.
+
+    Schema/bounds: ``keep_artifacts`` counts the live pointer when it exists.
+    Trust: operator-invoked maintenance under quiescence (paused + locks).
+    Retry: dry-run by default; apply writes a maintenance audit record.
+    Evidence: returns candidates + audit path. Failure: Denied for negative
+    retention, symlinks, or non-quiescent state. Snapshots/objects/runs/
+    decisions/proposals are never candidates.
+    """
     if keep_artifacts < 0:
         raise Denied("Artifact retention must not be negative")
     candidates = []
@@ -189,7 +214,7 @@ def restore(config, name: str, archive_path: Path, *, max_bytes: int = 107374182
             with tarfile.open(archive_path, "r|gz") as archive:
                 for member in archive:
                     relative = Path(member.name)
-                    parts = member.name.split("/")
+                    parts = relative_parts(member.name.rstrip("/") if member.isdir() else member.name)
                     if (relative.is_absolute() or not parts or any(p in ("", ".", "..") for p in parts)
                             or "\\" in member.name or parts[0] not in allowed
                             or not (member.isfile() or member.isdir()) or member.name in seen):
@@ -216,13 +241,12 @@ def restore(config, name: str, archive_path: Path, *, max_bytes: int = 107374182
                             output.write(block)
                             remaining -= len(block)
                         output.flush()
-                        with contextlib.suppress(OSError):
-                            os.fsync(output.fileno())
+                        os.fsync(output.fileno())
                     with contextlib.suppress(OSError, AttributeError, NotImplementedError):
                         target.chmod(0o600)
             metadata = read_json(stage / "backup.json")
-            if metadata.get("schema") != 1:
-                raise Denied("Unsupported backup schema")
+            if not isinstance(metadata, dict):
+                raise Denied("Invalid backup metadata")
             store = open_store(stage, config)
             checkpoint = store.get(metadata["checkpoint"])
             # get() verifies the manifest; materialize() verifies every code object.
@@ -230,12 +254,18 @@ def restore(config, name: str, archive_path: Path, *, max_bytes: int = 107374182
             if checkpoint.get("skipped"):
                 raise Denied("Checkpoint omitted unsupported filesystem objects")
             # Parse operator-owned fields before publishing a usable project.
-            settings = tomllib.loads((stage / "project.toml").read_text())
-            keys(settings, {"schema", "roles", "verify"}, "project")
+            settings = tomllib.loads((stage / "project.toml").read_text(encoding="utf-8"))
+            keys(settings, {"roles", "verify"}, "project")
             roles = strings(settings.get("roles", []), "project.roles")
             check_verify(settings.get("verify", []))
-            if settings.get("schema") != 1 or not roles or any(r not in config.roles for r in roles):
+            if not roles or any(r not in config.roles for r in roles):
                 raise Denied("Backup roles are not configured on this installation")
+            read_goal(stage / "PROJECT.md", "Restored goal must be nonempty and at most 64 KiB")
+            # Validate every published history reference before exposing the project.
+            for sid in store._history_ids():
+                historical = store.get(sid)
+                for path in historical["files"]:
+                    store.read(historical, path)
             init_managed_repo(stage / "workspace")
             write_json(stage / "control.json", {"armed": False, "paused": True,
                        "wake_generation": uuid.uuid4().hex, "reason": "Restored checkpoint; operator review required"})

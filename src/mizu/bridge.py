@@ -1,8 +1,8 @@
 """Per-run, authenticated local bridge. Tokens never enter model context.
 
-Transport schema (bridge.json, protocol 1)::
+Transport structure (bridge.json)::
 
-    {"protocol": 1, "transport": "unix" | "tcp",
+    {"transport": "unix" | "tcp",
      "socket": str | null, "host": str | null, "port": int | null,
      "token": str, "timeout_ms": int, "tools": [...]}
 
@@ -18,7 +18,7 @@ containers; the token is per-run and never enters model context. TCP binds
 loopback only and dialing refuses non-loopback endpoints, so a tampered
 config cannot redirect tool calls (and their file contents) off the host.
 On Windows, file ACLs differ from POSIX modes (see platform.secure_chmod):
-production secrecy still requires a Linux host.
+operators must verify the dedicated account ACLs on the target OS.
 
 Cancellation/retry: serve_forever polls every 0.1s; __exit__ shuts down,
 closes and joins the worker thread (2s). Clients set a socket timeout from
@@ -57,14 +57,14 @@ def default_transport() -> str:
 
 if _platform.HAS_UNIX_SOCKET_SERVER:
     class _UnixBridgeServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):  # type: ignore[attr-defined]
-        daemon_threads = True
-        block_on_close = False
+        daemon_threads = False
+        block_on_close = True
         request_queue_size = 16
 
 
 class _TCPBridgeServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
-    daemon_threads = True
-    block_on_close = False
+    daemon_threads = False
+    block_on_close = True
     request_queue_size = 16
 
 
@@ -79,10 +79,10 @@ def connect(config: dict) -> socket.socket:
     except (TypeError, ValueError) as exc:
         raise Denied("Invalid bridge configuration") from exc
     timeout = max(1, timeout_ms // 1000)
-    transport = config.get("transport", "unix")
+    transport = config.get("transport")
     if transport == "tcp":
         host, port = config.get("host"), config.get("port")
-        if host not in LOOPBACK_HOSTS or not isinstance(port, int) or not 1 <= port <= 65535:
+        if host not in LOOPBACK_HOSTS or type(port) is not int or not 1 <= port <= 65535:
             raise Denied("Bridge TCP endpoint must be loopback with a valid port")
         return socket.create_connection((host, port), timeout=timeout)
     if transport != "unix":
@@ -105,8 +105,12 @@ def connect(config: dict) -> socket.socket:
 
 class Bridge:
     def __init__(self, handle: Callable[[str, dict], dict], tools: list[dict], *, timeout: int,
-                 transport: str | None = None):
+                 transport: str | None = None, on_close=None):
         self.handle, self.tools, self.timeout = handle, tools, timeout
+        self.on_close = on_close
+        self.connections = set()
+        self.connections_lock = threading.Lock()
+        self.closing = threading.Event()
         if transport is None:
             transport = default_transport()
         if transport not in ("unix", "tcp"):
@@ -131,12 +135,23 @@ class Bridge:
 
         class Handler(socketserver.StreamRequestHandler):
             def handle(self):
+                with outer.connections_lock:
+                    if outer.closing.is_set():
+                        return
+                    outer.connections.add(self.connection)
+                try:
+                    self.exchange()
+                finally:
+                    with outer.connections_lock:
+                        outer.connections.discard(self.connection)
+
+            def exchange(self):
                 self.connection.settimeout(outer.timeout + 10)
                 try:
                     raw = self.rfile.readline(MAX_FRAME + 1)
                     if len(raw) > MAX_FRAME or not raw.endswith(b"\n"):
                         raise ValueError("Invalid bridge frame")
-                    request = json.loads(raw)
+                    request = json.loads(raw, parse_constant=lambda v: (_ for _ in ()).throw(ValueError("Non-finite JSON")))
                     if not isinstance(request, dict) or not isinstance(request.get("token"), str):
                         raise ValueError("Unauthenticated request")
                     if not hmac.compare_digest(request["token"], outer.token):
@@ -150,7 +165,10 @@ class Bridge:
                 except Exception:
                     response = {"ok": False, "error": "Internal tool failure; inspect the run record"}
                 try:
-                    self.wfile.write(canonical(response))
+                    wire = canonical(response)
+                    if len(wire) > MAX_FRAME:
+                        wire = canonical({"ok": False, "error": "Response exceeds frame bound; request a smaller page"})
+                    self.wfile.write(wire)
                     self.wfile.flush()
                 except (BrokenPipeError, OSError):
                     pass
@@ -166,7 +184,7 @@ class Bridge:
             self.host = "127.0.0.1"
             self.port = self.server.server_address[1]
             endpoint = {"transport": "tcp", "socket": None, "host": self.host, "port": self.port}
-        write_json(self.config_file, {"protocol": 1, **endpoint,
+        write_json(self.config_file, {**endpoint,
                                       "token": self.token, "timeout_ms": (self.timeout + 5) * 1000,
                                       "tools": self.tools})
         self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.1},
@@ -175,6 +193,13 @@ class Bridge:
         return self
 
     def __exit__(self, *exc):
+        self.closing.set()
+        if self.on_close is not None:
+            self.on_close()
+        with self.connections_lock:
+            for connection in self.connections:
+                with contextlib.suppress(OSError):
+                    connection.shutdown(socket.SHUT_RDWR)
         if self.server:
             self.server.shutdown()
             self.server.server_close()

@@ -202,14 +202,106 @@ def popen_kwargs() -> dict:
     if IS_POSIX:
         return {"start_new_session": True, "close_fds": True}
     flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    kwargs: dict = {"close_fds": False}
+    kwargs: dict = {"close_fds": True}
     if flags:
         kwargs["creationflags"] = flags
     return kwargs
 
 
-def terminate_process(process: "subprocess.Popen") -> None:
-    """Signal a spawned group on POSIX, terminate/kill on Windows."""
+
+def spawn(argv, **kwargs):
+    """Spawn a bounded process tree. Windows starts suspended until assigned
+    to a kill-on-close Job Object; failure terminates before model code runs.
+    POSIX uses the process session selected by popen_kwargs().
+    """
+    if not IS_WINDOWS:
+        return subprocess.Popen(argv, **kwargs)
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateJobObjectW.argtypes = (ctypes.c_void_p, wintypes.LPCWSTR)
+    kernel.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel.SetInformationJobObject.argtypes = (wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD)
+    kernel.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+    kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+    class BASIC(ctypes.Structure):
+        _fields_ = [("ProcessTime", ctypes.c_int64), ("JobTime", ctypes.c_int64),
+                    ("Flags", wintypes.DWORD), ("Min", ctypes.c_size_t), ("Max", ctypes.c_size_t),
+                    ("Active", wintypes.DWORD), ("Affinity", ctypes.c_size_t),
+                    ("Priority", wintypes.DWORD), ("Scheduling", wintypes.DWORD)]
+    class IO(ctypes.Structure):
+        _fields_ = [(n, ctypes.c_uint64) for n in ("ReadOps", "WriteOps", "OtherOps", "ReadBytes", "WriteBytes", "OtherBytes")]
+    class EXTENDED(ctypes.Structure):
+        _fields_ = [("Basic", BASIC), ("IO", IO), ("ProcessMemory", ctypes.c_size_t),
+                    ("JobMemory", ctypes.c_size_t), ("PeakProcess", ctypes.c_size_t), ("PeakJob", ctypes.c_size_t)]
+    job = kernel.CreateJobObjectW(None, None)
+    if not job:
+        raise ctypes.WinError(ctypes.get_last_error())
+    process = None
+    try:
+        info = EXTENDED()
+        info.Basic.Flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not kernel.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        kwargs["creationflags"] = kwargs.get("creationflags", 0) | 0x4  # CREATE_SUSPENDED
+        process = subprocess.Popen(argv, **kwargs)
+        if not kernel.AssignProcessToJobObject(job, wintypes.HANDLE(int(process._handle))):
+            raise ctypes.WinError(ctypes.get_last_error())
+        # Popen closes the primary thread handle. Enumerate the suspended
+        # process's threads and resume with the documented Win32 API.
+        class THREADENTRY(ctypes.Structure):
+            _fields_ = [("size", wintypes.DWORD), ("usage", wintypes.DWORD),
+                        ("tid", wintypes.DWORD), ("pid", wintypes.DWORD),
+                        ("priority", wintypes.LONG), ("delta", wintypes.LONG),
+                        ("flags", wintypes.DWORD)]
+        kernel.CreateToolhelp32Snapshot.argtypes = (wintypes.DWORD, wintypes.DWORD)
+        kernel.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel.Thread32First.argtypes = (wintypes.HANDLE, ctypes.POINTER(THREADENTRY))
+        kernel.Thread32Next.argtypes = (wintypes.HANDLE, ctypes.POINTER(THREADENTRY))
+        kernel.OpenThread.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel.OpenThread.restype = wintypes.HANDLE
+        kernel.ResumeThread.argtypes = (wintypes.HANDLE,)
+        kernel.ResumeThread.restype = wintypes.DWORD
+        snapshot = kernel.CreateToolhelp32Snapshot(0x4, 0)  # TH32CS_SNAPTHREAD
+        if snapshot == wintypes.HANDLE(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        resumed = False
+        try:
+            entry = THREADENTRY()
+            entry.size = ctypes.sizeof(entry)
+            found = kernel.Thread32First(snapshot, ctypes.byref(entry))
+            while found:
+                if entry.pid == process.pid:
+                    thread = kernel.OpenThread(0x2, False, entry.tid)  # THREAD_SUSPEND_RESUME
+                    if not thread:
+                        raise ctypes.WinError(ctypes.get_last_error())
+                    try:
+                        if kernel.ResumeThread(thread) == 0xffffffff:
+                            raise ctypes.WinError(ctypes.get_last_error())
+                        resumed = True
+                    finally:
+                        kernel.CloseHandle(thread)
+                found = kernel.Thread32Next(snapshot, ctypes.byref(entry))
+            if not resumed:
+                raise OSError("No suspended process thread found")
+        finally:
+            kernel.CloseHandle(snapshot)
+        process._mizu_job = job
+        return process
+    except BaseException:
+        if process is not None:
+            process.kill()
+            process.wait(timeout=.2 if grace == 0 else 5)
+        kernel.CloseHandle(job)
+        raise
+
+def terminate_process(process: "subprocess.Popen", grace: float = 1.0) -> None:
+    """Signal a spawned group on POSIX, terminate/kill on Windows.
+
+    Schema/bounds: SIGTERM, wait `grace`, SIGKILL, wait up to 5s.
+    Trust: local process only. Retry: none. Evidence: none.
+    Failure: suppresses lookup/permission errors; never raises for dead PIDs.
+    """
     import signal as _signal
 
     killpg = getattr(os, "killpg", None)
@@ -218,13 +310,25 @@ def terminate_process(process: "subprocess.Popen") -> None:
             killpg(process.pid, _signal.SIGTERM)
         if process.poll() is None:
             try:
-                process.wait(timeout=1.0)
+                process.wait(timeout=grace)
             except subprocess.TimeoutExpired:
                 pass
         with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
             killpg(process.pid, _signal.SIGKILL)
         with contextlib.suppress(subprocess.TimeoutExpired, OSError):
-            process.wait(timeout=5)
+            process.wait(timeout=.2 if grace == 0 else 5)
+        return
+    job = getattr(process, "_mizu_job", None)
+    if job is not None:
+        import ctypes
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+        if not kernel.CloseHandle(job):
+            raise ctypes.WinError(ctypes.get_last_error())
+        process._mizu_job = None
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=.2 if grace == 0 else 5)
         return
     with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
         process.terminate()
@@ -236,7 +340,7 @@ def terminate_process(process: "subprocess.Popen") -> None:
     with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
         process.kill()
     with contextlib.suppress(subprocess.TimeoutExpired, OSError):
-        process.wait(timeout=5)
+        process.wait(timeout=.2 if grace == 0 else 5)
 
 
 def credentials_owner_ok(path: Path) -> bool:
@@ -257,3 +361,54 @@ def credentials_owner_ok(path: Path) -> bool:
     if ids is not None and info.st_uid != ids[0]:
         return False
     return True
+
+
+def prepare_pipe(stream) -> None:
+    """POSIX polling pipes; Windows read readiness is queried explicitly."""
+    if IS_POSIX:
+        os.set_blocking(stream.fileno(), False)
+
+
+def read_pipe(stream, maximum: int) -> bytes:
+    """Read available raw pipe bytes, b'' on EOF, BlockingIOError if idle."""
+    if IS_WINDOWS:
+        import ctypes
+        from ctypes import wintypes
+        available = wintypes.DWORD()
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.PeekNamedPipe.argtypes = (wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD,
+                                        wintypes.LPVOID, ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID)
+        handle = _msvcrt.get_osfhandle(stream.fileno())
+        if not kernel.PeekNamedPipe(handle, None, 0, None, ctypes.byref(available), None):
+            error = ctypes.get_last_error()
+            if error in (109, 232):
+                return b""
+            raise ctypes.WinError(error)
+        if not available.value:
+            raise BlockingIOError("Pipe has no available data")
+        maximum = min(maximum, available.value)
+    return os.read(stream.fileno(), maximum)
+
+
+def cancel_pipe_io(thread) -> None:
+    """Cancel an owned Windows synchronous pipe operation before fd close."""
+    if not IS_WINDOWS or not thread.is_alive():
+        return
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenThread.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel.OpenThread.restype = wintypes.HANDLE
+    kernel.CancelSynchronousIo.argtypes = (wintypes.HANDLE,)
+    kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+    handle = kernel.OpenThread(0x0001, False, thread.native_id)  # THREAD_TERMINATE
+    if not handle:
+        # The thread can exit between is_alive and OpenThread.
+        if not thread.is_alive():
+            return
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        if not kernel.CancelSynchronousIo(handle) and ctypes.get_last_error() != 1168:
+            raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        kernel.CloseHandle(handle)

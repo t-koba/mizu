@@ -45,81 +45,134 @@ def environment(*, extra: dict[str, str] | None = None) -> dict[str, str]:
 
 
 def terminate(process: subprocess.Popen, grace: float = 1.0) -> None:
-    if _platform.IS_POSIX:
-        import contextlib
-        import signal as _signal
+    """Terminate a spawned process group with an explicit grace period."""
+    _platform.terminate_process(process, grace=grace)
 
-        killpg = getattr(os, "killpg", None)
-        if killpg is not None:
-            with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-                killpg(process.pid, _signal.SIGTERM)
-            if process.poll() is None:
+
+
+def _input_thread(stream, data: bytes, stop: threading.Event, errors: list,
+                  *, close: bool = False) -> threading.Thread:
+    """Raw, interruptible writes. A partial frame is never retried."""
+    _platform.prepare_pipe(stream)
+    def write():
+        try:
+            view = memoryview(data)
+            while view and not stop.is_set():
                 try:
-                    process.wait(timeout=grace)
-                except subprocess.TimeoutExpired:
-                    pass
-            with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-                killpg(process.pid, _signal.SIGKILL)
-            with contextlib.suppress(subprocess.TimeoutExpired, OSError):
-                process.wait(timeout=5)
-            return
-    _platform.terminate_process(process)
+                    count = os.write(stream.fileno(), view[:4096])
+                    if not count:
+                        raise OSError("Pipe write made no progress")
+                    view = view[count:]
+                except BlockingIOError:
+                    stop.wait(.01)
+        except (OSError, ValueError) as exc:
+            if not stop.is_set():
+                errors.append(exc)
+        finally:
+            if close:
+                with contextlib.suppress(OSError, ValueError):
+                    stream.close()
+    thread = threading.Thread(target=write, daemon=True, name="mizu-input")
+    thread.start()
+    return thread
+
+
+def _stop_io(stop: threading.Event, threads) -> None:
+    stop.set()
+    for thread in threads:
+        _platform.cancel_pipe_io(thread)
+    # Polling reads/nonblocking writes exit promptly; Windows synchronous
+    # writes are cancelled before closing descriptors. No buffered pipe locks.
+    for thread in threads:
+        thread.join(timeout=.2)
+        if thread.is_alive():
+            raise OSError("Pipe operation did not stop after cancellation")
+
+
+def send_bounded(process, data: bytes, *, deadline: float, cancel: Callable[[], bool]) -> None:
+    """Send one RPC frame under the caller's deadline; never replay it.
+
+    Failed/partial sends stop the process group. Delivery is unknown, not
+    retryable. Cancellation is checked before starting and after completion.
+    """
+    from .errors import Cancelled, LimitExceeded, ProtocolError
+    if cancel():
+        raise Cancelled("RPC send cancelled")
+    if time.monotonic() >= deadline:
+        raise LimitExceeded("RPC input deadline exceeded")
+    stop, errors = threading.Event(), []
+    thread = _input_thread(process.stdin, data, stop, errors)
+    try:
+        while thread.is_alive():
+            if cancel():
+                raise Cancelled("RPC send cancelled")
+            if time.monotonic() >= deadline:
+                raise LimitExceeded("RPC input deadline exceeded")
+            thread.join(timeout=min(.01, max(0, deadline-time.monotonic())))
+        if cancel():
+            raise Cancelled("RPC send cancelled")
+        if errors:
+            raise ProtocolError("RPC input closed; delivery unknown") from errors[0]
+    except Exception:
+        terminate(process, grace=0)
+        raise
+    finally:
+        _stop_io(stop, (thread,))
 
 
 def run(argv: Sequence[str], *, timeout: float, maximum: int,
         cwd: Path | None = None, env: dict[str, str] | None = None,
         cancel: Callable[[], bool] = lambda: False, input_data: bytes = b"") -> Result:
-    """Run argv with timeout/output/cancel bounds. Portable thread-pump design.
+    """Bound input/output/exit by one deadline, then stop and reap locally.
 
-    The previous selector + non-blocking-fd loop only works on POSIX (Windows
-    selectors do not support pipes). Threads with blocking reads behave the
-    same on all three OSes with no performance loss for bounded outputs.
+    Raw polling pipes avoid buffered read locks, including when detached
+    descendants retain pipe handles. POSIX signals the original process group;
+    containment of escaped descendants requires the configured OCI boundary.
+    Windows uses the kill-on-close Job and cancellable synchronous writes.
     """
     started = time.monotonic()
+    if cancel():
+        return Result(None, "", "", "cancelled", 0.0)
+    if timeout <= 0:
+        return Result(None, "", "", "timeout", 0.0)
+    deadline = started + timeout
     output = {"stdout": bytearray(), "stderr": bytearray()}
-    reason = "exited"
-    process = subprocess.Popen(list(argv), cwd=cwd, env=environment() if env is None else env,
-                               stdin=subprocess.PIPE if input_data else subprocess.DEVNULL,
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               **_platform.popen_kwargs())
-    assert process.stdout and process.stderr
-    truncated = threading.Event()
-
-    def pump(stream, key: str) -> None:
+    process = _platform.spawn(list(argv), cwd=cwd, env=environment() if env is None else env,
+                             stdin=subprocess.PIPE if input_data else subprocess.DEVNULL,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
+                             **_platform.popen_kwargs())
+    stop, truncated = threading.Event(), threading.Event()
+    output_lock = threading.Lock()
+    errors = []
+    def pump(stream, key):
+        _platform.prepare_pipe(stream)
         try:
-            while True:
-                chunk = stream.read(65536)
+            while not stop.is_set():
+                try:
+                    chunk = _platform.read_pipe(stream, 65536)
+                except BlockingIOError:
+                    stop.wait(.01)
+                    continue
                 if not chunk:
                     return
-                used = len(output["stdout"]) + len(output["stderr"])
-                room = max(0, maximum - used)
-                output[key].extend(chunk[:room])
-                if used + len(chunk) > maximum:
-                    truncated.set()
-                    # Drain without storing so a flooding child cannot block.
-                    while stream.read(65536):
-                        pass
-                    return
-        except (OSError, ValueError):
-            return
-
-    readers = [threading.Thread(target=pump, args=(process.stdout, "stdout"), daemon=True),
-               threading.Thread(target=pump, args=(process.stderr, "stderr"), daemon=True)]
+                with output_lock:
+                    used = len(output["stdout"]) + len(output["stderr"])
+                    output[key].extend(chunk[:max(0, maximum-used)])
+                    if used+len(chunk) > maximum:
+                        truncated.set()
+                        return
+        except (OSError, ValueError) as exc:
+            if not stop.is_set():
+                errors.append(exc)
+    readers = [threading.Thread(target=pump, args=(process.stdout, "stdout"), daemon=True, name="mizu-output"),
+               threading.Thread(target=pump, args=(process.stderr, "stderr"), daemon=True, name="mizu-output")]
     for reader in readers:
         reader.start()
-    if input_data:
-        assert process.stdin
-        try:
-            try:
-                process.stdin.write(input_data)
-            except (BrokenPipeError, OSError):
-                pass
-        finally:
-            with contextlib.suppress(Exception):
-                process.stdin.close()
+    input_errors = []
+    writer = _input_thread(process.stdin, input_data, stop, input_errors, close=True) if input_data else None
+    threads = (*readers, *((writer,) if writer else ()))
+    reason = "exited"
     try:
-        # Wait for process exit AND pipe EOF (orphans holding pipes keep the
-        # run bounded until timeout, then the whole group is signalled).
         while True:
             if cancel():
                 reason = "cancelled"
@@ -127,46 +180,29 @@ def run(argv: Sequence[str], *, timeout: float, maximum: int,
             if truncated.is_set():
                 reason = "output_limit"
                 break
-            if time.monotonic() - started >= timeout:
+            if input_errors or errors:
+                reason = "input_error" if input_errors else "output_error"
+                break
+            if time.monotonic() >= deadline:
                 reason = "timeout"
                 break
-            exited = process.poll() is not None
-            drained = not any(r.is_alive() for r in readers)
-            if exited and drained:
+            if process.poll() is not None and not any(t.is_alive() for t in threads):
+                # A pump may finish between the checks above and this exit check.
+                # Preserve its failure instead of racing it into a successful exit.
+                if truncated.is_set():
+                    reason = "output_limit"
+                elif input_errors or errors:
+                    reason = "input_error" if input_errors else "output_error"
                 break
-            if exited and not drained:
-                # Parent is gone but an orphan still holds a pipe: keep the
-                # bound, do not return "exited" while output is still open.
-                time.sleep(0.02)
-                continue
-            try:
-                process.wait(timeout=0.05)
-            except subprocess.TimeoutExpired:
-                continue
-        if reason != "exited":
-            terminate(process)
-        else:
-            if truncated.is_set():
-                reason = "output_limit"
-                terminate(process)
-            elif any(r.is_alive() for r in readers):
-                # Raced: pipes still open after exit (orphan). Enforce the bound.
-                remaining = max(0.1, timeout - (time.monotonic() - started))
-                deadline = time.monotonic() + remaining
-                while any(r.is_alive() for r in readers) and time.monotonic() < deadline:
-                    if cancel() or truncated.is_set():
-                        break
-                    time.sleep(0.02)
-                if any(r.is_alive() for r in readers):
-                    reason = "timeout" if not truncated.is_set() else "output_limit"
-                    terminate(process)
-        return Result(process.returncode, _text(output["stdout"]), _text(output["stderr"]), reason,
-                      round(time.monotonic() - started, 3))
+            stop.wait(min(.01, max(0, deadline-time.monotonic())))
     finally:
-        terminate(process)
-        for reader in readers:
-            reader.join(timeout=2)
-        for stream in (process.stdin, process.stdout, process.stderr):
-            if stream and not stream.closed:
-                with contextlib.suppress(Exception):
+        stop.set()
+        terminate(process, grace=0)
+        try:
+            _stop_io(stop, threads)
+        finally:
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream and not stream.closed:
                     stream.close()
+    return Result(process.returncode, _text(output["stdout"]), _text(output["stderr"]), reason,
+                  round(time.monotonic()-started, 3))

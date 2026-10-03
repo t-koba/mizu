@@ -56,24 +56,30 @@ def validate_url(url: str, hosts: list[str]) -> tuple[str, str]:
         raise Denied("Only HTTPS without credentials, on port 443, is allowed")
     if not host or host not in {h.lower() for h in hosts}:
         raise Denied(f"Host is not allowlisted: {host}")
-    if parsed.fragment:
-        raise Denied("Remove URL fragments before fetching")
+    # Fragments are client-side only: strip them instead of refusing, so feed
+    # links like /doc#section-3 stay fetchable. They never reach the wire.
     path = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
     return host, path
 
 
-def public_addresses(host: str) -> list[tuple]:
+def public_addresses(host: str, allow_private: bool = False) -> list[tuple]:
     addresses = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
     if not addresses:
         raise Denied("DNS returned no addresses")
     for _, _, _, _, address in addresses:
         ip = ipaddress.ip_address(address[0])
-        # is_global rejects loopback, link-local, reserved/private and CGNAT.
-        if not ip.is_global or ip.is_multicast or getattr(ip, "ipv4_mapped", None):
-            raise Denied("DNS target is not a public unicast address")
+        # Loopback, link-local, multicast, unspecified and transition addresses
+        # are never dialable: they reach the host itself or nowhere meaningful.
+        # Global unicast is always fine; RFC 1918/ULA private addresses need the
+        # operator's explicit `intranet` choice.
+        if ip.is_multicast or ip.is_loopback or ip.is_link_local or ip.is_unspecified \
+                or getattr(ip, "ipv4_mapped", None):
+            raise Denied("DNS target is not a dialable address")
         if ip.version == 6 and (ip in ipaddress.ip_network("64:ff9b::/96") or
                                ip in ipaddress.ip_network("2002::/16")):
             raise Denied("Transition addresses are not supported")
+        if not ip.is_global and not (allow_private and ip.is_private):
+            raise Denied("DNS target is not a public unicast address")
     return addresses
 
 
@@ -113,7 +119,8 @@ class Web:
             return {**cached, "cached": True}
         for _ in range(4):
             host, path = validate_url(url, self.settings["hosts"])
-            connection = PinnedHTTPS(host, public_addresses(host), self.settings["timeout_seconds"])
+            intranet = bool(self.settings.get("intranet", False))
+            connection = PinnedHTTPS(host, public_addresses(host, intranet), self.settings["timeout_seconds"])
             try:
                 connection.request("GET", path, headers={"User-Agent": "Mizu/" + __version__,
                                    "Accept-Encoding": "identity", "Accept": "text/*,application/xml,application/json"})
@@ -152,18 +159,28 @@ class Web:
         raise Denied("Too many redirects")
 
     def search(self, query: str) -> dict:
+        """Feed/adapter search with explicit truncation flags.
+
+        Schema: ``{"results": [{title,url,summary,...}], "errors": [...],
+        "scope", "trust", "truncated": bool, "feeds_total": int,
+        "feeds_consulted": int}``. Bounds: titles 300, summaries 1500,
+        results 30 (matches the tool array bound). Trust: external-untrusted.
+        Retry: per-feed best-effort, errors listed. Evidence: source_receipt
+        per result. Failure: Denied for bad query/adapter shape.
+        """
         if not isinstance(query, str) or not 1 <= len(query) <= 1000:
             raise Denied("Search query must be 1–1000 characters")
         command = self.settings["search_command"]
         if command:
             result = run(command, timeout=self.settings["timeout_seconds"],
                          maximum=self.settings["max_bytes"],
-                         input_data=json.dumps({"schema": 1, "query": query}).encode() + b"\n")
+                         input_data=json.dumps({"query": query}).encode() + b"\n")
             if result.exit_code != 0 or result.reason != "exited":
                 raise Denied("Configured search program failed")
             data = json.loads(result.stdout)
             if not isinstance(data, dict) or not isinstance(data.get("results"), list):
                 raise Denied("Search adapter must return a JSON object with a results array")
+            truncated = len(data["results"]) > 30
             results = data["results"][:30]
             for item in results:
                 if not isinstance(item, dict) or not all(isinstance(item.get(k), str) for k in ("title", "url", "summary")):
@@ -171,9 +188,11 @@ class Web:
                 # Search can discover new hosts. Fetching them still needs an explicit grant.
                 if not item["url"].startswith("https://"):
                     raise Denied("Search result URL must use HTTPS")
-            return {"results": results, "scope": "configured-search-adapter", "trust": "external-untrusted"}
+            return {"results": results, "scope": "configured-search-adapter", "trust": "external-untrusted",
+                    "truncated": truncated, "feeds_total": 0, "feeds_consulted": 0}
         results, errors = [], []
-        for feed in self.settings["feeds"][:30]:
+        feeds = list(self.settings["feeds"])
+        for feed in feeds:
             try:
                 receipt = self.fetch(feed)
                 source = receipt["text"]
@@ -193,10 +212,15 @@ class Web:
                     summary = "" if summary_node is None else "".join(summary_node.itertext())
                     if not link.startswith("https://"):
                         continue
+                    # Fixed discovery shaping: keyword overlap only. Operator
+                    # ranking lives in `search_command` when configured.
                     score = sum(word.lower() in (title + " " + summary).lower() for word in query.split())
                     results.append({"title": title[:300], "url": link, "summary": summary[:1500],
                                     "source_receipt": receipt["id"], "score": score})
             except (Denied, OSError, ET.ParseError, http.client.HTTPException) as exc:
                 errors.append({"feed": feed, "error": str(exc)})
-        return {"results": sorted(results, key=lambda r: r["score"], reverse=True)[:30],
-                "errors": errors, "scope": "configured-feeds-only", "trust": "external-untrusted"}
+        ordered = sorted(results, key=lambda r: r["score"], reverse=True)
+        truncated = len(ordered) > 30
+        return {"results": ordered[:30],
+                "errors": errors, "scope": "configured-feeds-only", "trust": "external-untrusted",
+                "truncated": truncated, "feeds_total": len(feeds), "feeds_consulted": len(feeds) - len(errors)}

@@ -16,7 +16,7 @@ def bounded(config, run_dir, operation, value, cancel):
     request = {"settings": config.web, "cache": str(config.data / "web-cache"),
                "receipts": str(run_dir / "sources"), "operation": operation, "value": value}
     # Search may fetch multiple feeds, but remains bounded by the parent run deadline.
-    timeout = config.web["timeout_seconds"] * (min(len(config.web["feeds"]), 30) + 1) if operation == "search" else config.web["timeout_seconds"] + 2
+    timeout = config.web["timeout_seconds"] * (len(config.web["feeds"]) + 1) if operation == "search" else config.web["timeout_seconds"] + 2
     result = run([sys.executable, "-m", "mizu.web_worker"], timeout=min(timeout, config.limits.run_seconds),
                  maximum=2 * 1024 * 1024, cancel=cancel, input_data=canonical(request),
                  env=environment(extra={"PYTHONPATH": str(root)}))

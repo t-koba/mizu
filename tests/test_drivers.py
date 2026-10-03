@@ -1,277 +1,152 @@
-"""Contract tests for the generic inference-engine registry (ADR-007).
-
-Covers routing, trusted argv, per-run confinement, usage honesty and the
-shared MCP proxy. Fake CLIs stand in for real binaries; nothing here proves
-live-provider behavior (see docs/testing.md for the separate live gates).
-"""
+"""Current engine contracts using synthetic peers, never live inference."""
 import dataclasses
 import io
 import json
 import os
+import sys
 import unittest
 import unittest.mock
 from pathlib import Path
 from support import Fixture, ROOT
 from mizu.bridge import Bridge
-from mizu.claude import ClaudeDriver, allowed_tools, build_argv as claude_argv, parse_events as claude_parse
-from mizu.codex import CodexDriver, build_argv as codex_argv, build_config_toml, parse_events as codex_parse
-from mizu.config import Config, load
-from mizu.doctor import check
+from mizu.claude import ClaudeDriver, model_delta, terminal_result
+from mizu.codex import CodexDriver, TokenUsage
+from mizu.config import load
 from mizu.drivers import admit_invocation, command_for, driver_for
+from mizu.engine_config import effective, session_record, save_session
 from mizu.errors import ConfigError, Denied, LimitExceeded, ProtocolError
 from mizu.fs import mkdir, read_json, write_json
 from mizu.mcp_proxy import forward, load_bridge, serve
 from mizu.pi import PiDriver
-from mizu.process import Result, environment
-from mizu.process import run as run_process
+from mizu.process import environment, run as run_process
 from mizu.protocol import tool_definitions
-from mizu.runtime import Engine
 from mizu.usage import summarize
 
 
-def extend_config(fixture, extra, name="alt.toml"):
-    path = fixture.root / "config" / name
-    path.write_text(fixture.file.read_text() + extra)
+def extend_config(fixture, extra, name='alt.toml'):
+    path = fixture.root/'config'/name
+    path.write_text(fixture.file.read_text()+extra)
     return load(path)
 
 
 class EngineConfigTests(Fixture):
-    def test_default_engine_is_pi(self):
-        self.assertEqual(self.config.engine("primary"), "pi")
-        self.assertEqual(self.config.engine("alternate"), "pi")
+    def test_routing_and_native_effort(self):
+        config = extend_config(self, '\n[profiles.c]\nengine="codex"\nprovider="custom"\nmodel="exact"\nsession="ephemeral"\n[profiles.c.options]\nmodel_reasoning_effort="future-effort"\n')
+        self.assertEqual(config.options('c')['model_reasoning_effort'], 'future-effort')
+        self.assertIsInstance(driver_for(config, 'c', {}), CodexDriver)
+        self.assertIsInstance(driver_for(config, 'primary', {}), PiDriver)
 
-    def test_unknown_engine_rejected(self):
-        with self.assertRaises(ConfigError):
-            extend_config(self, '\n[profiles.bad]\nprovider = "p"\nmodel = "m"\nengine = "flux"\n')
+    def test_engine_and_session_are_explicit(self):
+        for extra in ('[profiles.c]\nprovider="p"\nmodel="m"\n', '[profiles.c]\nengine="codex"\nprovider="p"\nmodel="m"\nsession="implicit"\n'):
+            with self.assertRaises(ConfigError):
+                extend_config(self, '\n'+extra)
 
-    def test_unknown_profile_rejected(self):
-        with self.assertRaises(ConfigError):
-            self.config.engine("missing")
+    def test_empty_command_and_unknown_profile(self):
+        path=self.root/'config/empty.toml'
+        path.write_text(self.file.read_text().replace('command = ["codex"]', 'command = []'))
+        with self.assertRaises(ConfigError): load(path)
+        with self.assertRaises(ConfigError): self.config.model('absent')
 
-    def test_empty_engine_command_rejected(self):
-        text = self.file.read_text().replace('codex_command = ["codex"]', 'codex_command = []')
-        path = self.root / "config" / "empty.toml"
-        path.write_text(text)
-        with self.assertRaises(ConfigError):
-            load(path)
+    def test_owned_options_conflict_before_admission(self):
+        ctx = self.context('consult')
+        for engine, key in (('pi','modelRuntime'), ('codex','model'), ('claude','can_use_tool')):
+            ctx.config = dataclasses.replace(self.config, profiles={**self.config.profiles, ctx.role.profile:
+                {**self.config.profiles[ctx.role.profile], 'engine':engine, 'options':{key:'override'}}})
+            with self.assertRaises(ConfigError): effective(ctx.config, ctx.role, ctx.role.profile)
+            self.assertEqual(ctx.request_count,0)
 
-    def test_command_for_unknown_engine_rejected(self):
-        with self.assertRaises(ConfigError):
-            command_for(self.config, "flux")
+    def test_shared_admission_idempotent_and_bounded(self):
+        ctx=self.context('consult')
+        admit_invocation(ctx,unit='turn'); admit_invocation(ctx,unit='turn')
+        self.assertEqual(ctx.request_count,1)
+        self.assertEqual(read_json(ctx.run_dir/'admission.json')['request_unit'],'turn')
+        denied=self.context('consult')
+        denied.config=dataclasses.replace(self.config,limits=dataclasses.replace(self.config.limits,daily_requests=0))
+        with self.assertRaises(LimitExceeded): admit_invocation(denied,unit='query')
+        self.assertEqual(denied.request_count,0)
 
+    def test_session_identity_covers_options_grants_policy_model(self):
+        ctx=self.context('consult')
+        settings=effective(self.config,ctx.role,'primary')
+        original,_=session_record(ctx,'primary',settings)
+        for key,value in (('model','changed'),('options',{'thinkingLevel':'new'}),('engine_tools',['tool']),('resources',[{'sha256':'a'*64}])):
+            changed,_=session_record(ctx,'primary',{**settings,key:value})
+            self.assertNotEqual(original,changed)
+        save_session(original,'session',{})
+        self.assertEqual(session_record(ctx,'primary',settings)[1]['id'],'session')
+        write_json(original,{'id':None})
+        with self.assertRaises(ConfigError): session_record(ctx,'primary',settings)
 
-class RegistryTests(Fixture):
-    def setUp(self):
-        super().setUp()
-        self.multi = extend_config(
-            self, '\n[profiles.codex]\nprovider = "openai"\nmodel = "m"\nengine = "codex"\n'
-                  '\n[profiles.claude]\nprovider = "anthropic"\nmodel = "m"\nengine = "claude"\n')
-
-    def test_driver_for_routes_by_engine(self):
-        cache = {}
-        self.assertIsInstance(driver_for(self.multi, "primary", cache), PiDriver)
-        self.assertIsInstance(driver_for(self.multi, "codex", cache), CodexDriver)
-        self.assertIsInstance(driver_for(self.multi, "claude", cache), ClaudeDriver)
-        self.assertIs(driver_for(self.multi, "codex", cache), cache["codex"])
-
-    def test_engine_resolve_prefers_injected_driver(self):
-        from support import ScriptDriver
-        engine = Engine(self.multi, driver=ScriptDriver())
-        self.assertIs(engine.resolve("codex"), engine.driver)
-        fresh = Engine(self.multi)
-        self.assertIsInstance(fresh.resolve("primary"), PiDriver)
-
-    def test_admit_invocation_is_idempotent(self):
-        context = self.context("consult")
-        admit_invocation(context)
-        admit_invocation(context)
-        self.assertEqual(context.request_count, 1)
-        self.assertEqual(read_json(context.run_dir / "admission.json")["requests"], 1)
-
-    def test_admit_invocation_enforces_shared_budget(self):
-        context = self.context("consult")
-        context.config = dataclasses.replace(
-            self.config, limits=dataclasses.replace(self.config.limits, daily_requests=0))
-        with self.assertRaises(LimitExceeded):
-            admit_invocation(context)
-        self.assertEqual(context.request_count, 0)
-
-    def test_admit_invocation_enforces_per_run_bound(self):
-        context = self.context("consult")
-        context.config = dataclasses.replace(
-            self.config, limits=dataclasses.replace(self.config.limits, requests_per_run=0))
-        with self.assertRaises(LimitExceeded):
-            admit_invocation(context)
+    def test_seal_gates_extra_and_nested_operations(self):
+        ctx=self.context('consult')
+        ctx.role=dataclasses.replace(ctx.role,engine_tools=('tool',))
+        self.assertTrue(ctx.handle('_engine_tool',{'name':'tool'})['allowed'])
+        with self.assertRaises(Denied): ctx.handle('_engine_tool',{'name':'other'})
+        ctx.handle('finish',{'outcome':'wait','summary':'done'})
+        with self.assertRaises(Denied): ctx.handle('_engine_tool',{'name':'tool'})
+        with self.assertRaises(Denied): ctx.handle('_budget',{'sequence':1})
 
 
-class CodexDriverTests(Fixture):
-    def test_argv_is_hardened(self):
-        argv = codex_argv(("codex",))
-        for token in ("exec", "--json", "--sandbox", "read-only", "--ask-for-approval",
-                      "never", "--skip-git-repo-check", "--ephemeral", "-"):
-            self.assertIn(token, argv)
-        text = " ".join(argv)
-        self.assertNotIn("--yolo", text)
-        self.assertNotIn("danger-full-access", text)
-        self.assertNotIn("dangerously-bypass", text)
+class SyntheticEngineTests(Fixture):
+    def execute(self,engine,scenario='normal',persistent=False):
+        ctx=self.context('consult')
+        profile=ctx.role.profile
+        raw={**self.config.profiles[profile], 'engine':engine, 'provider':'custom', 'options':{},
+             'session':'persistent' if persistent else 'ephemeral'}
+        engines={**self.config.engines,engine:{**self.config.engines[engine],
+                  'command':(sys.executable,str(ROOT/'tests/fake_engines.py'),engine,scenario)}}
+        config=dataclasses.replace(self.config,profiles={**self.config.profiles,profile:raw},engines=engines)
+        ctx.config=config
+        driver=CodexDriver(config) if engine=='codex' else ClaudeDriver(config)
+        with unittest.mock.patch.dict(os.environ,{'CODEX_AUTH_FILE':str(self.root/'absent')}):
+            return ctx,driver.execute(ctx,'synthetic prompt')
 
-    def test_argv_refuses_unsafe_command(self):
-        with self.assertRaises(ConfigError):
-            codex_argv(("codex", "--yolo"))
+    def test_both_drivers_require_seal_and_record_honest_units(self):
+        for engine,unit in (('codex','turn'),('claude','query')):
+            ctx,result=self.execute(engine)
+            self.assertEqual(result['request_unit'],unit)
+            self.assertEqual(result['requests'],1)
+            self.assertTrue(result['usage_known'])
+            self.assertIsNotNone(ctx.finished)
+            self.assertTrue((ctx.run_dir/(engine+'-events.jsonl')).is_file())
+            with self.assertRaises(ProtocolError): self.execute(engine,'missing-finish')
 
-    def test_config_confines_tools_and_disables_host_powers(self):
-        import tomllib
-        text = build_config_toml(model="m", instructions=Path("/tmp/i.md"),
-                                 capabilities=("files", "read", "finish"),
-                                 bridge_file=Path("/tmp/b.json"))
-        parsed = tomllib.loads(text)
-        self.assertEqual(parsed["model"], "m")
-        self.assertEqual(parsed["approval_policy"], "never")
-        self.assertEqual(parsed["sandbox_mode"], "read-only")
-        self.assertTrue(parsed["mcp_servers"]["mizu"]["required"])
-        self.assertEqual(parsed["mcp_servers"]["mizu"]["enabled_tools"],
-                         ["mizu_files", "mizu_read", "mizu_finish"])
-        self.assertIn('"mizu_files"', text)
-        self.assertIn('"mizu_finish"', text)
-        self.assertNotIn('"mizu_exec"', text)
-        self.assertIn('shell_tool = false', text)
-        self.assertIn('multi_agent = false', text)
-        self.assertIn('web_search = "disabled"', text)
-        self.assertIn('persistence = "none"', text)
-        self.assertIn('approval_policy = "never"', text)
-        self.assertIn('sandbox_mode = "read-only"', text)
+    def test_codex_terminal_failure_and_unanswerable_request(self):
+        for scenario in ('failed','interrupted','approval','mcp-failure','bad-json','exit'):
+            with self.subTest(scenario=scenario), self.assertRaises(ProtocolError): self.execute('codex',scenario)
 
-    def test_parse_events_collects_usage(self):
-        stdout = ('{"type":"thread.started","thread_id":"t1"}\n'
-                  'not json\n'
-                  '{"type":"item.completed","item":{}}\n'
-                  '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":3}}\n')
-        parsed = codex_parse(stdout)
-        self.assertEqual(parsed["conversation_id"], "t1")
-        self.assertEqual(parsed["usage"], [{"input_tokens": 10, "output_tokens": 3}])
-        self.assertEqual(parsed["bad_lines"], 1)
-        self.assertEqual(parsed["errors"], [])
+    def test_claude_success_subtype_does_not_override_api_error(self):
+        with self.assertRaises(ProtocolError): self.execute('claude','api-error')
+        for reason in ('max_turns','max_budget_usd','aborted_tools',None):
+            with self.assertRaises(ProtocolError): terminal_result({'subtype':'success','terminal_reason':reason,'is_error':False})
 
-    def test_parse_events_surfaces_errors(self):
-        parsed = codex_parse('{"type":"error","message":"rate limited"}\n')
-        self.assertEqual(parsed["errors"], ["rate limited"])
+    def test_post_finish_calls_are_refused(self):
+        for engine in ('codex','claude'):
+            self.execute(engine,'post-finish')
+        with self.assertRaises(Denied): self.execute('codex','native-after-finish')
 
-    def run_driver(self, stdout):
-        context = self.context("consult")
-
-        def fake_runner(argv, *, timeout, maximum, cwd, env, cancel, input_data=b""):
-            self.assertIn("--ephemeral", argv)
-            self.assertEqual(env.get("CODEX_HOME"), str(context.run_dir / "codex-home"))
-            context.handle("finish", {"outcome": "wait", "summary": "Observed via bridge"})
-            return Result(0, stdout, "", "exited", 0.1)
-
-        driver = CodexDriver(self.config, runner=fake_runner)
-        return driver, driver.execute(context, '{"goal": "probe"}')
-
-    def test_execute_round_trips_finish_and_records_usage(self):
-        stdout = ('{"type":"thread.started","thread_id":"t9"}\n'
-                  '{"type":"turn.completed","usage":{"input_tokens":7,"output_tokens":2}}\n')
-        _, result = self.run_driver(stdout)
-        self.assertEqual(result["engine"], "codex")
-        self.assertEqual(result["requests"], 1)
-        self.assertEqual(result["conversation_id"], "t9")
-        self.assertEqual(result["usage"], [{"input_tokens": 7, "output_tokens": 2}])
-
-    def test_execute_writes_evidence_files(self):
-        stdout = '{"type":"thread.started","thread_id":"t1"}\n'
-        _, result = self.run_driver(stdout)
-        matches = [p for p in (self.project.root / "runs").glob("*")
-                   if (p / "codex-events.jsonl").exists() and (p / "diagnostics.txt").exists()
-                   and (p / "codex-home" / "config.toml").exists()]
-        self.assertEqual(len(matches), 1)
-        self.assertIn("thread.started", (matches[0] / "codex-events.jsonl").read_text())
-
-    def test_execute_without_finish_is_refused(self):
-        context = self.context("consult")
-
-        def silent(argv, *, timeout, maximum, cwd, env, cancel, input_data=b""):
-            return Result(0, '{"type":"thread.started","thread_id":"t1"}\n', "", "exited", 0.1)
-
-        with self.assertRaises(ProtocolError):
-            CodexDriver(self.config, runner=silent).execute(context, "x")
-
-    def test_execute_failure_is_loud(self):
-        context = self.context("consult")
-
-        def broken(argv, *, timeout, maximum, cwd, env, cancel, input_data=b""):
-            return Result(1, "", "auth required", "exited", 0.1)
-
-        with self.assertRaises(ProtocolError):
-            CodexDriver(self.config, runner=broken).execute(context, "x")
-
-    def test_execute_cancelled_is_cancelled(self):
-        context = self.context("consult")
-        context.stop.set()
-
-        def slow(argv, *, timeout, maximum, cwd, env, cancel, input_data=b""):
-            return Result(0, "", "", "exited", 0.1)
-
-        from mizu.errors import Cancelled
-        with self.assertRaises(Cancelled):
-            CodexDriver(self.config, runner=slow).execute(context, "x")
+    def test_resume_uses_saved_session_and_usage_baseline(self):
+        for engine in ('codex','claude'):
+            first,result=self.execute(engine,persistent=True)
+            second,resumed=self.execute(engine,persistent=True)
+            self.assertEqual(result.get('conversation_id',result.get('session_id')),resumed.get('conversation_id',resumed.get('session_id')))
+            self.assertTrue(resumed['usage_known'])
+            values=resumed['usage'][0]
+            self.assertEqual(values.get('input_tokens',values.get('inputTokens')),0)
 
 
-class ClaudeDriverTests(Fixture):
-    def test_allowlist_is_explicit_mcp_only(self):
-        tools = allowed_tools(("files", "read", "finish"))
-        self.assertEqual(tools, ["mcp__mizu__mizu_files", "mcp__mizu__mizu_read", "mcp__mizu__mizu_finish"])
-        for tool in tools:
-            self.assertTrue(tool.startswith("mcp__mizu__"))
-        self.assertNotIn("Bash", " ".join(tools))
+class CumulativeUsageTests(unittest.TestCase):
+    def test_codex_duplicates_and_reordering(self):
+        usage=TokenUsage({'inputTokens':20})
+        for count in (25,25,23,30): usage.observe({'inputTokens':count})
+        self.assertEqual(usage.delta()['inputTokens'],10)
+        for invalid in (-1,True,float('inf')):
+            with self.assertRaises(ProtocolError): usage.observe({'inputTokens':invalid})
 
-    def test_argv_pins_policy_and_forbids_skip(self):
-        from mizu.claude import build_mcp_config
-        tools = allowed_tools(("read", "finish"))
-        argv = claude_argv(("claude",), mcp_config=Path("/tmp/m.json"), tools=tools,
-                           system_prompt="policy", prompt="work")
-        self.assertIn("-p", argv)
-        self.assertIn("stream-json", argv)
-        self.assertIn("--mcp-config", argv)
-        self.assertIn("--allowedTools", argv)
-        self.assertIn("--system-prompt", argv)
-        text = " ".join(argv)
-        self.assertNotIn("--dangerously-skip-permissions", text)
-        self.assertNotIn("--yolo", text)
-        config = json.loads(build_mcp_config(Path("/tmp/b.json")))
-        self.assertIn("mizu", config["mcpServers"])
-        self.assertEqual(config["mcpServers"]["mizu"]["args"], ["-m", "mizu.mcp_proxy"])
-
-    def test_parse_events_collects_usage_and_session(self):
-        stdout = ('{"type":"system","session_id":"s1"}\n'
-                  '{"type":"result","usage":{"input_tokens":5,"output_tokens":2}}\n')
-        parsed = claude_parse(stdout)
-        self.assertEqual(parsed["session_id"], "s1")
-        self.assertEqual(parsed["usage"], [{"input_tokens": 5, "output_tokens": 2}])
-
-    def test_execute_round_trips_finish(self):
-        context = self.context("consult")
-        stdout = '{"type":"result","session_id":"s2","usage":{"input_tokens":1,"output_tokens":1}}\n'
-
-        def fake_runner(argv, *, timeout, maximum, cwd, env, cancel):
-            self.assertIn("-p", argv)
-            context.handle("finish", {"outcome": "wait", "summary": "Observed via bridge"})
-            return Result(0, stdout, "", "exited", 0.1)
-
-        result = ClaudeDriver(self.config, runner=fake_runner).execute(context, "work")
-        self.assertEqual(result["engine"], "claude")
-        self.assertEqual(result["session_id"], "s2")
-        self.assertEqual(result["requests"], 1)
-
-    def test_execute_without_finish_is_refused(self):
-        context = self.context("consult")
-
-        def silent(argv, *, timeout, maximum, cwd, env, cancel):
-            return Result(0, "{}\n", "", "exited", 0.1)
-
-        with self.assertRaises(ProtocolError):
-            ClaudeDriver(self.config, runner=silent).execute(context, "work")
-
-
+    def test_claude_model_totals_exclude_double_counted_children(self):
+        value=model_delta({'main':{'inputTokens':30},'child':{'inputTokens':5}}, {'main':{'inputTokens':20}})
+        self.assertEqual(sum(item['inputTokens'] for item in value),15)
+        with self.assertRaises(ProtocolError): model_delta({'main':{'inputTokens':1}}, {'main':{'inputTokens':2}})
 class McpProxyTests(unittest.TestCase):
     def bridge_config(self, handle):
         bridge = Bridge(handle, tool_definitions(("finish",)), timeout=60)
@@ -392,7 +267,7 @@ class McpProxyTests(unittest.TestCase):
 
     def test_forward_rejects_bad_envelope(self):
         with self.assertRaises(Denied):
-            forward({"protocol": 1, "socket": "/nonexistent.sock", "token": "x",
+            forward({"transport":"unix", "socket": "/nonexistent.sock", "token": "x",
                      "timeout_ms": 1000, "tools": []}, "finish", {"outcome": "wait"})
 
 
@@ -413,61 +288,71 @@ class UsageEngineTests(Fixture):
         self.assertEqual(facts["recent_entries"][0]["engine"], "codex")
         self.assertEqual(facts["groups"][0]["engines"], ["codex"])
 
-    def test_legacy_records_without_engine_stay_honest(self):
+    def test_incomplete_records_without_engine_stay_honest(self):
         self.write_run("b" * 32, {"profile": "primary", "provider": "acme", "model": "m1",
                                   "requests": 1, "usage": []})
         facts = summarize(self.project)
         self.assertEqual(facts["recent_entries"][0]["engine"], "unknown")
 
+class CurrentFormatTests(Fixture):
+    def test_mcp_count_is_bounded_before_launch(self):
+        extra='\n'.join(f'[profiles.alternate.mcp_servers.server{i}]\nurl="https://example.invalid/mcp"' for i in range(65))
+        with self.assertRaises(ConfigError):extend_config(self,'\n'+extra)
 
-class DoctorEngineTests(Fixture):
-    def statuses(self, config):
-        return {c["name"]: c["status"] for c in check(config)["checks"]}
+    def test_native_plugin_content_separates_session_identity(self):
+        directory=self.root/'plugin';directory.mkdir()
+        content=directory/'plugin.json';content.write_text('{"name":"first"}')
+        ctx=self.context('consult');profile=ctx.role.profile
+        raw={**self.config.profiles[profile],'engine':'claude','session':'persistent',
+             'options':{'plugins':[{'type':'local','path':str(directory)}]}}
+        config=dataclasses.replace(self.config,profiles={**self.config.profiles,profile:raw})
+        ctx.config=config
+        first,_=session_record(ctx,profile,effective(config,ctx.role,profile))
+        content.write_text('{"name":"changed"}')
+        second,_=session_record(ctx,profile,effective(config,ctx.role,profile))
+        self.assertNotEqual(first,second)
 
-    def test_unused_engines_are_not_run(self):
-        statuses = self.statuses(self.config)
-        self.assertEqual(statuses["codex CLI"], "not_run")
-        self.assertEqual(statuses["claude CLI"], "not_run")
+    def test_internal_publication_has_no_generation_numbers(self):
+        import tomllib
+        from mizu.runtime import Engine
+        from support import ScriptDriver
+        self.assertNotIn('schema',tomllib.loads(self.file.read_text()))
+        self.assertEqual(set(tomllib.loads((self.project.root/'project.toml').read_text())),{'roles','verify'})
+        snapshot=self.project.snapshots.get()
+        self.assertNotIn('schema',snapshot)
+        result=Engine(self.config,driver=ScriptDriver()).run(self.project,'consult')
+        self.assertNotIn('schema',result)
+        with Bridge(lambda op,args:{},[],timeout=2) as bridge:
+            self.assertNotIn('protocol',read_json(bridge.config_file))
 
-    def test_proposal_stores_pass_when_clean(self):
-        self.assertEqual(self.statuses(self.config)["proposal stores"], "pass")
+    def test_tree_resource_digest_and_symlink_refusal(self):
+        from mizu.engine_config import resource_digest
+        tree=self.root/'reviewed-plugin';tree.mkdir()
+        file=tree/'plugin.json';file.write_text('{"name":"test"}')
+        original=resource_digest(tree)
+        file.write_text('{"name":"changed"}')
+        self.assertNotEqual(original,resource_digest(tree))
+        (tree/'link').symlink_to(file)
+        with self.assertRaises(ConfigError):resource_digest(tree)
 
-    def test_proposal_stores_flag_unreadable(self):
-        inbox = self.project.root / "inbox"
-        inbox.mkdir(parents=True, exist_ok=True)
-        (inbox / "bad.json").write_text("{corrupt")
-        checks = {c["name"]: c for c in check(self.config)["checks"]}
-        entry = checks["proposal stores"]
-        self.assertEqual(entry["status"], "fail")
-        self.assertIn("sample", entry["details"])
-
-    def test_missing_configured_engine_fails_loudly(self):
-        text = self.file.read_text().replace('codex_command = ["codex"]',
-                                             'codex_command = ["mizu-missing-binary-xyz"]')
-        text += '\n[profiles.codex]\nprovider = "openai"\nmodel = "m"\nengine = "codex"\n'
-        path = self.root / "config" / "codex.toml"
-        path.write_text(text)
-        statuses = self.statuses(load(path))
-        self.assertEqual(statuses["codex CLI"], "fail")
-        self.assertEqual(statuses["claude CLI"], "not_run")
-
-    def test_driver_flag_contracts_match_compat_files(self):
-        from mizu.claude import allowed_tools, build_argv as claude_argv
-        from mizu.codex import build_argv as codex_argv
-        codex = " ".join(codex_argv(("codex",)))
-        claude = " ".join(claude_argv(("claude",), mcp_config=Path("/tmp/m.json"),
-                                      tools=allowed_tools(("read", "finish")),
-                                      system_prompt="policy", prompt="work"))
-        for engine, argv_text in (("codex", codex), ("claude", claude)):
-            compat = read_json(ROOT / "adapters" / engine / "compatibility.json")
-            required = compat["required_flags"]
-            for flag in required:
-                self.assertIn(flag, argv_text, f"{engine} argv dropped {flag}")
-            forbiddens = compat.get("forbidden_argv", [])
-            for flag in forbiddens:
-                self.assertNotIn(flag, argv_text, f"{engine} argv allows {flag}")
-            self.assertEqual(sorted(required), sorted(set(required)))
-
-
-if __name__ == "__main__":
-    raise SystemExit(unittest.main())
+    def test_stdio_mcp_uses_existing_oci_floor(self):
+        from mizu.engine_config import connected_servers
+        ctx=self.context('consult')
+        settings={'mcp_servers':{'test':{'command':'/usr/bin/test-mcp','args':['literal;not shell']}}}
+        server=connected_servers(ctx,settings)['test']
+        argv=[server['command'],*server['args']]
+        self.assertIn('--read-only',argv)
+        self.assertIn('--cap-drop=ALL',argv)
+        self.assertIn('-i',argv)
+        self.assertIn('exec /usr/bin/test-mcp',argv[-1])
+        self.assertNotEqual(server['command'],'/usr/bin/test-mcp')
+        from mizu.engine_config import stop_engine_containers
+        from mizu.process import Result
+        names=list(ctx.engine_containers)
+        with unittest.mock.patch('mizu.process.run',return_value=Result(0,'','','exit',.1)) as remove:
+            stop_engine_containers(ctx)
+        self.assertEqual(ctx.engine_containers,[])
+        self.assertIn(names[0],remove.call_args.args[0])
+        ctx.engine_containers=names
+        with unittest.mock.patch('mizu.process.run',return_value=Result(1,'','mock cleanup failure','exit',.1)):
+            with self.assertRaises(Denied):stop_engine_containers(ctx)

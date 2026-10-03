@@ -24,18 +24,16 @@ class Project:
         self.root = config.data / "projects" / name
         self.workspace = self.root / "workspace"
         try:
-            self.settings = tomllib.loads((self.root / "project.toml").read_text())
+            self.settings = tomllib.loads((self.root / "project.toml").read_text(encoding="utf-8"))
         except (OSError, tomllib.TOMLDecodeError) as exc:
             raise ConfigError(f"Project is not initialized: {name}") from exc
-        keys(self.settings, {"schema", "roles", "verify"}, "project")
-        if self.settings.get("schema") != 1:
-            raise ConfigError("Unsupported project schema")
+        keys(self.settings, {"roles", "verify"}, "project")
         self.roles = strings(self.settings.get("roles", []), "project.roles")
         self.verify = check_verify(self.settings.get("verify", []))
         if not self.roles or any(r not in config.roles for r in self.roles):
             raise ConfigError("Project roles must refer to configured roles")
         self.snapshots = open_store(self.root, config)
-        self.insights = Insights(self.root)
+        self.insights = Insights(self.root, retention_days=config.limits.retention_days)
 
     @property
     def goal(self) -> str:
@@ -52,7 +50,8 @@ class Project:
 
     def status(self) -> dict:
         snapshot = self.snapshots.get()
-        budget = Budget(self.config.data / "budget", self.config.limits.daily_requests).usage()
+        budget = Budget(self.config.data / "budget", self.config.limits.daily_requests,
+                        self.config.limits.retention_days).usage()
         return {"project": self.name, "control": self.control(), "snapshot": snapshot["id"],
                 "code_digest": snapshot["code_digest"], "created_at": snapshot["created_at"],
                 "outcome": snapshot["outcome"], "summary": snapshot["summary"],
@@ -60,9 +59,10 @@ class Project:
                 "goal_digest": snapshot.get("goal_digest"), "wake_at": snapshot.get("wake_at"),
                 "health": {p.stem: read_json(p) for p in (self.root / "health").glob("*.json") if not p.is_symlink()},
                 "active": {p.stem: read_json(p) for p in (self.root / "active").glob("*.json") if not p.is_symlink()},
-                "pending_insights": self.insights.list(),
+                "pending_insights": self.insights.list(limit=self.config.limits.pending_insights),
                 "budget": {"used_requests": budget["used"], "limit_requests": budget["limit"],
-                           "day": budget["day"], "bytes": budget["bytes"]}}
+                           "day": budget["day"], "bytes": budget["bytes"],
+                           "reaped": budget["reaped"]}}
 
 
 #: Maximum operator acceptance commands per project (each spawns a container).
@@ -87,7 +87,7 @@ def read_goal(path: Path, complaint: str) -> str:
         oversized = False
     if oversized:
         raise ConfigError(complaint)
-    value = path.read_text()
+    value = path.read_text(encoding="utf-8")
     if not value.strip() or len(value.encode()) > 65536:
         raise ConfigError(complaint)
     return value
@@ -115,6 +115,34 @@ def init_managed_repo(workspace: Path) -> None:
     config_managed_repo(workspace, env)
 
 
+def _import_git_tree(source: Path, workspace: Path, env: dict[str, str]) -> None:
+    """Clone a clean git tree without history leakage. Loud failure only."""
+    status = run(["git", "-c", "core.fsmonitor=false", "-c", f"core.hooksPath={os.devnull}",
+                  "-C", str(source), "status", "--porcelain", "--untracked-files=all"],
+                 # Only emptiness matters; truncation preserves truthiness.
+                 timeout=30, maximum=65536, env=env)
+    if status.exit_code != 0 or status.stdout.strip():
+        raise Denied("Git import requires a clean source tree; commit or make a separate plain-directory export first")
+    result = run(["git", "-c", f"core.hooksPath={os.devnull}", "clone", "--no-local",
+                  "--no-hardlinks", "--", str(source), str(workspace)],
+                 timeout=300, maximum=1048576, env=env)
+    if result.exit_code != 0:
+        raise Denied(f"Repository import failed: {result.stderr}")
+    run(["git", "-C", str(workspace), "remote", "remove", "origin"],
+        timeout=15, maximum=8192, env=env)
+    config_managed_repo(workspace, env)
+
+
+def _import_plain_directory(source: Path, workspace: Path, stage: Path, config: Config) -> None:
+    """Copy only the visible snapshot, not caches or secrets."""
+    temporary_store = open_store(stage, config)
+    captured = temporary_store.capture_files(source)
+    if captured["skipped"]:
+        raise Denied("Plain-directory import contains unsupported links or special files: " + ", ".join(captured["skipped"][:10]))
+    temporary_store.materialize(captured, workspace)
+    init_managed_repo(workspace)
+
+
 def initialize(config: Config, name: str, source: Path, goal_file: Path,
                roles: list[str], verification: list[str], *, armed: bool = False) -> Project:
     identifier(name)
@@ -135,30 +163,11 @@ def initialize(config: Config, name: str, source: Path, goal_file: Path,
         try:
             env = git_env()
             if (source / ".git").exists():
-                status = run(["git", "-c", "core.fsmonitor=false", "-c", f"core.hooksPath={os.devnull}",
-                              "-C", str(source), "status", "--porcelain", "--untracked-files=all"],
-                             # Only emptiness matters; truncation preserves truthiness.
-                             timeout=30, maximum=65536, env=env)
-                if status.exit_code != 0 or status.stdout.strip():
-                    raise Denied("Git import requires a clean source tree; commit or make a separate plain-directory export first")
-                result = run(["git", "-c", f"core.hooksPath={os.devnull}", "clone", "--no-local",
-                              "--no-hardlinks", "--", str(source), str(stage / "workspace")],
-                             timeout=300, maximum=1048576, env=env)
-                if result.exit_code != 0:
-                    raise Denied(f"Repository import failed: {result.stderr}")
-                run(["git", "-C", str(stage / "workspace"), "remote", "remove", "origin"],
-                    timeout=15, maximum=8192, env=env)
-                config_managed_repo(stage / "workspace", env)
+                _import_git_tree(source, stage / "workspace", env)
             else:
-                # Plain directory import copies only the visible snapshot, not caches or secrets.
-                temporary_store = open_store(stage, config)
-                captured = temporary_store.capture_files(source)
-                if captured["skipped"]:
-                    raise Denied("Plain-directory import contains unsupported links or special files: " + ", ".join(captured["skipped"][:10]))
-                temporary_store.materialize(captured, stage / "workspace")
-                init_managed_repo(stage / "workspace")
+                _import_plain_directory(source, stage / "workspace", stage, config)
             atomic_write(stage / "PROJECT.md", goal.encode())
-            text = "schema = 1\nroles = " + json.dumps(roles) + "\nverify = " + json.dumps(verification) + "\n"
+            text = "roles = " + json.dumps(roles) + "\nverify = " + json.dumps(verification) + "\n"
             atomic_write(stage / "project.toml", text.encode())
             write_json(stage / "control.json", {"armed": armed, "paused": not armed,
                                                 "wake_generation": uuid.uuid4().hex, "updated_at": now(),

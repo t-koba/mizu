@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import difflib
+import itertools
 import fnmatch
 import os
 import stat
@@ -9,7 +10,7 @@ from pathlib import Path
 
 from . import platform as _platform
 from .errors import Denied, LimitExceeded
-from .fs import DIGEST, PREVIEW_BYTES, atomic_write, canonical, digest, mkdir, now, publish_pointer, read_json, safe_read, write_json, relative_parts
+from .fs import DIGEST, PREVIEW_BYTES, atomic_write, canonical, digest, mkdir, now, publish_pointer, read_json, safe_read, safe_read_info, write_json, relative_parts
 
 
 def open_store(root: Path, config) -> "Snapshots":
@@ -64,17 +65,7 @@ class Snapshots:
                 if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                     skipped.append(path)
                     continue
-                if len(files) >= self.max_files:
-                    raise LimitExceeded("Snapshot file count exceeded")
-                data = safe_read(workspace, path, self.max_file)
-                total += len(data)
-                if total > self.max_bytes:
-                    raise LimitExceeded("Snapshot byte limit exceeded")
-                sha = digest(data)
-                object_path = self.root / "objects" / sha
-                if not object_path.exists():
-                    atomic_write(object_path, data, exclusive=True)
-                files[path] = {"sha256": sha, "bytes": len(data), "executable": bool(info.st_mode & 0o111)}
+                total = self._capture_file(workspace, path, files, total)
         return {"files": files, "code_digest": digest(canonical(files)), "skipped": skipped,
                 "bytes": total}
 
@@ -85,22 +76,22 @@ class Snapshots:
             relative = Path(directory).relative_to(workspace)
             visible_dirs = []
             for d in sorted(dirs):
-                rel = (relative / d).as_posix() if str(relative) != "." else d
+                rel = (relative / d).as_posix()
                 full = Path(directory) / d
                 if self.excluded(rel):
                     continue
-                if full.is_symlink():
+                if full.is_symlink() or bool(getattr(full.lstat(), "st_file_attributes", 0) & 0x400):
                     skipped.append(rel)
                 else:
                     visible_dirs.append(d)
             dirs[:] = visible_dirs
             for name in sorted(names):
-                rel = (relative / name).as_posix() if str(relative) != "." else name
+                rel = (relative / name).as_posix()
                 if self.excluded(rel):
                     continue
                 full = Path(directory) / name
                 try:
-                    if full.is_symlink():
+                    if full.is_symlink() or bool(getattr(full.lstat(), "st_file_attributes", 0) & 0x400):
                         skipped.append(rel)
                         continue
                     info = full.stat()
@@ -110,24 +101,44 @@ class Snapshots:
                 if not stat.S_ISREG(info.st_mode) or getattr(info, "st_nlink", 1) != 1:
                     skipped.append(rel)
                     continue
-                if len(files) >= self.max_files:
-                    raise LimitExceeded("Snapshot file count exceeded")
-                data = safe_read(workspace, rel, self.max_file)
-                total += len(data)
-                if total > self.max_bytes:
-                    raise LimitExceeded("Snapshot byte limit exceeded")
-                sha = digest(data)
-                object_path = self.root / "objects" / sha
-                if not object_path.exists():
-                    atomic_write(object_path, data, exclusive=True)
-                files[rel] = {"sha256": sha, "bytes": len(data), "executable": bool(info.st_mode & 0o111)}
+                total = self._capture_file(workspace, rel, files, total)
         return {"files": files, "code_digest": digest(canonical(files)), "skipped": skipped,
                 "bytes": total}
+
+    def _capture_file(self, workspace: Path, name: str, files: dict, total: int) -> int:
+        if len(files) >= self.max_files:
+            raise LimitExceeded("Snapshot file count exceeded")
+        data, info = safe_read_info(workspace, name, self.max_file)
+        total += len(data)
+        if total > self.max_bytes:
+            raise LimitExceeded("Snapshot byte limit exceeded")
+        sha = digest(data)
+        atomic_write(self.root / "objects" / sha, data, exclusive=True)
+        files[name] = {"sha256": sha, "bytes": len(data), "executable": bool(info.st_mode & 0o111)}
+        return total
+
+    def _history_ids(self) -> list[str]:
+        pointer = read_json(self.root / "current.json")
+        if pointer is None:
+            return []
+        if not isinstance(pointer, dict):
+            raise Denied("Invalid publication pointer")
+        generation = pointer.get("history")
+        if not isinstance(generation, str) or not DIGEST.fullmatch(generation):
+            raise Denied("Publication pointer requires a history generation")
+        history = read_json(self.root / "histories" / (generation + ".json"))
+        if digest(canonical(history)) != generation:
+            raise Denied("History integrity failure")
+        if not isinstance(history, list) or any(not isinstance(sid, str) or not DIGEST.fullmatch(sid) for sid in history):
+            raise Denied("Invalid history entries")
+        if not history or history[-1] != pointer.get("snapshot"):
+            raise Denied("History generation does not end at the published snapshot")
+        return history
 
     def create(self, captured: dict, *, goal: str, state: str, run: str | None,
                outcome: str, summary: str, verification: dict | None = None,
                wake_at: float | None = None, inbox_seen: str = "", wake_generation: str = "") -> dict:
-        record = {"schema": 1, **captured, "created_at": now(), "goal": goal,
+        record = {**captured, "created_at": now(), "goal": goal,
                   "goal_digest": digest(goal.encode()), "state": state, "run": run,
                   "outcome": outcome, "summary": summary, "verification": verification,
                   "wake_at": wake_at, "inbox_seen": inbox_seen, "wake_generation": wake_generation}
@@ -137,18 +148,22 @@ class Snapshots:
 
     def publish(self, snapshot: dict) -> None:
         # This pointer is the commit point. A manifest exists before it can be visible.
-        history = read_json(self.root / "history.json", [])
+        self.get(snapshot["id"])
+        history = self._history_ids()
         if snapshot["id"] not in history:
             history = [*history, snapshot["id"]][-self.history_index:]
-            write_json(self.root / "history.json", history)
-        publish_pointer(self.root, {"snapshot": snapshot["id"]}, name="current.json")
+        generation = digest(canonical(history))
+        write_json(self.root / "histories" / (generation + ".json"), history, exclusive=True)
+        publish_pointer(self.root, {"snapshot": snapshot["id"], "history": generation}, name="current.json")
 
     def get(self, snapshot_id: str | None = None) -> dict:
         if snapshot_id is None:
             pointer = read_json(self.root / "current.json")
             if pointer is None:
                 raise Denied("No published snapshot")
-            snapshot_id = pointer["snapshot"]
+            if not isinstance(pointer, dict) or not isinstance(pointer.get("history"), str) or not DIGEST.fullmatch(pointer["history"]):
+                raise Denied("Publication pointer requires a history generation")
+            snapshot_id = pointer.get("snapshot")
         if not isinstance(snapshot_id, str) or not DIGEST.fullmatch(snapshot_id):
             raise Denied("Invalid snapshot ID")
         record = read_json(self.root / "snapshots" / f"{snapshot_id}.json")
@@ -157,20 +172,44 @@ class Snapshots:
         body = {k: v for k, v in record.items() if k != "id"}
         if record.get("id") != snapshot_id or digest(canonical(body)) != snapshot_id:
             raise Denied("Snapshot integrity failure")
+        if not isinstance(record.get("files"), dict):
+            raise Denied("Invalid snapshot files")
+        if digest(canonical(record["files"])) != record.get("code_digest"):
+            raise Denied("Snapshot code digest mismatch")
+        if not isinstance(record.get("goal"), str) or digest(record["goal"].encode()) != record.get("goal_digest"):
+            raise Denied("Snapshot goal digest mismatch")
+        self.validate_paths(record["files"])
+        for entry in record["files"].values():
+            if not isinstance(entry, dict) or not isinstance(entry.get("sha256"), str) or not DIGEST.fullmatch(entry["sha256"]) or type(entry.get("bytes")) is not int or not 0 <= entry["bytes"] <= self.max_file or type(entry.get("executable")) is not bool:
+                raise Denied("Invalid snapshot file metadata")
         return record
+
+    def validate_paths(self, files):
+        seen = set()
+        for name in files:
+            relative_parts(name)
+            if self.excluded(name):
+                raise Denied("Snapshot contains an excluded path")
+            key = name.casefold() if _platform.IS_WINDOWS else name
+            if key in seen:
+                raise Denied("Snapshot paths collide on this host")
+            seen.add(key)
+        if any("/".join(name.split("/")[:i]) in seen for name in seen for i in range(1, len(name.split("/")))):
+            raise Denied("Snapshot file and directory paths collide")
 
     def read(self, snapshot: dict, name: str) -> bytes:
         entry = snapshot["files"].get(name)
         if entry is None or not DIGEST.fullmatch(entry["sha256"]):
             raise Denied("File is not part of this snapshot")
         data = safe_read(self.root / "objects", entry["sha256"], self.max_file)
-        if digest(data) != entry["sha256"]:
+        if digest(data) != entry["sha256"] or len(data) != entry["bytes"]:
             raise Denied("Object integrity failure")
         return data
 
     def materialize(self, snapshot: dict, destination: Path) -> None:
         if destination.exists():
             raise Denied("Snapshot destination already exists")
+        self.validate_paths(snapshot["files"])
         mkdir(destination)
         for name, entry in snapshot["files"].items():
             relative_parts(name)
@@ -179,7 +218,7 @@ class Snapshots:
 
     def history(self, anchor: str, limit: int = 8) -> list[dict]:
         """Only entries at/before the caller's snapshot; never a moving mixed view."""
-        history = read_json(self.root / "history.json", [])
+        history = self._history_ids()
         if anchor not in history:
             return [self.get(anchor)]
         end = history.index(anchor) + 1
@@ -187,8 +226,14 @@ class Snapshots:
 
     def changes(self, anchor: str, maximum: int = PREVIEW_BYTES) -> dict:
         current = self.get(anchor)
-        earlier = self.history(anchor, self.history_index)[:-1]
-        base = next((s for s in reversed(earlier) if s["code_digest"] != current["code_digest"]), None)
+        ids = self._history_ids()
+        earlier = ids[:ids.index(anchor)] if anchor in ids else []
+        base = None
+        for sid in reversed(earlier):
+            candidate = self.get(sid)
+            if candidate["code_digest"] != current["code_digest"]:
+                base = candidate
+                break
         if base is None:
             return {"base_snapshot": None, "target_snapshot": anchor, "diff": "", "note": "No earlier distinct code snapshot in the recent window"}
         chunks, count, skipped = [], 0, []
@@ -203,9 +248,12 @@ class Snapshots:
             if b"\x00" in before or b"\x00" in after:
                 skipped.append(name)
                 continue
-            for line in difflib.unified_diff(before.decode("utf-8", "replace").splitlines(True),
+            old_mode = base["files"].get(name, {}).get("executable")
+            new_mode = current["files"].get(name, {}).get("executable")
+            mode_lines = [] if old_mode == new_mode else [f"mode {name}: {old_mode} -> {new_mode}\n"]
+            for line in itertools.chain(mode_lines, difflib.unified_diff(before.decode("utf-8", "replace").splitlines(True),
                                              after.decode("utf-8", "replace").splitlines(True),
-                                             fromfile="before/" + name, tofile="after/" + name):
+                                             fromfile="before/" + name, tofile="after/" + name)):
                 encoded = line.encode()
                 if count + len(encoded) > maximum:
                     return {"base_snapshot": base["id"], "target_snapshot": anchor, "diff": "".join(chunks), "truncated": True, "skipped": skipped}

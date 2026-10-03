@@ -39,17 +39,17 @@ class UsageTests(Fixture):
         self.assertFalse(facts["entries_truncated"])
 
     def test_normalizes_shapes_and_surfaces_unknown(self):
-        self.assertEqual(normalize({"promptTokens": 5, "completionTokens": 7})["input_tokens"], 5)
+        self.assertEqual(normalize({"inputTokens": 5, "outputTokens": 7}, "claude")["input_tokens"], 5)
         self.write_run("c" * 32, finished_at="2026-09-02T00:00:00+00:00",
-                       usage=[{"promptTokens": 5, "completionTokens": 7},
-                              {"input": 1, "cacheReadInputTokens": 50},
+                       usage=[{"input_tokens": 5, "output_tokens": 7},
+                              {"input_tokens": 1, "cache_read_tokens": 50},
                               "garbage"])
         facts = summarize(self.project)
         group = facts["groups"][0]
         self.assertEqual(group["input_tokens"], 6)
         self.assertEqual(group["output_tokens"], 7)
-        self.assertEqual(group["other_tokens"], 50)
-        self.assertIn("cacheReadInputTokens", group["unrecognized_keys"])
+        self.assertEqual(group["other_tokens"], 0)
+        self.assertEqual(group["cache_read_tokens"], 50)
         self.assertEqual(group["unknown_shapes"], 1)
         self.assertEqual(facts["unknown_shapes"], 1)
 
@@ -62,19 +62,21 @@ class UsageTests(Fixture):
         (run_dir / "result.json").write_text("{broken")
         facts = summarize(self.project)
         self.assertEqual(facts["totals"]["input_tokens"], 9)
-        self.assertEqual(facts["scanned_records"], 1)
+        self.assertEqual(facts["scanned_records"], 2)
 
-    def test_consultation_answers_included(self):
+    def test_parent_consultation_cannot_duplicate_child_usage(self):
         run_dir = self.project.root / "runs" / ("g" * 32)
         mkdir(run_dir)
-        write_json(run_dir / "consultation.json",
-                   {"question": "q", "answers": [
-                       {"profile": "primary",
-                        "model": {"provider": "acme", "model": "m2", "requests": 2,
-                                  "usage": [{"input_tokens": 3, "output_tokens": 4}]}},
-                       {"profile": "primary", "error": "no model here"}]})
+        model = {"provider": "acme", "model": "m2", "requests": 2,
+                 "usage": [{"input_tokens": 3, "output_tokens": 4}]}
+        write_json(run_dir / "consultation.json", {"question": "q", "answers": [{"run": "child", "model": model}]})
+        child = self.project.root / "runs" / "child"
+        mkdir(child)
+        write_json(child / "consultation.json", {"run": "child", "parent_run": run_dir.name,
+                   "role": "consult", "status": "completed", "finished_at": "2026-10-03T00:00:00+00:00", "model": model})
         facts = summarize(self.project)
         self.assertEqual(facts["totals"]["input_tokens"], 3)
+        self.assertEqual(facts["totals"]["runs"], 1)
         self.assertEqual(facts["groups"][0]["model"], "m2")
 
     def test_raw_records_untouched(self):

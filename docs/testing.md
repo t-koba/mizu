@@ -6,44 +6,33 @@
 |---|---|---|---|
 | Offline core | `python3 scripts/check.py` | Files, locks, budgets, failure paths, JSONL, grants, MCP, escaped reports, bounded process behavior | Real Pi/provider/container behavior |
 | Installer | `./scripts/test-install.sh` | Core staging, spaces, idempotence, manifests, CLI import/export/report/backup/restore | npm registry/install or model execution |
-| Dependency install | `./scripts/setup.sh` | Exact installed Pi version and local staging gates | Live credentials or isolation |
+| Dependency install | `./scripts/setup.sh` | Locked Pi dependency install and local staging gates | Live credentials or isolation |
+| Installed SDK / mock provider | `node scripts/check-pi-sdk.mjs` and `python3 scripts/check-model-adapters.py --help` | Current public SDK, runtime metering, managed bridge/MCP, Codex/Claude resume and usage deltas | Paid inference or OCI isolation |
 | Real isolation | `mizu doctor --sandbox` | Actual rootless command boundary on that host | VM-grade isolation or kernel security audit |
 | Live protocol (pi) | `mizu smoke --live` | Exact model selection, trusted extension handshake, admission hook, read + finish + settled | Research quality, all providers, large codebases |
 | Live protocol (codex/claude) | `mizu smoke --live` with an `engine = "codex"`/`"claude"` profile | Trusted argv, isolated home/config, required MCP bridge, budget admission, finish round trip, no side effects | Host-tool absence (configuration, not proof), all models, quotas |
 | Real work unit | Demo `run` with verification | Write, command execution, verification and publication together | Long-term reliability |
 | Soak | Operator-observed 24-hour deployment | Behavior over the tested workload/window | General availability SLA |
 
-`tests/fake_pi.py` is an intentionally local contract peer used by tests, not a
-replacement Pi or production fallback. `tests/test_drivers.py` uses injected
-fake runners the same way for codex/claude, plus a real-subprocess test of the
-exact `mizu.mcp_proxy` stdio command the drivers hand to vendor CLIs. Podman argv tests use mocks where marked.
-Node tests use a real local Unix socket but fake the Pi extension registry. A
-pass count must retain those labels.
+`tests/fake_pi.py` and fake runners in `tests/test_drivers.py` are contract test doubles, not production fallbacks. Tests verify argv construction, stdio MCP framing (`mizu.mcp_proxy`), and error handling without contacting live endpoints. Node tests use a local Unix socket with a simulated extension registry.
 
-## Offline commands (portable: Linux / macOS / Windows)
+## Offline test execution (Linux / macOS / Windows)
 
 ```sh
-python -m unittest discover -s tests -v
+python3 -m unittest discover -s tests -q
 node --test tests/bridge.test.mjs
-python scripts/check.py --report /private-validation/offline.json
+python3 scripts/check.py --report private-validation/offline.json
 ```
 
-On Linux additionally:
+On Linux:
 
 ```sh
 ./scripts/test-install.sh
 ```
 
-On Windows without bash use `python scripts/install.py --core-only ...` and
-`bin\\mizu.cmd` instead of the `.sh` wrappers. `scripts/check.py` treats
-missing bash as `not_run` for shell-syntax only; missing Node still fails
-because the bridge contract needs it. Podman/systemd assertions never run
-off Linux: they report `not_run`, not success.
+On Windows without bash: run `python scripts/install.py --core-only ...` and test via `bin\mizu.cmd`. Missing bash marks shell-syntax checks as `not_run`; missing Node fails the suite. Podman and systemd validations only run on Linux.
 
-No API key, npm dependency, browser or container daemon is needed for those
-commands. Node tests run on the available modern Node test runner, while actual
-Pi deployment still requires Node >=22.19.0. Python CI covers 3.11–3.13; only the
-versions listed in a particular validation receipt were actually run there.
+Offline tests require no API credentials, internet access, or running container daemons. The CI matrix targets Python 3.11–3.14; the recorded local result is Linux 3.14.
 
 Test categories include path/symlink/hardlink refusal, immutable ID retries,
 budget races and day changes, process cancellation/orphan pipes, unchanged
@@ -67,7 +56,7 @@ the workspace remains, and restart does not silently replay. Try concurrent
 workers and verify rejection. Lower request/time/output limits deliberately and
 confirm refusal. Export an Editor capsule and attempt a write to its source;
 confirm failure and successful proposal submission. Inspect artifact evidence
-and stale snapshot labeling. Exercise backup/restore and staged update/rollback.
+and stale snapshot labeling. Exercise backup/restore and staged update and removal of replaced code.
 
 Then enable periodic roles with modest budgets. Observe an entire day, including
 idle periods, paper generation, source refresh, provider failures and a restart.

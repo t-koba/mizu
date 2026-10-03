@@ -16,6 +16,10 @@ source-manifest.json
 *.tar.gz
 *.zip
 private-validation/
+# Regenerable verification receipts never belong in docs/; see docs/VALIDATION.md.
+docs/validation-*.json
 .DS_Store
 DISTRIBUTION.json
 MANIFEST.sha256
+
+installation-checks.json

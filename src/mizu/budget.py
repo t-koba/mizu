@@ -12,11 +12,23 @@ BUDGET_DAY_BYTES = 4 * 1024 * 1024
 
 
 class Budget:
-    def __init__(self, root: Path, daily: int):
+    def __init__(self, root: Path, daily: int, retention_days: int = 31):
         self.root, self.daily = root, daily
+        self.retention_days = retention_days
 
-    def gc(self, *, keep_days: int = 31) -> int:
-        """Remove day-files older than the window. Best-effort; never fails admission."""
+    def gc(self, *, keep_days: int | None = None) -> int:
+        """Remove day-files older than the window. Best-effort; never fails admission.
+
+        Schema/bounds: day-files ``YYYY-MM-DD.json``; ``keep_days`` defaults to
+        the operator-selected ``retention_days`` (``[limits] retention_days``,
+        default 31, 0 disables reaping). Trust: local operator state only.
+        Retry: best-effort, skips unreadable entries. Evidence: returns the
+        reaped count. Failure: never raises for I/O; corrupt names are skipped.
+        """
+        if keep_days is None:
+            keep_days = self.retention_days
+        if keep_days <= 0:
+            return 0
         removed = 0
         try:
             today = dt.datetime.now(dt.timezone.utc).date()
@@ -60,5 +72,6 @@ class Budget:
             size = path.stat().st_size
         except OSError:
             size = 0
-        self.gc()
-        return {"day": day, "used": len(record["requests"]), "limit": self.daily, "bytes": size}
+        reaped = self.gc()
+        return {"day": day, "used": len(record["requests"]), "limit": self.daily,
+                "bytes": size, "reaped": reaped}

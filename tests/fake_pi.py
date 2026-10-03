@@ -3,6 +3,7 @@ import json
 import os
 import socket
 import sys
+from pathlib import Path
 
 
 def flag(name, default=None):
@@ -15,6 +16,7 @@ def emit(data):
 
 
 config = json.load(open(os.environ["MIZU_BRIDGE_CONFIG"]))
+effective = json.load(open(sys.argv[-1]))
 scenario = flag("--fake-scenario", "normal")
 
 
@@ -41,18 +43,19 @@ if scenario == "exit":
 if scenario == "bad-json":
     print("not JSON", flush=True)
     raise SystemExit(0)
-bridge("_hello", {"protocol": 1})
+bridge("_hello", {})
 for raw in sys.stdin.buffer:
     command = json.loads(raw)
     if command["type"] == "get_state":
         emit({"type": "response", "id": command["id"], "success": True,
-              "data": {"model": {"provider": flag("--provider"), "id": "wrong" if scenario == "wrong-model" else flag("--model")}}})
+              "data": {"sessionFile": str(Path(effective["sessionDir"]) / "fake.jsonl"), "model": {"provider": effective["provider"], "id": "wrong" if scenario == "wrong-model" else effective["model"]}}})
     elif command["type"] == "prompt":
         emit({"type": "response", "id": command["id"], "success": True,
               "data": {"disposition": "handled" if scenario == "handled" else "started"}})
         if scenario == "handled":
             continue
         bridge("_budget", {"sequence": 1})
+        bridge("_model_usage", {"sequence": 2, "usage": {"input": 1, "output": 1}})
         emit({"type": "message_end", "message": {"role": "assistant", "content": "Unicode\u2028line\u2029end", "usage": {"input": 1, "output": 1}}})
         emit({"type": "agent_end"})  # A premature completion interpretation must fail the test.
         if scenario != "missing-finish":

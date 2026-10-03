@@ -17,7 +17,7 @@ class DashboardTests(Fixture):
         self.assertEqual(entry.stem, result["dashboard"])
         self.assertFalse(list(self.project.root.rglob("*.html")))
         payload = json.loads(entry.read_text())
-        self.assertEqual(payload["schema"], 1)
+        self.assertNotIn("schema", payload)
         self.assertEqual(payload["project"], "sample")
         self.assertIn("pending_insights", payload)
         latest = json.loads((self.project.root / "dashboard/latest.json").read_text())

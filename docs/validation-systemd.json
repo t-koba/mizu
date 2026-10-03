@@ -1,7 +1,0 @@
-{
-  "schema": 1,
-  "check": "systemd-unit-static-verification",
-  "exit_code": 0,
-  "units": 7,
-  "live_user_manager": "not_run"
-}

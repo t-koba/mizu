@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import signal
 import sys
 import threading
@@ -31,7 +30,9 @@ def parser() -> argparse.ArgumentParser:
     initialize.add_argument("project", help="New project name")
     initialize.add_argument("--source", type=Path, required=True, help="Clean source directory or git tree")
     initialize.add_argument("--goal", type=Path, required=True, help="Goal Markdown file")
-    initialize.add_argument("--roles", default="worker", help="Comma-separated configured roles")
+    # No hardcoded role assumption: omitted --roles resolves to the single
+    # configured role, else to worker when present, else requires explicit.
+    initialize.add_argument("--roles", default=None, help="Comma-separated configured roles (default: single role, else worker when present)")
     initialize.add_argument("--armed", action="store_true",
                             help="Start armed (operator has reviewed the source at init time)")
     initialize.add_argument("--verify", action="append", default=[], help="Operator-owned acceptance command; repeatable")
@@ -48,13 +49,15 @@ def parser() -> argparse.ArgumentParser:
                                        "daemon": "Poll and run; streams JSON Lines per unit (result objects and run_deferred events)",
                                        "cleanup": "Remove leftover labelled containers"}[name])
         p.add_argument("project", help="Managed project name")
-        p.add_argument("--role", default=None if name == "cleanup" else "worker", help="Configured role")
+        # No hardcoded role assumption: omitted --role resolves to the single
+        # configured role, else to worker when present, else requires explicit.
+        p.add_argument("--role", default=None, help="Configured role (default: single role, else worker when present)")
     p = sub.add_parser("doctor", help="Check platform, versions, isolation prerequisites and budget file")
     p.add_argument("--sandbox", action="store_true", help="Actually execute the rootless isolation smoke")
     p = sub.add_parser("smoke", help="Paid read-only live probe; never touches a real project")
     p.add_argument("--live", action="store_true", required=True, help="Explicit consent to a paid, read-only Pi/provider probe")
     p.add_argument("--profile", help="Model profile for the probe")
-    p.add_argument("--role", default="consult", help="Read-only probe role (default: consult)")
+    p.add_argument("--role", default=None, help="Read-only probe role (default: consult when present, else single role)")
     p = sub.add_parser("insight", help="Submit, list, read or ingest proposals")
     p.add_argument("action", choices=("submit", "list", "read", "ingest"), help="Proposal operation")
     p.add_argument("project", help="Managed project name")
@@ -90,7 +93,8 @@ def parser() -> argparse.ArgumentParser:
     p = sub.add_parser("prune", help="List (or apply) removal of reproducible inputs")
     p.add_argument("project", help="Managed project name")
     p.add_argument("--apply", action="store_true", help="Actually remove candidates")
-    p.add_argument("--keep-artifacts", type=int, default=30,
+    from .storage import DEFAULT_KEEP_ARTIFACTS
+    p.add_argument("--keep-artifacts", type=int, default=DEFAULT_KEEP_ARTIFACTS,
                    help="Keep this many recent published artifacts")
     p = sub.add_parser("budget", help="Show shared UTC-day request budget usage")
     p.add_argument("project", help="Managed project name")
@@ -102,12 +106,12 @@ def configure(file: Path, pi_command: str | None) -> dict:
     if file.exists():
         return {"config": str(file), "status": "unchanged", "note": "Existing settings and policies are never overwritten"}
     mkdir(file.parent)
-    text = (ROOT / "config/config.example.toml").read_text()
+    text = (ROOT / "config/config.example.toml").read_text(encoding="utf-8")
     if pi_command:
         argv = json.loads(pi_command)
         if not isinstance(argv, list) or not argv or any(not isinstance(v, str) or not v for v in argv):
             raise ConfigError("--pi-command-json must be a nonempty string array")
-        text = text.replace('pi_command = ["pi"]', "pi_command = " + json.dumps(argv))
+        text = text.replace('command = ["node"]', "command = " + json.dumps(argv))
     for policy in sorted((ROOT / "policies").glob("*.md")):
         target = file.parent / "policies" / policy.name
         if not target.exists():
@@ -117,6 +121,147 @@ def configure(file: Path, pi_command: str | None) -> dict:
     if not credentials.exists():
         atomic_write(credentials, b"# Literal KEY=value entries; no shell expansion. Mode 0600. Never commit this file.\n", exclusive=True)
     return {"config": str(file), "status": "created", "armed": False, "daily_requests": 0}
+
+
+def _resolve_role(config, preferred: str | None, *, probe: bool = False) -> str:
+    """Resolve an omitted --role without hardcoding role names.
+
+    Single-role configurations default to that role; otherwise prefer
+    `consult` (probe) or `worker` (run/daemon) when present; else require
+    explicit --role. Role names stay configuration, not a class hierarchy.
+    """
+    if preferred:
+        return preferred
+    if len(config.roles) == 1:
+        return next(iter(config.roles))
+    fallback = "consult" if probe else "worker"
+    if fallback in config.roles:
+        return fallback
+    raise ConfigError("Specify --role explicitly: no single or fallback role is configured")
+
+
+def _cmd_status(config, project, args):
+    return project.status()
+
+
+def _cmd_arm(config, project, args):
+    if config.limits.daily_requests <= 0:
+        raise ConfigError("Set a positive daily_requests limit before arming")
+    for name in project.roles:
+        config.model(config.roles[name].profile)
+    return project.set_control(armed=True, paused=False, reason="Operator armed", wake_generation=uuid.uuid4().hex)
+
+
+def _cmd_disarm(config, project, args):
+    return project.set_control(armed=False, paused=True, reason="Operator disarmed")
+
+
+def _cmd_pause(config, project, args):
+    return project.set_control(paused=True, reason="Operator paused")
+
+
+def _cmd_resume(config, project, args):
+    if not project.control().get("armed"):
+        raise Denied("Project is unarmed; use arm after reviewing its configuration")
+    return project.set_control(paused=False, reason="Operator resumed", wake_generation=uuid.uuid4().hex)
+
+
+def _cmd_wake(config, project, args):
+    return project.set_control(wake_generation=uuid.uuid4().hex, reason="Operator requested another work unit")
+
+
+def _cmd_run(config, project, args):
+    if _platform.is_root():
+        raise Denied("Never run agents as root")
+    from .runtime import Engine
+    role = _resolve_role(config, args.role)
+    stop = threading.Event()
+    watched = [sig for sig in (getattr(signal, "SIGTERM", None), getattr(signal, "SIGINT", None)) if sig is not None]
+    previous = {sig: signal.signal(sig, lambda s, f: stop.set()) for sig in watched}
+    try:
+        return Engine(config, stop=stop).run(project, role)
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
+def _cmd_daemon(config, project, args):
+    if _platform.is_root():
+        raise Denied("Never run agents as root")
+    from .runtime import daemon
+    daemon(config, project.name, _resolve_role(config, args.role))
+    return None
+
+
+def _cmd_cleanup(config, project, args):
+    from .sandbox import cleanup
+    return cleanup(config, project.root, args.role)
+
+
+def _cmd_insight(config, project, args):
+    if args.action == "list":
+        return project.insights.list(pending=False, limit=1000)
+    if args.action == "read":
+        if not args.id:
+            raise ConfigError("--id is required")
+        return project.insights.read(args.id)
+    if args.action == "ingest":
+        return project.insights.ingest_editor()
+    if not args.title or args.body is None:
+        raise ConfigError("Insight submission requires --title and --body")
+    if str(args.body) == "-":
+        body = sys.stdin.read(PREVIEW_BYTES + 1)
+    else:
+        if args.body.stat().st_size > PREVIEW_BYTES:
+            raise Denied("Insight body file exceeds byte limit")
+        body = args.body.read_text(encoding="utf-8")
+    return project.insights.submit(source="operator", title=args.title, body=body,
+                                   base_snapshot=project.snapshots.get()["id"], insight_id=args.id)
+
+
+def _cmd_editor_export(config, project, args):
+    from .editor import export
+    return export(project, args.destination)
+
+
+def _cmd_service(config, project, args):
+    from .services import install
+    return install(config, project, args.executable, args.directory)
+
+
+def _cmd_report(config, project, args):
+    from .report import publish
+    return publish(project, project.snapshots.get(), None, run_id=None)
+
+
+def _cmd_dashboard(config, project, args):
+    from .dashboard import publish
+    return publish(project)
+
+
+def _cmd_usage(config, project, args):
+    from .usage import summarize
+    return summarize(project)
+
+
+def _cmd_backup(config, project, args):
+    from .storage import backup
+    return backup(project, args.destination, verify=args.verify)
+
+
+def _cmd_prune(config, project, args):
+    from .storage import prune
+    return prune(project, apply=args.apply, keep_artifacts=args.keep_artifacts)
+
+
+_PROJECT_COMMANDS = {
+    "status": _cmd_status, "arm": _cmd_arm, "disarm": _cmd_disarm,
+    "pause": _cmd_pause, "resume": _cmd_resume, "wake": _cmd_wake,
+    "run": _cmd_run, "daemon": _cmd_daemon, "cleanup": _cmd_cleanup,
+    "insight": _cmd_insight, "service": _cmd_service, "report": _cmd_report,
+    "dashboard": _cmd_dashboard, "usage": _cmd_usage, "backup": _cmd_backup,
+    "prune": _cmd_prune,
+}
 
 
 def execute(args):
@@ -132,10 +277,13 @@ def execute(args):
         return check(config, sandbox=args.sandbox)
     if args.command == "smoke":
         from .smoke import live
-        return live(config, args.profile, args.role)
+        return live(config, args.profile, _resolve_role(config, args.role, probe=True))
     from .project import Project, initialize
     if args.command == "init":
-        project = initialize(config, args.project, args.source, args.goal, args.roles.split(","),
+        roles = args.roles.split(",") if args.roles else _resolve_role(config, None).split(",")
+        # _resolve_role returns one role name; init accepts a comma list.
+        # Single-role configs resolve to that role, otherwise worker fallback.
+        project = initialize(config, args.project, args.source, args.goal, roles,
                              args.verify, armed=args.armed)
         return project.status()
     if args.command == "restore":
@@ -144,85 +292,17 @@ def execute(args):
     if args.command == "budget":
         # Global shared budget: no project construction or validation needed.
         from .budget import Budget
-        return Budget(config.data / "budget", config.limits.daily_requests).usage()
-    project = Project(config, args.project)
-    if args.command == "status":
-        return project.status()
-    if args.command == "arm":
-        if config.limits.daily_requests <= 0:
-            raise ConfigError("Set a positive daily_requests limit before arming")
-        for name in project.roles:
-            config.model(config.roles[name].profile)
-        return project.set_control(armed=True, paused=False, reason="Operator armed", wake_generation=uuid.uuid4().hex)
-    if args.command == "disarm":
-        return project.set_control(armed=False, paused=True, reason="Operator disarmed")
-    if args.command == "pause":
-        return project.set_control(paused=True, reason="Operator paused")
-    if args.command == "resume":
-        if not project.control().get("armed"):
-            raise Denied("Project is unarmed; use arm after reviewing its configuration")
-        return project.set_control(paused=False, reason="Operator resumed", wake_generation=uuid.uuid4().hex)
-    if args.command == "wake":
-        return project.set_control(wake_generation=uuid.uuid4().hex, reason="Operator requested another work unit")
-    if args.command in ("run", "daemon"):
-        if _platform.is_root():
-            raise Denied("Never run agents as root")
-        from .runtime import Engine, daemon
-        if args.command == "daemon":
-            daemon(config, project.name, args.role)
-            return None
-        stop = threading.Event()
-        watched = [sig for sig in (getattr(signal, "SIGTERM", None), getattr(signal, "SIGINT", None)) if sig is not None]
-        previous = {sig: signal.signal(sig, lambda s, f: stop.set()) for sig in watched}
-        try:
-            return Engine(config, stop=stop).run(project, args.role)
-        finally:
-            for sig, handler in previous.items():
-                signal.signal(sig, handler)
-    if args.command == "cleanup":
-        from .sandbox import cleanup
-        return cleanup(config, project.root, args.role)
-    if args.command == "insight":
-        if args.action == "list":
-            return project.insights.list(pending=False, limit=1000)
-        if args.action == "read":
-            if not args.id:
-                raise ConfigError("--id is required")
-            return project.insights.read(args.id)
-        if args.action == "ingest":
-            return project.insights.ingest_editor()
-        if not args.title or args.body is None:
-            raise ConfigError("Insight submission requires --title and --body")
-        if str(args.body) == "-":
-            body = sys.stdin.read(PREVIEW_BYTES + 1)
-        else:
-            if args.body.stat().st_size > PREVIEW_BYTES:
-                raise Denied("Insight body file exceeds byte limit")
-            body = args.body.read_text()
-        return project.insights.submit(source="operator", title=args.title, body=body,
-                                       base_snapshot=project.snapshots.get()["id"], insight_id=args.id)
+        return Budget(config.data / "budget", config.limits.daily_requests,
+                      config.limits.retention_days).usage()
     if args.command == "editor":
-        from .editor import export
-        return export(project, args.destination)
-    if args.command == "service":
-        from .services import install
-        return install(config, project, args.executable, args.directory)
-    if args.command == "report":
-        from .report import publish
-        return publish(project, project.snapshots.get(), None, run_id=None)
-    if args.command == "dashboard":
-        from .dashboard import publish
-        return publish(project)
-    if args.command == "usage":
-        from .usage import summarize
-        return summarize(project)
-    if args.command == "backup":
-        from .storage import backup
-        return backup(project, args.destination, verify=args.verify)
-    if args.command == "prune":
-        from .storage import prune
-        return prune(project, apply=args.apply, keep_artifacts=args.keep_artifacts)
-    raise ConfigError("Unhandled command")
+        # `editor export` needs a project; `editor mcp` handled above.
+        project = Project(config, args.project)
+        return _cmd_editor_export(config, project, args)
+    project = Project(config, args.project)
+    handler = _PROJECT_COMMANDS.get(args.command)
+    if handler is None:
+        raise ConfigError("Unhandled command")
+    return handler(config, project, args)
 
 
 def main(argv=None) -> int:

@@ -12,8 +12,9 @@ measured workload requirements, not hypothetical scale.
 ## ADR-002 — Isolated commands, not host tool wrappers
 
 **Accepted.** Pi is a trusted inference/session process with no built-in tools.
-Its only extension talks to the host capability bridge. Model commands execute
-in rootless Podman with fixed mounts and limits. Editor is a separate capsule.
+Its primary extension talks to the host capability bridge (with up to 64 operator-configured,
+hash-verified extensions allowed). Model commands execute
+in a rootless container (Podman / Docker) with fixed mounts and limits. Editor is a separate capsule.
 This costs startup overhead and requires prepared images, but avoids policy-only
 permissions and a broad host shell. A VM may be required for a stronger threat
 model. No unsafe host fallback is provided.
@@ -49,9 +50,10 @@ these boundaries rather than hiding them behind aspirational settings.
 plus the protocol commit vocabulary; policy owns who, when, in what words
 and what counts as good. Concretely:
 
-- Mechanism: capability checks, sandbox argv and networklessness, atomic
+- Mechanism: capability checks, sandbox argv and privilege floors, atomic
   publication pointers, content hashes, budget/slot admission, failure
-  brakes (auto-pause, lock refusal, unarmed refusal, no self-promotion),
+  brakes (auto-pause unless `max_failures = 0`, lock refusal, unarmed refusal,
+  no self-promotion),
   `finish` outcomes (`continue`/`wait`/`blocked`/`done`) and `decide`
   verdicts (`accept`/`modify`/`defer`/`reject`). The verdict/outcome
   vocabularies are fixed because they are commit-point states, not prose.
@@ -73,35 +75,33 @@ and what counts as good. Concretely:
 Add a knob only when an operator would plausibly turn it; otherwise name
 the constant and document it here.
 
-## ADR-007 — Generic inference-engine abstraction (pi/codex/claude)
+## ADR-007 — Current native engine adapters
 
-**Accepted.** One driver contract, many CLIs. No per-model ad-hoc features.
+**Accepted.** Profiles explicitly select an engine, provider, model, session
+mode, native options, reviewed local resources and MCP servers. Runtime argv and
+agent directories live under `[engines.pi|codex|claude]`. Native thinking/effort
+values are forwarded without a common fixed list; requested and observed values
+remain separate evidence.
 
-- Profiles gain `engine="pi"|"codex"|"claude"` (default `pi`; backward
-  compatible). `provider/model/thinking` stay exact IDs verified at runtime.
-  Trusted commands are operator-owned argv arrays only
-  (`pi_command` pattern extended to `codex_command`/`claude_command`); no
-  shell strings, no model-supplied host commands.
-- Driver interface is `execute(context, prompt, profile)` one point
-  (`docs/extensions.md`). Every engine guarantees: empty control cwd,
-  system prompt = role policy verbatim, tools = capability-filtered `mizu_*`
-  only, exact model-identity check before paid use, shared
-  budget/slot/deadline/cancellation admission, sealed `finish`, usage
-  records, session key = role/model/goal/policy/caps.
-- One shared MCP bridge (private per-run socket/token, `required=true`
-  fail-closed). Pi uses the Unix-socket extension; codex/claude use stdio
-  MCP config pointing at the same bridge. Capability matrix per engine is
-  documented, not branched in policy prose: writer `exec/experiment/verify`
-  always runs in the networkless Podman sandbox; Codex runs with
-  `shell_tool=false`, `web_search=disabled`, `multi_agent=false`; Claude
-  allows `mcp__mizu_*` only. `agy` is excluded (no per-run system/MCP
-  pinning, global-config mutation, non-TTY risk, unclear automation terms).
-- Auth is operator-owned and out of band (`login` flows, `CODEX_HOME`,
-  keyring/file); secrets never enter containers or logs. Subscription caps
-  (shared 5h/weekly, message quotas) are account-level regardless of route:
-  no SLA claim, rate-limit maps to `wait` then auto-`pause`, no admission
-  refund, no silent model swap (ADR-005).
-- CLI versions are pinned with `adapters/*/compatibility.json` + installer
-  and doctor pin checks, same minimum-version policy as Pi >=0.87.1. Default behavior stays Pi;
-  new engines are opt-in per profile. Fake drivers cover contracts offline;
-  live provider gates stay separate.
+Pi uses the public SDK and metered ModelRuntime. Codex uses app-server stdio;
+Claude uses the official Python Agent SDK in an independently locked adapter
+environment. All drivers require the bridge before dispatch and a sealed finish
+plus native terminal success. Resume failures never become new conversations.
+Session identity binds policy, model, grants, effective options, local resource
+content and adapter content. No internal generation numbers, readers for older
+formats, conversions or engine version rejection paths exist.
+
+Role capabilities authorize Mizu operations; `engine_tools` authorizes extra
+native tools. Built-in host commands and native workspace writes cannot bypass
+the OCI/publication bridge. Operator stdio MCP runs through existing OCI limits;
+HTTP MCP endpoints and trusted local extension/plugin code remain explicit
+operator choices. Approvals do not expand grants; child tools cannot exceed the
+parent. Trusted extension code is not isolated from the adapter host.
+
+Pi reserves logical model requests before dispatch, including auxiliary calls.
+Codex reserves turns and Claude reserves queries, without claiming observation
+of their internal HTTP requests. Native cumulative usage is differenced and
+repeated notifications do not multiply it. SDK/CLI dependency locks and actual
+executable version evidence remain; doctor checks required capabilities.
+Synthetic peers, installed SDKs with mock providers, paid inference and actual
+OCI isolation are reported separately. Deployment remains an operator action.

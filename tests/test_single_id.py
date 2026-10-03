@@ -151,7 +151,7 @@ class SingleModeArgvTests(Fixture):
         calls = {"mkdir": 0, "read": 0}
         def counting_mkdir(path):
             calls["mkdir"] += 1
-        def counting_read(self):
+        def counting_read(self, *args, **kwargs):
             calls["read"] += 1
             return "cpu memory pids"
         # Single mode is Linux-only in production; the host filesystem and

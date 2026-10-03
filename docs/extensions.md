@@ -15,17 +15,20 @@ for observers and retain one integrating writer.
 
 ## A new inference engine (not a new provider)
 
-Engines are routed generically: `profiles.*.engine` selects `pi` (default),
+Engines are routed generically: `profiles.*.engine` explicitly selects `pi`,
 `codex` or `claude` through `src/mizu/drivers.py`, and all engines share the
 `execute(context, prompt, profile=...)` contract plus the `mizu-bridge` MCP
 proxy (`src/mizu/mcp_proxy.py`). Do not add per-model branches in policy or
 runtime code. A fourth engine needs, in this order:
 
-1. `adapters/<engine>/compatibility.json`: CLI name, pin basis, `required_flags`
-   for the `doctor` drift check, `forbidden_argv`, protocol/completion shape.
+1. `adapters/<engine>/contract.json`: managed entry point, required public capabilities
+   and completion/evidence shape. `doctor` and `check-cli` derive probe commands,
+   required flags and expected exports from this file (`adapter_contract()`), and
+   declared exports must appear in the launcher `--check-contract` report; drift
+   fails instead of passing silently.
 2. `src/mizu/<engine>.py`: trusted argv builder, isolated per-run config,
    event parser, `requires_sandbox = True`, no new host authority.
-3. `command_for` entry plus `codex_command`-style trusted argv config.
+3. `command_for` entry plus `engines.NAME.command` trusted argv config.
 4. Fake-runner contract tests plus a real-subprocess MCP proxy test; live
    `doctor`/`smoke --live` gates stay separate and unpinned until reviewed.
 5. `docs/configuration.md`, `docs/security.md` and `docs/testing.md` deltas.
@@ -84,10 +87,10 @@ model command to `subprocess(..., shell=True)` or a host shell.
 
 ## Changing Pi versions
 
-Keep version-dependent flags, events, schema registration and package pins in
-`pi.py` and `adapters/pi/`. Update `compatibility.json`, both direct pins, the
-installer and doctor pin checks, and the reviewed lock in one change. Compare
-tagged CLI/RPC/tool APIs, especially `before_provider_request`, `terminate` and
+Keep current engine events, tool registration and dependency locks in
+`pi.py` and `adapters/pi/`. Update `contract.json`, both direct pins, the
+installer and doctor capability checks, and the reviewed lock in one change. Compare
+tagged SDK/RPC/tool APIs, especially ModelRuntime admission, `terminate` and
 `agent_settled`. Run Python contract tests, Node extension tests, actual Pi
 startup, live read-only smoke and a real container write/verify run. Tests with
 `tests/fake_pi.py` check our protocol handling, not upstream compatibility.

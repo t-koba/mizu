@@ -1,0 +1,30 @@
+{
+  "command": [
+    "app-server",
+    "--listen",
+    "stdio://"
+  ],
+  "methods": [
+    "initialize",
+    "thread/start",
+    "thread/resume",
+    "turn/start",
+    "turn/interrupt",
+    "mcpServerStatus/list"
+  ],
+  "completion": "turn/completed status completed + mizu seal",
+  "request_unit": "turn",
+  "required_flags": [
+    "--listen"
+  ],
+  "contracts": [
+    {
+      "command": [
+        "app-server"
+      ],
+      "required_flags": [
+        "--listen"
+      ]
+    }
+  ]
+}

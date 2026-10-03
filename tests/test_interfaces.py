@@ -50,7 +50,8 @@ class InsightTests(Fixture):
     def test_spool_sender_cannot_be_forged(self):
         spool = self.project.root / "spool/editor"
         write_json(spool / "bad.json", {"source": "operator", "title": "x", "body": "x", "base_snapshot": None})
-        self.assertEqual(self.project.insights.ingest_editor(), {"accepted": 0, "rejected": 1})
+        self.assertEqual(self.project.insights.ingest_editor(),
+                         {"accepted": 0, "rejected": 1, "reaped": 0})
         self.assertEqual(self.project.insights.list(), [])
 
     def test_malformed_spool_directory_is_quarantined(self):
@@ -73,7 +74,12 @@ class InsightTests(Fixture):
         waiting = self.project.insights.submit(source="searcher", title="Wait", body="b", base_snapshot=None)
         self.project.insights.decide(waiting["id"], "defer", "later", "condition", "test")
         ancient = time.time() - 32 * 86400
-        os.utime(self.project.root / "inbox" / f"{old['id']}.json", (ancient, ancient))
+        from mizu.fs import read_json, write_json
+        import datetime
+        decision_path = self.project.root / "decisions" / f"{old['id']}.json"
+        decision = read_json(decision_path)
+        decision["created_at"] = datetime.datetime.fromtimestamp(ancient, datetime.timezone.utc).isoformat()
+        write_json(decision_path, decision)
         self.assertEqual(self.project.insights.gc_decided(), 1)
         self.assertFalse((self.project.root / "inbox" / f"{old['id']}.json").exists())
         self.assertTrue((self.project.root / "inbox" / f"{new['id']}.json").exists())
@@ -145,7 +151,7 @@ class EditorTests(Fixture):
 
 class PiProtocolTests(Fixture):
     def driver(self, scenario="normal"):
-        cfg = dataclasses.replace(self.config, pi_command=(sys.executable, str(ROOT / "tests/fake_pi.py"), "--fake-scenario", scenario))
+        cfg = dataclasses.replace(self.config, engines={**self.config.engines, "pi": {**self.config.engines["pi"], "command": (sys.executable, str(ROOT / "tests/fake_pi.py"), "--fake-scenario", scenario)}})
         return PiDriver(cfg)
 
     def test_rpc_waits_for_settlement_and_preserves_unicode(self):
@@ -181,12 +187,13 @@ class PiProtocolTests(Fixture):
         with self.assertRaises(ProtocolError):
             self.driver("handled").execute(ctx, "x")
 
-    def test_cli_disables_all_discovered_execution_paths(self):
+    def test_managed_launcher_uses_effective_configuration_file(self):
         ctx = self.context()
         argv = self.driver().argv(ctx.role, ctx.run_dir, "primary", ctx.goal_digest)
-        for flag in ("--no-builtin-tools", "--no-extensions", "--no-context-files", "--no-skills", "--no-approve", "--offline"):
-            self.assertIn(flag, argv)
-        self.assertIn("--session-id", argv)
+        from pathlib import Path as _Path
+        self.assertTrue(_Path(argv[-2]).as_posix().endswith("adapters/pi/launcher.mjs"))
+        self.assertEqual(argv[-1],str(ctx.run_dir / "pi-effective.json"))
+        self.assertNotIn("--mode",argv)
 
     def test_bridge_requires_per_run_secret(self):
         with Bridge(lambda op, args: {"accepted": True}, [], timeout=2) as bridge:
@@ -242,7 +249,9 @@ class IsolationAndWebTests(Fixture):
 
     def test_url_allowlist_is_exact(self):
         self.assertEqual(validate_url("https://example.com/a?q=1", ["example.com"]), ("example.com", "/a?q=1"))
-        for url in ("http://example.com/", "https://example.com.evil.test/", "https://user@example.com/", "https://example.com:1234/", "https://example.com/#frag"):
+        # Fragments are stripped client-side, never sent.
+        self.assertEqual(validate_url("https://example.com/a#section-3", ["example.com"]), ("example.com", "/a"))
+        for url in ("http://example.com/", "https://example.com.evil.test/", "https://user@example.com/", "https://example.com:1234/"):
             with self.assertRaises(Denied):
                 validate_url(url, ["example.com"])
 
@@ -251,6 +260,19 @@ class IsolationAndWebTests(Fixture):
             with patch("socket.getaddrinfo", return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, 443))]):
                 with self.assertRaises(Denied):
                     public_addresses("example.com")
+
+    def test_private_dns_allowed_by_policy(self):
+        from mizu.web import public_addresses as addresses
+        good_v4 = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (a, 443)) for a in ("10.1.2.3", "192.168.1.1")]
+        with patch("socket.getaddrinfo", return_value=good_v4):
+            self.assertEqual(addresses("example.com", True), good_v4)
+        good_v6 = [(socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("fd00::1", 443, 0, 0))]
+        with patch("socket.getaddrinfo", return_value=good_v6):
+            self.assertEqual(addresses("example.com", True), good_v6)
+        for address in ("127.0.0.1", "169.254.169.254", "224.0.0.1"):
+            with patch("socket.getaddrinfo", return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, 443))]):
+                with self.assertRaises(Denied):
+                    addresses("example.com", True)
 
     def test_public_dns_is_pinned(self):
         answer = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443))]
@@ -308,17 +330,17 @@ class OperationsTests(Fixture):
         self.assertEqual(len(self.project.snapshots.history(old["id"])), 1)
 
     def test_service_units_do_not_embed_credentials(self):
-        cases = (("linux", "mizu-sample-worker.service", "mizu-sample-reporter.timer"),
-                 ("macos", "mizu-sample-worker.plist", "mizu-sample-reporter.plist"),
-                 ("windows", "mizu-sample-worker.xml", "mizu-sample-reporter.xml"))
+        cases = (("linux", "mizu-6-sample-worker.service", "mizu-6-sample-reporter.timer"),
+                 ("macos", "mizu-6-sample-worker.plist", "mizu-6-sample-reporter.plist"),
+                 ("windows", "mizu-6-sample-worker.xml", "mizu-6-sample-reporter.xml"))
         for system, worker_unit, reporter_unit in cases:
-            units = render_services(self.config, self.project, ROOT / "bin/mizu", system=system)
+            units = render_services(dataclasses.replace(self.config, timezone="local"), self.project, ROOT / "bin/mizu", system=system)
             self.assertIn(worker_unit, units)
             self.assertIn(reporter_unit, units)
             self.assertNotIn("credentials.env", "".join(units.values()))
         units = render_services(self.config, self.project, ROOT / "bin/mizu", system="linux")
-        self.assertIn("07:00:00 UTC", units["mizu-sample-reporter.timer"])
-        self.assertIn("Delegate=yes", units["mizu-sample-worker.service"])
+        self.assertIn("07:00:00 UTC", units["mizu-6-sample-reporter.timer"])
+        self.assertIn("Delegate=yes", units["mizu-6-sample-worker.service"])
 
     def test_systemd_argument_escaping(self):
         self.assertEqual(quote('/a b/$c%q'), '"/a b/$$c%%q"')
@@ -404,12 +426,12 @@ class OperationsTests(Fixture):
                 directory = Path(tmp)
                 for extension in extensions:
                     (directory / f"mizu-sample-ghost{extension}").write_text("stale")
-                result = install(self.config, self.project, ROOT / "bin/mizu", directory, system=system)
+                result = install(dataclasses.replace(self.config, timezone="local"), self.project, ROOT / "bin/mizu", directory, system=system)
                 self.assertNotIn("ghost", "".join(result["written"]))
                 for extension in extensions:
-                    self.assertFalse((directory / f"mizu-sample-ghost{extension}").exists())
-                self.assertIn(result["verification"], ("pass", "skipped: systemd-analyze not available",
-                                                       "not_run: Linux only"))
+                    self.assertTrue((directory / f"mizu-sample-ghost{extension}").exists())
+                self.assertIn(result["verification"], ("pass", "not_run: native validator unavailable",
+                                                       "syntax-pass; native registration not_run"))
 
     def test_service_install_verification_branches(self):
         import subprocess
@@ -452,7 +474,7 @@ class OperationsTests(Fixture):
             launcher.write_text('print("mizu 0.1.0")\n')
             launcher.chmod(0o755)
             write_json(release / "source-manifest.json", {})
-            write_json(release / "installation.json", {"schema": 1, "version": "0.1.0",
+            write_json(release / "installation.json", {"version": "0.1.0",
                          "source_sha256": digest(canonical({})), "mode": mode,
                          "validation": "local-install-checks-passed"})
             return release

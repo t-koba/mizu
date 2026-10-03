@@ -76,6 +76,24 @@ class FileTests(unittest.TestCase):
         with self.assertRaises(Denied):
             safe_read(self.root, "two", 100)
 
+    def test_cross_api_identity_tolerates_handle_sourcing(self):
+        # Path stat and handle stat source device/index/creation fields
+        # differently on Windows; only mode/nlink/size/mtime bind across APIs.
+        from types import SimpleNamespace
+        from mizu.fs import _same_file
+        probe = self.root / "probe"
+        probe.write_bytes(b"data")
+        info = probe.stat()
+        twin = SimpleNamespace(st_mode=info.st_mode, st_nlink=info.st_nlink,
+                               st_size=info.st_size, st_mtime_ns=info.st_mtime_ns)
+        with patch("os.name", "nt"):
+            self.assertTrue(_same_file(info, twin))
+        self.assertTrue(_same_file(info, info))
+        exact = os.stat_result((info.st_mode, 999999, 888888, info.st_nlink,
+                                info.st_uid, info.st_gid, info.st_size,
+                                info.st_atime, info.st_mtime, info.st_ctime))
+        self.assertFalse(_same_file(info, exact))
+
     def test_fifo_nonblocking_denied(self):
         if not hasattr(os, "mkfifo"):
             self.skipTest("FIFOs require POSIX")
@@ -176,6 +194,15 @@ class ConfigTests(Fixture):
         with self.assertRaises(ConfigError):
             load(self.file)
 
+    def test_max_failures_zero_disables_auto_pause(self):
+        self.file.write_text(self.file.read_text().replace("max_failures = 3", "max_failures = 0"))
+        self.assertEqual(load(self.file).limits.max_failures, 0)
+
+    def test_intranet_must_be_bool(self):
+        self.file.write_text(self.file.read_text().replace("intranet = false", "intranet = \"yes\""))
+        with self.assertRaises(ConfigError):
+            load(self.file)
+
     def test_unknown_role_capability(self):
         self.file.write_text(self.file.read_text().replace('"decide"', '"host_root_shell"'))
         with self.assertRaises(ConfigError):
@@ -198,15 +225,23 @@ class ConfigTests(Fixture):
         self.assertEqual(self.file.read_bytes(), before)
 
     def test_init_defaults_to_one_unarmed_worker(self):
-        from mizu.cli import parser
+        from mizu.cli import _resolve_role, parser
         args = parser().parse_args(["init", "demo", "--source", "s", "--goal", "g"])
-        self.assertEqual(args.roles, "worker")
+        self.assertIsNone(args.roles)
         self.assertFalse(args.armed)
+        # Stock config resolves omitted --roles to worker; single-role to itself.
+        self.assertEqual(_resolve_role(self.config, None), "worker")
 
     def test_smoke_role_defaults_to_consult(self):
-        from mizu.cli import parser
+        from mizu.cli import _resolve_role, parser
         args = parser().parse_args(["smoke", "--live"])
-        self.assertEqual(args.role, "consult")
+        self.assertIsNone(args.role)
+        # Stock config resolves to consult; single-role configs to that role.
+        self.assertEqual(_resolve_role(self.config, None, probe=True), "consult")
+        single = {k: v for k, v in self.config.roles.items() if k == "consult"}
+        import dataclasses
+        solo = dataclasses.replace(self.config, roles=single)
+        self.assertEqual(_resolve_role(solo, None, probe=True), "consult")
 
     def test_history_and_prompt_bounds_are_validated(self):
         self.file.write_text(self.file.read_text().replace("history_index = 128", "history_index = 2"))
@@ -275,28 +310,24 @@ class ConfigTests(Fixture):
         self.assertEqual(PREVIEW_BYTES, 131072)
         self.assertRegex(__version__, r"^\d+\.\d+\.\d+$")
 
-    def test_pinned_versions_agree(self):
+    def test_dependency_lock_agrees_with_manifest(self):
         import json
-        from mizu import NODE_MINIMUM, PI_MINIMUM, __version__
-        minimum = tuple(map(int, PI_MINIMUM.split(".")))
-        compat = json.loads((ROOT / "adapters/pi/compatibility.json").read_text())
-        self.assertEqual((compat["pi_minimum"], compat["node_minimum"]), (PI_MINIMUM, NODE_MINIMUM))
+        from mizu import NODE_MINIMUM, __version__
         package = json.loads((ROOT / "adapters/pi/package.json").read_text())
-        self.assertEqual(package["version"], __version__)
-        for name in ("@earendil-works/pi-coding-agent", "@earendil-works/pi-ai"):
-            declared = package["dependencies"][name]
-            self.assertTrue(declared.startswith(">=") and PI_MINIMUM in declared)
-        self.assertIn(NODE_MINIMUM, package["engines"]["node"])
         lock = json.loads((ROOT / "adapters/pi/package-lock.json").read_text())
-        self.assertEqual(lock["version"], __version__)
-        self.assertEqual(lock["packages"][""]["version"], __version__)
-        for name in ("@earendil-works/pi-coding-agent", "@earendil-works/pi-ai"):
-            pinned = tuple(map(int, lock["packages"]["node_modules/" + name]["version"].split(".")))
-            self.assertGreaterEqual(pinned, minimum)
+        self.assertEqual(package["version"], __version__)
+        self.assertIn(NODE_MINIMUM, package["engines"]["node"])
+        for name, declared in package['dependencies'].items():
+            self.assertEqual(lock['packages']['node_modules/'+name]['version'],declared)
+            self.assertTrue(lock['packages']['node_modules/'+name]['integrity'])
+        contract=json.loads((ROOT/'adapters/pi/contract.json').read_text())
+        self.assertIn('ModelRuntime',contract['exports'])
+        self.assertNotIn('schema',contract)
 
     def test_shared_bounds_are_single_sourced(self):
         import mizu.bridge
         import mizu.editor
+        import mizu.mcp_loop
         import mizu.mcp_proxy
         import mizu.protocol
         import mizu.sandbox
@@ -307,11 +338,12 @@ class ConfigTests(Fixture):
         self.assertIs(mizu.sandbox.SCRIPT_MAX, fs.SCRIPT_MAX)
         self.assertIs(mizu.editor.MCP_VERSIONS, mizu.protocol.MCP_VERSIONS)
         self.assertIs(mizu.mcp_proxy.MCP_VERSIONS, mizu.protocol.MCP_VERSIONS)
+        self.assertIs(mizu.mcp_loop.MCP_VERSIONS, mizu.protocol.MCP_VERSIONS)
+        self.assertIs(mizu.mcp_loop.MAX_FRAME, fs.MAX_FRAME)
         from mizu.drivers import DIAGNOSTICS_TAIL_BYTES, EVENT_STREAM_BYTES
-        import mizu.claude
-        import mizu.codex
-        self.assertIs(mizu.codex.DIAGNOSTICS_TAIL_BYTES, DIAGNOSTICS_TAIL_BYTES)
-        self.assertIs(mizu.claude.EVENT_STREAM_BYTES, EVENT_STREAM_BYTES)
+        import mizu.engine_channel
+        self.assertIs(mizu.engine_channel.DIAGNOSTICS_TAIL_BYTES, DIAGNOSTICS_TAIL_BYTES)
+        self.assertIs(mizu.engine_channel.EVENT_STREAM_BYTES, EVENT_STREAM_BYTES)
 
     def test_verify_commands_are_counted_and_toml_safe(self):
         from mizu.project import check_verify

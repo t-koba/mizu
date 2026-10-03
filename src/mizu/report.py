@@ -6,15 +6,24 @@ HTML: presentation is operator policy (see examples/render-paper.py).
 """
 from __future__ import annotations
 
-from .fs import atomic_write, canonical, digest, mkdir, now, publish_pointer, write_json
+from .fs import atomic_write, canonical, digest, mkdir, now, publish_pointer, write_json, read_json, lock
 
 
 def render(snapshot: dict, document: dict | None) -> str:
+    """Render the staged document verbatim with a title heading.
+
+    Schema/bounds: ``{"title" (<=200), "body" (<=48000)}``. Trust: title/body
+    are model/operator prose (data). Retry: pure text. Evidence: snapshot
+    provenance lives in ``evidence.json`` and the artifact digest, not in
+    Markdown prose; presentation (headers, language, order) lives in
+    ``examples/render-paper.py``. Failure: never invents prose beyond the
+    mechanical fallback.
+    """
     if document is None:
         # Mechanical fallback only: no invented prose, all words are record data.
         document = {"title": "Snapshot " + snapshot["id"][:12],
                     "body": snapshot["state"] + "\n\n" + snapshot["summary"]}
-    return "# " + document["title"] + "\n\nSnapshot: `" + snapshot["id"] + "`  \nAs of: " + snapshot["created_at"] + "\n\n" + document["body"] + "\n"
+    return "# " + document["title"] + "\n\n" + document["body"] + "\n"
 
 
 def publish(project, snapshot: dict, document: dict | None = None, *, run_id: str | None = None) -> dict:
@@ -26,9 +35,15 @@ def publish(project, snapshot: dict, document: dict | None = None, *, run_id: st
     artifact_id = digest(canonical({"snapshot": snapshot["id"], "document": document, "run": run_id}))
     root = project.root / "artifacts"
     entry = root / artifact_id
-    mkdir(entry)
-    atomic_write(entry / "artifact.md", markdown.encode())
-    write_json(entry / "evidence.json", evidence)
-    # Entry first, pointer last (see fs.publish_pointer).
-    publish_pointer(root, {"artifact": artifact_id, "snapshot": snapshot["id"], "published_at": evidence["published_at"]})
+    with lock(root / ".publish.lock"):
+        mkdir(entry)
+        previous = read_json(entry / "evidence.json")
+        if previous is not None:
+            evidence = {**evidence, "published_at": previous["published_at"]}
+            if previous != evidence:
+                raise ValueError("Immutable artifact evidence conflict")
+        atomic_write(entry / "artifact.md", markdown.encode(), exclusive=True)
+        write_json(entry / "evidence.json", evidence, exclusive=True)
+        # Re-publication time belongs to the mutable pointer only.
+        publish_pointer(root, {"artifact": artifact_id, "snapshot": snapshot["id"], "published_at": now()})
     return {"artifact": artifact_id, "markdown": str(entry / "artifact.md")}

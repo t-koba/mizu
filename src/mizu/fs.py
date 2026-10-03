@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import contextlib
 import datetime as dt
+import errno
 import hashlib
 import json
 import os
 import re
 import stat
 import tempfile
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Iterator
 
 from . import platform as _platform
@@ -51,15 +52,22 @@ def mkdir(path: Path) -> None:
 
 
 def sync_dir(path: Path) -> None:
-    # Directory fsync is POSIX-only (needs O_DIRECTORY); best-effort elsewhere.
+    # Unsupported directory sync is distinct from a real durability failure.
+    if not _platform.IS_POSIX:
+        return
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
     try:
         fd = os.open(path, flags)
-    except (AttributeError, OSError, NotImplementedError, ValueError):
-        return
+    except OSError as exc:
+        if exc.errno in (errno.EINVAL, errno.ENOTSUP, errno.ENOSYS):
+            return
+        raise
     try:
-        with contextlib.suppress(OSError):
+        try:
             os.fsync(fd)
+        except OSError as exc:
+            if exc.errno not in (errno.EINVAL, errno.ENOTSUP, errno.ENOSYS):
+                raise
     finally:
         os.close(fd)
 
@@ -78,8 +86,7 @@ def atomic_write(path: Path, data: bytes, *, exclusive: bool = False,
         with os.fdopen(fd, "wb") as stream:
             stream.write(data)
             stream.flush()
-            with contextlib.suppress(OSError):
-                os.fsync(stream.fileno())
+            os.fsync(stream.fileno())
         if exclusive:
             try:
                 try:
@@ -103,7 +110,7 @@ def write_json(path: Path, value: Any, *, exclusive: bool = False) -> None:
 
 def read_json(path: Path, default: Any = None) -> Any:
     try:
-        return json.loads(path.read_bytes())
+        return json.loads(path.read_bytes(), parse_constant=lambda v: (_ for _ in ()).throw(ValueError("Non-finite JSON value")))
     except FileNotFoundError:
         return default
 
@@ -147,8 +154,11 @@ def relative_parts(name: str) -> tuple[str, ...]:
     if not isinstance(name, str) or not name or "\x00" in name or "\\" in name:
         raise Denied("Invalid relative path")
     parts = tuple(name.split("/"))
-    if PurePosixPath(name).is_absolute() or any(p in ("", ".", "..") for p in parts):
+    if PurePosixPath(name).is_absolute() or PureWindowsPath(name).drive or any(p in ("", ".", "..") for p in parts):
         raise Denied("Path must be relative, without empty, '.' or '..' components")
+    if _platform.IS_WINDOWS and any(':' in p or p.endswith((' ', '.')) or
+            PureWindowsPath(p).is_reserved() for p in parts):
+        raise Denied("Path is not representable on Windows")
     return parts
 
 
@@ -160,13 +170,22 @@ def safe_read(root: Path, name: str, maximum: int) -> bytes:
     the OS lacks openat/dir_fd (Windows), a resolve-and-check fallback keeps
     the same Denied contract without claiming TOCTOU pinning.
     """
+    return safe_read_info(root, name, maximum)[0]
+
+
+def safe_read_info(root: Path, name: str, maximum: int) -> tuple[bytes, os.stat_result]:
+    """Return bounded bytes and metadata from the same opened regular file.
+
+    No retries; unstable reads raise Denied. POSIX pins path components;
+    portable reads check reparse points and identity without claiming pinning.
+    """
     parts = relative_parts(name)
     if _platform.HAS_OPENAT and _platform.HAS_DIR_FD:
         return _safe_read_openat(root, name, parts, maximum)
     return _safe_read_portable(root, name, parts, maximum)
 
 
-def _safe_read_openat(root: Path, name: str, parts: tuple[str, ...], maximum: int) -> bytes:
+def _safe_read_openat(root: Path, name: str, parts: tuple[str, ...], maximum: int) -> tuple[bytes, os.stat_result]:
     fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
     try:
         for part in parts[:-1]:
@@ -186,25 +205,45 @@ def _safe_read_openat(root: Path, name: str, parts: tuple[str, ...], maximum: in
             after = os.fstat(stream.fileno())
             if len(data) > maximum:
                 raise LimitExceeded("File grew past configured byte limit")
-            if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
-                    after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+            if _file_identity(before) != _file_identity(after):
                 raise Denied("File changed while reading; retry at a stable boundary")
-            return data
+            return data, after
     except OSError as exc:
         raise Denied(f"Unsafe or unavailable path: {name}") from exc
     finally:
         os.close(fd)
 
 
-def _safe_read_portable(root: Path, name: str, parts: tuple[str, ...], maximum: int) -> bytes:
+def _file_identity(info):
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink,
+            info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _same_file(first, second):
+    """Cross-API identity check: path stat and handle stat source device,
+    index and creation fields differently on Windows (host-dependent
+    mismatches observed for freshly written files), so across APIs only
+    mode/nlink/size/mtime bind. Same-handle pairs stay exact."""
+    if os.name == "nt":
+        key = lambda info: (info.st_mode, info.st_nlink, info.st_size, info.st_mtime_ns)
+        return key(first) == key(second)
+    return _file_identity(first) == _file_identity(second)
+
+
+def _safe_read_portable(root: Path, name: str, parts: tuple[str, ...], maximum: int) -> tuple[bytes, os.stat_result]:
     target = root.joinpath(*parts)
     try:
         # Refuse any symlink along the path, including the final component.
-        current = root
-        for part in parts:
-            current = current / part
-            if current.is_symlink():
+        def check_components():
+            current = root
+            for part in ('', *parts):
+                current = current / part
+                info = current.lstat()
+                if stat.S_ISLNK(info.st_mode) or getattr(info, 'st_file_attributes', 0) & 0x400:
+                    raise Denied(f"Unsafe or unavailable path: {name}")
+            if not target.resolve().is_relative_to(root.resolve()):
                 raise Denied(f"Unsafe or unavailable path: {name}")
+        check_components()
         info = target.stat()
         if not stat.S_ISREG(info.st_mode):
             raise Denied("Only regular, non-hardlinked files are readable")
@@ -212,11 +251,48 @@ def _safe_read_portable(root: Path, name: str, parts: tuple[str, ...], maximum: 
             raise Denied("Only regular, non-hardlinked files are readable")
         if info.st_size > maximum:
             raise LimitExceeded("File exceeds configured byte limit")
-        data = target.read_bytes()[:maximum + 1]
+        with target.open('rb') as stream:
+            before = os.fstat(stream.fileno())
+            # The handle is the truth for type/link count; path stat already
+            # screened these, but the binding check must use handle values.
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+                raise Denied("Only regular, non-hardlinked files are readable")
+            if not _same_file(info, before):
+                raise Denied("File changed before reading")
+            data = stream.read(maximum + 1)
+            after = os.fstat(stream.fileno())
         if len(data) > maximum:
             raise LimitExceeded("File grew past configured byte limit")
-        return data
+        check_components()
+        if _file_identity(before) != _file_identity(after) or not _same_file(after, target.stat()):
+            raise Denied("File changed while reading; retry at a stable boundary")
+        return data, after
     except (Denied, LimitExceeded):
         raise
     except OSError as exc:
         raise Denied(f"Unsafe or unavailable path: {name}") from exc
+
+
+def page(items, offset: int = 0, limit: int = 1000, *, maximum: int = PREVIEW_BYTES) -> dict:
+    """Deterministic bounded list projection, offset is an index in sorted input.
+
+    Schema: items/offset/next_offset/truncated. Byte bound applies to canonical
+    item JSON. No retry or implicit continuation; caller explicitly pages.
+    """
+    selected = []
+    used = 0
+    for item in items[offset:offset + limit]:
+        size = len(canonical(item))
+        if used + size > maximum:
+            break
+        selected.append(item)
+        used += size
+    end = offset + len(selected)
+    return {"items": selected, "offset": offset,
+            "next_offset": end if end < len(items) else None, "truncated": end < len(items)}
+
+
+def text_preview(value: str, maximum: int = 8192) -> tuple[str, bool]:
+    """UTF-8 byte preview with explicit truncation; full evidence stays on disk."""
+    raw = value.encode('utf-8')
+    return raw[:maximum].decode('utf-8', 'ignore'), len(raw) > maximum

@@ -61,7 +61,7 @@ class ScriptDriver:
 
     def execute(self, context, prompt, *, profile=None):
         self.calls.append((context, prompt, profile))
-        context.handle("_hello", {"protocol": 1})
+        context.handle("_hello", {})
         context.handle("_budget", {"sequence": 1})
         if self.callback:
             self.callback(context, prompt, profile)

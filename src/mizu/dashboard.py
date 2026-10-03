@@ -13,12 +13,17 @@ the source of project truth.
 """
 from __future__ import annotations
 
-from .fs import canonical, digest, now, read_json, publish_entry
-from .usage import summarize
+import datetime as dt
+import heapq
 
-SCHEMA = 1
-#: Pending proposals surfaced per dashboard (matches the insight list bound).
-MAX_PENDING = 30
+from .fs import canonical, digest, now, read_json, publish_pointer, atomic_write, lock
+from .usage import summarize, record_time
+
+#: Pending-proposal projection bound is operator-selected
+#: ([limits] pending_insights, default 30). Raw inbox/decisions stay on disk.
+#: Recent decisions (10) and reason truncation (500 chars, flagged) stay fixed
+#: small-screen bounds; raw reasons stay in decisions/ on disk.
+MAX_PENDING_FALLBACK = 30
 #: Recent decisions surfaced per dashboard; older history stays on disk.
 MAX_DECISIONS = 10
 #: Long decision prose is truncated to this many characters for small screens.
@@ -34,14 +39,22 @@ def _truncate(text: str, maximum: int = REASON_TRUNCATE) -> dict:
 def collect(project) -> dict:
     """Gather the dashboard core from already-recorded project files.
 
-    Takes no locks and admits no model requests. The only write is the
-    best-effort reaping of budget day-files older than 31 days.
+    Schema/bounds: pending slice follows ``[limits] pending_insights``;
+    recent decisions 10, reason 500 chars (flagged), day-groups follow
+    ``[limits] retention_days``. Trust: recorded harness state + agent prose
+    (data, not proof). Retry: read-only, lock-free, idempotent publish.
+    Evidence: disposable projection; snapshots/runs/decisions stay on disk.
+    Failure: raises instead of inventing placeholders. The only write is the
+    best-effort reaping of budget day-files under the retention window.
     Raises the project's own errors (missing project, corrupt state) instead
     of inventing placeholder values.
     """
     base = project.status()
     control = base["control"]
-    pending = base["pending_insights"][:MAX_PENDING]
+    max_pending = getattr(getattr(project, "config", None), "limits", None)
+    max_pending = max_pending.pending_insights if max_pending is not None else MAX_PENDING_FALLBACK
+    projection = project.insights.projection(limit=max_pending)
+    pending = projection["items"]
     slim_pending = []
     for item in pending:
         entry = {k: item[k] for k in ("id", "source", "title", "created_at", "base_snapshot")}
@@ -56,24 +69,38 @@ def collect(project) -> dict:
         else:
             entry["decision"] = None
         slim_pending.append(entry)
-    decision_paths = sorted(p for p in (project.root / "decisions").glob("*.json") if not p.is_symlink())
+    decision_paths = (p for p in (project.root / "decisions").glob("*.json") if not p.is_symlink())
+    decision_count = 0
     recent = []
-    for path in decision_paths[-MAX_DECISIONS:]:
-        record = read_json(path, {})
+    for path in decision_paths:
+        try:
+            record = read_json(path, {})
+        except (OSError, ValueError, TypeError):
+            continue
         if not isinstance(record, dict) or "id" not in record:
             continue
-        recent.append({
+        decision_count += 1
+        entry = {
             "id": record.get("id"),
             "action": record.get("action"),
             "created_at": record.get("created_at"),
             "reason": _truncate(str(record.get("reason", ""))),
-        })
-    recent.sort(key=lambda item: (str(item.get("created_at") or ""), str(item.get("id") or "")))
+        }
+        key = (record_time(entry.get("created_at")), str(entry.get("id") or ""), path.name)
+        value = (*key, entry)
+        if len(recent) < MAX_DECISIONS:
+            heapq.heappush(recent, value)
+        elif key > recent[0][:3]:
+            heapq.heapreplace(recent, value)
+    recent = [e[3] for e in recent]
+    recent.sort(key=lambda item: (record_time(item.get("created_at")), str(item.get("id") or "")))
     facts = summarize(project)
-    recent_groups = facts["groups"][-31:]
+    retention = getattr(getattr(project, "config", None), "limits", None)
+    retention = retention.retention_days if retention is not None else 31
+    cutoff = (dt.datetime.now(dt.timezone.utc).date() - dt.timedelta(days=max(0, retention-1))).isoformat()
+    recent_groups = [g for g in facts["groups"] if not retention or g["day"] >= cutoff]
     artifact_pointer = project.root / "artifacts" / "latest.json"
     core = {
-        "schema": SCHEMA,
         "project": project.name,
         "control": {
             "armed": bool(control.get("armed")),
@@ -95,7 +122,9 @@ def collect(project) -> dict:
         "needs_operator_input": base["outcome"] == "blocked",
         "pending_insights": slim_pending,
         "pending_count": len(slim_pending),
-        "answered_count": len(decision_paths),
+        "pending_total": projection["total"],
+        "pending_truncated": projection["truncated"],
+        "answered_count": decision_count,
         "recent_decisions": recent,
         "health": base["health"],
         "active": base["active"],
@@ -130,8 +159,12 @@ def publish(project) -> dict:
     root = project.root / "dashboard"
     published_at = now()
     payload = {"id": dashboard_id, **core, "published_at": published_at}
-    publish_entry(root, f"{dashboard_id}.json", canonical(payload),
-                  {"dashboard": dashboard_id, "snapshot": core["snapshot"]["id"], "published_at": published_at})
+    with lock(root / ".publish.lock"):
+        existing = read_json(root / f"{dashboard_id}.json")
+        if existing is not None:
+            payload["published_at"] = existing["published_at"]
+        atomic_write(root / f"{dashboard_id}.json", canonical(payload), exclusive=True)
+        publish_pointer(root, {"dashboard": dashboard_id, "snapshot": core["snapshot"]["id"], "published_at": published_at})
     return {"dashboard": dashboard_id, "snapshot": core["snapshot"]["id"],
             "document": str(root / f"{dashboard_id}.json"),
             "pending_count": core["pending_count"],

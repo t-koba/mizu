@@ -1,11 +1,5 @@
-# Mizu schema 1. Copy with `mizu configure`; edit only the private copy.
-# Runtime invariants are code. Grants and limits are operator policy.
-schema = 1
+# Mizu current configuration. Edit the private copy created by `mizu configure`.
 data_dir = "~/.local/state/mizu"
-pi_dir = "pi"
-pi_command = ["pi"]
-codex_command = ["codex"]
-claude_command = ["claude"]
 timezone = "UTC"
 consult_profiles = ["primary", "alternate"]
 exclude = [".git", ".pi", ".env", ".env.*", ".venv", "node_modules", "__pycache__", ".pytest_cache"]
@@ -29,17 +23,33 @@ snapshot_bytes = 268435456
 snapshot_files = 20000
 history_index = 128              # Published IDs retained in history.json; manifests stay on disk.
 prompt_snapshots = 6             # Recent anchored summaries offered to each work unit.
+retention_days = 31              # Operator-selected retention window (days) for budget day-files and decided proposals. 0 disables time-based reaping; snapshots/runs/decisions/evidence are never reaped.
+pending_insights = 30            # Newest pending proposals offered per prompt/dashboard projection. Raw inbox/decisions stay on disk; `mizu insight list` uses 1000.
 free_disk_mb = 1024
 
 [sandbox]
 executable = "podman"             # Trusted container runtime: podman or docker (Podman/Desktop on macOS/Windows).
 image = ""                        # Local sha256:<64 hex> from build-sandbox.sh, or registry@sha256:...
+network = "none"                  # Policy-selected container network. `none` preserves isolation; any other value is passed to the runtime explicitly and accepts exfiltration risk. Secrets are never mounted either way.
 memory_mb = 2048
 cpus = 2
 pids = 256
 temporary_mb = 256
 file_mb = 128                     # Per-file limit, NOT a whole-workspace disk quota.
 selinux_label = true              # Linux-only :z relabeling of dedicated mounts.
+entrypoint = "/bin/sh"            # Policy-selected container entrypoint; the image must provide it.
+# Extra read-only host mounts, selected by policy. Model code can read but
+# never write through these. Never mount sockets, credentials, or secret
+# material; system and harness paths are refused.
+# [[sandbox.mounts]]
+# source = "/data/corpus"
+# target = "/data"
+# Extra container environment, selected by policy. Runtime vars (HOME, TMPDIR,
+# PATH) and secret-looking names (KEY/SECRET/TOKEN as a full _-separated token,
+# e.g. HF_TOKEN; MONKEY_PATH and TOKENIZERS_* stay allowed) are refused; values are
+# recorded by key only.
+# [sandbox.env]
+# HF_HOME = "/data/hf"
 mode = "rootless"                 # rootless on every OS, or single on Linux hosts without subordinate-ID delegation.
 # Single mode only (Linux): operator-owned namespace wrapper argv (absolute paths),
 # explicit podman storage paths, and a delegated cgroup parent whose final
@@ -53,40 +63,59 @@ mode = "rootless"                 # rootless on every OS, or single on Linux hos
 # cgroup_manager = "cgroupfs"
 # cgroup_parent = "user.slice/user-1000.slice/user@1000.service/mizucg"
 
-[profiles.primary]
-provider = ""                     # Exact Pi provider ID; no model is chosen implicitly.
-model = ""                        # Exact model ID, not a fuzzy name.
-thinking = "off"
-engine = "pi"                     # pi | codex | claude. Default pi; other engines use the same contract.
+[engines.pi]
+command = ["node"]
+directory = "pi"
 
-[profiles.alternate]
+[engines.codex]
+command = ["codex"]
+directory = "codex"
+
+[engines.claude]
+# Python interpreter from the separately installed Claude adapter environment.
+command = ["python3"]
+directory = "claude"
+
+[profiles.primary]
+engine = "pi"
 provider = ""
 model = ""
-thinking = "off"
+session = "persistent"
+[profiles.primary.options]
+thinkingLevel = "off"
+
+[profiles.alternate]
 engine = "pi"
+provider = ""
+model = ""
+session = "ephemeral"
+[profiles.alternate.options]
+thinkingLevel = "off"
 
-# ChatGPT subscription through the pi engine (no new driver): run the vendor
-# login once (e.g. `pi` /login, subscription → ChatGPT), then set:
-#   provider = "openai-codex"
-#   model = "EXACT_MODEL_ID"
-#   engine = "pi"
-# Subscription quotas are account-level (shared 5h/weekly caps): prefer API
-# keys or enterprise tokens for unattended 24h runs.
-
-# [profiles.codex-exec]          # codex CLI driver (Phase 3 live gate required).
-# provider = "openai"            # Route label for usage groups; must match operator intent.
-# model = "EXACT_MODEL_ID"
+# Native options belong to the selected engine; Mizu has no effort enum.
+# [profiles.codex]
 # engine = "codex"
-
-# [profiles.claude-sub]          # claude CLI driver (Phase 4 live gate required).
+# provider = "CUSTOM_PROVIDER_ID"
+# model = "EXACT_MODEL_ID"
+# session = "persistent"
+# [profiles.codex.options]
+# model_reasoning_effort = "high"
+# web_search = "live"
+# [profiles.claude]
+# engine = "claude"
 # provider = "anthropic"
 # model = "EXACT_MODEL_ID"
-# engine = "claude"
+# session = "persistent"
+# [profiles.claude.options]
+# effort = "high"
+# max_turns = 12
+# max_budget_usd = 1.0
 
 [web]
 hosts = []                       # Exact HTTPS host allowlist, rechecked on every redirect.
 feeds = []                       # RSS/Atom; optional discovery adapter below.
 search_command = []              # Trusted argv executable; JSON stdin/stdout, never a shell string.
+intranet = false                 # Policy-selected private-network retrieval. true allows RFC 1918/ULA destinations (loopback stays refused); the operator accepts the exfiltration risk.
 cache_seconds = 1800
 timeout_seconds = 20
 max_bytes = 524288
@@ -96,7 +125,6 @@ profile = "primary"
 policy = "policies/worker.md"
 workspace = "write"
 capabilities = ["files", "read", "diff", "exec", "experiment", "verify", "fetch", "search", "insights", "decide", "consult", "finish"]
-persistent = true
 daemon = true
 
 [roles.searcher]
@@ -134,7 +162,6 @@ profile = "primary"
 policy = "policies/maintainer.md"
 workspace = "write"
 capabilities = ["files", "read", "diff", "exec", "experiment", "verify", "insights", "decide", "consult", "finish"]
-persistent = true
 interval_seconds = 21600
 
 [roles.maintainer-searcher]

@@ -8,8 +8,9 @@ only a trusted extension gets a per-run authenticated local socket (a Unix
 socket, or loopback TCP with the same token where Unix sockets are
 unavailable). Run input
 comes from a captured code snapshot, not a writable operator configuration.
-Rootless Podman commands have no network, credentials, host home, SSH agent,
-Docker/Podman socket, devices, capabilities or privileged flag.
+Sandbox container commands have no network by default (`[sandbox] network = "none"`
+by default), no credentials, no host home, no SSH agent, no Docker/Podman
+control socket, devices, capabilities, or privileged flag.
 
 Readonly observers and Editor exports cannot modify the shared worktree.
 Source paths reject traversal, symlinks, hardlinks and nonregular files; objects
@@ -24,6 +25,9 @@ cannot continue to call tools or acquire another provider admission.
 
 The operator account, OS kernel, filesystem, release source, installed Pi/npm
 dependencies, trusted search executable and container images are trusted.
+Operator-selected Pi extensions are trusted code too: membership in this set
+is an operator selection with source review and hash pins, not something the
+mechanism can verify from the inside.
 An attacker with the same host UID or root access can alter the policy, read
 secrets or replace code. A private bridge token is a process-boundary aid,
 not protection from a compromised operator account. Use a dedicated service
@@ -31,7 +35,12 @@ account and trusted plugins only. A rootless container shares a kernel and is
 not sufficient isolation for arbitrary high-risk malware; use a disposable VM
 or stronger separately reviewed boundary for that threat model.
 
-Review images and use digests. No runtime pulls are permitted. Audit any
+Review images and use digests. No runtime pulls are permitted. Extra mounts and
+environment are operator-selected: never mount sockets, credentials, secret
+material, or anything the model must not read; the mechanism enforces
+read-only and refuses container-interior system targets (host sources stay
+explicit operator choice), but it cannot tell a dataset from a
+keyring. Audit any
 operator-installed search adapter: it executes on the host with a sanitized
 environment and is not model-supplied code. The model supplies only JSON inputs.
 Do not point it to a generic shell interpreter that evaluates query text.
@@ -49,13 +58,14 @@ not that editable tests were a complete or independent oracle.
 ### Inference-engine confinement
 
 All engines expose only the capability-filtered `mizu_*` tools; model-driven
-commands still execute only in the networkless Podman sandbox. Pi additionally
-starts with no built-in tools at all. Codex runs read-only with shell, web
-search and subagents disabled and its `mizu` MCP server `required`. Claude
-receives an explicit `mcp__mizu__*` allowlist and never a skip-permissions
-flag. Residual risk: unlike Pi, vendor CLIs keep their own host tools behind
-their own permission systems, so confinement there is configuration, not
-absence. Use a dedicated service account, keep the CLIs pinned and reviewed,
+commands execute in the container with the operator-selected network posture. Pi additionally
+starts with no built-in tools at all. Codex fixes `shell_tool=false` and marks its `mizu`
+MCP server `required`, while sandbox mode (`read-only`, `workspace-write`), web search,
+and subagents are profile-selectable (defaulting to read-only, disabled, and false). Claude
+disables built-in tools with `--tools ""`, uses strict per-run MCP configuration,
+and autoapproves only capability-granted MCP tools. It never uses skip-permissions.
+Residual risk: vendor CLIs can have managed settings and implementation-specific
+side effects; argv tests alone do not establish OS isolation. Use a dedicated service account, keep the CLIs pinned and reviewed,
 let `doctor` flag CLI drift, and confirm the read-only live smoke leaves no
 side effects before arming a new engine.
 
@@ -65,25 +75,50 @@ records and never mounted into command containers. An inline `CODEX_API_KEY`
 is forwarded to that one CLI invocation only. Treat `auth.json` files like
 passwords; review per-engine quota/retention terms before unattended runs.
 
-Configured providers can receive the project context that tools expose. The
-controller holds provider credentials; it must contact those endpoints. Editor
-inference also has network access and its own credentials. The web broker has
-explicit HTTPS access with host/IP/redirect checks. Experiment code has none.
 Secrets should never be part of a source import. Exclusion patterns are not DLP;
 a Git clone contains committed history and may contain tracked secrets even
 when snapshot views exclude a filename. Sanitize the source repository/history
 before giving any autonomous writer a clone. Treat tool output, conversations,
 artifacts and backups as private.
 
-## Network broker
+## Network broker and egress policy
 
-Only HTTPS, port 443 and exact allowed hosts are accepted. Userinfo, fragments,
-control characters and unsupported URLs are rejected. DNS answers must all be
-public; connections pin a checked IP and verify TLS against the original host.
+Outbound traffic is separated by purpose instead of banned uniformly:
+
+- Model-driven commands (`exec`/`experiment`/`verify`): container network off
+  by default and selectable by policy (`[sandbox] network`); read-only root,
+  dropped capabilities, `no-new-privileges` and user mapping stay fixed.
+  Dependencies arrive via operator-reviewed images, never via in-sandbox
+  downloads unless the operator enables the network and accepts the risk.
+- Retrieval (`fetch`/`search`): explicit HTTPS egress to operator-allowlisted
+  hosts, every response kept as a content receipt. Where to allow is policy
+  (`[web]`); the receipts, bounds and untrusted labels are
+  mechanism.
+- Provider inference: the controller holds credentials and must contact those
+  endpoints. Editor inference also has network access and its own credentials.
+  Experiment code has none.
+
+Per-threat mitigations:
+
+| Threat | Mitigation, and what remains operator duty |
+|---|---|
+| Secret exfiltration | Egress allowlist, no secrets in containers, a receipt for every retrieval, request budgets. Duty: keep secrets out of imports, set provider billing caps |
+| Malicious content executed | Fetched text is never executed by the harness; code runs only from snapshots and reviewed images; `verify` plus independent review precede `done` |
+| Supply chain | Digest-pinned images, no runtime pulls, hash verification where the ecosystem provides it (e.g. registry checksums), review of image contents |
+| Irreproducibility | Receipts (id, sha256, time), lockfiles, run records; search scope is reported honestly |
+| Cost | Request admission counts plus provider-side caps and bill inspection |
+| Prompt injection | External prose is data, never authority: no capability, goal, tool, model or budget change |
+
+Egress facts: only HTTPS, port 443 and exact allowed hosts are accepted. Userinfo,
+control characters and unsupported URLs are rejected; fragments are stripped
+client-side and never sent. DNS answers must all be
+public (unless `intranet = true`, which allows `ip.is_private` addresses; multicast, link-local, loopback, unspecified, and transition addresses stay refused);
+connections pin a checked IP and verify TLS against the original host.
 Redirects repeat validation. Environment HTTP proxies are not honored. Retrieval
 is a separate killable process with bounded time and response bytes, including
-DNS stalls. This implementation deliberately does not support intranet fetch,
-PDF/image processing, browser JavaScript or logged-in web sessions.
+DNS stalls. PDF/image processing, browser JavaScript and logged-in web sessions
+are not supported. Private-network destinations need the operator's explicit
+`intranet` choice; loopback stays refused either way.
 
 ## Explicit limits of limits
 
@@ -137,3 +172,5 @@ Do not expose state directories through an unprotected web server.
 See root `SECURITY.md` for responsible disclosure and `docs/testing.md` for
 actual, separately labelled test evidence. Passing mock tests is not proof of
 container isolation or real provider compatibility.
+
+On Windows, POSIX modes do not prove ACL secrecy. Use a dedicated ordinary-user account and verify its ACLs. Runtime rootless is separately recorded from host privilege. See [completion-contracts.md](completion-contracts.md).
