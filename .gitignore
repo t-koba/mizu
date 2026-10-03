@@ -23,3 +23,5 @@ DISTRIBUTION.json
 MANIFEST.sha256
 
 installation-checks.json
+
+/.mizu/
