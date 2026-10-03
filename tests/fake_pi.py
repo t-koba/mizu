@@ -55,6 +55,9 @@ for raw in sys.stdin.buffer:
         if scenario == "handled":
             continue
         bridge("_budget", {"sequence": 1})
+        if scenario == "provider-error":
+            emit({"type": "message_end", "message": {"role": "assistant", "stopReason": "error", "errorMessage": "synthetic failure 429 Retry-After 60"}})
+            continue
         bridge("_model_usage", {"sequence": 2, "usage": {"input": 1, "output": 1}})
         emit({"type": "message_end", "message": {"role": "assistant", "content": "Unicode\u2028line\u2029end", "usage": {"input": 1, "output": 1}}})
         emit({"type": "agent_end"})  # A premature completion interpretation must fail the test.

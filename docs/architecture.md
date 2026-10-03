@@ -171,3 +171,12 @@ Before adding caches, workers or a distributed queue, measure this cost on the
 actual repository and preserve the publication/security contracts.
 
 The updated publication/history, run, pagination and retention contracts are documented in [completion-contracts.md](completion-contracts.md).
+
+## Declarative model selection
+
+`selection.py` evaluates bounded predicates and persists observed availability;
+`classification.py` supplies attributes through rules and optional existing-driver
+inference. Runtime resolves a profile once per work unit. Ranking, error matching,
+recovery and classification meaning are operator TOML/Markdown, with no provider
+heuristics. See [the selection contract](model-selection.md) for trust, evidence,
+unknown values, cancellation, limits and explicit activation.

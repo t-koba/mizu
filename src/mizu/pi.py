@@ -10,7 +10,7 @@ from .bridge import Bridge
 from .config import Config, Role
 from .engine_channel import Channel
 from .engine_config import effective, connected_servers, session_record, save_session
-from .errors import ConfigError, ProtocolError
+from .errors import ConfigError, ProtocolError, ModelFailure
 from .fs import atomic_write, mkdir, write_json
 from .process import environment
 from .protocol import tool_definitions
@@ -76,8 +76,10 @@ class PiDriver:
                     elif kind == "message_end":
                         message = event.get("message", {})
                         if message.get("role") == "assistant":
-                            if message.get("stopReason") in ("error", "aborted"):
-                                raise ProtocolError(str(message.get("errorMessage", message["stopReason"]))[:4000])
+                            if message.get("stopReason") == "error":
+                                raise ModelFailure("pi", kind="error", message=message.get("errorMessage", "error"))
+                            if message.get("stopReason") == "aborted":
+                                raise ProtocolError("Pi request aborted")
                             observed.append({key: message.get(key) for key in ("provider", "api", "model", "thinkingLevel")})
                     elif kind == "agent_settled":
                         if context.request_count == 0:
@@ -89,7 +91,10 @@ class PiDriver:
                         break
             finally:
                 context.model_evidence.update(requests=context.request_count, usage=list(context.runtime_usage.values()),
-                                              usage_known=bool(context.runtime_usage), observed_models=observed+list(context.runtime_models.values()))
+                                              usage_known=bool(context.runtime_usage), observed_models=observed+list(context.runtime_models.values()),
+                                              usage_observations=[{"usage": value, "provider": context.runtime_models.get(seq, {}).get("provider"),
+                                                                   "model": context.runtime_models.get(seq, {}).get("model")}
+                                                                  for seq, value in context.runtime_usage.items()])
                 with contextlib.suppress(Exception):
                     channel.send({"type": "abort"})
                 channel.close()

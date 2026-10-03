@@ -170,3 +170,23 @@ policy = "policies/maintainer-searcher.md"
 workspace = "read"
 capabilities = ["files", "read", "search", "fetch", "experiment", "submit_insight", "finish"]
 interval_seconds = 21600
+
+# Optional dynamic selection. Replace a role's profile with selector = "adaptive".
+# Existing profiles above remain unchanged; set exact provider/model IDs yourself.
+# See docs/model-selection.md for external facts, task classification and errors.
+# [selectors.adaptive]
+# retry_seconds = 60
+# [[selectors.adaptive.rules]]
+# candidates = [{profile = "primary"}, {profile = "alternate"}]
+# [[selectors.adaptive.on_error]]
+# when = {path = "error.code", op = "eq", value = "OPERATOR_CHOSEN_CODE"}
+# scope = "profile"
+# seconds = 300
+# [selectors.adaptive.classifier]
+# profile = "alternate"
+# policy = "policies/classifier.md"
+# on_failure = "continue"
+# retry_seconds = 120
+# [selectors.adaptive.classifier.attributes.difficulty]
+# type = "string"
+# values = ["easy", "hard"]

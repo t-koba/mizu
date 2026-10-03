@@ -15,7 +15,7 @@ from unittest.mock import patch
 from support import Fixture, ScriptDriver, ROOT
 from mizu.bridge import Bridge, connect as bridge_connect
 from mizu.editor import Capsule, export, serve
-from mizu.errors import Denied, LimitExceeded, ProtocolError
+from mizu.errors import Denied, LimitExceeded, ProtocolError, ModelFailure
 from mizu.fs import canonical, read_json, write_json
 from mizu.pi import PiDriver
 from mizu.process import Result
@@ -160,6 +160,16 @@ class PiProtocolTests(Fixture):
         self.assertEqual(result["requests"], 1)
         self.assertIn("After agent_end", ctx.finished["summary"])
         self.assertIn("\u2028", ctx.finished["summary"])
+
+    def test_pi_failure_does_not_invent_status_or_reset_from_text(self):
+        ctx = self.context("consult")
+        with self.assertRaises(ModelFailure) as caught:
+            self.driver("provider-error").execute(ctx, "x")
+        evidence = caught.exception.evidence
+        self.assertEqual(evidence["source"], "pi")
+        self.assertIn("429", evidence["message"])
+        self.assertIsNone(evidence["code"])
+        self.assertIsNone(evidence["retry_at"])
 
     def test_wrong_exact_model_is_refused_before_payment(self):
         ctx = self.context("consult")

@@ -27,7 +27,9 @@ class Project:
             self.settings = tomllib.loads((self.root / "project.toml").read_text(encoding="utf-8"))
         except (OSError, tomllib.TOMLDecodeError) as exc:
             raise ConfigError(f"Project is not initialized: {name}") from exc
-        keys(self.settings, {"roles", "verify"}, "project")
+        keys(self.settings, {"roles", "verify", "attributes"}, "project")
+        from .selection import attributes
+        attributes(self.settings.get("attributes", {}))
         self.roles = strings(self.settings.get("roles", []), "project.roles")
         self.verify = check_verify(self.settings.get("verify", []))
         if not self.roles or any(r not in config.roles for r in self.roles):

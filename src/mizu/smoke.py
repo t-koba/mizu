@@ -23,7 +23,9 @@ def live(config: Config, profile: str | None = None, role_name: str = "consult")
     role = config.roles[role_name]
     from .runtime import check_consult_role
     check_consult_role(role_name, role)
-    role = dataclasses.replace(role, profile=profile or role.profile, workspace="read",
+    if role.selector and not profile:
+        raise ConfigError("A selector role requires an explicit --profile for smoke")
+    role = dataclasses.replace(role, profile=profile or role.profile, selector="", workspace="read",
                                capabilities=("files", "read", "finish"), on_change=False)
     limits = dataclasses.replace(config.limits, requests_per_run=min(2, config.limits.requests_per_run),
                                  tools_per_run=min(5, config.limits.tools_per_run),

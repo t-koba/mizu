@@ -46,7 +46,7 @@ def main():
         started = time.monotonic()
         print(f'== {name} ==', flush=True)
         process = subprocess.run(command, cwd=ROOT, env=env, check=False,
-                                 capture_output=True, text=True, timeout=180)
+                                 capture_output=True, text=True, timeout=300)
         sys.stdout.write(process.stdout)
         sys.stderr.write(process.stderr)
         status = 'pass' if process.returncode == 0 else 'fail'

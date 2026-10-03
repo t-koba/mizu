@@ -72,12 +72,40 @@ def _day(record, path):
         return dt.datetime.fromtimestamp(_mtime(path), dt.timezone.utc).date().isoformat()
 
 
+def usage_views(model):
+    """Split explicitly attributed observations without assigning invocation counts to models.
+
+    Legacy evidence keeps its recorded grouping. New adapters mark unknown
+    attribution explicitly. Admissions occupy the unknown/unknown bucket;
+    token-only views never multiply admission totals.
+    """
+    observations = model.get("usage_observations")
+    if not isinstance(observations, list):
+        return [model]
+    views = {}
+    for observation in observations:
+        if not isinstance(observation, dict):
+            observation = {"usage": observation}
+        identity = tuple(observation.get(k) if isinstance(observation.get(k), str) and observation[k] else "unknown"
+                         for k in ("provider", "model"))
+        view = views.setdefault(identity, {**model, "provider": identity[0], "model": identity[1],
+                                          "usage": [], "requests": 0, "requests_known": False,
+                                          "admission_only": False})
+        view["usage"].append(observation.get("usage"))
+    admission = views.setdefault(("unknown", "unknown"),
+        {**model, "provider": "unknown", "model": "unknown", "usage": [],
+         "admission_only": bool(observations)})
+    admission.update(requests=model.get("requests", 0), requests_known=model.get("requests_known", True))
+    return list(views.values())
+
+
 def summarize(project) -> dict:
     candidates = heapq.nlargest(MAX_RUNS_SCANNED + 1, (p for p in (project.root / "runs").glob("*")
                                 if p.is_dir() and not p.is_symlink()), key=lambda p: (_mtime(p), p.name))
     truncated = len(candidates) > MAX_RUNS_SCANNED
     groups, entries = {}, []
     scanned = skipped = unknown_shapes = entry_count = 0
+    run_count = unknown_usage_runs = unknown_request_runs = 0
     for run_dir in candidates[:MAX_RUNS_SCANNED]:
         jobs = []
         canonical_found = False
@@ -100,7 +128,15 @@ def summarize(project) -> dict:
                     if canonical_found:
                         continue
                     canonical_found = True
-                    jobs.append((run_dir.name, record, record["model"]))
+                    run_count += 1
+                    source = record["model"]
+                    unknown_request_runs += source.get("requests_known", True) is False
+                    observations = source.get("usage_observations")
+                    usages = ([item.get("usage") if isinstance(item, dict) else item for item in observations]
+                              if isinstance(observations, list) else source.get("usage"))
+                    known = isinstance(usages, list) and bool(usages) and source.get("usage_known", True)
+                    unknown_usage_runs += not (known and all(not normalize(item, str(source.get("engine", "unknown")))["unknown_shape"] for item in usages))
+                    jobs.extend((run_dir.name, record, view) for view in usage_views(record["model"]))
                 else:
                     continue
                 scanned += 1
@@ -132,7 +168,7 @@ def summarize(project) -> dict:
             group["request_units"][str(unit)] = group["request_units"].get(str(unit), 0) + requests
             usages = model.get("usage")
             parts = [normalize(item, engine) for item in usages] if isinstance(usages, list) else []
-            known = bool(parts) and model.get("usage_known", True) and not any(p["unknown_shape"] for p in parts)
+            known = model.get("admission_only", False) or (bool(parts) and model.get("usage_known", True) and not any(p["unknown_shape"] for p in parts))
             entry["usage_known"] = bool(known)
             if not known:
                 group["unknown_usage_runs"] += 1
@@ -161,6 +197,7 @@ def summarize(project) -> dict:
     recent = [e[3] for e in sorted(entries)]
     ordered = sorted(groups.values(), key=lambda g: (g["day"], g["provider"], g["model"]))
     totals = {field: sum(g[field] for g in ordered) for field in ("runs", "requests", *_FIELDS, "unknown_usage_runs", "unknown_request_runs")}
+    totals.update(runs=run_count, unknown_usage_runs=unknown_usage_runs, unknown_request_runs=unknown_request_runs)
     return {"project": project.name, "groups": ordered, "totals": totals,
             "recent_entries": recent, "entries_truncated": entry_count > MAX_RECENT_ENTRIES,
             "scanned_records": scanned, "skipped_records": skipped, "unknown_shapes": unknown_shapes,

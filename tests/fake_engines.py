@@ -35,6 +35,10 @@ if engine == 'claude':
     forward(bridge, '_hello', {})
     emit({'type': 'ready'})
     query = json.loads(sys.stdin.readline())
+    if scenario == 'query-error':
+        emit({'type': 'error', 'stage': 'query', 'error_type': 'SyntheticProviderFailure', 'error': 'try elsewhere', 'code': 'synthetic-code', 'retry_at': 2000000000})
+        sys.stdin.readline()
+        raise SystemExit(0)
     finish(bridge)
     emit({'type': 'result', 'terminal_reason': 'api_error' if scenario == 'api-error' else 'completed',
           'subtype': 'success', 'is_error': False, 'session_id': cfg.get('resume') or 'session',
@@ -56,6 +60,9 @@ else:
             tools = {tool['name']: {} for tool in bridge['tools']}
             emit({'id': identifier, 'result': {'data': [] if scenario == 'mcp-failure' else [{'name': 'mizu', 'tools': tools}]}})
         elif method == 'turn/start':
+            if scenario == 'rpc-error':
+                emit({'id': identifier, 'error': {'code': -32000, 'message': 'synthetic failure'}})
+                continue
             if scenario == 'approval':
                 emit({'id': 'ask', 'method': 'item/tool/requestUserInput', 'params': {}})
                 continue
@@ -68,7 +75,8 @@ else:
             emit({'method': 'thread/tokenUsage/updated', 'params': {'threadId': 'thread', 'turnId': turn,
                   'tokenUsage': {'total': {'inputTokens': 10, 'outputTokens': 5}}}})
             emit({'method': 'turn/completed', 'params': {'threadId': 'thread', 'turn': {'id': turn,
-                  'status': 'failed' if scenario == 'failed' else 'interrupted' if scenario == 'interrupted' else 'completed'}}})
+                  'status': 'failed' if scenario in ('failed', 'provider-error') else 'interrupted' if scenario == 'interrupted' else 'completed',
+                  **({'error': {'message': 'synthetic failure', 'code': 'synthetic-code', 'codexErrorInfo': {'synthetic': {'httpStatusCode': 503}}}} if scenario == 'provider-error' else {})}}})
             emit({'id': identifier, 'result': {'turn': {'id': turn}}})
         elif method == 'turn/interrupt':
             break

@@ -119,7 +119,9 @@ def check(config: Config, *, sandbox: bool = False) -> dict:
         else:
             checks.append({"name": f"{engine} adapter", "status": "not_run", "details": "No profile uses this engine"})
     from .engine_config import effective
-    checked("engine resources", lambda: [effective(config, role, role.profile)["resources"] for role in config.roles.values()])
+    from .selection import role_profiles
+    checked("engine resources", lambda: [effective(config, role, profile)["resources"]
+            for role in config.roles.values() for profile in role_profiles(config, role)])
     checked("container runtime prerequisites", lambda: container_runtime(config))
     def image():
         if not config.sandbox.image:

@@ -106,6 +106,11 @@ instead, since exfiltration risk was explicitly accepted.
 
 ## Profiles and roles
 
+Optional [dynamic model selection](model-selection.md) uses named TOML selectors,
+explicit task attributes, rule/inference classification and operator observations.
+Only roles with `selector` enable it; fixed profiles keep their existing behavior.
+
+
 A profile explicitly selects `engine`, `provider`, `model`, and `session`
 (`ephemeral` or `persistent`). IDs remain exact. Native `options` belong to
 that engine: Pi `thinkingLevel`, `settings`, `codemode`, `toolSearch`,
@@ -124,7 +129,7 @@ run inside the existing readonly OCI floor and require executables already
 present in the selected image; environment belongs in `sandbox.env`. No
 installation, login, package acquisition or deployment runs during work.
 
-A role has `profile`, `policy`, `workspace` (`write`, `read`, `none`),
+A role has exactly one of `profile` or `selector`, plus `policy`, `workspace` (`write`, `read`, `none`),
 `capabilities`, `engine_tools` (maximum 128 explicit names), `on_change`, and
 at most one of `daemon`, `interval_seconds`, `calendar`. Capabilities grant
 Mizu operations; `engine_tools` grants native or external MCP tools such as

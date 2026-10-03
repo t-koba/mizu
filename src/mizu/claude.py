@@ -9,7 +9,7 @@ from .bridge import Bridge
 from .drivers import admit_invocation
 from .engine_channel import Channel
 from .engine_config import effective, connected_servers, mizu_server, session_record, save_session
-from .errors import ProtocolError
+from .errors import ProtocolError, ModelFailure
 from .fs import mkdir, write_json
 from .process import environment
 from .protocol import tool_definitions
@@ -45,6 +45,9 @@ def model_delta(current, baseline):
 
 def terminal_result(event):
     if event.get('terminal_reason') != 'completed' or event.get('is_error') or event.get('subtype') != 'success':
+        if isinstance(event.get('terminal_reason'), str) and event.get('terminal_reason') not in ('aborted', 'cancelled', 'interrupted', 'aborted_tools', 'max_turns', 'max_budget_usd'):
+            raise ModelFailure('claude', kind=event['terminal_reason'], code=event.get('subtype'),
+                               message=event.get('errors') or event.get('subtype', ''))
         raise ProtocolError('Claude query failed: '+str(event.get('terminal_reason'))+' '+str(event.get('errors') or event.get('subtype'))[:4000])
 
 
@@ -119,6 +122,9 @@ class ClaudeDriver:
                 while True:
                     event = channel.receive()
                     if event.get('type') == 'error':
+                        if event.get('stage') == 'query':
+                            raise ModelFailure('claude', kind=event.get('error_type'), code=event.get('code'),
+                                               message=event.get('error', ''), retry_at=event.get('retry_at'))
                         raise ProtocolError(str(event.get('error'))[:4000])
                     if event.get('type') == 'result':
                         result = event
@@ -126,6 +132,7 @@ class ClaudeDriver:
                         if current is not None:
                             delta = model_delta(current, saved.get('usage', {}) if saved else {})
                             context.model_evidence.update(usage=delta, usage_known=True, observed_models=list(current),
+                                usage_observations=[{'provider': None, 'model': item['model'], 'usage': item} for item in delta],
                                 cost_estimate_usd=sum(item['cost_estimate_usd'] for item in delta) if all('cost_estimate_usd' in item for item in delta) else None,
                                 cost_scope='Provider-reported model usage only; unreported auxiliary requests are unknown')
                         terminal_result(event)

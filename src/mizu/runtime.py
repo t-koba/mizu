@@ -22,7 +22,7 @@ from .budget import Budget
 from .config import Config, Role, load
 from .doctor import container_runtime
 from .drivers import driver_for
-from .errors import Busy, Cancelled, ConfigError, Denied, LimitExceeded, MizuError
+from .errors import Busy, Cancelled, ConfigError, Denied, LimitExceeded, MizuError, ModelFailure
 from .fs import canonical, digest, lock, mkdir, now, read_json, safe_read, write_json, PREVIEW_BYTES, page, text_preview, DIGEST
 from .project import Project
 from .protocol import DEFINITIONS, validate
@@ -388,7 +388,16 @@ class Engine:
             return self.driver
         return driver_for(self.config, profile, self._drivers)
 
-    def run(self, project: Project, role_name: str) -> dict:
+    def preview(self, project: Project, role_name: str, attributes=None) -> dict:
+        if role_name not in project.roles:
+            raise Denied("Role is not enabled for this project")
+        role = self.config.roles[role_name]
+        if not role.selector:
+            return {"profile": role.profile, "selector": None}
+        from .classification import prepare
+        return prepare(self, project, role, project.snapshots.get(), attributes, preview=True)
+
+    def run(self, project: Project, role_name: str, *, attributes=None) -> dict:
         if role_name not in project.roles:
             raise Denied("Role is not enabled for this project")
         role = self.config.roles[role_name]
@@ -412,15 +421,11 @@ class Engine:
             if role.on_change and cursor.get("snapshot") == snapshot["id"]:
                 return {"skipped": "unchanged", "snapshot": snapshot["id"]}
             active = project.root / "active" / f"{role_name}.json"
-            driver = self.resolve(role.profile)
-            if getattr(driver, "requires_sandbox", True) and \
-                    any(c in role.capabilities for c in ("exec", "experiment", "verify")):
-                container_runtime(self.config)
-                cleanup(self.config, project.root, role_name)
             run_id = uuid.uuid4().hex
             run_dir = project.root / "runs" / run_id
             mkdir(run_dir)
             context = None
+            decision = None
             model_result = None
             result = None
             workspace = project.workspace if role.workspace == "write" else run_dir / "input"
@@ -430,6 +435,23 @@ class Engine:
                             "snapshot": snapshot["id"], "started_at": now(),
                             "config_sha256": digest(self.config.file.read_bytes()),
                             "policy_sha256": digest(role.policy.read_bytes())})
+                if role.selector:
+                    from .classification import prepare
+                    decision = prepare(self, project, role, snapshot, attributes)
+                    write_json(run_dir / "selection.json", decision)
+                    if not decision["profile"]:
+                        result = {"run": run_id, "role": role_name, "status": "waiting",
+                                  "finished_at": now(), "selection": decision,
+                                  "next_evaluation_at": decision["next_evaluation_at"]}
+                        write_json(run_dir / "result.json", result)
+                        return result
+                    role = dataclasses.replace(role, profile=decision["profile"], selector="")
+                if self.stop.is_set() or not project.control().get("armed") or project.control().get("paused"):
+                    raise Cancelled("Run stopped before model dispatch")
+                driver = self.resolve(role.profile)
+                if getattr(driver, "requires_sandbox", True) and any(c in role.capabilities for c in ("exec", "experiment", "verify")):
+                    container_runtime(self.config)
+                    cleanup(self.config, project.root, role_name)
                 workspace = project.workspace
                 if role.workspace != "write":
                     workspace = run_dir / "input"
@@ -467,8 +489,12 @@ class Engine:
                         wake_at=time.time() + finished["wait_seconds"] if finished["outcome"] == "wait" else None,
                         inbox_seen=context.inbox_seen,
                         wake_generation=context.wake_generation)
+                if decision:
+                    from .selection import State
+                    State(self.config).result(decision, run=run_id)
                 result = {"run": run_id, "role": role_name, "status": "prepared", "finished_at": now(),
-                          "finish": finished, "model": model_result, "snapshot": snapshot["id"]}
+                          "finish": finished, "model": model_result, "snapshot": snapshot["id"],
+                          **({"selection": decision} if decision else {})}
                 write_json(run_dir / "result.json", result)
                 if role.workspace == "write":
                     project.snapshots.publish(snapshot)
@@ -481,6 +507,13 @@ class Engine:
                            {"consecutive_failures": 0, "last_run": run_id, "updated_at": now()})
                 return result
             except BaseException as exc:
+                if isinstance(exc, ModelFailure) and context is not None and context.admission_error:
+                    from .errors import ProtocolError
+                    exc = ProtocolError("Local admission failed: " + context.admission_error)
+                handled = None
+                if decision and decision.get("profile") and isinstance(exc, ModelFailure) and context is not None and not context.cancelled():
+                    from .selection import State
+                    handled = State(self.config).result(decision, run=run_id, error=exc)
                 # Publication is an observed fact, even if subsequent work failed.
                 with contextlib.suppress(OSError, ValueError, TypeError):
                     publication = "unknown"
@@ -493,7 +526,10 @@ class Engine:
                     error = {"run": run_id, "role": role_name,
                              "status": "interrupted", "error": str(exc), "finished_at": now(),
                              "publication": publication,
-                             "durability": "unconfirmed" if isinstance(exc, OSError) or publication == "unknown" or _platform.IS_WINDOWS else "confirmed"}
+                             "durability": "unconfirmed" if isinstance(exc, OSError) or publication == "unknown" or _platform.IS_WINDOWS else "confirmed",
+                             **({"selection": decision} if decision else {}),
+                             **({"model_failure": exc.evidence} if isinstance(exc, ModelFailure) else {}),
+                             **({"selection_action": handled} if handled else {})}
                     if model_result is not None:
                         error["model"] = model_result
                     elif context is not None and hasattr(context, "model_evidence"):
@@ -501,6 +537,10 @@ class Engine:
                     write_json(run_dir / "error.json", error)
                     if result is not None:
                         write_json(run_dir / "result.json", {**result, "status": "interrupted", **error})
+                if handled:
+                    return {"run": run_id, "role": role_name, "status": "deferred",
+                            "error": str(exc), "selection": decision, "selection_action": handled,
+                            "next_evaluation_at": time.time() + self.config.limits.cooldown_seconds}
                 with contextlib.suppress(OSError, ValueError, TypeError):
                     health = read_json(project.root / "health" / f"{role_name}.json", {})
                     failures = health.get("consecutive_failures", 0) + 1
@@ -509,7 +549,7 @@ class Engine:
                     if self.config.limits.max_failures > 0 and \
                             failures >= self.config.limits.max_failures and not isinstance(exc, Cancelled):
                         project.set_control(paused=True, reason="Repeated failures; inspect health and run records")
-                raise
+                raise exc
             finally:
                 if context is not None:
                     context.closed = True
@@ -634,7 +674,11 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                     if ready:
                         result = Engine(config, stop=stop).run(project, role_name)
                         print(json.dumps(result, ensure_ascii=False), flush=True)
-                        stop.wait(config.limits.cooldown_seconds if role.workspace == "write" else config.limits.idle_seconds)
+                        delay = config.limits.cooldown_seconds if role.workspace == "write" else config.limits.idle_seconds
+                        if result.get("status") in ("waiting", "deferred"):
+                            # Poll at idle cadence as well, to observe operator fact/config updates.
+                            delay = min(config.limits.idle_seconds, max(0.1, result["next_evaluation_at"] - time.time()))
+                        stop.wait(delay)
                         continue
                 except (MizuError, OSError, ValueError) as exc:
                     print(json.dumps({"event": "run_deferred", "error": str(exc), "time": now()}), flush=True)

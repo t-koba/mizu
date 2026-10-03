@@ -184,6 +184,8 @@ class Role:
     interval_seconds: int = 0
     calendar: tuple[str, ...] = ()
     daemon: bool = False
+    selector: str = ""
+    attributes: dict = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -199,6 +201,7 @@ class Config:
     timezone: str
     web: dict
     exclude: tuple[str, ...]
+    selectors: dict = dataclasses.field(default_factory=dict)
 
     def _raw_profile(self, profile: str) -> dict:
         try:
@@ -239,7 +242,7 @@ def load(file: Path) -> Config:
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ConfigError(f"Cannot load configuration: {exc}") from exc
     keys(data, {"data_dir", "engines", "timezone", "limits", "sandbox", "profiles",
-                "roles", "consult_profiles", "web", "exclude"}, "root")
+                "roles", "consult_profiles", "web", "exclude", "selectors"}, "root")
     engines = data.get("engines", {})
     keys(engines, set(ENGINES), "engines")
     environments = {}
@@ -415,6 +418,8 @@ def load(file: Path) -> Config:
             if not re.fullmatch(r"[0-9a-f]{64}", sha) or entry["path"] in seen:
                 raise ConfigError("Resource requires a unique path and SHA-256 digest")
             seen.add(entry["path"])
+    from .selection import validate_selectors, attributes
+    selectors = validate_selectors(data.get("selectors", {}), profiles, file.parent)
     roles: dict[str, Role] = {}
     role_tables = data.get("roles", {})
     if not isinstance(role_tables, dict):
@@ -423,10 +428,14 @@ def load(file: Path) -> Config:
         if not ID.fullmatch(name):
             raise ConfigError("Invalid role name")
         keys(role, {"profile", "policy", "workspace", "capabilities", "engine_tools", "on_change",
-                    "interval_seconds", "calendar", "daemon"}, f"roles.{name}")
+                    "interval_seconds", "calendar", "daemon", "selector", "attributes"}, f"roles.{name}")
         profile = string(role.get("profile", ""), f"roles.{name}.profile")
-        if profile not in profiles:
-            raise ConfigError(f"Unknown profile for role {name}")
+        selector = string(role.get("selector", ""), f"roles.{name}.selector")
+        if ("profile" in role) == ("selector" in role):
+            raise ConfigError(f"Role {name} requires exactly one of profile or selector")
+        if selector and selector not in selectors or not selector and profile not in profiles:
+            raise ConfigError(f"Unknown profile or selector for role {name}")
+        attrs = attributes(role.get("attributes", {}))
         workspace = role.get("workspace", "read")
         if workspace not in ("write", "read", "none"):
             raise ConfigError("workspace must be write, read, or none")
@@ -457,7 +466,7 @@ def load(file: Path) -> Config:
             raise ConfigError("Choose one scheduling method per role")
         roles[name] = Role(name, profile, policy, workspace, caps,
                            strings(role.get("engine_tools", []), "engine_tools"),
-                           boolean(role.get("on_change", False), "on_change"), interval, calendar, daemon)
+                           boolean(role.get("on_change", False), "on_change"), interval, calendar, daemon, selector, attrs)
     if not roles:
         raise ConfigError("At least one role is required")
     consult = strings(data.get("consult_profiles", []), "consult_profiles")
@@ -478,4 +487,4 @@ def load(file: Path) -> Config:
     return Config(file, path_value(string(data.get("data_dir", "~/.local/state/mizu"), "data_dir"), file.parent),
                   environments, limits, sandbox, profiles, roles, consult, timezone, web,
                   strings(data.get("exclude", [".git", ".pi", ".env", ".env.*", ".venv",
-                                                "node_modules", "__pycache__", ".pytest_cache"]), "exclude"))
+                                                "node_modules", "__pycache__", ".pytest_cache"]), "exclude"), selectors)

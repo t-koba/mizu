@@ -26,7 +26,7 @@ from .snapshot import open_store
 #: Project members covered by backup/restore (plus backup.json on restore).
 MEMBERS = ("project.toml", "PROJECT.md", "control.json", "current.json", "snapshots", "objects",
            "inbox", "insight-ids", "histories", ".ingest", "decisions", "decision-history", "runs", "sessions", "artifacts", "health", "observed",
-           "maintenance", "spool")
+           "maintenance", "spool", "selection")
 
 
 @contextlib.contextmanager
@@ -255,7 +255,9 @@ def restore(config, name: str, archive_path: Path, *, max_bytes: int = 107374182
                 raise Denied("Checkpoint omitted unsupported filesystem objects")
             # Parse operator-owned fields before publishing a usable project.
             settings = tomllib.loads((stage / "project.toml").read_text(encoding="utf-8"))
-            keys(settings, {"roles", "verify"}, "project")
+            keys(settings, {"roles", "verify", "attributes"}, "project")
+            from .selection import attributes
+            attributes(settings.get("attributes", {}))
             roles = strings(settings.get("roles", []), "project.roles")
             check_verify(settings.get("verify", []))
             if not roles or any(r not in config.roles for r in roles):

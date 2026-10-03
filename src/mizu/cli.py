@@ -52,6 +52,19 @@ def parser() -> argparse.ArgumentParser:
         # No hardcoded role assumption: omitted --role resolves to the single
         # configured role, else to worker when present, else requires explicit.
         p.add_argument("--role", default=None, help="Configured role (default: single role, else worker when present)")
+        if name == "run":
+            p.add_argument("--attributes", type=Path, help="Operator JSON attributes for this execution")
+    p = sub.add_parser("selection", help="Preview selection or manage operator observations; no inference")
+    selection = p.add_subparsers(dest="selection_command", required=True)
+    p = selection.add_parser("preview")
+    p.add_argument("project")
+    p.add_argument("--role")
+    p.add_argument("--attributes", type=Path)
+    p = selection.add_parser("observe")
+    p.add_argument("--file", type=Path, required=True, help="Observation JSON file, or - for stdin")
+    selection.add_parser("status")
+    p = selection.add_parser("delete")
+    p.add_argument("group")
     p = sub.add_parser("doctor", help="Check platform, versions, isolation prerequisites and budget file")
     p.add_argument("--sandbox", action="store_true", help="Actually execute the rootless isolation smoke")
     p = sub.add_parser("smoke", help="Paid read-only live probe; never touches a real project")
@@ -147,8 +160,10 @@ def _cmd_status(config, project, args):
 def _cmd_arm(config, project, args):
     if config.limits.daily_requests <= 0:
         raise ConfigError("Set a positive daily_requests limit before arming")
+    from .selection import role_profiles
     for name in project.roles:
-        config.model(config.roles[name].profile)
+        for profile in role_profiles(config, config.roles[name]):
+            config.model(profile)
     return project.set_control(armed=True, paused=False, reason="Operator armed", wake_generation=uuid.uuid4().hex)
 
 
@@ -179,7 +194,7 @@ def _cmd_run(config, project, args):
     watched = [sig for sig in (getattr(signal, "SIGTERM", None), getattr(signal, "SIGINT", None)) if sig is not None]
     previous = {sig: signal.signal(sig, lambda s, f: stop.set()) for sig in watched}
     try:
-        return Engine(config, stop=stop).run(project, role)
+        return Engine(config, stop=stop).run(project, role, attributes=_attribute_input(getattr(args, "attributes", None)))
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)
@@ -264,6 +279,28 @@ _PROJECT_COMMANDS = {
 }
 
 
+def _selection_json(path):
+    from .selection import MAX_BYTES, bounded
+    try:
+        if str(path) == "-":
+            text = sys.stdin.read(MAX_BYTES + 1)
+        else:
+            if path.stat().st_size > MAX_BYTES:
+                raise ConfigError("Selection input exceeds 1 MiB")
+            with path.open(encoding="utf-8") as stream:
+                text = stream.read(MAX_BYTES + 1)
+        if len(text.encode("utf-8")) > MAX_BYTES:
+            raise ConfigError("Selection input exceeds 1 MiB")
+        return bounded(json.loads(text))
+    except (OSError, ValueError, RecursionError) as exc:
+        raise ConfigError("Cannot read selection JSON") from exc
+
+
+def _attribute_input(path):
+    from .selection import attributes
+    return attributes(_selection_json(path)) if path else {}
+
+
 def execute(args):
     if args.command == "configure":
         return configure(args.config, args.pi_command_json)
@@ -272,6 +309,18 @@ def execute(args):
         serve(args.bundle, args.outbox)
         return None
     config = load(args.config)
+    if args.command == "selection":
+        from .selection import State
+        state = State(config)
+        if args.selection_command == "observe":
+            return state.observe(_selection_json(args.file))
+        if args.selection_command == "status":
+            return state.read()
+        if args.selection_command == "delete":
+            return state.delete(args.group)
+        from .project import Project
+        from .runtime import Engine
+        return Engine(config).preview(Project(config, args.project), _resolve_role(config, args.role), _attribute_input(args.attributes))
     if args.command == "doctor":
         from .doctor import check
         return check(config, sandbox=args.sandbox)

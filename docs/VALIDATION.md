@@ -4,7 +4,7 @@
 
 | 検査 | 結果 | 範囲 |
 |---|---|---|
-| Python | **354件成功、失敗0、skip0** | Linux / Python 3.14.4。公開・耐久性・停止・保存・権限・予算・現行driverの模擬契約 |
+| Python | **381件成功、失敗0、skip0** | Linux / Python 3.14.4。公開・耐久性・停止・保存・権限・予算・現行driver・選択子/分類の模擬契約 |
 | Node | **18件成功、失敗0、skip0** | ローカルbridge通信、有限フレーム、構造化結果、拡張・ModelRuntimeの模擬契約 |
 | Python / JavaScript / Bash構文 | **成功** | scripts/check.py |
 | Pi 1.0.0 公開SDK | **成功** | 実SDK＋vendor faux provider。通常会話、分類、画像生成、仮想モデル、並列予約、拒否前のdispatch抑止、finish＋agent_settled |

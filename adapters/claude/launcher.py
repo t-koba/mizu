@@ -14,7 +14,11 @@ def emit(value):
     print(json.dumps(value, ensure_ascii=False, allow_nan=False), flush=True)
 
 
+failure_stage = "setup"
+
+
 async def main():
+    global failure_stage
     from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, HookMatcher, PermissionResultAllow, PermissionResultDeny, ResultMessage, AgentDefinition
     if '--check-contract' in sys.argv:
         assert callable(ClaudeSDKClient.interrupt) and callable(ClaudeSDKClient.get_mcp_status)
@@ -91,6 +95,7 @@ async def main():
         record = json.loads(line)
         if record['type'] != 'query':
             raise ValueError('Expected query input')
+        failure_stage = "query"
         await client.query(record['prompt'])
 
         async def controls():
@@ -117,5 +122,5 @@ if __name__ == '__main__':
     try:
         asyncio.run(main())
     except Exception as exc:
-        emit({'type': 'error', 'error': str(exc)[:4000]})
+        emit({'type': 'error', 'error': str(exc)[:4000], 'stage': failure_stage, 'error_type': type(exc).__name__})
         raise SystemExit(1)

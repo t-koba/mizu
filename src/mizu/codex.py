@@ -10,7 +10,7 @@ from .bridge import Bridge
 from .drivers import admit_invocation
 from .engine_channel import Channel
 from .engine_config import effective, connected_servers, mizu_server, session_record, save_session
-from .errors import ConfigError, ProtocolError
+from .errors import ModelFailure, ConfigError, ProtocolError
 from .fs import mkdir, write_json
 from .process import environment
 from .pi import credentials
@@ -157,7 +157,11 @@ class CodexDriver:
                         server_request(event)
                     elif event.get('id') == wanted:
                         if 'error' in event:
-                            raise ProtocolError('Codex '+method+' failed: '+str(event['error'])[:4000])
+                            error = event['error']
+                            if method == 'turn/start' and isinstance(error, dict):
+                                raise ModelFailure('codex', kind='turn/start', code=error.get('code'),
+                                                   message=error.get('message', ''), retry_at=error.get('retry_at'))
+                            raise ProtocolError('Codex '+method+' failed: '+str(error)[:4000])
                         return event.get('result', {})
                     else:
                         postponed.append(event)
@@ -223,6 +227,12 @@ class CodexDriver:
                         usage.observe(params['tokenUsage']['total'])
                     if event.get('method') == 'turn/completed' and params.get('turn', {}).get('id') == turn:
                         terminal = params['turn']
+                        if terminal.get('status') == 'failed' and isinstance(terminal.get('error'), dict):
+                            failure = terminal['error']
+                            raise ModelFailure('codex', kind='failed',
+                                               details={'codex_error_info': failure.get('codexErrorInfo')},
+                                               code=failure.get('code'), message=failure.get('message', ''),
+                                               retry_at=failure.get('retry_at'))
                         if terminal.get('status') != 'completed':
                             raise ProtocolError('Codex turn '+str(terminal.get('status'))+': '+str(terminal.get('error'))[:4000])
                         if context.finished is None:
@@ -238,6 +248,9 @@ class CodexDriver:
                     'input_tokens': delta['inputTokens'], 'output_tokens': delta['outputTokens'],
                     'cached_input_tokens': delta['cachedInputTokens'], 'reasoning_output_tokens': delta['reasoningOutputTokens']}]
                     if usage.known else [], usage_known=usage.known)
+                context.model_evidence['usage_observations'] = [
+                    {'provider': None, 'model': None, 'usage': value}
+                    for value in context.model_evidence['usage']]
                 try:
                     channel.close()
                 finally:

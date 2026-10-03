@@ -14,7 +14,7 @@ from mizu.codex import CodexDriver, TokenUsage
 from mizu.config import load
 from mizu.drivers import admit_invocation, command_for, driver_for
 from mizu.engine_config import effective, session_record, save_session
-from mizu.errors import ConfigError, Denied, LimitExceeded, ProtocolError
+from mizu.errors import ConfigError, Denied, LimitExceeded, ProtocolError, ModelFailure
 from mizu.fs import mkdir, read_json, write_json
 from mizu.mcp_proxy import forward, load_bridge, serve
 from mizu.pi import PiDriver
@@ -119,6 +119,52 @@ class SyntheticEngineTests(Fixture):
         with self.assertRaises(ProtocolError): self.execute('claude','api-error')
         for reason in ('max_turns','max_budget_usd','aborted_tools',None):
             with self.assertRaises(ProtocolError): terminal_result({'subtype':'success','terminal_reason':reason,'is_error':False})
+
+    def test_selector_routes_between_existing_engines(self):
+        from mizu.runtime import Engine
+        from mizu.selection import validate_selectors
+        engines = dict(self.config.engines)
+        profiles = dict(self.config.profiles)
+        for profile, engine, scenario in (('primary', 'codex', 'provider-error'), ('alternate', 'claude', 'normal')):
+            profiles[profile] = {**profiles[profile], 'engine': engine, 'provider': 'synthetic', 'options': {}, 'session': 'ephemeral'}
+            engines[engine] = {**engines[engine], 'command': (sys.executable, str(ROOT/'tests/fake_engines.py'), engine, scenario)}
+        spec = {'retry_seconds': 10, 'rules': [{'candidates': [{'profile': 'primary'}, {'profile': 'alternate'}]}],
+                'on_error': [{'when': {'path': 'error.code', 'op': 'eq', 'value': 'synthetic-code'}, 'scope': 'profile', 'seconds': 60}]}
+        validate_selectors({'dynamic': spec}, profiles, self.file.parent)
+        role = dataclasses.replace(self.config.roles['worker'], profile='', selector='dynamic', workspace='read', capabilities=('finish',))
+        config = dataclasses.replace(self.config, profiles=profiles, engines=engines,
+                                     roles={**self.config.roles, 'worker': role}, selectors={'dynamic': spec})
+        with unittest.mock.patch.dict(os.environ, {'CODEX_AUTH_FILE': str(self.root/'absent')}):
+            first = Engine(config).run(self.project, 'worker')
+            second = Engine(config).run(self.project, 'worker')
+        self.assertEqual(first['status'], 'deferred')
+        self.assertEqual(second['status'], 'completed')
+        self.assertEqual(second['model']['engine'], 'claude')
+        self.assertEqual(second['selection']['profile'], 'alternate')
+        self.assertFalse(self.project.control()['paused'])
+
+    def test_native_failure_facts_are_preserved_without_guessing(self):
+        for engine, scenario in (('codex', 'provider-error'), ('claude', 'query-error')):
+            with self.subTest(engine=engine), self.assertRaises(ModelFailure) as caught:
+                self.execute(engine, scenario)
+            evidence = caught.exception.evidence
+            self.assertEqual(evidence['source'], engine)
+            self.assertEqual(evidence['code'], 'synthetic-code')
+            if engine == 'codex':
+                self.assertEqual(evidence['details']['codex_error_info']['synthetic']['httpStatusCode'], 503)
+                self.assertIsNone(evidence['retry_at'])
+            else:
+                self.assertEqual(evidence['retry_at'], 2000000000)
+        with self.assertRaises(ModelFailure) as caught:
+            self.execute('codex', 'rpc-error')
+        self.assertEqual(caught.exception.evidence['code'], -32000)
+        with self.assertRaises(ModelFailure) as caught:
+            self.execute('claude', 'api-error')
+        self.assertEqual(caught.exception.evidence['kind'], 'api_error')
+        for reason in ('max_turns', 'max_budget_usd', 'aborted_tools', 'cancelled'):
+            with self.assertRaises(ProtocolError) as caught:
+                terminal_result({'terminal_reason': reason})
+            self.assertNotIsInstance(caught.exception, ModelFailure)
 
     def test_post_finish_calls_are_refused(self):
         for engine in ('codex','claude'):
