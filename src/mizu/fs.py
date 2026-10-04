@@ -121,15 +121,22 @@ def read_json(path: Path, default: Any = None) -> Any:
 #: otherwise succeed and break single-writer and budget admission. The
 #: per-path threading lock provides the missing within-process mutual
 #: exclusion; the OS lock still provides cross-process exclusion.
+#: Fixed liveness bound per ADR-026 (not a knob): no operator would
+#: plausibly tune an intra-process deadlock guard.
 _LOCAL_GUARD = threading.Lock()
 _LOCAL_LOCKS: dict[str, threading.Lock] = {}
 #: Blocking acquire bound so a re-entrant blocking request fails as Busy
-#: instead of hanging the daemon thread forever.
+#: instead of hanging the daemon thread forever. Fixed liveness bound
+#: (same 30 s as platform.lock_fd on Windows); see ADR-026.
 _LOCAL_BLOCKING_TIMEOUT = 30.0
 
 
 def _local_key(path: Path) -> str:
-    return os.path.normcase(os.path.abspath(str(path)))
+    # Canonicalize through the filesystem so aliased paths (symlinked
+    # parent, `.`/`..`, case variants on Windows) share one guard entry.
+    # realpath resolves existing components; the lock file itself may not
+    # exist yet, but its parent does (mkdir before acquire).
+    return os.path.normcase(os.path.realpath(str(path)))
 
 
 def _acquire_local(key: str, *, blocking: bool) -> threading.Lock:

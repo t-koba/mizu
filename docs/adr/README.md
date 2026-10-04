@@ -968,3 +968,51 @@ Audit table (value = current behavior, kept as default where moved):
 Operators needing longer dashboards set two numbers instead of patching
 code; every spend, isolation, framing, and liveness bound stays fixed
 with its reason above. Unset configs behave exactly as before.
+
+## ADR-026 — In-process lock guard with canonical keys and a fixed 30 s liveness bound
+
+**Accepted.** `fs.lock` serializes lock files within the process with a
+per-path threading guard (`_LOCAL_LOCKS` under `_LOCAL_GUARD`) keyed by
+`realpath` + `normcase`, plus a fixed 30 s blocking-acquire bound
+(`_LOCAL_BLOCKING_TIMEOUT`); Windows `platform.lock_fd` retries under the
+same 30 s bound (`WINDOWS_LOCK_TIMEOUT`).
+
+## Context
+
+OS advisory locks are per-process on Windows (`msvcrt`), so two opens from
+one process never contend and single-writer plus budget admission break.
+The guard restores within-process exclusion; the OS lock keeps
+cross-process exclusion. Review found the first key (`abspath`) bypassable
+via a symlinked parent and the 30 s bound undocumented/untested.
+
+## Decision
+
+- Mechanism provides capabilities; policy decides behavior. Guard keys,
+  the 30 s liveness bound, and the `Busy` failure are mechanism; when to
+  lock and how to recover stay operator/worker policy.
+- Keys use `os.path.realpath` (resolves symlinked parents, `.`/`..`) plus
+  `normcase` (Windows case-insensitivity). The lock file may not exist
+  yet, but its parent does after `mkdir`.
+- Both 30 s bounds stay fixed per ADR-006 (no knob): no operator would
+  plausibly tune an intra-process deadlock guard, and a larger value only
+  hangs the daemon longer. Listed in `docs/configuration.md` fixed bounds.
+- `platform.lock_fd` keeps its `BlockingIOError`-on-contention contract;
+  `fs.lock` maps it to `Busy` in all paths.
+
+## Schema, bounds, trust, retry/cancellation, evidence, failure
+
+- Schema: no new interface. `lock(path, blocking=?)` unchanged.
+- Bounds: one guard entry per canonical lock path; blocking waits at most
+  30 s, non-blocking never waits.
+- Trust: local paths and local exception types, never model input.
+- Retry/cancellation: single acquire per call; no retry in mechanism.
+- Evidence: `tests/test_lock_local.py` pins per-process-OS refusal,
+  cross-thread refusal, concurrent budget serialization, aliased-path
+  sharing, and blocking-bound `Busy` (patched timeout).
+- Failure: contention is `Busy`; no primitive is `OSError`, as before.
+
+## Consequences
+
+Windows threads serialize like POSIX `flock` holders; aliased spellings
+share one entry; a re-entrant blocking acquire fails instead of hanging.
+`check.py` stays green; stdlib-only; no model-specific defaults.

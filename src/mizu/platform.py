@@ -144,6 +144,12 @@ def secure_chmod(path: Path, mode: int) -> None:
     os.chmod(path, mode)
 
 
+#: Windows blocking-lock retry bound (fixed liveness bound per ADR-026,
+#: not a knob): mirrors fs._LOCAL_BLOCKING_TIMEOUT so a contended
+#: blocking acquire fails as Busy instead of hanging the daemon thread.
+WINDOWS_LOCK_TIMEOUT = 30.0
+
+
 def lock_fd(fd: int, *, blocking: bool = True) -> bool:
     """Exclusive advisory lock on an open fd. Returns False on contention.
 
@@ -161,7 +167,7 @@ def lock_fd(fd: int, *, blocking: bool = True) -> bool:
 
         mode = _msvcrt.LK_NBLCK  # type: ignore[attr-defined]
         if blocking:
-            deadline = time.monotonic() + 30
+            deadline = time.monotonic() + WINDOWS_LOCK_TIMEOUT
             while True:
                 try:
                     _msvcrt.locking(fd, mode, 1)  # type: ignore[attr-defined]
