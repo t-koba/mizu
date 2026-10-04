@@ -14,6 +14,15 @@ from .fs import mkdir, now, write_json
 from .project import initialize
 from .runtime import Engine
 
+#: Fixed probe budgets (mechanism constants, not knobs): the paid live probe
+#: caps spend while tolerating one benign extra step. On 2026-10-03 the
+#: contributor model listed files before reading probe.txt (3 sequences)
+#: and exhausted the old cap of 2. Four admits files plus read plus finish
+#: plus one auxiliary Pi request; tools stay 5 and wall-clock stays 120 s.
+SMOKE_REQUESTS_PER_RUN = 4
+SMOKE_TOOLS_PER_RUN = 5
+SMOKE_RUN_SECONDS = 120
+
 
 def live(config: Config, profile: str | None = None, role_name: str = "consult") -> dict:
     if _platform.is_root():
@@ -27,9 +36,13 @@ def live(config: Config, profile: str | None = None, role_name: str = "consult")
         raise ConfigError("A selector role requires an explicit --profile for smoke")
     role = dataclasses.replace(role, profile=profile or role.profile, selector="", workspace="read",
                                capabilities=("files", "read", "finish"), on_change=False)
-    limits = dataclasses.replace(config.limits, requests_per_run=min(2, config.limits.requests_per_run),
-                                 tools_per_run=min(5, config.limits.tools_per_run),
-                                 run_seconds=min(120, config.limits.run_seconds))
+    # Probe budgets stay fixed mechanism constants per ADR-006/ADR-013, not
+    # knobs: 4 requests tolerate one benign extra listing (files + read +
+    # finish is 3 sequences) plus one auxiliary Pi inference without opening
+    # paid spend; tools stay 5 and wall-clock stays 120 s.
+    limits = dataclasses.replace(config.limits, requests_per_run=min(SMOKE_REQUESTS_PER_RUN, config.limits.requests_per_run),
+                                 tools_per_run=min(SMOKE_TOOLS_PER_RUN, config.limits.tools_per_run),
+                                 run_seconds=min(SMOKE_RUN_SECONDS, config.limits.run_seconds))
     config = dataclasses.replace(config, roles={**config.roles, role_name: role}, limits=limits)
     challenge = "mizu-probe-" + uuid.uuid4().hex[:12]
     name = "smoke-" + uuid.uuid4().hex[:16]
@@ -42,7 +55,7 @@ def live(config: Config, profile: str | None = None, role_name: str = "consult")
         (source / "probe.txt").write_text(challenge)
         goal = root / "goal.md"
         # Test-only probe vector, not operator policy.
-        goal.write_text("Read probe.txt. Then call mizu_finish alone with outcome 'wait' and summary exactly the file contents. Do nothing else.")
+        goal.write_text("Read the file probe.txt in the workspace root (exact path probe.txt) with a single read. Do not list files first; the workspace contains only probe.txt. Then call mizu_finish alone with outcome 'wait' and summary exactly the file contents. Do nothing else.")
         evidence = config.data / "validation" / (name + ".project")
         try:
             project = initialize(config, name, source, goal, [role_name], [], armed=True)

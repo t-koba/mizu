@@ -440,3 +440,67 @@ Contributors see one short rule file with pointers; operators keep
 procedures in the existing docs without duplication. If a future audit
 finds contributor-relevant operator detail missing from the pointers,
 extend the pointer list — do not reintroduce procedure into `AGENTS.md`.
+
+## ADR-013 — Unambiguous smoke probe with a bounded 4-request margin
+
+**Accepted.** `mizu smoke --live` keeps its paid, read-only probe shape and
+evidence checks, but the probe goal names the exact path (`probe.txt` in the
+workspace root, single read, do-not-list-first) and the fixed request cap
+moves from 2 to 4 (`SMOKE_REQUESTS_PER_RUN = 4` in `src/mizu/smoke.py`;
+tools stay 5, wall-clock stays 120 s).
+
+## Context
+
+The probe capped spend at 2 provider requests with the goal `Read probe.txt
+...`. On 2026-10-03 the contributor model listed files before reading
+`probe.txt`: files plus read plus finish is 3 sequences, so the third
+admission raised `Per-run provider request budget exhausted` and the live
+smoke failed on `main`/`main-deep`. The instruction was ambiguous (no exact
+path, no list-vs-read guidance), and the cap had no margin for one benign
+extra step or one auxiliary Pi inference.
+
+## Decision
+
+- Mechanism provides capabilities; policy decides behavior. The probe goal
+  wording, the fixed request/tool/time caps, and the exact-evidence check
+  are mechanism/test vectors (ADR-006), not operator policy. Ideal model
+  behavior (read directly vs list first) stays model judgment; the mechanism
+  only makes the target unambiguous and budgets one benign extra step.
+- Goal: `Read the file probe.txt in the workspace root (exact path
+  probe.txt) with a single read. Do not list files first; the workspace
+  contains only probe.txt. Then call mizu_finish alone with outcome 'wait'
+  and summary exactly the file contents. Do nothing else.` The `mizu_finish
+  alone` convention and the exact-summary evidence check are unchanged.
+- Caps: `SMOKE_REQUESTS_PER_RUN = 4`, `SMOKE_TOOLS_PER_RUN = 5`,
+  `SMOKE_RUN_SECONDS = 120`, applied as `min(fixed, operator limits)` so the
+  probe never raises an operator budget. Four admits files plus read plus
+  finish plus one auxiliary Pi request (Codex turns / Claude queries admit
+  once per run, so they stay well inside the cap) without opening paid
+  spend. No new config keys; unknown keys still fail.
+
+## Schema, bounds, trust, retry/cancellation, evidence, failure
+
+- Schema: no new interface. `smoke.live` still takes `(config, profile,
+  role_name)` and returns the same pass/fail report shape.
+- Bounds: at most 4 provider admissions, 5 tools, 120 s per probe run;
+  single-file workspace (`probe.txt`); summary comparison is exact.
+- Trust: paid opt-in probe only (`--live` consent); read-only consult role
+  via the shared `check_consult_role` gate; never touches a real project.
+- Retry/cancellation: single probe run under the existing deadline/stop
+  handling; no retry in mechanism.
+- Evidence: `tests/test_smoke_probe.py` pins the exact-path wording, the
+  4/5/120 constants, the never-raise-operator-limit clamp, the
+  files-plus-read-plus-finish-fits-4 scenario (and that the old cap of 2
+  refused it), and the unchanged wrong-summary refusal.
+- Failure: `Denied` on root, unconfigured role, non-consult role, or
+  evidence mismatch, as before; `LimitExceeded` only when the fixed cap or
+  an even lower operator limit is reached.
+
+## Consequences
+
+The probe passes when the model reads directly (2 sequences) and when it
+lists once first (3 sequences), plus one spare for auxiliary inference,
+while paid spend stays capped at 4. If future models need more benign
+steps, revisit with measured probe traces — not hypothetical generosity —
+per ADR-001. `check.py` stays green; stdlib-only; no model-specific
+defaults.
