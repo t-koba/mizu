@@ -806,3 +806,9 @@ operator-authored (REVIEW finding on ADR-018).
 
 - `tests/test_vcs_publish.py`: reserved names refused at load.
 - `Denied`/`ConfigError` keep the approval-binds-pushed-bits invariant.
+## ADR-021 — Bounded opt-in daemon VCS polling
+
+**Accepted.** Daemon upstream/CI polling needs `vcs.poll_enabled = true`
+plus a command; cadence is `vcs.poll_interval_seconds` (15-86400, 300).
+One project polls once per tick via `vcs-poll.lock` plus `vcs-poll.json`;
+a tick is at most one 30 s fetch plus 4 branches at 15 s each.

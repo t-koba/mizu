@@ -505,7 +505,7 @@ def refresh_upstream(config, project) -> dict:
     Failure: ``Denied`` on adapter/shape errors; ``OSError`` on host I/O.
     No capability check here; the ``sync`` tool adds the grant gate.
     """
-    fetched = _vcs.fetch_refs(config.vcs)
+    fetched = _vcs.fetch_refs(capped_vcs_settings(config.vcs, POLL_FETCH_TIMEOUT_CAP))
     receipt = _vcs.inject_refs(project.workspace, fetched["refs"])
     return {"injected": receipt["injected"], "prefix": receipt["prefix"],
             "trust": "external-untrusted", "refs": dict(fetched["refs"])}
@@ -560,7 +560,47 @@ def poll_upstream(config, project, state: dict, *, now: float, interval: float,
 
 
 #: Maximum branches polled per CI tick (injected-ref derived, bounded).
-MAX_CI_BRANCHES = 32
+#: Four branches cap the daemon tick so one poll cannot block the loop for
+#: minutes even when every adapter call uses its full per-call timeout.
+MAX_CI_BRANCHES = 4
+#: Per-call adapter timeout caps for daemon polling (seconds). The operator
+#: `vcs.timeout_seconds` still bounds on-demand tools; daemon ticks use
+#: `min(configured, cap)` so a large configured timeout cannot stall the loop.
+POLL_CALL_TIMEOUT_CAP = 15
+POLL_FETCH_TIMEOUT_CAP = 30
+#: Shared per-project poll state (persisted timestamps) and lock name.
+POLL_STATE_FILE = "vcs-poll.json"
+POLL_LOCK_NAME = "vcs-poll.lock"
+
+
+def vcs_poll_enabled(config) -> bool:
+    """True only when daemon VCS polling is explicitly opted in.
+
+    Schema: operator config. Trust: config, never model input.
+    Failure: never raises; unconfigured/disabled reads as False.
+    """
+    try:
+        return bool(config.vcs.get("poll_enabled")) and bool(config.vcs.get("command"))
+    except (AttributeError, TypeError):
+        return False
+
+
+def vcs_poll_interval(config) -> float:
+    """Daemon VCS poll cadence (seconds) from `vcs.poll_interval_seconds`."""
+    try:
+        value = float(config.vcs.get("poll_interval_seconds", 300))
+    except (TypeError, ValueError):
+        return 300.0
+    return value if value > 0 else 300.0
+
+
+def capped_vcs_settings(settings: dict, cap: int) -> dict:
+    """Copy adapter settings with the timeout capped for daemon polling."""
+    try:
+        timeout = int(settings.get("timeout_seconds", 20))
+    except (TypeError, ValueError):
+        timeout = 20
+    return {**settings, "timeout_seconds": min(timeout, cap)}
 
 
 def poll_ci(config, project, state: dict, *, now: float, interval: float,
@@ -568,7 +608,7 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
     """Best-effort periodic CI polling: status per branch, failures to insights.
 
     Schema: ``branches=None`` derives from injected upstream refs
-    (``vcs.list_refs``, first 32 sorted); explicit lists are validated as
+    (``vcs.list_refs``, first 4 sorted); explicit lists are validated as
     branch names. Returns a ``ci_poll`` event dict or ``None`` when skipped
     (disabled or not due). Bounds: one adapter call per branch per due poll
     under the adapter timeout; status checks capped at 1024 rows each.
@@ -585,7 +625,12 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
     if not upstream_fetch_due(state.get("last_poll"), now, interval):
         return None
     state["last_poll"] = now
-    do_read = reader if reader is not None else _vcs.read_via
+    if branches is not None and len(list(branches)) > MAX_CI_BRANCHES:
+        raise Denied("Too many CI branches per poll")
+    def _default_reader(settings, op, params):
+        return _vcs.read_via(capped_vcs_settings(settings, POLL_CALL_TIMEOUT_CAP),
+                             op, params)
+    do_read = reader if reader is not None else _default_reader
     try:
         if branches is None:
             try:
@@ -951,17 +996,36 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                     config = updated
                     project = Project(config, name)
                     project.insights.ingest_editor(keep_days=config.limits.retention_days)
-                    fetched = poll_upstream(config, project, upstream_state,
-                                            now=time.monotonic(),
-                                            interval=config.limits.idle_seconds)
-                    if fetched is not None:
-                        print(json.dumps(fetched, ensure_ascii=False), flush=True)
-                    ci_state = upstream_state.setdefault("ci", {})
-                    polled = poll_ci(config, project, ci_state,
-                                     now=time.monotonic(),
-                                     interval=config.limits.idle_seconds)
-                    if polled is not None:
-                        print(json.dumps(polled, ensure_ascii=False), flush=True)
+                    if vcs_poll_enabled(config):
+                        interval = vcs_poll_interval(config)
+                        try:
+                            with lock(project.root / "locks" / POLL_LOCK_NAME,
+                                      blocking=False):
+                                shared = read_json(project.root / POLL_STATE_FILE, {})
+                                if isinstance(shared, dict):
+                                    if upstream_state.get("last_fetch") is None:
+                                        upstream_state["last_fetch"] = shared.get("last_fetch")
+                                    ci_state = upstream_state.setdefault("ci", {})
+                                    if ci_state.get("last_poll") is None:
+                                        ci_state["last_poll"] = shared.get("last_poll")
+                                else:
+                                    ci_state = upstream_state.setdefault("ci", {})
+                                fetched = poll_upstream(config, project, upstream_state,
+                                                        now=time.monotonic(),
+                                                        interval=interval)
+                                if fetched is not None:
+                                    print(json.dumps(fetched, ensure_ascii=False), flush=True)
+                                polled = poll_ci(config, project, ci_state,
+                                                 now=time.monotonic(),
+                                                 interval=interval)
+                                if polled is not None:
+                                    print(json.dumps(polled, ensure_ascii=False), flush=True)
+                                with contextlib.suppress(OSError, ValueError, TypeError):
+                                    write_json(project.root / POLL_STATE_FILE,
+                                               {"last_fetch": upstream_state.get("last_fetch"),
+                                                "last_poll": ci_state.get("last_poll")})
+                        except Busy:
+                            pass
                     role = config.roles[role_name]
                     ready = should_run(project, project.snapshots.get()) if role.workspace == "write" else (
                         project.control().get("armed") and not project.control().get("paused"))

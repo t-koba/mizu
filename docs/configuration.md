@@ -271,8 +271,10 @@ refresh and the best-effort daemon periodic fetch.
 | Key | Default | Description |
 |---|---|---|
 | `command` | `[]` | Trusted argv executable; JSON stdin/stdout, never a shell string. Empty disables |
-| `timeout_seconds` | `20` | Per-invocation deadline (1–16,777,216) |
+| `timeout_seconds` | `20` | Per-invocation deadline for on-demand tools (1–16,777,216) |
 | `max_bytes` | `524288` | Maximum adapter request/response payload, 512 KiB (1–16,777,216) |
+| `poll_enabled` | `false` | Explicit opt-in for daemon upstream/CI polling; `false` disables all daemon adapter calls |
+| `poll_interval_seconds` | `300` | Daemon poll cadence in seconds (15–86,400) |
 
 Adapter contract: stdin is one JSON object `{"op": ...}` bounded by
 `max_bytes`; stdout must be one JSON object. `fetch` returns
@@ -308,14 +310,20 @@ Without the grant the call is refused before any adapter spawn. Merging or
 rebasing `upstream/main` stays worker policy: ordinary workspace edits,
 then `verify` and publish. No silent auto-merge runs in the mechanism.
 
-The daemon performs the same host-side refresh periodically without any
-capability check (operator-scheduled polling, not model authority): each
-daemon iteration calls `poll_upstream` once it is due. Cadence reuses the
-operator-selected `[limits] idle_seconds` (no new knob per ADR-006); an
-empty `command` disables polling. Polling is best-effort: adapter/shape
-failures become visible `upstream_fetch` events (`ok: false`) and never
-publish a snapshot (injected refs stay digest-excluded). `last_fetch`
-advances on failure too, so one bad adapter cannot busy-loop.
+Daemon polling is an explicit opt-in (`poll_enabled = true` plus a
+configured `command`); by default the daemon never spawns the adapter.
+Cadence uses `poll_interval_seconds` (default 300 s). Polling is best-effort
+host-side work with no capability check (operator-scheduled, not model
+authority): each daemon iteration takes the per-project `vcs-poll.lock`
+(non-blocking) and shares `vcs-poll.json` timestamps, so one project polls
+once even with a daemon per role; a daemon that misses the lock skips the
+tick. Bounds keep one tick short: one fetch capped at
+`min(timeout_seconds, 30 s)`, CI at most 4 branches capped at
+`min(timeout_seconds, 15 s)` each (worst case ~90 s, never minutes per
+branch fan-out). Failures become visible `upstream_fetch` events
+(`ok: false`) and never publish a snapshot (injected refs stay
+digest-excluded). `last_fetch` advances on failure too, so one bad adapter
+cannot busy-loop.
 
 ## VCS publish (M2 step 1: `vcs_read`/`vcs_publish` behind `GO <branch>` approval)
 
@@ -323,7 +331,7 @@ Same `[vcs]` adapter, no new keys. `vcs_read` serves only `status`/`log`/`commen
 
 `status` responses are normalized to `{op, branch, checks: [{check, state, sha, url?}], trust}` (at most 1024 checks; `check` 1-256 chars, `state` 1-64 chars, `sha` 40/64 hex, `url` max 4096 chars); malformed shapes are `Denied`. `log`/`comments` pass through with `trust: external-untrusted`.
 
-The daemon polls CI on the same `[limits] idle_seconds` cadence as the upstream fetch (no new knob): each iteration derives branches from injected refs (first 32 sorted, else `main`), calls `status` once per branch, and records only `failure` states as deduplicated insights (passes ignored). Polling is best-effort host-side work with no capability check: failures become visible `ci_poll` events (`ok: false`) and never publish a snapshot; `last_poll` advances on failure too so one bad adapter cannot busy-loop.
+The daemon polls CI only when `poll_enabled` is true, on the same `poll_interval_seconds` cadence under the same per-project lock and shared timestamps: each tick derives branches from injected refs (first 4 sorted, else `main`), calls `status` once per branch with the 15 s per-call cap, and records only `failure` states as deduplicated insights (passes ignored). Explicit branch lists longer than 4 are refused. Failures become visible `ci_poll` events (`ok: false`) and never publish a snapshot; `last_poll` advances on failure too so one bad adapter cannot busy-loop.
 
 External publication requires recorded human approval (AGENTS.md: "no external publication without recorded human approval"): an insight titled exactly `GO <branch>` with source `operator` (`mizu insight submit`) whose body carries a `digest: <code_digest>` line for the exact workspace `code_digest` at call time, with an `accept` decision recorded via `mizu insight decide` (run `operator`) on that insight ID. Model-submitted insights and model `decide` records are refused as forged (`operator channel`). Missing, stale, undecided, or non-accept records are `Denied` (stale digests name the staleness). `vcs_publish` requires a writable workspace, is forbidden on consultation roles, and must not share a role with `submit_insight`/`decide` (config load refuses the combination; use a dedicated publisher role). Role names `operator`, `vcs`, and `editor` are refused at load so model roles cannot mint those sources. CI failures become deduplicated insights via stable IDs (`ci-<32 hex>` from branch+sha+check); repeats return the existing record (the log `url` is validated but not stored, so varying per-run URLs still dedupe; latest URL via `vcs_read`), passes are ignored.
 

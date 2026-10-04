@@ -634,14 +634,18 @@ def load(file: Path) -> Config:
         number(web[k], f"web.{k}", 1, 16777216)
     web["intranet"] = boolean(web["intranet"], "web.intranet")
     vcs = data.get("vcs", {})
-    keys(vcs, {"command", "timeout_seconds", "max_bytes"}, "vcs")
+    keys(vcs, {"command", "timeout_seconds", "max_bytes", "poll_enabled",
+               "poll_interval_seconds"}, "vcs")
     vcs = {"command": [], "timeout_seconds": 20,
-           "max_bytes": 524288, **vcs}
+           "max_bytes": 524288, "poll_enabled": False,
+           "poll_interval_seconds": 300, **vcs}
     strings(vcs["command"], "vcs.command")
     if vcs["command"] and any(not s or "\n" in s for s in vcs["command"]):
         raise ConfigError("vcs.command must be a nonempty argv array without newlines")
     for k in ("timeout_seconds", "max_bytes"):
         number(vcs[k], f"vcs.{k}", 1, 16777216)
+    vcs["poll_enabled"] = boolean(vcs["poll_enabled"], "vcs.poll_enabled")
+    number(vcs["poll_interval_seconds"], "vcs.poll_interval_seconds", 15, 86400)
     return Config(file, path_value(string(data.get("data_dir", "~/.local/state/mizu"), "data_dir"), file.parent),
                   environments, limits, sandbox, profiles, roles, consult, timezone, web, vcs,
                   strings(data.get("exclude", [".git", ".pi", ".env", ".env.*", ".venv",
