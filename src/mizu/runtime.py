@@ -418,6 +418,59 @@ def refresh_upstream(config, project) -> dict:
             "trust": "external-untrusted", "refs": dict(fetched["refs"])}
 
 
+def upstream_fetch_due(last_fetch: float | None, now: float, interval: float) -> bool:
+    """Return True when a periodic upstream fetch is due (fake-clock testable).
+
+    Schema: monotonic seconds; ``last_fetch=None`` means never fetched.
+    Bounds: ``interval <= 0`` always fetches (config floors keep it positive).
+    Trust: pure time arithmetic, no I/O. Failure: never raises.
+    """
+    if last_fetch is None:
+        return True
+    try:
+        return (float(now) - float(last_fetch)) >= float(interval)
+    except (TypeError, ValueError):
+        return True
+
+
+def poll_upstream(config, project, state: dict, *, now: float, interval: float,
+                  refresh=None) -> dict | None:
+    """Best-effort periodic upstream refresh for the daemon loop.
+
+    Schema: ``state`` holds ``last_fetch`` (monotonic) across calls; returns
+    an ``upstream_fetch`` event dict or ``None`` when skipped (disabled or not
+    due). Bounds: one ``refresh`` invocation per due poll under the adapter
+    timeout. Trust: host side only via ``refresh_upstream``; refs stay
+    external-untrusted. Retry/cancellation: no retry; ``last_fetch`` advances
+    on failure too so one bad adapter cannot busy-loop. Evidence: the
+    returned event names ok/injected or error; this helper never publishes a
+    snapshot (injected refs are digest-excluded). Failure: ``Denied``,
+    ``OSError`` and ``ValueError`` become ``ok=False`` events, never raised.
+    """
+    if not config.vcs.get("command"):
+        return None
+    if not upstream_fetch_due(state.get("last_fetch"), now, interval):
+        return None
+    state["last_fetch"] = now
+    do_refresh = refresh if refresh is not None else refresh_upstream
+    try:
+        receipt = do_refresh(config, project)
+    except (Denied, OSError, ValueError) as exc:
+        state["last_error"] = str(exc)
+        return {"event": "upstream_fetch", "ok": False,
+                "error": str(exc), "time": now_iso()}
+    state["last_error"] = ""
+    state["last_ok"] = now
+    return {"event": "upstream_fetch", "ok": True,
+            "injected": receipt["injected"], "prefix": receipt["prefix"],
+            "trust": "external-untrusted", "time": now_iso()}
+
+
+def now_iso() -> str:
+    """Wall-clock event stamp for ``poll_upstream`` (monotonic ``now`` stays in state)."""
+    return now()
+
+
 def prompt_for(context: Context) -> str:
     caps = set(context.role.capabilities)
     # Mechanism enforces grants, not policy choice: only capability-gated,
@@ -727,6 +780,7 @@ def daemon(config: Config, name: str, role_name: str) -> None:
     old = {s: signal.signal(s, stopped) for s in watched}
     try:
         with lock(config.data / "locks" / f"daemon-{name}-{role_name}.lock", blocking=False):
+            upstream_state: dict = {"last_fetch": None}
             while not stop.is_set():
                 try:
                     updated = load(config.file)
@@ -735,6 +789,11 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                     config = updated
                     project = Project(config, name)
                     project.insights.ingest_editor(keep_days=config.limits.retention_days)
+                    fetched = poll_upstream(config, project, upstream_state,
+                                            now=time.monotonic(),
+                                            interval=config.limits.idle_seconds)
+                    if fetched is not None:
+                        print(json.dumps(fetched, ensure_ascii=False), flush=True)
                     role = config.roles[role_name]
                     ready = should_run(project, project.snapshots.get()) if role.workspace == "write" else (
                         project.control().get("armed") and not project.control().get("paused"))

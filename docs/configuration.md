@@ -216,13 +216,14 @@ Configures outbound retrieval for `fetch` and `search`:
 
 URL fragments are stripped client-side and never sent. Redirects re-validate hostname, port, and IP. Text/HTML/XML/JSON formats are supported; binary/PDF/image formats are rejected.
 
-## VCS (upstream sync, M1 step 4: grant-gated `sync` refresh)
+## VCS (upstream sync, M1 step 5: grant-gated `sync` refresh plus daemon periodic fetch)
 
 Configures the operator-owned upstream-sync adapter. `src/mizu/vcs.py`
 (`invoke`/`fetch_refs`, plus host-side `inject_refs`/`list_refs`/`read_ref`)
 implements the single-invocation contract and read-only ref injection.
-`src/mizu/runtime.py` (`Context._op_sync`, `refresh_upstream`) implements the
-grant-gated `sync` refresh; no automatic fetch or daemon fetch runs yet.
+`src/mizu/runtime.py` (`Context._op_sync`, `refresh_upstream`,
+`upstream_fetch_due`/`poll_upstream`) implements the grant-gated `sync`
+refresh and the best-effort daemon periodic fetch.
 
 | Key | Default | Description |
 |---|---|---|
@@ -263,6 +264,15 @@ and at call time for replaced roles, and consultation roles cannot hold it).
 Without the grant the call is refused before any adapter spawn. Merging or
 rebasing `upstream/main` stays worker policy: ordinary workspace edits,
 then `verify` and publish. No silent auto-merge runs in the mechanism.
+
+The daemon performs the same host-side refresh periodically without any
+capability check (operator-scheduled polling, not model authority): each
+daemon iteration calls `poll_upstream` once it is due. Cadence reuses the
+operator-selected `[limits] idle_seconds` (no new knob per ADR-006); an
+empty `command` disables polling. Polling is best-effort: adapter/shape
+failures become visible `upstream_fetch` events (`ok: false`) and never
+publish a snapshot (injected refs stay digest-excluded). `last_fetch`
+advances on failure too, so one bad adapter cannot busy-loop.
 
 ## Project metadata
 
