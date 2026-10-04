@@ -504,3 +504,55 @@ while paid spend stays capped at 4. If future models need more benign
 steps, revisit with measured probe traces — not hypothetical generosity —
 per ADR-001. `check.py` stays green; stdlib-only; no model-specific
 defaults.
+
+## ADR-014 — Stable CI dedup body excludes the volatile log URL
+
+**Accepted (M2 fix).** `vcs.record_ci_result` validates the optional `url`
+(bounds: at most 4096 chars, no NUL/newline) but no longer persists it: the
+insight body covers only branch/sha/check plus the `external-untrusted`
+label, while the stable ID stays `ci-<32 hex>` from branch+sha+check. Repeats
+with a varying per-run log URL therefore resubmit identical content and
+return the existing record instead of raising `Denied: Insight ID was reused
+with different content` and aborting the `poll_ci` tick. The latest log URL
+stays available via `vcs_read` `status`; the single-writer insight invariant
+is unchanged.
+
+## Context
+
+M2 shipped `ci_insight_id` from branch+sha+check with a body including
+`log: {url}`. Any adapter emitting a varying log URL per run for the same
+failing check hit the insight-store reuse guard on the second poll, and the
+single outer `try` in `poll_ci` turned that `Denied` into `ok: false`,
+skipping every remaining branch/check. Existing tests only repeated the
+identical URL, so the path was uncovered (REVIEW 858aec2…: CHANGES; CI-FAIL
+768cf614…).
+
+## Decision
+
+- Mechanism provides capabilities; policy decides behavior. The stable-body
+  rule and the unchanged `poll_ci` best-effort contract are mechanism; which
+  failures matter stays policy.
+- No new interface, config keys, or stored records. `parse_status_checks`
+  still validates `url`; only persistence changes.
+- No per-check isolation added: with identical resubmits the tick stays
+  `ok: true` for this path, and broader isolation would change `ok: false`
+  semantics beyond the reported defect.
+
+## Schema, bounds, trust, retry/cancellation, evidence, failure
+
+- Schema: `record_ci_result(..., url="")` unchanged; body is now
+  `CI check '<check>' failed on branch '<branch>' at <sha>.` plus
+  `trust: external-untrusted`.
+- Bounds: `url` still bounded (4096, no NUL/newline); `Denied` on violation.
+- Trust: bodies stay `external-untrusted`; approval trust untouched.
+- Retry/cancellation: none; single local submit per failure.
+- Evidence: `tests/test_vcs_ci.py::test_varying_log_url_dedupes_and_poll_stays_ok`
+  pins varying-URL dedup, body without URL, and a due poll staying `ok`.
+- Failure: `Denied` only on bad branch/sha/check/url shapes; never on a
+  repeated failure with a new URL.
+
+## Consequences
+
+CI polling deduplicates as ADR-009 promised; varying URLs no longer spam the
+inbox or abort the tick. Operators needing per-run URLs use `vcs_read`.
+`check.py` stays green; stdlib-only; no model-specific defaults.

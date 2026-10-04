@@ -87,6 +87,31 @@ class CiStatusTests(Fixture):
         # Polling never publishes a snapshot.
         self.assertEqual(self.project.snapshots.get()["id"], before)
 
+    def test_varying_log_url_dedupes_and_poll_stays_ok(self):
+        # Repeats with a different per-run log URL must return the existing
+        # record (stable branch/sha/check body) instead of raising Denied,
+        # and a due poll with the new URL must stay ok.
+        first = vcs.record_ci_result(self.project, branch="main", sha=SHA_A,
+                                     check="unit", state="failure",
+                                     url="https://ci/run/1")
+        self.assertTrue(first["recorded"])
+        second = vcs.record_ci_result(self.project, branch="main", sha=SHA_A,
+                                      check="unit", state="failure",
+                                      url="https://ci/run/2")
+        self.assertEqual(second["id"], first["id"])
+        stored = self.project.insights.read(first["id"])
+        self.assertNotIn("https://ci/run", stored["body"])
+        # Due poll emitting the second URL for the same failure stays ok.
+        payload = {"checks": [{"check": "unit", "state": "failure", "sha": SHA_A,
+                               "url": "https://ci/run/2"}]}
+        config = dataclasses.replace(self.config, vcs=adapter_settings(status_code(payload)))
+        state = {}
+        event = poll_ci(config, self.project, state, now=0.0, interval=15.0,
+                        branches=["main"])
+        self.assertTrue(event["ok"])
+        self.assertEqual(event["failures"], 1)
+        self.assertEqual(event["recorded"][0]["id"], first["id"])
+
     def test_poll_disabled_adapter_never_polls(self):
         state = {}
         out = poll_ci(self.config, self.project, state, now=100.0, interval=15.0,

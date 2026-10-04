@@ -483,11 +483,15 @@ def record_ci_result(project, *, branch: str, sha: str, check: str,
     """Record a CI failure as an insight; deduplicate repeats, ignore passes.
 
     Schema: ``state`` is ``"failure"`` (record) or anything else
-    (ignored). ``url`` is an optional bounded log link. Bounds: title
-    <= 200 chars, body within the insight byte limit. Trust: adapter-derived
-    facts labeled external-untrusted in the body; the stable ID lets repeats
-    return the existing record instead of spamming the inbox. Failure:
-    ``Denied`` on bad names; adapter content never raises beyond validation.
+    (ignored). ``url`` is an optional bounded log link, validated but not
+    stored: the persisted body covers only branch/sha/check so repeats with
+    a varying per-run log URL resubmit identical content and return the
+    existing record. Bounds: title <= 200 chars, body within the insight
+    byte limit. Trust: adapter-derived facts labeled external-untrusted in
+    the body; the stable ID lets repeats return the existing record instead
+    of spamming the inbox. The latest log URL stays available via
+    ``vcs_read`` ``status``. Failure: ``Denied`` on bad names or bad URLs;
+    adapter content never raises beyond validation.
     """
     if state != "failure":
         return {"recorded": False, "state": state}
@@ -498,7 +502,7 @@ def record_ci_result(project, *, branch: str, sha: str, check: str,
     if len(title) > 200:
         title = title[:200]
     body = (f"CI check '{check}' failed on branch '{branch}' at {sha}.\n"
-            f"trust: external-untrusted\n" + (f"log: {url}\n" if url else ""))
+            f"trust: external-untrusted\n")
     record = project.insights.submit(source="vcs", title=title, body=body,
                                      base_snapshot=None, run=run,
                                      insight_id=insight_id)
