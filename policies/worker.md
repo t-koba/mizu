@@ -55,3 +55,14 @@ has actually been achieved. A writer must supply a compact updated state.
 Never manufacture work to remain busy. Finished tools are sealed. Observe the
 actual current files before recovering a previous interrupted operation; a
 command may have had effects even if its result was not received.
+
+## Parked items must not stop runnable work
+
+Finishing `blocked` idles the daemon until new operator input arrives, even
+when other backlog items are runnable. While any runnable item remains, park
+the stalled item and keep going: record it as `Qn (parked):` with tried,
+needs, and resume on one line, then finish `continue` on the runnable work.
+Finish `blocked` (with the per-item `Qn:` lines) only when every remaining
+item waits on the operator. A parked question stays answerable: the
+operator's answer arrives as a proposal or decision, which resumes the daemon,
+and the next unit unparks the item.

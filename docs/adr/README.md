@@ -309,3 +309,68 @@ render script can retire. Offline tests cover merge, nesting relative to
 the includer, duplicates naming both files, absolute/symlink refusal,
 cycles, depth/size bounds, unchanged `${VAR}` behavior, and unknown keys
 still failing. `check.py` stays green; stdlib-only; portable.
+
+## ADR-011 — Non-blocking work via park-and-continue worker policy (no new mechanism)
+
+**Accepted.** `blocked` on one backlog item must not stop other runnable work.
+Finding: worker policy alone suffices — no mechanism change. The writer parks
+the operator-dependent item in state as `Qn (parked): ...` and finishes
+`continue` while runnable work remains; `blocked` is reserved for when every
+remaining item waits on the operator. The daemon then keeps running under the
+existing `should_run` contract (`continue` always runs; `blocked`/`wait` resume
+only on wake, new proposals, or elapsed wait). `needs_operator_input` stays
+exactly `outcome == blocked`, so it keeps meaning "nothing further without the
+operator" instead of "something wants the operator while work continues".
+
+## Context
+
+`should_run` (mechanism, `src/mizu/runtime.py`) returns `False` for a `blocked`
+snapshot until a goal change, a `wake_generation` change, or a new proposal
+arrives. A writer that finishes `blocked` because one item needs operator input
+therefore idles the daemon even when other backlog items are runnable. The
+question was whether to add mechanism (e.g. per-item blocking states, a
+continue-while-blocked outcome) or to settle the scheduling choice in policy.
+
+## Decision
+
+- Mechanism provides capabilities; policy decides behavior. Run/don't-run
+  stays the fixed `should_run` vocabulary; which backlog item to work, in what
+  order, and when an item is parked are worker policy, not code heuristics.
+  No new outcome, knob, or per-item state is added.
+- Park-and-continue rule (in `policies/worker.md`): while any runnable item
+  remains, record the stalled item one line per question (`Qn (parked):` with
+  tried, needs, and resume) and finish `continue`. Finish `blocked` only when
+  every remaining item waits on the operator, keeping the existing per-item
+  `Qn:` lines.
+- A parked question is still answered without a fresh wake: the operator's
+  answer arrives as a proposal/decision (or `A: <qid>`), which advances the
+  inbox generation and resumes even a later `blocked` snapshot; the worker
+  then unparks the item in the next unit.
+
+## Schema, bounds, trust, retry/cancellation, evidence, failure
+
+- Schema: no new interface. State lines use the existing `Qn:` shape with a
+  `(parked)` marker; `finish` outcomes keep the fixed
+  `continue`/`wait`/`blocked`/`done` vocabulary (ADR-006).
+- Bounds: unchanged — state stays short and scoped per worker policy; no new
+  stored records.
+- Trust: parked items are worker prose (data, not proof); operator answers
+  arrive through the existing insight/decision store, not through state text.
+- Retry/cancellation: unchanged daemon semantics; parking never retries or
+  cancels operator input.
+- Evidence: fake-engine scenario test (`tests/test_nonblocking.py`) shows the
+  daemon continues past a parked item and `needs_operator_input` stays bound
+  to `blocked`.
+- Failure: finishing `blocked` while runnable work remains is a policy miss
+  (daemon idles until new input), not a mechanism error; review catches it via
+  the published state. Finishing `continue` with nothing runnable spins the
+  daemon at cooldown cadence — `wait`/`blocked` remain the correct outcomes
+  there.
+
+## Consequences
+
+No code change to runtime, daemon, dashboard, or protocol. Operators get
+non-blocking progress without a new commit-point state; `needs_operator_input`
+keeps its exact meaning. If a future workload shows policy alone failing
+(e.g. many interleaved stalls where state lines lose track), revisit with
+measured evidence — not hypothetical scale — per ADR-001.
