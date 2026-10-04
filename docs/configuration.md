@@ -19,11 +19,50 @@ silently change grants or paths. Prefer literal model aliases for systemd servic
 | `timezone` | IANA zone for Linux calendar timers; default UTC. macOS uses explicit local; Windows supports local and UTC (see completion-contracts.md) |
 | `consult_profiles` | Permitted independent consultation profiles |
 | `exclude` | Snapshot/import exclusion patterns; not a secret detection system |
+| `include` | Shared TOML fragments merged before validation; duplicate keys are errors (see below) |
 
 The daemon reloads configuration at work-unit boundaries. Changing schedules
 requires regenerating units and `systemctl --user daemon-reload`. Changing an
 active grant or model does not mutate an in-flight call. Pause first for urgent
 changes. Operator policies live outside model-writable trees.
+
+## Shared fragments (`include`)
+
+`include = ["shared/base.toml"]` at the top level merges shared TOML
+fragments before validation, so a fleet of configs can share one reviewed
+base (limits, engines, sandbox floors) while each file keeps its own roles.
+Fragments use the same schema as the main file and may themselves include
+further fragments. Merge first, validate after: the merged document must
+pass every existing rule (unknown keys fail, required tables still
+required). Operator tooling that concatenates configs
+(`mizu-env/ops/render-config.py`) can retire in favor of this knob.
+
+- Schema: root-only `include` array of strings. Only the top level and
+  fragments may carry it; it is consumed at load and never becomes a
+  runtime setting. Tables deep-merge; any duplicate leaf value (same
+  dotted path in two files, e.g. `limits.idle_seconds` or
+  `roles.worker.profile`) is a `ConfigError` naming both files. Arrays
+  never concatenate: defining the same array twice is a duplicate.
+- Bounds (fixed mechanism per ADR-006, not knobs): include depth at most
+  8, at most 32 files, at most 32 entries per file, 1 MiB total bytes
+  across the graph. Each entry is at most 4096 chars and must end in
+  `.toml`.
+- Trust: include entries are literal relative paths resolved against the
+  directory of the file that declares them. Absolute paths, `~`,
+  `${VAR}`, NUL/newlines are refused, as is any symlink in the written
+  path or the target itself. Relative values *inside* fragments (policy
+  paths, engine directories, `data_dir`) resolve against the top-level
+  config directory, exactly as if inlined. `${VAR}` expansion is
+  unchanged: fail-closed at the same call sites, never applied to
+  include entries.
+- Retry/cancellation: load-time single pass with no retries; a missing
+  fragment, cycle, or oversize graph fails the load immediately.
+- Evidence: duplicate errors name the dotted key and both files
+  (`Duplicate configuration key 'limits.idle_seconds' defined in
+  <first> and <second>`); cycle errors name the chain.
+- Failure: `ConfigError` on bad entries, missing fragments, symlink
+  escapes, cycles, bound breaches, duplicates, or unknown keys in any
+  fragment. Existing configs without `include` load unchanged.
 
 ## Limits
 
@@ -66,6 +105,7 @@ Safety-critical bounds are fixed in code rather than exposed as configuration kn
 | | `MAX_VERIFY_COMMANDS` | 32 | Prevents unbounded verify fan-out |
 | **Web broker** | URL / redirects / media | 4,096 chars / max 3 / text, JSON, XML | Strict URL length, redirect limit, and safe media types |
 | **Restore** | `--max-bytes` default | 1 GiB | Archive bomb defense; override explicitly if needed |
+| **Config include** | `MAX_INCLUDE_DEPTH` / `MAX_INCLUDE_FILES` / `MAX_INCLUDE_BYTES` (`config.py`) | 8 / 32 / 1 MiB | Shared-fragment recursion, file-count, and total-byte bounds; per-file entries max 32, entry length max 4096 |
 
 `on_change` is orthogonal to scheduling: it skips execution when the published snapshot is unchanged. A role with `on_change` alone and no `daemon`/`interval_seconds`/`calendar` runs only via explicit `mizu run`.
 

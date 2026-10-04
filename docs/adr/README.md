@@ -254,3 +254,58 @@ publish, CI dedup, consult cannot hold `vcs_publish`). Later M2 steps add
 daemon CI polling and richer status shapes behind the same bounds, each with
 focused offline tests. `check.py` stays green; stdlib-only; no model-specific
 defaults.
+
+## ADR-010 — Config `include` of shared TOML fragments
+
+**Accepted.** Add a top-level `include` array of shared TOML fragment paths.
+Fragments merge before validation (deep-merge tables; any duplicate leaf
+path is a `ConfigError` naming both files). Unknown keys still fail in
+every fragment. This lets operators keep one reviewed base (limits,
+engines, sandbox floors) across configs and retire the out-of-tree
+concatenation helper `mizu-env/ops/render-config.py` (not edited here).
+
+## Context
+
+Fleet operators duplicate whole configs per host/project and concatenate
+shared bases with an external script. External concatenation has no
+duplicate detection, no symlink discipline, and no depth/size bounds, and
+it lives outside the auditable load path. A load-time `include` keeps one
+mechanism, one validation, and explicit errors.
+
+## Decision
+
+- Mechanism provides capabilities; policy decides behavior. Fragment
+  discovery, merge order (fragments before includers, transitive first),
+  duplicate refusal, symlink refusal, and depth/size bounds are mechanism.
+  What to share, how to split files, and merge-vs-override choices are
+  operator policy: the mechanism never silently prefers one definition.
+- Schema: root-only `include = [...]` array of strings, allowed in the
+  top file and in fragments, consumed at load. Tables deep-merge; arrays
+  never concatenate. `include` itself unions across files (each file's
+  entries are followed) rather than conflicting.
+- Bounds (fixed per ADR-006, code not knobs): `MAX_INCLUDE_DEPTH = 8`,
+  `MAX_INCLUDE_FILES = 32`, `MAX_INCLUDE_BYTES = 1048576` total,
+  `MAX_INCLUDE_ENTRIES = 32` per file, entry length at most 4096 chars,
+  `.toml` suffix required. Diamonds (same file twice) merge once.
+- Trust: entries are literal relative paths against the declaring file's
+  directory. Absolute paths, `~`, `${VAR}`, NUL/newlines refused; any
+  symlink in the written path at/below the includer directory or in the
+  target refused. Values inside fragments resolve against the top-level
+  config directory as if inlined. `${VAR}` expansion semantics unchanged
+  (fail-closed at existing call sites, never applied to entries).
+- Retry/cancellation: single load-time pass, no retries; any failure is a
+  `ConfigError` before validation.
+- Evidence: duplicates name the dotted key and both files; cycles name
+  the chain; per-fragment unknown keys name the fragment.
+- Failure: `ConfigError` on bad entries, missing fragments, symlink
+  escapes, cycles, bound breaches, duplicates, or unknown keys. No
+  `include` means byte-identical behavior to before.
+
+## Consequences
+
+Operators can split configs into reviewed shared fragments with
+duplicate mistakes failing loudly with both filenames. The external
+render script can retire. Offline tests cover merge, nesting relative to
+the includer, duplicates naming both files, absolute/symlink refusal,
+cycles, depth/size bounds, unchanged `${VAR}` behavior, and unknown keys
+still failing. `check.py` stays green; stdlib-only; portable.

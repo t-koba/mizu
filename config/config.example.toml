@@ -1,4 +1,10 @@
 # Mizu current configuration. Edit the private copy created by `mizu configure`.
+# Shared fragments (M3): merge reviewed TOML before validation, e.g.
+# include = ["shared/base.toml"]. Entries are literal relative paths against
+# this file's directory (no ~, ${VAR}, absolute paths, or symlinks); tables
+# deep-merge and any duplicate leaf key is an error naming both files.
+# Relative values inside fragments resolve against this directory.
+# include = []
 data_dir = "~/.local/state/mizu"
 timezone = "UTC"
 consult_profiles = ["primary", "alternate"]

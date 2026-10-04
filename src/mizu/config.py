@@ -18,6 +18,11 @@ ENGINES = ("pi", "codex", "claude")
 MAX_RESOURCES = 64
 #: Protocol wait bound mirrored in protocol.finish.wait_seconds; keep both at 86400.
 MAX_WAIT_SECONDS = 86400
+#: Shared-fragment `include` bounds (fixed mechanism, not knobs per ADR-006).
+MAX_INCLUDE_DEPTH = 8
+MAX_INCLUDE_FILES = 32
+MAX_INCLUDE_BYTES = 1048576
+MAX_INCLUDE_ENTRIES = 32
 
 
 def _tz_database_missing() -> bool:
@@ -96,6 +101,137 @@ def expand(value: str, env: dict[str, str] | None = None) -> str:
 def path_value(value: str, base: Path) -> Path:
     path = Path(os.path.expanduser(expand(value)))
     return (base / path).resolve() if not path.is_absolute() else path.resolve()
+
+
+def _read_toml_bounded(path: Path, budget: list[int]) -> dict:
+    """Read one TOML file against the shared include byte budget."""
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise ConfigError(f"Cannot load configuration: {exc}") from exc
+    budget[0] += len(raw)
+    if budget[0] > MAX_INCLUDE_BYTES:
+        raise ConfigError(f"Included configuration exceeds {MAX_INCLUDE_BYTES} bytes")
+    try:
+        data = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise ConfigError(f"Cannot load configuration: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ConfigError("Configuration root must be a table")
+    return data
+
+
+def _include_target(includer: Path, entry: str) -> Path:
+    """Resolve one include entry relative to its includer without symlink escape."""
+    if not isinstance(entry, str) or not entry or len(entry) > 4096:
+        raise ConfigError("include entries must be nonempty paths of at most 4096 chars")
+    if "\x00" in entry or "\n" in entry:
+        raise ConfigError("include entries must not contain NUL or newlines")
+    if entry.startswith("~") or "${" in entry:
+        raise ConfigError("include entries are literal relative paths without ~ or ${VAR}")
+    candidate = Path(entry)
+    if candidate.is_absolute():
+        raise ConfigError("include entries must be relative to the including file")
+    if not entry.endswith(".toml"):
+        raise ConfigError("include entries must reference .toml files")
+    joined = includer.parent / candidate
+    # Refuse symlink escapes: no symlink in the written path at or below
+    # the includer directory, nor in the final target. Ancestors above the
+    # includer directory (e.g. platform temp symlinks) are out of scope;
+    # non-existent prefixes cannot be symlinks and are skipped.
+    try:
+        stack = list(includer.parent.parts)
+        for part in candidate.parts:
+            if part in ("", "."):
+                continue
+            if part == "..":
+                if len(stack) > 1:
+                    stack.pop()
+                continue
+            stack.append(part)
+            if Path(*stack).is_symlink():
+                raise ConfigError(f"include target escapes via symlink: {entry}")
+        if joined.is_symlink():
+            raise ConfigError(f"include target escapes via symlink: {entry}")
+        if not joined.is_file():
+            raise ConfigError(f"Included file not found: {entry}")
+    except OSError as exc:
+        raise ConfigError(f"Cannot load configuration: {exc}") from exc
+    return joined.resolve()
+
+
+def _merge_into(base: dict, fragment: dict, origin: Path, origins: dict[str, Path]) -> None:
+    """Deep-merge fragment into base; duplicate leaf paths name both files."""
+    def walk(dst: dict, src: dict, prefix: str) -> None:
+        for key, value in src.items():
+            dotted = f"{prefix}.{key}" if prefix else str(key)
+            if key in dst:
+                current = dst[key]
+                if isinstance(current, dict) and isinstance(value, dict):
+                    walk(current, value, dotted)
+                else:
+                    first = origins.get(dotted, origin)
+                    raise ConfigError(
+                        f"Duplicate configuration key '{dotted}' defined in "
+                        f"{first} and {origin}")
+            else:
+                dst[key] = value
+                if not isinstance(value, dict):
+                    origins[dotted] = origin
+                else:
+                    def mark(node: dict, path: str) -> None:
+                        for sub, val in node.items():
+                            sub_path = f"{path}.{sub}" if path else str(sub)
+                            if isinstance(val, dict):
+                                mark(val, sub_path)
+                            elif sub_path not in origins:
+                                origins[sub_path] = origin
+                    mark(value, dotted)
+    walk(base, fragment, "")
+
+
+def _load_merged(top: Path) -> dict:
+    """Load the top file plus its transitive `include` graph into one dict."""
+    budget = [0]
+    merged: dict = {}
+    origins: dict[str, Path] = {}
+    visited: set[Path] = set()
+
+    def visit(path: Path, depth: int, chain: tuple[Path, ...]) -> None:
+        resolved = path.resolve()
+        if resolved in chain:
+            raise ConfigError(f"Include cycle detected: {' -> '.join(str(p) for p in (*chain, resolved))}")
+        if resolved in visited:
+            return
+        if len(visited) >= MAX_INCLUDE_FILES:
+            raise ConfigError(f"Too many included files (max {MAX_INCLUDE_FILES})")
+        if depth > MAX_INCLUDE_DEPTH:
+            raise ConfigError(f"Include depth exceeds {MAX_INCLUDE_DEPTH}")
+        visited.add(resolved)
+        data = _read_toml_bounded(resolved, budget)
+        raw_include = data.pop("include", [])
+        if not isinstance(raw_include, list) or any(not isinstance(x, str) for x in raw_include):
+            raise ConfigError("include must be an array of strings")
+        if len(raw_include) > MAX_INCLUDE_ENTRIES:
+            raise ConfigError(f"Too many include entries (max {MAX_INCLUDE_ENTRIES})")
+        for entry in raw_include:
+            # Literal entries only: no ${VAR} or ~ expansion (expand() unchanged).
+            target = _include_target(resolved, entry)
+            visit(target, depth + 1, (*chain, resolved))
+        # Unknown root keys still fail here per fragment so the error names
+        # the fragment, then the final merged load re-checks the whole.
+        allowed = {"data_dir", "engines", "timezone", "limits", "sandbox", "profiles",
+                   "roles", "consult_profiles", "web", "vcs", "exclude", "selectors", "include"}
+        unknown = set(data) - allowed
+        if unknown:
+            raise ConfigError(f"Unknown keys in {resolved}: {', '.join(sorted(unknown))}")
+        _merge_into(merged, data, resolved, origins)
+
+    # Depth-first so shared fragments merge before the files that include
+    # them; the top file merges last and any duplicate leaf names its pair.
+    # Implemented by visiting includes first (above) then merging self.
+    visit(top, 0, ())
+    return merged
 
 
 def trusted_command(data: dict, key: str, default: str) -> tuple[str, ...]:
@@ -238,12 +374,10 @@ class Config:
 
 def load(file: Path) -> Config:
     file = file.expanduser().resolve()
-    try:
-        data = tomllib.loads(file.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError) as exc:
-        raise ConfigError(f"Cannot load configuration: {exc}") from exc
+    data = _load_merged(file)
     keys(data, {"data_dir", "engines", "timezone", "limits", "sandbox", "profiles",
-                "roles", "consult_profiles", "web", "vcs", "exclude", "selectors"}, "root")
+                "roles", "consult_profiles", "web", "vcs", "exclude", "selectors", "include"}, "root")
+    data.pop("include", None)
     engines = data.get("engines", {})
     keys(engines, set(ENGINES), "engines")
     environments = {}
