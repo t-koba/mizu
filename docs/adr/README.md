@@ -137,9 +137,9 @@ establishes the trusted-argv JSON pattern; reuse it for VCS.
   heuristics.
 - `[vcs]` table: `command` (argv array, empty disables), `timeout_seconds`,
   `max_bytes`. Unknown keys fail validation. Defaults keep existing configs
-  loading. Step 1 ships validation/docs only; fetch, ref injection, `sync`
-  dispatch, and daemon fetch land in later steps behind the same bounds.
-- Adapter contract (full M1): JSON stdin `{"op": ..., ...}` bounded by
+  loading; fetch, ref injection, `sync` dispatch, and daemon fetch share
+  the same bounds.
+- Adapter contract: JSON stdin `{"op": ..., ...}` bounded by
   `max_bytes`; JSON stdout object with refs; `process.run` with timeout, no
   shell, `maximum=max_bytes`; nonzero exit, timeout, oversize, malformed JSON
   are `Denied`. Host-side only, never in sandbox, never model-provided argv.
@@ -155,7 +155,7 @@ establishes the trusted-argv JSON pattern; reuse it for VCS.
 ## Schema, bounds, trust, retry/cancellation, evidence, failure
 
 - Schema: `[vcs]` as above; adapter JSON request/response documented in
-  `docs/configuration.md` (this step) and later in the fetch module docstring.
+  `docs/configuration.md` and the fetch module docstring.
 - Bounds: argv entries nonempty without newlines; `timeout_seconds`,
   `max_bytes` in `[1, 16777216]`; adapter stdout capped at `max_bytes`.
 - Trust: operator-owned host program; upstream refs are external-untrusted
@@ -170,13 +170,12 @@ establishes the trusted-argv JSON pattern; reuse it for VCS.
 
 ## Consequences
 
-Staged delivery: step 1 (config/docs/tests) lets operators stage `[vcs]`
-without behavior change. Later steps add the adapter module, ref injection,
-`sync` dispatch, and daemon fetch, each with contract tests (fake command:
-success, timeout, oversize, malformed JSON, nonzero exit), read-only and
-digest-exclusion tests, grant tests, end-to-end conflict test with fake
-engine, and periodic-fetch test with fake clock. Offline `check.py` stays
-green. No model-specific defaults; portable stdlib-only runtime.
+Staging `[vcs]` changes no behavior until the adapter is configured. Contract
+tests use a fake command (success, timeout, oversize, malformed JSON,
+nonzero exit) plus read-only and digest-exclusion tests, grant tests, an
+end-to-end conflict test with a fake engine, and a periodic-fetch test with
+a fake clock. Offline `check.py` stays green. No model-specific defaults;
+portable stdlib-only runtime.
 
 ## ADR-009 — VCS publish behind recorded human approval, read/publish split
 
@@ -191,7 +190,7 @@ deduplicating IDs.
 
 ## Context
 
-M1 gave the writer a read-only upstream view (`sync` refresh) with no push
+The writer holds a read-only upstream view (`sync` refresh) with no push
 path. Publishing to the outside world needs a mechanism that cannot be talked
 into shipping code: capability-gated tools, a human record bound to the exact
 bits, and a read path that cannot mutate. AGENTS.md states the invariant:
@@ -251,13 +250,12 @@ bits, and a read path that cannot mutate. AGENTS.md states the invariant:
 
 ## Consequences
 
-Step 1 ships the capability/protocol split, the approval gate, the CI dedup
-helper, AGENTS.md invariant, docs, and fake-adapter tests (unapproved push
-refused, stale digest refused, accepted digest publishes, `vcs_read` cannot
-publish, CI dedup, consult cannot hold `vcs_publish`). Later M2 steps add
-daemon CI polling and richer status shapes behind the same bounds, each with
-focused offline tests. `check.py` stays green; stdlib-only; no model-specific
-defaults.
+Fake-adapter tests cover the capability/protocol split, the approval gate,
+and the CI dedup helper (unapproved push refused, stale digest refused,
+accepted digest publishes, `vcs_read` cannot publish, CI dedup, consult
+cannot hold `vcs_publish`). Daemon CI polling and status shapes reuse the
+same bounds with focused offline tests. `check.py` stays green; stdlib-only;
+no model-specific defaults.
 
 ## ADR-010 — Config `include` of shared TOML fragments
 
@@ -1025,7 +1023,7 @@ kept). The composed text is the engine system prompt and the policy digest.
 
 ## Context
 
-Operators share principles across roles and projects; with `include` (M3)
+Operators share principles across roles and projects; with `include`
 each `config.toml` can be hand-written once the shared prose lives in
 reviewed Markdown parts. A single path forces duplication or an external
 concatenation step.
@@ -1104,11 +1102,9 @@ summary, so rotation must reload exact text, never a paraphrase.
   rotation reason are the evidence; oversize/missing parts fail closed to a
   full prompt, never partial text.
 
-## Evidence / failure
+## Consequences
 
-- Staged: this ADR records the design; the delta builder, rotation gate,
-  `[limits]` keys with docs/example, and focused offline tests
-  (resumed-unit bytes stay O(delta), new key/compacted units stay full,
-  rotation re-keys with reason while carrying the snapshot id) land next.
-- `python3 scripts/check.py` stays green; stdlib-only; no model-specific
-  defaults.
+Focused offline tests bound resumed-unit bytes to the delta: new keys and
+compacted sessions stay full, rotation re-keys with a reason while carrying
+the snapshot id. `python3 scripts/check.py` stays green; stdlib-only; no
+model-specific defaults.

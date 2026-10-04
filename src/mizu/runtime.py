@@ -747,7 +747,7 @@ def prompt_for(context: Context) -> str:
 
 
 def prompt_delta_for(context: Context, pending: list) -> str:
-    """Append-only delta for a resumed persistent session (M14).
+    """Append-only delta for a resumed persistent session.
 
     Schema: ``goal_digest`` pin plus the pinned ``published_snapshot`` and a
     small ``snapshot_delta`` (previous/current ids), then only the pending
@@ -777,7 +777,7 @@ def prompt_delta_for(context: Context, pending: list) -> str:
 
 
 def session_prompt(context: Context, role, run_dir: Path) -> tuple:
-    """Choose the full or delta prompt for this dispatch (M14).
+    """Choose the full or delta prompt for this dispatch.
 
     Schema: peeks at the content-bound session record for the role profile;
     returns ``(prompt, mode, session_key, rotation, session_dir)`` where mode

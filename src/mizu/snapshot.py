@@ -33,7 +33,7 @@ class Snapshots:
         mkdir(root / "snapshots")
 
     def excluded(self, name: str) -> bool:
-        # Reserved upstream-ref subtree (M1): injected refs are read-only
+        # Reserved upstream-ref subtree: injected refs are read-only
         # workspace views served from the live tree, never snapshot content,
         # so they cannot affect code_digest even under an emptied operator
         # exclude list. Operators must not keep project source here.

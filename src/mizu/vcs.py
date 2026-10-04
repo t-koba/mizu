@@ -1,4 +1,4 @@
-"""Upstream-sync trusted argv adapter plus read-only ref injection (M1).
+"""Upstream-sync trusted argv adapter plus read-only ref injection.
 
 Schema: operator-owned ``[vcs] command`` argv receives one JSON object on
 stdin (``{"op": ...}``) and must print one JSON object on stdout.

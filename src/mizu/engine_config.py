@@ -172,7 +172,7 @@ def session_record(context, profile, settings):
     return path, record
 
 
-#: M14 persistent-session rotation: usage totals are read from the saved
+#: Persistent-session rotation: usage totals are read from the saved
 #: per-session record plus existing per-run evidence; no new counters.
 MAX_SESSION_TOKENS = 2**63 - 1
 
@@ -278,7 +278,7 @@ def session_age_seconds(path):
 
 
 def rotation_due(limits, path, saved, engine="unknown"):
-    """Decide whether a resumed persistent session must restart (M14).
+    """Decide whether a resumed persistent session must restart.
 
     Schema: reads ``[limits] session_max_tokens``, ``session_max_cost_usd``
     and ``session_max_age_seconds`` (0 disables each). Bounds: token/cost
@@ -344,7 +344,7 @@ def read_prompt_state(directory):
 
 
 def write_prompt_state(directory, *, snapshot, inbox_generation):
-    """Record what a persistent session has already received (M14 delta)."""
+    """Record what a persistent session has already received (delta)."""
     from .fs import now, write_json
     write_json(directory / "prompt_state.json",
                {"snapshot": snapshot, "inbox_generation": inbox_generation, "created_at": now()})

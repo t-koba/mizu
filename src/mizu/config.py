@@ -289,12 +289,12 @@ class Limits:
     #: dashboard projection. Raw inbox/decisions stay on disk; the operator
     #: review path (`mizu insight list`) uses a separate 1000-item bound.
     pending_insights: int = 30
-    #: Operator-selected dashboard projection bounds (M12 audit). Raw
+    #: Operator-selected dashboard projection bounds. Raw
     #: decisions stay on disk; the dashboard shows the newest N with
     #: reasons truncated to M chars (flagged).
     dashboard_decisions: int = 10
     dashboard_reason_chars: int = 500
-    #: Operator-selected persistent-session rotation bounds (M14). A resumed
+    #: Operator-selected persistent-session rotation bounds. A resumed
     #: persistent session restarts with a fresh session key once cumulative
     #: usage or wall-clock session age reaches a bound, carrying the
     #: published snapshot and composed policy forward. 0 disables that bound;
