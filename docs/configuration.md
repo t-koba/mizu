@@ -280,6 +280,10 @@ advances on failure too, so one bad adapter cannot busy-loop.
 
 Same `[vcs]` adapter, no new keys. `vcs_read` serves only `status`/`log`/`comments` (`{"op", "branch", optional `"sha"`}); `vcs_publish` serves only `push`/`pr` (`{"op", "branch"}`). Cross-path calls are `Denied` (`vcs_read cannot publish`). Host-side only, single invocation under `timeout_seconds`, stdout capped at `max_bytes`; results stay `external-untrusted` with `vcs-read.json` / `vcs-publish.json` evidence.
 
+`status` responses are normalized to `{op, branch, checks: [{check, state, sha, url?}], trust}` (at most 1024 checks; `check` 1-256 chars, `state` 1-64 chars, `sha` 40/64 hex, `url` max 4096 chars); malformed shapes are `Denied`. `log`/`comments` pass through with `trust: external-untrusted`.
+
+The daemon polls CI on the same `[limits] idle_seconds` cadence as the upstream fetch (no new knob): each iteration derives branches from injected refs (first 32 sorted, else `main`), calls `status` once per branch, and records only `failure` states as deduplicated insights (passes ignored). Polling is best-effort host-side work with no capability check: failures become visible `ci_poll` events (`ok: false`) and never publish a snapshot; `last_poll` advances on failure too so one bad adapter cannot busy-loop.
+
 External publication requires recorded human approval (AGENTS.md: "no external publication without recorded human approval"): an insight titled exactly `GO <branch>` whose body carries a `digest: <code_digest>` line for the exact workspace `code_digest` at call time, with an `accept` decision on that insight ID. Missing, stale, undecided, or non-accept records are `Denied` (stale digests name the staleness). `vcs_publish` requires a writable workspace and is forbidden on consultation roles. CI failures become deduplicated insights via stable IDs (`ci-<32 hex>` from branch+sha+check); repeats return the existing record, passes are ignored.
 
 ## Project metadata

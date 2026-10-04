@@ -509,6 +509,72 @@ def poll_upstream(config, project, state: dict, *, now: float, interval: float,
             "trust": "external-untrusted", "time": now_iso()}
 
 
+#: Maximum branches polled per CI tick (injected-ref derived, bounded).
+MAX_CI_BRANCHES = 32
+
+
+def poll_ci(config, project, state: dict, *, now: float, interval: float,
+            branches=None, reader=None) -> dict | None:
+    """Best-effort periodic CI polling: status per branch, failures to insights.
+
+    Schema: ``branches=None`` derives from injected upstream refs
+    (``vcs.list_refs``, first 32 sorted); explicit lists are validated as
+    branch names. Returns a ``ci_poll`` event dict or ``None`` when skipped
+    (disabled or not due). Bounds: one adapter call per branch per due poll
+    under the adapter timeout; status checks capped at 1024 rows each.
+    Trust: host side only; adapter facts stay external-untrusted and only
+    ``failure`` states are recorded via ``vcs.record_ci_result`` (stable
+    dedup IDs, passes ignored). Retry/cancellation: no retry; ``last_poll``
+    advances even on failure so one bad adapter cannot busy-loop. Evidence:
+    the event names ok/recorded branches/counts or error; this helper never
+    publishes a snapshot. Failure: ``Denied``, ``OSError`` and ``ValueError``
+    become ``ok=False`` events, never raised.
+    """
+    if not config.vcs.get("command"):
+        return None
+    if not upstream_fetch_due(state.get("last_poll"), now, interval):
+        return None
+    state["last_poll"] = now
+    do_read = reader if reader is not None else _vcs.read_via
+    try:
+        if branches is None:
+            try:
+                names = sorted(_vcs.list_refs(project.workspace))[:MAX_CI_BRANCHES]
+            except OSError as exc:
+                raise Denied(f"CI polling is unavailable: {exc}") from exc
+            # Fall back to main so a fresh workspace still polls once configured.
+            targets = names or ["main"]
+        else:
+            targets = [_vcs.check_branch(b) for b in branches]
+        recorded: list[dict] = []
+        failures = 0
+        for branch in targets:
+            data = do_read(config.vcs, "status", {"branch": branch})
+            checks = data.get("checks")
+            if not isinstance(checks, list):
+                raise Denied("VCS status must carry a checks array")
+            for entry in checks:
+                if entry.get("state") != "failure":
+                    continue
+                receipt = _vcs.record_ci_result(
+                    project, branch=branch, sha=entry["sha"],
+                    check=entry["check"], state="failure",
+                    url=entry.get("url", ""))
+                failures += 1
+                if receipt.get("recorded"):
+                    recorded.append({"id": receipt["id"], "branch": branch,
+                                     "check": entry["check"]})
+        state["last_error"] = ""
+        state["last_ok"] = now
+        return {"event": "ci_poll", "ok": True, "branches": list(targets),
+                "failures": failures, "recorded": recorded,
+                "trust": "external-untrusted", "time": now_iso()}
+    except (Denied, OSError, ValueError) as exc:
+        state["last_error"] = str(exc)
+        return {"event": "ci_poll", "ok": False,
+                "error": str(exc), "time": now_iso()}
+
+
 def now_iso() -> str:
     """Wall-clock event stamp for ``poll_upstream`` (monotonic ``now`` stays in state)."""
     return now()
@@ -837,6 +903,12 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                                             interval=config.limits.idle_seconds)
                     if fetched is not None:
                         print(json.dumps(fetched, ensure_ascii=False), flush=True)
+                    ci_state = upstream_state.setdefault("ci", {})
+                    polled = poll_ci(config, project, ci_state,
+                                     now=time.monotonic(),
+                                     interval=config.limits.idle_seconds)
+                    if polled is not None:
+                        print(json.dumps(polled, ensure_ascii=False), flush=True)
                     role = config.roles[role_name]
                     ready = should_run(project, project.snapshots.get()) if role.workspace == "write" else (
                         project.control().get("armed") and not project.control().get("paused"))

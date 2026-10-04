@@ -399,7 +399,51 @@ def read_via(settings: dict, op: str, params: dict) -> dict:
             raise Denied("Invalid VCS sha filter")
         request["sha"] = sha
     data = invoke(settings, request)
+    if op == "status":
+        return {"op": op, "branch": branch, "checks": parse_status_checks(data),
+                "trust": "external-untrusted"}
     return {**data, "trust": "external-untrusted"}
+
+
+#: Maximum CI checks per status response (adapter payload already capped).
+MAX_CHECKS = 1024
+
+
+def parse_status_checks(data: dict) -> list:
+    """Validate a ``status`` adapter response into normalized check rows.
+
+    Schema: ``{"checks": [{check, state, sha, url?}]}``; ``check`` 1-256
+    chars without newline/NUL, ``state`` 1-64 chars without newline/NUL,
+    ``sha`` 40/64 lowercase hex, optional ``url`` at most 4096 chars
+    without newline/NUL. Bounds: at most 1024 checks. Trust: adapter
+    facts stay external-untrusted; this only validates shape. Failure:
+    ``Denied`` on missing/malformed shapes.
+    """
+    if not isinstance(data, dict):
+        raise Denied("VCS status must be a JSON object")
+    checks = data.get("checks")
+    if not isinstance(checks, list) or len(checks) > MAX_CHECKS:
+        raise Denied("VCS status must carry a checks array with at most 1024 entries")
+    out = []
+    for entry in checks:
+        if not isinstance(entry, dict) or set(entry) - {"check", "state", "sha", "url"}:
+            raise Denied("Invalid VCS status check entry")
+        check = entry.get("check")
+        state = entry.get("state")
+        sha = entry.get("sha")
+        url = entry.get("url", "")
+        if (not isinstance(check, str) or not check or len(check) > 256
+                or "\n" in check or "\x00" in check):
+            raise Denied("Invalid CI check name")
+        if (not isinstance(state, str) or not state or len(state) > 64
+                or "\n" in state or "\x00" in state):
+            raise Denied("Invalid CI check state")
+        if not isinstance(sha, str) or not _SHA.fullmatch(sha):
+            raise Denied("Invalid VCS sha for CI insight")
+        if not isinstance(url, str) or len(url) > 4096 or "\x00" in url or "\n" in url:
+            raise Denied("Invalid CI log URL")
+        out.append({"check": check, "state": state, "sha": sha, "url": url})
+    return out
 
 
 def publish_via(settings: dict, op: str, params: dict) -> dict:

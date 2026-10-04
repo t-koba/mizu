@@ -97,7 +97,7 @@ class VcsPublishTests(Fixture):
 
     def test_vcs_read_cannot_publish(self):
         config, role = with_caps(self, "worker", ["vcs_read"])
-        config = dataclasses.replace(config, vcs=adapter_settings(PUSH_OK))
+        config = dataclasses.replace(config, vcs=adapter_settings(READ_OK))
         ctx = make_context(self, config, role)
         out = ctx.handle("vcs_read", {"op": "status", "branch": "main"})
         self.assertEqual(out["trust"], "external-untrusted")
