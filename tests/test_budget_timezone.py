@@ -13,6 +13,15 @@ from mizu.budget import Budget
 from mizu.config import ConfigError
 
 
+def _has_zone(name):
+    try:
+        from zoneinfo import ZoneInfo
+        ZoneInfo(name)
+        return True
+    except Exception:
+        return False
+
+
 def frozen(instant):
     """Patch only mizu.budget's datetime view so the clock is deterministic."""
     mdt = mock.patch("mizu.budget.dt")
@@ -37,6 +46,7 @@ class BudgetTimezoneTests(unittest.TestCase):
             budget._today(),
             real_dt.datetime.now(real_dt.timezone.utc).date().isoformat())
 
+    @unittest.skipUnless(_has_zone("Asia/Tokyo"), "no tz database for Asia/Tokyo")
     def test_same_instant_names_different_days(self):
         # 2026-10-03T15:00Z is still Oct 3 in UTC but Oct 4 in Tokyo.
         instant = real_dt.datetime(2026, 10, 3, 15, 0, tzinfo=real_dt.timezone.utc)
@@ -54,6 +64,7 @@ class BudgetTimezoneTests(unittest.TestCase):
         self.assertEqual((record["day"], record["zone"]), ("2026-10-04", "Asia/Tokyo"))
         self.assertEqual(tokyo.usage("alpha")["day"], "2026-10-04")
 
+    @unittest.skipUnless(_has_zone("America/New_York"), "no tz database for America/New_York")
     def test_dst_zone_computes_local_day(self):
         # Spring forward in New York: 07:30Z is 03:30 EDT on Mar 8.
         instant = real_dt.datetime(2026, 3, 8, 7, 30, tzinfo=real_dt.timezone.utc)
