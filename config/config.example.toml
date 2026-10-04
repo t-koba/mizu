@@ -111,6 +111,11 @@ thinkingLevel = "off"
 # max_turns = 12
 # max_budget_usd = 1.0
 
+[vcs]
+command = []                 # Trusted argv executable for upstream sync; JSON stdin/stdout, never a shell string. Empty disables.
+timeout_seconds = 20         # Per-invocation deadline for the adapter.
+max_bytes = 524288           # Maximum adapter response payload (512 KiB).
+
 [web]
 hosts = []                       # Exact HTTPS host allowlist, rechecked on every redirect.
 feeds = []                       # RSS/Atom; optional discovery adapter below.

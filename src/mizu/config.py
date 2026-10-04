@@ -200,6 +200,7 @@ class Config:
     consult_profiles: tuple[str, ...]
     timezone: str
     web: dict
+    vcs: dict
     exclude: tuple[str, ...]
     selectors: dict = dataclasses.field(default_factory=dict)
 
@@ -242,7 +243,7 @@ def load(file: Path) -> Config:
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ConfigError(f"Cannot load configuration: {exc}") from exc
     keys(data, {"data_dir", "engines", "timezone", "limits", "sandbox", "profiles",
-                "roles", "consult_profiles", "web", "exclude", "selectors"}, "root")
+                "roles", "consult_profiles", "web", "vcs", "exclude", "selectors"}, "root")
     engines = data.get("engines", {})
     keys(engines, set(ENGINES), "engines")
     environments = {}
@@ -484,7 +485,16 @@ def load(file: Path) -> Config:
     for k in ("cache_seconds", "timeout_seconds", "max_bytes"):
         number(web[k], f"web.{k}", 1, 16777216)
     web["intranet"] = boolean(web["intranet"], "web.intranet")
+    vcs = data.get("vcs", {})
+    keys(vcs, {"command", "timeout_seconds", "max_bytes"}, "vcs")
+    vcs = {"command": [], "timeout_seconds": 20,
+           "max_bytes": 524288, **vcs}
+    strings(vcs["command"], "vcs.command")
+    if vcs["command"] and any(not s or "\n" in s for s in vcs["command"]):
+        raise ConfigError("vcs.command must be a nonempty argv array without newlines")
+    for k in ("timeout_seconds", "max_bytes"):
+        number(vcs[k], f"vcs.{k}", 1, 16777216)
     return Config(file, path_value(string(data.get("data_dir", "~/.local/state/mizu"), "data_dir"), file.parent),
-                  environments, limits, sandbox, profiles, roles, consult, timezone, web,
+                  environments, limits, sandbox, profiles, roles, consult, timezone, web, vcs,
                   strings(data.get("exclude", [".git", ".pi", ".env", ".env.*", ".venv",
                                                 "node_modules", "__pycache__", ".pytest_cache"]), "exclude"), selectors)

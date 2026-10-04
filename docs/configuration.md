@@ -215,6 +215,27 @@ Configures outbound retrieval for `fetch` and `search`:
 
 URL fragments are stripped client-side and never sent. Redirects re-validate hostname, port, and IP. Text/HTML/XML/JSON formats are supported; binary/PDF/image formats are rejected.
 
+## VCS (upstream sync, M1 step 1: configuration only)
+
+Configures the operator-owned upstream-sync adapter. No fetch, merge, or
+daemon fetch runs yet; this step only validates and documents the grant
+surface so operators can stage configuration early.
+
+| Key | Default | Description |
+|---|---|---|
+| `command` | `[]` | Trusted argv executable; JSON stdin/stdout, never a shell string. Empty disables |
+| `timeout_seconds` | `20` | Per-invocation deadline (1–16,777,216) |
+| `max_bytes` | `524288` | Maximum adapter response payload, 512 KiB (1–16,777,216) |
+
+Schema/bounds: `command` is an argv array of strings without newlines (empty
+means disabled); `timeout_seconds`/`max_bytes` are integers in
+`[1, 16777216]`. Unknown `[vcs]` keys fail validation. Trust: operator-owned
+host program only; never model-provided, never run in the sandbox.
+Retry/cancellation: none yet (no invocation in this step). Evidence: none
+yet. Failure: `ConfigError` on unknown keys, bad argv, or out-of-range
+bounds; defaults apply when `[vcs]` is absent so existing configs keep
+loading.
+
 ## Project metadata
 
 `projects/NAME/PROJECT.md` is the human goal. `project.toml` has `roles`
