@@ -272,10 +272,10 @@ def prune(project: Project, *, apply: bool = False, keep_artifacts: int = DEFAUL
         to_drop.sort()
         if keep_artifacts:
             victims = artifact_candidates(project, keep_artifacts)
-        removed = {"reproducible_inputs": [str(p.relative_to(project.root)) for p in candidates],
-                   "artifacts": [str(p.relative_to(project.root)) for p in victims],
-                   "event_logs_compressed": [str(p.relative_to(project.root)) for p in to_compress],
-                   "event_logs_removed": [str(p.relative_to(project.root)) for p in to_drop]}
+        removed = {"reproducible_inputs": [p.relative_to(project.root).as_posix() for p in candidates],
+                   "artifacts": [p.relative_to(project.root).as_posix() for p in victims],
+                   "event_logs_compressed": [p.relative_to(project.root).as_posix() for p in to_compress],
+                   "event_logs_removed": [p.relative_to(project.root).as_posix() for p in to_drop]}
         if apply:
             for candidate in candidates:
                 if candidate.is_symlink():
@@ -290,13 +290,13 @@ def prune(project: Project, *, apply: bool = False, keep_artifacts: int = DEFAUL
                 if candidate.is_symlink():
                     raise Denied("Refusing a symlink during prune")
                 target = _compress_event_log(candidate)
-                compressed_names.append(str(target.relative_to(project.root)))
+                compressed_names.append(target.relative_to(project.root).as_posix())
             dropped_names: list[str] = []
             for candidate in to_drop:
                 if candidate.is_symlink():
                     raise Denied("Refusing a symlink during prune")
                 candidate.unlink()
-                dropped_names.append(str(candidate.relative_to(project.root)))
+                dropped_names.append(candidate.relative_to(project.root).as_posix())
             for parent in {c.parent for c in (*candidates, *victims, *to_compress, *to_drop)}:
                 try:
                     sync_dir(parent)
@@ -309,7 +309,7 @@ def prune(project: Project, *, apply: bool = False, keep_artifacts: int = DEFAUL
                                "event_log_compress_days": compress_days,
                                "event_log_retention_days": retention_days, **removed})
             sync_dir(audit.parent)
-            removed["audit"] = str(audit.relative_to(project.root))
+            removed["audit"] = audit.relative_to(project.root).as_posix()
     return {"applied": apply, **removed,
             "retained": "All result/error/consultation/started/selection/usage records, snapshots, "
                         "content objects, sessions, decisions, and proposals. "
