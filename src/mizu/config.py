@@ -13,7 +13,7 @@ from .errors import ConfigError
 from .fs import ID
 CAPABILITIES = frozenset({"diff", "files", "read", "exec", "experiment", "verify", "fetch",
                           "search", "insights", "decide", "submit_insight", "consult",
-                          "report", "finish"})
+                          "report", "finish", "sync"})
 ENGINES = ("pi", "codex", "claude")
 MAX_RESOURCES = 64
 #: Protocol wait bound mirrored in protocol.finish.wait_seconds; keep both at 86400.
@@ -452,6 +452,8 @@ def load(file: Path) -> Config:
             raise ConfigError(f"Role {name} requires the finish capability")
         if "verify" in caps and workspace != "write":
             raise ConfigError("verify requires a writable workspace")
+        if "sync" in caps and workspace != "write":
+            raise ConfigError("sync requires a writable workspace")
         if workspace == "write" and "verify" not in caps:
             raise ConfigError(f"Writable role {name} requires the verify capability so "
                               "completion can be bound to acceptance commands")

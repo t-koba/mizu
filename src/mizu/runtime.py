@@ -54,7 +54,7 @@ def slot(config: Config):
 #: none of these. Read-only grants (files/read/diff/insights/fetch/search)
 #: stay operator choice, plus the required finish.
 CONSULT_FORBIDDEN = frozenset({"exec", "experiment", "verify", "decide",
-                               "submit_insight", "consult", "report"})
+                               "submit_insight", "consult", "report", "sync"})
 
 
 def check_consult_role(role_name: str, role) -> None:
@@ -337,6 +337,32 @@ class Context:
         return self.project.insights.submit(source=self.role.name, title=args["title"], body=args["body"],
                                              base_snapshot=self.snapshot["id"], run=self.run_dir.name)
 
+    def _op_sync(self, args: dict) -> dict:
+        # Host-side refresh only: fetch upstream refs via the trusted adapter
+        # and inject them read-only under refs/remotes/upstream/*. Merging is
+        # worker policy (workspace edits + verify + publish); the mechanism
+        # only records the receipt. Requires a writable workspace so read
+        # roles cannot mutate the shared ref view.
+        if self.role.workspace != "write":
+            raise Denied("Sync requires a writable workspace")
+        try:
+            fetched = _vcs.fetch_refs(self.config.vcs)
+        except OSError as exc:
+            raise Denied(f"Upstream sync is unavailable: {exc}") from exc
+        try:
+            receipt = _vcs.inject_refs(self.project.workspace, fetched["refs"])
+        except OSError as exc:
+            raise Denied(f"Upstream refs are unavailable: {exc}") from exc
+        names = sorted(fetched["refs"])
+        record = {"synced": True, "injected": receipt["injected"],
+                  "prefix": receipt["prefix"], "trust": "external-untrusted",
+                  "upstream": fetched["refs"].get("main"),
+                  "evidence": "sync.json", "refs": names}
+        write_json(self.run_dir / "sync.json",
+                   {"injected": receipt["injected"], "prefix": receipt["prefix"],
+                    "trust": "external-untrusted", "refs": fetched["refs"]})
+        return record
+
     def _op_consult(self, args: dict) -> dict:
         if self.consult is None:
             raise Denied("Nested consultation is disabled")
@@ -372,8 +398,24 @@ class Context:
         "exec": _op_exec, "experiment": _op_experiment, "verify": _op_verify,
         "fetch": _op_fetch, "search": _op_search, "insights": _op_insights,
         "decide": _op_decide, "submit_insight": _op_submit_insight,
+        "sync": _op_sync,
         "consult": _op_consult, "report": _op_report, "finish": _op_finish,
     }
+
+
+def refresh_upstream(config, project) -> dict:
+    """Host-side upstream refresh: fetch refs and inject them read-only.
+
+    Schema: returns ``{"injected": n, "prefix": ..., "trust": ...}``.
+    Bounds: adapter bounds from ``config.vcs``; at most 4096 refs.
+    Trust: operator-owned adapter; refs stay external-untrusted.
+    Failure: ``Denied`` on adapter/shape errors; ``OSError`` on host I/O.
+    No capability check here; the ``sync`` tool adds the grant gate.
+    """
+    fetched = _vcs.fetch_refs(config.vcs)
+    receipt = _vcs.inject_refs(project.workspace, fetched["refs"])
+    return {"injected": receipt["injected"], "prefix": receipt["prefix"],
+            "trust": "external-untrusted", "refs": dict(fetched["refs"])}
 
 
 def prompt_for(context: Context) -> str:

@@ -169,12 +169,13 @@ models are recorded. Model usage excludes unreported auxiliary billing.
 | `submit_insight` | Submit proposal with route-derived identity |
 | `consult` | Consult operator-allowlisted profiles through a named read-only role (default `consult`), no nested consultation |
 | `report` | Stage a Markdown document for static artifact publication |
+| `sync` | Refresh upstream refs via the trusted VCS adapter (writable workspace only); merges stay as workspace edits followed by verification |
 | `finish` | Seal result; cannot acquire new permissions |
 
 A consultation names its answering role explicitly (`role`, default `consult`).
 Any configured role qualifies as long as it stays read-only (`workspace = "read"`)
 without write/execute grants (`exec`, `experiment`, `verify`, `decide`,
-`submit_insight`, `consult`, `report`); read-only grants (`files`, `read`,
+`submit_insight`, `consult`, `report`, `sync`); read-only grants (`files`, `read`,
 `diff`, `insights`, `fetch`, `search`) stay operator choice plus the required
 `finish`. Anything broader is refused before any model call by the single
 shared gate (`runtime.check_consult_role`, also used by `smoke --live`).
@@ -215,12 +216,13 @@ Configures outbound retrieval for `fetch` and `search`:
 
 URL fragments are stripped client-side and never sent. Redirects re-validate hostname, port, and IP. Text/HTML/XML/JSON formats are supported; binary/PDF/image formats are rejected.
 
-## VCS (upstream sync, M1 step 3: adapter invocation and ref injection)
+## VCS (upstream sync, M1 step 4: grant-gated `sync` refresh)
 
 Configures the operator-owned upstream-sync adapter. `src/mizu/vcs.py`
 (`invoke`/`fetch_refs`, plus host-side `inject_refs`/`list_refs`/`read_ref`)
-implements the single-invocation contract and read-only ref injection; no
-automatic fetch, merge, `sync` capability, or daemon fetch runs yet.
+implements the single-invocation contract and read-only ref injection.
+`src/mizu/runtime.py` (`Context._op_sync`, `refresh_upstream`) implements the
+grant-gated `sync` refresh; no automatic fetch or daemon fetch runs yet.
 
 | Key | Default | Description |
 |---|---|---|
@@ -236,8 +238,9 @@ newlines/NUL, no leading `/` or `..`; shas 40/64 lowercase hex) with
 shell, `maximum=max_bytes`. Trust: operator-owned host program only; never
 model-provided, never run in the sandbox. Retry/cancellation: single
 invocation per call under the configured timeout; no shell retry.
-Evidence: caller binds results (later: fetch receipts, `sync` bound to
-`code_digest`). Failure: `ConfigError` on unknown keys, bad argv, or
+Evidence: `sync` writes `sync.json` (full refs) and returns a bounded
+summary (`injected`, `prefix`, `trust`, `upstream` for `main`, sorted `refs`
+names); completion still binds to `code_digest` via `verify`. Failure: `ConfigError` on unknown keys, bad argv, or
 out-of-range bounds; `Denied` on unconfigured adapter, oversize request,
 timeout, oversize response, nonzero exit, or malformed/non-object JSON.
 Defaults apply when `[vcs]` is absent so existing configs keep loading.
@@ -251,6 +254,15 @@ emptied operator `exclude` list. Operators must not keep project source
 there. The `files`/`read` tools serve injected refs read-only from the
 project workspace (read roles included; `none` sees none). Content stays
 `external-untrusted` until merged and verified.
+
+The `sync` tool refreshes that view on demand: it calls `fetch` on the
+adapter, then `inject_refs` into the project workspace, and returns the
+bounded summary above. It requires the `sync` capability (writable workspace
+only; `sync` on a read/`none` role is refused at load for configured roles
+and at call time for replaced roles, and consultation roles cannot hold it).
+Without the grant the call is refused before any adapter spawn. Merging or
+rebasing `upstream/main` stays worker policy: ordinary workspace edits,
+then `verify` and publish. No silent auto-merge runs in the mechanism.
 
 ## Project metadata
 

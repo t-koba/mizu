@@ -84,6 +84,8 @@ DEFINITIONS = {
                 obj({"question": text(8000), "profiles": array(text(64), 8), "role": text(64)}, ("question",))),
     "report": ("Stage a UTF-8 Markdown document for static publication as this work unit's artifact. Structure and length follow the role policy; recorded evidence is attached separately by the runtime.",
                obj({"title": text(200), "body": text(48000)}, ("title", "body"))),
+    "sync": ("Refresh upstream refs through the trusted VCS adapter. Merge work stays as workspace edits followed by verification.",
+             obj()),
     "finish": ("End this work unit. Call after all other tools. 'done' on writable roles requires successful verification.",
                obj({"outcome": {"type": "string", "enum": ["continue", "wait", "blocked", "done"]},
                     "summary": text(12000), "state": text(32000),
