@@ -181,7 +181,12 @@ installation, login, package acquisition or deployment runs during work.
 
 A role has exactly one of `profile` or `selector`, plus `policy`, `workspace` (`write`, `read`, `none`),
 `capabilities`, `engine_tools` (maximum 128 explicit names), `on_change`, and
-at most one of `daemon`, `interval_seconds`, `calendar`. Capabilities grant
+at most one of `daemon`, `interval_seconds`, `calendar`. `policy` is a path
+string or an array of path strings (e.g. shared principles plus the role file);
+parts are read as UTF-8 in order and joined with one `\n` (trailing newline
+kept), so the composed text is the prompt and the policy digest. Missing,
+unreadable, non-UTF-8, or oversize parts fail load; unknown keys still fail.
+Bounds (fixed mechanism): at most 16 parts, each at most 64 KiB, 256 KiB total. Capabilities grant
 Mizu operations; `engine_tools` grants native or external MCP tools such as
 `codemode`, `web_search`, or `mcp__docs__search`. Exposure and automatic approval
 never grant execution authority. Native host command/file tools cannot bypass

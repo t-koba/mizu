@@ -2,6 +2,7 @@
 from pathlib import Path
 
 from .errors import ConfigError
+from .config import role_policy_text
 from .fs import canonical, digest, mkdir, read_json, write_json
 
 
@@ -152,7 +153,7 @@ def local_settings_digest(config, engine):
 
 
 def session_record(context, profile, settings):
-    identity = {'settings': settings, 'policy': context.role.policy.read_text(encoding='utf-8'),
+    identity = {'settings': settings, 'policy': role_policy_text(context.role),
                 'goal': context.goal_digest, 'capabilities': context.role.capabilities,
                 'workspace': context.role.workspace, 'command': context.config.command(settings['engine']),
                 'adapter_digest': adapter_digest(settings['engine']),

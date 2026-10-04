@@ -6,7 +6,7 @@ import time
 import uuid
 from pathlib import Path
 
-from .config import Role
+from .config import Role, role_policy_text
 from .engine_config import effective, adapter_digest, local_settings_digest
 from .errors import Cancelled, ConfigError, Denied, ProtocolError, ModelFailure
 from .fs import canonical, digest, mkdir, now, read_json, write_json
@@ -22,12 +22,9 @@ def classify(engine, project, role, snapshot, facts, *, preview=False):
     if not definition:
         return {}, None
     config = engine.config
-    classifier_role = Role(role.name, definition['profile'], Path(definition['policy']), 'none', ('finish',))
+    classifier_role = Role(role.name, definition['profile'], (Path(definition['policy']),), 'none', ('finish',))
     settings = effective(config, classifier_role, classifier_role.profile)
-    policy_path = classifier_role.policy
-    if policy_path.stat().st_size > 65536:
-        raise ConfigError('Classifier policy exceeds 64 KiB')
-    policy = policy_path.read_text(encoding='utf-8')
+    policy = role_policy_text(classifier_role)
     inputs = {'task': facts['task'], 'attributes': facts['attributes'], 'role': role.name,
               'project': project.name, 'output_attributes': definition['attributes']}
     key = digest(canonical({'inputs': inputs, 'definition': definition, 'policy': policy,

@@ -19,7 +19,7 @@ from pathlib import Path
 
 from . import platform as _platform
 from .budget import Budget
-from .config import Config, Role, load
+from .config import Config, Role, load, role_policy_bytes
 from .doctor import container_runtime
 from .drivers import driver_for
 from .errors import Busy, Cancelled, ConfigError, Denied, InfraExceeded, LimitExceeded, MizuError, ModelFailure, ProtocolError
@@ -764,7 +764,7 @@ class Engine:
                 write_json(run_dir / "started.json", {"run": run_id, "role": role_name,
                             "snapshot": snapshot["id"], "started_at": now(),
                             "config_sha256": digest(self.config.file.read_bytes()),
-                            "policy_sha256": digest(role.policy.read_bytes())})
+                            "policy_sha256": digest(role_policy_bytes(role))})
                 if role.selector:
                     from .classification import prepare
                     decision = prepare(self, project, role, snapshot, attributes)

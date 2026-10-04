@@ -28,6 +28,11 @@ MAX_INCLUDE_DEPTH = 8
 MAX_INCLUDE_FILES = 32
 MAX_INCLUDE_BYTES = 1048576
 MAX_INCLUDE_ENTRIES = 32
+#: Composed role-policy bounds (fixed mechanism, not knobs): at most 16
+#: Markdown parts, each at most 64 KiB, 256 KiB total composed text.
+MAX_ROLE_POLICY_PARTS = 16
+MAX_ROLE_POLICY_BYTES = 65536
+MAX_ROLE_POLICY_TOTAL = 262144
 
 
 def _tz_database_missing() -> bool:
@@ -330,7 +335,7 @@ class Sandbox:
 class Role:
     name: str
     profile: str
-    policy: Path
+    policy: tuple
     workspace: str
     capabilities: tuple[str, ...]
     engine_tools: tuple[str, ...] = ()
@@ -340,6 +345,40 @@ class Role:
     daemon: bool = False
     selector: str = ""
     attributes: dict = dataclasses.field(default_factory=dict)
+
+
+def role_policy_text(role: "Role") -> str:
+    """Composed role policy text: parts read as UTF-8 and joined in order.
+
+    Schema: tuple of policy paths on the role. Bounds: parts validated at
+    config load (each at most 64 KiB, 16 parts, 256 KiB total). Trust:
+    operator-owned Markdown under the config directory, never model input.
+    Retry/cancellation: n/a (read at dispatch). Failure: ConfigError on
+    missing/unreadable/non-UTF-8 content (fail closed, never partial text).
+    """
+    texts: list[str] = []
+    for part in role.policy:
+        try:
+            raw = part.read_bytes()
+        except OSError as exc:
+            raise ConfigError(f"Policy file not found: {part}") from exc
+        if len(raw) > MAX_ROLE_POLICY_BYTES:
+            raise ConfigError(f"Policy file exceeds 64 KiB: {part}")
+        try:
+            texts.append(raw.decode("utf-8"))
+        except UnicodeDecodeError as exc:
+            raise ConfigError(f"Policy file is not UTF-8: {part}") from exc
+    if not texts:
+        raise ConfigError("Role policy requires at least one file")
+    total = sum(len(x.encode("utf-8")) for x in texts)
+    if total > MAX_ROLE_POLICY_TOTAL:
+        raise ConfigError("Composed role policy exceeds 256 KiB")
+    return "\n".join(piece.rstrip("\n") for piece in texts) + "\n"
+
+
+def role_policy_bytes(role: "Role") -> bytes:
+    """Composed policy bytes for digests and engine prompts."""
+    return role_policy_text(role).encode("utf-8")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -618,9 +657,36 @@ def load(file: Path) -> Config:
         if workspace == "write" and "verify" not in caps:
             raise ConfigError(f"Writable role {name} requires the verify capability so "
                               "completion can be bound to acceptance commands")
-        policy = path_value(string(role.get("policy", ""), "policy"), file.parent)
-        if not policy.is_file():
-            raise ConfigError(f"Policy file not found: {policy}")
+        raw_policy = role.get("policy", "")
+        if isinstance(raw_policy, str):
+            entries = [raw_policy]
+        elif isinstance(raw_policy, list) and all(isinstance(x, str) for x in raw_policy):
+            entries = list(raw_policy)
+        else:
+            raise ConfigError(f"roles.{name}.policy must be a path string or an array of path strings")
+        if not entries or len(entries) > MAX_ROLE_POLICY_PARTS:
+            raise ConfigError(f"roles.{name}.policy must list 1-{MAX_ROLE_POLICY_PARTS} files")
+        if len(set(entries)) != len(entries):
+            raise ConfigError(f"roles.{name}.policy lists a duplicate file")
+        policies: list[Path] = []
+        for entry in entries:
+            candidate = path_value(string(entry, "policy"), file.parent)
+            if not candidate.is_file():
+                raise ConfigError(f"Policy file not found: {candidate}")
+            try:
+                size = candidate.stat().st_size
+            except OSError as exc:
+                raise ConfigError(f"Policy file not found: {candidate}") from exc
+            if size > MAX_ROLE_POLICY_BYTES:
+                raise ConfigError(f"Policy file exceeds 64 KiB: {candidate}")
+            policies.append(candidate)
+        try:
+            total = sum(len(part.read_bytes()) for part in policies)
+        except OSError as exc:
+            raise ConfigError(f"Policy file not found: {exc}") from exc
+        if total > MAX_ROLE_POLICY_TOTAL:
+            raise ConfigError(f"Composed role policy exceeds 256 KiB: {name}")
+        policy = tuple(policies)
         interval = number(role.get("interval_seconds", 0), "interval_seconds", 0, 31536000)
         calendar = strings(role.get("calendar", []), "calendar")
         if any(not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", t) for t in calendar):

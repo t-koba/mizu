@@ -1016,3 +1016,49 @@ via a symlinked parent and the 30 s bound undocumented/untested.
 Windows threads serialize like POSIX `flock` holders; aliased spellings
 share one entry; a re-entrant blocking acquire fails instead of hanging.
 `check.py` stays green; stdlib-only; no model-specific defaults.
+
+## ADR-027 — Composed role policies from ordered Markdown parts
+
+**Accepted.** A role's `policy` accepts a path string or an array of path
+strings, read as UTF-8 in order and joined with one `\n` (trailing newline
+kept). The composed text is the engine system prompt and the policy digest.
+
+## Context
+
+Operators share principles across roles and projects; with `include` (M3)
+each `config.toml` can be hand-written once the shared prose lives in
+reviewed Markdown parts. A single path forces duplication or an external
+concatenation step.
+
+## Decision
+
+- Mechanism: `Role.policy` is a tuple of paths; `config.role_policy_text`
+  composes them; `started.json` `policy_sha256`, engine prompts
+  (Pi/Codex/Claude `systemPrompt`/`baseInstructions`), and session identity
+  all use the composed text, so any part change re-keys sessions.
+- Policy: the string-or-list choice and the part order in TOML; relative
+  paths resolve against the top-level config directory (as with fragments).
+- String loads keep working (one-element tuple); duplicate entries are
+  refused; classifier `policy` stays a single path.
+
+## Schema, bounds, trust, retry/cancellation, evidence, failure
+
+- Schema: `policy = "..."` or `policy = ["a.md", "b.md"]`; non-string,
+  empty, or duplicate entries are `ConfigError`.
+- Bounds: at most 16 parts, each at most 64 KiB, 256 KiB total (fixed
+  mechanism, not knobs); docs in `docs/configuration.md` and
+  `config/config.example.toml`.
+- Trust: operator-owned files under the config directory, never model
+  input; no `~`/`${VAR}` expansion beyond existing `path_value`.
+- Retry/cancellation: load-time and dispatch-time reads fail immediately;
+  no retries; dispatch never uses partial text.
+- Evidence: `tests/test_role_policy_compose.py` pins string compat, order,
+  missing/oversize/non-string refusal, session re-keying, and composed
+  content; `check.py` green.
+- Failure: missing/unreadable/non-UTF-8/oversize parts are `ConfigError`
+  (fail closed); unknown keys still fail.
+
+## Consequences
+
+Operators write shared principles once and list them first; hand-written
+configs retire the external generator step. Default behavior is unchanged.

@@ -140,6 +140,8 @@ max_bytes = 524288
 
 [roles.worker]
 profile = "primary"
+# Composed policy: string or list in order, e.g. ["policies/shared.md", "policies/worker.md"].
+# At most 16 files, each at most 64 KiB, 256 KiB total; missing/oversize fails.
 policy = "policies/worker.md"
 workspace = "write"
 capabilities = ["files", "read", "diff", "exec", "experiment", "verify", "fetch", "search", "insights", "decide", "consult", "finish"]

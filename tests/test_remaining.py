@@ -294,9 +294,10 @@ class RemainingTests(Fixture):
         from mizu.runtime import Engine
         from mizu.fs import read_json
         from support import ScriptDriver
-        missing=dataclasses.replace(self.config.roles['reviewer'],policy=self.root/'absent-policy.md')
+        missing=dataclasses.replace(self.config.roles['reviewer'],policy=(self.root/'absent-policy.md',))
         config=dataclasses.replace(self.config,roles={**self.config.roles,'reviewer':missing})
-        with self.assertRaises(FileNotFoundError):Engine(config,driver=ScriptDriver()).run(self.project,'reviewer')
+        from mizu.errors import ConfigError as _ConfigError
+        with self.assertRaises(_ConfigError):Engine(config,driver=ScriptDriver()).run(self.project,'reviewer')
         def work(*_):raise OSError('driver start failed')
         with self.assertRaises(OSError):Engine(self.config,driver=ScriptDriver(work)).run(self.project,'reviewer')
         records=list((self.project.root/'runs').glob('*/error.json'))
