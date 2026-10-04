@@ -9,7 +9,7 @@ from . import platform as _platform
 from .bridge import Bridge
 from .config import Config, Role, role_policy_text
 from .engine_channel import Channel
-from .engine_config import effective, connected_servers, session_record, save_session
+from .engine_config import effective, connected_servers, session_record, save_session, session_token_total, MAX_SESSION_TOKENS
 from .errors import ConfigError, ProtocolError, ModelFailure
 from .fs import atomic_write, mkdir, write_json
 from .process import environment
@@ -87,7 +87,7 @@ class PiDriver:
                         if context.finished is None:
                             raise ProtocolError("Pi settled without mizu_finish")
                         if settings["session"] == "persistent" and not context.ephemeral:
-                            save_session(path, session_file, {})
+                            save_session(path, session_file, {"tokens": _cumulative_tokens(saved, context)})
                         break
             finally:
                 context.model_evidence.update(requests=context.request_count, usage=list(context.runtime_usage.values()),
@@ -123,3 +123,36 @@ def credentials(path: Path) -> dict[str, str]:
             value = value[1:-1]
         result[name] = value
     return result
+
+
+def _cumulative_tokens(saved, context):
+    """Cumulative Pi session tokens: saved total plus this run's usage.
+
+    Schema: reads the bounded saved record plus ``context.runtime_usage``
+    normalized with the Pi key map. Bounds: capped at 2**63-1. Trust:
+    local evidence only. Failure: unknown shapes add nothing, so rotation
+    stays age-driven when the provider reports no recognized counters.
+    """
+    from .usage import normalize
+    run_total = 0
+    try:
+        items = list(context.runtime_usage.values())
+    except AttributeError:
+        items = []
+    for value in items[:4096]:
+        try:
+            part = normalize(value if isinstance(value, dict) else {}, "pi")
+        except Exception:
+            continue
+        if part.get("unknown_shape"):
+            continue
+        for field in ("input_tokens", "output_tokens", "cache_read_tokens",
+                      "cache_write_tokens", "other_tokens"):
+            piece = part.get(field, 0)
+            if type(piece) is int and piece > 0:
+                run_total = min(run_total + piece, MAX_SESSION_TOKENS)
+    try:
+        previous = session_token_total(saved, "pi")
+    except Exception:
+        previous = 0
+    return min(previous + run_total, MAX_SESSION_TOKENS)

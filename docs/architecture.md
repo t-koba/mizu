@@ -141,6 +141,15 @@ old sessions are kept for audit. No silent provider fallback or automatic replay
 is implemented. Operators can change profiles at a boundary, and Worker can
 request independent consultations against the same snapshot. Consultations
 share budget/slot limits and fail independently; they cannot edit code.
+A resumed persistent session receives only an append-only delta (goal pin,
+current snapshot pin, proposals not yet offered), never the full goal and
+history again; a new, compacted-away, or rotated session receives the full
+prompt. Rotation is operator policy via `[limits] session_max_tokens`,
+`session_max_cost_usd`, and `session_max_age_seconds` (0 disables each):
+a due rotation removes `session.json` so the next dispatch mints a fresh
+provider session while the published snapshot and composed policy reload
+unchanged, recording the reason in `rotation.json` and the mode/key in
+`prompt_projection.json` (ADR-028).
 
 Repeated failures pause a project. A restarting worker inspects actual files and
 previous failure evidence before further action. It does not resend the last

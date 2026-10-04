@@ -700,6 +700,101 @@ def prompt_for(context: Context) -> str:
                       ensure_ascii=False)
 
 
+def prompt_delta_for(context: Context, pending: list) -> str:
+    """Append-only delta for a resumed persistent session (M14).
+
+    Schema: ``goal_digest`` pin plus the pinned ``published_snapshot`` and a
+    small ``snapshot_delta`` (previous/current ids), then only the pending
+    proposals not yet offered, workspace markers and capability-gated
+    acceptance commands. The full goal text and ``recent_snapshots`` history
+    are never repeated: the provider session already holds them. Key order is
+    fixed (pins first) so the stable prefix keeps working caches warm.
+    Bounds: pending follows ``[limits] pending_insights``; the delta carries
+    no file contents and no history array, so resumed-unit bytes stay flat as
+    history grows. Trust: local recorded state only, never model input.
+    Retry/cancellation: pure projection, no I/O. Evidence: the dispatching
+    run records ``prompt_mode=delta`` and ``prompt_bytes`` in
+    ``prompt_projection.json``. Failure: never raises for missing state
+    (callers fall back to the full prompt).
+    """
+    caps = set(context.role.capabilities)
+    acceptance = list(context.project.verify) if "verify" in caps else []
+    return json.dumps({"goal_digest": context.goal_digest,
+                       "published_snapshot": {k: context.snapshot[k] for k in (
+                           "id", "code_digest", "created_at", "state", "summary", "verification")},
+                       "snapshot_delta": {"id": context.snapshot["id"],
+                                          "code_digest": context.snapshot["code_digest"]},
+                       "pending_insights": pending,
+                       "workspace": "/workspace", "workspace_mode": context.role.workspace,
+                       "acceptance_commands": acceptance},
+                      ensure_ascii=False)
+
+
+def session_prompt(context: Context, role, run_dir: Path) -> tuple:
+    """Choose the full or delta prompt for this dispatch (M14).
+
+    Schema: peeks at the content-bound session record for the role profile;
+    returns ``(prompt, mode, session_key, rotation, session_dir)`` where mode
+    is ``"full"`` or ``"delta"`` and rotation is the ``rotation.json`` record
+    (or None). Bounds: prompt-state and rotation evidence are small JSON
+    files; pending lists follow ``[limits] pending_insights``. Trust: local
+    session state only. Retry/cancellation: never raises for session I/O;
+    any failure falls back to the full prompt and empty identity. Evidence:
+    rotations write ``rotation.json``; dispatches record the mode in
+    ``prompt_projection.json``. Failure: a due rotation removes
+    ``session.json`` so the next dispatch mints a fresh provider session
+    while the published snapshot and composed policy reload unchanged; a
+    missing or invalid record (new, compacted-away or rotated session) takes
+    the full prompt.
+    """
+    from .engine_config import (effective, read_prompt_state, rotate_session,
+                                rotation_due, session_record)
+    if getattr(context, "ephemeral", False):
+        return prompt_for(context), "full", "", None, None
+    try:
+        settings = effective(context.config, role, role.profile)
+    except Exception:
+        return prompt_for(context), "full", "", None, None
+    if settings.get("session") != "persistent":
+        return prompt_for(context), "full", "", None, None
+    try:
+        path, saved = session_record(context, role.profile, settings)
+    except Exception:
+        return prompt_for(context), "full", "", None, None
+    session_dir = path.parent
+    key = session_dir.name
+    if saved is None:
+        return prompt_for(context), "full", key, None, session_dir
+    try:
+        due, reason = rotation_due(context.config.limits, path, saved,
+                                   settings.get("engine", "unknown"))
+    except Exception:
+        due, reason = False, ""
+    if due:
+        try:
+            record = rotate_session(path, run_dir, reason)
+        except Exception:
+            return prompt_for(context), "full", key, None, session_dir
+        return prompt_for(context), "full", key, record, session_dir
+    caps = set(context.role.capabilities)
+    try:
+        current_generation = context.project.insights.generation()
+        last = read_prompt_state(session_dir)
+        if (last is not None
+                and last.get("inbox_generation") == current_generation
+                and last.get("snapshot") == context.snapshot["id"]):
+            pending: list = []
+        else:
+            pending = context.project.insights.list(limit=context.config.limits.pending_insights) \
+                if ("insights" in caps or "decide" in caps) else []
+    except Exception:
+        pending = []
+    try:
+        return prompt_delta_for(context, pending), "delta", key, None, session_dir
+    except Exception:
+        return prompt_for(context), "full", key, None, session_dir
+
+
 class Engine:
     def __init__(self, config: Config, *, driver=None, stop: threading.Event | None = None, ephemeral: bool = False):
         self.config = config
@@ -792,14 +887,16 @@ class Engine:
                 context = Context(self.config, project, role, run_dir, snapshot, workspace,
                                   stop=self.stop, consult=self.consult)
                 context.ephemeral = self.ephemeral
-                prompt = prompt_for(context)
+                prompt, prompt_mode, session_key, rotation, session_dir = session_prompt(context, role, run_dir)
                 decoded = json.loads(prompt)
                 write_json(run_dir / "prompt_projection.json",
                            {"run": run_id, "role": role_name, "snapshot": snapshot["id"],
                             "recent_snapshots": len(decoded.get("recent_snapshots", [])),
                             "pending_insights": len(decoded.get("pending_insights", [])),
                             "acceptance_commands": len(decoded.get("acceptance_commands", [])),
-                            "prompt_bytes": len(prompt.encode("utf-8")), "created_at": now()})
+                            "prompt_bytes": len(prompt.encode("utf-8")), "created_at": now(),
+                            "prompt_mode": prompt_mode, "session_key": session_key,
+                            "rotation": (rotation or {}).get("reason", "")})
                 model_result = driver.execute(context, prompt)
                 if context.cancelled():
                     raise Cancelled("Run stopped before publication")
@@ -830,6 +927,11 @@ class Engine:
                     project.snapshots.publish(snapshot)
                 if context.commentary is not None:
                     result["artifact"] = publish(project, snapshot, context.commentary, run_id=run_id)
+                if session_dir is not None:
+                    with contextlib.suppress(OSError, ValueError, TypeError):
+                        from .engine_config import write_prompt_state
+                        write_prompt_state(session_dir, snapshot=snapshot["id"],
+                                           inbox_generation=context.inbox_seen)
                 result["status"] = "completed"
                 write_json(run_dir / "result.json", result)
                 write_json(project.root / "observed" / f"{role_name}.json",

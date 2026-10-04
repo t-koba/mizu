@@ -172,6 +172,156 @@ def session_record(context, profile, settings):
     return path, record
 
 
+#: M14 persistent-session rotation: usage totals are read from the saved
+#: per-session record plus existing per-run evidence; no new counters.
+MAX_SESSION_TOKENS = 2**63 - 1
+
+
+def _as_int(value):
+    return value if type(value) is int and value >= 0 else None
+
+
+def session_token_total(saved, engine="unknown"):
+    """Cumulative model tokens recorded for a saved persistent session.
+
+    Schema: ``saved`` is a ``session_record()`` record (``{'id', 'usage'}``).
+    Bounds: usage payloads stay under the 256 KiB session-record bound.
+    Trust: local operator state only. Failure: unknown shapes count 0
+    (rotation stays age-driven) rather than raising.
+    """
+    try:
+        usage = saved.get("usage", {}) if isinstance(saved, dict) else {}
+        if not isinstance(usage, dict):
+            return 0
+        direct = _as_int(usage.get("tokens"))
+        if direct is not None:
+            return min(direct, MAX_SESSION_TOKENS)
+        if isinstance(usage.get("totalTokens"), int):
+            total = usage.get("totalTokens")
+            if type(total) is int and total >= 0:
+                return min(total, MAX_SESSION_TOKENS)
+        if "totalTokens" in usage and isinstance(usage.get("total"), dict):
+            total = _as_int(usage["total"].get("totalTokens"))
+            if total is not None:
+                return min(total, MAX_SESSION_TOKENS)
+        total = 0
+        for value in list(usage.values())[:4096]:
+            if not isinstance(value, dict):
+                continue
+            for key in ("totalTokens", "inputTokens", "input_tokens", "input",
+                        "outputTokens", "output_tokens", "output",
+                        "cachedTokens", "cache_read_tokens", "cacheRead",
+                        "cache_creation_tokens", "cacheWrite",
+                        "reasoningTokens", "reasoning_tokens"):
+                part = _as_int(value.get(key)) if isinstance(value, dict) else None
+                if part is not None:
+                    total = min(total + part, MAX_SESSION_TOKENS)
+        return total
+    except Exception:
+        return 0
+
+
+def session_cost_total(saved):
+    """Cumulative estimated USD recorded for a saved persistent session."""
+    try:
+        usage = saved.get("usage", {}) if isinstance(saved, dict) else {}
+        if not isinstance(usage, dict):
+            return 0.0
+        total = 0.0
+        candidates = [usage] + [v for v in list(usage.values())[:4096] if isinstance(v, dict)]
+        for entry in candidates:
+            for key in ("costUSD", "cost_estimate_usd", "cost"):
+                value = entry.get(key)
+                if type(value) in (int, float) and value >= 0:
+                    total += float(value)
+        import math
+        return total if math.isfinite(total) and total >= 0 else 0.0
+    except Exception:
+        return 0.0
+
+
+def session_age_seconds(path):
+    """Wall-clock age of a saved session file, or None when unknown."""
+    import time
+    try:
+        return max(0.0, time.time() - path.stat().st_mtime)
+    except OSError:
+        return None
+
+
+def rotation_due(limits, path, saved, engine="unknown"):
+    """Decide whether a resumed persistent session must restart (M14).
+
+    Schema: reads ``[limits] session_max_tokens``, ``session_max_cost_usd``
+    and ``session_max_age_seconds`` (0 disables each). Bounds: token/cost
+    totals come from the bounded saved record; age from file mtime. Trust:
+    local operator state only. Failure: never raises; unknown usage counts
+    as zero so age still rotates Pi sessions that report no cumulative
+    tokens. Returns ``(due, reason)`` with an empty reason when fresh.
+    """
+    if saved is None:
+        return False, ""
+    try:
+        maximum = getattr(limits, "session_max_tokens", 0) or 0
+        if maximum:
+            total = session_token_total(saved, engine)
+            if total >= maximum:
+                return True, f"tokens {total}>={maximum}"
+        cost_max = getattr(limits, "session_max_cost_usd", 0) or 0
+        if cost_max:
+            cost = session_cost_total(saved)
+            if cost >= float(cost_max):
+                return True, f"cost {cost}>={cost_max}"
+        age_max = getattr(limits, "session_max_age_seconds", 0) or 0
+        if age_max:
+            age = session_age_seconds(path)
+            if age is not None and age >= age_max:
+                return True, f"age {age:.0f}s>={age_max}s"
+    except Exception:
+        return False, ""
+    return False, ""
+
+
+def rotate_session(path, run_dir, reason):
+    """Restart a persistent session, keeping the published snapshot.
+
+    Schema: removes ``session.json`` so the next dispatch mints a fresh
+    provider session under the same content-bound key directory; writes
+    ``rotation.json`` evidence into the current run directory. The published
+    snapshot and composed policy reload on the next unit (callers reuse the
+    exact published snapshot id). Failure: missing session files are
+    tolerated; other I/O errors propagate.
+    """
+    from .fs import now, write_json
+    key = path.parent.name if hasattr(path, "parent") else ""
+    record = {"rotated": True, "reason": reason, "session_key": key, "created_at": now()}
+    write_json(run_dir / "rotation.json", record)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    return record
+
+
+def read_prompt_state(directory):
+    """Last dispatched snapshot/inbox generation for a session directory."""
+    from .fs import read_json
+    try:
+        record = read_json(directory / "prompt_state.json", None)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict):
+        return None
+    return record
+
+
+def write_prompt_state(directory, *, snapshot, inbox_generation):
+    """Record what a persistent session has already received (M14 delta)."""
+    from .fs import now, write_json
+    write_json(directory / "prompt_state.json",
+               {"snapshot": snapshot, "inbox_generation": inbox_generation, "created_at": now()})
+
+
 def save_session(path, identifier, usage):
     if not isinstance(identifier, str) or not identifier or len(identifier) > 4096:
         raise ConfigError('Engine did not return a valid session identifier')

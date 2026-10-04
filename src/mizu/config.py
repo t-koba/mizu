@@ -294,6 +294,14 @@ class Limits:
     #: reasons truncated to M chars (flagged).
     dashboard_decisions: int = 10
     dashboard_reason_chars: int = 500
+    #: Operator-selected persistent-session rotation bounds (M14). A resumed
+    #: persistent session restarts with a fresh session key once cumulative
+    #: usage or wall-clock session age reaches a bound, carrying the
+    #: published snapshot and composed policy forward. 0 disables that bound;
+    #: unset preserves the previous never-rotate behaviour.
+    session_max_tokens: int = 0
+    session_max_cost_usd: float = 0
+    session_max_age_seconds: int = 0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -452,11 +460,18 @@ def load(file: Path) -> Config:
                      "retention_days": (0, 3650), "pending_insights": (1, 1000),
                      "event_log_compress_days": (0, 3650), "event_log_retention_days": (0, 3650),
                      "dashboard_decisions": (1, 1000), "dashboard_reason_chars": (1, 10000),
+                     "session_max_tokens": (0, 1073741824), "session_max_age_seconds": (0, 31536000),
                      "default_wait_seconds": (1, MAX_WAIT_SECONDS),
                      "maximum_wait_seconds": (1, MAX_WAIT_SECONDS),
                      "daily_requests": (0, 100000), "shared_daily_requests": (0, 100000), "max_failures": (0, 1073741824),
                      "free_disk_mb": (0, 1073741824)}
     for k, v in lim.items():
+        if k == "session_max_cost_usd":
+            import math
+            if type(v) not in (int, float) or isinstance(v, bool) or not math.isfinite(float(v)) \
+                    or not 0 <= float(v) <= 1000000:
+                raise ConfigError("limits.session_max_cost_usd must be a number in [0, 1000000]")
+            continue
         low, high = _LIMIT_RANGES.get(k, (1, 1073741824))
         number(v, f"limits.{k}", low, high)
     limits = Limits(**lim)
