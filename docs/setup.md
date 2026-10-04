@@ -52,6 +52,8 @@ podman info --format json
 
 Linux 上で rootless Podman を利用する場合、`/etc/subuid` と `/etc/subgid` の割り当て、cgroup v2 の有効化を済ませてください。
 
+Mizu は rootless Podman 実行時に `--user <host uid> --userns=keep-id` を渡すため、空のユーザー `containers.conf`（`userns = "keep-id"` の追記なし）でもワークスペースが読み取り可能で `mizu doctor --sandbox` が通ります。`--userns=keep-id` は Podman 専用です。Docker では同フラグを渡さず `--user <host uid>` のみで実行します。
+
 ### (3) Node.js と npm の準備
 
 Node.js 22.19.0 以上が必要です。

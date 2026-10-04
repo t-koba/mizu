@@ -556,3 +556,60 @@ identical URL, so the path was uncovered (REVIEW 858aec2…: CHANGES; CI-FAIL
 CI polling deduplicates as ADR-009 promised; varying URLs no longer spam the
 inbox or abort the tick. Operators needing per-run URLs use `vcs_read`.
 `check.py` stays green; stdlib-only; no model-specific defaults.
+
+## ADR-015 — Rootless Podman keeps the host uid via `--userns=keep-id`
+
+**Accepted (M7).** Rootless (`mode = "rootless"`) Podman runs pass
+`--userns=keep-id` alongside the existing `--user <host uid:gid>`, so the
+host uid is kept inside the container and the bind-mounted workspace stays
+readable with an empty user `containers.conf`. Docker runs omit the flag
+(Podman-only mode); `single` mode is unchanged (`--uidmap 0:0:1`,
+`--gidmap 0:0:1`, `--user 0:0`, no `userns` flag).
+
+## Context
+
+Rootless Podman without an explicit userns maps `--user <host uid>` to a
+subordinate container id, so the workspace bind mount appears owned by
+another id and `doctor --sandbox` (`real sandbox smoke`) fails with exit 1.
+Operators worked around it with `userns = "keep-id"` in the user
+`containers.conf`, which is operator state outside the auditable argv.
+Passing `--userns=keep-id` per run moves the choice into the fixed
+mechanism argv, where `doctor --sandbox` proves it under a systemd user
+service with an empty `containers.conf`.
+
+## Decision
+
+- Mechanism provides capabilities; policy decides behavior. The extra
+  `run` flag, its Podman-only gate, and the unchanged hardening floor
+  (read-only root, cap-drop, no-new-privs, resource limits) are mechanism.
+  Which runtime binary, image, network, mounts, and env to use stays
+  operator policy in `[sandbox]`.
+- No new config keys; unknown keys still fail. `sandbox.executable` with
+  basename `podman` selects the flag; any other runtime (notably `docker`)
+  runs with `--user` only. No operator knob per ADR-006.
+- `single` mode keeps its single-ID mapping and never carries `userns`.
+
+## Schema, bounds, trust, retry/cancellation, evidence, failure
+
+- Schema: no new interface. `Sandbox._fixed_floor` appends
+  `--userns=keep-id` after `--user` in rootless Podman argv only.
+- Bounds: one literal flag value; no lengths, sizes, or timeouts involved.
+- Trust: local argv construction from operator config, never model input;
+  the flag does not grant host privilege beyond the invoking user.
+- Retry/cancellation: none (argv construction); execution keeps the
+  existing timeout/cleanup contract.
+- Evidence: `tests/test_platform.py` pins Podman carries `keep-id` and
+  Docker omits it; `tests/test_single_id.py` pins rootless Podman carries
+  it and single mode omits it; `docs/setup.md` records the empty
+  `containers.conf` outcome and the Docker note.
+- Failure: an unknown future runtime simply runs without the flag (its
+  own mapping applies); a Podman lacking `keep-id` fails loudly at run
+  time through the existing startup-error record, never as a silent
+  downgrade.
+
+## Consequences
+
+`doctor --sandbox` passes with an empty user `containers.conf` under a
+systemd user service on rootless Podman; Docker behavior is documented and
+unchanged. `check.py` stays green; stdlib-only; no model-specific
+defaults.

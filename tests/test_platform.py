@@ -148,9 +148,20 @@ class ContainerArgvTests(unittest.TestCase):
         for flag in ("--network=none", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
                      "--pull=never", "--pids-limit", "--memory", "--cpus", "--user"):
             self.assertIn(flag, args)
-        self.assertNotIn("--userns", " ".join(args))
+        # M7: rootless Podman keeps the host uid so the workspace stays readable.
+        self.assertIn("--userns=keep-id", args)
         self.assertFalse(any("docker.sock" in s or "credentials.env" in s for s in args))
         self.assertEqual(args[-3:], [self.config().sandbox.image, "-c", "echo hi"])
+
+    def test_rootless_docker_omits_keep_id(self):
+        from mizu.sandbox import Sandbox
+        work = self.root / "work"
+        work.mkdir()
+        engine = Sandbox(self.config("docker"), self.root, "worker", self.root / "run")
+        args = engine.argv("n", work, "echo hi", writable=True)
+        self.assertIn("--user", args)
+        self.assertNotIn("--userns=keep-id", args)
+        self.assertNotIn("--userns", " ".join(args))
 
     def test_network_is_policy_selected(self):
         from mizu.sandbox import Sandbox

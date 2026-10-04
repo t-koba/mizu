@@ -112,7 +112,7 @@ Safety-critical bounds are fixed in code rather than exposed as configuration kn
 
 ## Sandbox
 
-The container interior is always Linux. The runtime must support standard flags (`--user`, `--network`, `--read-only`, `--cap-drop`, resource limits).
+The container interior is always Linux. The runtime must support standard flags (`--user`, `--network`, `--read-only`, `--cap-drop`, resource limits). Rootless Podman runs additionally pass `--userns=keep-id` so `--user <host uid>` keeps the host identity inside the container and the bind-mounted workspace stays readable; Docker has no `keep-id` mode and runs without the flag.
 
 | Key | Default | Description |
 |---|---|---|

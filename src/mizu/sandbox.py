@@ -178,6 +178,13 @@ class Sandbox:
                         "--uidmap", "0:0:1", "--gidmap", "0:0:1", "--user", "0:0"]
         else:
             command += ["--user", _platform.container_user()]
+            # Rootless Podman without an explicit userns maps `--user <host uid>`
+            # to a subordinate container id, leaving the bind-mounted workspace
+            # unreadable. `--userns=keep-id` keeps the host uid inside the
+            # container so the mount stays readable. Docker has no `keep-id`
+            # mode, so the flag is Podman-only (see docs/setup.md).
+            if _is_podman(cfg.executable):
+                command += ["--userns=keep-id"]
         command += ["--read-only", "--cap-drop=ALL",
                     "--security-opt=no-new-privileges",
                     "--memory", f"{cfg.memory_mb}m", "--memory-swap", f"{cfg.memory_mb}m",

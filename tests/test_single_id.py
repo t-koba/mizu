@@ -122,7 +122,8 @@ class SingleModeArgvTests(Fixture):
         args = engine.argv("n", self.root, "echo hi", writable=True)
         self.assertNotIn("--root", args)
         self.assertNotIn("--uidmap", args)
-        self.assertNotIn("--userns", " ".join(args))
+        # M7: rootless Podman carries keep-id; Docker omits it (covered in test_platform).
+        self.assertIn("--userns=keep-id", args)
         self.assertIn(_platform.container_user(), args)
 
     def test_missing_helper_refused(self):
