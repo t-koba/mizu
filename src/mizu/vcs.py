@@ -143,6 +143,21 @@ def split_ref_path(path: str) -> str | None:
     return name
 
 
+def _clear_readonly_for_windows(path: Path) -> None:
+    """Clear the read-only bit so Windows can replace/remove the file.
+
+    POSIX unlink/replace succeeds on read-only files, but Windows refuses
+    with PermissionError. Injected refs stay read-only otherwise; this only
+    makes the pending replace/remove writable on Windows.
+    """
+    if os.name != "nt":
+        return
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
 def _ensure_host_dir(path: Path) -> None:
     """Create a host-side directory level, refusing symlinks and files."""
     try:
@@ -194,6 +209,8 @@ def inject_refs(workspace: Path, refs: dict) -> dict:
             raise Denied(f"Cannot inject upstream refs: {exc}") from exc
         if existed is not None and stat.S_ISLNK(existed.st_mode):
             raise Denied("Refusing to overwrite a symlink with upstream ref content")
+        if existed is not None:
+            _clear_readonly_for_windows(target)
         atomic_write(target, (validated[name] + "\n").encode(), mode=0o444)
     _prune_stale(base, wanted)
     try:
@@ -221,6 +238,7 @@ def _prune_stale(base: Path, wanted: set[str]) -> None:
             rel = target.relative_to(base).as_posix()
             if rel not in wanted:
                 try:
+                    _clear_readonly_for_windows(target)
                     target.unlink()
                 except OSError as exc:
                     raise Denied(f"Cannot prune upstream refs: {exc}") from exc
