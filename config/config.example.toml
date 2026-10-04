@@ -12,6 +12,7 @@ exclude = [".git", ".pi", ".env", ".env.*", ".venv", "node_modules", "__pycache_
 
 [limits]
 daily_requests = 0                 # Fail closed. Set a deliberate positive limit.
+shared_daily_requests = 0          # Optional shared total across projects sharing data_dir (0 disables, max 100,000).
 requests_per_run = 24
 tools_per_run = 64
 run_seconds = 1200

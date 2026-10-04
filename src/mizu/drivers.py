@@ -67,9 +67,12 @@ def admit_invocation(context, *, unit: str) -> dict:
         return {"admitted": True}
     if context.request_count >= context.config.limits.requests_per_run:
         raise LimitExceeded("Per-run provider request budget exhausted")
+    project_name = getattr(getattr(context, "project", None), "name", "")
     try:
         Budget(context.config.data / "budget", context.config.limits.daily_requests,
-               context.config.limits.retention_days).take(f"{context.run_dir.name}:invocation")
+               context.config.limits.retention_days,
+               context.config.limits.shared_daily_requests).take(
+                   f"{context.run_dir.name}:invocation", project=project_name)
     except InfraExceeded:
         if hasattr(context,'model_evidence'):
             context.model_evidence['admission_status']='rejected'

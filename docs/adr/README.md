@@ -814,3 +814,28 @@ operator-authored (REVIEW finding on ADR-018).
 plus a command; cadence is `vcs.poll_interval_seconds` (15-86400, 300).
 One project polls once per tick via `vcs-poll.lock` plus `vcs-poll.json`;
 a tick is at most one 30 s fetch plus 4 branches at 15 s each.
+## ADR-022 — Per-project request budget with an optional shared total
+
+**Accepted.** Day-files keep the shared aggregate plus a per-project map;
+`daily_requests` caps each project, `shared_daily_requests` (0 disables)
+caps the shared total; `mizu budget <project>` and `mizu status` report both.
+
+## Context
+
+Projects sharing `data_dir` shared one UTC-day counter while
+`daily_requests` is per config, so the smallest limit stopped one project
+on another's usage.
+
+## Decision
+
+- Mechanism: `Budget.take`/`usage` scope counts by validated project name
+  under one lock; per-project refused first, then the shared cap; legacy
+  files keep their aggregate and start per-project counts at 0.
+- No new behavior without the key: `shared_daily_requests = 0` disables the
+  shared cap; unknown keys still fail.
+
+## Evidence / failure
+
+- `tests/test_budget_projects.py`: independence, shared cap, both reported.
+- `Denied` on bad project/request names; `InfraExceeded` names the refused
+  scope; `check.py` green.

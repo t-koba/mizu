@@ -135,7 +135,9 @@ def check(config: Config, *, sandbox: bool = False) -> dict:
         return config.sandbox.image
     checked("sandbox image", image)
     checks.append({"name": "provider-request admission", "status": "pass" if config.limits.daily_requests > 0 else "disabled",
-                   "details": {"daily_requests": config.limits.daily_requests, "scope": "shared UTC-day request count, not currency"}})
+                   "details": {"daily_requests": config.limits.daily_requests,
+                             "shared_daily_requests": config.limits.shared_daily_requests,
+                             "scope": "per-project UTC-day request count plus optional shared total, not currency"}})
     checks.append({"name": "search sources", "status": "pass" if config.web["feeds"] or config.web["search_command"] else "disabled",
                    "details": "Configure feeds or a trusted search executable; no implicit search service."})
     if sandbox:
@@ -224,8 +226,11 @@ def free_disk(config: Config) -> dict:
 
 def budget_file(config: Config) -> dict:
     usage = Budget(config.data / "budget", config.limits.daily_requests,
-                   config.limits.retention_days).usage()
+                   config.limits.retention_days,
+                   config.limits.shared_daily_requests).usage()
     if not isinstance(usage["used"], int) or usage["used"] < 0 or usage["used"] > max(usage["limit"], 0):
+        raise ConfigError("Budget file is corrupt; inspect data/budget/<day>.json")
+    if usage["shared_limit"] > 0 and (usage["shared_used"] < 0 or usage["shared_used"] > usage["shared_limit"]):
         raise ConfigError("Budget file is corrupt; inspect data/budget/<day>.json")
     return usage
 

@@ -250,6 +250,7 @@ def trusted_command(data: dict, key: str, default: str) -> tuple[str, ...]:
 @dataclasses.dataclass(frozen=True)
 class Limits:
     daily_requests: int = 0
+    shared_daily_requests: int = 0
     requests_per_run: int = 24
     tools_per_run: int = 64
     run_seconds: int = 1200
@@ -400,7 +401,7 @@ def load(file: Path) -> Config:
                      "retention_days": (0, 3650), "pending_insights": (1, 1000),
                      "default_wait_seconds": (1, MAX_WAIT_SECONDS),
                      "maximum_wait_seconds": (1, MAX_WAIT_SECONDS),
-                     "daily_requests": (0, 100000), "max_failures": (0, 1073741824),
+                     "daily_requests": (0, 100000), "shared_daily_requests": (0, 100000), "max_failures": (0, 1073741824),
                      "free_disk_mb": (0, 1073741824)}
     for k, v in lim.items():
         low, high = _LIMIT_RANGES.get(k, (1, 1073741824))

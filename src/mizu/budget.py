@@ -1,20 +1,22 @@
-"""Shared, crash-conservative request admission across all roles and projects."""
+"""Per-project request admission with an optional shared UTC-day total."""
 from __future__ import annotations
 
 import datetime as dt
 from pathlib import Path
 
-from .errors import InfraExceeded
-from .fs import atomic_write, canonical, lock, read_json
+from .errors import Denied, InfraExceeded
+from .fs import atomic_write, canonical, identifier, lock, read_json
 
 #: Day-file byte bound (~160K admissions at ~25 B/entry); count cap binds first.
 BUDGET_DAY_BYTES = 4 * 1024 * 1024
 
 
 class Budget:
-    def __init__(self, root: Path, daily: int, retention_days: int = 31):
+    def __init__(self, root: Path, daily: int, retention_days: int = 31,
+                 shared_daily: int = 0):
         self.root, self.daily = root, daily
         self.retention_days = retention_days
+        self.shared_daily = shared_daily
 
     def gc(self, *, keep_days: int | None = None) -> int:
         """Remove day-files older than the window. Best-effort; never fails admission.
@@ -43,35 +45,109 @@ class Budget:
             pass
         return removed
 
-    def take(self, request_id: str, *, day: str | None = None) -> int:
+    @staticmethod
+    def _check_project(project: str) -> str:
+        if not project:
+            return ""
+        try:
+            return identifier(project)
+        except Denied as exc:
+            raise Denied(f"Invalid budget project: {exc}") from exc
+
+    @staticmethod
+    def _split(record: dict) -> tuple[list, dict]:
+        requests = record.get("requests", [])
+        if not isinstance(requests, list):
+            requests = []
+        projects = record.get("projects", {})
+        if not isinstance(projects, dict):
+            projects = {}
+        clean: dict[str, list] = {}
+        for name, entries in projects.items():
+            if isinstance(name, str) and isinstance(entries, list):
+                clean[name] = entries
+        return requests, clean
+
+    def take(self, request_id: str, *, day: str | None = None, project: str = "") -> int:
+        """Admit one request against the per-project limit and the shared total.
+
+        Schema: ``request_id`` is an opaque caller string (``run:sequence``);
+        ``project`` is the validated project name (``\"\"`` keeps the legacy
+        shared-only accounting used by unit callers). Bounds: per-project
+        count below ``daily``; shared aggregate below ``shared_daily`` when
+        positive; day-file below ``BUDGET_DAY_BYTES``. Trust: local operator
+        state under ``budget.lock``. Retry: idempotent per (project,
+        request_id); a repeat returns the per-project count without charging.
+        Evidence: returns the per-project count (shared count when no project
+        is named). Failure: ``InfraExceeded`` when disabled, per-project
+        exhausted, shared exhausted, or oversize; legacy files without
+        ``projects`` keep their aggregate and start per-project counts at 0.
+        """
         day = day or dt.datetime.now(dt.timezone.utc).date().isoformat()
         dt.date.fromisoformat(day)
+        project = self._check_project(project)
+        if not isinstance(request_id, str) or not request_id or "\x00" in request_id or "\n" in request_id:
+            raise Denied("Invalid budget request identity")
         if self.daily <= 0:
             raise InfraExceeded("Model calls are disabled: set limits.daily_requests explicitly")
         with lock(self.root / "budget.lock"):
             path = self.root / f"{day}.json"
             record = read_json(path, {"day": day, "requests": []})
-            if request_id in record["requests"]:
-                return len(record["requests"])
-            if len(record["requests"]) >= self.daily:
+            if not isinstance(record, dict):
+                record = {"day": day, "requests": []}
+            record["day"] = day
+            requests, projects = self._split(record)
+            entries = projects.get(project, [])
+            if request_id in entries:
+                return len(entries)
+            if len(entries) >= self.daily:
+                if project:
+                    raise InfraExceeded(
+                        f"UTC daily model-request budget exhausted for project '{project}'")
                 raise InfraExceeded("UTC daily model-request budget exhausted")
-            record["requests"].append(request_id)
+            if self.shared_daily > 0 and len(requests) >= self.shared_daily:
+                raise InfraExceeded("UTC daily model-request shared budget exhausted")
+            entries = [*entries, request_id]
+            projects[project] = entries
+            if request_id not in requests:
+                requests = [*requests, request_id]
+            record["requests"] = requests
+            record["projects"] = projects
             body = canonical(record)
             if len(body) > BUDGET_DAY_BYTES:
                 raise InfraExceeded("Budget day-file exceeds byte bound; inspect data/budget")
             atomic_write(path, body)
-            count = len(record["requests"])
+            count = len(entries)
         self.gc()
         return count
 
-    def usage(self) -> dict:
+    def usage(self, project: str = "") -> dict:
+        """Report per-project usage plus the shared UTC-day total.
+
+        Schema: ``project=\"\"`` reports the shared aggregate as ``used``
+        (legacy shape); a named project reports its own count as ``used``
+        with ``limit`` as the per-project cap. Both shapes always carry
+        ``shared_used``/``shared_limit``. Bounds: reads today's day-file only.
+        Trust: local operator state. Failure: never raises for I/O; corrupt
+        shapes read as empty.
+        """
+        project = self._check_project(project)
         day = dt.datetime.now(dt.timezone.utc).date().isoformat()
         path = self.root / f"{day}.json"
         record = read_json(path, {"requests": []})
+        if not isinstance(record, dict):
+            record = {"requests": []}
+        requests, projects = self._split(record)
+        shared = len(requests)
+        if project:
+            used, limit = len(projects.get(project, [])), self.daily
+        else:
+            used, limit = shared, self.daily
         try:
             size = path.stat().st_size
         except OSError:
             size = 0
         reaped = self.gc()
-        return {"day": day, "used": len(record["requests"]), "limit": self.daily,
-                "bytes": size, "reaped": reaped}
+        return {"day": day, "used": used, "limit": limit,
+                "shared_used": shared, "shared_limit": self.shared_daily,
+                "project": project, "bytes": size, "reaped": reaped}

@@ -95,7 +95,9 @@ class ResumeHealthTests(Fixture):
                 try:
                     Budget(context.config.data / "budget",
                            context.config.limits.daily_requests,
-                           context.config.limits.retention_days).take("fill-to-exhaust")
+                           context.config.limits.retention_days,
+                           context.config.limits.shared_daily_requests).take(
+                               "fill-to-exhaust", project=context.project.name)
                 except Exception:
                     pass
                 return pi.execute(context, prompt, profile=profile)

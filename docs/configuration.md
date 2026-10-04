@@ -68,7 +68,8 @@ required). Operator tooling that concatenates configs
 
 | Key | Scope and description |
 |---|---|
-| `daily_requests` | Shared provider admissions across all projects per UTC day (0 disables, max 100,000). Day-files older than `retention_days` are reaped. Pi counts logical model requests, Codex counts turns, Claude counts queries |
+| `daily_requests` | Per-project provider admissions per UTC day (0 disables, max 100,000). Day-files older than `retention_days` are reaped. Pi counts logical model requests, Codex counts turns, Claude counts queries |
+| `shared_daily_requests` | Optional shared total across all projects sharing `data_dir` per UTC day (0 disables the shared cap, max 100,000). Per-project admissions also count toward this total; the tighter bound refuses first |
 | `requests_per_run`, `tools_per_run` | Per-work-unit request and tool bounds; child consultations consume shared daily budget |
 | `run_seconds`, `command_seconds` | Deadlines for the overall work unit and individual container commands |
 | `idle_seconds`, `cooldown_seconds` | Daemon sleep between poll iterations and pause between work units |
@@ -84,8 +85,9 @@ required). Operator tooling that concatenates configs
 | `pending_insights` | Newest pending proposals offered in prompts/dashboard (1–1,000; default 30). `mizu insight list` uses 1,000 |
 | `free_disk_mb` | Minimum free disk space required to start a work unit |
 
-All limits are positive integers except `daily_requests`, `max_failures`, `free_disk_mb`, and `retention_days`, which may be zero.
-`daily_requests` counts logical admissions, not dollar amounts; configure spending limits with your provider. Use `mizu status` and `mizu budget` for UTC-day counts, and `mizu usage` for token statistics.
+All limits are positive integers except `daily_requests`, `shared_daily_requests`, `max_failures`, `free_disk_mb`, and `retention_days`, which may be zero.
+`daily_requests` counts logical admissions, not dollar amounts; configure spending limits with your provider. Use `mizu status` and `mizu budget` for per-project and shared UTC-day counts, and `mizu usage` for token statistics.
+Day-files (`data/budget/YYYY-MM-DD.json`) keep the shared aggregate plus a per-project map, so two configs sharing `data_dir` with different `daily_requests` admit independently unless the optional shared total is reached. `mizu budget <project>` and `mizu status` report both numbers.
 
 ## Fixed mechanism bounds
 

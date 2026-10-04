@@ -23,7 +23,7 @@ class Fixture(unittest.TestCase):
         configure(self.file, None)
         text = self.file.read_text().replace('data_dir = "~/.local/state/mizu"', 'data_dir = ' + json.dumps(str(self.root / "data")))
         text = text.replace('provider = ""', 'provider = "test-provider"').replace('model = ""', 'model = "test-model"')
-        text = text.replace('daily_requests = 0', 'daily_requests = 100').replace('free_disk_mb = 1024', 'free_disk_mb = 0')
+        text = text.replace('\ndaily_requests = 0', '\ndaily_requests = 100').replace('free_disk_mb = 1024', 'free_disk_mb = 0')
         text = text.replace('image = ""', 'image = "sha256:' + 'a' * 64 + '"')
         self.file.write_text(text)
         self.config = load(self.file)

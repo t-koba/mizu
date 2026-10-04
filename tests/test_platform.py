@@ -133,7 +133,7 @@ class ContainerArgvTests(unittest.TestCase):
         text = config_file.read_text().replace('data_dir = "~/.local/state/mizu"',
                                                 'data_dir = ' + json.dumps(str(self.root / "data")))
         text = text.replace('provider = ""', 'provider = "p"').replace('model = ""', 'model = "m"')
-        text = text.replace('daily_requests = 0', 'daily_requests = 1').replace('free_disk_mb = 1024', 'free_disk_mb = 0')
+        text = text.replace('\ndaily_requests = 0', '\ndaily_requests = 1').replace('free_disk_mb = 1024', 'free_disk_mb = 0')
         text = text.replace('image = ""', 'image = "sha256:' + 'a' * 64 + '"')
         text = text.replace('executable = "podman"', f'executable = "{executable}"')
         config_file.write_text(text)
@@ -340,7 +340,7 @@ class ServiceRendererTests(unittest.TestCase):
         text = config_file.read_text().replace('data_dir = "~/.local/state/mizu"',
                                                 'data_dir = ' + json.dumps(str(self.root / "data")))
         text = text.replace('provider = ""', 'provider = "p"').replace('model = ""', 'model = "m"')
-        text = text.replace('daily_requests = 0', 'daily_requests = 1').replace('free_disk_mb = 1024', 'free_disk_mb = 0')
+        text = text.replace('\ndaily_requests = 0', '\ndaily_requests = 1').replace('free_disk_mb = 1024', 'free_disk_mb = 0')
         text = text.replace('image = ""', 'image = "sha256:' + 'a' * 64 + '"')
         config_file.write_text(text)
         self.config = __import__("dataclasses").replace(load(config_file), timezone="local")

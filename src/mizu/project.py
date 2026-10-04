@@ -82,7 +82,8 @@ class Project:
     def status(self) -> dict:
         snapshot = self.snapshots.get()
         budget = Budget(self.config.data / "budget", self.config.limits.daily_requests,
-                        self.config.limits.retention_days).usage()
+                        self.config.limits.retention_days,
+                        self.config.limits.shared_daily_requests).usage(self.name)
         return {"project": self.name, "control": self.control(), "snapshot": snapshot["id"],
                 "code_digest": snapshot["code_digest"], "created_at": snapshot["created_at"],
                 "outcome": snapshot["outcome"], "summary": snapshot["summary"],
@@ -92,6 +93,8 @@ class Project:
                 "active": {p.stem: read_json(p) for p in (self.root / "active").glob("*.json") if not p.is_symlink()},
                 "pending_insights": self.insights.list(limit=self.config.limits.pending_insights),
                 "budget": {"used_requests": budget["used"], "limit_requests": budget["limit"],
+                           "shared_used_requests": budget["shared_used"],
+                           "shared_limit_requests": budget["shared_limit"],
                            "day": budget["day"], "bytes": budget["bytes"],
                            "reaped": budget["reaped"]}}
 

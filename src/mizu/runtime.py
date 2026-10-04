@@ -205,7 +205,9 @@ class Context:
                             raise LimitExceeded("Per-run provider request budget exhausted")
                         try:
                             Budget(self.config.data / "budget", self.config.limits.daily_requests,
-                                   self.config.limits.retention_days).take(f"{self.run_dir.name}:{sequence}")
+                                   self.config.limits.retention_days,
+                                   self.config.limits.shared_daily_requests).take(
+                                       f"{self.run_dir.name}:{sequence}", project=self.project.name)
                         except InfraExceeded:
                             if hasattr(self, 'model_evidence'):
                                 self.model_evidence['admission_status'] = 'rejected'
@@ -729,9 +731,12 @@ class Engine:
         if not control.get("armed") or control.get("paused"):
             raise Denied("Project is unarmed or paused")
         usage = Budget(self.config.data / "budget", self.config.limits.daily_requests,
-                       self.config.limits.retention_days).usage()
+                       self.config.limits.retention_days,
+                       self.config.limits.shared_daily_requests).usage(project.name)
         if usage["limit"] <= usage["used"]:
-            raise InfraExceeded("UTC daily model-request budget unavailable")
+            raise InfraExceeded(f"UTC daily model-request budget unavailable for project '{project.name}'")
+        if usage["shared_limit"] > 0 and usage["shared_used"] >= usage["shared_limit"]:
+            raise InfraExceeded("UTC daily model-request shared budget unavailable")
         if shutil.disk_usage(project.root).free < self.config.limits.free_disk_mb * 1048576:
             raise InfraExceeded("Free disk space is below the configured reserve")
         with contextlib.ExitStack() as stack:
