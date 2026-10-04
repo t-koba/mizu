@@ -1,7 +1,7 @@
 # Architecture decisions
 
 Keep entries short: Accepted, Context, Decision, Evidence/Failure only, as in
-ADR-018 through ADR-021. Full interface schema, bounds, trust, retry/cancel,
+ADR-018 through ADR-023. Full interface schema, bounds, trust, retry/cancel,
 evidence, and failure stay in the module docstrings and docs/.
 
 ## ADR-001 — Local files and operating-system supervision
@@ -839,3 +839,27 @@ on another's usage.
 - `tests/test_budget_projects.py`: independence, shared cap, both reported.
 - `Denied` on bad project/request names; `InfraExceeded` names the refused
   scope; `check.py` green.
+## ADR-023 — Digest-gated on_change observers
+
+**Accepted.** `on_change` compares `code_digest`, not snapshot id;
+state-only republications do not reschedule observers.
+
+## Context
+
+State-only republications minted a new snapshot id with the same code,
+so an `on_change` reviewer re-reviewed identical code each tick and its
+approval woke the writer, looping model calls overnight.
+
+## Decision
+
+- Mechanism: `observed/<role>.json` stores `{snapshot, code_digest}`;
+  `_on_change_observed` skips when the digest matches (legacy cursors
+  fall back to id equality once). Writer publication is unchanged; a
+  no-action wake publishes the same digest and observers keep skipping.
+- No new config keys; unknown keys still fail.
+
+## Evidence / failure
+
+- `tests/test_onchange_digest.py`: state-only republication skips
+  without a model call; code change runs and upgrades the cursor.
+- `check.py` green.

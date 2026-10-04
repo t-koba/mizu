@@ -747,8 +747,9 @@ class Engine:
             project.insights.ingest_editor(keep_days=project.config.limits.retention_days)
             snapshot = project.snapshots.get()
             cursor = read_json(project.root / "observed" / f"{role_name}.json", {})
-            if role.on_change and cursor.get("snapshot") == snapshot["id"]:
-                return {"skipped": "unchanged", "snapshot": snapshot["id"]}
+            if role.on_change and _on_change_observed(cursor, snapshot):
+                return {"skipped": "unchanged", "snapshot": snapshot["id"],
+                        "code_digest": snapshot["code_digest"]}
             active = project.root / "active" / f"{role_name}.json"
             run_id = uuid.uuid4().hex
             run_dir = project.root / "runs" / run_id
@@ -831,7 +832,8 @@ class Engine:
                     result["artifact"] = publish(project, snapshot, context.commentary, run_id=run_id)
                 result["status"] = "completed"
                 write_json(run_dir / "result.json", result)
-                write_json(project.root / "observed" / f"{role_name}.json", {"snapshot": snapshot["id"]})
+                write_json(project.root / "observed" / f"{role_name}.json",
+                           {"snapshot": snapshot["id"], "code_digest": snapshot["code_digest"]})
                 write_json(project.root / "health" / f"{role_name}.json",
                            {"consecutive_failures": 0, "last_run": run_id, "updated_at": now()})
                 return result
@@ -957,6 +959,35 @@ class Engine:
                 answer['error'],answer['error_truncated']=text_preview(result['error'],2048)
             answers.append(answer)
         return {**record,'answers':answers}
+
+
+def _on_change_observed(cursor: dict, snapshot: dict) -> bool:
+    """True when an ``on_change`` role already observed this code.
+
+    Schema: observed cursor plus the published snapshot. Bounds: string
+    comparison only. Trust: local operator state plus content digests, never
+    model input. Failure: never raises; unreadable cursors read as unseen.
+
+    State-only republications keep the same ``code_digest`` under a new
+    snapshot id, so they do not schedule ``on_change`` roles. A wake caused
+    by an insight that needs no action still publishes (writer judgment),
+    but that publication carries the same digest and observers keep
+    skipping, so one no-op wake cannot retrigger the loop. Legacy cursors
+    without ``code_digest`` fall back to snapshot-id equality once, then
+    upgrade on the next completed run.
+    """
+    try:
+        current = snapshot.get("code_digest")
+        if not isinstance(cursor, dict):
+            return False
+        if not isinstance(current, str) or not current:
+            return cursor.get("snapshot") == snapshot.get("id")
+        seen = cursor.get("code_digest")
+        if isinstance(seen, str) and seen:
+            return seen == current
+        return cursor.get("snapshot") == snapshot.get("id")
+    except Exception:
+        return False
 
 
 def should_run(project: Project, snapshot: dict, current_time: float | None = None) -> bool:

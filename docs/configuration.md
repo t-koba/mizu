@@ -110,7 +110,7 @@ Safety-critical bounds are fixed in code rather than exposed as configuration kn
 | **Smoke probe** | `SMOKE_REQUESTS_PER_RUN` / `TOOLS` / `SECONDS` (`smoke.py`) | 4 / 5 / 120 s | Paid `smoke --live` spend cap with margin for one benign listing plus one auxiliary request; applied as `min(fixed, operator limits)` |
 | **Config include** | `MAX_INCLUDE_DEPTH` / `MAX_INCLUDE_FILES` / `MAX_INCLUDE_BYTES` (`config.py`) | 8 / 32 / 1 MiB | Shared-fragment recursion, file-count, and total-byte bounds; per-file entries max 32, entry length max 4096 |
 
-`on_change` is orthogonal to scheduling: it skips execution when the published snapshot is unchanged. A role with `on_change` alone and no `daemon`/`interval_seconds`/`calendar` runs only via explicit `mizu run`.
+`on_change` is orthogonal to scheduling: it skips execution when the published `code_digest` is unchanged, so state-only republications do not reschedule it. A role with `on_change` alone and no `daemon`/`interval_seconds`/`calendar` runs only via explicit `mizu run`.
 
 ## Sandbox
 
