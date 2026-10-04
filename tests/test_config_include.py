@@ -52,7 +52,7 @@ class IncludeTests(Fixture):
             load(self.file)
         message = str(ctx.exception)
         self.assertIn("limits.idle_seconds", message)
-        self.assertIn(str(frag), message)
+        self.assertIn(str(frag.resolve()), message)
         self.assertIn(str(self.file.resolve()), message)
 
     def test_absolute_include_refused(self):
