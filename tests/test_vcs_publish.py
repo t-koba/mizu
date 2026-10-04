@@ -215,6 +215,17 @@ class VcsApprovalChannelTests(Fixture):
             load(path)
 
 
+class VcsReservedRoleNameTests(Fixture):
+    def test_operator_vcs_editor_names_refused_at_load(self):
+        from mizu.config import load
+        for name in ("operator", "vcs", "editor"):
+            text = self.file.read_text() + f'\n[roles.{name}]\n'
+            path = self.root / f"config/reserved-{name}.toml"
+            path.write_text(text)
+            with self.assertRaisesRegex(ConfigError, "reserved"):
+                load(path)
+
+
 class VcsDigestBindingTests(Fixture):
     def test_adapter_must_echo_approved_digest(self):
         import dataclasses as _dc

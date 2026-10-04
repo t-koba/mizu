@@ -786,3 +786,23 @@ A `GO` approval bound the host check but not the pushed bits.
 
 - `tests/test_vcs_publish.py`: echo, mismatch, missing, param-required.
 - `Denied` on missing/mismatch; `check.py` green.
+
+## ADR-020 — Reserved role names keep the operator channel unforgeable
+
+**Accepted.** Config load refuses role names `operator`, `vcs`, `editor`.
+
+## Context
+
+Model `submit_insight` fixes source to the role name, so a role named
+`operator` could author a `GO` body a later human accept would record as
+operator-authored (REVIEW finding on ADR-018).
+
+## Decision
+
+- Mechanism: `RESERVED_ROLE_NAMES` in `config.load`; `ConfigError` at load.
+- No new keys; run names stay hex vs `operator`.
+
+## Evidence / failure
+
+- `tests/test_vcs_publish.py`: reserved names refused at load.
+- `Denied`/`ConfigError` keep the approval-binds-pushed-bits invariant.

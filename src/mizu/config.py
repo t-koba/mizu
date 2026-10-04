@@ -15,6 +15,11 @@ CAPABILITIES = frozenset({"diff", "files", "read", "exec", "experiment", "verify
                           "search", "insights", "decide", "submit_insight", "consult",
                           "report", "finish", "sync", "vcs_read", "vcs_publish"})
 ENGINES = ("pi", "codex", "claude")
+#: Role names that collide with insight sources owned by the host/operator
+#: channel (operator CLI, vcs CI helper, editor outbox). Model
+#: `submit_insight` fixes source to the role name, so these are refused
+#: at config load to keep the operator channel unforgeable.
+RESERVED_ROLE_NAMES = frozenset({"operator", "vcs", "editor"})
 MAX_RESOURCES = 64
 #: Protocol wait bound mirrored in protocol.finish.wait_seconds; keep both at 86400.
 MAX_WAIT_SECONDS = 86400
@@ -562,6 +567,8 @@ def load(file: Path) -> Config:
     for name, role in role_tables.items():
         if not ID.fullmatch(name):
             raise ConfigError("Invalid role name")
+        if name in RESERVED_ROLE_NAMES:
+            raise ConfigError(f"Role name '{name}' is reserved for the operator channel")
         keys(role, {"profile", "policy", "workspace", "capabilities", "engine_tools", "on_change",
                     "interval_seconds", "calendar", "daemon", "selector", "attributes"}, f"roles.{name}")
         profile = string(role.get("profile", ""), f"roles.{name}.profile")
