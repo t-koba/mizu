@@ -1092,7 +1092,7 @@ summary, so rotation must reload exact text, never a paraphrase.
 - Full prompt when: new session key, compaction detected, goal/policy key
   change, or rotation. Ephemeral, consult, and smoke paths stay full-prompt.
 - Rotation keys in `[limits]` (0 disables each; unset keeps current
-  behavior): `session_max_tokens`, `session_max_cost`, `session_max_age_seconds`.
+  behavior): `session_max_tokens`, `session_max_cost_usd`, `session_max_age_seconds`.
   Tokens/cost read existing `runtime_usage`/model evidence (cost is a native
   estimate, never a billing claim per ADR-005); age reads run timestamps. No
   new counters. Rotation carries the exact published snapshot plus composed

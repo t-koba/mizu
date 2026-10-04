@@ -2,6 +2,7 @@ import dataclasses
 import json
 import os
 import time
+import unittest
 
 from support import Fixture, ScriptDriver
 from mizu.engine_config import effective, session_record, save_session
@@ -111,3 +112,30 @@ class SessionDeltaTests(Fixture):
         record = projection(self, result["run"])
         self.assertEqual(record["prompt_mode"], "full")
         self.assertEqual(record["session_key"], "")
+
+
+class SessionTotalsTests(unittest.TestCase):
+    """Native per-engine shapes total exactly once (review 7837a1c0)."""
+
+    def test_claude_cache_tokens_are_counted(self):
+        from mizu.engine_config import session_token_total
+        saved = {"usage": {"my-model": {"inputTokens": 10, "outputTokens": 5,
+                                        "cacheReadInputTokens": 100,
+                                        "cacheCreationInputTokens": 50}}}
+        self.assertEqual(session_token_total(saved), 165)
+
+    def test_codex_flat_total_is_used_verbatim(self):
+        from mizu.engine_config import session_token_total
+        saved = {"usage": {"inputTokens": 1, "outputTokens": 2,
+                           "cachedInputTokens": 3, "reasoningOutputTokens": 4,
+                           "totalTokens": 10}}
+        self.assertEqual(session_token_total(saved), 10)
+
+    def test_aggregates_win_without_double_count(self):
+        from mizu.engine_config import session_token_total, session_cost_total
+        saved = {"usage": {"m": {"totalTokens": 100, "inputTokens": 60, "outputTokens": 40}}}
+        self.assertEqual(session_token_total(saved), 100)
+        saved = {"usage": {"costUSD": 2.0, "m": {"costUSD": 2.0}}}
+        self.assertEqual(session_cost_total(saved), 2.0)
+        saved = {"usage": {"m": {"costUSD": 1.0, "cost_estimate_usd": 1.0}}}
+        self.assertEqual(session_cost_total(saved), 1.0)

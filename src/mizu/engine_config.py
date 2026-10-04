@@ -181,13 +181,53 @@ def _as_int(value):
     return value if type(value) is int and value >= 0 else None
 
 
+#: Native per-model token keys saved by each driver: Codex saves its flat
+#: TokenUsage.total (codex.TokenUsage.FIELDS); Claude saves native cumulative
+#: per-model usage (claude.TOKEN_FIELDS); Pi saves ``{"tokens": N}``.
+#: engine_config must not import the drivers (they import this module), so the
+#: native names are repeated here and pinned by regression tests.
+_TOKEN_COMPONENTS = ("inputTokens", "input_tokens", "input",
+                     "outputTokens", "output_tokens", "output",
+                     "cachedInputTokens", "cachedTokens", "cache_read_tokens", "cacheRead",
+                     "cacheReadInputTokens",
+                     "cacheCreationInputTokens", "cache_creation_tokens", "cacheWrite",
+                     "reasoningOutputTokens", "reasoningTokens", "reasoning_tokens")
+_COST_KEYS = ("costUSD", "cost_estimate_usd", "cost")
+
+
+def _entry_tokens(entry):
+    """Token count for one usage entry: an aggregate wins over components."""
+    aggregate = _as_int(entry.get("totalTokens"))
+    if aggregate is not None:
+        return aggregate
+    subtotal = 0
+    for key in _TOKEN_COMPONENTS:
+        part = _as_int(entry.get(key))
+        if part is not None:
+            subtotal = min(subtotal + part, MAX_SESSION_TOKENS)
+    return subtotal
+
+
+def _entry_cost(entry):
+    """Cost for one usage entry: same quantity under several names counts once."""
+    import math
+    found = []
+    for key in _COST_KEYS:
+        value = entry.get(key)
+        if type(value) in (int, float) and value >= 0 and math.isfinite(value):
+            found.append(float(value))
+    return max(found) if found else None
+
+
 def session_token_total(saved, engine="unknown"):
     """Cumulative model tokens recorded for a saved persistent session.
 
     Schema: ``saved`` is a ``session_record()`` record (``{'id', 'usage'}``).
-    Bounds: usage payloads stay under the 256 KiB session-record bound.
-    Trust: local operator state only. Failure: unknown shapes count 0
-    (rotation stays age-driven) rather than raising.
+    Bounds: usage payloads stay under the 256 KiB session-record bound; at
+    most 4097 entries are scanned. Trust: local operator state only.
+    Failure: unknown shapes count 0 (rotation stays age-driven) rather than
+    raising. An entry carrying ``totalTokens`` counts the aggregate only, so
+    aggregate-plus-component records never double-count.
     """
     try:
         usage = saved.get("usage", {}) if isinstance(saved, dict) else {}
@@ -196,26 +236,12 @@ def session_token_total(saved, engine="unknown"):
         direct = _as_int(usage.get("tokens"))
         if direct is not None:
             return min(direct, MAX_SESSION_TOKENS)
-        if isinstance(usage.get("totalTokens"), int):
-            total = usage.get("totalTokens")
-            if type(total) is int and total >= 0:
-                return min(total, MAX_SESSION_TOKENS)
-        if "totalTokens" in usage and isinstance(usage.get("total"), dict):
-            total = _as_int(usage["total"].get("totalTokens"))
-            if total is not None:
-                return min(total, MAX_SESSION_TOKENS)
-        total = 0
+        if _as_int(usage.get("totalTokens")) is not None:
+            return min(usage["totalTokens"], MAX_SESSION_TOKENS)
+        total = _entry_tokens(usage)
         for value in list(usage.values())[:4096]:
-            if not isinstance(value, dict):
-                continue
-            for key in ("totalTokens", "inputTokens", "input_tokens", "input",
-                        "outputTokens", "output_tokens", "output",
-                        "cachedTokens", "cache_read_tokens", "cacheRead",
-                        "cache_creation_tokens", "cacheWrite",
-                        "reasoningTokens", "reasoning_tokens"):
-                part = _as_int(value.get(key)) if isinstance(value, dict) else None
-                if part is not None:
-                    total = min(total + part, MAX_SESSION_TOKENS)
+            if isinstance(value, dict):
+                total = min(total + _entry_tokens(value), MAX_SESSION_TOKENS)
         return total
     except Exception:
         return 0
@@ -227,14 +253,16 @@ def session_cost_total(saved):
         usage = saved.get("usage", {}) if isinstance(saved, dict) else {}
         if not isinstance(usage, dict):
             return 0.0
-        total = 0.0
-        candidates = [usage] + [v for v in list(usage.values())[:4096] if isinstance(v, dict)]
-        for entry in candidates:
-            for key in ("costUSD", "cost_estimate_usd", "cost"):
-                value = entry.get(key)
-                if type(value) in (int, float) and value >= 0:
-                    total += float(value)
         import math
+        top = _entry_cost(usage)
+        if top is not None:
+            return top if math.isfinite(top) and top >= 0 else 0.0
+        total = 0.0
+        for value in list(usage.values())[:4096]:
+            if isinstance(value, dict):
+                piece = _entry_cost(value)
+                if piece is not None:
+                    total += piece
         return total if math.isfinite(total) and total >= 0 else 0.0
     except Exception:
         return 0.0
