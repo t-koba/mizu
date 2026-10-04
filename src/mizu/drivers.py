@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 
 from .budget import Budget
-from .errors import Cancelled, ConfigError, LimitExceeded, ProtocolError
+from .errors import Cancelled, ConfigError, InfraExceeded, LimitExceeded, ProtocolError
 from .fs import write_json, canonical, now
 
 #: Driver stderr tail retained per run (bounded failure evidence).
@@ -70,6 +70,14 @@ def admit_invocation(context, *, unit: str) -> dict:
     try:
         Budget(context.config.data / "budget", context.config.limits.daily_requests,
                context.config.limits.retention_days).take(f"{context.run_dir.name}:invocation")
+    except InfraExceeded:
+        if hasattr(context,'model_evidence'):
+            context.model_evidence['admission_status']='rejected'
+        try:
+            context.admission_wait = True
+        except Exception:
+            pass
+        raise
     except LimitExceeded:
         if hasattr(context,'model_evidence'):
             context.model_evidence['admission_status']='rejected'

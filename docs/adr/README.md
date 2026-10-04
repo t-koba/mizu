@@ -674,3 +674,72 @@ One transient after a resume no longer re-pauses; sustained real faults
 still pause after `max_failures`, and daily-budget/lock contention waits
 for the operator/day rollover instead of pausing. `check.py` stays green;
 stdlib-only; no model-specific defaults.
+
+## ADR-017 — Narrow infra-wait deferral to budget/disk guards; Pi budget refusal defers by type
+
+**Accepted (M8 fix for CI-FAIL b1617770, ce093c1c).** `INFRA_WAIT` narrows from
+`(Busy, LimitExceeded)` to `(Busy, InfraExceeded)`, and `Engine.run` defers via
+`is_deferred(exc, context)` instead of `is_infra_wait(exc)` alone.
+
+## Context
+
+ADR-016 gated the consecutive-failure brake on the exception type
+`(Busy, LimitExceeded)` with the stated intent of only "admission, slots, or
+disk/budget guards" while claiming "all other exceptions count as before".
+The type was broader than the intent: engine deadlines, event-stream evidence
+bounds, RPC input deadlines, per-run tool/request bounds, file-count and
+snapshot bounds all raise plain `LimitExceeded` and silently stopped counting
+(REVIEW 2d067dac Finding 1; experiment 1eca27b4 showed five engine-deadline
+failures leaving `consecutive_failures=None`). Separately, the M8 acceptance
+"budget exhaustion defers" was only demonstrated for the in-process
+`LimitExceeded` path: on the Pi transport a host-side `_budget` refusal becomes
+`{"ok": false}` on the bridge, the adapter collapses, and the host surfaces
+`ProtocolError` (or `ModelFailure` for a real SDK `stopReason=error`), neither
+of which deferred (Finding 2; experiment 8d5cebee).
+
+## Decision
+
+- Mechanism provides capabilities; policy decides behavior. The narrowed gate,
+  the new `InfraExceeded` type, and the host-side `admission_wait` flag are
+  mechanism. When to resume and what counts as healthy stay operator/worker
+  policy.
+- New `errors.InfraExceeded(LimitExceeded)`: deferrable daily-budget and
+  disk-reserve guards only. It subclasses `LimitExceeded` so existing
+  `except LimitExceeded` admission handling still catches it. `Budget.take`
+  (disabled, exhausted, day-file bound) and the `Engine.run` pre-dispatch
+  daily-budget/disk-reserve checks raise it. Every other `LimitExceeded` site
+  (engine deadline/event bound, RPC deadline, per-run tool/request bounds,
+  runtime-usage bound, workspace file-count, snapshot/file bounds) stays plain
+  `LimitExceeded` and counts toward the brake.
+- `Busy` stays fully deferrable (all `Busy` sites are lock/slot waits).
+- `Context.admission_wait` (default `False`) records an in-run host-side
+  budget refusal by type: set only on the `InfraExceeded` path in
+  `Context.handle("_budget")` and `drivers.admit_invocation`, never by message
+  text. `is_deferred(exc, context)` defers when `is_infra_wait(exc)` holds, or
+  when `admission_wait` is true and `exc` is `ProtocolError`/`ModelFailure`
+  (the Pi transport collapse shape). A `ModelFailure` arriving with
+  `admission_wait` is normalized to `InfraExceeded` before the brake so the
+  gate stays type-based.
+- No message parsing anywhere; no new config keys; unknown keys still fail.
+
+## Schema, bounds, trust, retry/cancellation, evidence, failure
+
+- Schema: `InfraExceeded(LimitExceeded)`; `is_deferred(exc, context=None)`;
+  `Context.admission_wait: bool`.
+- Bounds: none beyond the existing limit values.
+- Trust: local exception types plus one host-side boolean, never model input.
+- Retry/cancellation: unchanged; infra waits retry at daemon idle cadence via
+  the existing `run_deferred` event.
+- Evidence: `tests/test_resume_health.py` pins the narrow gate (budget
+  defers, engine-deadline `LimitExceeded` counts to pause), the Pi-channel
+  budget refusal through `tests/fake_pi.py` deferring without counting, plus
+  the existing resume/Busy/real-fault pins.
+- Failure: infra waits still raise (codes unchanged) and still record
+  `error.json`; non-wait faults count and auto-pause exactly as before.
+
+## Consequences
+
+The runaway-model brake is restored for engine/local bound faults while daily
+budget, disk reserve, and lock contention wait instead of pausing; the Pi
+incident path (in-run budget exhaustion) now defers on every engine. `check.py`
+stays green; stdlib-only; no model-specific defaults.

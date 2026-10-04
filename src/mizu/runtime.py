@@ -22,7 +22,7 @@ from .budget import Budget
 from .config import Config, Role, load
 from .doctor import container_runtime
 from .drivers import driver_for
-from .errors import Busy, Cancelled, ConfigError, Denied, LimitExceeded, MizuError, ModelFailure
+from .errors import Busy, Cancelled, ConfigError, Denied, InfraExceeded, LimitExceeded, MizuError, ModelFailure, ProtocolError
 from .fs import canonical, digest, lock, mkdir, now, read_json, safe_read, write_json, PREVIEW_BYTES, page, text_preview, DIGEST
 from .project import Project
 from .protocol import DEFINITIONS, validate
@@ -49,12 +49,14 @@ def slot(config: Config):
     raise Busy("All configured execution slots are in use")
 
 
-#: Infrastructure waits defer (Busy locks/slots, LimitExceeded budgets) rather
-#: than counting toward the consecutive-failure brake. Real model/operation
-#: faults (Denied, ProtocolError/ModelFailure, OSError, ValueError) still
-#: count. The error record is still written and the exception still raised,
-#: so nothing is hidden; the daemon surfaces it as a run_deferred event.
-INFRA_WAIT = (Busy, LimitExceeded)
+#: Infrastructure waits defer (Busy locks/slots, InfraExceeded daily-budget
+#: and disk-reserve guards) rather than counting toward the consecutive-failure
+#: brake. All other faults still count, including plain LimitExceeded bound
+#: faults (engine deadlines, event-stream/RPC bounds, per-run tool/request
+#: bounds, file-count/snapshot bounds). The error record is still written and
+#: the exception still raised, so nothing is hidden; the daemon surfaces it
+#: as a run_deferred event.
+INFRA_WAIT = (Busy, InfraExceeded)
 
 
 def is_infra_wait(exc: BaseException) -> bool:
@@ -64,6 +66,31 @@ def is_infra_wait(exc: BaseException) -> bool:
     classification, never model input. Failure: never raises.
     """
     return isinstance(exc, INFRA_WAIT)
+
+
+def is_deferred(exc: BaseException, context=None) -> bool:
+    """True when a failure defers rather than counting toward the brake.
+
+    Schema: exception plus the run Context (or None). Bounds: type check plus
+    one host-side flag. Trust: local classification, never model input.
+    Failure: never raises.
+
+    The Pi transport converts an in-run host-side daily-budget refusal
+    (InfraExceeded from ``_budget``) into ``{"ok": false}`` on the bridge,
+    so the adapter collapses and the host driver surfaces ``ProtocolError``
+    or ``ModelFailure``. ``Context.admission_wait`` records that refusal by
+    type (set only for InfraExceeded, never by message text), so a
+    ProtocolError/ModelFailure arriving after such a refusal is the same
+    infrastructure wait, not a new model fault.
+    """
+    if isinstance(exc, INFRA_WAIT):
+        return True
+    try:
+        if context is not None and getattr(context, "admission_wait", False):
+            return isinstance(exc, (ProtocolError, ModelFailure))
+    except Exception:
+        return False
+    return False
 
 
 #: Capabilities that let a consultation role change shared state or execute
@@ -111,6 +138,7 @@ class Context:
         self.tool_count = 0
         self.finished: dict | None = None
         self.admission_error: str | None = None
+        self.admission_wait = False
         self.closed = False
         self.operations_stopped = threading.Event()
         self.verification: dict | None = None
@@ -178,6 +206,11 @@ class Context:
                         try:
                             Budget(self.config.data / "budget", self.config.limits.daily_requests,
                                    self.config.limits.retention_days).take(f"{self.run_dir.name}:{sequence}")
+                        except InfraExceeded:
+                            if hasattr(self, 'model_evidence'):
+                                self.model_evidence['admission_status'] = 'rejected'
+                            self.admission_wait = True
+                            raise
                         except LimitExceeded:
                             if hasattr(self, 'model_evidence'):
                                 self.model_evidence['admission_status'] = 'rejected'
@@ -653,9 +686,9 @@ class Engine:
         usage = Budget(self.config.data / "budget", self.config.limits.daily_requests,
                        self.config.limits.retention_days).usage()
         if usage["limit"] <= usage["used"]:
-            raise LimitExceeded("UTC daily model-request budget unavailable")
+            raise InfraExceeded("UTC daily model-request budget unavailable")
         if shutil.disk_usage(project.root).free < self.config.limits.free_disk_mb * 1048576:
-            raise LimitExceeded("Free disk space is below the configured reserve")
+            raise InfraExceeded("Free disk space is below the configured reserve")
         with contextlib.ExitStack() as stack:
             stack.enter_context(lock(project.root / "locks" / f"run-{role_name}.lock", blocking=False))
             if role.workspace == "write":
@@ -754,8 +787,10 @@ class Engine:
                 return result
             except BaseException as exc:
                 if isinstance(exc, ModelFailure) and context is not None and context.admission_error:
-                    from .errors import ProtocolError
-                    exc = ProtocolError("Local admission failed: " + context.admission_error)
+                    if getattr(context, "admission_wait", False):
+                        exc = InfraExceeded("UTC daily model-request budget exhausted")
+                    else:
+                        exc = ProtocolError("Local admission failed: " + context.admission_error)
                 handled = None
                 if decision and decision.get("profile") and isinstance(exc, ModelFailure) and context is not None and not context.cancelled():
                     from .selection import State
@@ -787,7 +822,7 @@ class Engine:
                     return {"run": run_id, "role": role_name, "status": "deferred",
                             "error": str(exc), "selection": decision, "selection_action": handled,
                             "next_evaluation_at": time.time() + self.config.limits.cooldown_seconds}
-                if not is_infra_wait(exc):
+                if not is_deferred(exc, context):
                     with contextlib.suppress(OSError, ValueError, TypeError):
                         health = read_json(project.root / "health" / f"{role_name}.json", {})
                         failures = health.get("consecutive_failures", 0) + 1

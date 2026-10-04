@@ -4,7 +4,7 @@ from __future__ import annotations
 import datetime as dt
 from pathlib import Path
 
-from .errors import LimitExceeded
+from .errors import InfraExceeded
 from .fs import atomic_write, canonical, lock, read_json
 
 #: Day-file byte bound (~160K admissions at ~25 B/entry); count cap binds first.
@@ -47,18 +47,18 @@ class Budget:
         day = day or dt.datetime.now(dt.timezone.utc).date().isoformat()
         dt.date.fromisoformat(day)
         if self.daily <= 0:
-            raise LimitExceeded("Model calls are disabled: set limits.daily_requests explicitly")
+            raise InfraExceeded("Model calls are disabled: set limits.daily_requests explicitly")
         with lock(self.root / "budget.lock"):
             path = self.root / f"{day}.json"
             record = read_json(path, {"day": day, "requests": []})
             if request_id in record["requests"]:
                 return len(record["requests"])
             if len(record["requests"]) >= self.daily:
-                raise LimitExceeded("UTC daily model-request budget exhausted")
+                raise InfraExceeded("UTC daily model-request budget exhausted")
             record["requests"].append(request_id)
             body = canonical(record)
             if len(body) > BUDGET_DAY_BYTES:
-                raise LimitExceeded("Budget day-file exceeds byte bound; inspect data/budget")
+                raise InfraExceeded("Budget day-file exceeds byte bound; inspect data/budget")
             atomic_write(path, body)
             count = len(record["requests"])
         self.gc()

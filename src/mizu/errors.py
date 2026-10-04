@@ -21,6 +21,19 @@ class LimitExceeded(MizuError):
     code = 69
 
 
+class InfraExceeded(LimitExceeded):
+    """Deferrable infrastructure limit: daily budget or disk reserve.
+
+    A subclass of ``LimitExceeded`` so existing ``except LimitExceeded``
+    admission handling still catches it, while the consecutive-failure
+    brake can distinguish it from model/local bound faults by type alone
+    (no message parsing). Only budget/disk guards raise this; engine
+    deadlines, event-stream bounds, RPC deadlines, per-run tool/request
+    bounds, file-count/snapshot bounds stay plain ``LimitExceeded`` and
+    still count toward the brake.
+    """
+
+
 class Cancelled(MizuError):
     code = 130
 
