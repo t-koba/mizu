@@ -227,7 +227,7 @@ def free_disk(config: Config) -> dict:
 def budget_file(config: Config) -> dict:
     usage = Budget(config.data / "budget", config.limits.daily_requests,
                    config.limits.retention_days,
-                   config.limits.shared_daily_requests).usage()
+                   config.limits.shared_daily_requests, config.timezone).usage()
     if not isinstance(usage["used"], int) or usage["used"] < 0 or usage["used"] > max(usage["limit"], 0):
         raise ConfigError("Budget file is corrupt; inspect data/budget/<day>.json")
     if usage["shared_limit"] > 0 and (usage["shared_used"] < 0 or usage["shared_used"] > usage["shared_limit"]):

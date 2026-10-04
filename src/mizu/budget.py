@@ -1,4 +1,4 @@
-"""Per-project request admission with an optional shared UTC-day total."""
+"""Per-project request admission with an optional shared day total."""
 from __future__ import annotations
 
 import datetime as dt
@@ -13,15 +13,22 @@ BUDGET_DAY_BYTES = 4 * 1024 * 1024
 
 class Budget:
     def __init__(self, root: Path, daily: int, retention_days: int = 31,
-                 shared_daily: int = 0):
+                 shared_daily: int = 0, timezone: str = "UTC"):
+        from .config import resolve_timezone
         self.root, self.daily = root, daily
         self.retention_days = retention_days
         self.shared_daily = shared_daily
+        self.timezone = timezone
+        self._tz = resolve_timezone(timezone)
+
+    def _today(self) -> str:
+        """Current budget day in the configured zone (UTC default unchanged)."""
+        return dt.datetime.now(self._tz).date().isoformat()
 
     def gc(self, *, keep_days: int | None = None) -> int:
         """Remove day-files older than the window. Best-effort; never fails admission.
 
-        Schema/bounds: day-files ``YYYY-MM-DD.json``; ``keep_days`` defaults to
+        Schema/bounds: day-files ``YYYY-MM-DD.json`` in the configured zone; ``keep_days`` defaults to
         the operator-selected ``retention_days`` (``[limits] retention_days``,
         default 31, 0 disables reaping). Trust: local operator state only.
         Retry: best-effort, skips unreadable entries. Evidence: returns the
@@ -33,7 +40,7 @@ class Budget:
             return 0
         removed = 0
         try:
-            today = dt.datetime.now(dt.timezone.utc).date()
+            today = dt.datetime.now(self._tz).date()
             for path in self.root.glob("????-??-??.json"):
                 try:
                     if (today - dt.date.fromisoformat(path.stem)).days > keep_days:
@@ -79,11 +86,11 @@ class Budget:
         state under ``budget.lock``. Retry: idempotent per (project,
         request_id); a repeat returns the per-project count without charging.
         Evidence: returns the per-project count (shared count when no project
-        is named). Failure: ``InfraExceeded`` when disabled, per-project
+        is named) plus ``day`` in the configured zone and ``zone`` naming it. Failure: ``InfraExceeded`` when disabled, per-project
         exhausted, shared exhausted, or oversize; legacy files without
         ``projects`` keep their aggregate and start per-project counts at 0.
         """
-        day = day or dt.datetime.now(dt.timezone.utc).date().isoformat()
+        day = day or self._today()
         dt.date.fromisoformat(day)
         project = self._check_project(project)
         if not isinstance(request_id, str) or not request_id or "\x00" in request_id or "\n" in request_id:
@@ -92,10 +99,11 @@ class Budget:
             raise InfraExceeded("Model calls are disabled: set limits.daily_requests explicitly")
         with lock(self.root / "budget.lock"):
             path = self.root / f"{day}.json"
-            record = read_json(path, {"day": day, "requests": []})
+            record = read_json(path, {"day": day, "zone": self.timezone, "requests": []})
             if not isinstance(record, dict):
-                record = {"day": day, "requests": []}
+                record = {"day": day, "zone": self.timezone, "requests": []}
             record["day"] = day
+            record["zone"] = self.timezone
             requests, projects = self._split(record)
             entries = projects.get(project, [])
             if request_id in entries:
@@ -103,10 +111,10 @@ class Budget:
             if len(entries) >= self.daily:
                 if project:
                     raise InfraExceeded(
-                        f"UTC daily model-request budget exhausted for project '{project}'")
-                raise InfraExceeded("UTC daily model-request budget exhausted")
+                        f"{self.timezone} daily model-request budget exhausted for project '{project}'")
+                raise InfraExceeded(f"{self.timezone} daily model-request budget exhausted")
             if self.shared_daily > 0 and len(requests) >= self.shared_daily:
-                raise InfraExceeded("UTC daily model-request shared budget exhausted")
+                raise InfraExceeded(f"{self.timezone} daily model-request shared budget exhausted")
             entries = [*entries, request_id]
             projects[project] = entries
             if request_id not in requests:
@@ -122,7 +130,7 @@ class Budget:
         return count
 
     def usage(self, project: str = "") -> dict:
-        """Report per-project usage plus the shared UTC-day total.
+        """Report per-project usage plus the shared day total.
 
         Schema: ``project=\"\"`` reports the shared aggregate as ``used``
         (legacy shape); a named project reports its own count as ``used``
@@ -132,7 +140,7 @@ class Budget:
         shapes read as empty.
         """
         project = self._check_project(project)
-        day = dt.datetime.now(dt.timezone.utc).date().isoformat()
+        day = self._today()
         path = self.root / f"{day}.json"
         record = read_json(path, {"requests": []})
         if not isinstance(record, dict):
@@ -148,6 +156,6 @@ class Budget:
         except OSError:
             size = 0
         reaped = self.gc()
-        return {"day": day, "used": used, "limit": limit,
+        return {"day": day, "zone": self.timezone, "used": used, "limit": limit,
                 "shared_used": shared, "shared_limit": self.shared_daily,
                 "project": project, "bytes": size, "reaped": reaped}

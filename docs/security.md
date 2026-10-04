@@ -122,7 +122,7 @@ are not supported. Private-network destinations need the operator's explicit
 
 ## Explicit limits of limits
 
-Request admission counts are global per UTC day and retained across restarts.
+Request admission counts are global per day in the configured timezone (UTC default) and retained across restarts.
 They are not a monetary cap, a token cap, or a guarantee about hidden upstream
 retries. Set account-level spending limits and inspect provider bills.
 

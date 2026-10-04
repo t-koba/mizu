@@ -42,7 +42,7 @@ inputs. The trusted host adapter never executes model-provided host commands.
 | `dashboard.py` | Bounded static JSON of recorded facts with atomic latest pointer | Presentation, per-project panels |
 | `services.py` | Render OS service definitions (systemd / launchd / Task Scheduler) | Implicitly start or arm |
 | `storage.py` | Paused backup, bounded restore, conservative pruning | Evidence retention policy |
-| `budget.py` | Shared UTC-day request budget and retention reaping | Monetary spending caps |
+| `budget.py` | Shared day request budget (configured timezone) and retention reaping | Monetary spending caps |
 | `usage.py` | Aggregated token usage facts from completed run records | Billing rates or currency pricing |
 | `doctor.py` | Platform, runtime, isolation, and budget health checks | Autonomous repair or bypasses |
 

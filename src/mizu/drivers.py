@@ -71,7 +71,7 @@ def admit_invocation(context, *, unit: str) -> dict:
     try:
         Budget(context.config.data / "budget", context.config.limits.daily_requests,
                context.config.limits.retention_days,
-               context.config.limits.shared_daily_requests).take(
+               context.config.limits.shared_daily_requests, context.config.timezone).take(
                    f"{context.run_dir.name}:invocation", project=project_name)
     except InfraExceeded:
         if hasattr(context,'model_evidence'):

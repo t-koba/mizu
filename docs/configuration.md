@@ -16,7 +16,7 @@ silently change grants or paths. Prefer literal model aliases for systemd servic
 |---|---|
 | `data_dir` | Private local filesystem state; restart before moving it |
 | `engines` | Named Pi/Codex/Claude environments: trusted `command` argv and private `directory` |
-| `timezone` | IANA zone for Linux calendar timers; default UTC. macOS uses explicit local; Windows supports local and UTC (see completion-contracts.md) |
+| `timezone` | IANA zone for Linux calendar timers and the request-budget day; default UTC. macOS uses explicit local; Windows supports local and UTC (see completion-contracts.md) |
 | `consult_profiles` | Permitted independent consultation profiles |
 | `exclude` | Snapshot/import exclusion patterns; not a secret detection system |
 | `include` | Shared TOML fragments merged before validation; duplicate keys are errors (see below) |
@@ -68,8 +68,8 @@ required). Operator tooling that concatenates configs
 
 | Key | Scope and description |
 |---|---|
-| `daily_requests` | Per-project provider admissions per UTC day (0 disables, max 100,000). Day-files older than `retention_days` are reaped. Pi counts logical model requests, Codex counts turns, Claude counts queries |
-| `shared_daily_requests` | Optional shared total across all projects sharing `data_dir` per UTC day (0 disables the shared cap, max 100,000). Per-project admissions also count toward this total; the tighter bound refuses first |
+| `daily_requests` | Per-project provider admissions per day in the configured `timezone` (UTC default; 0 disables, max 100,000). Day-files older than `retention_days` are reaped. Pi counts logical model requests, Codex counts turns, Claude counts queries |
+| `shared_daily_requests` | Optional shared total across all projects sharing `data_dir` per day in the configured `timezone` (UTC default; 0 disables the shared cap, max 100,000). Per-project admissions also count toward this total; the tighter bound refuses first |
 | `requests_per_run`, `tools_per_run` | Per-work-unit request and tool bounds; child consultations consume shared daily budget |
 | `run_seconds`, `command_seconds` | Deadlines for the overall work unit and individual container commands |
 | `idle_seconds`, `cooldown_seconds` | Daemon sleep between poll iterations and pause between work units |
@@ -95,8 +95,8 @@ required). Operator tooling that concatenates configs
 All limits are positive integers except `daily_requests`, `shared_daily_requests`, `max_failures`, `free_disk_mb`, `retention_days`, `event_log_compress_days`, `event_log_retention_days`, `session_max_tokens`, and `session_max_age_seconds`, which may be zero. `session_max_cost_usd` is a number (integer or float) which may be zero.
 
 Run-evidence retention keeps growth bounded: `mizu prune` (paused project, dry-run by default, `--apply` writes a `maintenance/prune-*.json` audit) gzips raw engine logs older than `event_log_compress_days` and drops raw/`.gz` logs older than `event_log_retention_days`. Age is file mtime versus now; the `.gz` keeps the raw mtime so the drop clock does not restart. Only top-level `runs/*/` `*-events.jsonl` and `diagnostics.txt` (plus their `.gz`) are candidates — `result.json`, `error.json`, `consultation.json`, `started.json`, `selection.json`, admission/usage records, snapshots, objects, sessions, decisions, and proposals are always kept, so `mizu usage`, dashboards, and restores keep working. Snapshots reference workspace objects only, never run logs, so compressed/dropped logs are disposable projections absent from later backups by construction.
-`daily_requests` counts logical admissions, not dollar amounts; configure spending limits with your provider. Use `mizu status` and `mizu budget` for per-project and shared UTC-day counts, and `mizu usage` for token statistics.
-Day-files (`data/budget/YYYY-MM-DD.json`) keep the shared aggregate plus a per-project map, so two configs sharing `data_dir` with different `daily_requests` admit independently unless the optional shared total is reached. `mizu budget <project>` and `mizu status` report both numbers.
+`daily_requests` counts logical admissions, not dollar amounts; configure spending limits with your provider. Use `mizu status` and `mizu budget` for per-project and shared day counts in the configured `timezone`, and `mizu usage` for token statistics.
+Day-files (`data/budget/YYYY-MM-DD.json`) keep the date in the configured `timezone` (UTC when unset) plus the shared aggregate, a per-project map, and the `zone` that wrote them, so two configs sharing `data_dir` with different `daily_requests` admit independently unless the optional shared total is reached. `mizu budget <project>` and `mizu status` report both numbers with the day and zone. Projects sharing one `data_dir` should share one `timezone`: different zones name different days for the same instant, splitting the shared total across day-files.
 
 ## Fixed mechanism bounds
 

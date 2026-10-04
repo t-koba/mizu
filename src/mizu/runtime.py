@@ -206,7 +206,7 @@ class Context:
                         try:
                             Budget(self.config.data / "budget", self.config.limits.daily_requests,
                                    self.config.limits.retention_days,
-                                   self.config.limits.shared_daily_requests).take(
+                                   self.config.limits.shared_daily_requests, self.config.timezone).take(
                                        f"{self.run_dir.name}:{sequence}", project=self.project.name)
                         except InfraExceeded:
                             if hasattr(self, 'model_evidence'):
@@ -873,11 +873,11 @@ class Engine:
             raise Denied("Project is unarmed or paused")
         usage = Budget(self.config.data / "budget", self.config.limits.daily_requests,
                        self.config.limits.retention_days,
-                       self.config.limits.shared_daily_requests).usage(project.name)
+                       self.config.limits.shared_daily_requests, self.config.timezone).usage(project.name)
         if usage["limit"] <= usage["used"]:
-            raise InfraExceeded(f"UTC daily model-request budget unavailable for project '{project.name}'")
+            raise InfraExceeded(f"{self.config.timezone} daily model-request budget unavailable for project '{project.name}'")
         if usage["shared_limit"] > 0 and usage["shared_used"] >= usage["shared_limit"]:
-            raise InfraExceeded("UTC daily model-request shared budget unavailable")
+            raise InfraExceeded(f"{self.config.timezone} daily model-request shared budget unavailable")
         if shutil.disk_usage(project.root).free < self.config.limits.free_disk_mb * 1048576:
             raise InfraExceeded("Free disk space is below the configured reserve")
         with contextlib.ExitStack() as stack:
@@ -988,7 +988,7 @@ class Engine:
             except BaseException as exc:
                 if isinstance(exc, ModelFailure) and context is not None and context.admission_error:
                     if getattr(context, "admission_wait", False):
-                        exc = InfraExceeded("UTC daily model-request budget exhausted")
+                        exc = InfraExceeded(f"{self.config.timezone} daily model-request budget exhausted")
                     else:
                         exc = ProtocolError("Local admission failed: " + context.admission_error)
                 handled = None

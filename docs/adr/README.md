@@ -179,3 +179,11 @@ Bounds (fixed): at most 16 parts, each at most 64 KiB, 256 KiB total; see "Roles
 A resumed persistent session receives only what changed since its last unit; new, compacted,
 or rotated sessions get the full prompt with the exact published state and composed policy text.
 Rotation past token, cost, or age `[limits]` keys records the new session key and reason.
+
+## ADR-029 — Budget day follows the configured timezone
+Day-files name the date in `timezone` (UTC default unchanged when unset) via
+`config.resolve_timezone`, so the reset that fired at 09:00 JST now fires at
+midnight Tokyo time; each record carries the `zone` that wrote it alongside the
+ISO date. Projects sharing one `data_dir` should share one `timezone`: different
+zones name different days for the same instant, splitting the shared total across
+day-files. Reaping (`retention_days`) uses each caller's zone window and stays best-effort.

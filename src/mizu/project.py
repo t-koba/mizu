@@ -83,7 +83,7 @@ class Project:
         snapshot = self.snapshots.get()
         budget = Budget(self.config.data / "budget", self.config.limits.daily_requests,
                         self.config.limits.retention_days,
-                        self.config.limits.shared_daily_requests).usage(self.name)
+                        self.config.limits.shared_daily_requests, self.config.timezone).usage(self.name)
         return {"project": self.name, "control": self.control(), "snapshot": snapshot["id"],
                 "code_digest": snapshot["code_digest"], "created_at": snapshot["created_at"],
                 "outcome": snapshot["outcome"], "summary": snapshot["summary"],

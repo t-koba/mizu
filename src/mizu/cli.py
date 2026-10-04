@@ -112,7 +112,7 @@ def parser() -> argparse.ArgumentParser:
     from .storage import DEFAULT_KEEP_ARTIFACTS
     p.add_argument("--keep-artifacts", type=int, default=DEFAULT_KEEP_ARTIFACTS,
                    help="Keep this many recent published artifacts")
-    p = sub.add_parser("budget", help="Show per-project and shared UTC-day request budget usage")
+    p = sub.add_parser("budget", help="Show per-project and shared day request budget usage")
     p.add_argument("project", help="Managed project name")
     return cli
 
@@ -347,14 +347,14 @@ def execute(args):
         from .storage import restore
         return restore(config, args.project, args.archive, max_bytes=args.max_bytes)
     if args.command == "budget":
-        # Per-project usage plus the shared UTC-day total; the name is
+        # Per-project usage plus the shared day total; the name is
         # validated but the project need not exist (counts are keyed by name).
         from .budget import Budget
         from .fs import identifier
         name = identifier(args.project)
         usage = Budget(config.data / "budget", config.limits.daily_requests,
                        config.limits.retention_days,
-                       config.limits.shared_daily_requests).usage(name)
+                       config.limits.shared_daily_requests, config.timezone).usage(name)
         return {"project": name, **usage}
     if args.command == "editor":
         # `editor export` needs a project; `editor mcp` handled above.
