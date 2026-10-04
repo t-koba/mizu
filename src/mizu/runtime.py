@@ -507,7 +507,7 @@ def refresh_upstream(config, project) -> dict:
     Failure: ``Denied`` on adapter/shape errors; ``OSError`` on host I/O.
     No capability check here; the ``sync`` tool adds the grant gate.
     """
-    fetched = _vcs.fetch_refs(capped_vcs_settings(config.vcs, POLL_FETCH_TIMEOUT_CAP))
+    fetched = _vcs.fetch_refs(capped_vcs_settings(config.vcs, vcs_poll_fetch_timeout(config)))
     receipt = _vcs.inject_refs(project.workspace, fetched["refs"])
     return {"injected": receipt["injected"], "prefix": receipt["prefix"],
             "trust": "external-untrusted", "refs": dict(fetched["refs"])}
@@ -568,15 +568,53 @@ def poll_upstream(config, project, state: dict, *, now: float, interval: float,
             "trust": "external-untrusted", "time": now_iso()}
 
 
-#: Maximum branches polled per CI tick (injected-ref derived, bounded).
-#: Four branches cap the daemon tick so one poll cannot block the loop for
-#: minutes even when every adapter call uses its full per-call timeout.
+#: Fail-closed defaults for daemon polling bounds (operator policy in
+#: `[vcs]` carries the same values; see ``vcs_poll_*`` below). The branch
+#: cap keeps one tick short so a poll cannot block the loop for minutes
+#: even when every adapter call uses its full per-call timeout. The
+#: per-call caps bound daemon ticks via `min(timeout_seconds, cap)` so a
+#: large on-demand timeout cannot stall the loop.
 MAX_CI_BRANCHES = 4
-#: Per-call adapter timeout caps for daemon polling (seconds). The operator
-#: `vcs.timeout_seconds` still bounds on-demand tools; daemon ticks use
-#: `min(configured, cap)` so a large configured timeout cannot stall the loop.
 POLL_CALL_TIMEOUT_CAP = 15
 POLL_FETCH_TIMEOUT_CAP = 30
+
+
+def _vcs_poll_number(settings: dict, key: str, default: int) -> int:
+    """Configured `[vcs]` poll bound or its fail-closed default."""
+    try:
+        value = int(settings.get(key, default))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+def vcs_poll_max_branches(config) -> int:
+    """Daemon CI branches per tick from `vcs.poll_max_branches` (default 4)."""
+    try:
+        settings = config.vcs
+    except AttributeError:
+        return MAX_CI_BRANCHES
+    return _vcs_poll_number(settings, "poll_max_branches", MAX_CI_BRANCHES)
+
+
+def vcs_poll_fetch_timeout(config) -> int:
+    """Daemon fetch cap from `vcs.poll_fetch_timeout_seconds` (default 30)."""
+    try:
+        settings = config.vcs
+    except AttributeError:
+        return POLL_FETCH_TIMEOUT_CAP
+    return _vcs_poll_number(settings, "poll_fetch_timeout_seconds",
+                            POLL_FETCH_TIMEOUT_CAP)
+
+
+def vcs_poll_status_timeout(config) -> int:
+    """Daemon per-branch status cap from `vcs.poll_status_timeout_seconds` (default 15)."""
+    try:
+        settings = config.vcs
+    except AttributeError:
+        return POLL_CALL_TIMEOUT_CAP
+    return _vcs_poll_number(settings, "poll_status_timeout_seconds",
+                            POLL_CALL_TIMEOUT_CAP)
 #: Shared per-project poll state (persisted timestamps) and lock name.
 POLL_STATE_FILE = "vcs-poll.json"
 POLL_LOCK_NAME = "vcs-poll.lock"
@@ -617,8 +655,8 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
     """Best-effort periodic CI polling: status per branch, failures to insights.
 
     Schema: ``branches=None`` derives from injected upstream refs
-    (``vcs.list_refs``, first 4 sorted); explicit lists are validated as
-    branch names. Returns a ``ci_poll`` event dict or ``None`` when skipped
+    (``vcs.list_refs``, first ``poll_max_branches`` sorted); explicit lists
+    are validated as branch names. Returns a ``ci_poll`` event dict or ``None`` when skipped
     (disabled or not due). Bounds: one adapter call per branch per due poll
     under the adapter timeout; status checks capped at 1024 rows each.
     Trust: host side only; adapter facts stay external-untrusted and only
@@ -634,16 +672,17 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
     if not upstream_fetch_due(state.get("last_poll"), now, interval):
         return None
     state["last_poll"] = now
+    max_branches = vcs_poll_max_branches(config)
     def _default_reader(settings, op, params):
-        return _vcs.read_via(capped_vcs_settings(settings, POLL_CALL_TIMEOUT_CAP),
+        return _vcs.read_via(capped_vcs_settings(settings, vcs_poll_status_timeout(config)),
                              op, params)
     do_read = reader if reader is not None else _default_reader
     try:
-        if branches is not None and len(list(branches)) > MAX_CI_BRANCHES:
+        if branches is not None and len(list(branches)) > max_branches:
             raise Denied("Too many CI branches per poll")
         if branches is None:
             try:
-                names = sorted(_vcs.list_refs(project.workspace))[:MAX_CI_BRANCHES]
+                names = sorted(_vcs.list_refs(project.workspace))[:max_branches]
             except OSError as exc:
                 raise Denied(f"CI polling is unavailable: {exc}") from exc
             # Fall back to main so a fresh workspace still polls once configured.

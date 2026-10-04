@@ -41,6 +41,22 @@ class PollBoundsTests(Fixture):
         self.assertFalse(event["ok"])
         self.assertIn("Too many", event["error"])
 
+    def test_poll_bounds_follow_operator_config(self):
+        self.assertEqual(self.config.vcs["poll_max_branches"], 4)
+        self.assertEqual(self.config.vcs["poll_fetch_timeout_seconds"], 30)
+        self.assertEqual(self.config.vcs["poll_status_timeout_seconds"], 15)
+        cfg = dataclasses.replace(self.config, vcs={**self.config.vcs,
+            "command": ["true"], "poll_enabled": True, "poll_max_branches": 2})
+        def reader(settings, op, params):
+            return {"checks": [], "trust": "external-untrusted"}
+        ok = poll_ci(cfg, self.project, {}, now=0.0, interval=15.0,
+                     branches=["a", "b"], reader=reader)
+        self.assertTrue(ok["ok"])
+        refused = poll_ci(cfg, self.project, {}, now=100.0, interval=15.0,
+                          branches=["a", "b", "c"], reader=reader)
+        self.assertFalse(refused["ok"])
+        self.assertIn("Too many", refused["error"])
+
     def test_per_project_lock_is_single_flight(self):
         path = self.project.root / "locks" / "vcs-poll.lock"
         with lock(path, blocking=False):

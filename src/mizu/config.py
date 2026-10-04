@@ -731,10 +731,13 @@ def load(file: Path) -> Config:
     web["intranet"] = boolean(web["intranet"], "web.intranet")
     vcs = data.get("vcs", {})
     keys(vcs, {"command", "timeout_seconds", "max_bytes", "poll_enabled",
-               "poll_interval_seconds"}, "vcs")
+               "poll_interval_seconds", "poll_max_branches",
+               "poll_fetch_timeout_seconds", "poll_status_timeout_seconds"}, "vcs")
     vcs = {"command": [], "timeout_seconds": 20,
            "max_bytes": 524288, "poll_enabled": False,
-           "poll_interval_seconds": 300, **vcs}
+           "poll_interval_seconds": 300, "poll_max_branches": 4,
+           "poll_fetch_timeout_seconds": 30,
+           "poll_status_timeout_seconds": 15, **vcs}
     strings(vcs["command"], "vcs.command")
     if vcs["command"] and any(not s or "\n" in s for s in vcs["command"]):
         raise ConfigError("vcs.command must be a nonempty argv array without newlines")
@@ -742,6 +745,9 @@ def load(file: Path) -> Config:
         number(vcs[k], f"vcs.{k}", 1, 16777216)
     vcs["poll_enabled"] = boolean(vcs["poll_enabled"], "vcs.poll_enabled")
     number(vcs["poll_interval_seconds"], "vcs.poll_interval_seconds", 15, 86400)
+    number(vcs["poll_max_branches"], "vcs.poll_max_branches", 1, 64)
+    number(vcs["poll_fetch_timeout_seconds"], "vcs.poll_fetch_timeout_seconds", 1, 300)
+    number(vcs["poll_status_timeout_seconds"], "vcs.poll_status_timeout_seconds", 1, 300)
     return Config(file, path_value(string(data.get("data_dir", "~/.local/state/mizu"), "data_dir"), file.parent),
                   environments, limits, sandbox, profiles, roles, consult, timezone, web, vcs,
                   strings(data.get("exclude", [".git", ".pi", ".env", ".env.*", ".venv",
