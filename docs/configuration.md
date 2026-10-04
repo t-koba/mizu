@@ -215,26 +215,32 @@ Configures outbound retrieval for `fetch` and `search`:
 
 URL fragments are stripped client-side and never sent. Redirects re-validate hostname, port, and IP. Text/HTML/XML/JSON formats are supported; binary/PDF/image formats are rejected.
 
-## VCS (upstream sync, M1 step 1: configuration only)
+## VCS (upstream sync, M1 step 2: adapter invocation only)
 
-Configures the operator-owned upstream-sync adapter. No fetch, merge, or
-daemon fetch runs yet; this step only validates and documents the grant
-surface so operators can stage configuration early.
+Configures the operator-owned upstream-sync adapter. `src/mizu/vcs.py`
+(`invoke`/`fetch_refs`) implements the single-invocation contract; no
+automatic fetch, merge, ref injection, `sync` capability, or daemon fetch
+runs yet.
 
 | Key | Default | Description |
 |---|---|---|
 | `command` | `[]` | Trusted argv executable; JSON stdin/stdout, never a shell string. Empty disables |
 | `timeout_seconds` | `20` | Per-invocation deadline (1–16,777,216) |
-| `max_bytes` | `524288` | Maximum adapter response payload, 512 KiB (1–16,777,216) |
+| `max_bytes` | `524288` | Maximum adapter request/response payload, 512 KiB (1–16,777,216) |
 
-Schema/bounds: `command` is an argv array of strings without newlines (empty
-means disabled); `timeout_seconds`/`max_bytes` are integers in
-`[1, 16777216]`. Unknown `[vcs]` keys fail validation. Trust: operator-owned
-host program only; never model-provided, never run in the sandbox.
-Retry/cancellation: none yet (no invocation in this step). Evidence: none
-yet. Failure: `ConfigError` on unknown keys, bad argv, or out-of-range
-bounds; defaults apply when `[vcs]` is absent so existing configs keep
-loading.
+Adapter contract: stdin is one JSON object `{"op": ...}` bounded by
+`max_bytes`; stdout must be one JSON object. `fetch` returns
+`{"refs": {name: sha}}` (at most 4096 refs; names 1–512 chars without
+newlines/NUL, no leading `/` or `..`; shas 40/64 lowercase hex) with
+`trust: external-untrusted`. Invocation uses `process.run` with timeout, no
+shell, `maximum=max_bytes`. Trust: operator-owned host program only; never
+model-provided, never run in the sandbox. Retry/cancellation: single
+invocation per call under the configured timeout; no shell retry.
+Evidence: caller binds results (later: fetch receipts, `sync` bound to
+`code_digest`). Failure: `ConfigError` on unknown keys, bad argv, or
+out-of-range bounds; `Denied` on unconfigured adapter, oversize request,
+timeout, oversize response, nonzero exit, or malformed/non-object JSON.
+Defaults apply when `[vcs]` is absent so existing configs keep loading.
 
 ## Project metadata
 
