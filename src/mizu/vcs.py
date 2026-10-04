@@ -273,3 +273,189 @@ def read_ref(workspace: Path, name: str) -> str:
     if not _SHA.fullmatch(text.strip()):
         raise Denied("Invalid upstream ref content")
     return text.strip()
+
+
+#: Read-only adapter operations served by ``vcs_read``. Publishing
+#: operations (``push``/``pr``) are never served through this path.
+READ_OPS = frozenset({"status", "log", "comments"})
+#: Mutating adapter operations served by ``vcs_publish`` behind a recorded
+#: human ``GO <branch>`` approval bound to branch and code digest.
+PUBLISH_OPS = frozenset({"push", "pr"})
+
+#: Approval body line binding an insight to the exact pushed tree.
+#: Example body line: ``digest: <64 lowercase hex>``.
+GO_DIGEST_RE = re.compile(r"^digest:\s*([0-9a-f]{64})\s*$", re.M)
+
+
+def go_title(branch: str) -> str:
+    """Return the required human-approval insight title for a branch."""
+    return "GO " + branch
+
+
+def parse_go_digest(body: str) -> str | None:
+    """Return the ``digest:`` line from an approval body, else ``None``."""
+    if not isinstance(body, str):
+        return None
+    match = GO_DIGEST_RE.search(body)
+    return match.group(1) if match else None
+
+
+def check_branch(branch: str) -> str:
+    """Validate a publish/read branch name (same rules as ref names)."""
+    _check_ref_name(branch)
+    if len(branch) > 256:
+        raise Denied("Invalid VCS branch name")
+    return branch
+
+
+def require_go_approval(project, branch: str, code_digest: str) -> dict:
+    """Require a recorded human ``GO <branch>`` approval for this digest.
+
+    Schema: ``branch`` per ``check_branch``; ``code_digest`` 64 hex of the
+    exact tree being published (workspace capture, not model supplied).
+    Trust: local insight inbox plus ``decisions/`` records; only an operator
+    (or a role with ``decide`` reaching a human) can record ``accept``.
+    Retry/cancellation: pure local reads, no retry. Evidence: returned
+    ``{"insight": id, "branch": ..., "code_digest": ...}`` names the
+    approval bound to this publication. Failure: ``Denied`` when no matching
+    title exists, when the digest line is missing/stale, or when the matching
+    record is undecided or not ``accept``. Stale digests are refused even
+    when an older approval exists.
+    """
+    from .fs import DIGEST as _DIGEST
+    check_branch(branch)
+    if not isinstance(code_digest, str) or not _DIGEST.fullmatch(code_digest):
+        raise Denied("Invalid code digest for publication approval")
+    want = go_title(branch)
+    inbox = project.root / "inbox"
+    saw_title = False
+    saw_stale = False
+    saw_undecided = False
+    saw_refused = False
+    try:
+        paths = sorted(inbox.glob("*.json"))
+    except OSError as exc:
+        raise Denied(f"Publication approval is unavailable: {exc}") from exc
+    for path in paths:
+        if path.is_symlink():
+            continue
+        try:
+            item = json.loads(path.read_bytes())
+            if not isinstance(item, dict) or item.get("title") != want:
+                continue
+        except (OSError, ValueError):
+            continue
+        saw_title = True
+        if parse_go_digest(item.get("body", "")) != code_digest:
+            saw_stale = True
+            continue
+        insight_id = item.get("id")
+        if not isinstance(insight_id, str) or not insight_id:
+            continue
+        decision_path = project.root / "decisions" / f"{insight_id}.json"
+        if decision_path.is_symlink():
+            saw_undecided = True
+            continue
+        try:
+            decision = json.loads(decision_path.read_bytes())
+        except (OSError, ValueError):
+            saw_undecided = True
+            continue
+        if not isinstance(decision, dict) or decision.get("id") != insight_id:
+            saw_undecided = True
+            continue
+        if decision.get("action") == "accept":
+            return {"insight": insight_id, "branch": branch,
+                    "code_digest": code_digest}
+        saw_refused = True
+    if saw_refused or saw_undecided:
+        raise Denied("Publication approval is not accepted for this code digest")
+    if saw_stale:
+        raise Denied("Recorded human approval is stale for this code digest")
+    if saw_title:
+        raise Denied("Publication approval is not accepted for this code digest")
+    raise Denied("External publication requires recorded human approval")
+
+
+def read_via(settings: dict, op: str, params: dict) -> dict:
+    """Invoke a read-only adapter operation (``status``/``log``/``comments``).
+
+    Schema: ``params`` must include ``branch``; optional ``sha`` passes
+    through when given. Bounds: same ``max_bytes``/timeout contract as
+    ``invoke``. Trust: operator-owned adapter; results are
+    external-untrusted. Failure: ``Denied`` on publish ops, bad branch, or
+    any adapter contract violation. Never publishes.
+    """
+    if op not in READ_OPS:
+        raise Denied("vcs_read cannot publish; unknown or mutating operation")
+    if not isinstance(params, dict):
+        raise Denied("Invalid VCS read parameters")
+    branch = params.get("branch")
+    check_branch(branch)
+    request = {"op": op, "branch": branch}
+    sha = params.get("sha")
+    if sha is not None:
+        if not isinstance(sha, str) or not _SHA.fullmatch(sha):
+            raise Denied("Invalid VCS sha filter")
+        request["sha"] = sha
+    data = invoke(settings, request)
+    return {**data, "trust": "external-untrusted"}
+
+
+def publish_via(settings: dict, op: str, params: dict) -> dict:
+    """Invoke a mutating adapter operation (``push``/``pr``) after approval.
+
+    Schema: ``params`` must include ``branch``. Bounds: same contract as
+    ``invoke``. Trust: operator-owned adapter only; the caller must have
+    passed ``require_go_approval`` first (this helper checks the op gate,
+    not the human record). Failure: ``Denied`` on read-only/unknown ops or
+    adapter violations.
+    """
+    if op not in PUBLISH_OPS:
+        raise Denied("vcs_publish cannot publish this operation")
+    if not isinstance(params, dict):
+        raise Denied("Invalid VCS publish parameters")
+    branch = params.get("branch")
+    check_branch(branch)
+    data = invoke(settings, {"op": op, "branch": branch})
+    if not isinstance(data, dict):
+        raise Denied("VCS adapter must return a JSON object")
+    return {**data, "trust": "external-untrusted"}
+
+
+def ci_insight_id(branch: str, sha: str, check: str) -> str:
+    """Derive a stable, deduplicating insight ID for a CI failure."""
+    from .fs import digest as _digest, canonical as _canonical
+    check_branch(branch)
+    if not isinstance(sha, str) or not _SHA.fullmatch(sha):
+        raise Denied("Invalid VCS sha for CI insight")
+    if not isinstance(check, str) or not check or len(check) > 256 or "\n" in check or "\x00" in check:
+        raise Denied("Invalid CI check name")
+    return "ci-" + _digest(_canonical({"branch": branch, "sha": sha, "check": check}))[:32]
+
+
+def record_ci_result(project, *, branch: str, sha: str, check: str,
+                     state: str, url: str = "", run: str | None = None) -> dict:
+    """Record a CI failure as an insight; deduplicate repeats, ignore passes.
+
+    Schema: ``state`` is ``"failure"`` (record) or anything else
+    (ignored). ``url`` is an optional bounded log link. Bounds: title
+    <= 200 chars, body within the insight byte limit. Trust: adapter-derived
+    facts labeled external-untrusted in the body; the stable ID lets repeats
+    return the existing record instead of spamming the inbox. Failure:
+    ``Denied`` on bad names; adapter content never raises beyond validation.
+    """
+    if state != "failure":
+        return {"recorded": False, "state": state}
+    if not isinstance(url, str) or len(url) > 4096 or "\x00" in url or "\n" in url:
+        raise Denied("Invalid CI log URL")
+    insight_id = ci_insight_id(branch, sha, check)
+    title = f"CI {check} failed on {branch}"
+    if len(title) > 200:
+        title = title[:200]
+    body = (f"CI check '{check}' failed on branch '{branch}' at {sha}.\n"
+            f"trust: external-untrusted\n" + (f"log: {url}\n" if url else ""))
+    record = project.insights.submit(source="vcs", title=title, body=body,
+                                     base_snapshot=None, run=run,
+                                     insight_id=insight_id)
+    return {"recorded": True, "id": record["id"], "title": title}

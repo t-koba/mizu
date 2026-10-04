@@ -21,3 +21,5 @@ and failure behavior. New policy is Markdown/TOML; new mechanism belongs behind
 explicit grants. Executing Maintainer roles work in their own candidate projects. Repository
 contributors update the current development source; deployment remains an
 explicit operator action.
+
+No external publication without recorded human approval: pushes and PRs require an accepted `GO <branch>` proposal bound to the exact code digest.

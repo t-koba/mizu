@@ -54,7 +54,8 @@ def slot(config: Config):
 #: none of these. Read-only grants (files/read/diff/insights/fetch/search)
 #: stay operator choice, plus the required finish.
 CONSULT_FORBIDDEN = frozenset({"exec", "experiment", "verify", "decide",
-                               "submit_insight", "consult", "report", "sync"})
+                               "submit_insight", "consult", "report", "sync",
+                               "vcs_publish"})
 
 
 def check_consult_role(role_name: str, role) -> None:
@@ -363,6 +364,48 @@ class Context:
                     "trust": "external-untrusted", "refs": fetched["refs"]})
         return record
 
+    def _op_vcs_read(self, args: dict) -> dict:
+        # Read-only VCS view: CI status, logs, PR comments via the trusted
+        # adapter. Never publishes; mutating ops are refused here even if
+        # the adapter would serve them. Requires a visible workspace.
+        if self.role.workspace == "none":
+            raise Denied("This role has no workspace")
+        try:
+            data = _vcs.read_via(self.config.vcs, args["op"],
+                                 {"branch": args["branch"], **({"sha": args["sha"]} if "sha" in args else {})})
+        except OSError as exc:
+            raise Denied(f"VCS read is unavailable: {exc}") from exc
+        record = {"op": args["op"], "branch": args["branch"], "trust": "external-untrusted",
+                  "evidence": "vcs-read.json", "result": data}
+        write_json(self.run_dir / "vcs-read.json", data)
+        return record
+
+    def _op_vcs_publish(self, args: dict) -> dict:
+        # External publication: push/PR via the trusted adapter behind a
+        # recorded human GO approval bound to branch and code digest.
+        # Fail-closed without approval; stale digests refused. Merging stays
+        # workspace edits + verify; this only ships the approved tree.
+        if self.role.workspace != "write":
+            raise Denied("Publication requires a writable workspace")
+        captured = self.project.snapshots.capture_files(self.workspace)
+        if captured.get("skipped"):
+            raise Denied("Publication requires a representable snapshot")
+        code_digest = captured["code_digest"]
+        approval = _vcs.require_go_approval(self.project, args["branch"], code_digest)
+        try:
+            data = _vcs.publish_via(self.config.vcs, args["op"], {"branch": args["branch"]})
+        except OSError as exc:
+            raise Denied(f"VCS publication is unavailable: {exc}") from exc
+        record = {"published": True, "op": args["op"], "branch": args["branch"],
+                  "code_digest": code_digest, "approval": approval["insight"],
+                  "trust": "external-untrusted", "evidence": "vcs-publish.json",
+                  "result": data}
+        write_json(self.run_dir / "vcs-publish.json",
+                   {"op": args["op"], "branch": args["branch"],
+                    "code_digest": code_digest, "approval": approval["insight"],
+                    "trust": "external-untrusted", "result": data})
+        return record
+
     def _op_consult(self, args: dict) -> dict:
         if self.consult is None:
             raise Denied("Nested consultation is disabled")
@@ -398,7 +441,7 @@ class Context:
         "exec": _op_exec, "experiment": _op_experiment, "verify": _op_verify,
         "fetch": _op_fetch, "search": _op_search, "insights": _op_insights,
         "decide": _op_decide, "submit_insight": _op_submit_insight,
-        "sync": _op_sync,
+        "sync": _op_sync, "vcs_read": _op_vcs_read, "vcs_publish": _op_vcs_publish,
         "consult": _op_consult, "report": _op_report, "finish": _op_finish,
     }
 

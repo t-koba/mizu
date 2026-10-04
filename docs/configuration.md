@@ -170,6 +170,8 @@ models are recorded. Model usage excludes unreported auxiliary billing.
 | `consult` | Consult operator-allowlisted profiles through a named read-only role (default `consult`), no nested consultation |
 | `report` | Stage a Markdown document for static artifact publication |
 | `sync` | Refresh upstream refs via the trusted VCS adapter (writable workspace only); merges stay as workspace edits followed by verification |
+| `vcs_read` | Read CI status, logs, PR comments via the trusted VCS adapter; never publishes (read roles may hold it) |
+| `vcs_publish` | Push a branch or open a PR via the trusted VCS adapter behind a recorded human `GO <branch>` approval (writable workspace only; consultation roles cannot hold it) |
 | `finish` | Seal result; cannot acquire new permissions |
 
 A consultation names its answering role explicitly (`role`, default `consult`).
@@ -273,6 +275,12 @@ empty `command` disables polling. Polling is best-effort: adapter/shape
 failures become visible `upstream_fetch` events (`ok: false`) and never
 publish a snapshot (injected refs stay digest-excluded). `last_fetch`
 advances on failure too, so one bad adapter cannot busy-loop.
+
+## VCS publish (M2 step 1: `vcs_read`/`vcs_publish` behind `GO <branch>` approval)
+
+Same `[vcs]` adapter, no new keys. `vcs_read` serves only `status`/`log`/`comments` (`{"op", "branch", optional `"sha"`}); `vcs_publish` serves only `push`/`pr` (`{"op", "branch"}`). Cross-path calls are `Denied` (`vcs_read cannot publish`). Host-side only, single invocation under `timeout_seconds`, stdout capped at `max_bytes`; results stay `external-untrusted` with `vcs-read.json` / `vcs-publish.json` evidence.
+
+External publication requires recorded human approval (AGENTS.md: "no external publication without recorded human approval"): an insight titled exactly `GO <branch>` whose body carries a `digest: <code_digest>` line for the exact workspace `code_digest` at call time, with an `accept` decision on that insight ID. Missing, stale, undecided, or non-accept records are `Denied` (stale digests name the staleness). `vcs_publish` requires a writable workspace and is forbidden on consultation roles. CI failures become deduplicated insights via stable IDs (`ci-<32 hex>` from branch+sha+check); repeats return the existing record, passes are ignored.
 
 ## Project metadata
 

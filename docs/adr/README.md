@@ -173,3 +173,84 @@ success, timeout, oversize, malformed JSON, nonzero exit), read-only and
 digest-exclusion tests, grant tests, end-to-end conflict test with fake
 engine, and periodic-fetch test with fake clock. Offline `check.py` stays
 green. No model-specific defaults; portable stdlib-only runtime.
+
+## ADR-009 — VCS publish behind recorded human approval, read/publish split
+
+**Accepted (M2 step 1).** Add `vcs_read` (CI status/logs, PR comments) and
+`vcs_publish` (push, PR) operations over the existing operator-owned trusted
+argv `[vcs]` adapter (same JSON stdin/stdout, timeout, `max_bytes`, no shell
+as M1/`web.search_command`). Push/PR fail closed without a recorded human
+approval: an insight titled exactly `GO <branch>` whose body carries a
+`digest: <code_digest>` line for the exact tree being published, with an
+`accept` decision on that insight. CI failures become insights with stable
+deduplicating IDs.
+
+## Context
+
+M1 gave the writer a read-only upstream view (`sync` refresh) with no push
+path. Publishing to the outside world needs a mechanism that cannot be talked
+into shipping code: capability-gated tools, a human record bound to the exact
+bits, and a read path that cannot mutate. AGENTS.md states the invariant:
+"no external publication without recorded human approval".
+
+## Decision
+
+- Mechanism provides capabilities; policy decides behavior. The `vcs_read` /
+  `vcs_publish` tools, the `GO <branch>` digest check, and the stable CI
+  insight IDs are mechanism. When to publish, which branch, and whether CI is
+  green enough are operator/worker policy, not code heuristics.
+- Same `[vcs]` table, no new config keys: `command`, `timeout_seconds`,
+  `max_bytes` (unknown keys still fail). Capabilities `vcs_read` and
+  `vcs_publish` gate the tools; `vcs_publish` requires a writable workspace
+  (config load refuses it on read roles, call time refuses replaced roles)
+  and is forbidden on consultation roles. `vcs_read` is read-only and allowed
+  on read roles.
+- Adapter contract: `vcs_read` serves only `status`/`log`/`comments` with
+  `{"op", "branch", optional "sha"}`; `vcs_publish` serves only `push`/
+  `pr` with `{"op", "branch"}`. Cross-path ops are `Denied`
+  (`vcs_read cannot publish`). Host-side only, never in sandbox, never
+  model-provided argv; single invocation under the configured timeout.
+- Approval record: insight title `GO <branch>` (branch validated like a ref
+  name, max 256 chars), body line `digest: <64 hex>`, decision `accept` on
+  that insight ID. The runtime captures the workspace `code_digest` at call
+  time and compares against the body line; stale digests, missing lines,
+  undecided or non-accept decisions are `Denied` with distinct reasons. Any
+  valid matching record suffices; the returned receipt names the insight ID,
+  branch, and digest.
+- CI insights: `record_ci_result` records only `failure` states as insights
+  from adapter facts; passes are ignored. ID `ci-<32 hex>` derives from
+  branch+sha+check, so repeats resubmit identical content and return the
+  existing record instead of duplicating the inbox. Bodies are labeled
+  `external-untrusted`.
+- No silent auto-publish, no auto-merge, no retry in mechanism. Publication
+  writes `vcs-publish.json` / `vcs-read.json` evidence; completion still binds
+  to `code_digest` via `verify`.
+
+## Schema, bounds, trust, retry/cancellation, evidence, failure
+
+- Schema: `vcs_read {op, branch, sha?}`, `vcs_publish {op, branch}` per
+  `protocol.DEFINITIONS`; adapter JSON objects validated by `vcs.invoke`.
+- Bounds: branch 1-256 chars; sha 40/64 hex; check names 1-256 chars; log
+  URLs 4096 chars; adapter stdout capped at `max_bytes`; at most one adapter
+  spawn per call.
+- Trust: operator-owned host program; adapter results and CI bodies stay
+  `external-untrusted` until merged/verified. Approval trust comes from the
+  local insight/decision store, not the adapter.
+- Retry/cancellation: single invocation per tool call under
+  `timeout_seconds`; tool-cancelled runs refuse before dispatch.
+- Evidence: `vcs-publish.json` (op/branch/digest/approval/result),
+  `vcs-read.json`, CI insight IDs.
+- Failure: `ConfigError` on `vcs_publish` without writable workspace at load;
+  `Denied` on missing/stale/unaccepted approval, cross-path ops, bad
+  branch/sha, adapter timeout/oversize/nonzero-exit/malformed JSON, or
+  unrepresentable workspace.
+
+## Consequences
+
+Step 1 ships the capability/protocol split, the approval gate, the CI dedup
+helper, AGENTS.md invariant, docs, and fake-adapter tests (unapproved push
+refused, stale digest refused, accepted digest publishes, `vcs_read` cannot
+publish, CI dedup, consult cannot hold `vcs_publish`). Later M2 steps add
+daemon CI polling and richer status shapes behind the same bounds, each with
+focused offline tests. `check.py` stays green; stdlib-only; no model-specific
+defaults.
