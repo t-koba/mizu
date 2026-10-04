@@ -914,3 +914,57 @@ Long soaks stay bounded to records plus N/M-day log windows while
 `mizu usage`/dashboards keep working; operators needing full streams keep
 them with `0`/`0` or from backups. `check.py` stays green; stdlib-only;
 no model-specific defaults.
+
+## ADR-025 — Policy audit moves dashboard projection bounds to config
+
+**Accepted.** `[limits] dashboard_decisions` (default 10) and
+`dashboard_reason_chars` (default 500) replace the fixed dashboard
+recent-decision count and reason truncation; behavior is unchanged by
+default. All other audited fixed constants stay in code as safety or
+resource bounds, with the reason recorded below.
+
+## Context
+
+Fixed behavioral constants had accumulated in mechanism while operators
+could reasonably choose presentation, retention, and schedule values
+differently. The audit lists each class and moves the presentation pair
+that carries no safety cost; spending, isolation, framing, and liveness
+bounds stay fixed.
+
+## Decision
+
+Audit table (value = current behavior, kept as default where moved):
+
+| Constant (code) | Value | Disposition | Why |
+|---|---|---|---|
+| `SMOKE_REQUESTS/TOOLS/SECONDS` (`smoke.py`) | 4 / 5 / 120 s | Stays fixed | Paid spend cap with one benign-listing margin; opening it opens spend |
+| Infra-wait classes (`Busy`/`InfraExceeded` defer, `LimitExceeded` counts) | type-based | Stays fixed | Fault taxonomy prevents hiding real faults; operator controls brake via `max_failures` plus budget/disk thresholds |
+| `POLL_CALL/FETCH_TIMEOUT_CAP`, `MAX_CI_BRANCHES` (`runtime.py`) | 15 s / 30 s / 4 | Stays fixed | Per-tick ~90 s liveness bound keeps the daemon responsive; cadence itself is `poll_interval_seconds` policy |
+| `poll_interval_seconds`, `pending_insights`, `prompt_snapshots`, `history_index`, `retention_days`, event-log days | configured | Already policy | Existing `[limits]`/`[vcs]` knobs with documented defaults |
+| `PREVIEW_BYTES`, `MAX_FRAME`, `SCRIPT_MAX`, insight/report/finish/consult/search sizes | 128 KiB / 1 MiB / 64 KiB / 60 KiB / 48 KiB / 12+32 KiB / 8 KiB+8 / 1k+4k | Stays fixed | Framing and memory safety: unbounded reads or messages risk OOM and protocol desync |
+| Sandbox termination, `MAX_VERIFY_COMMANDS`, include depth/files/bytes, web redirect/media, restore `--max-bytes` | 1 s+5 s / 32 / 8+32+1 MiB / 3 / 1 GiB | Stays fixed | Termination, fan-out, recursion, and archive-bomb safety floors |
+| `MAX_RUNS_SCANNED`, `MAX_RECENT_ENTRIES`, record size caps (`usage.py`) | 5000 / 200 / 1 MiB | Stays fixed | Unbounded run scans stall usage/dashboard; records stay complete on disk |
+| `MAX_DECISIONS`, `REASON_TRUNCATE` (`dashboard.py`) | 10 / 500 | Moves to policy | Pure projection: raw decisions stay on disk, only the small-screen slice changes |
+
+- Mechanism: `dashboard.collect` reads the two bounds from `limits`
+  (fallback to the same constants when no config is present); truncation
+  stays flagged.
+- Policy: the two `[limits]` keys above; unknown keys still fail.
+
+## Schema, bounds, trust, retry/cancellation, evidence, failure
+
+- Schema: `Limits` gains the two keys with docs in
+  `docs/configuration.md` and `config/config.example.toml`.
+- Bounds: decisions 1-1000, reason chars 1-10000; projections stay
+  bounded even at the maxima while raw history stays complete.
+- Trust: recorded decisions only, never model input; read-only projection.
+- Retry/cancellation: none; pure function of recorded files plus limits.
+- Evidence: `tests/test_dashboard_policy.py` pins defaults 10/500,
+  custom 2/100 slicing and truncation, and range refusal.
+- Failure: out-of-range values are `ConfigError`; `check.py` green.
+
+## Consequences
+
+Operators needing longer dashboards set two numbers instead of patching
+code; every spend, isolation, framing, and liveness bound stays fixed
+with its reason above. Unset configs behave exactly as before.

@@ -284,6 +284,11 @@ class Limits:
     #: dashboard projection. Raw inbox/decisions stay on disk; the operator
     #: review path (`mizu insight list`) uses a separate 1000-item bound.
     pending_insights: int = 30
+    #: Operator-selected dashboard projection bounds (M12 audit). Raw
+    #: decisions stay on disk; the dashboard shows the newest N with
+    #: reasons truncated to M chars (flagged).
+    dashboard_decisions: int = 10
+    dashboard_reason_chars: int = 500
 
 
 @dataclasses.dataclass(frozen=True)
@@ -407,6 +412,7 @@ def load(file: Path) -> Config:
     _LIMIT_RANGES = {"history_index": (8, 1000000), "prompt_snapshots": (1, 64),
                      "retention_days": (0, 3650), "pending_insights": (1, 1000),
                      "event_log_compress_days": (0, 3650), "event_log_retention_days": (0, 3650),
+                     "dashboard_decisions": (1, 1000), "dashboard_reason_chars": (1, 10000),
                      "default_wait_seconds": (1, MAX_WAIT_SECONDS),
                      "maximum_wait_seconds": (1, MAX_WAIT_SECONDS),
                      "daily_requests": (0, 100000), "shared_daily_requests": (0, 100000), "max_failures": (0, 1073741824),

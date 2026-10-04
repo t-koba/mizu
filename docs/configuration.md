@@ -85,6 +85,8 @@ required). Operator tooling that concatenates configs
 | `event_log_compress_days` | Compress bulky per-run engine logs (`*-events.jsonl`, `diagnostics.txt`) at or beyond N days old to `.gz` (0 disables; 0–3,650; default 7) |
 | `event_log_retention_days` | Drop bulky per-run engine logs (raw and `.gz`) at or beyond M days old (0 disables; 0–3,650; default 31). Result/error/consultation/started/selection/usage records, snapshots, objects, sessions, decisions, and proposals are never candidates |
 | `pending_insights` | Newest pending proposals offered in prompts/dashboard (1–1,000; default 30). `mizu insight list` uses 1,000 |
+| `dashboard_decisions` | Recent decisions shown per dashboard (1–1,000; default 10). Older history stays in `decisions/` on disk |
+| `dashboard_reason_chars` | Dashboard reason/revisit truncation length in chars (1–10,000; default 500, flagged truncated). Raw prose stays on disk |
 | `free_disk_mb` | Minimum free disk space required to start a work unit |
 
 All limits are positive integers except `daily_requests`, `shared_daily_requests`, `max_failures`, `free_disk_mb`, `retention_days`, `event_log_compress_days`, and `event_log_retention_days`, which may be zero.

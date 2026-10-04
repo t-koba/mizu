@@ -21,13 +21,21 @@ from .usage import summarize, record_time
 
 #: Pending-proposal projection bound is operator-selected
 #: ([limits] pending_insights, default 30). Raw inbox/decisions stay on disk.
-#: Recent decisions (10) and reason truncation (500 chars, flagged) stay fixed
-#: small-screen bounds; raw reasons stay in decisions/ on disk.
+#: Recent-decision count and reason truncation are operator-selected
+#: ([limits] dashboard_decisions default 10, dashboard_reason_chars default
+#: 500, flagged); raw reasons stay in decisions/ on disk. The constants
+#: below are fallback defaults when no configured limits are present.
 MAX_PENDING_FALLBACK = 30
-#: Recent decisions surfaced per dashboard; older history stays on disk.
+#: Fallback default for [limits] dashboard_decisions; older history stays on disk.
 MAX_DECISIONS = 10
-#: Long decision prose is truncated to this many characters for small screens.
+#: Fallback default for [limits] dashboard_reason_chars for small screens.
 REASON_TRUNCATE = 500
+
+
+def _configured(project, name: str, fallback: int) -> int:
+    limits = getattr(getattr(project, "config", None), "limits", None)
+    value = getattr(limits, name, fallback) if limits is not None else fallback
+    return value if type(value) is int else fallback
 
 
 def _truncate(text: str, maximum: int = REASON_TRUNCATE) -> dict:
@@ -40,8 +48,9 @@ def collect(project) -> dict:
     """Gather the dashboard core from already-recorded project files.
 
     Schema/bounds: pending slice follows ``[limits] pending_insights``;
-    recent decisions 10, reason 500 chars (flagged), day-groups follow
-    ``[limits] retention_days``. Trust: recorded harness state + agent prose
+    recent decisions follow ``[limits] dashboard_decisions`` (default 10),
+    reason truncation follows ``[limits] dashboard_reason_chars`` (default
+    500 chars, flagged), day-groups follow ``[limits] retention_days``. Trust: recorded harness state + agent prose
     (data, not proof). Retry: read-only, lock-free, idempotent publish.
     Evidence: disposable projection; snapshots/runs/decisions stay on disk.
     Failure: raises instead of inventing placeholders. The only write is the
@@ -56,6 +65,8 @@ def collect(project) -> dict:
     projection = project.insights.projection(limit=max_pending)
     pending = projection["items"]
     slim_pending = []
+    reason_chars = _configured(project, "dashboard_reason_chars", REASON_TRUNCATE)
+    max_decisions = _configured(project, "dashboard_decisions", MAX_DECISIONS)
     for item in pending:
         entry = {k: item[k] for k in ("id", "source", "title", "created_at", "base_snapshot")}
         decision = item.get("decision")
@@ -63,8 +74,8 @@ def collect(project) -> dict:
             entry["decision"] = {
                 "action": decision.get("action"),
                 "created_at": decision.get("created_at"),
-                "reason": _truncate(str(decision.get("reason", ""))),
-                "revisit": _truncate(str(decision.get("revisit", ""))),
+                "reason": _truncate(str(decision.get("reason", "")), maximum=reason_chars),
+                "revisit": _truncate(str(decision.get("revisit", "")), maximum=reason_chars),
             }
         else:
             entry["decision"] = None
@@ -84,11 +95,11 @@ def collect(project) -> dict:
             "id": record.get("id"),
             "action": record.get("action"),
             "created_at": record.get("created_at"),
-            "reason": _truncate(str(record.get("reason", ""))),
+            "reason": _truncate(str(record.get("reason", "")), maximum=reason_chars),
         }
         key = (record_time(entry.get("created_at")), str(entry.get("id") or ""), path.name)
         value = (*key, entry)
-        if len(recent) < MAX_DECISIONS:
+        if len(recent) < max_decisions:
             heapq.heappush(recent, value)
         elif key > recent[0][:3]:
             heapq.heapreplace(recent, value)

@@ -34,6 +34,8 @@ retention_days = 31              # Operator-selected retention window (days) for
 event_log_compress_days = 7    # Compress bulky per-run engine logs (*-events.jsonl, diagnostics.txt) older than N days to .gz (0 disables).
 event_log_retention_days = 31   # Drop bulky per-run engine logs (raw and .gz) older than M days (0 disables); result/error/selection records are always kept.
 pending_insights = 30            # Newest pending proposals offered per prompt/dashboard projection. Raw inbox/decisions stay on disk; `mizu insight list` uses 1000.
+dashboard_decisions = 10         # Recent decisions shown per dashboard; raw decisions stay on disk.
+dashboard_reason_chars = 500     # Dashboard reason/revisit truncation length (flagged); raw prose stays on disk.
 free_disk_mb = 1024
 
 [sandbox]
