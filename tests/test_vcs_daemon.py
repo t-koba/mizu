@@ -97,6 +97,28 @@ class DaemonPeriodicFetchTests(Fixture):
         self.assertEqual(self.project.snapshots.get()["id"], before)
         self.assertEqual(vcs.list_refs(self.project.workspace), [])
 
+
+    def test_future_timestamp_is_due_after_clock_reset(self):
+        # Persisted wall-clock in the future (or stale monotonic above the new
+        # clock after a reboot) must not suppress polling.
+        self.assertTrue(upstream_fetch_due(200.0, 10.0, 15.0))
+
+    def test_shared_state_refresh_suppresses_second_daemon(self):
+        from mizu.runtime import poll_project_vcs
+        config = dataclasses.replace(
+            self.config, vcs=adapter_settings("import sys; sys.exit(3)"))
+        first_state: dict = {"last_fetch": None}
+        first = poll_project_vcs(config, self.project, first_state,
+                                 now=1000.0, interval=300.0)
+        self.assertTrue(first)
+        # A second daemon with fresh memory reads the shared file and skips
+        # within the interval: once per project per interval holds.
+        second_state: dict = {"last_fetch": None}
+        skipped = poll_project_vcs(config, self.project, second_state,
+                                   now=1100.0, interval=300.0)
+        self.assertEqual(skipped, [])
+        self.assertEqual(second_state.get("last_fetch"), 1000.0)
+
     def test_poll_failure_does_not_raise_denied(self):
         def boom(config, project):
             raise Denied("boom")

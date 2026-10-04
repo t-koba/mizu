@@ -516,14 +516,21 @@ def refresh_upstream(config, project) -> dict:
 def upstream_fetch_due(last_fetch: float | None, now: float, interval: float) -> bool:
     """Return True when a periodic upstream fetch is due (fake-clock testable).
 
-    Schema: monotonic seconds; ``last_fetch=None`` means never fetched.
+    Schema: wall-clock seconds; ``last_fetch=None`` means never fetched.
     Bounds: ``interval <= 0`` always fetches (config floors keep it positive).
     Trust: pure time arithmetic, no I/O. Failure: never raises.
     """
     if last_fetch is None:
         return True
     try:
-        return (float(now) - float(last_fetch)) >= float(interval)
+        last = float(last_fetch)
+        current = float(now)
+    except (TypeError, ValueError):
+        return True
+    if last > current:
+        return True
+    try:
+        return (current - last) >= float(interval)
     except (TypeError, ValueError):
         return True
 
@@ -532,7 +539,7 @@ def poll_upstream(config, project, state: dict, *, now: float, interval: float,
                   refresh=None) -> dict | None:
     """Best-effort periodic upstream refresh for the daemon loop.
 
-    Schema: ``state`` holds ``last_fetch`` (monotonic) across calls; returns
+    Schema: ``state`` holds ``last_fetch`` (wall-clock) across calls; returns
     an ``upstream_fetch`` event dict or ``None`` when skipped (disabled or not
     due). Bounds: one ``refresh`` invocation per due poll under the adapter
     timeout. Trust: host side only via ``refresh_upstream``; refs stay
@@ -627,13 +634,13 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
     if not upstream_fetch_due(state.get("last_poll"), now, interval):
         return None
     state["last_poll"] = now
-    if branches is not None and len(list(branches)) > MAX_CI_BRANCHES:
-        raise Denied("Too many CI branches per poll")
     def _default_reader(settings, op, params):
         return _vcs.read_via(capped_vcs_settings(settings, POLL_CALL_TIMEOUT_CAP),
                              op, params)
     do_read = reader if reader is not None else _default_reader
     try:
+        if branches is not None and len(list(branches)) > MAX_CI_BRANCHES:
+            raise Denied("Too many CI branches per poll")
         if branches is None:
             try:
                 names = sorted(_vcs.list_refs(project.workspace))[:MAX_CI_BRANCHES]
@@ -673,7 +680,7 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
 
 
 def now_iso() -> str:
-    """Wall-clock event stamp for ``poll_upstream`` (monotonic ``now`` stays in state)."""
+    """Wall-clock event stamp for ``poll_upstream``."""
     return now()
 
 
@@ -1117,6 +1124,74 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
     return outcome == "wait" and snapshot.get("wake_at") is not None and current_time >= snapshot["wake_at"]
 
 
+def _wall(value):
+    """Wall-clock timestamp or None for poll state merging."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number or number in (float("inf"), float("-inf")):
+        return None
+    return number
+
+
+def refresh_poll_state(state: dict, shared: dict) -> dict:
+    """Refresh in-memory poll state from shared persisted state.
+
+    Schema: ``state`` is the daemon in-memory ``{"last_fetch", "ci": {"last_poll"}}``;
+    ``shared`` is the flat ``vcs-poll.json`` mapping. Returns the ``ci`` sub-state.
+    Bounds: numeric timestamps only; anything else is ignored. Trust: local
+    operator state, never model input. Failure: never raises.
+    """
+    ci_state = state.setdefault("ci", {})
+    if not isinstance(shared, dict):
+        return ci_state
+    for key, target in (("last_fetch", state), ("last_poll", ci_state)):
+        seen = _wall(shared.get(key))
+        if seen is None:
+            continue
+        current = _wall(target.get(key))
+        if current is None or seen > current:
+            target[key] = seen
+    return ci_state
+
+
+def poll_project_vcs(config, project, state: dict, *, now: float, interval: float) -> list:
+    """Poll upstream refs and CI once for a project under the shared lock.
+
+    Schema: ``state`` is daemon in-memory poll state; ``now`` is wall-clock
+    seconds; returns the due poll events (possibly empty). Bounds: at most one
+    fetch plus one CI tick per call under adapter timeout caps. Trust: host
+    side only; refs and CI facts stay external-untrusted. Retry/cancellation:
+    no retry; timestamps advance even on failure. Evidence: returned events and
+    the shared ``vcs-poll.json`` timestamps. Failure: never raises; a missed
+    lock or bad state yields no events.
+    """
+    try:
+        with lock(project.root / "locks" / POLL_LOCK_NAME, blocking=False):
+            try:
+                shared = read_json(project.root / POLL_STATE_FILE, {})
+            except (OSError, ValueError, TypeError):
+                shared = {}
+            ci_state = refresh_poll_state(state, shared)
+            events = []
+            fetched = poll_upstream(config, project, state, now=now, interval=interval)
+            if fetched is not None:
+                events.append(fetched)
+            polled = poll_ci(config, project, ci_state, now=now, interval=interval)
+            if polled is not None:
+                events.append(polled)
+            with contextlib.suppress(OSError, ValueError, TypeError):
+                write_json(project.root / POLL_STATE_FILE,
+                           {"last_fetch": state.get("last_fetch"),
+                            "last_poll": ci_state.get("last_poll")})
+            return events
+    except Busy:
+        return []
+    except (OSError, ValueError, TypeError):
+        return []
+
+
 def daemon(config: Config, name: str, role_name: str) -> None:
     stop = threading.Event()
     def stopped(signum, frame):
@@ -1136,34 +1211,9 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                     project.insights.ingest_editor(keep_days=config.limits.retention_days)
                     if vcs_poll_enabled(config):
                         interval = vcs_poll_interval(config)
-                        try:
-                            with lock(project.root / "locks" / POLL_LOCK_NAME,
-                                      blocking=False):
-                                shared = read_json(project.root / POLL_STATE_FILE, {})
-                                if isinstance(shared, dict):
-                                    if upstream_state.get("last_fetch") is None:
-                                        upstream_state["last_fetch"] = shared.get("last_fetch")
-                                    ci_state = upstream_state.setdefault("ci", {})
-                                    if ci_state.get("last_poll") is None:
-                                        ci_state["last_poll"] = shared.get("last_poll")
-                                else:
-                                    ci_state = upstream_state.setdefault("ci", {})
-                                fetched = poll_upstream(config, project, upstream_state,
-                                                        now=time.monotonic(),
-                                                        interval=interval)
-                                if fetched is not None:
-                                    print(json.dumps(fetched, ensure_ascii=False), flush=True)
-                                polled = poll_ci(config, project, ci_state,
-                                                 now=time.monotonic(),
-                                                 interval=interval)
-                                if polled is not None:
-                                    print(json.dumps(polled, ensure_ascii=False), flush=True)
-                                with contextlib.suppress(OSError, ValueError, TypeError):
-                                    write_json(project.root / POLL_STATE_FILE,
-                                               {"last_fetch": upstream_state.get("last_fetch"),
-                                                "last_poll": ci_state.get("last_poll")})
-                        except Busy:
-                            pass
+                        for event in poll_project_vcs(config, project, upstream_state,
+                                                      now=time.time(), interval=interval):
+                            print(json.dumps(event, ensure_ascii=False), flush=True)
                     role = config.roles[role_name]
                     ready = should_run(project, project.snapshots.get()) if role.workspace == "write" else (
                         project.control().get("armed") and not project.control().get("paused"))

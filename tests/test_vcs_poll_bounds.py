@@ -35,9 +35,11 @@ class PollBoundsTests(Fixture):
         self.assertEqual(MAX_CI_BRANCHES, 4)
         cfg = dataclasses.replace(self.config, vcs={**self.config.vcs,
             "command": ["true"], "poll_enabled": True})
-        with self.assertRaises(Denied):
-            poll_ci(cfg, self.project, {}, now=0.0, interval=15.0,
-                    branches=["a", "b", "c", "d", "e"])
+        event = poll_ci(cfg, self.project, {}, now=0.0, interval=15.0,
+                        branches=["a", "b", "c", "d", "e"])
+        self.assertEqual(event["event"], "ci_poll")
+        self.assertFalse(event["ok"])
+        self.assertIn("Too many", event["error"])
 
     def test_per_project_lock_is_single_flight(self):
         path = self.project.root / "locks" / "vcs-poll.lock"
