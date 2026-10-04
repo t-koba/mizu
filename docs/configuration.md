@@ -215,12 +215,12 @@ Configures outbound retrieval for `fetch` and `search`:
 
 URL fragments are stripped client-side and never sent. Redirects re-validate hostname, port, and IP. Text/HTML/XML/JSON formats are supported; binary/PDF/image formats are rejected.
 
-## VCS (upstream sync, M1 step 2: adapter invocation only)
+## VCS (upstream sync, M1 step 3: adapter invocation and ref injection)
 
 Configures the operator-owned upstream-sync adapter. `src/mizu/vcs.py`
-(`invoke`/`fetch_refs`) implements the single-invocation contract; no
-automatic fetch, merge, ref injection, `sync` capability, or daemon fetch
-runs yet.
+(`invoke`/`fetch_refs`, plus host-side `inject_refs`/`list_refs`/`read_ref`)
+implements the single-invocation contract and read-only ref injection; no
+automatic fetch, merge, `sync` capability, or daemon fetch runs yet.
 
 | Key | Default | Description |
 |---|---|---|
@@ -241,6 +241,16 @@ Evidence: caller binds results (later: fetch receipts, `sync` bound to
 out-of-range bounds; `Denied` on unconfigured adapter, oversize request,
 timeout, oversize response, nonzero exit, or malformed/non-object JSON.
 Defaults apply when `[vcs]` is absent so existing configs keep loading.
+
+Host-side `inject_refs` writes validated refs as read-only (`0o444`) files
+under the reserved workspace subtree `refs/remotes/upstream/*` (at most
+4096 refs; stale entries pruned on refresh; symlink escapes refused).
+`Snapshots.excluded` always excludes that subtree, so injected refs never
+affect `code_digest` — even if the model rewrites them, and even under an
+emptied operator `exclude` list. Operators must not keep project source
+there. The `files`/`read` tools serve injected refs read-only from the
+project workspace (read roles included; `none` sees none). Content stays
+`external-untrusted` until merged and verified.
 
 ## Project metadata
 

@@ -28,9 +28,12 @@ class VcsConfigTests(Fixture):
             load(path)
 
     def test_bad_argv_refused(self):
-        for bad in ('command = [""]', 'command = ["ok\nbad"]'):
+        for bad in ('command = [""]', 'command = ["ok\\nbad"]',
+                    'command = "vcs"'):
             path = self.root / "config/bad-argv.toml"
-            path.write_text(self.file.read_text() + f'\n[vcs]\n{bad}\n')
+            base = self.file.read_text()
+            assert "command = []" in base
+            path.write_text(base.replace("command = []", bad, 1))
             with self.assertRaises(ConfigError, msg=bad):
                 load(path)
 

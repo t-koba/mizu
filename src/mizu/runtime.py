@@ -28,6 +28,7 @@ from .project import Project
 from .protocol import DEFINITIONS, validate
 from .report import publish
 from .sandbox import Sandbox, cleanup
+from . import vcs as _vcs
 from .web import Web
 from .web_worker import bounded
 
@@ -201,6 +202,10 @@ class Context:
             names = []
         elif self.role.workspace != "write":
             names = sorted(self.snapshot["files"])
+            names = sorted(names + self._injected_ref_paths())
+            result = page(names, args.get("offset", 0), args.get("limit", 1000))
+            result["files"] = result.pop("items")
+            return result
         else:
             names = []
             for directory, dirs, files in os.walk(self.workspace, followlinks=False):
@@ -213,11 +218,31 @@ class Context:
                         if len(names) > self.config.limits.snapshot_files:
                             raise LimitExceeded("Workspace file count exceeded")
             names.sort()
+            names = names + self._injected_ref_paths()
+            names.sort()
         result = page(names, args.get("offset", 0), args.get("limit", 1000))
         result["files"] = result.pop("items")
         return result
 
+    def _injected_ref_paths(self) -> list[str]:
+        # Injected refs live in the project workspace even for read roles
+        # (snapshots exclude them, so materialized inputs lack them).
+        try:
+            refs = _vcs.list_refs(self.project.workspace)
+        except OSError as exc:
+            raise Denied(f"Upstream refs are unavailable: {exc}") from exc
+        return [_vcs.REF_PREFIX_PATH + "/" + name for name in refs]
+
     def _op_read(self, args: dict) -> dict:
+        ref = _vcs.split_ref_path(args["path"])
+        if ref is not None:
+            if self.role.workspace == "none":
+                raise Denied("Path is not exposed to this role")
+            try:
+                text = _vcs.read_ref(self.project.workspace, ref)
+            except OSError as exc:
+                raise Denied(f"Upstream ref is unavailable: {exc}") from exc
+            return {"path": args["path"], "text": text}
         if self.role.workspace == "none" or self.project.snapshots.excluded(args["path"]):
             raise Denied("Path is not exposed to this role")
         data = safe_read(self.workspace, args["path"], min(self.config.limits.file_bytes, PREVIEW_BYTES))

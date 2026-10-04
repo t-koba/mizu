@@ -11,6 +11,7 @@ from pathlib import Path
 from . import platform as _platform
 from .errors import Denied, LimitExceeded
 from .fs import DIGEST, PREVIEW_BYTES, atomic_write, canonical, digest, mkdir, now, publish_pointer, read_json, safe_read, safe_read_info, write_json, relative_parts
+from .vcs import REF_PREFIX
 
 
 def open_store(root: Path, config) -> "Snapshots":
@@ -32,6 +33,13 @@ class Snapshots:
         mkdir(root / "snapshots")
 
     def excluded(self, name: str) -> bool:
+        # Reserved upstream-ref subtree (M1): injected refs are read-only
+        # workspace views served from the live tree, never snapshot content,
+        # so they cannot affect code_digest even under an emptied operator
+        # exclude list. Operators must not keep project source here.
+        parts = name.split("/")
+        if len(parts) >= len(REF_PREFIX) and tuple(parts[:len(REF_PREFIX)]) == REF_PREFIX:
+            return True
         return any(fnmatch.fnmatchcase(part, pattern)
                    for part in name.split("/") for pattern in self.excludes)
 
