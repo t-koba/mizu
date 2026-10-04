@@ -28,6 +28,8 @@ class PlatformContractTests(unittest.TestCase):
         self.assertTrue(_platform.HAS_FLOCK or _platform.HAS_MSVCRT_LOCK or os.name == "nt")
 
     def test_container_user_is_never_root(self):
+        if _platform.is_root():
+            self.skipTest("container-user probe needs an unprivileged host uid; root hosts are refused by the run/doctor/smoke guards")
         user = _platform.container_user()
         self.assertNotEqual(user.split(":")[0], "0")
         ids = _platform.uid_gid()

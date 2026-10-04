@@ -111,7 +111,10 @@ class ConsultGateTests(Fixture):
     def test_single_shared_gate(self):
         import mizu.runtime as runtime
         import mizu.smoke as smoke
-        with patch.object(runtime,'check_consult_role',side_effect=Denied('shared gate')) as gate:
+        # The root refusal is orthogonal to the shared-gate assertion; run the
+        # gate logic as an unprivileged user even when the suite runs as root.
+        with patch('mizu.smoke._platform.is_root', return_value=False), \
+                patch.object(runtime,'check_consult_role',side_effect=Denied('shared gate')) as gate:
             with self.assertRaisesRegex(Denied,'shared gate'):
                 smoke.live(self.config,role_name='consult')
             gate.assert_called_once_with('consult',self.config.roles['consult'])

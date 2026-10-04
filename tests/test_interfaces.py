@@ -539,7 +539,8 @@ class OperationsTests(Fixture):
             seen.update(project.config.limits.__dict__ if hasattr(project, "config") else {})
             seen.update(self.config.limits.__dict__)
             raise RuntimeError("stop after capture")
-        with unittest.mock.patch.object(Engine, "run", fake_run):
+        with unittest.mock.patch.object(Engine, "run", fake_run), \
+             unittest.mock.patch("mizu.smoke._platform.is_root", return_value=False):
             try:
                 smoke.live(config, role_name="consult")
             except Exception:
