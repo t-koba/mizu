@@ -49,6 +49,23 @@ def slot(config: Config):
     raise Busy("All configured execution slots are in use")
 
 
+#: Infrastructure waits defer (Busy locks/slots, LimitExceeded budgets) rather
+#: than counting toward the consecutive-failure brake. Real model/operation
+#: faults (Denied, ProtocolError/ModelFailure, OSError, ValueError) still
+#: count. The error record is still written and the exception still raised,
+#: so nothing is hidden; the daemon surfaces it as a run_deferred event.
+INFRA_WAIT = (Busy, LimitExceeded)
+
+
+def is_infra_wait(exc: BaseException) -> bool:
+    """True when a failure is an infrastructure wait that defers, not a fault.
+
+    Schema: exception instance. Bounds: type check only. Trust: local
+    classification, never model input. Failure: never raises.
+    """
+    return isinstance(exc, INFRA_WAIT)
+
+
 #: Capabilities that let a consultation role change shared state or execute
 #: code. Consultation must stay read-only and advisory: workspace "read" plus
 #: none of these. Read-only grants (files/read/diff/insights/fetch/search)
@@ -770,14 +787,15 @@ class Engine:
                     return {"run": run_id, "role": role_name, "status": "deferred",
                             "error": str(exc), "selection": decision, "selection_action": handled,
                             "next_evaluation_at": time.time() + self.config.limits.cooldown_seconds}
-                with contextlib.suppress(OSError, ValueError, TypeError):
-                    health = read_json(project.root / "health" / f"{role_name}.json", {})
-                    failures = health.get("consecutive_failures", 0) + 1
-                    write_json(project.root / "health" / f"{role_name}.json",
-                               {"consecutive_failures": failures, "last_run": run_id, "error": str(exc), "updated_at": now()})
-                    if self.config.limits.max_failures > 0 and \
-                            failures >= self.config.limits.max_failures and not isinstance(exc, Cancelled):
-                        project.set_control(paused=True, reason="Repeated failures; inspect health and run records")
+                if not is_infra_wait(exc):
+                    with contextlib.suppress(OSError, ValueError, TypeError):
+                        health = read_json(project.root / "health" / f"{role_name}.json", {})
+                        failures = health.get("consecutive_failures", 0) + 1
+                        write_json(project.root / "health" / f"{role_name}.json",
+                                   {"consecutive_failures": failures, "last_run": run_id, "error": str(exc), "updated_at": now()})
+                        if self.config.limits.max_failures > 0 and \
+                                failures >= self.config.limits.max_failures and not isinstance(exc, Cancelled):
+                            project.set_control(paused=True, reason="Repeated failures; inspect health and run records")
                 raise exc
             finally:
                 if context is not None:

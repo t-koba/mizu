@@ -613,3 +613,64 @@ service with an empty `containers.conf`.
 systemd user service on rootless Podman; Docker behavior is documented and
 unchanged. `check.py` stays green; stdlib-only; no model-specific
 defaults.
+
+## ADR-016 — Resume rebase plus infrastructure-wait deferral
+
+**Accepted (M8).** `mizu resume` resets per-role `consecutive_failures` to 0
+(keeping `last_run` evidence), and `Busy`/`LimitExceeded` failures defer
+instead of counting toward the `max_failures` auto-pause brake. Error
+records are still written and the exception still raised (daemon emits
+`run_deferred`), so real faults stay visible.
+
+## Context
+
+`mizu resume` only cleared `paused`, leaving `consecutive_failures` at its
+pre-pause value, so one further failure immediately re-paused (2026-10-04:
+a UTC-day budget exhaustion plus a 15 s `podman ps` timeout left the
+counter at 2; the next single failure hit 3 and paused). Pre-dispatch
+slot/workspace locks and the daily-budget pre-check already defer outside
+the run `try`, but in-run budget/lock waits (`Busy`, `LimitExceeded` from
+admission, slots, or disk/budget guards) incremented the same brake as
+model faults.
+
+## Decision
+
+- Mechanism provides capabilities; policy decides behavior. The resume
+  reset, the `INFRA_WAIT = (Busy, LimitExceeded)` type gate, and the
+  unchanged error/raise contract are mechanism. When to resume and what
+  counts as healthy stay operator/worker policy.
+- `Project.reset_health()` rewrites each `health/*.json` with
+  `consecutive_failures = 0`, preserving `last_run`; `_cmd_resume` calls
+  it before clearing `paused`. No new config keys; unknown keys still
+  fail.
+- `Engine.run` skips the health increment and auto-pause when
+  `is_infra_wait(exc)` is true. All other exceptions (`Denied`,
+  `ProtocolError`/`ModelFailure`, `OSError`, `ValueError`, plus
+  `Cancelled` keeping its existing no-pause rule) count as before.
+- No message parsing: the gate is the exception type, not string
+  matching, so container-runtime `Denied` (missing runtime, failed
+  smoke, cleanup failure) still counts; the resume rebase is its
+  mitigation (one transient no longer re-pauses).
+
+## Schema, bounds, trust, retry/cancellation, evidence, failure
+
+- Schema: no new interface. `reset_health() -> {role: 0}`; `is_infra_wait`
+  takes an exception only.
+- Bounds: health dir `*.json` only; symlink records skipped.
+- Trust: local operator state and local exception types, never model
+  input.
+- Retry/cancellation: none; resume is a single operator act, infra waits
+  retry at daemon idle cadence via the existing `run_deferred` event.
+- Evidence: `tests/test_resume_health.py` pins resume reset (counter 0,
+  `last_run` kept, next single failure does not re-pause), budget/Busy
+  deferral without counting or pausing (error.json still written), and
+  real `ProtocolError` faults still counting to pause.
+- Failure: `Denied` on unarmed resume as before; infra waits still raise
+  (`Busy`/`LimitExceeded` codes unchanged) and still record `error.json`.
+
+## Consequences
+
+One transient after a resume no longer re-pauses; sustained real faults
+still pause after `max_failures`, and daily-budget/lock contention waits
+for the operator/day rollover instead of pausing. `check.py` stays green;
+stdlib-only; no model-specific defaults.

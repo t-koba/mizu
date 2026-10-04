@@ -50,6 +50,35 @@ class Project:
             write_json(self.root / "control.json", value)
             return value
 
+    def reset_health(self) -> dict:
+        """Reset per-role consecutive failure counters (resume rebase).
+
+        Schema: returns ``{role: 0}`` for each reset record. Bounds: health
+        dir only, ``*.json`` regular files. Trust: local operator state.
+        Retry: best-effort per file, never raises. Evidence: rewritten health
+        records keep ``last_run`` and note the reset. Failure: never raises;
+        unreadable files are skipped.
+        """
+        reset: dict = {}
+        try:
+            paths = list((self.root / "health").glob("*.json"))
+        except OSError:
+            return reset
+        for path in paths:
+            try:
+                if path.is_symlink():
+                    continue
+                record = read_json(path, {})
+                if not isinstance(record, dict):
+                    continue
+                record = {**record, "consecutive_failures": 0,
+                          "updated_at": now(), "resumed": True}
+                write_json(path, record)
+                reset[path.stem] = 0
+            except (OSError, ValueError, TypeError):
+                continue
+        return reset
+
     def status(self) -> dict:
         snapshot = self.snapshots.get()
         budget = Budget(self.config.data / "budget", self.config.limits.daily_requests,

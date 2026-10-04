@@ -178,6 +178,7 @@ def _cmd_pause(config, project, args):
 def _cmd_resume(config, project, args):
     if not project.control().get("armed"):
         raise Denied("Project is unarmed; use arm after reviewing its configuration")
+    project.reset_health()
     return project.set_control(paused=False, reason="Operator resumed", wake_generation=uuid.uuid4().hex)
 
 

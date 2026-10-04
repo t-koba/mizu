@@ -73,7 +73,7 @@ required). Operator tooling that concatenates configs
 | `run_seconds`, `command_seconds` | Deadlines for the overall work unit and individual container commands |
 | `idle_seconds`, `cooldown_seconds` | Daemon sleep between poll iterations and pause between work units |
 | `default_wait_seconds`, `maximum_wait_seconds` | Default and maximum model-selected wait times (1–86,400s) |
-| `max_failures` | Consecutive role failures before auto-pause (0 disables auto-pause) |
+| `max_failures` | Consecutive role failures before auto-pause (0 disables auto-pause; `Busy`/`LimitExceeded` infra waits defer without counting, `mizu resume` resets to 0 — ADR-016) |
 | `parallel_runs`, `parallel_consults` | Global execution slots and per-consultation fan-out (`parallel_consults <= parallel_runs`) |
 | `output_bytes` | Maximum captured stdout/stderr per command |
 | `file_bytes` | Maximum readable file size |
