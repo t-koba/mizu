@@ -374,3 +374,69 @@ non-blocking progress without a new commit-point state; `needs_operator_input`
 keeps its exact meaning. If a future workload shows policy alone failing
 (e.g. many interleaved stalls where state lines lose track), revisit with
 measured evidence — not hypothetical scale — per ADR-001.
+
+## ADR-012 — AGENTS.md holds contributor rules only; operator rules live in docs/
+
+**Accepted.** `AGENTS.md` keeps contributor rules only (mechanism/policy
+separation, minimal mechanism, single-writer, offline checks, focused
+regression tests, interface-doc duties, no private paths, no external
+publication without recorded human approval). Operator instructions for
+deployment, credentials, scheduling, and promotion are removed from
+`AGENTS.md`; the file points at the operator docs instead
+(`docs/setup.md`, `docs/operations.md`, `docs/releasing.md`,
+`docs/security.md`, plus `docs/configuration.md` for the `GO <branch>`
+approval shape). The removed operator sentences are delivered to the
+operator as the insight "Operator rules extracted from AGENTS.md". No new
+mechanism, config keys, or stored records.
+
+## Context
+
+`AGENTS.md` mixed contributor prohibitions ("do not add automatic
+deployment ...") with operator-facing sentences ("Executing Maintainer
+roles work in their own candidate projects. Repository contributors update
+the current development source; deployment remains an explicit operator
+action."). Contributors need prohibitions; operators need procedures
+(service units, credential stores, promotion staging). One file serving
+both invites private paths and stale duplicated procedures, and lets
+contributors mistake operator procedure for something to encode in code.
+
+## Decision
+
+- Mechanism provides capabilities; policy decides behavior. This split is
+  documentation policy, not mechanism: no code, schema, bounds, or grant
+  changes.
+- Keep in `AGENTS.md`: contributor scope line, mechanism/policy and KISS
+  rules, single-writer contract (as a contributor prohibition), offline
+  checks and test discipline, interface-doc duties, Markdown/TOML policy
+  line, "work in the current development source; do not stage, promote, or
+  deploy a release from a contributor change", and the publication
+  invariant with a pointer to `docs/configuration.md`.
+- Remove from `AGENTS.md`: the Maintainer-candidate/operator-deployment
+  sentences (delivered as the operator insight); replace with an explicit
+  out-of-scope pointer to the four operator docs above.
+- Operator docs (`docs/setup.md`, `docs/operations.md`,
+  `docs/releasing.md`, `docs/security.md`) are unchanged and remain the
+  single home for deployment, credentials, scheduling, and promotion.
+
+## Schema, bounds, trust, retry/cancellation, evidence, failure
+
+- Schema: no new interface. `AGENTS.md` keeps prose only; doc pointers are
+  relative `docs/*.md` paths.
+- Bounds: no private paths or operator commands in `AGENTS.md`
+  (`systemctl`/`launchctl`/`schtasks`, credential-store paths, home
+  directories); pointers name four existing docs.
+- Trust: `AGENTS.md` grants no permissions; operator procedures stay
+  operator-owned docs, not model instructions.
+- Retry/cancellation: not applicable (docs-only change).
+- Evidence: `tests/test_agents_split.py` pins contributor scope plus the
+  invariant, the four pointers, link validity (every `docs/*.md` mention
+  resolves), and absence of operator commands/private paths.
+- Failure: a broken doc pointer or a reintroduced operator instruction
+  fails the new test; `python3 scripts/check.py` stays green.
+
+## Consequences
+
+Contributors see one short rule file with pointers; operators keep
+procedures in the existing docs without duplication. If a future audit
+finds contributor-relevant operator detail missing from the pointers,
+extend the pointer list — do not reintroduce procedure into `AGENTS.md`.
