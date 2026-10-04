@@ -1,11 +1,14 @@
 """Conservative maintenance: backups at a quiescent boundary and safe pruning.
 
 Evidence, snapshot manifests, objects and persistent sessions are never silently
-removed. Pruning removes only reproducible run inputs; evidence is retained.
+removed. Pruning removes only reproducible run inputs, old artifact documents,
+and bulky per-run engine logs under operator-set retention; result, error,
+consultation, started, selection, and usage records are retained.
 """
 from __future__ import annotations
 
 import contextlib
+import gzip
 import io
 import json
 import os
@@ -122,20 +125,120 @@ def backup(project: Project, destination: Path, *, verify: bool = False) -> dict
 DEFAULT_KEEP_ARTIFACTS = 30
 
 
+#: Day length for run-evidence retention age (file mtime vs now).
+_DAY_SECONDS = 86400
+
+#: Bulky per-run engine logs eligible for retention (raw names). Compressed
+#: ``.gz`` siblings are eligible for the drop stage only. Every other run
+#: file (result/error/consultation/started/selection/admission/usage records,
+#: prompts, sessions, sources) is never a candidate.
+_EVENT_LOG_RAW = ("diagnostics.txt",)
+
+
+def _event_log_paths(run_dir: Path) -> tuple[list[Path], list[Path]]:
+    """Raw and compressed bulky log paths directly under one run dir."""
+    raw: list[Path] = []
+    compressed: list[Path] = []
+    for child in sorted(run_dir.glob("*-events.jsonl")):
+        if child.is_file() and not child.is_symlink():
+            raw.append(child)
+    for name in _EVENT_LOG_RAW:
+        candidate = run_dir / name
+        try:
+            if candidate.is_file() and not candidate.is_symlink():
+                raw.append(candidate)
+        except OSError:
+            continue
+    for child in sorted(run_dir.glob("*-events.jsonl.gz")):
+        if child.is_file() and not child.is_symlink():
+            compressed.append(child)
+    for name in _EVENT_LOG_RAW:
+        candidate = run_dir / f"{name}.gz"
+        try:
+            if candidate.is_file() and not candidate.is_symlink():
+                compressed.append(candidate)
+        except OSError:
+            continue
+    return raw, compressed
+
+
+def _file_age_days(path: Path) -> float:
+    try:
+        return (time.time() - path.stat().st_mtime) / _DAY_SECONDS
+    except OSError:
+        return -1.0
+
+
+def _compress_event_log(raw: Path) -> Path:
+    """Gzip one raw log, keep the original mtime on the ``.gz``, unlink raw."""
+    target = raw.with_name(raw.name + ".gz")
+    if target.is_symlink():
+        raise Denied("Refusing a symlink during prune")
+    try:
+        mtime = raw.stat().st_mtime
+    except OSError as exc:
+        raise Denied(f"Cannot read event log: {exc}") from exc
+    temporary = raw.with_name(raw.name + f".tmp-{uuid.uuid4().hex[:8]}.gz")
+    try:
+        with raw.open("rb") as source, gzip.GzipFile(temporary, "wb", mtime=int(mtime)) as output:
+            shutil.copyfileobj(source, output, length=1048576)
+            output.flush()
+        try:
+            os.utime(temporary, (mtime, mtime))
+        except OSError as exc:
+            raise Denied(f"Cannot stamp compressed event log: {exc}") from exc
+        os.rename(temporary, target)
+        try:
+            os.utime(target, (mtime, mtime))
+        except OSError:
+            pass
+    finally:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+    raw.unlink()
+    try:
+        sync_dir(raw.parent)
+    except OSError:
+        pass
+    return target
+
+
 def prune(project: Project, *, apply: bool = False, keep_artifacts: int = DEFAULT_KEEP_ARTIFACTS) -> dict:
-    """List (or apply) removal of reproducible inputs and old artifact docs.
+    """List (or apply) removal of reproducible inputs, old artifacts, and bulky logs.
 
     Schema/bounds: ``keep_artifacts`` counts the live pointer when it exists.
-    Trust: operator-invoked maintenance under quiescence (paused + locks).
+    ``[limits] event_log_compress_days`` (0 disables, 0-3650) gzips raw
+    ``*-events.jsonl``/``diagnostics.txt`` at or beyond N days old;
+    ``[limits] event_log_retention_days`` (0 disables, 0-3650) drops raw and
+    ``.gz`` logs at or beyond M days old. Age is file mtime vs now; the
+    compressed copy keeps the raw mtime so the drop clock does not restart.
+    Only top-level run-dir logs are candidates; result/error/consultation/
+    started/selection/admission/usage records, snapshots, objects, sessions,
+    decisions, and proposals are never candidates.
+    Trust: operator-invoked maintenance under quiescence (paused + locks);
+    paths are local run evidence, never model input.
     Retry: dry-run by default; apply writes a maintenance audit record.
     Evidence: returns candidates + audit path. Failure: Denied for negative
-    retention, symlinks, or non-quiescent state. Snapshots/objects/runs/
-    decisions/proposals are never candidates.
+    retention, symlinks, or non-quiescent state.
     """
     if keep_artifacts < 0:
         raise Denied("Artifact retention must not be negative")
+    limits = getattr(project.config, "limits", None)
+    compress_days = getattr(limits, "event_log_compress_days", 7)
+    retention_days = getattr(limits, "event_log_retention_days", 31)
+    try:
+        compress_days = int(compress_days)
+        retention_days = int(retention_days)
+    except (TypeError, ValueError) as exc:
+        raise Denied(f"Invalid event-log retention: {exc}") from exc
+    if compress_days < 0 or retention_days < 0:
+        raise Denied("Event-log retention must not be negative")
     candidates = []
     victims: list[Path] = []
+    to_compress: list[Path] = []
+    to_drop: list[Path] = []
     with quiescent(project):
         for run_dir in sorted((project.root / "runs").glob("*")):
             if not run_dir.is_dir() or run_dir.is_symlink():
@@ -143,10 +246,36 @@ def prune(project: Project, *, apply: bool = False, keep_artifacts: int = DEFAUL
             finished = (run_dir / "result.json").exists() or (run_dir / "error.json").exists() or (run_dir / "consultation.json").exists()
             if finished and (run_dir / "input").is_dir():
                 candidates.append(run_dir / "input")
+            raw, compressed = _event_log_paths(run_dir)
+            for path in raw:
+                if path.is_symlink():
+                    raise Denied("Refusing a symlink during prune")
+                age = _file_age_days(path)
+                if age < 0:
+                    continue
+                if retention_days and age >= retention_days:
+                    to_drop.append(path)
+                elif compress_days and age >= compress_days:
+                    to_compress.append(path)
+            for path in compressed:
+                if path.is_symlink():
+                    raise Denied("Refusing a symlink during prune")
+                age = _file_age_days(path)
+                if age < 0:
+                    continue
+                if retention_days and age >= retention_days:
+                    to_drop.append(path)
+        # A path selected for the drop stage is never also compressed.
+        drop_set = {str(path) for path in to_drop}
+        to_compress = [path for path in to_compress if str(path) not in drop_set]
+        to_compress.sort()
+        to_drop.sort()
         if keep_artifacts:
             victims = artifact_candidates(project, keep_artifacts)
         removed = {"reproducible_inputs": [str(p.relative_to(project.root)) for p in candidates],
-                   "artifacts": [str(p.relative_to(project.root)) for p in victims]}
+                   "artifacts": [str(p.relative_to(project.root)) for p in victims],
+                   "event_logs_compressed": [str(p.relative_to(project.root)) for p in to_compress],
+                   "event_logs_removed": [str(p.relative_to(project.root)) for p in to_drop]}
         if apply:
             for candidate in candidates:
                 if candidate.is_symlink():
@@ -156,16 +285,37 @@ def prune(project: Project, *, apply: bool = False, keep_artifacts: int = DEFAUL
                 if candidate.is_symlink():
                     raise Denied("Refusing a symlink during prune")
                 shutil.rmtree(candidate)
-            for parent in {c.parent for c in (*candidates, *victims)}:
-                sync_dir(parent)
+            compressed_names: list[str] = []
+            for candidate in to_compress:
+                if candidate.is_symlink():
+                    raise Denied("Refusing a symlink during prune")
+                target = _compress_event_log(candidate)
+                compressed_names.append(str(target.relative_to(project.root)))
+            dropped_names: list[str] = []
+            for candidate in to_drop:
+                if candidate.is_symlink():
+                    raise Denied("Refusing a symlink during prune")
+                candidate.unlink()
+                dropped_names.append(str(candidate.relative_to(project.root)))
+            for parent in {c.parent for c in (*candidates, *victims, *to_compress, *to_drop)}:
+                try:
+                    sync_dir(parent)
+                except OSError:
+                    pass
+            removed["event_logs_compressed"] = compressed_names
+            removed["event_logs_removed"] = dropped_names
             audit = project.root / "maintenance" / f"prune-{int(time.time())}-{uuid.uuid4().hex[:8]}.json"
-            write_json(audit, {"applied_at": now(), "keep_artifacts": keep_artifacts, **removed})
+            write_json(audit, {"applied_at": now(), "keep_artifacts": keep_artifacts,
+                               "event_log_compress_days": compress_days,
+                               "event_log_retention_days": retention_days, **removed})
             sync_dir(audit.parent)
             removed["audit"] = str(audit.relative_to(project.root))
     return {"applied": apply, **removed,
-            "retained": "All evidence, snapshots, content objects, conversations and proposals. "
-                        "Artifact documents beyond the kept count are operator-approved disposable projections; "
-                        "their evidence remains in snapshots and runs."}
+            "retained": "All result/error/consultation/started/selection/usage records, snapshots, "
+                        "content objects, sessions, decisions, and proposals. "
+                        "Artifact documents beyond the kept count and bulky engine logs beyond "
+                        "operator retention are disposable projections; "
+                        "their evidence remains in snapshots and run records."}
 
 
 def artifact_candidates(project: Project, keep: int) -> list[Path]:

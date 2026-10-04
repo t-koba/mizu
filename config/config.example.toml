@@ -31,6 +31,8 @@ snapshot_files = 20000
 history_index = 128              # Published IDs retained in history.json; manifests stay on disk.
 prompt_snapshots = 6             # Recent anchored summaries offered to each work unit.
 retention_days = 31              # Operator-selected retention window (days) for budget day-files and decided proposals. 0 disables time-based reaping; snapshots/runs/decisions/evidence are never reaped.
+event_log_compress_days = 7    # Compress bulky per-run engine logs (*-events.jsonl, diagnostics.txt) older than N days to .gz (0 disables).
+event_log_retention_days = 31   # Drop bulky per-run engine logs (raw and .gz) older than M days (0 disables); result/error/selection records are always kept.
 pending_insights = 30            # Newest pending proposals offered per prompt/dashboard projection. Raw inbox/decisions stay on disk; `mizu insight list` uses 1000.
 free_disk_mb = 1024
 

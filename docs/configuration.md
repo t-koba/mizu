@@ -82,10 +82,14 @@ required). Operator tooling that concatenates configs
 | `history_index` | Maximum published snapshot IDs retained in the immutable history generation (8–1,000,000; manifests stay on disk) |
 | `prompt_snapshots` | Number of recent anchored snapshot summaries offered to prompts (1–64) |
 | `retention_days` | Retention window (days) for daily budget files and decided proposals (0 disables; 0–3,650). Reaping reports `reaped`. Snapshots, runs, decisions, and evidence are never reaped |
+| `event_log_compress_days` | Compress bulky per-run engine logs (`*-events.jsonl`, `diagnostics.txt`) at or beyond N days old to `.gz` (0 disables; 0–3,650; default 7) |
+| `event_log_retention_days` | Drop bulky per-run engine logs (raw and `.gz`) at or beyond M days old (0 disables; 0–3,650; default 31). Result/error/consultation/started/selection/usage records, snapshots, objects, sessions, decisions, and proposals are never candidates |
 | `pending_insights` | Newest pending proposals offered in prompts/dashboard (1–1,000; default 30). `mizu insight list` uses 1,000 |
 | `free_disk_mb` | Minimum free disk space required to start a work unit |
 
-All limits are positive integers except `daily_requests`, `shared_daily_requests`, `max_failures`, `free_disk_mb`, and `retention_days`, which may be zero.
+All limits are positive integers except `daily_requests`, `shared_daily_requests`, `max_failures`, `free_disk_mb`, `retention_days`, `event_log_compress_days`, and `event_log_retention_days`, which may be zero.
+
+Run-evidence retention keeps growth bounded: `mizu prune` (paused project, dry-run by default, `--apply` writes a `maintenance/prune-*.json` audit) gzips raw engine logs older than `event_log_compress_days` and drops raw/`.gz` logs older than `event_log_retention_days`. Age is file mtime versus now; the `.gz` keeps the raw mtime so the drop clock does not restart. Only top-level `runs/*/` `*-events.jsonl` and `diagnostics.txt` (plus their `.gz`) are candidates — `result.json`, `error.json`, `consultation.json`, `started.json`, `selection.json`, admission/usage records, snapshots, objects, sessions, decisions, and proposals are always kept, so `mizu usage`, dashboards, and restores keep working. Snapshots reference workspace objects only, never run logs, so compressed/dropped logs are disposable projections absent from later backups by construction.
 `daily_requests` counts logical admissions, not dollar amounts; configure spending limits with your provider. Use `mizu status` and `mizu budget` for per-project and shared UTC-day counts, and `mizu usage` for token statistics.
 Day-files (`data/budget/YYYY-MM-DD.json`) keep the shared aggregate plus a per-project map, so two configs sharing `data_dir` with different `daily_requests` admit independently unless the optional shared total is reached. `mizu budget <project>` and `mizu status` report both numbers.
 

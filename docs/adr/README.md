@@ -863,3 +863,54 @@ approval woke the writer, looping model calls overnight.
 - `tests/test_onchange_digest.py`: state-only republication skips
   without a model call; code change runs and upgrades the cursor.
 - `check.py` green.
+## ADR-024 — Bounded run-evidence retention for bulky engine logs
+
+**Accepted.** Operator-set `[limits] event_log_compress_days` (default 7)
+gzips raw `runs/*/` `*-events.jsonl`/`diagnostics.txt` at or beyond N days
+old; `event_log_retention_days` (default 31) drops raw and `.gz` logs at or
+beyond M days old. `mizu prune` reports and applies both stages.
+
+## Context
+
+`runs/` grows ~120 MB/day per project (`pi-events.jsonl` ~90%) while
+snapshots/runs/decisions/evidence were never reaped, so long soaks exhaust
+disk. Usage, dashboards, and restores read only result/error/selection
+records, never raw event streams.
+
+## Decision
+
+- Mechanism: `storage.prune` selects only top-level run-dir logs by file
+  mtime vs now (0 disables a stage; drop wins over compress; `.gz` keeps
+  the raw mtime so the drop clock does not restart). Result/error/
+  consultation/started/selection/admission/usage records, snapshots,
+  objects, sessions, decisions, and proposals are never candidates.
+  Snapshots reference workspace objects only, never run logs, so pruned
+  logs are disposable projections absent from later backups by
+  construction; the audit `maintenance/prune-*.json` records both stages.
+- Policy: the two day counts in `[limits]` (0-3650 each); unknown keys
+  still fail.
+
+## Schema, bounds, trust, retry/cancellation, evidence, failure
+
+- Schema: `prune()` gains `event_logs_compressed`/`event_logs_removed`
+  (project-relative paths) plus audit `event_log_compress_days`/
+  `event_log_retention_days`; `Limits` gains the two keys with docs in
+  `docs/configuration.md` and `config/config.example.toml`.
+- Bounds: day counts 0-3650; only `runs/*/` top-level logs; symlinked
+  runs/logs refused; gzip streams in 1 MiB chunks (stdlib only).
+- Trust: local run evidence under quiescence (paused + locks), never model
+  input.
+- Retry/cancellation: dry-run by default; apply is idempotent (second run
+  reports empty); no daemon retry.
+- Evidence: `tests/test_run_retention.py` pins recent-kept/old-compressed/
+  older-dropped, record survival with working `usage.summarize`, mtime
+  preservation, and 0-disables-both.
+- Failure: negative retention is `Denied`; unreadable logs are `Denied`,
+  never silent; `check.py` green.
+
+## Consequences
+
+Long soaks stay bounded to records plus N/M-day log windows while
+`mizu usage`/dashboards keep working; operators needing full streams keep
+them with `0`/`0` or from backups. `check.py` stays green; stdlib-only;
+no model-specific defaults.

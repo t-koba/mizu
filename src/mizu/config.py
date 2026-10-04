@@ -273,6 +273,13 @@ class Limits:
     #: decided (non-deferred) proposals. 0 disables time-based reaping;
     #: snapshots, runs, decisions and evidence are never reaped.
     retention_days: int = 31
+    #: Operator-selected retention (days) for bulky per-run engine logs
+    #: (``*-events.jsonl`` plus ``diagnostics.txt``). Files older than
+    #: ``event_log_compress_days`` gzip to ``.gz``; raw and compressed logs
+    #: older than ``event_log_retention_days`` are dropped. 0 disables that
+    #: stage. Result/error/selection records are never candidates.
+    event_log_compress_days: int = 7
+    event_log_retention_days: int = 31
     #: Operator-selected bound on pending proposals offered per prompt /
     #: dashboard projection. Raw inbox/decisions stay on disk; the operator
     #: review path (`mizu insight list`) uses a separate 1000-item bound.
@@ -399,6 +406,7 @@ def load(file: Path) -> Config:
     # auto-pause brake only (budgets/deadlines still bound spend and time).
     _LIMIT_RANGES = {"history_index": (8, 1000000), "prompt_snapshots": (1, 64),
                      "retention_days": (0, 3650), "pending_insights": (1, 1000),
+                     "event_log_compress_days": (0, 3650), "event_log_retention_days": (0, 3650),
                      "default_wait_seconds": (1, MAX_WAIT_SECONDS),
                      "maximum_wait_seconds": (1, MAX_WAIT_SECONDS),
                      "daily_requests": (0, 100000), "shared_daily_requests": (0, 100000), "max_failures": (0, 1073741824),
