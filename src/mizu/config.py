@@ -5,7 +5,7 @@ import dataclasses
 import os
 import re
 import tomllib
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -140,7 +140,7 @@ def _include_target(includer: Path, entry: str) -> Path:
     if entry.startswith("~") or "${" in entry:
         raise ConfigError("include entries are literal relative paths without ~ or ${VAR}")
     candidate = Path(entry)
-    if candidate.is_absolute():
+    if candidate.anchor or PureWindowsPath(entry).anchor:
         raise ConfigError("include entries must be relative to the including file")
     if not entry.endswith(".toml"):
         raise ConfigError("include entries must reference .toml files")

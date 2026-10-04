@@ -62,6 +62,18 @@ class IncludeTests(Fixture):
             load(self.file)
         self.assertIn("relative", str(ctx.exception))
 
+    def test_windows_anchored_include_refused(self):
+        # Root-anchored without a drive ("/etc/...") is not is_absolute()
+        # on Windows, and drive-anchored entries are relative on POSIX.
+        # Both must fail closed as non-relative on every host.
+        base = self.file.read_text()
+        for entry in ("C:/hosts.toml", "C:hosts.toml", "//server/share/a.toml"):
+            with self.subTest(entry=entry):
+                self.file.write_text(f'include = ["{entry}"]\n' + base)
+                with self.assertRaises(ConfigError) as ctx:
+                    load(self.file)
+                self.assertIn("relative", str(ctx.exception))
+
     def test_symlink_escape_refused(self):
         outside = self.root / "outside.toml"
         outside.write_text("[limits]\nidle_seconds = 15\n")
