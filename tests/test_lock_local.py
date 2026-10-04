@@ -56,5 +56,30 @@ class LocalLockTests(unittest.TestCase):
         self.assertFalse(other.is_alive())
 
 
+    def test_concurrent_budget_admission_serialized_when_os_lock_is_per_process(self):
+        # Budget admission holds budget.lock across read-modify-write; with a
+        # per-process OS primitive (Windows msvcrt) threads would race without
+        # the in-process guard and exceed the limit.
+        import concurrent.futures
+        from mizu.budget import Budget
+        from mizu.errors import LimitExceeded
+
+        root = Path(self.temp.name) / "budget"
+        root.mkdir()
+
+        def attempt(i):
+            try:
+                Budget(root, 12).take(str(i))
+                return 1
+            except LimitExceeded:
+                return 0
+
+        with patch("mizu.fs._platform.lock_fd", return_value=True), \
+             patch("mizu.fs._platform.unlock_fd", return_value=None):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+                self.assertEqual(sum(pool.map(attempt, range(40))), 12)
+            self.assertEqual(Budget(root, 12).usage()["used"], 12)
+
+
 if __name__ == "__main__":
     unittest.main()
