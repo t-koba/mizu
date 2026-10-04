@@ -765,3 +765,24 @@ No operator `decide` path existed.
 
 - `tests/test_vcs_publish.py`: forged submit/decide refused, separation refused.
 - `Denied` (`operator channel` / self-approval); `check.py` green.
+
+## ADR-019 — Digest-bound publication adapter
+
+**Accepted.** `vcs_publish` sends the approved `code_digest` as `digest`;
+the adapter verifies the pushed tree before pushing and echoes it back.
+Missing/mismatched echoes are `Denied`.
+
+## Context
+
+A `GO` approval bound the host check but not the pushed bits.
+
+## Decision
+
+- Mechanism: `publish_via` requires `code_digest`, sends `digest`, checks echo.
+- Adapter contract: verify-then-push, echo `digest` (documented in
+  `docs/configuration.md`).
+
+## Evidence / failure
+
+- `tests/test_vcs_publish.py`: echo, mismatch, missing, param-required.
+- `Denied` on missing/mismatch; `check.py` green.

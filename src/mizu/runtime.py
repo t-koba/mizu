@@ -443,7 +443,7 @@ class Context:
         code_digest = captured["code_digest"]
         approval = _vcs.require_go_approval(self.project, args["branch"], code_digest)
         try:
-            data = _vcs.publish_via(self.config.vcs, args["op"], {"branch": args["branch"]})
+            data = _vcs.publish_via(self.config.vcs, args["op"], {"branch": args["branch"], "code_digest": code_digest})
         except OSError as exc:
             raise Denied(f"VCS publication is unavailable: {exc}") from exc
         record = {"published": True, "op": args["op"], "branch": args["branch"],

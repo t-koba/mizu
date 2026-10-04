@@ -20,6 +20,10 @@ def adapter_settings(code, timeout=5, maximum=524288):
 READ_OK = ("import sys,json; req=json.load(sys.stdin); "
            "print(json.dumps({'op': req['op'], 'branch': req['branch'], 'checks': []}))")
 PUSH_OK = ("import sys,json; req=json.load(sys.stdin); "
+           "print(json.dumps({'op': req['op'], 'branch': req['branch'], 'digest': req['digest'], 'pushed': True}))")
+PUSH_WRONG_DIGEST = ("import sys,json; req=json.load(sys.stdin); "
+           "print(json.dumps({'op': req['op'], 'branch': req['branch'], 'digest': '" + "f" * 64 + "', 'pushed': True}))")
+PUSH_NO_DIGEST = ("import sys,json; req=json.load(sys.stdin); "
            "print(json.dumps({'op': req['op'], 'branch': req['branch'], 'pushed': True}))")
 
 
@@ -104,7 +108,7 @@ class VcsPublishTests(Fixture):
         with self.assertRaisesRegex(Denied, "cannot publish"):
             vcs.read_via(config.vcs, "push", {"branch": "main"})
         with self.assertRaisesRegex(Denied, "cannot publish"):
-            vcs.publish_via(config.vcs, "status", {"branch": "main"})
+            vcs.publish_via(config.vcs, "status", {"branch": "main", "code_digest": "a" * 64})
         # vcs_read capability alone cannot reach publish (capability gate).
         with self.assertRaisesRegex(Denied, "no capability"):
             ctx.handle("vcs_publish", {"op": "push", "branch": "main"})
@@ -209,3 +213,40 @@ class VcsApprovalChannelTests(Fixture):
         from mizu.config import load
         with self.assertRaisesRegex(ConfigError, "self-approval"):
             load(path)
+
+
+class VcsDigestBindingTests(Fixture):
+    def test_adapter_must_echo_approved_digest(self):
+        import dataclasses as _dc
+        config, role = with_caps(self, "worker", ["vcs_publish"])
+        digest = current_digest(self)
+        rec = approve(self, "main", digest)
+        config = _dc.replace(config, vcs=adapter_settings(PUSH_OK))
+        ctx = make_context(self, config, role)
+        out = ctx.handle("vcs_publish", {"op": "push", "branch": "main"})
+        self.assertEqual(out["code_digest"], digest)
+        self.assertEqual(out["result"]["digest"], digest)
+
+    def test_mismatched_digest_echo_refused(self):
+        import dataclasses as _dc
+        config, role = with_caps(self, "worker", ["vcs_publish"])
+        digest = current_digest(self)
+        approve(self, "main", digest)
+        config = _dc.replace(config, vcs=adapter_settings(PUSH_WRONG_DIGEST))
+        ctx = make_context(self, config, role)
+        with self.assertRaisesRegex(Denied, "confirm the pushed code digest"):
+            ctx.handle("vcs_publish", {"op": "push", "branch": "main"})
+
+    def test_missing_digest_echo_refused(self):
+        import dataclasses as _dc
+        config, role = with_caps(self, "worker", ["vcs_publish"])
+        digest = current_digest(self)
+        approve(self, "main", digest)
+        config = _dc.replace(config, vcs=adapter_settings(PUSH_NO_DIGEST))
+        ctx = make_context(self, config, role)
+        with self.assertRaisesRegex(Denied, "confirm the pushed code digest"):
+            ctx.handle("vcs_publish", {"op": "push", "branch": "main"})
+
+    def test_publish_via_requires_digest_param(self):
+        with self.assertRaisesRegex(Denied, "code digest"):
+            vcs.publish_via(adapter_settings(PUSH_OK), "push", {"branch": "main"})

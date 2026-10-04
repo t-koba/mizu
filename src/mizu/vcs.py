@@ -471,21 +471,31 @@ def parse_status_checks(data: dict) -> list:
 def publish_via(settings: dict, op: str, params: dict) -> dict:
     """Invoke a mutating adapter operation (``push``/``pr``) after approval.
 
-    Schema: ``params`` must include ``branch``. Bounds: same contract as
-    ``invoke``. Trust: operator-owned adapter only; the caller must have
-    passed ``require_go_approval`` first (this helper checks the op gate,
-    not the human record). Failure: ``Denied`` on read-only/unknown ops or
-    adapter violations.
+    Schema: ``params`` must include ``branch`` and ``code_digest`` (64 hex
+    of the approved tree). The request sends ``digest`` alongside ``op``
+    and ``branch``; the adapter must verify the pushed tree matches it
+    before pushing and echo the same ``digest`` in its response. Bounds:
+    same contract as ``invoke``. Trust: operator-owned adapter only; the
+    caller must have passed ``require_go_approval`` first (this helper
+    checks the op gate, not the human record). Failure: ``Denied`` on
+    read-only/unknown ops, bad digest, or adapter violations including a
+    missing/mismatched digest echo.
     """
+    from .fs import DIGEST as _DIGEST
     if op not in PUBLISH_OPS:
         raise Denied("vcs_publish cannot publish this operation")
     if not isinstance(params, dict):
         raise Denied("Invalid VCS publish parameters")
     branch = params.get("branch")
     check_branch(branch)
-    data = invoke(settings, {"op": op, "branch": branch})
+    code_digest = params.get("code_digest")
+    if not isinstance(code_digest, str) or not _DIGEST.fullmatch(code_digest):
+        raise Denied("Invalid code digest for publication")
+    data = invoke(settings, {"op": op, "branch": branch, "digest": code_digest})
     if not isinstance(data, dict):
         raise Denied("VCS adapter must return a JSON object")
+    if data.get("digest") != code_digest:
+        raise Denied("VCS adapter must confirm the pushed code digest")
     return {**data, "trust": "external-untrusted"}
 
 

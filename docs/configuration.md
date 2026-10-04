@@ -319,7 +319,7 @@ advances on failure too, so one bad adapter cannot busy-loop.
 
 ## VCS publish (M2 step 1: `vcs_read`/`vcs_publish` behind `GO <branch>` approval)
 
-Same `[vcs]` adapter, no new keys. `vcs_read` serves only `status`/`log`/`comments` (`{"op", "branch", optional `"sha"`}); `vcs_publish` serves only `push`/`pr` (`{"op", "branch"}`). Cross-path calls are `Denied` (`vcs_read cannot publish`). Host-side only, single invocation under `timeout_seconds`, stdout capped at `max_bytes`; results stay `external-untrusted` with `vcs-read.json` / `vcs-publish.json` evidence.
+Same `[vcs]` adapter, no new keys. `vcs_read` serves only `status`/`log`/`comments` (`{"op", "branch", optional `"sha"`}); `vcs_publish` serves only `push`/`pr` (`{"op", "branch", "digest"}`). Cross-path calls are `Denied` (`vcs_read cannot publish`). Host-side only, single invocation under `timeout_seconds`, stdout capped at `max_bytes`; results stay `external-untrusted` with `vcs-read.json` / `vcs-publish.json` evidence. Publish requests carry the approved `code_digest` as `digest`; the adapter must verify the pushed tree matches it before pushing and echo the same `digest` in its response, else the call is `Denied` (`must confirm the pushed code digest`).
 
 `status` responses are normalized to `{op, branch, checks: [{check, state, sha, url?}], trust}` (at most 1024 checks; `check` 1-256 chars, `state` 1-64 chars, `sha` 40/64 hex, `url` max 4096 chars); malformed shapes are `Denied`. `log`/`comments` pass through with `trust: external-untrusted`.
 
