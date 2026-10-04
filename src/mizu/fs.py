@@ -10,6 +10,7 @@ import os
 import re
 import stat
 import tempfile
+import threading
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Iterator
 
@@ -115,24 +116,66 @@ def read_json(path: Path, default: Any = None) -> Any:
         return default
 
 
+#: In-process exclusion for lock files. OS advisory locks (msvcrt on
+#: Windows) are per-process, so a second open from this process would
+#: otherwise succeed and break single-writer and budget admission. The
+#: per-path threading lock provides the missing within-process mutual
+#: exclusion; the OS lock still provides cross-process exclusion.
+_LOCAL_GUARD = threading.Lock()
+_LOCAL_LOCKS: dict[str, threading.Lock] = {}
+#: Blocking acquire bound so a re-entrant blocking request fails as Busy
+#: instead of hanging the daemon thread forever.
+_LOCAL_BLOCKING_TIMEOUT = 30.0
+
+
+def _local_key(path: Path) -> str:
+    return os.path.normcase(os.path.abspath(str(path)))
+
+
+def _acquire_local(key: str, *, blocking: bool) -> threading.Lock:
+    with _LOCAL_GUARD:
+        local = _LOCAL_LOCKS.setdefault(key, threading.Lock())
+    if blocking:
+        held = local.acquire(True, _LOCAL_BLOCKING_TIMEOUT)
+    else:
+        held = local.acquire(False)
+    if not held:
+        raise BlockingIOError("Already running")
+    return local
+
+
 @contextlib.contextmanager
 def lock(path: Path, *, blocking: bool = True) -> Iterator[None]:
     """Kernel releases the lock on death. Never unlink a lock inode."""
     mkdir(path.parent)
+    try:
+        local = _acquire_local(_local_key(path), blocking=blocking)
+    except BlockingIOError:
+        raise Busy(f"Already running: {path.stem}") from None
     flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
-    fd = os.open(path, flags, 0o600)
+    try:
+        fd = os.open(path, flags, 0o600)
+    except OSError:
+        local.release()
+        raise
     try:
         try:
             _platform.lock_fd(fd, blocking=blocking)
         except BlockingIOError:
             raise Busy(f"Already running: {path.stem}") from None
         yield
+    except Busy:
+        raise
+    except BlockingIOError:
+        raise Busy(f"Already running: {path.stem}") from None
     finally:
         with contextlib.suppress(Exception):
             _platform.unlock_fd(fd)
-        os.close(fd)
+        with contextlib.suppress(Exception):
+            os.close(fd)
+        local.release()
 
 
 def publish_pointer(root: Path, pointer: dict, *, name: str = "latest.json") -> None:
