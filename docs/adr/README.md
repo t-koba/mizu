@@ -1,5 +1,9 @@
 # Architecture decisions
 
+Keep entries short: Accepted, Context, Decision, Evidence/Failure only, as in
+ADR-018 through ADR-021. Full interface schema, bounds, trust, retry/cancel,
+evidence, and failure stay in the module docstrings and docs/.
+
 ## ADR-001 — Local files and operating-system supervision
 
 **Accepted.** Use JSON/Markdown files, atomic publication, flock and systemd user
@@ -176,7 +180,7 @@ green. No model-specific defaults; portable stdlib-only runtime.
 
 ## ADR-009 — VCS publish behind recorded human approval, read/publish split
 
-**Accepted (M2 step 1).** Add `vcs_read` (CI status/logs, PR comments) and
+**Accepted.** Add `vcs_read` (CI status/logs, PR comments) and
 `vcs_publish` (push, PR) operations over the existing operator-owned trusted
 argv `[vcs]` adapter (same JSON stdin/stdout, timeout, `max_bytes`, no shell
 as M1/`web.search_command`). Push/PR fail closed without a recorded human
@@ -507,7 +511,7 @@ defaults.
 
 ## ADR-014 — Stable CI dedup body excludes the volatile log URL
 
-**Accepted (M2 fix).** `vcs.record_ci_result` validates the optional `url`
+**Accepted.** `vcs.record_ci_result` validates the optional `url`
 (bounds: at most 4096 chars, no NUL/newline) but no longer persists it: the
 insight body covers only branch/sha/check plus the `external-untrusted`
 label, while the stable ID stays `ci-<32 hex>` from branch+sha+check. Repeats
@@ -524,8 +528,7 @@ M2 shipped `ci_insight_id` from branch+sha+check with a body including
 failing check hit the insight-store reuse guard on the second poll, and the
 single outer `try` in `poll_ci` turned that `Denied` into `ok: false`,
 skipping every remaining branch/check. Existing tests only repeated the
-identical URL, so the path was uncovered (REVIEW 858aec2…: CHANGES; CI-FAIL
-768cf614…).
+identical URL, so the path was uncovered, as found by review.
 
 ## Decision
 
@@ -559,7 +562,7 @@ inbox or abort the tick. Operators needing per-run URLs use `vcs_read`.
 
 ## ADR-015 — Rootless Podman keeps the host uid via `--userns=keep-id`
 
-**Accepted (M7).** Rootless (`mode = "rootless"`) Podman runs pass
+**Accepted.** Rootless (`mode = "rootless"`) Podman runs pass
 `--userns=keep-id` alongside the existing `--user <host uid:gid>`, so the
 host uid is kept inside the container and the bind-mounted workspace stays
 readable with an empty user `containers.conf`. Docker runs omit the flag
@@ -616,7 +619,7 @@ defaults.
 
 ## ADR-016 — Resume rebase plus infrastructure-wait deferral
 
-**Accepted (M8).** `mizu resume` resets per-role `consecutive_failures` to 0
+**Accepted.** `mizu resume` resets per-role `consecutive_failures` to 0
 (keeping `last_run` evidence), and `Busy`/`LimitExceeded` failures defer
 instead of counting toward the `max_failures` auto-pause brake. Error
 records are still written and the exception still raised (daemon emits
@@ -677,7 +680,7 @@ stdlib-only; no model-specific defaults.
 
 ## ADR-017 — Narrow infra-wait deferral to budget/disk guards; Pi budget refusal defers by type
 
-**Accepted (M8 fix for CI-FAIL b1617770, ce093c1c).** `INFRA_WAIT` narrows from
+**Accepted.** `INFRA_WAIT` narrows from
 `(Busy, LimitExceeded)` to `(Busy, InfraExceeded)`, and `Engine.run` defers via
 `is_deferred(exc, context)` instead of `is_infra_wait(exc)` alone.
 
@@ -689,13 +692,12 @@ disk/budget guards" while claiming "all other exceptions count as before".
 The type was broader than the intent: engine deadlines, event-stream evidence
 bounds, RPC input deadlines, per-run tool/request bounds, file-count and
 snapshot bounds all raise plain `LimitExceeded` and silently stopped counting
-(REVIEW 2d067dac Finding 1; experiment 1eca27b4 showed five engine-deadline
-failures leaving `consecutive_failures=None`). Separately, the M8 acceptance
+found by review: engine-deadline failures stopped counting. Separately, the M8 acceptance
 "budget exhaustion defers" was only demonstrated for the in-process
 `LimitExceeded` path: on the Pi transport a host-side `_budget` refusal becomes
 `{"ok": false}` on the bridge, the adapter collapses, and the host surfaces
 `ProtocolError` (or `ModelFailure` for a real SDK `stopReason=error`), neither
-of which deferred (Finding 2; experiment 8d5cebee).
+of which deferred, as found by review.
 
 ## Decision
 
