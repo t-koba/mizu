@@ -1062,3 +1062,53 @@ concatenation step.
 
 Operators write shared principles once and list them first; hand-written
 configs retire the external generator step. Default behavior is unchanged.
+
+## ADR-028 — Persistent-session delta prompt and rotation as policy
+
+**Accepted.** A resumed persistent session receives only what changed since
+its last unit as an append-only delta; a new or compacted session receives
+the full prompt. Operator keys rotate the session when its tokens, cost, or
+age exceed configured limits (or on goal change), reloading the exact
+published state plus composed policy text.
+
+## Context
+
+`runtime.prompt_for` resends the full goal plus up to 6 recent snapshots and
+30 pending insights every unit, while the Pi `SessionManager` already retains
+the active-branch history and compacts it; Mizu therefore double-supplies
+history. Long sessions degrade and naive compaction drifts policy into
+summary, so rotation must reload exact text, never a paraphrase.
+
+## Decision
+
+- Mechanism provides capabilities; policy decides behavior. The delta shape,
+  the full-prompt conditions, the stable order, and the rotation gate are
+  mechanism; the three limits below are operator policy.
+- Delta (resumed persistent session only): goal-digest pin, new published
+  state, snapshot delta since the session's last unit, and insights newer
+  than `inbox_seen`. Stable order first (composed policy as system prompt,
+  then goal digest, then immutable snapshot pins) with only the tail varying;
+  deltas append to the active branch, never reorder the prefix.
+- Full prompt when: new session key, compaction detected, goal/policy key
+  change, or rotation. Ephemeral, consult, and smoke paths stay full-prompt.
+- Rotation keys in `[limits]` (0 disables each; unset keeps current
+  behavior): `session_max_tokens`, `session_max_cost`, `session_max_age_seconds`.
+  Tokens/cost read existing `runtime_usage`/model evidence (cost is a native
+  estimate, never a billing claim per ADR-005); age reads run timestamps. No
+  new counters. Rotation carries the exact published snapshot plus composed
+  policy text forward and records the new session key plus reason.
+- Schema, bounds, trust, retry/cancellation, evidence, failure: delta is one
+  bounded JSON user message reusing `pending_insights`/`prompt_snapshots`
+  bounds; operator-owned state only, never model input; single pass with no
+  retry; `prompt_projection.json` (`prompt_bytes`) plus session key and
+  rotation reason are the evidence; oversize/missing parts fail closed to a
+  full prompt, never partial text.
+
+## Evidence / failure
+
+- Staged: this ADR records the design; the delta builder, rotation gate,
+  `[limits]` keys with docs/example, and focused offline tests
+  (resumed-unit bytes stay O(delta), new key/compacted units stay full,
+  rotation re-keys with reason while carrying the snapshot id) land next.
+- `python3 scripts/check.py` stays green; stdlib-only; no model-specific
+  defaults.
