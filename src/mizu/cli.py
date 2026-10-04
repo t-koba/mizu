@@ -71,12 +71,15 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--live", action="store_true", required=True, help="Explicit consent to a paid, read-only Pi/provider probe")
     p.add_argument("--profile", help="Model profile for the probe")
     p.add_argument("--role", default=None, help="Read-only probe role (default: consult when present, else single role)")
-    p = sub.add_parser("insight", help="Submit, list, read or ingest proposals")
-    p.add_argument("action", choices=("submit", "list", "read", "ingest"), help="Proposal operation")
+    p = sub.add_parser("insight", help="Submit, list, read, decide or ingest proposals")
+    p.add_argument("action", choices=("submit", "list", "read", "decide", "ingest"), help="Proposal operation")
     p.add_argument("project", help="Managed project name")
-    p.add_argument("--id", help="Proposal ID for read/submit")
+    p.add_argument("--id", help="Proposal ID for read/submit/decide")
     p.add_argument("--title", help="Proposal title for submit")
     p.add_argument("--body", type=Path, help="Read Markdown body from this file; '-' reads stdin")
+    p.add_argument("--decision", help="Decision action for decide (accept/modify/defer/reject)")
+    p.add_argument("--reason", default="", help="Decision reason for decide")
+    p.add_argument("--revisit", default="", help="Revisit condition for defer")
     p = sub.add_parser("editor", help="Export a capsule or serve the Editor MCP")
     esub = p.add_subparsers(dest="editor_command", required=True)
     p = esub.add_parser("export", help="Export an immutable Editor capsule")
@@ -221,6 +224,10 @@ def _cmd_insight(config, project, args):
         if not args.id:
             raise ConfigError("--id is required")
         return project.insights.read(args.id)
+    if args.action == "decide":
+        if not args.id or not args.decision:
+            raise ConfigError("Insight decide requires --id and --decision")
+        return project.insights.decide(args.id, args.decision, args.reason or "", args.revisit or "", "operator")
     if args.action == "ingest":
         return project.insights.ingest_editor()
     if not args.title or args.body is None:

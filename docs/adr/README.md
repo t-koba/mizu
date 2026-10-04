@@ -743,3 +743,25 @@ The runaway-model brake is restored for engine/local bound faults while daily
 budget, disk reserve, and lock contention wait instead of pausing; the Pi
 incident path (in-run budget exhaustion) now defers on every engine. `check.py`
 stays green; stdlib-only; no model-specific defaults.
+## ADR-018 — Operator-channel publication approval
+
+**Accepted.** `GO <branch>` approvals count only with insight source
+`operator` and `accept` decision run `operator` (`mizu insight decide`);
+model submits/decides are refused as forged. Configs combining
+`vcs_publish` with `submit_insight`/`decide` fail to load.
+
+## Context
+
+Model `submit_insight`/`decide` could mint a `GO` approval and accept it.
+No operator `decide` path existed.
+
+## Decision
+
+- Mechanism: source/run gate in `require_go_approval`, config separation,
+  `mizu insight decide` (run `operator`).
+- Model run names are directory hex, never `operator`; source is runtime-set.
+
+## Evidence / failure
+
+- `tests/test_vcs_publish.py`: forged submit/decide refused, separation refused.
+- `Denied` (`operator channel` / self-approval); `check.py` green.

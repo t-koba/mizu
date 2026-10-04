@@ -308,17 +308,30 @@ def check_branch(branch: str) -> str:
     return branch
 
 
+#: Insight source and decision run marking an operator-recorded approval.
+#: Model ``submit_insight`` fixes source to the role name and model ``decide``
+#: fixes run to the run directory name, so neither can mint these values.
+OPERATOR_SOURCE = "operator"
+OPERATOR_RUN = "operator"
+
+
 def require_go_approval(project, branch: str, code_digest: str) -> dict:
     """Require a recorded human ``GO <branch>`` approval for this digest.
 
     Schema: ``branch`` per ``check_branch``; ``code_digest`` 64 hex of the
     exact tree being published (workspace capture, not model supplied).
-    Trust: local insight inbox plus ``decisions/`` records; only an operator
-    (or a role with ``decide`` reaching a human) can record ``accept``.
+    Trust: local insight inbox plus ``decisions/`` records; the approval
+    insight must carry source ``operator`` (``mizu insight submit``) and the
+    ``accept`` decision must carry run ``operator`` (``mizu insight decide``).
+    Model-submitted insights (source is the role name) and model decisions
+    (run is the run directory name) never satisfy this gate. Use a dedicated
+    publisher role without ``submit_insight``/``decide`` (refused together
+    with ``vcs_publish`` at config load) for defense in depth.
     Retry/cancellation: pure local reads, no retry. Evidence: returned
     ``{"insight": id, "branch": ..., "code_digest": ...}`` names the
     approval bound to this publication. Failure: ``Denied`` when no matching
-    title exists, when the digest line is missing/stale, or when the matching
+    title exists, when the digest line is missing/stale, when the source or
+    decision run is not the operator channel, or when the matching
     record is undecided or not ``accept``. Stale digests are refused even
     when an older approval exists.
     """
@@ -332,6 +345,7 @@ def require_go_approval(project, branch: str, code_digest: str) -> dict:
     saw_stale = False
     saw_undecided = False
     saw_refused = False
+    saw_forged = False
     try:
         paths = sorted(inbox.glob("*.json"))
     except OSError as exc:
@@ -346,6 +360,9 @@ def require_go_approval(project, branch: str, code_digest: str) -> dict:
         except (OSError, ValueError):
             continue
         saw_title = True
+        if item.get("source") != OPERATOR_SOURCE:
+            saw_forged = True
+            continue
         if parse_go_digest(item.get("body", "")) != code_digest:
             saw_stale = True
             continue
@@ -364,10 +381,15 @@ def require_go_approval(project, branch: str, code_digest: str) -> dict:
         if not isinstance(decision, dict) or decision.get("id") != insight_id:
             saw_undecided = True
             continue
-        if decision.get("action") == "accept":
+        if decision.get("action") == "accept" and decision.get("run") == OPERATOR_RUN:
             return {"insight": insight_id, "branch": branch,
                     "code_digest": code_digest}
+        if decision.get("action") == "accept":
+            saw_forged = True
+            continue
         saw_refused = True
+    if saw_forged:
+        raise Denied("Publication approval must come from the operator channel")
     if saw_refused or saw_undecided:
         raise Denied("Publication approval is not accepted for this code digest")
     if saw_stale:

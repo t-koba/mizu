@@ -45,12 +45,12 @@ def current_digest(fixture):
     return captured["code_digest"]
 
 
-def approve(fixture, branch, digest, action="accept"):
+def approve(fixture, branch, digest, action="accept", source="operator", run="operator"):
     record = fixture.project.insights.submit(
-        source="operator", title=f"GO {branch}",
+        source=source, title=f"GO {branch}",
         body=f"Ship it.\ndigest: {digest}\n",
         base_snapshot=None, run=None)
-    fixture.project.insights.decide(record["id"], action, "reviewed", "", "manual")
+    fixture.project.insights.decide(record["id"], action, "reviewed", "", run)
     return record
 
 
@@ -173,3 +173,39 @@ class VcsPublishTests(Fixture):
 
 if __name__ == "__main__":
     raise SystemExit(unittest.main())
+
+
+class VcsApprovalChannelTests(Fixture):
+    def test_model_submitted_go_refused(self):
+        config, role = with_caps(self, "worker", ["vcs_publish"])
+        config = dataclasses.replace(config, vcs=adapter_settings(PUSH_OK))
+        approve(self, "main", current_digest(self), source="worker", run="operator")
+        ctx = make_context(self, config, role)
+        with self.assertRaisesRegex(Denied, "operator channel"):
+            ctx.handle("vcs_publish", {"op": "push", "branch": "main"})
+
+    def test_model_decide_refused(self):
+        config, role = with_caps(self, "worker", ["vcs_publish"])
+        config = dataclasses.replace(config, vcs=adapter_settings(PUSH_OK))
+        approve(self, "main", current_digest(self), source="operator", run="run-abc123")
+        ctx = make_context(self, config, role)
+        with self.assertRaisesRegex(Denied, "operator channel"):
+            ctx.handle("vcs_publish", {"op": "push", "branch": "main"})
+
+    def test_publish_role_must_not_hold_decide_or_submit(self):
+        text = self.file.read_text()
+        needle = '[roles.maintainer]'
+        self.assertIn(needle, text)
+        segment = text.split(needle, 1)[1].split('[roles.', 1)[0]
+        self.assertIn('"decide"', segment)
+        patched = text.replace(
+            'capabilities = ["files", "read", "diff", "exec", "experiment", "verify", "insights", "decide", "consult", "finish"]',
+            'capabilities = ["files", "read", "diff", "exec", "experiment", "verify", "insights", "decide", "consult", "finish", "vcs_publish"]',
+            1)
+        if patched == text:
+            self.skipTest("maintainer capability line shape changed")
+        path = self.root / "config/publish-decide.toml"
+        path.write_text(patched)
+        from mizu.config import load
+        with self.assertRaisesRegex(ConfigError, "self-approval"):
+            load(path)
