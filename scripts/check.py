@@ -42,11 +42,14 @@ def main():
     checks = []
     counts = {}
     env = {**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'}
+    # The offline suite is process-spawn heavy (~90 s on Linux); Windows
+    # runners need substantially more headroom than 300 s, well within the
+    # 15-minute CI job budget.
     def execute(name, command, *, count=None):
         started = time.monotonic()
         print(f'== {name} ==', flush=True)
         process = subprocess.run(command, cwd=ROOT, env=env, check=False,
-                                 capture_output=True, text=True, timeout=300)
+                                 capture_output=True, text=True, timeout=600)
         sys.stdout.write(process.stdout)
         sys.stderr.write(process.stderr)
         status = 'pass' if process.returncode == 0 else 'fail'
