@@ -22,7 +22,7 @@ from pathlib import Path
 
 from .config import keys, strings
 from .errors import Denied
-from .fs import atomic_write, identifier, lock, mkdir, now, read_json, sync_dir, write_json, relative_parts
+from .fs import DIGEST, atomic_write, identifier, lock, mkdir, now, read_json, sync_dir, write_json, relative_parts
 from .project import Project, check_verify, init_managed_repo, read_goal
 from .snapshot import open_store
 
@@ -316,6 +316,276 @@ def prune(project: Project, *, apply: bool = False, keep_artifacts: int = DEFAUL
                         "Artifact documents beyond the kept count and bulky engine logs beyond "
                         "operator retention are disposable projections; "
                         "their evidence remains in snapshots and run records."}
+
+
+#: Reference-aware storage accounting bounds (fixed mechanism, not knobs):
+#: reference JSON files larger than this are skipped and counted, never
+#: loaded fully, so one huge run record cannot exhaust the audit.
+_AUDIT_JSON_BYTES = 1048576
+#: Sample lists stay small; full counts/bytes are always exact.
+_AUDIT_SAMPLE = 100
+
+
+def _audit_digest(value) -> str | None:
+    if isinstance(value, str) and DIGEST.fullmatch(value):
+        return value
+    return None
+
+
+def _audit_json(path: Path):
+    """Bounded JSON read for audit references; None when skipped/unreadable."""
+    try:
+        if path.is_symlink() or not path.is_file():
+            return None
+        try:
+            if path.stat().st_size > _AUDIT_JSON_BYTES:
+                return None
+        except OSError:
+            return None
+        record = read_json(path, None)
+        return record if isinstance(record, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def audit(project: Project) -> dict:
+    """Report snapshot/object retention accounting; read-only preview only.
+
+    Schema: ``{snapshots: {manifests, bytes, live, referenced,
+    unreferenced, unreferenced_bytes, unreferenced_sample,
+    unreferenced_truncated, skipped}, histories: {generations, bytes},
+    objects: {count, bytes, referenced_count, referenced_bytes,
+    orphan_count, orphan_bytes, orphan_sample, orphan_truncated, skipped},
+    references: {history_snapshots, run_snapshots, artifact_snapshots,
+    insight_snapshots}, preview_only: True}``. Counts and byte totals are
+    exact; sample lists hold at most ``_AUDIT_SAMPLE`` sorted IDs with a
+    truncation flag.
+    Bounds: reference JSON files above ``_AUDIT_JSON_BYTES`` are skipped
+    and counted; symlinks are never followed; corrupt entries are skipped,
+    never raised. Manifest ``files`` entries with invalid digests are
+    skipped. Trust: local recorded state only (data, not proof); insight
+    prose is never read, only ``base_snapshot`` IDs. Retry/cancellation:
+    read-only, lock-free, idempotent; safe to retry while writers run, with
+    no quiescence requirement because nothing is removed.
+    Evidence: exact counts/bytes plus bounded samples; full evidence stays
+    on disk under ``snapshots/``, ``histories/`` and ``objects/``.
+    Failure: raises only when the project or its store is unreadable;
+    per-file faults are counted as skipped. Nothing is deleted, moved, or
+    rewritten by this preview.
+    """
+    root = project.root
+    # All manifests on disk with their object references.
+    manifests: dict[str, dict] = {}
+    manifest_bytes = 0
+    manifest_skipped = 0
+    manifest_objects: dict[str, set[str]] = {}
+    snapshots_dir = root / "snapshots"
+    try:
+        snapshot_paths = sorted(snapshots_dir.glob("*.json")) if snapshots_dir.is_dir() else []
+    except OSError:
+        snapshot_paths = []
+    for child in snapshot_paths:
+        try:
+            if child.is_symlink():
+                manifest_skipped += 1
+                continue
+            sid = child.stem
+            if not DIGEST.fullmatch(sid):
+                manifest_skipped += 1
+                continue
+            try:
+                manifest_bytes += child.stat().st_size
+            except OSError:
+                manifest_skipped += 1
+                continue
+            record = _audit_json(child)
+            if not isinstance(record, dict) or not isinstance(record.get("files"), dict):
+                manifest_skipped += 1
+                continue
+            manifests[sid] = record
+            shapes: set[str] = set()
+            for entry in record["files"].values():
+                if not isinstance(entry, dict):
+                    continue
+                sha = _audit_digest(entry.get("sha256"))
+                if sha is not None:
+                    shapes.add(sha)
+            manifest_objects[sid] = shapes
+        except OSError:
+            manifest_skipped += 1
+    # All history generations on disk plus the live generation.
+    history_ids: set[str] = set()
+    generations = 0
+    histories_bytes = 0
+    histories_dir = root / "histories"
+    try:
+        history_paths = sorted(histories_dir.glob("*.json")) if histories_dir.is_dir() else []
+    except OSError:
+        history_paths = []
+    for child in history_paths:
+        try:
+            if child.is_symlink() or not DIGEST.fullmatch(child.stem):
+                continue
+            try:
+                histories_bytes += child.stat().st_size
+            except OSError:
+                continue
+            generations += 1
+            try:
+                if child.stat().st_size <= _AUDIT_JSON_BYTES:
+                    record = read_json(child, None)
+                else:
+                    record = None
+            except (OSError, ValueError):
+                record = None
+            if isinstance(record, list):
+                for sid in record:
+                    digest_id = _audit_digest(sid)
+                    if digest_id is not None:
+                        history_ids.add(digest_id)
+        except OSError:
+            continue
+    live_ids: set[str] = set()
+    try:
+        live_ids = set(project.snapshots._history_ids())
+    except Exception:
+        try:
+            pointer = read_json(root / "current.json", {})
+            if isinstance(pointer, dict):
+                digest_id = _audit_digest(pointer.get("snapshot"))
+                if digest_id is not None:
+                    live_ids = {digest_id}
+        except (OSError, ValueError):
+            live_ids = set()
+    history_ids |= live_ids
+    # Durable snapshot references: runs, artifacts, insights.
+    run_ids: set[str] = set()
+    try:
+        run_dirs = sorted((root / "runs").glob("*")) if (root / "runs").is_dir() else []
+    except OSError:
+        run_dirs = []
+    for run_dir in run_dirs:
+        try:
+            if not run_dir.is_dir() or run_dir.is_symlink():
+                continue
+        except OSError:
+            continue
+        for name in ("started.json", "result.json", "consultation.json", "error.json", "prompt_projection.json"):
+            record = _audit_json(run_dir / name)
+            if record is None:
+                continue
+            digest_id = _audit_digest(record.get("snapshot"))
+            if digest_id is not None:
+                run_ids.add(digest_id)
+    artifact_ids: set[str] = set()
+    try:
+        pointer = read_json(root / "artifacts" / "latest.json", {})
+        if isinstance(pointer, dict):
+            digest_id = _audit_digest(pointer.get("snapshot"))
+            if digest_id is not None:
+                artifact_ids.add(digest_id)
+    except (OSError, ValueError):
+        pass
+    try:
+        artifact_dirs = sorted((root / "artifacts").glob("*")) if (root / "artifacts").is_dir() else []
+    except OSError:
+        artifact_dirs = []
+    for child in artifact_dirs:
+        try:
+            if not child.is_dir() or child.is_symlink():
+                continue
+            record = _audit_json(child / "evidence.json")
+            if record is None:
+                continue
+            digest_id = _audit_digest(record.get("snapshot"))
+            if digest_id is not None:
+                artifact_ids.add(digest_id)
+        except OSError:
+            continue
+    insight_ids: set[str] = set()
+    try:
+        inbox_paths = sorted((root / "inbox").glob("*.json")) if (root / "inbox").is_dir() else []
+    except OSError:
+        inbox_paths = []
+    for child in inbox_paths:
+        try:
+            if child.is_symlink():
+                continue
+            record = _audit_json(child)
+            if record is None:
+                continue
+            digest_id = _audit_digest(record.get("base_snapshot"))
+            if digest_id is not None:
+                insight_ids.add(digest_id)
+        except OSError:
+            continue
+    referenced_ids = set(history_ids) | set(run_ids) | set(artifact_ids) | set(insight_ids)
+    # Manifests outside every durable reference are reclaim candidates
+    # (preview only); live/history membership already counts as referenced.
+    unreferenced = sorted(sid for sid in manifests if sid not in referenced_ids)
+    unreferenced_bytes = 0
+    for sid in unreferenced:
+        try:
+            unreferenced_bytes += (snapshots_dir / f"{sid}.json").stat().st_size
+        except OSError:
+            continue
+    # Objects referenced by any manifest on disk (including unreferenced
+    # manifests and failed-capture orphans distinction).
+    referenced_objects: set[str] = set()
+    for shapes in manifest_objects.values():
+        referenced_objects |= shapes
+    objects_dir = root / "objects"
+    try:
+        object_paths = sorted(objects_dir.glob("*")) if objects_dir.is_dir() else []
+    except OSError:
+        object_paths = []
+    object_sizes: dict[str, int] = {}
+    objects_skipped = 0
+    for child in object_paths:
+        try:
+            if child.is_symlink() or not child.is_file() or not DIGEST.fullmatch(child.name):
+                objects_skipped += 1
+                continue
+            try:
+                object_sizes[child.name] = child.stat().st_size
+            except OSError:
+                objects_skipped += 1
+        except OSError:
+            objects_skipped += 1
+    orphan = sorted(name for name in object_sizes if name not in referenced_objects)
+    return {
+        "snapshots": {
+            "manifests": len(manifests),
+            "bytes": manifest_bytes,
+            "live": len([sid for sid in manifests if sid in live_ids]),
+            "referenced": len([sid for sid in manifests if sid in referenced_ids]),
+            "unreferenced": len(unreferenced),
+            "unreferenced_bytes": unreferenced_bytes,
+            "unreferenced_sample": unreferenced[:_AUDIT_SAMPLE],
+            "unreferenced_truncated": len(unreferenced) > _AUDIT_SAMPLE,
+            "skipped": manifest_skipped,
+        },
+        "histories": {"generations": generations, "bytes": histories_bytes},
+        "objects": {
+            "count": len(object_sizes),
+            "bytes": sum(object_sizes.values()),
+            "referenced_count": len([name for name in object_sizes if name in referenced_objects]),
+            "referenced_bytes": sum(size for name, size in object_sizes.items() if name in referenced_objects),
+            "orphan_count": len(orphan),
+            "orphan_bytes": sum(object_sizes[name] for name in orphan),
+            "orphan_sample": orphan[:_AUDIT_SAMPLE],
+            "orphan_truncated": len(orphan) > _AUDIT_SAMPLE,
+            "skipped": objects_skipped,
+        },
+        "references": {
+            "history_snapshots": len(history_ids),
+            "run_snapshots": len(run_ids),
+            "artifact_snapshots": len(artifact_ids),
+            "insight_snapshots": len(insight_ids),
+        },
+        "preview_only": True,
+        "retained": "All manifests, history generations, objects, runs, artifacts, sessions, decisions, and proposals are retained; this preview removes nothing.",
+    }
 
 
 def artifact_candidates(project: Project, keep: int) -> list[Path]:

@@ -106,6 +106,8 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("project", help="New project name")
     p.add_argument("--archive", type=Path, required=True, help="Backup archive")
     p.add_argument("--max-bytes", type=int, default=1073741824, help="Restore byte limit")
+    p = sub.add_parser("storage", help="Report snapshot/object retention accounting; read-only preview, nothing is removed")
+    p.add_argument("project", help="Managed project name")
     p = sub.add_parser("prune", help="List (or apply) removal of reproducible inputs")
     p.add_argument("project", help="Managed project name")
     p.add_argument("--apply", action="store_true", help="Actually remove candidates")
@@ -277,13 +279,18 @@ def _cmd_prune(config, project, args):
     return prune(project, apply=args.apply, keep_artifacts=args.keep_artifacts)
 
 
+def _cmd_storage(config, project, args):
+    from .storage import audit
+    return audit(project)
+
+
 _PROJECT_COMMANDS = {
     "status": _cmd_status, "arm": _cmd_arm, "disarm": _cmd_disarm,
     "pause": _cmd_pause, "resume": _cmd_resume, "wake": _cmd_wake,
     "run": _cmd_run, "daemon": _cmd_daemon, "cleanup": _cmd_cleanup,
     "insight": _cmd_insight, "service": _cmd_service, "report": _cmd_report,
     "dashboard": _cmd_dashboard, "usage": _cmd_usage, "backup": _cmd_backup,
-    "prune": _cmd_prune,
+    "prune": _cmd_prune, "storage": _cmd_storage,
 }
 
 
