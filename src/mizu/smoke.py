@@ -61,7 +61,7 @@ def live(config: Config, profile: str | None = None, role_name: str = "consult")
         raise ConfigError("A selector role requires an explicit --profile for smoke")
     mkdir(config.data / "validation")
     probe_policy = config.data / "validation" / "smoke-probe-policy.md"
-    probe_policy.write_text(SMOKE_PROBE_POLICY, encoding="utf-8")
+    probe_policy.write_bytes(SMOKE_PROBE_POLICY.encode("utf-8"))
     role = dataclasses.replace(role, profile=profile or role.profile, selector="", workspace="read",
                                capabilities=("files", "read", "finish"), on_change=False,
                                policy=(probe_policy,))
