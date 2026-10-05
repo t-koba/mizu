@@ -65,18 +65,7 @@ def _mtime(path):
         return 0.0
 
 
-def _zone(project) -> dt.tzinfo:
-    """Configured day-boundary zone for usage buckets (UTC default unchanged)."""
-    try:
-        from .config import resolve_timezone
-        name = getattr(getattr(project, "config", None), "timezone", "UTC") or "UTC"
-        return resolve_timezone(name)
-    except Exception:
-        return dt.timezone.utc
-
-
-def _day(record, path, tz: dt.tzinfo | None = None):
-    tz = tz if tz is not None else dt.timezone.utc
+def _day(record, path, tz: dt.tzinfo):
     try:
         return dt.datetime.fromisoformat(record["finished_at"]).astimezone(tz).date().isoformat()
     except (KeyError, ValueError, TypeError):
@@ -111,7 +100,7 @@ def usage_views(model):
 
 
 def summarize(project) -> dict:
-    tz = _zone(project)
+    tz = project.config.tzinfo
     candidates = heapq.nlargest(MAX_RUNS_SCANNED + 1, (p for p in (project.root / "runs").glob("*")
                                 if p.is_dir() and not p.is_symlink()), key=lambda p: (_mtime(p), p.name))
     truncated = len(candidates) > MAX_RUNS_SCANNED

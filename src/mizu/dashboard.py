@@ -108,11 +108,7 @@ def collect(project) -> dict:
     facts = summarize(project)
     retention = getattr(getattr(project, "config", None), "limits", None)
     retention = retention.retention_days if retention is not None else 31
-    try:
-        from .config import resolve_timezone as _resolve_tz
-        _tz = _resolve_tz(getattr(getattr(project, "config", None), "timezone", "UTC") or "UTC")
-    except Exception:
-        _tz = dt.timezone.utc
+    _tz = project.config.tzinfo
     cutoff = (dt.datetime.now(_tz).date() - dt.timedelta(days=max(0, retention-1))).isoformat()
     recent_groups = [g for g in facts["groups"] if not retention or g["day"] >= cutoff]
     artifact_pointer = project.root / "artifacts" / "latest.json"

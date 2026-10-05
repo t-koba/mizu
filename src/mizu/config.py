@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import dataclasses
+import datetime as dt
 import os
 import re
 import tomllib
@@ -404,6 +405,10 @@ class Config:
     vcs: dict
     exclude: tuple[str, ...]
     selectors: dict = dataclasses.field(default_factory=dict)
+    tzinfo: dt.tzinfo | None = None
+
+    def __post_init__(self):
+        object.__setattr__(self, "tzinfo", resolve_timezone(self.timezone))
 
     def _raw_profile(self, profile: str) -> dict:
         try:
@@ -718,7 +723,6 @@ def load(file: Path) -> Config:
     if any(p not in profiles for p in consult) or len(set(consult)) != len(consult):
         raise ConfigError("consult_profiles must contain unique, configured profiles")
     timezone = string(data.get("timezone", "UTC"), "timezone")
-    resolve_timezone(timezone)
     web = data.get("web", {})
     keys(web, {"hosts", "feeds", "cache_seconds", "timeout_seconds", "max_bytes", "search_command",
                "intranet"}, "web")

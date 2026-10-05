@@ -730,21 +730,13 @@ def _prompt_clock(context: Context) -> dict:
     last so the stable prefix keeps working caches warm. Bounds: two small
     string fields. Trust: local clock plus operator ``timezone`` (default
     UTC). Retry/cancellation: n/a (pure projection). Evidence: recorded in
-    ``prompt_projection.json`` bytes only. Failure: never raises; falls back
-    to a UTC stamp on any error.
+    ``prompt_projection.json`` bytes only. Failure: raises on broken
+    configuration (fail closed, never a silent UTC day).
     """
-    try:
-        from .config import resolve_timezone as _resolve_tz
-        name = getattr(getattr(context, "config", None), "timezone", "UTC") or "UTC"
-        try:
-            tz = _resolve_tz(name)
-        except Exception:
-            import datetime as _dt
-            tz, name = _dt.timezone.utc, "UTC"
-        import datetime as _dt
-        return {"now": _dt.datetime.now(tz).isoformat(timespec="seconds"), "timezone": str(name)}
-    except Exception:
-        return {"now": "", "timezone": "UTC"}
+    import datetime as _dt
+    tz = context.config.tzinfo
+    name = context.config.timezone
+    return {"now": _dt.datetime.now(tz).isoformat(timespec="seconds"), "timezone": str(name)}
 
 
 def prompt_for(context: Context) -> str:
