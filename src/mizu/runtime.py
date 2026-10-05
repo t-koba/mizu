@@ -52,8 +52,10 @@ def slot(config: Config):
 #: Infrastructure waits defer (Busy locks/slots, InfraExceeded daily-budget
 #: and disk-reserve guards) rather than counting toward the consecutive-failure
 #: brake. All other faults still count, including plain LimitExceeded bound
-#: faults (engine deadlines, event-stream/RPC bounds, per-run tool/request
-#: bounds, file-count/snapshot bounds). The error record is still written and
+#: faults (engine deadlines, per-record transport/RPC bounds, per-run
+#: tool/request bounds, file-count/snapshot bounds). Event-stream retention
+#: past the operator budget truncates retained evidence explicitly instead
+#: of failing the run. The error record is still written and
 #: the exception still raised, so nothing is hidden; the daemon surfaces it
 #: as a run_deferred event.
 INFRA_WAIT = (Busy, InfraExceeded)

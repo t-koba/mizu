@@ -40,6 +40,23 @@ class RunRetentionTests(Fixture):
             os.utime(run / keep, (now, now))
         return run
 
+    def test_truncation_marker_rides_with_its_stream(self):
+        self.project.set_control(paused=True)
+        mid = self._run_with_logs("mid", 10)
+        old = self._run_with_logs("old", 40)
+        for run in (mid, old):
+            marker = run / "pi-events-truncated.json"
+            marker.write_bytes(b'{"truncated":true}\n')
+            _touch(marker, 10 if run == mid else 40)
+        dry = prune(self.project, apply=False)
+        self.assertIn("runs/mid/pi-events-truncated.json", dry["event_logs_compressed"])
+        self.assertIn("runs/old/pi-events-truncated.json", dry["event_logs_removed"])
+        applied = prune(self.project, apply=True)
+        self.assertTrue((mid / "pi-events-truncated.json.gz").exists())
+        self.assertFalse((old / "pi-events-truncated.json").exists())
+        self.assertFalse((old / "pi-events-truncated.json.gz").exists())
+        self.assertEqual(applied["applied"], True)
+
     def test_recent_logs_kept_old_compressed_older_dropped(self):
         self.project.set_control(paused=True)
         recent = self._run_with_logs("recent", 1)

@@ -340,10 +340,11 @@ class ConfigTests(Fixture):
         self.assertIs(mizu.mcp_proxy.MCP_VERSIONS, mizu.protocol.MCP_VERSIONS)
         self.assertIs(mizu.mcp_loop.MCP_VERSIONS, mizu.protocol.MCP_VERSIONS)
         self.assertIs(mizu.mcp_loop.MAX_FRAME, fs.MAX_FRAME)
-        from mizu.drivers import DIAGNOSTICS_TAIL_BYTES, EVENT_STREAM_BYTES
+        from mizu.drivers import DIAGNOSTICS_TAIL_BYTES, EVENT_STREAM_BYTES, EVENT_RECORD_BYTES
         import mizu.engine_channel
         self.assertIs(mizu.engine_channel.DIAGNOSTICS_TAIL_BYTES, DIAGNOSTICS_TAIL_BYTES)
         self.assertIs(mizu.engine_channel.EVENT_STREAM_BYTES, EVENT_STREAM_BYTES)
+        self.assertIs(mizu.engine_channel.EVENT_RECORD_BYTES, EVENT_RECORD_BYTES)
 
     def test_verify_commands_are_counted_and_toml_safe(self):
         from mizu.project import check_verify

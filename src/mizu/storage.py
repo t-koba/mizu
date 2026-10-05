@@ -138,10 +138,18 @@ _EVENT_LOG_RAW = ("diagnostics.txt",)
 
 
 def _event_log_paths(run_dir: Path) -> tuple[list[Path], list[Path]]:
-    """Raw and compressed bulky log paths directly under one run dir."""
+    """Raw and compressed bulky log paths directly under one run dir.
+
+    The ``*-events-truncated.json`` marker rides with its event stream:
+    it compresses and drops on the same clocks, so a capped stream never
+    leaves an orphaned marker or an unmarked gap.
+    """
     raw: list[Path] = []
     compressed: list[Path] = []
     for child in sorted(run_dir.glob("*-events.jsonl")):
+        if child.is_file() and not child.is_symlink():
+            raw.append(child)
+    for child in sorted(run_dir.glob("*-events-truncated.json")):
         if child.is_file() and not child.is_symlink():
             raw.append(child)
     for name in _EVENT_LOG_RAW:
@@ -152,6 +160,9 @@ def _event_log_paths(run_dir: Path) -> tuple[list[Path], list[Path]]:
         except OSError:
             continue
     for child in sorted(run_dir.glob("*-events.jsonl.gz")):
+        if child.is_file() and not child.is_symlink():
+            compressed.append(child)
+    for child in sorted(run_dir.glob("*-events-truncated.json.gz")):
         if child.is_file() and not child.is_symlink():
             compressed.append(child)
     for name in _EVENT_LOG_RAW:
@@ -466,7 +477,8 @@ def prune(project: Project, *, apply: bool = False, keep_artifacts: int = DEFAUL
 
     Schema/bounds: ``keep_artifacts`` counts the live pointer when it exists.
     ``[limits] event_log_compress_days`` (0 disables, 0-3650) gzips raw
-    ``*-events.jsonl``/``diagnostics.txt`` at or beyond N days old;
+    ``*-events.jsonl``/``diagnostics.txt``/``*-events-truncated.json`` at or
+    beyond N days old;
     ``[limits] event_log_retention_days`` (0 disables, 0-3650) drops raw and
     ``.gz`` logs at or beyond M days old. ``[limits] dashboard_keep``
     (0 keeps all, 0-1000) keeps the newest N dashboard generations plus the

@@ -286,6 +286,13 @@ class Limits:
     #: stage. Result/error/selection records are never candidates.
     event_log_compress_days: int = 7
     event_log_retention_days: int = 31
+    #: Operator-selected aggregate retention (bytes) for one run's engine
+    #: event stream (``*-events.jsonl``). Bytes past this budget are dropped
+    #: from the retained file with an explicit ``*-events-truncated.json``
+    #: marker; parsing and the run continue, so diagnostic volume can never
+    #: discard already-sealed publishable work. The per-record transport
+    #: bound stays fixed mechanism, never policy.
+    event_stream_bytes: int = 4 * 1024 * 1024
     #: Operator-selected bound on pending proposals offered per prompt /
     #: dashboard projection. Raw inbox/decisions stay on disk; the operator
     #: review path (`mizu insight list`) uses a separate 1000-item bound.
@@ -470,6 +477,7 @@ def load(file: Path) -> Config:
     _LIMIT_RANGES = {"history_index": (8, 1000000), "prompt_snapshots": (1, 64),
                      "retention_days": (0, 3650), "pending_insights": (1, 1000),
                      "event_log_compress_days": (0, 3650), "event_log_retention_days": (0, 3650),
+                     "event_stream_bytes": (1048576, 268435456),
                      "dashboard_decisions": (1, 1000), "dashboard_reason_chars": (1, 10000),
                      "dashboard_keep": (0, 1000),
                      "session_max_tokens": (0, 1073741824), "session_max_age_seconds": (0, 31536000),

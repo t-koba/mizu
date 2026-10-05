@@ -13,8 +13,14 @@ from .fs import write_json, canonical, now
 
 #: Driver stderr tail retained per run (bounded failure evidence).
 DIAGNOSTICS_TAIL_BYTES = 256 * 1024
-#: Raw CLI event-stream bound per invocation (evidence, not a bill).
+#: Default aggregate engine event-stream retention per invocation (evidence,
+#: not a bill). Operator-overridable via `[limits] event_stream_bytes`; the
+#: policy default always equals this mechanism default.
 EVENT_STREAM_BYTES = 4 * 1024 * 1024
+#: Fixed transport safety: one engine JSONL record beyond this is refused
+#: outright (fail closed), so a lineless flood cannot exhaust memory while
+#: aggregate retention stays a separate operator policy. Not a knob.
+EVENT_RECORD_BYTES = 1024 * 1024
 #: Failure-evidence tail attached to driver errors.
 ERROR_TAIL_CHARS = 4000
 
