@@ -391,3 +391,27 @@ class PreviousReportTests(Fixture):
         self.assertIsNotNone(previous)
         self.assertTrue(previous["body_truncated"])
         self.assertLessEqual(len(previous["body"].encode("utf-8")), PREVIOUS_REPORT_BYTES)
+
+class InsightRetrievalTests(Fixture):
+    def test_explicit_paging_reaches_beyond_prompt_selection(self):
+        from mizu.runtime import Context
+        snap = self.project.snapshots.get()["id"]
+        for n in range(35):
+            self.project.insights.submit(source="searcher", title=f"Idea {n:02d}",
+                                         body="Evidence", base_snapshot=snap)
+        ctx = self.context("worker")
+        first = ctx.handle("insights", {"offset": 0, "limit": 1000})
+        self.assertEqual(first["total"], 35)
+        self.assertEqual(len(first["insights"]), 35)
+        # Prompt selection stays bounded.
+        import json
+        from mizu.runtime import prompt_for
+        prompt = json.loads(prompt_for(ctx))
+        self.assertEqual(len(prompt["pending_insights"]), 30)
+        # Overflow page is discoverable without knowing IDs.
+        overflow = ctx.handle("insights", {"offset": 30, "limit": 1000})
+        self.assertEqual(overflow["total"], 35)
+        self.assertEqual(len(overflow["insights"]), 5)
+        self.assertFalse(overflow["selection_truncated"])
+        seen = [item["id"] for page in (first, overflow) for item in page["insights"]]
+        self.assertEqual(len(set(seen)), 35)

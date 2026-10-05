@@ -58,6 +58,11 @@ def slot(config: Config):
 #: as a run_deferred event.
 INFRA_WAIT = (Busy, InfraExceeded)
 
+#: Explicit paged insight retrieval may walk the whole pending set (tool
+#: page limit, same bound as `mizu insight list`); prompt and dashboard
+#: selection stays bounded by `[limits] pending_insights`.
+INSIGHT_RETRIEVAL_LIMIT = 1000
+
 
 def is_infra_wait(exc: BaseException) -> bool:
     """True when a failure is an infrastructure wait that defers, not a fault.
@@ -375,7 +380,10 @@ class Context:
     def _op_insights(self, args: dict) -> dict:
         if args.get("id"):
             return self.project.insights.read(args["id"])
-        projection = self.project.insights.projection(limit=self.config.limits.pending_insights)
+        # Prompt selection stays at pending_insights; explicit retrieval pages
+        # the whole pending set, so overflow items remain discoverable.
+        retrieval = min(args.get("offset", 0) + args.get("limit", 1000), INSIGHT_RETRIEVAL_LIMIT)
+        projection = self.project.insights.projection(limit=max(1, retrieval))
         response = page(projection['items'],args.get('offset',0),args.get('limit',1000),maximum=PREVIEW_BYTES*2)
         response['insights'] = response.pop('items')
         response['total'] = projection['total']
