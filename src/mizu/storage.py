@@ -348,33 +348,14 @@ def _audit_json(path: Path):
         return None
 
 
-def audit(project: Project) -> dict:
-    """Report snapshot/object retention accounting; read-only preview only.
+def _audit_collect(project: Project) -> dict:
+    """Full reference-aware collection; internal helper for audit/reclaim.
 
-    Schema: ``{snapshots: {manifests, bytes, live, referenced,
-    unreferenced, unreferenced_bytes, unreferenced_sample,
-    unreferenced_truncated, skipped}, histories: {generations, bytes},
-    objects: {count, bytes, referenced_count, referenced_bytes,
-    orphan_count, orphan_bytes, orphan_sample, orphan_truncated, skipped},
-    references: {history_snapshots, run_snapshots, artifact_snapshots,
-    insight_snapshots}, preview_only: True}``. Counts and byte totals are
-    exact; sample lists hold at most ``_AUDIT_SAMPLE`` sorted IDs with a
-    truncation flag.
-    Bounds: reference JSON files above ``_AUDIT_JSON_BYTES`` are skipped
-    and counted; symlinks are never followed; corrupt entries are skipped,
-    never raised. Manifest ``files`` entries with invalid digests are
-    skipped. Trust: local recorded state only (data, not proof); insight
-    prose is never read, only ``base_snapshot`` IDs. Retry/cancellation:
-    read-only, lock-free, idempotent; safe to retry while writers run, with
-    no quiescence requirement because nothing is removed.
-    Evidence: exact counts/bytes plus bounded samples; full evidence stays
-    on disk under ``snapshots/``, ``histories/`` and ``objects/``.
-    Failure: raises only when the project or its store is unreadable;
-    per-file faults are counted as skipped. Nothing is deleted, moved, or
-    rewritten by this preview.
+    Returns exact full sorted ID lists (no truncation) plus sizes; callers
+    truncate for display. Same roots, bounds, and symlink/corrupt skipping
+    as audit(); see audit() for the contract.
     """
     root = project.root
-    # All manifests on disk with their object references.
     manifests: dict[str, dict] = {}
     manifest_bytes = 0
     manifest_skipped = 0
@@ -413,7 +394,6 @@ def audit(project: Project) -> dict:
             manifest_objects[sid] = shapes
         except OSError:
             manifest_skipped += 1
-    # All history generations on disk plus the live generation.
     history_ids: set[str] = set()
     generations = 0
     histories_bytes = 0
@@ -458,7 +438,6 @@ def audit(project: Project) -> dict:
         except (OSError, ValueError):
             live_ids = set()
     history_ids |= live_ids
-    # Durable snapshot references: runs, artifacts, insights.
     run_ids: set[str] = set()
     try:
         run_dirs = sorted((root / "runs").glob("*")) if (root / "runs").is_dir() else []
@@ -520,8 +499,6 @@ def audit(project: Project) -> dict:
         except OSError:
             continue
     referenced_ids = set(history_ids) | set(run_ids) | set(artifact_ids) | set(insight_ids)
-    # Manifests outside every durable reference are reclaim candidates
-    # (preview only); live/history membership already counts as referenced.
     unreferenced = sorted(sid for sid in manifests if sid not in referenced_ids)
     unreferenced_bytes = 0
     for sid in unreferenced:
@@ -530,10 +507,11 @@ def audit(project: Project) -> dict:
         except OSError:
             continue
     # Objects referenced by any manifest on disk (including unreferenced
-    # manifests and failed-capture orphans distinction).
-    referenced_objects: set[str] = set()
+    # manifests). Apply removes exactly this preview set, so a second
+    # audit/reclaim converges on objects orphaned by manifest removal.
+    live_objects: set[str] = set()
     for shapes in manifest_objects.values():
-        referenced_objects |= shapes
+        live_objects |= shapes
     objects_dir = root / "objects"
     try:
         object_paths = sorted(objects_dir.glob("*")) if objects_dir.is_dir() else []
@@ -552,40 +530,166 @@ def audit(project: Project) -> dict:
                 objects_skipped += 1
         except OSError:
             objects_skipped += 1
-    orphan = sorted(name for name in object_sizes if name not in referenced_objects)
+    orphan = sorted(name for name in object_sizes if name not in live_objects)
+    return {
+        "manifests": manifests,
+        "manifest_bytes": manifest_bytes,
+        "manifest_skipped": manifest_skipped,
+        "manifest_objects": manifest_objects,
+        "live_ids": live_ids,
+        "referenced_ids": referenced_ids,
+        "history_ids": history_ids,
+        "run_ids": run_ids,
+        "artifact_ids": artifact_ids,
+        "insight_ids": insight_ids,
+        "generations": generations,
+        "histories_bytes": histories_bytes,
+        "unreferenced": unreferenced,
+        "unreferenced_bytes": unreferenced_bytes,
+        "live_objects": live_objects,
+        "object_sizes": object_sizes,
+        "objects_skipped": objects_skipped,
+        "orphan": orphan,
+    }
+
+
+def audit(project: Project) -> dict:
+    """Report snapshot/object retention accounting; read-only preview only.
+
+    Schema: ``{snapshots: {manifests, bytes, live, referenced,
+    unreferenced, unreferenced_bytes, unreferenced_sample,
+    unreferenced_truncated, skipped}, histories: {generations, bytes},
+    objects: {count, bytes, referenced_count, referenced_bytes,
+    orphan_count, orphan_bytes, orphan_sample, orphan_truncated, skipped},
+    references: {history_snapshots, run_snapshots, artifact_snapshots,
+    insight_snapshots}, preview_only: True}``. Counts and byte totals are
+    exact; sample lists hold at most ``_AUDIT_SAMPLE`` sorted IDs with a
+    truncation flag.
+    Bounds: reference JSON files above ``_AUDIT_JSON_BYTES`` are skipped
+    and counted; symlinks are never followed; corrupt entries are skipped,
+    never raised. Manifest ``files`` entries with invalid digests are
+    skipped. Trust: local recorded state only (data, not proof); insight
+    prose is never read, only ``base_snapshot`` IDs. Retry/cancellation:
+    read-only, lock-free, idempotent; safe to retry while writers run, with
+    no quiescence requirement because nothing is removed.
+    Evidence: exact counts/bytes plus bounded samples; full evidence stays
+    on disk under ``snapshots/``, ``histories/`` and ``objects/``.
+    Failure: raises only when the project or its store is unreadable;
+    per-file faults are counted as skipped. Nothing is deleted, moved, or
+    rewritten by this preview.
+    """
+    collected = _audit_collect(project)
+    manifests = collected["manifests"]
+    live_ids = collected["live_ids"]
+    referenced_ids = collected["referenced_ids"]
+    unreferenced = collected["unreferenced"]
+    live_objects = collected["live_objects"]
+    object_sizes = collected["object_sizes"]
+    orphan = collected["orphan"]
     return {
         "snapshots": {
             "manifests": len(manifests),
-            "bytes": manifest_bytes,
+            "bytes": collected["manifest_bytes"],
             "live": len([sid for sid in manifests if sid in live_ids]),
             "referenced": len([sid for sid in manifests if sid in referenced_ids]),
             "unreferenced": len(unreferenced),
-            "unreferenced_bytes": unreferenced_bytes,
+            "unreferenced_bytes": collected["unreferenced_bytes"],
             "unreferenced_sample": unreferenced[:_AUDIT_SAMPLE],
             "unreferenced_truncated": len(unreferenced) > _AUDIT_SAMPLE,
-            "skipped": manifest_skipped,
+            "skipped": collected["manifest_skipped"],
         },
-        "histories": {"generations": generations, "bytes": histories_bytes},
+        "histories": {"generations": collected["generations"], "bytes": collected["histories_bytes"]},
         "objects": {
             "count": len(object_sizes),
             "bytes": sum(object_sizes.values()),
-            "referenced_count": len([name for name in object_sizes if name in referenced_objects]),
-            "referenced_bytes": sum(size for name, size in object_sizes.items() if name in referenced_objects),
+            "referenced_count": len([name for name in object_sizes if name in live_objects]),
+            "referenced_bytes": sum(size for name, size in object_sizes.items() if name in live_objects),
             "orphan_count": len(orphan),
             "orphan_bytes": sum(object_sizes[name] for name in orphan),
             "orphan_sample": orphan[:_AUDIT_SAMPLE],
             "orphan_truncated": len(orphan) > _AUDIT_SAMPLE,
-            "skipped": objects_skipped,
+            "skipped": collected["objects_skipped"],
         },
         "references": {
-            "history_snapshots": len(history_ids),
-            "run_snapshots": len(run_ids),
-            "artifact_snapshots": len(artifact_ids),
-            "insight_snapshots": len(insight_ids),
+            "history_snapshots": len(collected["history_ids"]),
+            "run_snapshots": len(collected["run_ids"]),
+            "artifact_snapshots": len(collected["artifact_ids"]),
+            "insight_snapshots": len(collected["insight_ids"]),
         },
         "preview_only": True,
         "retained": "All manifests, history generations, objects, runs, artifacts, sessions, decisions, and proposals are retained; this preview removes nothing.",
     }
+
+
+def reclaim(project: Project, *, apply: bool = False) -> dict:
+    """List (or apply) removal of unreferenced manifests and orphan objects.
+
+    Schema: ``{applied, snapshots: [relative manifest paths], objects:
+    [relative object paths], unreferenced_bytes, orphan_bytes, audit?}``.
+    The candidate sets are exactly what ``audit()`` reports in full: manifests
+    outside every durable reference (live/history/run/artifact/insight) and
+    objects referenced by no manifest on disk. Full ID lists are returned
+    (sorted); use ``audit()`` for the bounded display samples.
+    Bounds: same bounded reads, digest checks, and symlink skipping as
+    ``audit()``; history generations are never candidates, and neither are
+    runs, artifacts, sessions, decisions, or proposals.
+    Trust: operator-invoked maintenance; the explicit ``--apply`` invocation
+    behind quiescence (paused + locks) is the grant. Candidates are
+    recomputed inside the quiescent section, so a stale preview can never
+    authorize a removal.
+    Retry/cancellation: dry-run (default) is read-only, lock-free, and
+    idempotent. Apply writes a ``maintenance/storage-*.json`` audit record;
+    a second reclaim converges on objects orphaned by manifest removal.
+    Evidence: returns removed/retained paths plus the maintenance audit path.
+    Failure: Denied for symlinks at removal time or a non-quiescent project
+    when applying; per-file read faults are skipped, never raised.
+    """
+    if not apply:
+        collected = _audit_collect(project)
+        return {
+            "applied": False,
+            "snapshots": [f"snapshots/{sid}.json" for sid in collected["unreferenced"]],
+            "objects": [f"objects/{name}" for name in collected["orphan"]],
+            "unreferenced_bytes": collected["unreferenced_bytes"],
+            "orphan_bytes": sum(collected["object_sizes"][name] for name in collected["orphan"]),
+            "retained": "All live/history/run/artifact/insight-referenced manifests, history generations, "
+                        "runs, artifacts, sessions, decisions, and proposals. "
+                        "Repeat audit/reclaim converges on newly orphaned objects.",
+        }
+    with quiescent(project):
+        collected = _audit_collect(project)
+        manifest_paths = [project.root / "snapshots" / f"{sid}.json" for sid in collected["unreferenced"]]
+        object_paths = [project.root / "objects" / name for name in collected["orphan"]]
+        for path in (*manifest_paths, *object_paths):
+            if path.is_symlink():
+                raise Denied("Refusing a symlink during storage reclamation")
+        removed = {"snapshots": [p.relative_to(project.root).as_posix() for p in manifest_paths],
+                   "objects": [p.relative_to(project.root).as_posix() for p in object_paths]}
+        for path in manifest_paths:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+        for path in object_paths:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+        for parent in {p.parent for p in (*manifest_paths, *object_paths)}:
+            try:
+                sync_dir(parent)
+            except OSError:
+                pass
+        record = project.root / "maintenance" / f"storage-{int(time.time())}-{uuid.uuid4().hex[:8]}.json"
+        write_json(record, {"applied_at": now(), **removed,
+                            "unreferenced_bytes": collected["unreferenced_bytes"],
+                            "orphan_bytes": sum(collected["object_sizes"][name] for name in collected["orphan"])})
+        sync_dir(record.parent)
+        removed["audit"] = record.relative_to(project.root).as_posix()
+    return {"applied": True, **removed,
+            "retained": "All live/history/run/artifact/insight-referenced manifests, history generations, "
+                        "runs, artifacts, sessions, decisions, and proposals. "
+                        "Repeat audit/reclaim converges on newly orphaned objects."}
 
 
 def artifact_candidates(project: Project, keep: int) -> list[Path]:

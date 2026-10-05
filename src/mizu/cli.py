@@ -106,8 +106,9 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("project", help="New project name")
     p.add_argument("--archive", type=Path, required=True, help="Backup archive")
     p.add_argument("--max-bytes", type=int, default=1073741824, help="Restore byte limit")
-    p = sub.add_parser("storage", help="Report snapshot/object retention accounting; read-only preview, nothing is removed")
+    p = sub.add_parser("storage", help="Report snapshot/object retention accounting; dry-run preview unless --apply")
     p.add_argument("project", help="Managed project name")
+    p.add_argument("--apply", action="store_true", help="Remove unreferenced manifests and orphan objects under quiescence")
     p = sub.add_parser("prune", help="List (or apply) removal of reproducible inputs")
     p.add_argument("project", help="Managed project name")
     p.add_argument("--apply", action="store_true", help="Actually remove candidates")
@@ -280,7 +281,9 @@ def _cmd_prune(config, project, args):
 
 
 def _cmd_storage(config, project, args):
-    from .storage import audit
+    from .storage import audit, reclaim
+    if getattr(args, "apply", False):
+        return reclaim(project, apply=True)
     return audit(project)
 
 

@@ -1,7 +1,9 @@
-"""Reference-aware storage accounting is a read-only preview. Offline only."""
+"""Reference-aware storage accounting preview plus gated reclamation. Offline only."""
+import json
 import unittest
 from support import Fixture
-from mizu.storage import audit
+from mizu.errors import Denied
+from mizu.storage import audit, reclaim
 
 
 class StorageAuditTests(Fixture):
@@ -58,3 +60,64 @@ class StorageAuditTests(Fixture):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StorageReclaimTests(Fixture):
+    def test_dry_run_lists_candidates_and_removes_nothing(self):
+        orphan = "e" * 64
+        (self.project.root / "objects" / orphan).write_bytes(b"orphan-bytes")
+        captured = self.project.snapshots.capture_files(self.project.workspace)
+        snap = self.project.snapshots.create(
+            captured, goal=self.project.goal, state="Preview only",
+            run=None, outcome="wait", summary="Unpublished preview")
+        report = reclaim(self.project)
+        self.assertFalse(report["applied"])
+        self.assertIn(f"snapshots/{snap['id']}.json", report["snapshots"])
+        self.assertIn(f"objects/{orphan}", report["objects"])
+        self.assertTrue((self.project.root / "objects" / orphan).exists())
+        self.assertTrue((self.project.root / "snapshots" / f"{snap['id']}.json").exists())
+
+    def test_apply_requires_quiescence(self):
+        with self.assertRaises(Denied):
+            reclaim(self.project, apply=True)
+
+    def test_apply_removes_only_unreferenced_and_writes_audit(self):
+        orphan = "e" * 64
+        (self.project.root / "objects" / orphan).write_bytes(b"orphan-bytes")
+        captured = self.project.snapshots.capture_files(self.project.workspace)
+        snap = self.project.snapshots.create(
+            captured, goal=self.project.goal, state="Unreferenced",
+            run=None, outcome="wait", summary="Unpublished preview")
+        live = self.project.snapshots.get()["id"]
+        self.project.set_control(paused=True)
+        result = reclaim(self.project, apply=True)
+        self.assertTrue(result["applied"])
+        self.assertIn(f"snapshots/{snap['id']}.json", result["snapshots"])
+        self.assertIn(f"objects/{orphan}", result["objects"])
+        self.assertFalse((self.project.root / "snapshots" / f"{snap['id']}.json").exists())
+        self.assertFalse((self.project.root / "objects" / orphan).exists())
+        # Live history and its objects survive.
+        self.assertTrue((self.project.root / "snapshots" / f"{live}.json").exists())
+        audit_path = self.project.root / result["audit"]
+        self.assertTrue(audit_path.is_file())
+        record = json.loads(audit_path.read_text())
+        self.assertIn("applied_at", record)
+        # Second reclaim converges to empty.
+        again = reclaim(self.project, apply=True)
+        self.assertTrue(again["applied"])
+        self.assertEqual(again["snapshots"], [])
+        self.assertEqual(again["objects"], [])
+
+    def test_apply_protects_run_referenced_snapshot(self):
+        from mizu.fs import write_json
+        run = self.project.root / "runs" / "probe"
+        run.mkdir(parents=True)
+        captured = self.project.snapshots.capture_files(self.project.workspace)
+        snap = self.project.snapshots.create(
+            captured, goal=self.project.goal, state="Referenced by a run",
+            run="probe", outcome="wait", summary="Run reference")
+        write_json(run / "started.json", {"run": "probe", "snapshot": snap["id"]})
+        self.project.set_control(paused=True)
+        result = reclaim(self.project, apply=True)
+        self.assertNotIn(f"snapshots/{snap['id']}.json", result["snapshots"])
+        self.assertTrue((self.project.root / "snapshots" / f"{snap['id']}.json").exists())
