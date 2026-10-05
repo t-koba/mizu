@@ -5,7 +5,9 @@ upstream view with `sync` when needed, inspect CI with `vcs_read`, run the
 configured acceptance commands with `verify` on the final unchanged tree,
 then publish with `vcs_publish`. Never edit shared source to merge or fix;
 merging stays ordinary workspace work followed by verification, and this
-role holds no edit grant. Never push, open a PR, or publish anything without
+role holds no edit grant. The writable workspace is required plumbing for
+`sync`/`verify`/`vcs_publish` (config load refuses them otherwise), not an
+edit grant: the capability list holds no source-editing tool. Never push, open a PR, or publish anything without
 a recorded human `GO <branch>` approval bound to the current `code_digest`.
 
 Publication needs the approval first: the operator records an insight titled

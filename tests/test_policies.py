@@ -35,6 +35,13 @@ class PolicyContractTests(unittest.TestCase):
         self.assertIn('[roles.publisher]', example)
         self.assertIn('policies/publisher.md', example)
         self.assertIn('vcs_publish', example)
+        head, tail = example.split('[roles.publisher]')
+        comment = head.split('Dedicated publisher for external publication only')[1]
+        self.assertIn('required plumbing', comment)
+        stanza = tail.split('\n\n')[0]
+        self.assertIn('workspace = "write"', stanza)
+        self.assertNotIn('"exec"', stanza)
+        self.assertIn('required plumbing', text)
 
 
 if __name__ == "__main__":

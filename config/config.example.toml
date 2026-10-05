@@ -202,8 +202,11 @@ interval_seconds = 21600
 # `mizu run <project> --role publisher` after the operator records
 # `GO <branch>` approval for the current code digest (see docs/configuration.md).
 # This role never holds `submit_insight`/`decide`, so it cannot approve its own
-# push (config load refuses that combination). It holds no edit grants;
-# merging stays ordinary workspace work followed by verification.
+# push (config load refuses that combination). `workspace = "write"` below is
+# required plumbing: config load refuses `verify`/`sync`/`vcs_publish` without
+# it. It is not an edit grant: the capability list holds no source-editing
+# tool (no `exec`, no edit engine tools), so merging stays ordinary workspace
+# work by other roles followed by verification.
 # [roles.publisher]
 # profile = "primary"
 # policy = "policies/publisher.md"
