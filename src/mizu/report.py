@@ -6,7 +6,40 @@ HTML: presentation is operator policy (see examples/render-paper.py).
 """
 from __future__ import annotations
 
-from .fs import atomic_write, canonical, digest, mkdir, now, publish_pointer, write_json, read_json, lock
+from .errors import Denied, LimitExceeded
+from .fs import atomic_write, canonical, digest, mkdir, now, publish_pointer, write_json, read_json, lock, safe_read, text_preview, DIGEST
+
+#: Prompt bound (UTF-8 bytes) on the previous edition offered to `report`
+#: roles. The read cap covers the staged-document schema (bodies <= 48000).
+PREVIOUS_REPORT_BYTES = 8192
+PREVIOUS_REPORT_READ_BYTES = 65536
+
+
+def previous(project) -> dict | None:
+    """Bounded body of the latest published artifact, or None.
+
+    Schema: ``{"artifact", "snapshot", "body", "body_truncated"}``. Bounds:
+    body is a UTF-8 prefix of at most ``PREVIOUS_REPORT_BYTES``. Trust:
+    recorded local state only. Retry/cancellation: pure projection over
+    bounded reads. Failure: never raises; a missing, corrupt, or unreadable
+    artifact reads as no previous edition (context, not authority).
+    """
+    try:
+        pointer = read_json(project.root / "artifacts" / "latest.json", {})
+        if not isinstance(pointer, dict):
+            return None
+        artifact = pointer.get("artifact")
+        if not isinstance(artifact, str) or not DIGEST.fullmatch(artifact):
+            return None
+        raw = safe_read(project.root, "artifacts/" + artifact + "/artifact.md",
+                        PREVIOUS_REPORT_READ_BYTES)
+    except (OSError, ValueError, Denied, LimitExceeded):
+        return None
+    body, truncated = text_preview(raw.decode("utf-8", "replace"), PREVIOUS_REPORT_BYTES)
+    snapshot = pointer.get("snapshot")
+    return {"artifact": artifact,
+            "snapshot": snapshot if isinstance(snapshot, str) else None,
+            "body": body, "body_truncated": truncated}
 
 
 def render(snapshot: dict, document: dict | None) -> str:

@@ -332,3 +332,51 @@ class PromptClockTests(Fixture):
         self.assertEqual(delta["timezone"], self.config.timezone)
         self.assertIn("now", delta)
         self.assertEqual(list(delta.keys())[-2:], ["now", "timezone"])
+
+class PreviousReportTests(Fixture):
+    def test_absent_artifact_reads_as_none(self):
+        import json
+        from mizu.runtime import prompt_for, prompt_delta_for
+        self.assertIsNone(json.loads(prompt_for(self.context("reporter")))["previous_report"])
+        self.assertIsNone(json.loads(prompt_delta_for(self.context("reporter"), []))["previous_report"])
+        self.assertIsNone(json.loads(prompt_for(self.context("worker")))["previous_report"])
+
+    def test_report_role_sees_previous_edition(self):
+        import json
+        from mizu.report import publish
+        from mizu.runtime import prompt_for, prompt_delta_for
+        snap = self.project.snapshots.get()
+        record = publish(self.project, snap, {"title": "Edition one", "body": "shipped green"})
+        prompt = json.loads(prompt_for(self.context("reporter")))
+        previous = prompt["previous_report"]
+        self.assertEqual(previous["artifact"], record["artifact"])
+        self.assertEqual(previous["snapshot"], snap["id"])
+        self.assertIn("shipped green", previous["body"])
+        self.assertFalse(previous["body_truncated"])
+        # Capability-gated: worker sees none even with an edition recorded.
+        self.assertIsNone(json.loads(prompt_for(self.context("worker")))["previous_report"])
+        # Delta prompts carry it too so resumed editions stay current.
+        delta = json.loads(prompt_delta_for(self.context("reporter"), []))
+        self.assertEqual(delta["previous_report"]["artifact"], record["artifact"])
+        # Clock stays last in both shapes.
+        self.assertEqual(list(prompt.keys())[-2:], ["now", "timezone"])
+        self.assertEqual(list(delta.keys())[-2:], ["now", "timezone"])
+
+    def test_previous_edition_body_is_bounded(self):
+        import json
+        from mizu.report import publish, PREVIOUS_REPORT_BYTES
+        from mizu.runtime import prompt_for
+        snap = self.project.snapshots.get()
+        publish(self.project, snap, {"title": "Long", "body": "x" * 20000})
+        previous = json.loads(prompt_for(self.context("reporter")))["previous_report"]
+        self.assertTrue(previous["body_truncated"])
+        self.assertLessEqual(len(previous["body"].encode("utf-8")), PREVIOUS_REPORT_BYTES)
+
+    def test_corrupt_pointer_reads_as_none(self):
+        import json
+        from mizu.fs import mkdir
+        from mizu.runtime import prompt_for
+        root = self.project.root / "artifacts"
+        mkdir(root)
+        (root / "latest.json").write_text("{broken")
+        self.assertIsNone(json.loads(prompt_for(self.context("reporter")))["previous_report"])

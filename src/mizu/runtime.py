@@ -26,7 +26,7 @@ from .errors import Busy, Cancelled, ConfigError, Denied, InfraExceeded, LimitEx
 from .fs import canonical, digest, lock, mkdir, now, read_json, safe_read, write_json, PREVIEW_BYTES, page, text_preview, DIGEST
 from .project import Project
 from .protocol import DEFINITIONS, validate
-from .report import publish
+from .report import previous as _previous_report, publish
 from .sandbox import Sandbox, cleanup
 from . import vcs as _vcs
 from .web import Web
@@ -759,6 +759,8 @@ def prompt_for(context: Context) -> str:
                        "workspace": "/workspace", "workspace_mode": context.role.workspace,
                        "pending_insights": pending,
                        "acceptance_commands": acceptance,
+                       "previous_report": (_previous_report(context.project)
+                                          if "report" in caps else None),
                        **_prompt_clock(context)},
                       ensure_ascii=False)
 
@@ -790,6 +792,8 @@ def prompt_delta_for(context: Context, pending: list) -> str:
                        "pending_insights": pending,
                        "workspace": "/workspace", "workspace_mode": context.role.workspace,
                        "acceptance_commands": acceptance,
+                       "previous_report": (_previous_report(context.project)
+                                          if "report" in caps else None),
                        **_prompt_clock(context)},
                       ensure_ascii=False)
 
