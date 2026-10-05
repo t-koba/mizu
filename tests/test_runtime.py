@@ -380,3 +380,14 @@ class PreviousReportTests(Fixture):
         mkdir(root)
         (root / "latest.json").write_text("{broken")
         self.assertIsNone(json.loads(prompt_for(self.context("reporter")))["previous_report"])
+
+    def test_large_multibyte_edition_still_previews(self):
+        import json
+        from mizu.report import publish, PREVIOUS_REPORT_BYTES
+        from mizu.runtime import prompt_for
+        snap = self.project.snapshots.get()
+        publish(self.project, snap, {"title": "Emoji", "body": "\U0001F600" * 48000})
+        previous = json.loads(prompt_for(self.context("reporter")))["previous_report"]
+        self.assertIsNotNone(previous)
+        self.assertTrue(previous["body_truncated"])
+        self.assertLessEqual(len(previous["body"].encode("utf-8")), PREVIOUS_REPORT_BYTES)

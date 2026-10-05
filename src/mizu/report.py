@@ -10,9 +10,11 @@ from .errors import Denied, LimitExceeded
 from .fs import atomic_write, canonical, digest, mkdir, now, publish_pointer, write_json, read_json, lock, safe_read, text_preview, DIGEST
 
 #: Prompt bound (UTF-8 bytes) on the previous edition offered to `report`
-#: roles. The read cap covers the staged-document schema (bodies <= 48000).
+#: roles. The read cap covers the staged-document schema in bytes: bodies
+#: are bounded by 48000 characters (schema maxLength counts characters),
+#: so 48000 x 4B worst case plus title and heading slack.
 PREVIOUS_REPORT_BYTES = 8192
-PREVIOUS_REPORT_READ_BYTES = 65536
+PREVIOUS_REPORT_READ_BYTES = 262144
 
 
 def previous(project) -> dict | None:

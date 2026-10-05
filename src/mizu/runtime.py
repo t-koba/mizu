@@ -770,15 +770,19 @@ def prompt_delta_for(context: Context, pending: list) -> str:
 
     Schema: ``goal_digest`` pin plus the pinned ``published_snapshot`` and a
     small ``snapshot_delta`` (previous/current ids), then only the pending
-    proposals not yet offered, workspace markers and capability-gated
-    acceptance commands. The full goal text and ``recent_snapshots`` history
+    proposals not yet offered, workspace markers, capability-gated acceptance
+    commands, and a capability-gated ``previous_report`` preview for roles
+    holding ``report``. The full goal text and ``recent_snapshots`` history
     are never repeated: the provider session already holds them. Key order is
     fixed (pins first) so the stable prefix keeps working caches warm.
     Bounds: pending follows ``[limits] pending_insights``; the delta carries
-    no file contents and no history array, so resumed-unit bytes stay flat as
-    history grows. Trust: local recorded state only, never model input.
-    Retry/cancellation: pure projection, no I/O. Evidence: the dispatching
-    run records ``prompt_mode=delta`` and ``prompt_bytes`` in
+    no workspace file contents and no history array, so resumed-unit bytes
+    stay flat as history grows apart from the fixed previous-report preview
+    (at most ``report.PREVIOUS_REPORT_BYTES``). Trust: local recorded state
+    only, never model input. Retry/cancellation: bounded local reads only
+    (artifact pointer plus one file prefix); ``previous()`` never raises,
+    so an unreadable artifact reads as no previous edition. Evidence: the
+    dispatching run records ``prompt_mode=delta`` and ``prompt_bytes`` in
     ``prompt_projection.json``. Failure: never raises for missing state
     (callers fall back to the full prompt).
     """
