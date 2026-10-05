@@ -13,13 +13,22 @@ from mizu.budget import Budget
 from mizu.config import ConfigError
 
 
-def _has_zone(name):
+def _zoneinfo_or_fixed(name):
+    """Real zone where the host ships a tz database, fixed offset otherwise.
+
+    Budget day math only needs the configured wall-clock offset at the
+    frozen instant, so a fixed offset stands in where the host ships no
+    database and the non-UTC day assertions stay covered on every
+    platform. Unknown names still raise through the real lookup.
+    """
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+    offsets = {"Asia/Tokyo": 9 * 3600, "America/New_York": -4 * 3600}
     try:
-        from zoneinfo import ZoneInfo
-        ZoneInfo(name)
-        return True
-    except Exception:
-        return False
+        return ZoneInfo(name)
+    except ZoneInfoNotFoundError:
+        if name not in offsets:
+            raise
+        return real_dt.timezone(real_dt.timedelta(seconds=offsets[name]), name)
 
 
 def frozen(instant):
@@ -46,12 +55,14 @@ class BudgetTimezoneTests(unittest.TestCase):
             budget._today(),
             real_dt.datetime.now(real_dt.timezone.utc).date().isoformat())
 
-    @unittest.skipUnless(_has_zone("Asia/Tokyo"), "no tz database for Asia/Tokyo")
     def test_same_instant_names_different_days(self):
         # 2026-10-03T15:00Z is still Oct 3 in UTC but Oct 4 in Tokyo.
         instant = real_dt.datetime(2026, 10, 3, 15, 0, tzinfo=real_dt.timezone.utc)
         stopper = frozen(instant)
         self.addCleanup(stopper.stop)
+        zoner = mock.patch("mizu.config.ZoneInfo", side_effect=_zoneinfo_or_fixed)
+        zoner.start()
+        self.addCleanup(zoner.stop)
         utc = Budget(self.root, 10)
         tokyo = Budget(self.root, 10, timezone="Asia/Tokyo")
         self.assertEqual(utc._today(), "2026-10-03")
@@ -64,12 +75,14 @@ class BudgetTimezoneTests(unittest.TestCase):
         self.assertEqual((record["day"], record["zone"]), ("2026-10-04", "Asia/Tokyo"))
         self.assertEqual(tokyo.usage("alpha")["day"], "2026-10-04")
 
-    @unittest.skipUnless(_has_zone("America/New_York"), "no tz database for America/New_York")
     def test_dst_zone_computes_local_day(self):
         # Spring forward in New York: 07:30Z is 03:30 EDT on Mar 8.
         instant = real_dt.datetime(2026, 3, 8, 7, 30, tzinfo=real_dt.timezone.utc)
         stopper = frozen(instant)
         self.addCleanup(stopper.stop)
+        zoner = mock.patch("mizu.config.ZoneInfo", side_effect=_zoneinfo_or_fixed)
+        zoner.start()
+        self.addCleanup(zoner.stop)
         budget = Budget(self.root, 10, timezone="America/New_York")
         self.assertEqual(budget._today(), "2026-03-08")
         budget.take("d1", project="alpha")
