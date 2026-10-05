@@ -723,6 +723,30 @@ def now_iso() -> str:
     return now()
 
 
+def _prompt_clock(context: Context) -> dict:
+    """Current wall-clock time plus the configured zone for agent reasoning.
+
+    Schema: ``{"now": <ISO-8601 with offset>, "timezone": <name>}`` appended
+    last so the stable prefix keeps working caches warm. Bounds: two small
+    string fields. Trust: local clock plus operator ``timezone`` (default
+    UTC). Retry/cancellation: n/a (pure projection). Evidence: recorded in
+    ``prompt_projection.json`` bytes only. Failure: never raises; falls back
+    to a UTC stamp on any error.
+    """
+    try:
+        from .config import resolve_timezone as _resolve_tz
+        name = getattr(getattr(context, "config", None), "timezone", "UTC") or "UTC"
+        try:
+            tz = _resolve_tz(name)
+        except Exception:
+            import datetime as _dt
+            tz, name = _dt.timezone.utc, "UTC"
+        import datetime as _dt
+        return {"now": _dt.datetime.now(tz).isoformat(timespec="seconds"), "timezone": str(name)}
+    except Exception:
+        return {"now": "", "timezone": "UTC"}
+
+
 def prompt_for(context: Context) -> str:
     caps = set(context.role.capabilities)
     # Mechanism enforces grants, not policy choice: only capability-gated,
@@ -742,7 +766,8 @@ def prompt_for(context: Context) -> str:
                                                 context.snapshot["id"], context.config.limits.prompt_snapshots)],
                        "workspace": "/workspace", "workspace_mode": context.role.workspace,
                        "pending_insights": pending,
-                       "acceptance_commands": acceptance},
+                       "acceptance_commands": acceptance,
+                       **_prompt_clock(context)},
                       ensure_ascii=False)
 
 
@@ -772,7 +797,8 @@ def prompt_delta_for(context: Context, pending: list) -> str:
                                           "code_digest": context.snapshot["code_digest"]},
                        "pending_insights": pending,
                        "workspace": "/workspace", "workspace_mode": context.role.workspace,
-                       "acceptance_commands": acceptance},
+                       "acceptance_commands": acceptance,
+                       **_prompt_clock(context)},
                       ensure_ascii=False)
 
 

@@ -106,7 +106,9 @@ kept up to `limits.pending_insights`;
 summarized. `diff` compares the anchored
 snapshot with the preceding distinct code digest. Large and binary files are
 listed rather than inserted into a huge diff. This is bounded context, not a
-vector database or an automatically complete history search.
+vector database or an automatically complete history search. Usage day buckets
+and the dashboard window edge use the configured `timezone` day boundary so
+`mizu usage` groups agree with `mizu budget` for the same day.
 
 `continue` starts another meaningful unit. `wait` sleeps until its deadline,
 new information, a changed goal or a human wake. `blocked` needs a wake or new
@@ -156,7 +158,9 @@ previous failure evidence before further action. It does not resend the last
 command blindly, run `git reset --hard`, or manufacture a successful observation.
 
 The runtime prompt carries only protocol framing (goal, anchored snapshot
-references, capability-gated pending insights and acceptance commands); sealing
+references, capability-gated pending insights and acceptance commands, plus the
+current wall-clock time and configured zone as trailing `now`/`timezone` fields
+so the stable prefix keeps working caches warm); sealing
 is directed by the `finish` tool contract. Each run
 records `prompt_projection.json` with the sent counts (`recent_snapshots`,
 `pending_insights`, `acceptance_commands`) and `prompt_bytes` as evidence for

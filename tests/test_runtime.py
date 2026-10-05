@@ -317,3 +317,18 @@ class PromptProjectionTests(Fixture):
         self.assertEqual(projection["snapshot"], before)
         self.assertGreaterEqual(projection["prompt_bytes"], 100)
         self.assertGreaterEqual(projection["recent_snapshots"], 1)
+
+class PromptClockTests(Fixture):
+    def test_prompt_carries_current_time_and_zone_last(self):
+        import json
+        from mizu.runtime import prompt_for, prompt_delta_for
+        prompt = json.loads(prompt_for(self.context("worker")))
+        self.assertEqual(prompt["timezone"], self.config.timezone)
+        self.assertIn("now", prompt)
+        self.assertIn("+", prompt["now"].replace("Z", "+") if prompt["now"] else "+")
+        keys = list(json.loads(prompt_for(self.context("worker"))).keys())
+        self.assertEqual(keys[-2:], ["now", "timezone"])
+        delta = json.loads(prompt_delta_for(self.context("worker"), []))
+        self.assertEqual(delta["timezone"], self.config.timezone)
+        self.assertIn("now", delta)
+        self.assertEqual(list(delta.keys())[-2:], ["now", "timezone"])

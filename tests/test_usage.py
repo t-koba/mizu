@@ -103,3 +103,29 @@ class UsageTests(Fixture):
         self.assertEqual(payload["usage"]["totals"]["input_tokens"], 4)
         self.assertEqual(payload["usage"]["recent_entries"][0]["finished_at"],
                          "2026-09-06T22:30:00+00:00")
+
+    def test_day_buckets_follow_configured_timezone(self):
+        # 15:00 UTC is the next local day in +09:00 zones, so UTC and
+        # zone-configured buckets must disagree by one day here.
+        import dataclasses
+        try:
+            config = dataclasses.replace(self.config, timezone="Asia/Tokyo")
+            from mizu.config import resolve_timezone
+            resolve_timezone("Asia/Tokyo")
+        except Exception as exc:
+            self.skipTest(f"tz database unavailable: {exc}")
+        from mizu.project import Project
+        project = Project(config, "sample")
+        run_dir = project.root / "runs" / ("t" * 32)
+        from mizu.fs import mkdir, write_json
+        mkdir(run_dir)
+        write_json(run_dir / "started.json", {"run": "t" * 32, "role": "worker",
+                                              "started_at": "2026-09-01T15:00:00+00:00"})
+        write_json(run_dir / "result.json", {"run": "t" * 32, "role": "worker", "status": "completed",
+                                             "finished_at": "2026-09-01T15:00:00+00:00", "finish": {},
+                                             "model": {"profile": "primary", "provider": "acme",
+                                                       "model": "m1", "requests": 1,
+                                                       "usage": [{"input_tokens": 1}]},
+                                             "snapshot": "x"})
+        self.assertEqual(summarize(self.project)["groups"][0]["day"], "2026-09-01")
+        self.assertEqual(summarize(project)["groups"][0]["day"], "2026-09-02")

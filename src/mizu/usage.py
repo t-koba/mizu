@@ -65,11 +65,22 @@ def _mtime(path):
         return 0.0
 
 
-def _day(record, path):
+def _zone(project) -> dt.tzinfo:
+    """Configured day-boundary zone for usage buckets (UTC default unchanged)."""
     try:
-        return dt.datetime.fromisoformat(record["finished_at"]).astimezone(dt.timezone.utc).date().isoformat()
+        from .config import resolve_timezone
+        name = getattr(getattr(project, "config", None), "timezone", "UTC") or "UTC"
+        return resolve_timezone(name)
+    except Exception:
+        return dt.timezone.utc
+
+
+def _day(record, path, tz: dt.tzinfo | None = None):
+    tz = tz if tz is not None else dt.timezone.utc
+    try:
+        return dt.datetime.fromisoformat(record["finished_at"]).astimezone(tz).date().isoformat()
     except (KeyError, ValueError, TypeError):
-        return dt.datetime.fromtimestamp(_mtime(path), dt.timezone.utc).date().isoformat()
+        return dt.datetime.fromtimestamp(_mtime(path), tz).date().isoformat()
 
 
 def usage_views(model):
@@ -100,6 +111,7 @@ def usage_views(model):
 
 
 def summarize(project) -> dict:
+    tz = _zone(project)
     candidates = heapq.nlargest(MAX_RUNS_SCANNED + 1, (p for p in (project.root / "runs").glob("*")
                                 if p.is_dir() and not p.is_symlink()), key=lambda p: (_mtime(p), p.name))
     truncated = len(candidates) > MAX_RUNS_SCANNED
@@ -143,7 +155,7 @@ def summarize(project) -> dict:
             except (OSError, ValueError, TypeError, AttributeError):
                 skipped += 1
         for run_id, record, model in jobs:
-            day = _day(record, run_dir)
+            day = _day(record, run_dir, tz)
             provider, model_id, engine = (str(model.get(k, "unknown")) for k in ("provider", "model", "engine"))
             key = (day, provider, model_id)
             group = groups.setdefault(key, {"day": day, "provider": provider, "model": model_id,
