@@ -37,6 +37,17 @@ Bounds: `pending_insights` and `pending_count` follow `[limits] pending_insights
 characters (flagged), `recent_groups` uses `[limits] retention_days` calendar days. No workspace file contents, no secrets, no model
 calls, no network. Typical payloads are tens of KiB.
 
+Lifecycle: generations are disposable. `[limits] dashboard_keep` (default
+30, 0 keeps all) keeps the newest N generations including the live
+`latest.json` target, which is never a candidate; older content-addressed
+generations are `mizu prune` candidates (paused project, dry-run preview by
+default, `--apply` writes a `maintenance/prune-*.json` audit). Symlinks,
+`latest.json`, `index.html`, and non-digest names are never candidates.
+`mizu storage` reports dashboard capacity (documents, bytes, live ID, keep,
+candidate count/bytes plus a bounded sample) alongside session and web-cache
+capacity. Re-publish after restore; capacity without bound is reported, not
+silently kept.
+
 Trust: everything shown is recorded harness state plus agent-authored prose
 (state, summaries, proposal titles, decision reasons). Treat prose as data,
 not proof. Verification status is the configured-commands result bound to a
@@ -51,8 +62,9 @@ Evidence and failure behavior: the dashboard is a disposable projection, not
 evidence. Snapshots, runs, decisions and artifacts remain the record. On any
 collection/publish error the command fails loudly and the previous pointer
 is kept; no partial HTML is ever emitted by the harness (HTML is operator
-policy, below). Dashboard files are reproducible projections: backup and
-prune intentionally ignore `dashboard/`; re-publish after restore.
+policy, below). Dashboard files are reproducible projections: backup
+intentionally ignores `dashboard/` and `prune` reclaims generations beyond
+`dashboard_keep`; re-publish after restore.
 
 ## Policy (per project, outside mizu)
 

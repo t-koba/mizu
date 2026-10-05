@@ -295,6 +295,12 @@ class Limits:
     #: reasons truncated to M chars (flagged).
     dashboard_decisions: int = 10
     dashboard_reason_chars: int = 500
+    #: Operator-selected retention for disposable dashboard generations
+    #: (content-addressed ``dashboard/<sha256>.json`` projections). The live
+    #: ``latest.json`` target is always protected; the newest generations up
+    #: to this count are kept, older ones are disposable candidates for
+    #: ``prune``. 0 keeps all (disables reclamation).
+    dashboard_keep: int = 30
     #: Operator-selected persistent-session rotation bounds. A resumed
     #: persistent session restarts with a fresh session key once cumulative
     #: usage or wall-clock session age reaches a bound, carrying the
@@ -465,6 +471,7 @@ def load(file: Path) -> Config:
                      "retention_days": (0, 3650), "pending_insights": (1, 1000),
                      "event_log_compress_days": (0, 3650), "event_log_retention_days": (0, 3650),
                      "dashboard_decisions": (1, 1000), "dashboard_reason_chars": (1, 10000),
+                     "dashboard_keep": (0, 1000),
                      "session_max_tokens": (0, 1073741824), "session_max_age_seconds": (0, 31536000),
                      "default_wait_seconds": (1, MAX_WAIT_SECONDS),
                      "maximum_wait_seconds": (1, MAX_WAIT_SECONDS),

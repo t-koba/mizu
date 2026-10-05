@@ -36,6 +36,7 @@ event_log_retention_days = 31   # Drop bulky per-run engine logs (raw and .gz) o
 pending_insights = 30            # Newest pending proposals offered per prompt/dashboard projection. Raw inbox/decisions stay on disk; `mizu insight list` uses 1000.
 dashboard_decisions = 10         # Recent decisions shown per dashboard; raw decisions stay on disk.
 dashboard_reason_chars = 500     # Dashboard reason/revisit truncation length (flagged); raw prose stays on disk.
+dashboard_keep = 30              # Disposable dashboard generations kept (live latest.json target always kept; 0 keeps all).
 session_max_tokens = 0          # Restart a resumed persistent session once cumulative tokens reach N (0 disables).
 session_max_cost_usd = 0         # Restart a resumed persistent session once estimated cost (USD) reaches N (0 disables).
 session_max_age_seconds = 0      # Restart a resumed persistent session once wall-clock session age reaches N seconds (0 disables).
