@@ -663,17 +663,20 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
     """Best-effort periodic CI polling: status per branch, failures to insights.
 
     Schema: ``branches=None`` derives from injected upstream refs
-    (``vcs.list_refs``, first ``poll_max_branches`` sorted); explicit lists
-    are validated as branch names. Returns a ``ci_poll`` event dict or ``None`` when skipped
-    (disabled or not due). Bounds: one adapter call per branch per due poll
-    under the adapter timeout; status checks capped at 1024 rows each.
-    Trust: host side only; adapter facts stay external-untrusted and only
-    ``failure`` states are recorded via ``vcs.record_ci_result`` (stable
-    dedup IDs, passes ignored). Retry/cancellation: no retry; ``last_poll``
-    advances even on failure so one bad adapter cannot busy-loop. Evidence:
-    the event names ok/recorded branches/counts or error; this helper never
-    publishes a snapshot. Failure: ``Denied``, ``OSError`` and ``ValueError``
-    become ``ok=False`` events, never raised.
+    (``vcs.list_refs``): all of them when they fit ``poll_max_branches``,
+    else a rotating window tracked in ``state["ci_offset"]`` so every branch
+    is covered within ceil(refs/max) ticks instead of pinning the sorted
+    tail; explicit lists are validated as branch names. Returns a ``ci_poll``
+    event dict or ``None`` when skipped (disabled or not due). Bounds: one
+    adapter call per branch per due poll under the adapter timeout; status
+    checks capped at 1024 rows each. Trust: host side only; adapter facts
+    stay external-untrusted and only ``failure`` states are recorded via
+    ``vcs.record_ci_result`` (stable dedup IDs, passes ignored).
+    Retry/cancellation: no retry; ``last_poll`` and the rotation cursor
+    advance even on failure so one bad adapter cannot busy-loop or pin the
+    window. Evidence: the event names ok/recorded branches/counts/total or
+    error; this helper never publishes a snapshot. Failure: ``Denied``,
+    ``OSError`` and ``ValueError`` become ``ok=False`` events, never raised.
     """
     if not config.vcs.get("command"):
         return None
@@ -690,13 +693,23 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
             raise Denied("Too many CI branches per poll")
         if branches is None:
             try:
-                names = sorted(_vcs.list_refs(project.workspace))[:max_branches]
+                names = sorted(_vcs.list_refs(project.workspace))
             except OSError as exc:
                 raise Denied(f"CI polling is unavailable: {exc}") from exc
-            # Fall back to main so a fresh workspace still polls once configured.
-            targets = names or ["main"]
+            branches_total = len(names)
+            if len(names) <= max_branches:
+                # Fall back to main so a fresh workspace still polls once configured.
+                targets = names or ["main"]
+            else:
+                offset = state.get("ci_offset", 0)
+                if not isinstance(offset, int) or offset < 0:
+                    offset = 0
+                start = offset % len(names)
+                targets = [names[(start + i) % len(names)] for i in range(max_branches)]
+                state["ci_offset"] = (start + max_branches) % len(names)
         else:
             targets = [_vcs.check_branch(b) for b in branches]
+            branches_total = len(targets)
         recorded: list[dict] = []
         failures = 0
         for branch in targets:
@@ -718,6 +731,7 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
         state["last_error"] = ""
         state["last_ok"] = now
         return {"event": "ci_poll", "ok": True, "branches": list(targets),
+                "branches_total": branches_total,
                 "failures": failures, "recorded": recorded,
                 "trust": "external-untrusted", "time": now_iso()}
     except (Denied, OSError, ValueError) as exc:

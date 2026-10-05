@@ -148,6 +148,29 @@ class CiStatusTests(Fixture):
         self.assertEqual(out["branches"], ["main", "other"])
         self.assertEqual(sorted(seen), ["main", "other"])
 
+    def test_poll_rotates_over_more_refs_than_budget(self):
+        refs = {"a": "a" * 40, "b": "b" * 40, "c": "c" * 40, "d": "d" * 40, "main": SHA_A}
+        vcs.inject_refs(self.project.workspace, refs)
+        seen = []
+        def reader(settings, op, params):
+            seen.append(params["branch"])
+            return {"checks": [], "trust": "external-untrusted"}
+        config = dataclasses.replace(self.config, vcs={**adapter_settings(
+            status_code({"checks": []})), "poll_max_branches": 4})
+        state: dict = {}
+        first = poll_ci(config, self.project, state, now=0.0, interval=15.0, reader=reader)
+        self.assertTrue(first["ok"])
+        self.assertEqual(first["branches"], ["a", "b", "c", "d"])
+        self.assertEqual(first["branches_total"], 5)
+        # A second, older fixed slice would repeat a,b,c,d and starve main.
+        second = poll_ci(config, self.project, state, now=15.0, interval=15.0, reader=reader)
+        self.assertTrue(second["ok"])
+        self.assertEqual(second["branches"], ["main", "a", "b", "c"])
+        self.assertEqual(second["branches_total"], 5)
+        third = poll_ci(config, self.project, state, now=30.0, interval=15.0, reader=reader)
+        self.assertEqual(third["branches"], ["d", "main", "a", "b"])
+        self.assertEqual(set(seen), {"a", "b", "c", "d", "main"})
+
 
 if __name__ == "__main__":
     raise SystemExit(unittest.main())
