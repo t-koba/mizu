@@ -24,6 +24,18 @@ class PolicyContractTests(unittest.TestCase):
         self.assertIn("no shared-code write authority", text)
         self.assertIn("submit_insight", text)
 
+    def test_publisher_ships_only_approved_tree(self):
+        text = (ROOT / "policies/publisher.md").read_text()
+        self.assertIn("GO <branch>", text)
+        self.assertIn("vcs_publish", text)
+        self.assertIn("vcs_read", text)
+        self.assertIn("never holds `submit_insight`", text)
+        self.assertIn("mizu_finish", text)
+        example = (ROOT / "config/config.example.toml").read_text()
+        self.assertIn('[roles.publisher]', example)
+        self.assertIn('policies/publisher.md', example)
+        self.assertIn('vcs_publish', example)
+
 
 if __name__ == "__main__":
     raise SystemExit(unittest.main())

@@ -197,6 +197,19 @@ workspace = "read"
 capabilities = ["files", "read", "search", "fetch", "experiment", "submit_insight", "finish"]
 interval_seconds = 21600
 
+# Dedicated publisher for external publication only. Uncomment to enable on a
+# project with `[vcs] command` configured; run explicitly via
+# `mizu run <project> --role publisher` after the operator records
+# `GO <branch>` approval for the current code digest (see docs/configuration.md).
+# This role never holds `submit_insight`/`decide`, so it cannot approve its own
+# push (config load refuses that combination). It holds no edit grants;
+# merging stays ordinary workspace work followed by verification.
+# [roles.publisher]
+# profile = "primary"
+# policy = "policies/publisher.md"
+# workspace = "write"
+# capabilities = ["files", "read", "diff", "verify", "sync", "vcs_read", "vcs_publish", "insights", "finish"]
+
 # Optional dynamic selection. Replace a role's profile with selector = "adaptive".
 # Existing profiles above remain unchanged; set exact provider/model IDs yourself.
 # See docs/model-selection.md for external facts, task classification and errors.
