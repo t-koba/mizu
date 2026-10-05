@@ -277,10 +277,19 @@ class BoundaryTests(Fixture):
 
     def test_native_calendar_refuses_unrepresentable_timezone(self):
         from mizu.services import render
-        try:
+        import mizu.config as config_mod
+        from unittest.mock import patch as _patch
+        real_zoneinfo = config_mod.ZoneInfo
+        def zoneinfo_or_fixed(name):
+            try:
+                return real_zoneinfo(name)
+            except Exception:
+                # render() only inspects the timezone string, so a fixed
+                # offset stands in where the host ships no tz database and
+                # the refusal branch stays covered on every platform.
+                return dt.timezone(dt.timedelta(hours=9), name)
+        with _patch.object(config_mod, "ZoneInfo", side_effect=zoneinfo_or_fixed):
             config=dataclasses.replace(self.config,timezone="Asia/Tokyo")
-        except Exception as exc:
-            self.skipTest(f"tz database unavailable: {exc}")
         for system in ("macos","windows"):
             with self.assertRaises(Denied):render(config,self.project,ROOT / "bin/mizu",system=system)
         self.assertTrue(render(config,self.project,ROOT / "bin/mizu",system="linux"))
