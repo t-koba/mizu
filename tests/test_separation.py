@@ -339,6 +339,56 @@ class WebSeparationTests(Fixture):
         self.assertEqual(len(out["results"]), 30)
         self.assertTrue(out["truncated"])
 
+    def test_adapter_also_consults_feeds_with_source_labels(self):
+        from mizu.web import Web
+        import json
+        import tempfile
+        from mizu.process import Result
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
+        feed = "https://example.org/feed"
+        web = Web({"hosts": ["example.org"], "feeds": [feed], "cache_seconds": 0,
+                   "timeout_seconds": 5, "max_bytes": 1048576,
+                   "search_command": ["python3", "adapter"], "intranet": False},
+                  tmp / "c", tmp / "r")
+        web.fetch = lambda url: {"id": "r", "text": "<rss><channel><item><title>flaky builds</title>"
+                    "<link>https://example.org/paper</link><description>d</description></item></channel></rss>"}
+        import mizu.web as webmod
+        adapted = [{"title": "t", "url": "https://x/", "summary": "s"}]
+        with patch.object(webmod, "run", return_value=Result(0, json.dumps({"results": adapted}), "", "exited", 0.1)):
+            out = web.search("flaky")
+        self.assertEqual(out["scope"], "configured-search-adapter+feeds")
+        self.assertEqual(out["feeds_total"], 1)
+        self.assertEqual(out["feeds_consulted"], 1)
+        self.assertEqual(out["errors"], [])
+        self.assertEqual(len(out["results"]), 2)
+        # Adapter keeps ranking priority; every result names its source.
+        self.assertEqual(out["results"][0]["source"], "search-adapter")
+        self.assertEqual(out["results"][1]["source"], feed)
+        self.assertFalse(out["truncated"])
+
+    def test_adapter_priority_fills_result_bound_first(self):
+        from mizu.web import Web
+        import json
+        import tempfile
+        from mizu.process import Result
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
+        web = Web({"hosts": ["example.org"], "feeds": ["https://example.org/feed"],
+                   "cache_seconds": 0, "timeout_seconds": 5, "max_bytes": 1048576,
+                   "search_command": ["python3", "adapter"], "intranet": False},
+                  tmp / "c", tmp / "r")
+        web.fetch = lambda url: {"id": "r", "text": "<rss><channel><item><title>q</title>"
+                    "<link>https://example.org/y</link><description>d</description></item></channel></rss>"}
+        import mizu.web as webmod
+        adapted = [{"title": "t", "url": "https://x/", "summary": "s"} for _ in range(30)]
+        with patch.object(webmod, "run", return_value=Result(0, json.dumps({"results": adapted}), "", "exited", 0.1)):
+            out = web.search("q")
+        self.assertEqual(len(out["results"]), 30)
+        self.assertTrue(all(item["source"] == "search-adapter" for item in out["results"]))
+        self.assertTrue(out["truncated"])
+        self.assertEqual(out["feeds_consulted"], 1)
+
 
 class DriverSeparationTests(Fixture):
     def test_pi_does_not_rewrite_operator_settings(self):
@@ -406,56 +456,5 @@ class PresentationSeparationTests(Fixture):
         self.assertIn("RestartSec=15", text)
         self.assertIn("AccuracySec=10s", text)
 
-
 if __name__ == "__main__":
     raise SystemExit(unittest.main())
-
-    def test_adapter_also_consults_feeds_with_source_labels(self):
-        from mizu.web import Web
-        import json
-        import tempfile
-        from mizu.process import Result
-        tmp = Path(tempfile.mkdtemp())
-        self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
-        feed = "https://example.org/feed"
-        web = Web({"hosts": ["example.org"], "feeds": [feed], "cache_seconds": 0,
-                   "timeout_seconds": 5, "max_bytes": 1048576,
-                   "search_command": ["python3", "adapter"], "intranet": False},
-                  tmp / "c", tmp / "r")
-        web.fetch = lambda url: {"id": "r", "text": "<rss><channel><item><title>flaky builds</title>"
-                    "<link>https://example.org/paper</link><description>d</description></item></channel></rss>"}
-        import mizu.web as webmod
-        adapted = [{"title": "t", "url": "https://x/", "summary": "s"}]
-        with patch.object(webmod, "run", return_value=Result(0, json.dumps({"results": adapted}), "", "exited", 0.1)):
-            out = web.search("flaky")
-        self.assertEqual(out["scope"], "configured-search-adapter+feeds")
-        self.assertEqual(out["feeds_total"], 1)
-        self.assertEqual(out["feeds_consulted"], 1)
-        self.assertEqual(out["errors"], [])
-        self.assertEqual(len(out["results"]), 2)
-        # Adapter keeps ranking priority; every result names its source.
-        self.assertEqual(out["results"][0]["source"], "search-adapter")
-        self.assertEqual(out["results"][1]["source"], feed)
-        self.assertFalse(out["truncated"])
-
-    def test_adapter_priority_fills_result_bound_first(self):
-        from mizu.web import Web
-        import json
-        import tempfile
-        from mizu.process import Result
-        tmp = Path(tempfile.mkdtemp())
-        self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
-        web = Web({"hosts": ["example.org"], "feeds": ["https://example.org/feed"],
-                   "cache_seconds": 0, "timeout_seconds": 5, "max_bytes": 1048576,
-                   "search_command": ["python3", "adapter"], "intranet": False},
-                  tmp / "c", tmp / "r")
-        web.fetch = lambda url: {"id": "r", "text": "<rss><channel><item><title>q</title>"
-                    "<link>https://example.org/y</link><description>d</description></item></channel></rss>"}
-        import mizu.web as webmod
-        adapted = [{"title": "t", "url": "https://x/", "summary": "s"} for _ in range(30)]
-        with patch.object(webmod, "run", return_value=Result(0, json.dumps({"results": adapted}), "", "exited", 0.1)):
-            out = web.search("q")
-        self.assertEqual(len(out["results"]), 30)
-        self.assertTrue(all(item["source"] == "search-adapter" for item in out["results"]))
-        self.assertTrue(out["truncated"])
-        self.assertEqual(out["feeds_consulted"], 1)
