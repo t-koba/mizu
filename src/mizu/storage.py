@@ -353,9 +353,10 @@ def _web_cache_seconds(project: Project) -> int:
 def _web_cache_candidates(project: Project) -> tuple[list[Path], dict]:
     """Expired global web-cache entries under the invoking config TTL.
 
-    Expiry is ``retrieved_epoch`` age versus ``[web] cache_seconds``; oversize
-    receipts fall back to file mtime so large expired entries still converge.
-    Corrupt entries and symlinks are skipped, never candidates. The cache is
+    Expiry is ``retrieved_epoch`` age versus ``[web] cache_seconds``; entries
+    without a usable epoch (corrupt, unreadable, or valid JSON without one)
+    fall back to file mtime so poison entries still converge.
+    Symlinks are skipped, never candidates. The cache is
     shared across projects under ``data_dir``; the invoking project's TTL
     decides expiry and removal is best-effort (a concurrent fetch recreates
     the entry, so apply is safe to retry).
@@ -391,18 +392,14 @@ def _web_cache_candidates(project: Project) -> tuple[list[Path], dict]:
                 if type(raw) in (int, float) and raw == raw and raw not in (float("inf"), float("-inf")) and raw >= 0:
                     epoch = float(raw)
             if epoch is None:
-                if size > _AUDIT_JSON_BYTES:
-                    try:
-                        epoch = float(child.stat().st_mtime)
-                        expired = (time.time() - epoch) >= seconds
-                    except (OSError, ValueError):
-                        skipped += 1
-                        continue
-                    if expired:
-                        candidates.append(child)
-                        expired_bytes += size
+                try:
+                    mtime = float(child.stat().st_mtime)
+                except (OSError, ValueError):
+                    skipped += 1
                     continue
-                skipped += 1
+                if (time.time() - mtime) >= seconds:
+                    candidates.append(child)
+                    expired_bytes += size
                 continue
             if (time.time() - epoch) >= seconds:
                 candidates.append(child)
@@ -475,7 +472,7 @@ def prune(project: Project, *, apply: bool = False, keep_artifacts: int = DEFAUL
     (0 keeps all, 0-1000) keeps the newest N dashboard generations plus the
     live ``latest.json`` target; older content-addressed generations are
     disposable candidates. ``[web] cache_seconds`` decides web-cache expiry
-    from ``retrieved_epoch`` age (oversize receipts fall back to mtime).
+    from ``retrieved_epoch`` age (entries without a usable epoch fall back to mtime).
     Age is file mtime vs now unless noted; the compressed copy keeps the raw
     mtime so the drop clock does not restart.
     Only top-level run-dir logs, non-live dashboard generations, and expired

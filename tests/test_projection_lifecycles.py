@@ -75,7 +75,7 @@ class ProjectionLifecycleTests(Fixture):
         key.mkdir(parents=True, exist_ok=True)
         write_json(key / "session.json", {"id": "sess-1"})
         (key / "transcript-old.json").write_bytes(b'{"turn":1}\n')
-        # Web cache: one expired, one fresh, one corrupt.
+        # Web cache: one expired, one fresh, one aged poison entry, one fresh poison entry.
         cache = self.config.data / "web-cache"
         cache.mkdir(parents=True, exist_ok=True)
         expired_id = _digest("https://example.com/old")
@@ -86,12 +86,16 @@ class ProjectionLifecycleTests(Fixture):
                    "retrieved_epoch": time.time(), "status": 200, "text": "new"})
         corrupt_id = _digest("https://example.com/bad")
         (cache / f"{corrupt_id}.json").write_bytes(b"not json{")
+        _touch(cache / f"{corrupt_id}.json", 7200)
+        fresh_corrupt_id = _digest("https://example.com/fresh-bad")
+        (cache / f"{fresh_corrupt_id}.json").write_bytes(b"not json{")
         dry = prune(self.project, apply=False)
         self.assertIn(f"dashboard/{ids[0]}.json", dry["dashboard_generations"])
         self.assertNotIn(f"dashboard/{ids[3]}.json", dry["dashboard_generations"])
         self.assertIn(f"web-cache/{expired_id}.json", dry["web_cache"])
         self.assertNotIn(f"web-cache/{fresh_id}.json", dry["web_cache"])
-        self.assertNotIn(f"web-cache/{corrupt_id}.json", dry["web_cache"])
+        self.assertIn(f"web-cache/{corrupt_id}.json", dry["web_cache"])
+        self.assertNotIn(f"web-cache/{fresh_corrupt_id}.json", dry["web_cache"])
         # Dry run removes nothing.
         self.assertTrue((self.project.root / "dashboard" / f"{ids[0]}.json").exists())
         self.assertTrue((cache / f"{expired_id}.json").exists())
@@ -100,7 +104,8 @@ class ProjectionLifecycleTests(Fixture):
         self.assertTrue((self.project.root / "dashboard" / f"{ids[3]}.json").exists())
         self.assertFalse((cache / f"{expired_id}.json").exists())
         self.assertTrue((cache / f"{fresh_id}.json").exists())
-        self.assertTrue((cache / f"{corrupt_id}.json").exists())
+        self.assertFalse((cache / f"{corrupt_id}.json").exists())
+        self.assertTrue((cache / f"{fresh_corrupt_id}.json").exists())
         # Sessions survive every stage.
         self.assertTrue((key / "session.json").is_file())
         self.assertTrue((key / "transcript-old.json").is_file())
@@ -108,6 +113,26 @@ class ProjectionLifecycleTests(Fixture):
         record = json.loads((self.project.root / applied["audit"]).read_text())
         self.assertIn("dashboard_generations", record)
         self.assertIn("web_cache", record)
+
+    def test_fetch_treats_poison_cache_as_miss(self):
+        import tempfile
+        from mizu.fs import digest as fs_digest
+        from mizu.web import Web
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
+        cache = tmp / "cache"
+        receipts = tmp / "receipts"
+        cache.mkdir(parents=True)
+        receipts.mkdir(parents=True)
+        web = Web({"hosts": [], "feeds": [], "cache_seconds": 1800, "timeout_seconds": 5,
+                   "max_bytes": 1024, "search_command": [], "intranet": False}, cache, receipts)
+        url = "https://example.com/poison"
+        (cache / f"{fs_digest(url.encode())}.json").write_bytes(b"not json{")
+        with self.assertRaises(Denied):
+            web.fetch(url)
+        write_json(cache / f"{fs_digest(url.encode())}.json", {"url": url})
+        with self.assertRaises(Denied):
+            web.fetch(url)
 
     def test_prune_requires_quiescence_for_projections(self):
         self._dashboard(count=2, live_index=1)

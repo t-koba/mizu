@@ -120,8 +120,16 @@ class Web:
     def fetch(self, url: str) -> dict:
         original = url
         cache_file = self.cache / f"{digest(url.encode())}.json"
-        cached = read_json(cache_file)
-        if cached and time.time() - cached["retrieved_epoch"] < self.settings["cache_seconds"]:
+        try:
+            cached = read_json(cache_file)
+        except (OSError, ValueError):
+            cached = None
+        epoch = cached.get("retrieved_epoch") if isinstance(cached, dict) else None
+        if (type(epoch) in (int, float) and epoch == epoch
+                and epoch not in (float("inf"), float("-inf")) and epoch >= 0
+                and isinstance(cached.get("url"), str) and isinstance(cached.get("final_url"), str)
+                and isinstance(cached.get("id"), str)
+                and time.time() - float(epoch) < self.settings["cache_seconds"]):
             # A policy change must also revoke previously cached hosts.
             validate_url(cached["url"], self.settings["hosts"])
             validate_url(cached["final_url"], self.settings["hosts"])
