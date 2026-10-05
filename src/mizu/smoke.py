@@ -37,9 +37,9 @@ SMOKE_RUN_SECONDS = 120
 
 #: Fixed probe system prompt (mechanism, not operator policy): the live probe
 #: must read ``probe.txt`` even when the operator's consult policy says to
-#: advise from the snapshot without reading files. Kept byte-identical to
-#: the probe goal so engine and goal agree; operator consult text is never
-#: used here.
+#: advise from the snapshot without reading files. Mirrors the probe goal
+#: so engine and goal agree on the operative instruction; operator consult
+#: text is never used here.
 SMOKE_PROBE_POLICY = (
     "You are the Mizu live smoke probe. Read the file probe.txt in the"
     " workspace root (exact path probe.txt) with a single read. Do not list"
