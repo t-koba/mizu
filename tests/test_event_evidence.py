@@ -16,10 +16,12 @@ FLOOD_LINES = 20000
 
 
 def _flood_argv():
+    # Byte-exact on every host: binary writes never translate LF to CRLF the
+    # way Windows text-mode stdout does, so retained+dropped accounting holds.
     return [sys.executable, "-c",
             "import json,sys\n"
             f"for i in range({FLOOD_LINES}):\n"
-            " sys.stdout.write(json.dumps({'type':'tick','n':i,'pad':'x'*200})+'\\n')"]
+            " sys.stdout.buffer.write((json.dumps({'type':'tick','n':i,'pad':'x'*200})+'\\n').encode())"]
 
 
 class EventEvidenceTests(Fixture):
