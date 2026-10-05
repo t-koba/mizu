@@ -158,38 +158,14 @@ class Web:
                 connection.close()
         raise Denied("Too many redirects")
 
-    def search(self, query: str) -> dict:
-        """Feed/adapter search with explicit truncation flags.
+    def _search_feeds(self, query: str) -> tuple[list, list, int, int]:
+        """Keyword overlap over every configured feed; best-effort per feed.
 
-        Schema: ``{"results": [{title,url,summary,...}], "errors": [...],
-        "scope", "trust", "truncated": bool, "feeds_total": int,
-        "feeds_consulted": int}``. Bounds: titles 300, summaries 1500,
-        results 30 (matches the tool array bound). Trust: external-untrusted.
-        Retry: per-feed best-effort, errors listed. Evidence: source_receipt
-        per result. Failure: Denied for bad query/adapter shape.
+        Schema: ``(results, errors, feeds_total, feeds_consulted)``. Each
+        result carries ``"source"`` naming the feed it came from. Bounds:
+        titles 300, summaries 1500. Trust: external-untrusted. Failure:
+        per-feed faults are listed, never raised.
         """
-        if not isinstance(query, str) or not 1 <= len(query) <= 1000:
-            raise Denied("Search query must be 1–1000 characters")
-        command = self.settings["search_command"]
-        if command:
-            result = run(command, timeout=self.settings["timeout_seconds"],
-                         maximum=self.settings["max_bytes"],
-                         input_data=json.dumps({"query": query}).encode() + b"\n")
-            if result.exit_code != 0 or result.reason != "exited":
-                raise Denied("Configured search program failed")
-            data = json.loads(result.stdout)
-            if not isinstance(data, dict) or not isinstance(data.get("results"), list):
-                raise Denied("Search adapter must return a JSON object with a results array")
-            truncated = len(data["results"]) > 30
-            results = data["results"][:30]
-            for item in results:
-                if not isinstance(item, dict) or not all(isinstance(item.get(k), str) for k in ("title", "url", "summary")):
-                    raise Denied("Invalid search adapter result")
-                # Search can discover new hosts. Fetching them still needs an explicit grant.
-                if not item["url"].startswith("https://"):
-                    raise Denied("Search result URL must use HTTPS")
-            return {"results": results, "scope": "configured-search-adapter", "trust": "external-untrusted",
-                    "truncated": truncated, "feeds_total": 0, "feeds_consulted": 0}
         results, errors = [], []
         feeds = list(self.settings["feeds"])
         for feed in feeds:
@@ -216,11 +192,54 @@ class Web:
                     # ranking lives in `search_command` when configured.
                     score = sum(word.lower() in (title + " " + summary).lower() for word in query.split())
                     results.append({"title": title[:300], "url": link, "summary": summary[:1500],
-                                    "source_receipt": receipt["id"], "score": score})
+                                    "source": feed, "source_receipt": receipt["id"], "score": score})
             except (Denied, OSError, ET.ParseError, http.client.HTTPException) as exc:
                 errors.append({"feed": feed, "error": str(exc)})
         ordered = sorted(results, key=lambda r: r["score"], reverse=True)
+        return ordered, errors, len(feeds), len(feeds) - len(errors)
+
+    def search(self, query: str) -> dict:
+        """Search every configured source with explicit truncation flags.
+
+        Schema: ``{"results": [{title,url,source,...}], "errors": [...],
+        "scope", "trust", "truncated": bool, "feeds_total": int,
+        "feeds_consulted": int}``. Bounds: titles 300, summaries 1500,
+        results 30 (matches the tool array bound). The adapter keeps ranking
+        priority: its results come first, then feed matches fill the
+        remaining slots. Trust: external-untrusted. Retry: per-feed
+        best-effort, errors listed. Evidence: source_receipt per feed result.
+        Failure: Denied for bad query/adapter shape.
+        """
+        if not isinstance(query, str) or not 1 <= len(query) <= 1000:
+            raise Denied("Search query must be 1–1000 characters")
+        command = self.settings["search_command"]
+        if command:
+            result = run(command, timeout=self.settings["timeout_seconds"],
+                         maximum=self.settings["max_bytes"],
+                         input_data=json.dumps({"query": query}).encode() + b"\n")
+            if result.exit_code != 0 or result.reason != "exited":
+                raise Denied("Configured search program failed")
+            data = json.loads(result.stdout)
+            if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+                raise Denied("Search adapter must return a JSON object with a results array")
+            adapter_overflow = len(data["results"]) > 30
+            results = data["results"][:30]
+            for item in results:
+                if not isinstance(item, dict) or not all(isinstance(item.get(k), str) for k in ("title", "url", "summary")):
+                    raise Denied("Invalid search adapter result")
+                # Search can discover new hosts. Fetching them still needs an explicit grant.
+                if not item["url"].startswith("https://"):
+                    raise Denied("Search result URL must use HTTPS")
+                item["source"] = "search-adapter"
+            feeds, errors, feeds_total, feeds_consulted = self._search_feeds(query)
+            room = 30 - len(results)
+            results = results + feeds[:room]
+            truncated = adapter_overflow or len(feeds) > room
+            scope = "configured-search-adapter+feeds" if feeds_total else "configured-search-adapter"
+            return {"results": results, "errors": errors, "scope": scope, "trust": "external-untrusted",
+                    "truncated": truncated, "feeds_total": feeds_total, "feeds_consulted": feeds_consulted}
+        ordered, errors, feeds_total, feeds_consulted = self._search_feeds(query)
         truncated = len(ordered) > 30
         return {"results": ordered[:30],
                 "errors": errors, "scope": "configured-feeds-only", "trust": "external-untrusted",
-                "truncated": truncated, "feeds_total": len(feeds), "feeds_consulted": len(feeds) - len(errors)}
+                "truncated": truncated, "feeds_total": feeds_total, "feeds_consulted": feeds_consulted}

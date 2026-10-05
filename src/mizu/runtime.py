@@ -357,7 +357,7 @@ class Context:
         rows=[]
         for item in record.get('results',[]):
             row={}
-            for key,bound in (('title',300),('url',4096),('summary',1500)):
+            for key,bound in (('title',300),('url',4096),('summary',1500),('source',4096)):
                 row[key],row[key+'_truncated']=text_preview(item.get(key,''),bound)
             receipt=item.get('source_receipt')
             if isinstance(receipt,str) and DIGEST.fullmatch(receipt):row['source_receipt']=receipt
