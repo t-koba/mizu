@@ -21,6 +21,16 @@ from .errors import Denied
 from .fs import digest, now, read_json, write_json
 from .process import run
 
+#: Retained search candidates across adapter and feeds. Matches the tool
+#: page limit so explicit paging can walk everything the sources returned.
+#: Byte protection stays with per-field bounds and the adapter stdout cap
+#: (`[web] max_bytes`); this count never enlarges a prompt by itself
+#: because `_op_search` pages through it.
+SEARCH_RESULT_LIMIT = 1000
+#: Per-feed shaping bound: one huge feed must not crowd out other sources
+#: before the global cut. Feed order decides which items are kept.
+SEARCH_FEED_ITEM_LIMIT = 200
+
 
 class Text(HTMLParser):
     def __init__(self):
@@ -163,12 +173,14 @@ class Web:
 
         Schema: ``(results, errors, feeds_total, feeds_consulted)``. Each
         result carries ``"source"`` naming the feed it came from. Bounds:
-        titles 300, summaries 1500. Trust: external-untrusted. Failure:
-        per-feed faults are listed, never raised.
+        titles 300, summaries 1500, at most ``SEARCH_FEED_ITEM_LIMIT`` items
+        per feed. Trust: external-untrusted. Failure: per-feed faults are
+        listed, never raised.
         """
         results, errors = [], []
         feeds = list(self.settings["feeds"])
         for feed in feeds:
+            kept = 0
             try:
                 receipt = self.fetch(feed)
                 source = receipt["text"]
@@ -176,6 +188,8 @@ class Web:
                     raise Denied("XML document type and entity declarations are refused")
                 root = ET.fromstring(source)
                 for item in root.iter():
+                    if kept >= SEARCH_FEED_ITEM_LIMIT:
+                        break
                     if item.tag.rsplit("}", 1)[-1] not in ("item", "entry"):
                         continue
                     fields = {child.tag.rsplit("}", 1)[-1]: child for child in item}
@@ -193,6 +207,7 @@ class Web:
                     score = sum(word.lower() in (title + " " + summary).lower() for word in query.split())
                     results.append({"title": title[:300], "url": link, "summary": summary[:1500],
                                     "source": feed, "source_receipt": receipt["id"], "score": score})
+                    kept += 1
             except (Denied, OSError, ET.ParseError, http.client.HTTPException) as exc:
                 errors.append({"feed": feed, "error": str(exc)})
         ordered = sorted(results, key=lambda r: r["score"], reverse=True)
@@ -204,8 +219,9 @@ class Web:
         Schema: ``{"results": [{title,url,source,...}], "errors": [...],
         "scope", "trust", "truncated": bool, "feeds_total": int,
         "feeds_consulted": int}``. Bounds: titles 300, summaries 1500,
-        results 30 (matches the tool array bound). The adapter keeps ranking
-        priority: its results come first, then feed matches fill the
+        at most ``SEARCH_RESULT_LIMIT`` retained candidates (matches the tool
+        page limit, so callers page the full retained set). The adapter keeps
+        ranking priority: its results come first, then feed matches fill the
         remaining slots. Trust: external-untrusted. Retry: per-feed
         best-effort, errors listed. Evidence: source_receipt per feed result.
         Failure: Denied for bad query/adapter shape.
@@ -222,8 +238,8 @@ class Web:
             data = json.loads(result.stdout)
             if not isinstance(data, dict) or not isinstance(data.get("results"), list):
                 raise Denied("Search adapter must return a JSON object with a results array")
-            adapter_overflow = len(data["results"]) > 30
-            results = data["results"][:30]
+            adapter_overflow = len(data["results"]) > SEARCH_RESULT_LIMIT
+            results = data["results"]
             for item in results:
                 if not isinstance(item, dict) or not all(isinstance(item.get(k), str) for k in ("title", "url", "summary")):
                     raise Denied("Invalid search adapter result")
@@ -231,15 +247,16 @@ class Web:
                 if not item["url"].startswith("https://"):
                     raise Denied("Search result URL must use HTTPS")
                 item["source"] = "search-adapter"
+            results = results[:SEARCH_RESULT_LIMIT]
             feeds, errors, feeds_total, feeds_consulted = self._search_feeds(query)
-            room = 30 - len(results)
+            room = SEARCH_RESULT_LIMIT - len(results)
             results = results + feeds[:room]
             truncated = adapter_overflow or len(feeds) > room
             scope = "configured-search-adapter+feeds" if feeds_total else "configured-search-adapter"
             return {"results": results, "errors": errors, "scope": scope, "trust": "external-untrusted",
                     "truncated": truncated, "feeds_total": feeds_total, "feeds_consulted": feeds_consulted}
         ordered, errors, feeds_total, feeds_consulted = self._search_feeds(query)
-        truncated = len(ordered) > 30
-        return {"results": ordered[:30],
+        truncated = len(ordered) > SEARCH_RESULT_LIMIT
+        return {"results": ordered[:SEARCH_RESULT_LIMIT],
                 "errors": errors, "scope": "configured-feeds-only", "trust": "external-untrusted",
                 "truncated": truncated, "feeds_total": feeds_total, "feeds_consulted": feeds_consulted}

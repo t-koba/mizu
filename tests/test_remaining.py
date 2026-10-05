@@ -360,6 +360,32 @@ class RemainingTests(Fixture):
         self.assertLess(len(canonical({'content':[{'text':canonical(result).decode()}]})),MAX_FRAME)
         validate({'query':'test','offset':2,'limit':2},DEFINITIONS['search'][1])
 
+    def test_search_pages_adapter_results_beyond_old_barrier(self):
+        import json
+        import tempfile
+        from mizu.process import Result
+        from mizu.web import Web
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
+        web = Web({**self.config.web, "search_command": ["python3", "adapter"]},
+                  tmp / "c", tmp / "r")
+        import mizu.web as webmod
+        adapted = [{"title": f"t{n}", "url": "https://x/", "summary": "s"} for n in range(35)]
+        with patch.object(webmod, "run", return_value=Result(0, json.dumps({"results": adapted}), "", "exited", 0.1)):
+            records = web.search("test")
+        self.assertEqual(len(records["results"]), 35)
+        ctx = self.context("searcher")
+        with patch("mizu.runtime.bounded", return_value=records):
+            first = ctx._op_search({"query": "test", "offset": 0, "limit": 30})
+            overflow = ctx._op_search({"query": "test", "offset": 30, "limit": 1000})
+        self.assertEqual(len(first["results"]), 30)
+        self.assertEqual(first["next_offset"], 30)
+        self.assertTrue(first["truncated"])
+        self.assertEqual(len(overflow["results"]), 5)
+        self.assertEqual(overflow["results"][0]["title"], "t30")
+        self.assertIsNone(overflow["next_offset"])
+        self.assertFalse(overflow["truncated"])
+
     def test_invalid_engine_json_cannot_poison_saved_usage(self):
         from mizu.drivers import parse_event
         with self.assertRaises(ValueError): parse_event('{"usage":{"input_tokens":NaN}}')

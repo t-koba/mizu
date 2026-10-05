@@ -317,26 +317,50 @@ class WebSeparationTests(Fixture):
         self.assertEqual(result["feeds_total"], 40)
         self.assertIn("truncated", result)
 
-    def test_adapter_truncation_flagged(self):
-        from mizu.web import Web
+    def test_feed_overflow_truncates_with_all_feeds_consulted(self):
+        from mizu.web import Web, SEARCH_RESULT_LIMIT
+        import tempfile
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
+        feeds = [f"https://example.org/f{n}" for n in range(40)]
+        web = Web({"hosts": ["example.org"], "feeds": feeds, "cache_seconds": 0,
+                   "timeout_seconds": 1, "max_bytes": 1024, "search_command": [],
+                   "intranet": False}, tmp / "cache", tmp / "rcpt")
+        seen = []
+        items = "".join("<item><title>hi</title><link>https://example.org/x</link>"
+                        "<description>d</description></item>" for _ in range(30))
+        def fake_fetch(url):
+            seen.append(url)
+            return {"id": "r", "text": f"<rss><channel>{items}</channel></rss>"}
+        web.fetch = fake_fetch
+        result = web.search("hi")
+        self.assertEqual(len(seen), 40)
+        self.assertEqual(result["feeds_consulted"], 40)
+        self.assertEqual(len(result["results"]), SEARCH_RESULT_LIMIT)
+        self.assertTrue(result["truncated"])
+
+    def test_adapter_results_page_up_to_documented_limit(self):
+        from mizu.web import Web, SEARCH_RESULT_LIMIT
         import json
         import tempfile
         from mizu.process import Result
         tmp = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as script:
-            script.write("import json,sys; json.dump({'results': [{'title':'t','url':'https://x/','summary':'s'} for _ in range(35)]}, sys.stdout)")
-            name = script.name
-        self.addCleanup(lambda: os.unlink(name))
         web = Web({"hosts": [], "feeds": [], "cache_seconds": 0, "timeout_seconds": 5,
-                   "max_bytes": 1048576, "search_command": ["python3", name],
+                   "max_bytes": 1048576, "search_command": ["python3", "adapter"],
                    "intranet": False}, tmp / "c", tmp / "r")
-        # Fake run instead of a real subprocess.
         import mizu.web as webmod
+        # 35 small results are retained in full: no hidden fixed barrier.
         results = [{"title": "t", "url": "https://x/", "summary": "s"} for _ in range(35)]
         with patch.object(webmod, "run", return_value=Result(0, json.dumps({"results": results}), "", "exited", 0.1)):
             out = web.search("q")
-        self.assertEqual(len(out["results"]), 30)
+        self.assertEqual(len(out["results"]), 35)
+        self.assertFalse(out["truncated"])
+        # Beyond the documented limit the oldest-shaped overflow is cut and flagged.
+        many = [{"title": "t", "url": "https://x/", "summary": "s"} for _ in range(SEARCH_RESULT_LIMIT + 5)]
+        with patch.object(webmod, "run", return_value=Result(0, json.dumps({"results": many}), "", "exited", 0.1)):
+            out = web.search("q")
+        self.assertEqual(len(out["results"]), SEARCH_RESULT_LIMIT)
         self.assertTrue(out["truncated"])
 
     def test_adapter_also_consults_feeds_with_source_labels(self):
@@ -368,7 +392,7 @@ class WebSeparationTests(Fixture):
         self.assertFalse(out["truncated"])
 
     def test_adapter_priority_fills_result_bound_first(self):
-        from mizu.web import Web
+        from mizu.web import Web, SEARCH_RESULT_LIMIT
         import json
         import tempfile
         from mizu.process import Result
@@ -381,10 +405,10 @@ class WebSeparationTests(Fixture):
         web.fetch = lambda url: {"id": "r", "text": "<rss><channel><item><title>q</title>"
                     "<link>https://example.org/y</link><description>d</description></item></channel></rss>"}
         import mizu.web as webmod
-        adapted = [{"title": "t", "url": "https://x/", "summary": "s"} for _ in range(30)]
+        adapted = [{"title": "t", "url": "https://x/", "summary": "s"} for _ in range(SEARCH_RESULT_LIMIT)]
         with patch.object(webmod, "run", return_value=Result(0, json.dumps({"results": adapted}), "", "exited", 0.1)):
             out = web.search("q")
-        self.assertEqual(len(out["results"]), 30)
+        self.assertEqual(len(out["results"]), SEARCH_RESULT_LIMIT)
         self.assertTrue(all(item["source"] == "search-adapter" for item in out["results"]))
         self.assertTrue(out["truncated"])
         self.assertEqual(out["feeds_consulted"], 1)
