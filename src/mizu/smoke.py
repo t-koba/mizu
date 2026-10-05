@@ -1,4 +1,16 @@
-"""An opt-in, paid end-to-end engine test. It cannot change a real project."""
+"""An opt-in, paid end-to-end engine test. It cannot change a real project.
+
+Schema: ``live(config, profile, role_name)`` runs the named consult role's
+engine against a temporary project containing only ``probe.txt``.
+Bounds: paid spend is capped at fixed ``SMOKE_REQUESTS/TOOLS/SECONDS``
+(clamped below operator limits, never raised). Trust: the probe system
+prompt is the fixed ``SMOKE_PROBE_POLICY`` written per run under
+``<data>/validation/smoke-probe-policy.md``; operator consult policy text
+is never offered, so smoke tests the engine/provider path only.
+Retry/cancellation: single run under the run deadline; no retry.
+Evidence: pass/fail JSON plus the moved project under ``<data>/validation``.
+Failure: ``Denied`` when the engine does not return the probe contents.
+"""
 from __future__ import annotations
 
 import dataclasses
@@ -23,6 +35,19 @@ SMOKE_REQUESTS_PER_RUN = 4
 SMOKE_TOOLS_PER_RUN = 5
 SMOKE_RUN_SECONDS = 120
 
+#: Fixed probe system prompt (mechanism, not operator policy): the live probe
+#: must read ``probe.txt`` even when the operator's consult policy says to
+#: advise from the snapshot without reading files. Kept byte-identical to
+#: the probe goal so engine and goal agree; operator consult text is never
+#: used here.
+SMOKE_PROBE_POLICY = (
+    "You are the Mizu live smoke probe. Read the file probe.txt in the"
+    " workspace root (exact path probe.txt) with a single read. Do not list"
+    " files first; the workspace contains only probe.txt. Then call"
+    " mizu_finish alone with outcome 'wait' and summary exactly the file"
+    " contents. Do nothing else.\n"
+)
+
 
 def live(config: Config, profile: str | None = None, role_name: str = "consult") -> dict:
     if _platform.is_root():
@@ -34,8 +59,12 @@ def live(config: Config, profile: str | None = None, role_name: str = "consult")
     check_consult_role(role_name, role)
     if role.selector and not profile:
         raise ConfigError("A selector role requires an explicit --profile for smoke")
+    mkdir(config.data / "validation")
+    probe_policy = config.data / "validation" / "smoke-probe-policy.md"
+    probe_policy.write_text(SMOKE_PROBE_POLICY, encoding="utf-8")
     role = dataclasses.replace(role, profile=profile or role.profile, selector="", workspace="read",
-                               capabilities=("files", "read", "finish"), on_change=False)
+                               capabilities=("files", "read", "finish"), on_change=False,
+                               policy=(probe_policy,))
     # Probe budgets stay fixed mechanism constants per ADR-006/ADR-013, not
     # knobs: 4 requests tolerate one benign extra listing (files + read +
     # finish is 3 sequences) plus one auxiliary Pi inference without opening

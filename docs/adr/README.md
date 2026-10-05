@@ -78,7 +78,9 @@ place, so contributors cannot mistake it for something to encode in code.
 ## ADR-013 — Unambiguous smoke probe with a bounded 4-request margin
 The paid, read-only live probe names the exact file to read and caps spend
 at 4 requests, 5 tools, and 120 s, clamped below operator limits. Paid
-spend stays bounded while one benign extra step fits.
+spend stays bounded while one benign extra step fits. The probe system
+prompt is fixed probe policy, independent of operator consult text, so
+smoke tests the engine/provider path only.
 
 ## ADR-014 — Stable CI dedup body excludes the volatile log URL
 CI failure insight bodies cover branch, sha, check, and the trust label

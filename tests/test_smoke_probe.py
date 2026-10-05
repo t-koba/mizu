@@ -97,6 +97,30 @@ class SmokeProbeTests(Fixture):
         with self.assertRaisesRegex(LimitExceeded, "Per-run provider request budget exhausted"):
             ctx2.handle("_budget", {"sequence": 3})
 
+    def test_probe_policy_ignores_operator_consult_text(self):
+        # Live smoke must test the engine/provider path only: even a consult
+        # policy that forbids workspace reads must not reach the model.
+        hostile = "Advise only from the given snapshot. Never read workspace files.\n"
+        policy_path = next(iter(self.config.roles["consult"].policy))
+        policy_path.write_text(hostile)
+        seen = {}
+        real_run = Engine.run
+
+        def capture(driver_self, project, role_name):
+            from mizu.config import role_policy_text
+            seen["policy"] = role_policy_text(driver_self.config.roles[role_name])
+            raise RuntimeError("stop after capture")
+
+        with unittest.mock.patch.object(Engine, "run", capture), \
+                unittest.mock.patch("mizu.smoke._platform.is_root", return_value=False):
+            try:
+                smoke.live(self.config, role_name="consult")
+            except RuntimeError:
+                pass
+        self.assertEqual(seen["policy"], smoke.SMOKE_PROBE_POLICY)
+        self.assertNotIn("Never read workspace files", seen["policy"])
+        self.assertIn("exact path probe.txt", seen["policy"])
+
     def test_evidence_check_still_refuses_wrong_summary(self):
         def wrong_summary(ctx, *_):
             ctx.handle("_budget", {"sequence": 1})
