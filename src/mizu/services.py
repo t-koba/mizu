@@ -6,6 +6,12 @@ service manager: systemd user units on Linux, launchd plists on macOS, Task
 Scheduler XML on Windows. Each emitter is pure text over the same inputs;
 `system=` exists so tests cover all three spellings on any host. Nothing is
 started or enabled here on any platform.
+
+Decision events and due structured waits wake scheduled roles before their
+next interval: systemd path units on Linux and WatchPaths on macOS invoke the
+same `mizu run`, which admits on events and otherwise reports unchanged; the
+periodic timers stay unchanged. Task Scheduler XML has no file trigger in
+this minimal schema, so Windows still dispatches events when its timer fires.
 """
 from __future__ import annotations
 
@@ -25,7 +31,7 @@ from .fs import atomic_write, identifier, mkdir, sync_dir, digest, read_json, wr
 from .project import Project
 
 #: Definition file extensions each platform owns.
-SERVICE_EXTENSIONS = {"linux": (".service", ".timer"), "macos": (".plist",), "windows": (".xml",)}
+SERVICE_EXTENSIONS = {"linux": (".service", ".timer", ".path"), "macos": (".plist",), "windows": (".xml",)}
 
 #: Fixed per-platform template floors (mechanism, not operator policy):
 #: restart delay avoids a tight crash loop, timer accuracy/jitter avoids
@@ -69,8 +75,30 @@ def _scheduled_roles(config: Config, project: Project, executable: Path):
         yield name, role, base, args
 
 
+def event_watches(config: Config, project: Project) -> dict[str, list[str]]:
+    """Event-trigger watch directories per scheduled role.
+
+    Mechanism: roles with decision_events wake on decision-history and waits
+    writes; write roles with a schedule additionally wake when their own
+    structured waits come due. Daemon roles need no file trigger (their loop
+    re-checks admission every idle tick via should_run) and unscheduled roles
+    get nothing. Periodic discovery stays independent policy: timers and
+    calendar entries keep their own schedules unchanged.
+    """
+    watches = {}
+    for name in project.roles:
+        role = config.roles[name]
+        if role.daemon or not (role.interval_seconds or role.calendar):
+            continue
+        if not role.decision_events and role.workspace != "write":
+            continue
+        watches[name] = [str(project.root / "decision-history"), str(project.root / "waits")]
+    return watches
+
+
 def _render_systemd(config: Config, project: Project, executable: Path) -> dict[str, str]:
     result = {}
+    watches = event_watches(config, project)
     for name, role, base, args in _scheduled_roles(config, project, executable):
         cleanup = [str(executable.resolve()), "--config", str(config.file),
                    "cleanup", project.name, "--role", name]
@@ -93,6 +121,12 @@ def _render_systemd(config: Config, project: Project, executable: Path) -> dict[
             timer.extend(f"OnCalendar=*-*-* {t}:00" + ("" if config.timezone == "local" else " " + config.timezone) for t in role.calendar)
         timer.extend(["", "[Install]", "WantedBy=timers.target"])
         result[base + ".timer"] = "\n".join(timer) + "\n"
+        if name in watches:
+            trigger = ["[Unit]", f"Description=Mizu event trigger for {project.name} / {name}", "",
+                       "[Path]",
+                       *(f"PathChanged={watch}" for watch in watches[name]),
+                       f"Unit={base}.service", "", "[Install]", "WantedBy=default.target"]
+            result[base + ".path"] = "\n".join(trigger) + "\n"
     return result
 
 
@@ -104,6 +138,7 @@ def _render_launchd(config: Config, project: Project, executable: Path) -> dict[
     result = {}
     entry = executable.resolve()
     resolved = str(entry)
+    watches = event_watches(config, project)
     for name, role, base, _ in _scheduled_roles(config, project, executable):
         args = [resolved, "--config", str(config.file),
                 "daemon" if role.daemon else "run", project.name, "--role", name]
@@ -120,6 +155,10 @@ def _render_launchd(config: Config, project: Project, executable: Path) -> dict[
                 f"<key>Minute</key><integer>{int(t[3:])}</integer></dict>\n" for t in role.calendar)
             body.extend(["  <key>StartCalendarInterval</key>", "  <array>",
                          entries.rstrip("\n"), "  </array>"])
+        if not role.daemon and name in watches:
+            paths = "".join(f"    <string>{_xml(watch)}</string>\n" for watch in watches[name])
+            body.extend(["  <key>WatchPaths</key>", "  <array>",
+                         paths.rstrip("\n"), "  </array>"])
         result[base + ".plist"] = ('<?xml version="1.0" encoding="UTF-8"?>\n'
                                    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
                                    '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
@@ -136,6 +175,11 @@ def _windows_arguments(args: list[str]) -> str:
 
 
 def _render_windows(config: Config, project: Project, executable: Path) -> dict[str, str]:
+    # No file trigger in this minimal Task Scheduler schema: event admission
+    # still applies when the timer fires (Engine.run checks decisions and
+    # due waits on every dispatch); file-triggered wake before the interval
+    # is provided where the platform supports it (systemd path, launchd
+    # WatchPaths).
     result = {}
     entry = executable.resolve()
     if entry.suffix.lower() in (".cmd", ".bat"):
@@ -268,8 +312,9 @@ def install(config: Config, project: Project, executable: Path, destination: Pat
                                "timezone": config.timezone if name == "linux" or (name == "windows" and config.timezone == "UTC") else "OS local"})
             sync_dir(directory)
     if name == "linux":
-        start = [unit for unit in units if unit.endswith(".timer") or
-                 (unit.endswith(".service") and unit[:-8] + ".timer" not in units)]
+        triggered = {unit[:-6] for unit in units if unit.endswith((".timer", ".path"))}
+        start = [unit for unit in units if unit.endswith((".timer", ".path")) or
+                 (unit.endswith(".service") and unit[:-8] not in triggered)]
     else:
         start = sorted(units)
     return {"system": name, "directory": str(directory), "written": sorted(units), "enable_units": sorted(start),

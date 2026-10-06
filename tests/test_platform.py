@@ -383,6 +383,37 @@ class ServiceRendererTests(unittest.TestCase):
         reporter = ET.fromstring(units["mizu-3-svc-reporter.xml"])
         self.assertIsNotNone(reporter.find("t:Triggers/t:CalendarTrigger", ns))
 
+    def test_event_trigger_watches_decisions_and_waits(self):
+        import dataclasses
+        import plistlib
+        from mizu.doctor import service_units
+        from mizu.services import event_watches, install, render
+        roles = dict(self.config.roles)
+        roles["reporter"] = dataclasses.replace(roles["reporter"], decision_events=("reject", "defer"))
+        config = dataclasses.replace(self.config, roles=roles)
+        watches = event_watches(config, self.project)
+        # The daemon writer needs no file trigger; the unwatched reporter
+        # schedule is unchanged.
+        self.assertEqual(sorted(watches), ["reporter"])
+        base = "mizu-3-svc-reporter"
+        units = render(config, self.project, ROOT / "bin/mizu", system="linux")
+        trigger = units[base + ".path"]
+        self.assertIn(f"Unit={base}.service", trigger)
+        self.assertIn("decision-history", trigger)
+        self.assertIn("waits", trigger)
+        self.assertIn("OnCalendar=", units[base + ".timer"])
+        job = plistlib.loads(render(config, self.project, ROOT / "bin/mizu", system="macos")[base + ".plist"].encode())
+        self.assertTrue(any("decision-history" in path for path in job["WatchPaths"]))
+        worker = plistlib.loads(render(config, self.project, ROOT / "bin/mizu", system="macos")["mizu-3-svc-worker.plist"].encode())
+        self.assertNotIn("WatchPaths", worker)
+        directory = self.root / "units-event-linux"
+        result = install(config, self.project, ROOT / "bin/mizu", directory, system="linux")
+        self.assertIn(base + ".path", result["written"])
+        self.assertIn(base + ".path", result["enable_units"])
+        self.assertNotIn(base + ".service", result["enable_units"])
+        checked = service_units(directory, system="linux")
+        self.assertEqual(sorted(checked["units"]), sorted(result["written"]))
+
     def test_unknown_system_is_refused(self):
         from mizu.errors import Denied
         from mizu.services import render

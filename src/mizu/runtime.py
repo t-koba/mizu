@@ -1231,7 +1231,40 @@ def _on_change_observed(cursor: dict, snapshot: dict) -> bool:
         return False
 
 
-def should_run(project: Project, snapshot: dict, current_time: float | None = None) -> bool:
+def _role_events_due(project: Project, snapshot: dict, role_name=None) -> bool:
+    """True when a decision event or due structured wait routes to a checked role.
+
+    The checked set is the running role when named, else every write role in
+    the project. Decision registration and wait expiry leave no inbox or
+    snapshot generation footprint of their own (the operator CLI can defer
+    with a wait outside any run), so the writer gate must consult the event
+    and wait stores directly before suppressing dispatch. Never raises:
+    unreadable stores read as no events; admission itself still fails loudly
+    inside Engine.run.
+    """
+    try:
+        names = [role_name] if role_name in project.roles else [
+            name for name in project.roles
+            if name in project.config.roles and project.config.roles[name].workspace == "write"]
+        for name in names:
+            try:
+                triggers = project.config.roles[name].decision_events
+                if triggers and project.insights.decision_events(name, triggers):
+                    return True
+            except (Denied, OSError, ValueError, TypeError, KeyError, AttributeError):
+                pass
+            try:
+                if project.insights.due_waits(name, snapshot):
+                    return True
+            except (Denied, OSError, ValueError, TypeError, KeyError, AttributeError):
+                pass
+    except (Denied, OSError, ValueError, TypeError, KeyError, AttributeError):
+        pass
+    return False
+
+
+def should_run(project: Project, snapshot: dict, current_time: float | None = None,
+               role_name: str | None = None) -> bool:
     """Fixed single-writer publication contract (mechanism, not operator policy).
 
     `done` needs an explicit wake or changed goal; `continue` always runs;
@@ -1252,6 +1285,8 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
     if outcome == "continue":
         return True
     if project.insights.generation() != snapshot.get("inbox_seen", ""):
+        return True
+    if _role_events_due(project, snapshot, role_name):
         return True
     return outcome == "wait" and snapshot.get("wake_at") is not None and current_time >= snapshot["wake_at"]
 
@@ -1347,7 +1382,7 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                                                       now=time.time(), interval=interval):
                             print(json.dumps(event, ensure_ascii=False), flush=True)
                     role = config.roles[role_name]
-                    ready = should_run(project, project.snapshots.get()) if role.workspace == "write" else (
+                    ready = should_run(project, project.snapshots.get(), role_name=role_name) if role.workspace == "write" else (
                         project.control().get("armed") and not project.control().get("paused"))
                     if ready:
                         result = Engine(config, stop=stop).run(project, role_name)

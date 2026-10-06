@@ -294,7 +294,7 @@ def service_units(directory: Path | None = None, *, system: str | None = None) -
         return _check_units(directory, "mizu-*.xml", name, "Tasks", _task_executable)
     if name != "linux":
         raise ConfigError(f"Unsupported service platform: {name}")
-    return _check_units(directory, ("mizu-*.service", "mizu-*.timer"), name, "Units", _systemd_executable)
+    return _check_units(directory, ("mizu-*.service", "mizu-*.timer", "mizu-*.path"), name, "Units", _systemd_executable)
 
 
 def _check_units(directory: Path, patterns, system: str, noun: str,
@@ -329,7 +329,7 @@ def _check_units(directory: Path, patterns, system: str, noun: str,
 
 def _systemd_executable(path: Path):
     text = path.read_text(encoding="utf-8").splitlines()
-    if path.name.endswith(".timer"):
+    if path.name.endswith((".timer", ".path")):
         target = next(l for l in text if l.startswith("Unit=")).partition("=")[2]
         return [str(path.parent / target)] if (path.parent / target).exists() else []
     line = next(l for l in text if l.startswith("ExecStart="))

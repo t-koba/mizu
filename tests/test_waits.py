@@ -69,6 +69,27 @@ class WaitRegistrationTests(Fixture):
 
 
 class WaitDispatchTests(Fixture):
+    def test_decision_then_due_wait_dispatch_without_interval(self):
+        import dataclasses
+        roles = dict(self.config.roles)
+        roles["reviewer"] = dataclasses.replace(roles["reviewer"], decision_events=("reject",))
+        config = dataclasses.replace(self.config, roles=roles)
+        engine = Engine(config, driver=ScriptDriver())
+        engine.run(self.project, "reviewer")
+        snap = self.project.snapshots.get()["id"]
+        rejected = self.project.insights.submit(source="reviewer", title="First", body="evidence",
+                                                base_snapshot=snap)
+        self.project.insights.decide(rejected["id"], "reject", "not yet", "", "reviewer")
+        first = engine.run(self.project, "reviewer")
+        started = read_json(self.project.root / "runs" / first["run"] / "started.json")
+        self.assertEqual(started["admission"], "decision")
+        _defer(self.project, "reviewer", {"kind": "deadline", "at": _past()}, title="Second")
+        second = engine.run(self.project, "reviewer")
+        started = read_json(self.project.root / "runs" / second["run"] / "started.json")
+        # The defer itself is not a trigger, so the due wait alone admits:
+        # both dispatches happened back-to-back with no interval elapsing.
+        self.assertEqual(started["admission"], "wait")
+
     def _engine(self):
         return Engine(self.config, driver=ScriptDriver())
 

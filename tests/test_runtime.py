@@ -229,6 +229,36 @@ class EngineTests(Fixture):
         self.assertFalse(should_run(self.project, snap, current_time=snap["wake_at"] - 1))
         self.assertTrue(should_run(self.project, snap, current_time=snap["wake_at"] + 1))
 
+    def test_code_change_wait_wakes_writer(self):
+        snap = self.project.snapshots.get()
+        proposal = self.project.insights.submit(source="worker", title="Risk", body="evidence",
+                                                base_snapshot=snap["id"])
+        self.project.insights.decide(proposal["id"], "defer", "recheck after edits", "when code changes",
+                                     "worker", wait={"kind": "code_change"})
+        (self.project.workspace / "app.py").write_bytes(b"VALUE = 3\n")
+        Engine(self.config, driver=ScriptDriver()).run(self.project, "worker")
+        # The wait came due after the run published: no inbox, goal, or wake
+        # change marks it, so only the event check admits the next dispatch.
+        self.assertTrue(should_run(self.project, self.project.snapshots.get()))
+        self.assertTrue(should_run(self.project, self.project.snapshots.get(), role_name="worker"))
+        # An unnamed check covers the same write set.
+        self.assertTrue(should_run(self.project, self.project.snapshots.get(), role_name="ghost"))
+
+    def test_decision_event_wakes_writer(self):
+        roles = dict(self.config.roles)
+        roles["worker"] = dataclasses.replace(roles["worker"], decision_events=("reject",))
+        config = dataclasses.replace(self.config, roles=roles)
+        project = Project(config, "sample")
+        proposal = project.insights.submit(source="worker", title="Idea", body="evidence",
+                                           base_snapshot=project.snapshots.get()["id"])
+        Engine(config, driver=ScriptDriver()).run(project, "worker")
+        self.assertFalse(should_run(project, project.snapshots.get(), role_name="worker"))
+        # A rejection leaves no inbox-generation footprint, so only the
+        # event check admits the next dispatch.
+        project.insights.decide(proposal["id"], "reject", "not now", "", "worker")
+        self.assertTrue(should_run(project, project.snapshots.get(), role_name="worker"))
+        self.assertTrue(should_run(project, project.snapshots.get()))
+
     def test_done_does_not_reopen_for_news(self):
         snap = {**self.project.snapshots.get(), "outcome": "done", "wake_generation": "test-wake"}
         self.project.insights.submit(source="searcher", title="News", body="interesting", base_snapshot=snap["id"])

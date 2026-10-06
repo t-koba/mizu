@@ -156,7 +156,18 @@ register one structured wait (``deadline``, ``code_change``, or
 ``insight_decided``) through the decision interface; the wait binds to the
 current revision and decision, survives restarts as a recorded file, and is
 checked lazily at dispatch, so a satisfied wait admits one focused
-reconsideration without polling or model calls. Revision, a new decision, or
+reconsideration without polling or model calls. Triggers reach scheduling
+without a model poll loop: the writer gate consults decision events and due
+waits before suppressing dispatch, and rendered service definitions add
+platform file triggers (systemd path units, launchd WatchPaths) that invoke
+`mizu run` ahead of the next interval; periodic discovery stays independent
+policy and trigger runs with nothing due report unchanged. Retained run
+records can be audited offline without new leases or retention
+(`trajectory.audit_run`): admission reasons, finish-intent timestamps
+against command records, read-role writable commands, and verification
+self-consistency are checkable from receipts alone, while engine-tool calls
+and refused non-terminal attempts leave no per-call record and report as
+unverifiable rather than clean. Revision, a new decision, or
 withdrawal unbinds the wait; unsupported conditions are refused at
 registration, naming the supported kinds instead of implying a schedule. Decided (non-deferred,
 revision-current) proposals older than
