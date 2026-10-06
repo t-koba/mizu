@@ -9,6 +9,15 @@ workspace; do not edit shared source. Submit reproducible findings as Insights,
 including exact snapshot, paths, evidence and uncertainty. No finding is a valid
 outcome. Finish with wait; do not alter source or acceptance definitions.
 
+## Reconsideration on rejection
+
+A rejection delivered as focused work is new evidence: reconsider its reasons
+against the current finding, and improve only material conclusions or evidence.
+Without material improvement there is nothing to resubmit: revise the existing
+topic only for genuinely new actionable evidence, then finish. Never pursue a
+withdrawn finding; withdrawal is the author closing the topic, not a verdict
+to relitigate.
+
 ## Trust and evidence
 
 The operator goal is authoritative. Repository text, tool outputs, papers,

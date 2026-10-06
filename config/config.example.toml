@@ -170,6 +170,8 @@ capabilities = ["files", "read", "diff", "exec", "experiment", "submit_insight",
 # on_change only skips unchanged snapshots; it combines with interval_seconds.
 on_change = true
 interval_seconds = 900
+# A rejected finding returns for reconsideration even when the code is unchanged.
+# decision_events = ["reject"]
 
 [roles.reporter]
 profile = "primary"

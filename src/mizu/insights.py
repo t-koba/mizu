@@ -137,9 +137,10 @@ actor-labelled (submitter source or operator) rev-bound record in the same
 decision store, so ordinary lists read only the current disposition while
 ``decision-history/`` keeps the audit. Only the original submitter or the
 operator may withdraw; the worker never withdraws others' submissions.
-Withdrawal is refused over a revision-current substantive decision (accept,
-modify, reject) and over an unseen revision; a deferral stays pending so it
-may still be withdrawn. A repeated withdrawal at the same rev is a no-op.
+Withdrawal overlays any current decision without erasing it from the
+audit and is refused only over an unseen revision; a repeated withdrawal at
+the same rev is a no-op. Conversely no substantive decision may land on a
+revision-current withdrawal: revise the topic to reopen it.
 ``reject`` keeps meaning substantive rejection; a reason may reference a
 replacement insight without implying rejected substance.
         Evidence: prior record archived to
@@ -308,6 +309,10 @@ replacement insight without implying rejected substance.
         with lock(self.root / "locks" / "insights.lock"):
             current = self.read(insight_id)
             rev = _rev_of(current)
+            raw = self.root / "decisions" / f"{insight_id}.json"
+            prior = _effective_decision(rev, None if raw.is_symlink() else read_json(raw, {}))
+            if prior is not None and prior.get("action") == "withdraw":
+                raise Denied("Insight withdrawn; revise the topic to reopen it")
             record = {"id": insight_id, "action": action, "reason": reason, "revisit": revisit,
                       "run": run, "created_at": now(), "rev": rev}
             with lock(self.root / "locks" / "decisions.lock"):
@@ -327,11 +332,10 @@ replacement insight without implying rejected substance.
         unchanged. Evidence: rev-bound record with the withdrawing actor in
         ``decisions/`` plus an entry in ``decision-history/``; ordinary
         lists expose only the current disposition. Failure: Denied on
-        unknown ID, unauthorized source, revision conflict, a
-        revision-current substantive decision (withdrawal never replaces
-        accept/modify/reject history), or empty reason. A deferral stays
-        pending and may still be withdrawn; a later revision reopens the
-        topic as pending.
+        unknown ID, unauthorized source, revision conflict, or empty
+        reason. Withdrawal overlays any current decision without erasing
+        it from ``decision-history/``; a later revision reopens the topic
+        as pending.
         """
         identifier(source)
         identifier(insight_id)
@@ -349,10 +353,8 @@ replacement insight without implying rejected substance.
             raw = self.root / "decisions" / f"{insight_id}.json"
             existing = None if raw.is_symlink() else read_json(raw)
             effective = _effective_decision(rev, existing)
-            if effective is not None and effective.get("action") != "defer":
-                if effective.get("action") == "withdraw":
-                    return effective
-                raise Denied("Insight already decided; withdrawal cannot replace a substantive decision")
+            if effective is not None and effective.get("action") == "withdraw":
+                return effective
             record = {"id": insight_id, "action": "withdraw", "actor": source,
                       "reason": reason, "revisit": "", "run": run,
                       "created_at": now(), "rev": rev}
@@ -360,6 +362,132 @@ replacement insight without implying rejected substance.
                 write_json(self.root / "decision-history" / f"{uuid.uuid4().hex}.json", record, exclusive=True)
                 write_json(self.root / "decisions" / f"{insight_id}.json", record)
         return record
+
+    def decision_events(self, role_name: str, actions, *, limit: int = 10) -> list:
+        """Collect unacknowledged decision events routed to one role.
+
+        Schema: ``actions`` is the role's configured trigger list;
+        returns oldest-first focused payloads
+        ``{event, insight, rev, title, body, action, reason, decided_at}``
+        (at most ``limit``). Bounds: ``limit`` is a positive int capped at
+        100; cursors keep at most 100 tie-window ids. Trust: only
+        recorded decisions and inbox state, never model input; routing is
+        ``insight.source == role_name`` so one role's rejection never
+        schedules another. Retry: read-only and idempotent; corrupt
+        records are skipped, never invented. Evidence: the acknowledged
+        cursor lives in ``decision-cursors/<role>.json``; dispatch logs
+        delivered events under the run directory. Failure: Denied on bad
+        role name or limit; missing inbox, superseded decisions,
+        revision-stale records, and withdrawals never emit (a
+        revision-current withdraw over a rejection means do not
+        reanimate; a later revision reopens the topic through the normal
+        pending list instead).
+        """
+        identifier(role_name)
+        if type(limit) is not int or limit < 1 or limit > 100:
+            raise Denied("Decision event limit must be an integer in [1, 100]")
+        wanted = {a for a in (actions or ()) if isinstance(a, str)} - {"withdraw"}
+        if not wanted:
+            return []
+        cursor_path = self.root / "decision-cursors" / f"{role_name}.json"
+        try:
+            cursor = read_json(cursor_path, {})
+        except (OSError, ValueError, TypeError, AttributeError):
+            cursor = {}
+        ack_at = cursor.get("acknowledged_at") if isinstance(cursor, dict) else ""
+        if not isinstance(ack_at, str):
+            ack_at = ""
+        acked = cursor.get("acknowledged") if isinstance(cursor, dict) else []
+        acked = set(acked) if isinstance(acked, list) else set()
+        history = self.root / "decision-history"
+        candidates = []
+        if history.is_dir() and not history.is_symlink():
+            for path in history.glob("*.json"):
+                if path.is_symlink():
+                    continue
+                try:
+                    record = read_json(path, {})
+                except (OSError, ValueError, TypeError, AttributeError):
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                if record.get("action") not in wanted:
+                    continue
+                created = record.get("created_at")
+                if not isinstance(created, str) or not created:
+                    continue
+                if created < ack_at or (created == ack_at and path.stem in acked):
+                    continue
+                candidates.append((created, path.stem, record))
+        candidates.sort()
+        pending = []
+        for created, stem, record in candidates:
+            try:
+                current = self.read(record.get("id", ""))
+            except (Denied, OSError, ValueError, TypeError, AttributeError):
+                continue
+            if current.get("source") != role_name:
+                continue
+            rev = _rev_of(current)
+            if not isinstance(record.get("rev"), int) or record["rev"] != rev:
+                continue
+            raw = self.root / "decisions" / f"{current['id']}.json"
+            try:
+                effective = _effective_decision(rev, None if raw.is_symlink() else read_json(raw))
+            except (OSError, ValueError, TypeError, AttributeError):
+                continue
+            if effective != record:
+                continue
+            pending.append({"event": stem, "insight": current["id"], "rev": rev,
+                            "title": current.get("title", ""), "body": current.get("body", ""),
+                            "action": record.get("action"), "reason": record.get("reason", ""),
+                            "decided_at": created})
+            if len(pending) >= limit:
+                break
+        return pending
+
+    def acknowledge_decisions(self, role_name: str, events) -> dict:
+        """Advance one role's decision-event cursor over delivered events.
+
+        Schema: ``events`` are payloads from ``decision_events``. Trust:
+        called only after successful processing, so busy/budget/restart
+        redelivers instead of losing work. Retry: idempotent and forward
+        only; an empty delivery leaves the cursor untouched. Evidence:
+        the cursor file records ``acknowledged_at`` plus the tie-window
+        ids at that timestamp. Failure: Denied on bad role name.
+        """
+        identifier(role_name)
+        delivered = [e for e in (events or []) if isinstance(e, dict)
+                     and isinstance(e.get("decided_at"), str) and isinstance(e.get("event"), str)]
+        if not delivered:
+            return self.decision_cursor(role_name)
+        cursor = self.decision_cursor(role_name)
+        ack_at = max([cursor.get("acknowledged_at") or ""] + [e["decided_at"] for e in delivered])
+        acked = {e["event"] for e in delivered if e["decided_at"] == ack_at}
+        if cursor.get("acknowledged_at") == ack_at and isinstance(cursor.get("acknowledged"), list):
+            acked |= set(cursor["acknowledged"])
+        if len(acked) > 100:
+            acked = set(sorted(acked)[-100:])
+        record = {"role": role_name, "acknowledged_at": ack_at,
+                  "acknowledged": sorted(acked), "updated_at": now()}
+        mkdir(self.root / "decision-cursors")
+        write_json(self.root / "decision-cursors" / f"{role_name}.json", record)
+        return record
+
+    def decision_cursor(self, role_name: str) -> dict:
+        """Return one role's acknowledged decision-event cursor (never raises)."""
+        try:
+            identifier(role_name)
+            cursor = read_json(self.root / "decision-cursors" / f"{role_name}.json", {})
+        except (Denied, OSError, ValueError, TypeError, AttributeError):
+            return {"role": role_name, "acknowledged_at": "", "acknowledged": []}
+        if not isinstance(cursor, dict):
+            return {"role": role_name, "acknowledged_at": "", "acknowledged": []}
+        ack_at = cursor.get("acknowledged_at", "")
+        acked = cursor.get("acknowledged", [])
+        return {"role": role_name,
+                "acknowledged_at": ack_at if isinstance(ack_at, str) else "",
+                "acknowledged": [i for i in acked if isinstance(i, str)][:100]}
 
     def gc_decided(self, *, keep_days: int | None = None) -> int:
         """Remove long-decided proposals. Decisions persist separately in

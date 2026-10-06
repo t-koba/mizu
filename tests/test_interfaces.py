@@ -673,11 +673,17 @@ class InsightWithdrawalTests(Fixture):
         self.assertEqual(second, first)
         self.assertEqual(len(list((self.project.root / "decision-history").glob("*.json"))), before)
 
-    def test_withdraw_refuses_decided_but_allows_deferred_and_reopens_on_revise(self):
+    def test_withdraw_overlays_decided_and_blocks_reanimation_until_revise(self):
+        from mizu.fs import read_json
         item = self.project.insights.submit(source="operator", title="T", body="v1", base_snapshot=None)
         self.project.insights.decide(item["id"], "accept", "good", "", "test")
+        record = self.project.insights.withdraw(item["id"], source="operator", reason="retract approval")
+        self.assertEqual(record["action"], "withdraw")
+        actions = sorted(r["action"] for r in
+                         (read_json(p) for p in (self.project.root / "decision-history").glob("*.json")))
+        self.assertEqual(actions, ["accept", "withdraw"])
         with self.assertRaises(Denied):
-            self.project.insights.withdraw(item["id"], source="operator", reason="retract approval")
+            self.project.insights.decide(item["id"], "reject", "second thoughts", "", "test")
         other = self.project.insights.submit(source="operator", title="U", body="v1", base_snapshot=None)
         self.project.insights.decide(other["id"], "defer", "later", "condition", "test")
         self.project.insights.withdraw(other["id"], source="operator", reason="moot")

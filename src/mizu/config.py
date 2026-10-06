@@ -367,6 +367,7 @@ class Role:
     daemon: bool = False
     selector: str = ""
     attributes: dict = dataclasses.field(default_factory=dict)
+    decision_events: tuple[str, ...] = ()
 
 
 def role_policy_text(role: "Role") -> str:
@@ -659,7 +660,8 @@ def load(file: Path) -> Config:
         if name in RESERVED_ROLE_NAMES:
             raise ConfigError(f"Role name '{name}' is reserved for the operator channel")
         keys(role, {"profile", "policy", "workspace", "capabilities", "engine_tools", "on_change",
-                    "interval_seconds", "calendar", "daemon", "selector", "attributes"}, f"roles.{name}")
+                    "interval_seconds", "calendar", "daemon", "selector", "attributes",
+                    "decision_events"}, f"roles.{name}")
         profile = string(role.get("profile", ""), f"roles.{name}.profile")
         selector = string(role.get("selector", ""), f"roles.{name}.selector")
         if ("profile" in role) == ("selector" in role):
@@ -729,9 +731,20 @@ def load(file: Path) -> Config:
         daemon = boolean(role.get("daemon", False), "daemon")
         if sum((bool(interval), bool(calendar), daemon)) > 1:
             raise ConfigError("Choose one scheduling method per role")
+        raw_events = role.get("decision_events", [])
+        events = strings(raw_events, f"roles.{name}.decision_events")
+        if len(events) > 8 or len(set(events)) != len(events):
+            raise ConfigError(f"roles.{name}.decision_events must list at most 8 unique actions")
+        for event in events:
+            if not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", event):
+                raise ConfigError(f"roles.{name}.decision_events entries must be lowercase action names")
+            if event == "withdraw":
+                raise ConfigError(f"roles.{name}.decision_events must never include withdraw; "
+                                  "withdrawn findings are never reanimated")
         roles[name] = Role(name, profile, policy, workspace, caps,
                            strings(role.get("engine_tools", []), "engine_tools"),
-                           boolean(role.get("on_change", False), "on_change"), interval, calendar, daemon, selector, attrs)
+                           boolean(role.get("on_change", False), "on_change"), interval, calendar, daemon, selector, attrs,
+                           decision_events=events)
     if not roles:
         raise ConfigError("At least one role is required")
     consult = strings(data.get("consult_profiles", []), "consult_profiles")

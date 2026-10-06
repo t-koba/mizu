@@ -30,7 +30,7 @@ from .snapshot import open_store
 
 #: Project members covered by backup/restore (plus backup.json on restore).
 MEMBERS = ("project.toml", "PROJECT.md", "control.json", "current.json", "snapshots", "objects",
-           "inbox", "insight-ids", "insight-revisions", "histories", ".ingest", "decisions", "decision-history", "runs", "sessions", "artifacts", "health", "observed",
+           "inbox", "insight-ids", "insight-revisions", "histories", ".ingest", "decisions", "decision-history", "decision-cursors", "runs", "sessions", "artifacts", "health", "observed",
            "maintenance", "spool", "selection")
 
 

@@ -122,7 +122,7 @@ Safety-critical bounds are fixed in code rather than exposed as configuration kn
 | **Config include** | `MAX_INCLUDE_DEPTH` / `MAX_INCLUDE_FILES` / `MAX_INCLUDE_BYTES` (`config.py`) | 8 / 32 / 1 MiB | Shared-fragment recursion, file-count, and total-byte bounds; per-file entries max 32, entry length max 4096 |
 | **Locks** | `WINDOWS_LOCK_TIMEOUT` (`platform.py`) / `_LOCAL_BLOCKING_TIMEOUT` + per-path guard (`fs.py`) | 30 s | Liveness bound: contended blocking acquires fail as Busy instead of hanging the daemon thread; intra-process guard has no plausible operator tuning (ADR-026) |
 
-`on_change` is orthogonal to scheduling: it skips execution when the published `code_digest` is unchanged, so state-only republications do not reschedule it. A role with `on_change` alone and no `daemon`/`interval_seconds`/`calendar` runs only via explicit `mizu run`.
+`on_change` is orthogonal to scheduling: it skips execution when the published `code_digest` is unchanged, so state-only republications do not reschedule it. An unacknowledged decision event routed to the role (`decision_events`) is a distinct admission reason that unchanged-code suppression must not swallow. A role with `on_change` alone and no `daemon`/`interval_seconds`/`calendar` runs only via explicit `mizu run`.
 
 ## Sandbox
 
@@ -185,8 +185,9 @@ present in the selected image; environment belongs in `sandbox.env`. No
 installation, login, package acquisition or deployment runs during work.
 
 A role has exactly one of `profile` or `selector`, plus `policy`, `workspace` (`write`, `read`, `none`),
-`capabilities`, `engine_tools` (maximum 128 explicit names), `on_change`, and
-at most one of `daemon`, `interval_seconds`, `calendar`. `policy` is a path
+`capabilities`, `engine_tools` (maximum 128 explicit names), `on_change`,
+`decision_events` (at most 8 unique lowercase decision actions, never
+`withdraw`), and at most one of `daemon`, `interval_seconds`, `calendar`. `policy` is a path
 string or an array of path strings (e.g. shared principles plus the role file);
 parts are read as UTF-8 in order and joined with one `\n` (trailing newline
 kept), so the composed text is the prompt and the policy digest. Missing,

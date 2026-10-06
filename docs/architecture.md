@@ -142,7 +142,15 @@ pending. Author withdrawal (`mizu insight withdraw`, submitter or operator
 only) closes a pending proposal with an actor-labelled rev-bound record in
 the same decision store; it is refused over a revision-current substantive
 decision and over an unseen revision, a repeated request is a no-op, and
-`reject` keeps meaning substantive rejection. Decided (non-deferred,
+`reject` keeps meaning substantive rejection. A role with configured
+`decision_events` is additionally admitted by unacknowledged decisions routed
+to it (insight source equals role name): the dispatch delivers the current
+finding plus the reason as focused work, records the admission and the
+delivered events under the run directory, and advances a per-role acknowledged
+cursor only after successful processing, so pause, budget, concurrency, and
+restart keep their authority and nothing is lost or repeated. Withdrawn or
+superseded decisions never emit, and a substantive decision never lands on a
+withdrawn revision. Decided (non-deferred,
 revision-current) proposals older than
 `limits.retention_days` are reaped on ingest; their decisions persist in
 `decisions/` and `decision-history/`, so inbox scans stay bounded. The prompt
