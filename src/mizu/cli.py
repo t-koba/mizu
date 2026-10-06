@@ -72,7 +72,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--profile", help="Model profile for the probe")
     p.add_argument("--role", default=None, help="Read-only probe role (default: consult when present, else single role)")
     p = sub.add_parser("insight", help="Submit, list, read, decide or ingest proposals")
-    p.add_argument("action", choices=("submit", "list", "read", "decide", "ingest"), help="Proposal operation")
+    p.add_argument("action", choices=("submit", "list", "read", "decide", "ingest", "revise", "history"), help="Proposal operation")
     p.add_argument("project", help="Managed project name")
     p.add_argument("--id", help="Proposal ID for read/submit/decide")
     p.add_argument("--title", help="Proposal title for submit")
@@ -80,6 +80,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--decision", help="Decision action for decide (accept/modify/defer/reject)")
     p.add_argument("--reason", default="", help="Decision reason for decide")
     p.add_argument("--revisit", default="", help="Revisit condition for defer")
+    p.add_argument("--expected-rev", type=int, default=None, help="Compare-and-swap revision for revise")
     p = sub.add_parser("editor", help="Export a capsule or serve the Editor MCP")
     esub = p.add_subparsers(dest="editor_command", required=True)
     p = esub.add_parser("export", help="Export an immutable Editor capsule")
@@ -227,6 +228,26 @@ def _cmd_insight(config, project, args):
         if not args.id:
             raise ConfigError("--id is required")
         return project.insights.read(args.id)
+    if args.action == "history":
+        if not args.id:
+            raise ConfigError("--id is required")
+        return project.insights.history(args.id)
+    if args.action == "revise":
+        if not args.id:
+            raise ConfigError("--id is required")
+        if not args.title or args.body is None:
+            raise ConfigError("Insight revision requires --title and --body")
+        if str(args.body) == "-":
+            import sys as _sys
+            from .fs import PREVIEW_BYTES as _PREVIEW
+            body = _sys.stdin.read(_PREVIEW + 1)
+        else:
+            if args.body.stat().st_size > PREVIEW_BYTES:
+                raise Denied("Insight body file exceeds byte limit")
+            body = args.body.read_text(encoding="utf-8")
+        return project.insights.revise(args.id, source="operator", title=args.title, body=body,
+                                       base_snapshot=project.snapshots.get()["id"],
+                                       expected_rev=args.expected_rev)
     if args.action == "decide":
         if not args.id or not args.decision:
             raise ConfigError("Insight decide requires --id and --decision")

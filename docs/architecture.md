@@ -35,7 +35,7 @@ inputs. The trusted host adapter never executes model-provided host commands.
 | `protocol.py` | Tool schemas and strict parameter validation | Tool implementation semantics |
 | `sandbox.py`, `process.py` | Bounded execution, termination, cleanup | Experiment usefulness |
 | `snapshot.py` | Content objects, immutable manifests, published pointer | Semantic correctness |
-| `insights.py` | Submission identity, immutable proposals, decision history | Acceptance or rejection |
+| `insights.py` | Submission identity, revisable proposals with separate audit, decision history | Acceptance or rejection |
 | `web.py` | Allowed retrieval and external source receipts | Scientific truth |
 | `editor.py` | Snapshot export and read/propose MCP | Code editing |
 | `report.py` | Escaped static artifact (Markdown + evidence) with atomic latest pointer | Presentation, retention policy |
@@ -119,14 +119,24 @@ paused/disarmed.
 ## Insight handoff
 
 The submitting route assigns the source identity. A record contains ID, source,
-created time, base snapshot, title and Markdown body. Reusing an ID with identical
-content is safe; changing content under that ID is rejected. Original proposals
-are immutable, decisions are separate, and decision changes append history.
-Deferral requires a revisit condition. Decided (non-deferred) proposals older
-than `limits.retention_days` are reaped on ingest; their decisions persist in `decisions/` and
-`decision-history/`, so inbox scans stay bounded. The prompt offer keeps the
-newest `limits.pending_insights` proposals so recent evidence is never hidden
-behind the bound. Worker discretion applies to proposals,
+created time, base snapshot, title, Markdown body, revision identity (`rev`)
+and update time. Ordinary prompts, lists, reads and the dashboard expose only
+the current content, its current decision/evidence gap and `rev`; obsolete
+claims are replaced, never appended. The first submission creates `rev` 1.
+The original submitter may revise under the stable ID via compare-and-swap on
+`expected_rev`; identical retries are no-ops that do not advance the inbox
+generation, while a meaningful revision archives the prior record to
+`insight-revisions/<id>.r<rev>.json` and becomes pending again. Prior
+revisions are returned only by the explicit history path, never injected into
+routine context, and are durable audit like decisions (backed up, never
+pruned). Direct ID reuse with different content outside revise is rejected.
+Decisions bind to the reviewed `rev`, so a prior approval never authorizes
+changed content; deferral still requires a revisit condition and stays
+pending. Decided (non-deferred, revision-current) proposals older than
+`limits.retention_days` are reaped on ingest; their decisions persist in
+`decisions/` and `decision-history/`, so inbox scans stay bounded. The prompt
+offer keeps the newest `limits.pending_insights` proposals so recent evidence
+is never hidden behind the bound. Worker discretion applies to proposals,
 not to the operator's goal or prohibitions.
 
 Editor uploads are first atomically claimed into a private ingest directory;

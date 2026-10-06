@@ -30,7 +30,7 @@ from .snapshot import open_store
 
 #: Project members covered by backup/restore (plus backup.json on restore).
 MEMBERS = ("project.toml", "PROJECT.md", "control.json", "current.json", "snapshots", "objects",
-           "inbox", "insight-ids", "histories", ".ingest", "decisions", "decision-history", "runs", "sessions", "artifacts", "health", "observed",
+           "inbox", "insight-ids", "insight-revisions", "histories", ".ingest", "decisions", "decision-history", "runs", "sessions", "artifacts", "health", "observed",
            "maintenance", "spool", "selection")
 
 
@@ -605,7 +605,7 @@ def prune(project: Project, *, apply: bool = False, keep_artifacts: int = DEFAUL
             removed["audit"] = audit.relative_to(project.root).as_posix()
     return {"applied": apply, **removed,
             "retained": "All result/error/consultation/started/selection/usage records, snapshots, "
-                        "content objects, sessions, decisions, and proposals. "
+                        "content objects, sessions, decisions, proposals, and insight revisions. "
                         "Artifact documents beyond the kept count, dashboard generations beyond "
                         "dashboard_keep, bulky engine logs beyond operator retention, and "
                         "web-cache entries expired past cache_seconds are disposable projections; "
@@ -936,7 +936,7 @@ def audit(project: Project) -> dict:
             "insight_snapshots": len(collected["insight_ids"]),
         },
         "preview_only": True,
-        "retained": "All manifests, history generations, objects, runs, artifacts, sessions, decisions, and proposals are retained; this preview removes nothing. "
+        "retained": "All manifests, history generations, objects, runs, artifacts, sessions, decisions, proposals, and insight revisions are retained; this preview removes nothing. "
                     "Dashboard generations beyond dashboard_keep and web-cache entries expired past cache_seconds are disposable (see dashboard/sessions/web_cache); "
                     "sessions are durable audit evidence and are accounted, never reclaimed.",
     }
@@ -953,7 +953,7 @@ def reclaim(project: Project, *, apply: bool = False) -> dict:
     (sorted); use ``audit()`` for the bounded display samples.
     Bounds: same bounded reads, digest checks, and symlink skipping as
     ``audit()``; history generations are never candidates, and neither are
-    runs, artifacts, sessions, decisions, or proposals.
+    runs, artifacts, sessions, decisions, proposals, or insight revisions.
     Trust: operator-invoked maintenance; the explicit ``--apply`` invocation
     behind quiescence (paused + locks) is the grant. Candidates are
     recomputed inside the quiescent section, so a stale preview can never
@@ -974,7 +974,7 @@ def reclaim(project: Project, *, apply: bool = False) -> dict:
             "unreferenced_bytes": collected["unreferenced_bytes"],
             "orphan_bytes": sum(collected["object_sizes"][name] for name in collected["orphan"]),
             "retained": "All live/history/run/artifact/insight-referenced manifests, history generations, "
-                        "runs, artifacts, sessions, decisions, and proposals. "
+                        "runs, artifacts, sessions, decisions, proposals, and insight revisions. "
                         "Repeat audit/reclaim converges on newly orphaned objects.",
         }
     with quiescent(project):
@@ -1009,7 +1009,7 @@ def reclaim(project: Project, *, apply: bool = False) -> dict:
         removed["audit"] = record.relative_to(project.root).as_posix()
     return {"applied": True, **removed,
             "retained": "All live/history/run/artifact/insight-referenced manifests, history generations, "
-                        "runs, artifacts, sessions, decisions, and proposals. "
+                        "runs, artifacts, sessions, decisions, proposals, and insight revisions. "
                         "Repeat audit/reclaim converges on newly orphaned objects."}
 
 

@@ -553,3 +553,51 @@ class OperationsTests(Fixture):
         engine = Sandbox(self.config, self.project.root, "worker", self.project.root / "runs" / "probe")
         argv = engine.argv("n", self.project.workspace, "true", writable=False)
         self.assertIn("--user", argv)
+
+class InsightRevisionTests(Fixture):
+    def test_revise_replaces_content_and_archives_audit(self):
+        item = self.project.insights.submit(source="operator", title="T", body="v1", base_snapshot=None)
+        self.assertEqual(item["rev"], 1)
+        gen1 = self.project.insights.generation()
+        revised = self.project.insights.revise(item["id"], source="operator", title="T", body="v2", base_snapshot=None, expected_rev=1)
+        self.assertEqual(revised["rev"], 2)
+        self.assertEqual(self.project.insights.read(item["id"])["body"], "v2")
+        hist = self.project.insights.history(item["id"])
+        self.assertEqual(len(hist), 1)
+        self.assertEqual(hist[0]["body"], "v1")
+        listed = [i for i in self.project.insights.list(pending=False) if i["id"] == item["id"]][0]
+        self.assertEqual(listed["rev"], 2)
+        self.assertNotEqual(self.project.insights.generation(), gen1)
+
+    def test_noop_revise_does_not_wake(self):
+        item = self.project.insights.submit(source="operator", title="T", body="v1", base_snapshot=None)
+        gen1 = self.project.insights.generation()
+        same = self.project.insights.revise(item["id"], source="operator", title="T", body="v1", base_snapshot=None)
+        self.assertEqual(same["rev"], 1)
+        self.assertEqual(self.project.insights.history(item["id"]), [])
+        self.assertEqual(self.project.insights.generation(), gen1)
+
+    def test_revise_requires_submitter_and_cas(self):
+        item = self.project.insights.submit(source="operator", title="T", body="v1", base_snapshot=None)
+        with self.assertRaises(Denied):
+            self.project.insights.revise(item["id"], source="editor", title="T", body="v2", base_snapshot=None)
+        with self.assertRaises(Denied):
+            self.project.insights.revise(item["id"], source="operator", title="T", body="v2", base_snapshot=None, expected_rev=99)
+        with self.assertRaises(Denied):
+            self.project.insights.submit(source="operator", title="T", body="other", base_snapshot=None, insight_id=item["id"])
+
+    def test_stale_approval_becomes_pending_and_gc_keeps_it(self):
+        import datetime
+        from mizu.fs import read_json, write_json
+        item = self.project.insights.submit(source="operator", title="T", body="v1", base_snapshot=None)
+        self.project.insights.decide(item["id"], "accept", "good", "", "test")
+        self.assertEqual(self.project.insights.list(), [])
+        self.project.insights.revise(item["id"], source="operator", title="T", body="v2", base_snapshot=None)
+        self.assertIn(item["id"], [i["id"] for i in self.project.insights.list()])
+        decision_path = self.project.root / "decisions" / f"{item['id']}.json"
+        decision = read_json(decision_path)
+        ancient = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=32)
+        decision["created_at"] = ancient.isoformat()
+        write_json(decision_path, decision)
+        self.assertEqual(self.project.insights.gc_decided(), 0)
+        self.assertEqual(self.project.insights.read(item["id"])["rev"], 2)
