@@ -176,7 +176,10 @@ class Insights:
                        "superseded_at": stamped, "superseded_by_rev": current_rev + 1}
             mkdir(self.root / "insight-revisions")
             archive_path = self.root / "insight-revisions" / f"{insight_id}.r{current_rev}.json"
-            existing = None if archive_path.is_symlink() else read_json(archive_path)
+            try:
+                existing = None if archive_path.is_symlink() else read_json(archive_path)
+            except (OSError, ValueError, TypeError, AttributeError, Denied):
+                raise Denied("Insight revision archive conflict; reread the current revision")
             if existing is not None:
                 # A completed revise advances the inbox, so an archive for
                 # the still-current rev is an orphan from a crash between

@@ -627,6 +627,14 @@ class InsightRevisionTests(Fixture):
         with self.assertRaises(Denied):
             self.project.insights.revise(item["id"], source="operator", title="T", body="v2", base_snapshot=None)
 
+
+    def test_corrupt_archive_is_denied_not_crash(self):
+        from mizu.fs import mkdir
+        item = self.project.insights.submit(source="operator", title="T", body="v1", base_snapshot=None)
+        mkdir(self.project.root / "insight-revisions")
+        (self.project.root / "insight-revisions" / f"{item['id']}.r1.json").write_bytes(b"not-json{{{")
+        with self.assertRaises(Denied):
+            self.project.insights.revise(item["id"], source="operator", title="T", body="v2", base_snapshot=None)
     def test_same_content_retry_preserves_stored_run(self):
         gen1 = self.project.insights.submit(source="operator", title="T", body="v1", base_snapshot=None, run="run-1")
         gen = self.project.insights.generation()
