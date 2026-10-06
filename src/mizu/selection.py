@@ -424,25 +424,27 @@ def work_inputs(project, role, snapshot, bounds):
                   'action': event.get('action'), 'reason': _clip(event.get('reason'), cap),
                   'at': _at(event.get('decided_at'))}
                  for event in events if isinstance(event, dict)][:bounds['max_decisions']]
+    verification = snapshot.get('verification')
+    # Only the verification verdict is material: snapshot ids and outcomes
+    # turn over on every publication and must not invalidate the cache.
+    snapshot_evidence = {'verified': isinstance(verification, dict)
+                         and verification.get('passed') is True}
     # Both lists arrive oldest-first. Any validated bound combination must fit
     # the work-input budget, so over-budget documents shed oldest items first
     # (ties shed decisions before proposals, the actionable work) instead of
-    # failing at runtime. Retention is deterministic in the recorded inputs.
-    while (proposals or decisions) and len(canonical({'proposals': proposals,
-                                                      'decisions': decisions})) > MAX_WORK_BYTES:
+    # failing at runtime. The guard measures the exact returned shape, wrapper
+    # included. Retention is deterministic in the recorded inputs.
+    work = {'proposals': proposals, 'evidence': {'snapshot': snapshot_evidence,
+                                                 'decisions': decisions}}
+    while (proposals or decisions) and len(canonical(work)) > MAX_WORK_BYTES:
         if proposals and (not decisions or proposals[0]['at'] < decisions[0]['at']):
             proposals.pop(0)
         elif decisions:
             decisions.pop(0)
         else:
             proposals.pop(0)
-    verification = snapshot.get('verification')
-    # Only the verification verdict is material: snapshot ids and outcomes
-    # turn over on every publication and must not invalidate the cache.
-    evidence = {'snapshot': {'verified': isinstance(verification, dict)
-                             and verification.get('passed') is True},
-                'decisions': decisions}
-    work = {'proposals': proposals, 'evidence': evidence}
+        work = {'proposals': proposals, 'evidence': {'snapshot': snapshot_evidence,
+                                                     'decisions': decisions}}
     return bounded(work, MAX_WORK_BYTES)
 
 

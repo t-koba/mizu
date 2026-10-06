@@ -414,6 +414,23 @@ class ClassificationTests(SelectionFixture):
         result = Engine(self.config, driver=ScriptDriver(callback)).run(self.project, role.name)
         self.assertEqual(result['selection']['classification']['status'], 'completed')
 
+    def test_shedding_measures_returned_shape(self):
+        from mizu.selection import MAX_WORK_BYTES, work_inputs
+        role, spec = self.classifier()
+        spec['classifier']['inputs'] = {'max_proposals': 64, 'max_decisions': 64,
+                                         'max_text_bytes': 65536}
+        validate_selectors({'dynamic': spec}, self.config.profiles, self.file.parent)
+        bounds = spec['classifier']['inputs']
+        sizes = (65536, 65331)
+        for index, size in enumerate(sizes):
+            write_json(self.project.root/'inbox'/f'edge-{index}.json',
+                       {'id': f'edge-{index}', 'source': 'worker', 'title': f'{index}-' + 'x' * size,
+                        'body': 'bulk', 'base_snapshot': self.project.snapshots.get()['id'],
+                        'created_at': f'2026-10-06T0{index}:00:00+00:00', 'rev': 1})
+        work = work_inputs(self.project, role, self.project.snapshots.get(), bounds)
+        self.assertLessEqual(len(canonical(work)), MAX_WORK_BYTES)
+        self.assertEqual([item['id'] for item in work['proposals']], ['edge-1'])
+
     def test_inputs_bounds_validated_defaulted_and_missing_classifier(self):
         role, spec = self.classifier()
         from mizu.selection import DEFAULT_CLASSIFIER_INPUTS
