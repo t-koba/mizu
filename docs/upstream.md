@@ -1,17 +1,21 @@
 # 現行エンジンの調査と実装契約
 
 2026-10-03 に Pi 1.0.0、Codex CLI 0.160.0、Claude Code 2.1.288、
-Python Agent SDK 0.2.163 の公開仕様と配布物を確認した。実行物のバージョンは
-証跡であり、Mizu が旧実行物を判定・変換・拒否するための条件ではない。
-内部の設定・bridge・保存記録には世代番号を持たせない。
+Python Agent SDK 0.2.163 の公開仕様と配布物を確認した。2026-10-06 に公式
+stable の Pi 1.0.4 へ追随し、adapters/pi の両 Pi 依存を 1.0.4 に固定した。
+実行物のバージョンは証跡であり、Mizu が旧実行物を判定・変換・拒否する
+ための条件ではない。内部の設定・bridge・保存記録には世代番号を持たせない。
 
 ## Pi
 
-[1.0.0 の変更履歴](https://github.com/earendil-works/pi/blob/v1.0.0/packages/coding-agent/CHANGELOG.md)、
-[公開 SDK](https://github.com/earendil-works/pi/blob/v1.0.0/packages/coding-agent/docs/sdk.md)、
-[拡張 API](https://github.com/earendil-works/pi/blob/v1.0.0/packages/coding-agent/docs/extensions.md)、
-[RPC](https://github.com/earendil-works/pi/blob/v1.0.0/packages/coding-agent/docs/rpc.md)
-を参照した。実際の npm 配布物の公開型定義も確認した。
+[1.0.4 の変更履歴](https://github.com/earendil-works/pi/blob/v1.0.4/packages/coding-agent/CHANGELOG.md)、
+[公開 SDK](https://github.com/earendil-works/pi/blob/v1.0.4/packages/coding-agent/docs/sdk.md)、
+[拡張 API](https://github.com/earendil-works/pi/blob/v1.0.4/packages/coding-agent/docs/extensions.md)、
+[RPC](https://github.com/earendil-works/pi/blob/v1.0.4/packages/coding-agent/docs/rpc.md)
+を参照した。v1.0.1 から v1.0.4 の差分を評価し、Mizu が使う公開入口
+（`ModelRuntime`、`createAgentSession`、`runRpcMode`、設定・拡張・型）に
+契約破壊がないことを確認してから固定した。実際の npm 配布物の公開型定義と
+lock の整合も確認した。
 
 管理下の launcher が `ModelRuntime`、`createAgentSession`、`runRpcMode` を使用する。
 `stream` / `streamSimple` / deferred fetch、分類、画像生成の公開要求入口に
