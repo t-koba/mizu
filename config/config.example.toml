@@ -237,3 +237,8 @@ interval_seconds = 21600
 # [selectors.adaptive.classifier.attributes.difficulty]
 # type = "string"
 # values = ["easy", "hard"]
+# Bounded current-work inputs for inference (defaults shown; 0 disables).
+# [selectors.adaptive.classifier.inputs]
+# max_proposals = 8
+# max_decisions = 8
+# max_text_bytes = 2048

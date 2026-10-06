@@ -296,7 +296,10 @@ class ClassificationTests(SelectionFixture):
             'retry_seconds': 60, 'attributes': {'difficulty': {'type': 'string', 'values': ['hard', 'easy']}}}
         return self.setup_selection(spec)
 
-    def test_inference_grants_cache_budget_and_precedence(self):
+    def classifying_calls(self, driver):
+        return [call for call in driver.calls if call[0].role.workspace == 'none']
+
+    def test_explicit_labels_skip_inference_and_keep_precedence(self):
         role, _ = self.classifier()
         def callback(ctx, prompt, profile):
             if ctx.role.workspace == 'none' and ctx.role.profile == 'alternate':
@@ -310,19 +313,101 @@ class ClassificationTests(SelectionFixture):
         before = Budget(self.config.data/'budget', 100).usage()['used']
         first = engine.run(self.project, role.name, attributes={'difficulty': 'easy'})
         self.assertEqual(first['selection']['facts']['attributes']['difficulty'], 'easy')
-        self.assertEqual(len(driver.calls), 2)
-        self.assertEqual(Budget(self.config.data/'budget', 100).usage()['used'] - before, 2)
-        # Use a stable read-only role so the public state stays the same for cache reuse.
-        role = dataclasses.replace(role, workspace='none', capabilities=('finish',))
-        self.config = dataclasses.replace(self.config, roles={**self.config.roles, role.name: role})
-        engine = Engine(self.config, driver=driver)
+        self.assertEqual(first['selection']['attribute_sources']['difficulty'], 'run')
+        self.assertEqual(first['selection']['classification']['status'], 'explicit')
+        self.assertEqual(first['selection']['classification']['source'], 'explicit')
+        # No inference work unit ran: only the main execution consumed a request.
+        self.assertEqual(self.classifying_calls(driver), [])
+        self.assertEqual(len(driver.calls), 1)
+        self.assertEqual(Budget(self.config.data/'budget', 100).usage()['used'] - before, 1)
         engine.run(self.project, role.name, attributes={'difficulty': 'easy'})
-        count = len(driver.calls)
-        result = engine.run(self.project, role.name, attributes={'difficulty': 'easy'})
-        self.assertEqual(result['selection']['classification']['status'], 'cached')
-        self.assertEqual(len(driver.calls), count+1)
+        self.assertEqual(self.classifying_calls(driver), [])
         result = engine.run(self.project, role.name, attributes={'difficulty': 'hard'})
-        self.assertEqual(result['selection']['classification']['status'], 'completed')
+        self.assertEqual(result['selection']['facts']['attributes']['difficulty'], 'hard')
+        self.assertEqual(result['selection']['classification']['status'], 'explicit')
+        self.assertEqual(self.classifying_calls(driver), [])
+
+    def test_inference_cache_budget_records_and_single_use_between_units(self):
+        role, _ = self.classifier()
+        prompts = []
+        def callback(ctx, prompt, profile):
+            if ctx.role.workspace == 'none':
+                prompts.append(json.loads(prompt))
+                ctx.handle('finish', {'outcome': 'done', 'summary': '{"difficulty":"hard"}'})
+        driver = ScriptDriver(callback)
+        engine = Engine(self.config, driver=driver)
+        before = Budget(self.config.data/'budget', 100).usage()['used']
+        first = engine.run(self.project, role.name)
+        classification = first['selection']['classification']
+        self.assertEqual(classification['status'], 'completed')
+        self.assertEqual(classification['source'], 'inference')
+        self.assertIn('material inputs', classification['reason'])
+        self.assertEqual(classification['model']['requests'], 1)
+        self.assertEqual(first['selection']['facts']['attributes']['difficulty'], 'hard')
+        self.assertEqual(len(self.classifying_calls(driver)), 1)
+        self.assertEqual(Budget(self.config.data/'budget', 100).usage()['used'] - before, 2)
+        saved = read_json(self.project.root/'selection'/f'{role.name}-classification.json')
+        self.assertEqual(saved['key'], classification['key'])
+        # An unchanged second unit reuses the cache without new inference.
+        second = engine.run(self.project, role.name)
+        self.assertEqual(second['selection']['classification']['status'], 'cached')
+        self.assertEqual(second['selection']['classification']['source'], 'cache')
+        self.assertEqual(len(self.classifying_calls(driver)), 1)
+        runs = [path.parent for path in self.project.root.glob('runs/*/started.json')
+                if read_json(path).get('kind') == 'classification']
+        self.assertEqual(len(runs), 1)
+
+    def test_idle_state_churn_reuses_cache_while_new_work_reclassifies(self):
+        role, _ = self.classifier()
+        inferred = []
+        def callback(ctx, prompt, profile):
+            if ctx.role.workspace == 'none':
+                inferred.append(json.loads(prompt))
+                ctx.handle('finish', {'outcome': 'done', 'summary': '{"difficulty":"hard"}'})
+        driver = ScriptDriver(callback)
+        engine = Engine(self.config, driver=driver)
+        engine.run(self.project, role.name)
+        self.assertEqual(len(inferred), 1)
+        self.assertEqual(inferred[0]['proposals'], [])
+        # Bookkeeping state churn from an unrelated worker unit keeps the key.
+        Engine(self.config, driver=ScriptDriver()).run(self.project, 'worker')
+        result = engine.run(self.project, role.name)
+        self.assertEqual(result['selection']['classification']['status'], 'cached')
+        self.assertEqual(len(inferred), 1)
+        # A newly actionable proposal revision is material: inference runs again.
+        proposal = self.project.insights.submit(source='worker', title='Fresh risk', body='evidence',
+                                                base_snapshot=self.project.snapshots.get()['id'])
+        result = engine.run(self.project, role.name)
+        classification = result['selection']['classification']
+        self.assertEqual(classification['status'], 'completed')
+        self.assertEqual(len(inferred), 2)
+        self.assertEqual(inferred[1]['proposals'][0]['id'], proposal['id'])
+        self.assertEqual(inferred[1]['proposals'][0]['rev'], proposal['rev'])
+        # Fresh review evidence routed to the role is material as well.
+        self.project.insights.decide(proposal['id'], 'reject', 'not yet', '', role.name)
+        evidence = engine.run(self.project, role.name)['selection']['classification']
+        self.assertEqual(evidence['status'], 'completed')
+        self.assertEqual(len(inferred), 3)
+        self.assertEqual(inferred[2]['evidence']['decisions'][0]['insight'], proposal['id'])
+        self.assertIn('verified', inferred[2]['evidence']['snapshot'])
+
+    def test_inputs_bounds_validated_defaulted_and_missing_classifier(self):
+        role, spec = self.classifier()
+        from mizu.selection import DEFAULT_CLASSIFIER_INPUTS
+        self.assertEqual(spec['classifier']['inputs'], DEFAULT_CLASSIFIER_INPUTS)
+        spec['classifier']['inputs'] = {'max_proposals': 0, 'max_decisions': 2, 'max_text_bytes': 256}
+        validate_selectors({'dynamic': spec}, self.config.profiles, self.file.parent)
+        self.assertEqual(spec['classifier']['inputs']['max_proposals'], 0)
+        for bad in ({'max_proposals': 65}, {'max_text_bytes': 100}, {'unknown': 1},
+                    {'max_decisions': 'many'}):
+            broken = copy.deepcopy(spec)
+            broken['classifier']['inputs'] = bad
+            with self.assertRaises(ConfigError):
+                validate_selectors({'dynamic': broken}, self.config.profiles, self.file.parent)
+        plain = specification()
+        role, _ = self.setup_selection(plain)
+        result = Engine(self.config, driver=ScriptDriver()).run(self.project, role.name)
+        self.assertIsNone(result['selection']['classification'])
 
     def test_classifier_invalid_output_wait_retry_and_preview(self):
         role, _ = self.classifier('wait')
@@ -358,9 +443,12 @@ class ClassificationTests(SelectionFixture):
         def callback(ctx, *_):
             if ctx.role.workspace == 'none':
                 ctx.handle('finish', {'outcome': 'done', 'summary': '{"difficulty":"hard"}'})
-        result = Engine(self.config, driver=ScriptDriver(callback)).run(self.project, role.name)
+        driver = ScriptDriver(callback)
+        result = Engine(self.config, driver=driver).run(self.project, role.name)
         self.assertEqual(result['selection']['facts']['attributes']['difficulty'], 'easy')
         self.assertEqual(result['selection']['attribute_sources']['difficulty'], 'rule:0')
+        self.assertEqual(result['selection']['classification']['status'], 'explicit')
+        self.assertEqual(self.classifying_calls(driver), [])
 
     def test_classifier_and_work_share_daily_budget(self):
         role, _ = self.classifier()

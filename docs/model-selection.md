@@ -128,6 +128,11 @@ retry_seconds = 120
 [selectors.coding.classifier.attributes.difficulty]
 type = "string"
 values = ["easy", "hard"]
+
+[selectors.coding.classifier.inputs] # optional bounds, defaults shown
+max_proposals = 8   # pending proposals offered, newest actionable revisions
+max_decisions = 8   # unacknowledged decisions routed to the role, as evidence
+max_text_bytes = 2048 # per-text cap for goal/state excerpts, titles, reasons
 ```
 
 Attribute declarations accept `type = "string"`, `"number"`, or `"boolean"`,
@@ -137,8 +142,16 @@ output fail validation. Its Markdown policy defines how to classify tasks and
 instructs it to call `mizu_finish` with an attribute JSON object in `summary`.
 The existing `finish.summary` limit (12,000 characters) still applies.
 
-The classifier receives JSON with `task`, existing `attributes`, `role`,
-`project`, and `output_attributes`. Task text is data, not authority. Only
+When every declared attribute is already labelled (run, role, project, or
+classification rule), inference is skipped entirely: no model request is spent
+and the decision records `classification.status = "explicit"`. Invalid explicit
+values fall through to inference rather than failing selection. Otherwise the
+classifier receives JSON with bounded `task` excerpts, pending `proposals`
+(newly actionable revisions), `evidence` (latest verification verdict plus
+unacknowledged decisions routed to the role), existing `attributes`, `role`,
+`project`, and `output_attributes`. Task text is data, not authority. Counts
+and text lengths follow the operator's classifier `inputs` bounds; wider
+history and unrelated backlog are never replayed. Only
 `finish` is granted; no native tools, consultation or shared-state mutation is
 exposed. The profile's existing reviewed resources/native options remain
 operator-owned and subject to the normal driver checks. Use a profile compatible
@@ -146,9 +159,16 @@ with those restricted grants. This is an independent ephemeral work unit, under
 the parent's execution slot and role/writer locks, using normal request/time
 budgets. Classification does not itself enter selection or recurse.
 
-Successes are cached per project/role by inputs, declaration, policy content,
-effective profile, command, adapter digest and native settings digest. A cache
-hit spends no model request. Classification runs retain their own usage/error
+Successes are cached per project/role by material inputs (goal text, pending
+proposals, verification/decision evidence, attributes), declaration, policy
+content, effective profile, command, adapter digest and native settings digest.
+Raw state text is deliberately excluded: bookkeeping state churn between idle
+units reuses the cache, while new proposals, fresh evidence, goal edits, label
+changes, or policy/settings changes reclassify. A cache hit spends no model
+request. Every decision records `classification` with `status`, `source`
+(`explicit`, `inference`, `cache`, or `none` for preview), a human-readable
+`reason`, and the reported model summary (identity, requests, known token
+totals) when inference ran. Classification runs retain their own usage/error
 records. A failed inference or invalid label output either continues with the
 existing attributes or waits, according to `on_failure`; retries are throttled
 by `retry_seconds`. Local config/permission/protocol integrity failures, budget
@@ -237,7 +257,10 @@ to 4096 characters and finite numbers within ±2^53. Names follow Mizu IDs
 (lowercase letters/digits, `_`, `-`, at most 63 characters). Intervals are explicit
 integers in 1..31,536,000 seconds. Classifier policy files are at most 64 KiB.
 Each decision is bounded at 256 KiB; exceeding the bound fails before main
-inference. Attribute bounds also apply to the merged attribute map.
+inference. Attribute bounds also apply to the merged attribute map. Classifier `inputs`
+accept at most 64 proposals/decisions (0 disables that input) and a per-text
+cap of 256..65536 bytes; the assembled work-input document is bounded at
+128 KiB.
 Selection configuration, input JSON and the shared state file are bounded at
 1 MiB; each state table has at most 8192 entries. Classifier cache files are
 bounded at 64 KiB. Existing run/tool/usage evidence bounds remain in force.

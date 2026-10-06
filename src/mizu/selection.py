@@ -11,6 +11,14 @@ MAX_BYTES = 1024 * 1024
 MAX_ITEMS = 64
 UNKNOWN = object()
 
+#: Default bounds for classifier work inputs (operator policy may override
+#: per classifier through its `inputs` table; 0 disables that input).
+DEFAULT_CLASSIFIER_INPUTS = {'max_proposals': 8, 'max_decisions': 8, 'max_text_bytes': 2048}
+#: Upper bound on the assembled work-input document itself.
+MAX_WORK_BYTES = 131072
+#: Decision actions that count as review evidence (withdrawals never inform routing).
+EVIDENCE_ACTIONS = ('accept', 'modify', 'defer', 'reject')
+
 
 def table(value, allowed, where):
     if not isinstance(value, dict) or set(value) - set(allowed):
@@ -189,7 +197,7 @@ def validate_selectors(value, profiles, base):
                 raise ConfigError('until must reference error.retry_at')
         if 'classifier' in spec:
             classifier = spec['classifier']
-            table(classifier, {'profile', 'policy', 'attributes', 'on_failure', 'retry_seconds'}, 'classifier')
+            table(classifier, {'profile', 'policy', 'attributes', 'on_failure', 'retry_seconds', 'inputs'}, 'classifier')
             if not isinstance(classifier.get('profile'), str) or classifier['profile'] not in profiles:
                 raise ConfigError('Classifier requires a fixed configured profile')
             if classifier.get('on_failure') not in ('continue', 'wait'):
@@ -203,6 +211,16 @@ def validate_selectors(value, profiles, base):
             if not path.is_file() or path.stat().st_size > 65536:
                 raise ConfigError('Classifier policy must be a file of at most 64 KiB')
             classifier['policy'] = str(path)
+            raw_inputs = classifier.get('inputs', {})
+            if not isinstance(raw_inputs, dict) or set(raw_inputs) - set(DEFAULT_CLASSIFIER_INPUTS):
+                raise ConfigError('Classifier inputs must name known bounds')
+            merged = {**DEFAULT_CLASSIFIER_INPUTS, **raw_inputs}
+            for key in ('max_proposals', 'max_decisions'):
+                if type(merged[key]) is not int or not 0 <= merged[key] <= MAX_ITEMS:
+                    raise ConfigError('Classifier item bounds must be integers in 0..64')
+            if type(merged['max_text_bytes']) is not int or not 256 <= merged['max_text_bytes'] <= 65536:
+                raise ConfigError('Classifier text bound must be an integer in 256..65536')
+            classifier['inputs'] = merged
             fields = classifier.get('attributes')
             if not isinstance(fields, dict) or not 1 <= len(fields) <= MAX_ITEMS:
                 raise ConfigError('Classifier requires 1..64 attribute definitions')
@@ -367,6 +385,48 @@ def base_facts(project, role, snapshot, explicit=None):
     attributes(attrs)
     return {'project': project.name, 'role': role.name, 'attributes': attrs,
             'task': {'goal': project.goal, 'state': snapshot.get('state', '')}}, sources
+
+
+def _clip(text, maximum):
+    if not isinstance(text, str):
+        return ''
+    return text if len(text) <= maximum else text[:maximum]
+
+
+def work_inputs(project, role, snapshot, bounds):
+    """Bounded current-work inputs for inference, not for rule predicates.
+
+    Returns ``{'proposals': [...], 'evidence': {...}}``: pending (actionable)
+    proposals with their current revisions, plus the latest snapshot
+    verification and unacknowledged decisions routed to this role. Counts and
+    text lengths follow the operator's classifier ``inputs`` bounds; unreadable
+    stores read as absent rather than failing selection. History beyond these
+    windows is never replayed.
+    """
+    cap = bounds['max_text_bytes']
+    try:
+        pending = project.insights.list(pending=True, limit=bounds['max_proposals'])
+    except Exception:
+        pending = []
+    proposals = [{'id': item.get('id'), 'rev': item.get('rev'), 'source': item.get('source'),
+                  'title': _clip(item.get('title'), cap)}
+                 for item in pending if isinstance(item, dict)][:bounds['max_proposals']]
+    try:
+        events = project.insights.decision_events(role.name, EVIDENCE_ACTIONS,
+                                                  limit=bounds['max_decisions'])
+    except Exception:
+        events = []
+    decisions = [{'insight': event.get('insight'), 'rev': event.get('rev'),
+                  'action': event.get('action'), 'reason': _clip(event.get('reason'), cap)}
+                 for event in events if isinstance(event, dict)][:bounds['max_decisions']]
+    verification = snapshot.get('verification')
+    # Only the verification verdict is material: snapshot ids and outcomes
+    # turn over on every publication and must not invalidate the cache.
+    evidence = {'snapshot': {'verified': isinstance(verification, dict)
+                             and verification.get('passed') is True},
+                'decisions': decisions}
+    work = {'proposals': proposals, 'evidence': evidence}
+    return bounded(work, MAX_WORK_BYTES)
 
 
 def rule_attributes(spec, facts, sources):
