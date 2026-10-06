@@ -100,6 +100,8 @@ def collect(project) -> dict:
             "created_at": record.get("created_at"),
             "reason": _truncate(str(record.get("reason", "")), maximum=reason_chars),
         }
+        if record.get("actor"):
+            entry["actor"] = record.get("actor")
         key = (record_time(entry.get("created_at")), str(entry.get("id") or ""), path.name)
         value = (*key, entry)
         if len(recent) < max_decisions:

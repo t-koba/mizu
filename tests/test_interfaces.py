@@ -643,3 +643,58 @@ class InsightRevisionTests(Fixture):
         self.assertEqual(self.project.insights.read(gen1["id"])["run"], "run-1")
         self.assertEqual(self.project.insights.history(gen1["id"]), [])
         self.assertEqual(self.project.insights.generation(), gen)
+
+class InsightWithdrawalTests(Fixture):
+    def test_submitter_withdraw_closes_with_actor_label(self):
+        item = self.project.insights.submit(source="editor", title="T", body="v1", base_snapshot=None)
+        gen = self.project.insights.generation()
+        record = self.project.insights.withdraw(item["id"], source="editor", reason="no longer needed")
+        self.assertEqual((record["action"], record["actor"], record["rev"]), ("withdraw", "editor", 1))
+        self.assertEqual(self.project.insights.list(), [])
+        listed = [i for i in self.project.insights.list(pending=False) if i["id"] == item["id"]][0]
+        self.assertEqual((listed["decision"]["action"], listed["decision"]["actor"]), ("withdraw", "editor"))
+        self.assertEqual(self.project.insights.generation(), gen)
+
+    def test_operator_may_withdraw_others_but_not_vice_versa(self):
+        item = self.project.insights.submit(source="editor", title="T", body="v1", base_snapshot=None)
+        record = self.project.insights.withdraw(item["id"], source="operator", reason="out of scope")
+        self.assertEqual(record["actor"], "operator")
+        other = self.project.insights.submit(source="operator", title="U", body="v1", base_snapshot=None)
+        with self.assertRaises(Denied):
+            self.project.insights.withdraw(other["id"], source="editor", reason="seizing control")
+        with self.assertRaises(Denied):
+            self.project.insights.decide(other["id"], "withdraw", "via decide", "", "test")
+
+    def test_repeated_withdraw_is_idempotent(self):
+        item = self.project.insights.submit(source="operator", title="T", body="v1", base_snapshot=None)
+        first = self.project.insights.withdraw(item["id"], source="operator", reason="done")
+        before = len(list((self.project.root / "decision-history").glob("*.json")))
+        second = self.project.insights.withdraw(item["id"], source="operator", reason="done again")
+        self.assertEqual(second, first)
+        self.assertEqual(len(list((self.project.root / "decision-history").glob("*.json"))), before)
+
+    def test_withdraw_refuses_decided_but_allows_deferred_and_reopens_on_revise(self):
+        item = self.project.insights.submit(source="operator", title="T", body="v1", base_snapshot=None)
+        self.project.insights.decide(item["id"], "accept", "good", "", "test")
+        with self.assertRaises(Denied):
+            self.project.insights.withdraw(item["id"], source="operator", reason="retract approval")
+        other = self.project.insights.submit(source="operator", title="U", body="v1", base_snapshot=None)
+        self.project.insights.decide(other["id"], "defer", "later", "condition", "test")
+        self.project.insights.withdraw(other["id"], source="operator", reason="moot")
+        self.assertEqual(self.project.insights.list(), [])
+        with self.assertRaises(Denied):
+            self.project.insights.withdraw(other["id"], source="operator", reason="stale", expected_rev=99)
+        self.project.insights.revise(other["id"], source="operator", title="U", body="v2", base_snapshot=None)
+        self.assertIn(other["id"], [i["id"] for i in self.project.insights.list()])
+
+    def test_withdrawn_proposal_is_gc_eligible(self):
+        import datetime
+        from mizu.fs import read_json, write_json
+        item = self.project.insights.submit(source="operator", title="T", body="v1", base_snapshot=None)
+        self.project.insights.withdraw(item["id"], source="operator", reason="moot")
+        decision_path = self.project.root / "decisions" / f"{item['id']}.json"
+        decision = read_json(decision_path)
+        ancient = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=32)
+        decision["created_at"] = ancient.isoformat()
+        write_json(decision_path, decision)
+        self.assertEqual(self.project.insights.gc_decided(), 1)

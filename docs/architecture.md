@@ -130,7 +130,7 @@ generation, while a meaningful revision archives the prior record to
 revise converges on retry: an orphan archive for the still-current rev is
 overwritten, and a same-content retry preserves the stored `run` (revision
 provenance recorded only on meaningful change). The current transport
-exposes revise/history only to the operator (`mizu insight revise/history`);
+exposes revise/history/withdraw only to the operator (`mizu insight revise/history/withdraw`);
 other sources supersede obsolete claims via a new insight until a reviewed
 release adds an owner revise transport. Prior
 revisions are returned only by the explicit history path, never injected into
@@ -138,7 +138,12 @@ routine context, and are durable audit like decisions (backed up, never
 pruned). Direct ID reuse with different content outside revise is rejected.
 Decisions bind to the reviewed `rev`, so a prior approval never authorizes
 changed content; deferral still requires a revisit condition and stays
-pending. Decided (non-deferred, revision-current) proposals older than
+pending. Author withdrawal (`mizu insight withdraw`, submitter or operator
+only) closes a pending proposal with an actor-labelled rev-bound record in
+the same decision store; it is refused over a revision-current substantive
+decision and over an unseen revision, a repeated request is a no-op, and
+`reject` keeps meaning substantive rejection. Decided (non-deferred,
+revision-current) proposals older than
 `limits.retention_days` are reaped on ingest; their decisions persist in
 `decisions/` and `decision-history/`, so inbox scans stay bounded. The prompt
 offer keeps the newest `limits.pending_insights` proposals so recent evidence

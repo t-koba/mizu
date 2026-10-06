@@ -131,6 +131,17 @@ class Insights:
         without bumping rev, archiving, or waking; ``run`` is provenance
         recorded only on meaningful change, so a same-content retry with a
         different ``run`` preserves the stored ``run`` and repairs identity.
+Withdrawal contract (operator EDITOR 6fa4163d): author withdrawal is distinct
+from substantive rejection. ``withdraw`` closes a pending proposal with an
+actor-labelled (submitter source or operator) rev-bound record in the same
+decision store, so ordinary lists read only the current disposition while
+``decision-history/`` keeps the audit. Only the original submitter or the
+operator may withdraw; the worker never withdraws others' submissions.
+Withdrawal is refused over a revision-current substantive decision (accept,
+modify, reject) and over an unseen revision; a deferral stays pending so it
+may still be withdrawn. A repeated withdrawal at the same rev is a no-op.
+``reject`` keeps meaning substantive rejection; a reason may reference a
+replacement insight without implying rejected substance.
         Evidence: prior record archived to
         ``insight-revisions/<id>.r<rev>.json`` with superseded markers;
         inbox generation advances only on meaningful change. Crash recovery:
@@ -299,6 +310,52 @@ class Insights:
             rev = _rev_of(current)
             record = {"id": insight_id, "action": action, "reason": reason, "revisit": revisit,
                       "run": run, "created_at": now(), "rev": rev}
+            with lock(self.root / "locks" / "decisions.lock"):
+                write_json(self.root / "decision-history" / f"{uuid.uuid4().hex}.json", record, exclusive=True)
+                write_json(self.root / "decisions" / f"{insight_id}.json", record)
+        return record
+
+    def withdraw(self, insight_id: str, *, source: str, reason: str,
+                 expected_rev: int | None = None, run: str | None = None) -> dict:
+        """Close a pending proposal by author withdrawal, not rejection.
+
+        Schema: nonempty reason; ``expected_rev`` (when given) must equal
+        the current rev (compare-and-swap). Trust: ``source`` must equal
+        the original submitter or be ``operator``; anything else is Denied,
+        so the worker never withdraws others' submissions. Retry: a
+        repeated withdrawal at the same rev returns the stored record
+        unchanged. Evidence: rev-bound record with the withdrawing actor in
+        ``decisions/`` plus an entry in ``decision-history/``; ordinary
+        lists expose only the current disposition. Failure: Denied on
+        unknown ID, unauthorized source, revision conflict, a
+        revision-current substantive decision (withdrawal never replaces
+        accept/modify/reject history), or empty reason. A deferral stays
+        pending and may still be withdrawn; a later revision reopens the
+        topic as pending.
+        """
+        identifier(source)
+        identifier(insight_id)
+        if not isinstance(reason, str) or not reason.strip():
+            raise Denied("Withdrawal requires a reason")
+        if expected_rev is not None and (type(expected_rev) is not int or expected_rev < 1):
+            raise Denied("expected_rev must be a positive integer")
+        with lock(self.root / "locks" / "insights.lock"):
+            current = self.read(insight_id)
+            if current.get("source") != source and source != "operator":
+                raise Denied("Only the submitter or operator may withdraw this insight")
+            rev = _rev_of(current)
+            if expected_rev is not None and expected_rev != rev:
+                raise Denied("Insight revision conflict; reread the current revision")
+            raw = self.root / "decisions" / f"{insight_id}.json"
+            existing = None if raw.is_symlink() else read_json(raw)
+            effective = _effective_decision(rev, existing)
+            if effective is not None and effective.get("action") != "defer":
+                if effective.get("action") == "withdraw":
+                    return effective
+                raise Denied("Insight already decided; withdrawal cannot replace a substantive decision")
+            record = {"id": insight_id, "action": "withdraw", "actor": source,
+                      "reason": reason, "revisit": "", "run": run,
+                      "created_at": now(), "rev": rev}
             with lock(self.root / "locks" / "decisions.lock"):
                 write_json(self.root / "decision-history" / f"{uuid.uuid4().hex}.json", record, exclusive=True)
                 write_json(self.root / "decisions" / f"{insight_id}.json", record)
