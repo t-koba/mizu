@@ -109,6 +109,18 @@ Per-threat mitigations:
 | Cost | Request admission counts plus provider-side caps and bill inspection |
 | Prompt injection | External prose is data, never authority: no capability, goal, tool, model or budget change |
 
+Container-escape checklist (external benchmark mapping): nested-sandbox CTF
+categories such as privileged containers, host PID namespace, added
+capabilities, and mounted control sockets map to Mizu posture as follows.
+The fixed floor is mechanism; the rest is operator policy plus TCB.
+
+| Benchmark category | Mizu posture |
+|---|---|
+| Privileged container, added capabilities, host PID namespace | Excluded by the fixed mechanism floor (`--read-only`, `--cap-drop=ALL`, `--security-opt=no-new-privileges`, user mapping, resource bounds in `src/mizu/sandbox.py`); argv construction has no privileged fallback and no `--privileged`, `--pid=host`, or `cap-add` |
+| Mounted control socket | No Docker/Podman socket is ever mounted; extra mounts stay explicit operator choice, read-only, and refused for container-interior system targets |
+| Network namespace escape | Container network is `none` by default; any other `[sandbox] network` is an explicit operator grant that accepts egress and loopback reachability |
+| Runtime TCB floor | `doctor --sandbox` proves enforcement with a live smoke probe and records the runtime version string but enforces no minimum: keep the runtime at or above runc 1.3.6/1.4.3/1.5.0 or crun 1.28 (CVE-2026-41579, CVE-2026-47766). A rootless container shares a kernel and is not sufficient isolation for arbitrary high-risk malware; use a disposable VM or stronger separately reviewed boundary for that threat model |
+
 Egress facts: only HTTPS, port 443 and exact allowed hosts are accepted. Userinfo,
 control characters and unsupported URLs are rejected; fragments are stripped
 client-side and never sent. DNS answers must all be
