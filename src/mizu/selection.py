@@ -404,12 +404,16 @@ def work_inputs(project, role, snapshot, bounds):
     windows is never replayed.
     """
     cap = bounds['max_text_bytes']
+
+    def _at(value):
+        return value if isinstance(value, str) else ''
+
     try:
         pending = project.insights.list(pending=True, limit=bounds['max_proposals'])
     except Exception:
         pending = []
     proposals = [{'id': item.get('id'), 'rev': item.get('rev'), 'source': item.get('source'),
-                  'title': _clip(item.get('title'), cap)}
+                  'title': _clip(item.get('title'), cap), 'at': _at(item.get('created_at'))}
                  for item in pending if isinstance(item, dict)][:bounds['max_proposals']]
     try:
         events = project.insights.decision_events(role.name, EVIDENCE_ACTIONS,
@@ -417,8 +421,21 @@ def work_inputs(project, role, snapshot, bounds):
     except Exception:
         events = []
     decisions = [{'insight': event.get('insight'), 'rev': event.get('rev'),
-                  'action': event.get('action'), 'reason': _clip(event.get('reason'), cap)}
+                  'action': event.get('action'), 'reason': _clip(event.get('reason'), cap),
+                  'at': _at(event.get('decided_at'))}
                  for event in events if isinstance(event, dict)][:bounds['max_decisions']]
+    # Both lists arrive oldest-first. Any validated bound combination must fit
+    # the work-input budget, so over-budget documents shed oldest items first
+    # (ties shed decisions before proposals, the actionable work) instead of
+    # failing at runtime. Retention is deterministic in the recorded inputs.
+    while (proposals or decisions) and len(canonical({'proposals': proposals,
+                                                      'decisions': decisions})) > MAX_WORK_BYTES:
+        if proposals and (not decisions or proposals[0]['at'] < decisions[0]['at']):
+            proposals.pop(0)
+        elif decisions:
+            decisions.pop(0)
+        else:
+            proposals.pop(0)
     verification = snapshot.get('verification')
     # Only the verification verdict is material: snapshot ids and outcomes
     # turn over on every publication and must not invalidate the cache.

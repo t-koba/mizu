@@ -260,7 +260,10 @@ Each decision is bounded at 256 KiB; exceeding the bound fails before main
 inference. Attribute bounds also apply to the merged attribute map. Classifier `inputs`
 accept at most 64 proposals/decisions (0 disables that input) and a per-text
 cap of 256..65536 bytes; the assembled work-input document is bounded at
-128 KiB.
+128 KiB. Every validated bound combination fits that budget: over-budget
+documents shed oldest items first (ties shed decisions before proposals, the
+actionable work), so a large configured window degrades to the newest workload
+instead of failing at runtime.
 Selection configuration, input JSON and the shared state file are bounded at
 1 MiB; each state table has at most 8192 entries. Classifier cache files are
 bounded at 64 KiB. Existing run/tool/usage evidence bounds remain in force.

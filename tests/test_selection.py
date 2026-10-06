@@ -391,6 +391,29 @@ class ClassificationTests(SelectionFixture):
         self.assertEqual(inferred[2]['evidence']['decisions'][0]['insight'], proposal['id'])
         self.assertIn('verified', inferred[2]['evidence']['snapshot'])
 
+    def test_max_bounds_shed_oldest_instead_of_failing(self):
+        from mizu.selection import MAX_WORK_BYTES, work_inputs
+        role, spec = self.classifier()
+        spec['classifier']['inputs'] = {'max_proposals': 64, 'max_decisions': 64,
+                                         'max_text_bytes': 65536}
+        validate_selectors({'dynamic': spec}, self.config.profiles, self.file.parent)
+        bounds = spec['classifier']['inputs']
+        for index in range(3):
+            write_json(self.project.root/'inbox'/f'heavy-{index}.json',
+                       {'id': f'heavy-{index}', 'source': 'worker', 'title': f'{index}-' + 'x' * 50000,
+                        'body': 'bulk', 'base_snapshot': self.project.snapshots.get()['id'],
+                        'created_at': f'2026-10-06T0{index}:00:00+00:00', 'rev': 1})
+        snapshot = self.project.snapshots.get()
+        work = work_inputs(self.project, role, snapshot, bounds)
+        self.assertLessEqual(len(canonical(work)), MAX_WORK_BYTES)
+        # Oldest-first shedding retains the newest workload.
+        self.assertEqual([item['id'] for item in work['proposals']], ['heavy-1', 'heavy-2'])
+        def callback(ctx, *_):
+            if ctx.role.workspace == 'none':
+                ctx.handle('finish', {'outcome': 'done', 'summary': '{"difficulty":"hard"}'})
+        result = Engine(self.config, driver=ScriptDriver(callback)).run(self.project, role.name)
+        self.assertEqual(result['selection']['classification']['status'], 'completed')
+
     def test_inputs_bounds_validated_defaulted_and_missing_classifier(self):
         role, spec = self.classifier()
         from mizu.selection import DEFAULT_CLASSIFIER_INPUTS
