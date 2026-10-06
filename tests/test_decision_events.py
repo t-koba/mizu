@@ -118,3 +118,56 @@ class DecisionTriggerConfigTests(Fixture):
 
 if __name__ == "__main__":
     raise SystemExit(unittest.main())
+
+
+class DeferRefinementTests(Fixture):
+    def test_defer_routes_once_with_gap_and_never_repeats_while_open(self):
+        config = _trigger_config(self.config, events=("reject", "defer"))
+        engine = Engine(config, driver=ScriptDriver())
+        engine.run(self.project, "reviewer")
+        item = self.project.insights.submit(source="reviewer", title="Finding", body="v1",
+                                            base_snapshot=self.project.snapshots.get()["id"])
+        self.project.insights.decide(item["id"], "defer", "needs field data", "observe X in the wild", "test")
+        events = self.project.insights.decision_events("reviewer", ("reject", "defer"))
+        self.assertEqual(len(events), 1)
+        self.assertEqual((events[0]["action"], events[0]["reason"]), ("defer", "needs field data"))
+        admitted = engine.run(self.project, "reviewer")
+        started = read_json(self.project.root / "runs" / admitted["run"] / "started.json")
+        self.assertEqual(started["admission"], "decision")
+        # One focused reconsideration only: still deferred, still unchanged code, no new event.
+        self.assertEqual(self.project.insights.decision_events("reviewer", ("reject", "defer")), [])
+        self.assertEqual(engine.run(self.project, "reviewer").get("skipped"), "unchanged")
+
+    def test_meaningful_revision_wakes_writer_with_stale_gap_visible(self):
+        from mizu.runtime import should_run
+        self.project.set_control(armed=True, paused=False, wake_generation="")
+        item = self.project.insights.submit(source="reviewer", title="Finding", body="v1",
+                                            base_snapshot=self.project.snapshots.get()["id"])
+        self.project.insights.decide(item["id"], "defer", "needs field data", "observe X", "test")
+        captured = self.project.snapshots.capture_files(self.project.workspace)
+        republished = self.project.snapshots.create(
+            captured, goal=self.project.goal, state="Writer parked.", run=None,
+            outcome="wait", summary="Parked with deferred finding.",
+            inbox_seen=self.project.insights.generation())
+        self.project.snapshots.publish(republished)
+        snap = self.project.snapshots.get()
+        self.assertFalse(should_run(self.project, {**snap, "outcome": "wait"}))
+        self.project.insights.revise(item["id"], source="reviewer", title="Finding",
+                                     body="v2 with field data", base_snapshot=None)
+        # The generation change wakes the writer; the old gap stays attached
+        # with its rev so the writer reassesses a visibly stale decision.
+        self.assertTrue(should_run(self.project, {**snap, "outcome": "wait"}))
+        pending = [i for i in self.project.insights.list() if i["id"] == item["id"]][0]
+        self.assertEqual(pending["rev"], 2)
+        self.assertEqual((pending["decision"]["action"], pending["decision"]["rev"]), ("defer", 1))
+
+    def test_deferred_gap_stays_visible_with_revisit(self):
+        from mizu.dashboard import collect
+        item = self.project.insights.submit(source="reviewer", title="Finding", body="v1",
+                                            base_snapshot=self.project.snapshots.get()["id"])
+        self.project.insights.decide(item["id"], "defer", "blocked on release", "wait for v2", "test")
+        core = collect(self.project)
+        entries = [e for e in core["pending_insights"] if e["id"] == item["id"]]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual((entries[0]["decision"]["action"], entries[0]["decision"]["revisit"]["text"]),
+                         ("defer", "wait for v2"))

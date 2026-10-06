@@ -150,7 +150,10 @@ delivered events under the run directory, and advances a per-role acknowledged
 cursor only after successful processing, so pause, budget, concurrency, and
 restart keep their authority and nothing is lost or repeated. Withdrawn or
 superseded decisions never emit, and a substantive decision never lands on a
-withdrawn revision. Decided (non-deferred,
+withdrawn revision. Deferral delivery is one-shot per decision: the revisit
+prose is never parsed as an executable condition, so dependency waits make no
+repeated calls while open and wake only on a new revision, a new proposal, or
+an explicit operator wake. Decided (non-deferred,
 revision-current) proposals older than
 `limits.retention_days` are reaped on ingest; their decisions persist in
 `decisions/` and `decision-history/`, so inbox scans stay bounded. The prompt
