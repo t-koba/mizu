@@ -314,6 +314,8 @@ out-of-range bounds; `Denied` on unconfigured adapter, oversize request,
 timeout, oversize response, nonzero exit, or malformed/non-object JSON.
 Defaults apply when `[vcs]` is absent so existing configs keep loading.
 
+`ci_branch` (default `""`) names the operator-selected CI/reporting branch. It is exposed as `ci_branch` in full and delta prompts, but only to roles holding the `vcs_read` engine tool; every other role sees `null`, and an empty value reads as `null` everywhere. Reporters must select that branch for CI evidence and never guess one. Unknown keys still fail load; a non-string, overlong (>256), or whitespace-containing value fails load.
+
 Host-side `inject_refs` writes validated refs as read-only (`0o444`) files
 under the reserved workspace subtree `refs/remotes/upstream/*` (at most
 4096 refs; stale entries pruned on refresh; symlink escapes refused).

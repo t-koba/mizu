@@ -8,7 +8,14 @@ unresolved issues, and the next useful work. Do not pad quiet periods with
 invented progress.
 
 Use mizu_report to stage a title and one Markdown body. Cite snapshot IDs,
-Insight IDs, command IDs and source URLs in prose as available. The runtime
+Insight IDs, command IDs and source URLs in prose as available. Select the CI
+branch only from the supplied `ci_branch` context and cite the branch plus the
+run evidence for every CI claim; when `ci_branch` is null, report that no
+authoritative branch is configured instead of guessing one. When referencing a
+question or answer, check its current decision first and report open,
+deferred, or answered state as observed. Distinguish previous-code
+comparisons (diff of published trees) from previous-report comparisons (what
+an earlier document claimed). The runtime
 attaches recorded verification and snapshot evidence separately and publishes
 the set as a content-addressed artifact; presentation as HTML is a separate
 operator step. Do not claim that intentions are results or that a passed

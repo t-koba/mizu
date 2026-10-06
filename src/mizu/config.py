@@ -762,11 +762,11 @@ def load(file: Path) -> Config:
         number(web[k], f"web.{k}", 1, 16777216)
     web["intranet"] = boolean(web["intranet"], "web.intranet")
     vcs = data.get("vcs", {})
-    keys(vcs, {"command", "timeout_seconds", "max_bytes", "poll_enabled",
+    keys(vcs, {"command", "timeout_seconds", "max_bytes", "ci_branch", "poll_enabled",
                "poll_interval_seconds", "poll_max_branches",
                "poll_fetch_timeout_seconds", "poll_status_timeout_seconds"}, "vcs")
     vcs = {"command": [], "timeout_seconds": 20,
-           "max_bytes": 524288, "poll_enabled": False,
+           "max_bytes": 524288, "ci_branch": "", "poll_enabled": False,
            "poll_interval_seconds": 300, "poll_max_branches": 4,
            "poll_fetch_timeout_seconds": 30,
            "poll_status_timeout_seconds": 15, **vcs}
@@ -775,6 +775,9 @@ def load(file: Path) -> Config:
         raise ConfigError("vcs.command must be a nonempty argv array without newlines")
     for k in ("timeout_seconds", "max_bytes"):
         number(vcs[k], f"vcs.{k}", 1, 16777216)
+    vcs["ci_branch"] = string(vcs["ci_branch"], "vcs.ci_branch")
+    if vcs["ci_branch"] and (len(vcs["ci_branch"]) > 256 or any(c.isspace() for c in vcs["ci_branch"])):
+        raise ConfigError("vcs.ci_branch must be empty or a branch name without whitespace (at most 256 chars)")
     vcs["poll_enabled"] = boolean(vcs["poll_enabled"], "vcs.poll_enabled")
     number(vcs["poll_interval_seconds"], "vcs.poll_interval_seconds", 15, 86400)
     number(vcs["poll_max_branches"], "vcs.poll_max_branches", 1, 64)
