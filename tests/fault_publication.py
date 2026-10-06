@@ -8,8 +8,12 @@ from mizu import fs
 from mizu.snapshot import Snapshots
 
 
-def main():
-    root, mode, point = Path(sys.argv[1]), sys.argv[2], int(sys.argv[3])
+def run_case(root, mode, point):
+    """One publish attempt with a fault at the point-th boundary.
+
+    Returns the boundary events observed. Crash mode never returns: the
+    process exits mid-publish to simulate death between boundaries.
+    """
     events = []
     def boundary(name, phase):
         events.append([name, phase])
@@ -48,7 +52,23 @@ def main():
     finally:
         for name,value in originals.items():setattr(fs.os,name,value)
         fs.os.fdopen=fdopen
-    print(json.dumps(events))
+    return events
+
+
+def main():
+    root, mode, point = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+    if point == 'batch':
+        # Recoverable-fault points over pre-made pristine case trees, one
+        # spawn per mode instead of one per point. Crash mode is never
+        # batched: each point needs its own process death. Cases run in
+        # numeric order on disjoint trees with fresh state per point.
+        if mode == 'crash':
+            raise SystemExit('batch supports only recoverable fault modes')
+        points = sorted(int(p.name) for p in root.iterdir()
+                        if p.name.isdigit() and not p.is_symlink() and p.is_dir())
+        print(json.dumps([run_case(root/str(point), mode, point) for point in points]))
+        return
+    print(json.dumps(run_case(root, mode, int(point))))
 
 
 if __name__ == '__main__':main()

@@ -9,6 +9,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import threading
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,21 +43,43 @@ def main():
     checks = []
     counts = {}
     env = {**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'}
-    # The offline suite is process-spawn heavy (~90 s on Linux); Windows
+    # The offline suite is process-spawn heavy (~75 s on Linux); Windows
     # runners need substantially more headroom than 300 s, well within the
-    # 15-minute CI job budget.
-    def execute(name, command, *, count=None):
+    # 15-minute CI job budget. Step output streams live (merged in order) so
+    # a hung step leaves the last-running test visible, and a step timeout
+    # is recorded as a structured failure with the partial output counted
+    # instead of crashing the gate before the receipt is written.
+    def execute(name, command, *, count=None, timeout=600):
         started = time.monotonic()
         print(f'== {name} ==', flush=True)
-        process = subprocess.run(command, cwd=ROOT, env=env, check=False,
-                                 capture_output=True, text=True, timeout=600)
-        sys.stdout.write(process.stdout)
-        sys.stderr.write(process.stderr)
-        status = 'pass' if process.returncode == 0 else 'fail'
+        chunks: list[str] = []
+        def pump(stream):
+            for line in stream:
+                sys.stdout.write(line)
+                chunks.append(line)
+            sys.stdout.flush()
+        status, exit_code, details = 'pass', 0, ''
+        with subprocess.Popen(command, cwd=ROOT, env=env, stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, text=True, bufsize=1) as process:
+            reader = threading.Thread(target=pump, args=(process.stdout,), daemon=True)
+            reader.start()
+            try:
+                exit_code = process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                exit_code = process.wait(timeout=30)
+                status = 'fail'
+                details = f'timed out after {timeout} s'
+            reader.join(timeout=30)
+        text = ''.join(chunks)
+        if exit_code != 0:
+            status = 'fail'
         entry = {'name': name, 'status': status,
-                 'seconds': round(time.monotonic() - started, 3), 'exit_code': process.returncode}
+                 'seconds': round(time.monotonic() - started, 3), 'exit_code': exit_code}
+        if details:
+            entry['details'] = details
         if count is not None:
-            found = count(process.stdout + process.stderr)
+            found = count(text)
             entry['tests'] = found
             counts[name] = found
         checks.append(entry)

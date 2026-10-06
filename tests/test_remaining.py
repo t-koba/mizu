@@ -97,21 +97,36 @@ class RemainingTests(Fixture):
         result=subprocess.run([sys.executable,str(script),str(trace),'trace','0'],env=env,capture_output=True,text=True,check=True,timeout=5)
         events=json.loads(result.stdout)
         self.assertTrue({'write','fsync','replace','link'} <= {e[0] for e in events})
-        for mode in ('eio','enospc','crash'):
-            for point in range(1,len(events)+1):
+        def check_recovered(root):
+            restarted=Snapshots(root/'store',excludes=(),max_file=1024,max_bytes=4096,max_files=4)
+            current=restarted.get()
+            self.assertIn(current['summary'],('old','new'))
+            history=restarted.history(current['id'])
+            self.assertEqual(history[-1]['id'],current['id'])
+            for snapshot in history:
+                for name in snapshot['files']:restarted.read(snapshot,name)
+            if current['summary']=='old':self.assertEqual(len(history),1)
+        for mode in ('eio','enospc'):
+            # One spawn per recoverable mode over pristine per-point trees
+            # instead of one spawn per point; every boundary is still
+            # injected and every recovery still asserted.
+            batch=self.root/mode;batch.mkdir()
+            for point in range(1,len(events)+1):shutil.copytree(base,batch/str(point))
+            result=subprocess.run([sys.executable,str(script),str(batch),mode,'batch'],env=env,capture_output=True,text=True,timeout=120)
+            self.assertEqual(result.returncode,0,result.stderr)
+            batches=json.loads(result.stdout)
+            self.assertEqual(len(batches),len(events))
+            for point,case in enumerate(batches,start=1):
                 with self.subTest(mode=mode,boundary=events[point-1],point=point):
-                    root=self.root/f'{mode}-{point}';shutil.copytree(base,root)
-                    result=subprocess.run([sys.executable,str(script),str(root),mode,str(point)],env=env,capture_output=True,text=True,timeout=5)
-                    self.assertIn(result.returncode,(0,86))
-                    if mode != 'crash':self.assertEqual(len(json.loads(result.stdout)),point)
-                    restarted=Snapshots(root/'store',excludes=(),max_file=1024,max_bytes=4096,max_files=4)
-                    current=restarted.get()
-                    self.assertIn(current['summary'],('old','new'))
-                    history=restarted.history(current['id'])
-                    self.assertEqual(history[-1]['id'],current['id'])
-                    for snapshot in history:
-                        for name in snapshot['files']:restarted.read(snapshot,name)
-                    if current['summary']=='old':self.assertEqual(len(history),1)
+                    self.assertEqual(len(case),point)
+                    check_recovered(batch/str(point))
+        for point in range(1,len(events)+1):
+            # Crash points keep one process death per point.
+            with self.subTest(mode='crash',boundary=events[point-1],point=point):
+                root=self.root/f'crash-{point}';shutil.copytree(base,root)
+                result=subprocess.run([sys.executable,str(script),str(root),'crash',str(point)],env=env,capture_output=True,text=True,timeout=5)
+                self.assertIn(result.returncode,(0,86))
+                check_recovered(root)
 
     def test_decision_order_normalizes_timezone_offsets(self):
         from mizu.dashboard import collect
