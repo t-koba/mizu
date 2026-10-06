@@ -82,6 +82,13 @@ def collect(project) -> dict:
             }
         else:
             entry["decision"] = None
+        wait = project.insights.wait_for(item["id"])
+        if wait is not None:
+            entry["wait"] = {"kind": wait.get("kind"), "at": wait.get("at"),
+                             "target": wait.get("target"),
+                             "registered_at": wait.get("registered_at")}
+        else:
+            entry["wait"] = None
         slim_pending.append(entry)
     decision_paths = (p for p in (project.root / "decisions").glob("*.json") if not p.is_symlink())
     decision_count = 0

@@ -80,6 +80,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--decision", help="Decision action for decide (accept/modify/defer/reject)")
     p.add_argument("--reason", default="", help="Decision reason for decide, withdrawal reason for withdraw")
     p.add_argument("--revisit", default="", help="Revisit condition for defer")
+    p.add_argument("--wait", default=None, help="Structured defer wait as kind[:arg]: deadline:<ISO-at> | code_change | insight_decided:<id>")
     p.add_argument("--expected-rev", type=int, default=None, help="Compare-and-swap revision for revise")
     p = sub.add_parser("editor", help="Export a capsule or serve the Editor MCP")
     esub = p.add_subparsers(dest="editor_command", required=True)
@@ -221,6 +222,20 @@ def _cmd_cleanup(config, project, args):
     return cleanup(config, project.root, args.role)
 
 
+def _parse_wait(spec):
+    """Parse a CLI ``--wait kind[:arg]`` spec into a wait dict (None when absent)."""
+    if spec is None:
+        return None
+    kind, _, arg = spec.partition(":")
+    if kind == "deadline" and arg:
+        return {"kind": "deadline", "at": arg}
+    if kind == "code_change" and not arg:
+        return {"kind": "code_change"}
+    if kind == "insight_decided" and arg:
+        return {"kind": "insight_decided", "insight": arg}
+    raise ConfigError("Insight wait must be deadline:<ISO-at>, code_change, or insight_decided:<id>")
+
+
 def _cmd_insight(config, project, args):
     if args.action == "list":
         return project.insights.list(pending=False, limit=1000)
@@ -251,7 +266,8 @@ def _cmd_insight(config, project, args):
     if args.action == "decide":
         if not args.id or not args.decision:
             raise ConfigError("Insight decide requires --id and --decision")
-        return project.insights.decide(args.id, args.decision, args.reason or "", args.revisit or "", "operator")
+        return project.insights.decide(args.id, args.decision, args.reason or "", args.revisit or "", "operator",
+                                                 wait=_parse_wait(args.wait))
     if args.action == "withdraw":
         if not args.id or not args.reason.strip():
             raise ConfigError("Insight withdraw requires --id and --reason")

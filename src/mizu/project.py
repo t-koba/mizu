@@ -36,6 +36,7 @@ class Project:
             raise ConfigError("Project roles must refer to configured roles")
         self.snapshots = open_store(self.root, config)
         self.insights = Insights(self.root, retention_days=config.limits.retention_days)
+        self.insights.snapshots = self.snapshots
 
     @property
     def goal(self) -> str:

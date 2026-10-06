@@ -75,9 +75,14 @@ DEFINITIONS = {
                obj({"query": text(1000),**PAGE_FIELDS}, ("query",))),
     "insights": ("List pending proposals, or read one proposal by ID.",
                  obj({"id": text(64), **PAGE_FIELDS})),
-    "decide": ("Record a proposal decision with action, reason and revisit fields. The defer action requires a revisit value.",
+    "decide": ("Record a proposal decision with action, reason and revisit fields. The defer action requires a revisit value. "
+               "A defer may register one structured wait as {kind} with kind deadline (plus at: timezone-aware ISO "
+               "timestamp), code_change, or insight_decided (plus insight: proposal id); waits bind to the current "
+               "revision and are refused for other actions or unsupported kinds.",
                obj({"id": text(64), "action": {"type": "string", "enum": ["accept", "modify", "defer", "reject"]},
-                    "reason": text(4000), "revisit": text(2000)}, ("id", "action", "reason"))),
+                    "reason": text(4000), "revisit": text(2000),
+                    "wait": obj({"kind": {"type": "string", "enum": ["deadline", "code_change", "insight_decided"]},
+                                 "at": text(64), "insight": text(64)}, ("kind",))}, ("id", "action", "reason"))),
     "submit_insight": ("Submit an immutable proposal. Sender identity is assigned by the runtime, not the model.",
                        obj({"title": text(200), "body": text(60000)}, ("title", "body"))),
     "consult": ("Ask configured models independently about the SAME immutable code snapshot. Nested consultation is disabled by the runtime.",

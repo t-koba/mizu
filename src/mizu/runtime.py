@@ -147,6 +147,7 @@ class Context:
         self.admission_error: str | None = None
         self.admission_wait = False
         self.decision_events: list = []
+        self.wait_events: list = []
         self.closed = False
         self.operations_stopped = threading.Event()
         self.verification: dict | None = None
@@ -395,7 +396,8 @@ class Context:
 
     def _op_decide(self, args: dict) -> dict:
         return self.project.insights.decide(args["id"], args["action"], args["reason"],
-                                            args.get("revisit", ""), self.run_dir.name)
+                                            args.get("revisit", ""), self.run_dir.name,
+                                            wait=args.get("wait"))
 
     def _op_submit_insight(self, args: dict) -> dict:
         return self.project.insights.submit(source=self.role.name, title=args["title"], body=args["body"],
@@ -784,6 +786,7 @@ def prompt_for(context: Context) -> str:
                        "workspace": "/workspace", "workspace_mode": context.role.workspace,
                        "pending_insights": pending,
                        "decision_events": list(getattr(context, "decision_events", []) or []),
+                       "wait_events": list(getattr(context, "wait_events", []) or []),
                        "acceptance_commands": acceptance,
                        "previous_report": (_previous_report(context.project)
                                           if "report" in caps else None),
@@ -821,6 +824,7 @@ def prompt_delta_for(context: Context, pending: list) -> str:
                                           "code_digest": context.snapshot["code_digest"]},
                        "pending_insights": pending,
                        "decision_events": list(getattr(context, "decision_events", []) or []),
+                       "wait_events": list(getattr(context, "wait_events", []) or []),
                        "workspace": "/workspace", "workspace_mode": context.role.workspace,
                        "acceptance_commands": acceptance,
                        "previous_report": (_previous_report(context.project)
@@ -944,7 +948,8 @@ class Engine:
             code_unchanged = role.on_change and _on_change_observed(cursor, snapshot)
             triggers = tuple(getattr(role, "decision_events", ()) or ())
             decision_events = project.insights.decision_events(role_name, triggers) if triggers else []
-            if code_unchanged and not decision_events:
+            wait_events = project.insights.due_waits(role_name, snapshot)
+            if code_unchanged and not decision_events and not wait_events:
                 return {"skipped": "unchanged", "snapshot": snapshot["id"],
                         "code_digest": snapshot["code_digest"]}
             active = project.root / "active" / f"{role_name}.json"
@@ -958,8 +963,8 @@ class Engine:
             workspace = project.workspace if role.workspace == "write" else run_dir / "input"
             try:
                 write_json(active, {"run": run_id, "role": role_name, "started_at": now()})
-                if decision_events and code_unchanged:
-                    admission = "decision"
+                if code_unchanged and (decision_events or wait_events):
+                    admission = "decision" if decision_events else "wait"
                 elif role.on_change:
                     admission = "change"
                 else:
@@ -967,12 +972,17 @@ class Engine:
                 write_json(run_dir / "started.json", {"run": run_id, "role": role_name,
                             "snapshot": snapshot["id"], "started_at": now(),
                             "admission": admission, "decision_events": len(decision_events),
+                            "wait_events": len(wait_events),
                             "config_sha256": digest(self.config.file.read_bytes()),
                             "policy_sha256": digest(role_policy_bytes(role))})
                 if decision_events:
                     write_json(run_dir / "decision-events.json",
                                {"run": run_id, "role": role_name, "admission": admission,
                                 "events": decision_events})
+                if wait_events:
+                    write_json(run_dir / "wait-events.json",
+                               {"run": run_id, "role": role_name, "admission": admission,
+                                "events": wait_events})
                 if role.selector:
                     from .classification import prepare
                     decision = prepare(self, project, role, snapshot, attributes)
@@ -1001,6 +1011,7 @@ class Engine:
                                   stop=self.stop, consult=self.consult)
                 context.ephemeral = self.ephemeral
                 context.decision_events = decision_events
+                context.wait_events = wait_events
                 prompt, prompt_mode, session_key, rotation, session_dir = session_prompt(context, role, run_dir)
                 decoded = json.loads(prompt)
                 write_json(run_dir / "prompt_projection.json",
@@ -1008,6 +1019,7 @@ class Engine:
                             "recent_snapshots": len(decoded.get("recent_snapshots", [])),
                             "pending_insights": len(decoded.get("pending_insights", [])),
                             "decision_events": len(decoded.get("decision_events", [])),
+                            "wait_events": len(decoded.get("wait_events", [])),
                             "acceptance_commands": len(decoded.get("acceptance_commands", [])),
                             "prompt_bytes": len(prompt.encode("utf-8")), "created_at": now(),
                             "prompt_mode": prompt_mode, "session_key": session_key,
@@ -1054,6 +1066,9 @@ class Engine:
                 if context.decision_events:
                     with contextlib.suppress(OSError, ValueError, TypeError, AttributeError):
                         project.insights.acknowledge_decisions(role_name, context.decision_events)
+                if context.wait_events:
+                    with contextlib.suppress(OSError, ValueError, TypeError, AttributeError, Denied):
+                        project.insights.consume_waits(role_name, context.wait_events)
                 write_json(project.root / "health" / f"{role_name}.json",
                            {"consecutive_failures": 0, "last_run": run_id, "updated_at": now()})
                 return result

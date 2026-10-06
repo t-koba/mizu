@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import time
+import contextlib
 import datetime as dt
 import heapq
 import uuid
@@ -70,10 +71,19 @@ def _effective_decision(item_rev: int, decision) -> dict | None:
     return decision
 
 
+#: Observable wait kinds a deferral may register. All are checkable at
+#: dispatch from local recorded state, so waits survive restarts without
+#: polling or model calls. Anything else is refused at registration with
+#: this list, exposing the missing wake source instead of implying it.
+WAIT_KINDS = ("deadline", "code_change", "insight_decided")
+
+
 class Insights:
     def __init__(self, root: Path, maximum: int = PREVIEW_BYTES, retention_days: int = 31):
         self.root, self.maximum = root, maximum
         self.retention_days = retention_days
+        #: Snapshot store for wait baselines; wired by Project, else None.
+        self.snapshots = None
 
     def submit(self, *, source: str, title: str, body: str, base_snapshot: str | None,
                run: str | None = None, insight_id: str | None = None) -> dict:
@@ -301,11 +311,12 @@ replacement insight without implying rejected substance.
                 continue
         return digest(canonical(sorted(parts)))
 
-    def decide(self, insight_id: str, action: str, reason: str, revisit: str, run: str) -> dict:
+    def decide(self, insight_id: str, action: str, reason: str, revisit: str, run: str, wait=None) -> dict:
         if action not in ("accept", "modify", "defer", "reject") or not reason.strip():
             raise Denied("Decision requires a supported action and a reason")
         if action == "defer" and not revisit.strip():
             raise Denied("Deferred proposals require a revisit condition")
+        registered = self._normalize_wait(wait, action)
         with lock(self.root / "locks" / "insights.lock"):
             current = self.read(insight_id)
             rev = _rev_of(current)
@@ -318,7 +329,214 @@ replacement insight without implying rejected substance.
             with lock(self.root / "locks" / "decisions.lock"):
                 write_json(self.root / "decision-history" / f"{uuid.uuid4().hex}.json", record, exclusive=True)
                 write_json(self.root / "decisions" / f"{insight_id}.json", record)
+                if registered is not None:
+                    registered = {**registered, "owner": insight_id, "rev": rev,
+                                  "decision": record, "registered_at": now(), "run": run}
+                    mkdir(self.root / "waits")
+                    write_json(self.root / "waits" / f"{insight_id}.json", registered)
         return record
+
+    def _normalize_wait(self, wait, action: str) -> dict | None:
+        """Validate a structured defer wait (fail closed, no prose parsing).
+
+        Schema: None, or ``{"kind": ...}`` with kind-specific fields:
+        ``deadline`` needs tz-aware ISO ``at``; ``code_change`` needs no
+        fields (the current published digest is the baseline);
+        ``insight_decided`` needs an ``insight`` id. Bounds: at most one
+        wait per insight; unknown kinds, bad params, and waits on
+        non-defer actions are Denied naming the supported set. Trust:
+        recorded state only. Failure: Denied, never a silent downgrade
+        to prose.
+        """
+        if wait is None:
+            return None
+        if action != "defer":
+            raise Denied("Structured waits may only be registered with a deferral")
+        if not isinstance(wait, dict):
+            raise Denied(f"Unsupported wait; supported kinds: {', '.join(WAIT_KINDS)}")
+        kind = wait.get("kind")
+        if kind not in WAIT_KINDS:
+            raise Denied(f"Unsupported wait; supported kinds: {', '.join(WAIT_KINDS)}")
+        if kind == "deadline":
+            at = wait.get("at")
+            try:
+                moment = dt.datetime.fromisoformat(at) if isinstance(at, str) else None
+            except (ValueError, TypeError):
+                moment = None
+            if moment is None or moment.tzinfo is None:
+                raise Denied("A deadline wait needs a timezone-aware ISO timestamp in 'at'")
+            return {"kind": kind, "at": moment.isoformat(timespec="seconds")}
+        if kind == "insight_decided":
+            target = wait.get("insight")
+            if not isinstance(target, str) or not target:
+                raise Denied("An insight_decided wait needs an 'insight' id")
+            identifier(target)
+            return {"kind": kind, "target": target}
+        if set(wait) - {"kind"}:
+            raise Denied("A code_change wait takes no fields")
+        try:
+            baseline = self.project_snapshots_digest()
+        except (OSError, ValueError, TypeError, AttributeError):
+            raise Denied("A code_change wait needs a published snapshot baseline")
+        return {"kind": kind, "digest": baseline}
+
+    def project_snapshots_digest(self) -> str:
+        """Current published code digest (wait baseline hook, never raises silently)."""
+        store = self.snapshots
+        if store is None:
+            raise ValueError("No snapshot store")
+        current = store.get()
+        digest_value = current.get("code_digest") if isinstance(current, dict) else None
+        if not isinstance(digest_value, str) or not digest_value:
+            raise ValueError("No published code digest")
+        return digest_value
+
+    def wait_for(self, insight_id: str) -> dict | None:
+        """Return the valid registered wait for one insight, else None (never raises)."""
+        try:
+            identifier(insight_id)
+            stored = read_json(self.root / "waits" / f"{insight_id}.json", {})
+        except (Denied, OSError, ValueError, TypeError, AttributeError):
+            return None
+        if not isinstance(stored, dict):
+            return None
+        try:
+            current = self.read(insight_id)
+        except (Denied, OSError, ValueError, TypeError, AttributeError):
+            return None
+        if not self._wait_bound(stored, current):
+            return None
+        return stored
+
+    def _wait_bound(self, stored: dict, current: dict) -> bool:
+        """True while a wait stays bound to its topic revision and decision."""
+        try:
+            if stored.get("rev") != _rev_of(current):
+                return False
+            raw = self.root / "decisions" / f"{current['id']}.json"
+            if raw.is_symlink():
+                return False
+            return read_json(raw) == stored.get("decision")
+        except (OSError, ValueError, TypeError, AttributeError):
+            return False
+
+    def due_waits(self, role_name: str, snapshot: dict, *, limit: int = 10) -> list:
+        """Collect registered waits due for one role (one-shot, dispatch-lazy).
+
+        Schema: returns oldest-registered-first payloads with insight, rev,
+        title, body, kind, reason, revisit, and registered_at (plus ``at``
+        for deadlines, ``target`` for insight_decided), at most ``limit``.
+        Bounds: ``limit`` in [1, 100]. Trust: recorded decisions, inbox,
+        and snapshots only; routing is ``insight.source == role_name``.
+        Retry: read-only except best-effort pruning of waits unbound by
+        revision, a new decision, or withdrawal. Evidence: delivery is
+        logged under the run directory; consumed waits are removed on
+        acknowledge. Failure: Denied on bad role name or limit; unbound,
+        unmet, and moot (target withdrawn) waits never emit.
+        """
+        identifier(role_name)
+        if type(limit) is not int or limit < 1 or limit > 100:
+            raise Denied("Wait limit must be an integer in [1, 100]")
+        directory = self.root / "waits"
+        if not directory.is_dir() or directory.is_symlink():
+            return []
+        candidates = []
+        for path in sorted(directory.glob("*.json")):
+            if path.is_symlink():
+                continue
+            try:
+                stored = read_json(path, {})
+            except (OSError, ValueError, TypeError, AttributeError):
+                continue
+            if not isinstance(stored, dict) or stored.get("kind") not in WAIT_KINDS:
+                continue
+            try:
+                current = self.read(stored.get("owner", ""))
+            except (Denied, OSError, ValueError, TypeError, AttributeError):
+                continue
+            if not self._wait_bound(stored, current):
+                with contextlib.suppress(OSError):
+                    path.unlink()
+                continue
+            if current.get("source") != role_name or not self._wait_due(stored, snapshot):
+                continue
+            candidates.append((stored.get("registered_at", ""), stored, current))
+            if len(candidates) >= limit:
+                break
+        due = []
+        for _, stored, current in sorted(candidates, key=lambda item: item[0]):
+            defer = stored.get("decision", {})
+            if not isinstance(defer, dict):
+                defer = {}
+            payload = {"insight": current["id"], "rev": _rev_of(current),
+                       "title": current.get("title", ""), "body": current.get("body", ""),
+                       "kind": stored.get("kind"), "reason": defer.get("reason", ""),
+                       "revisit": defer.get("revisit", ""),
+                       "registered_at": stored.get("registered_at", "")}
+            if stored.get("kind") == "deadline":
+                payload["at"] = stored.get("at")
+            if stored.get("kind") == "insight_decided":
+                payload["target"] = stored.get("target")
+            due.append(payload)
+        return due
+
+    def _wait_due(self, stored: dict, snapshot: dict) -> bool:
+        """True when a bound wait's observable condition is met (never raises)."""
+        try:
+            kind = stored.get("kind")
+            if kind == "deadline":
+                moment = dt.datetime.fromisoformat(stored.get("at", ""))
+                return dt.datetime.now(dt.timezone.utc) >= moment
+            if kind == "code_change":
+                current = snapshot.get("code_digest") if isinstance(snapshot, dict) else None
+                return isinstance(current, str) and bool(current) and current != stored.get("digest")
+            if kind == "insight_decided":
+                target = self.root / "decisions" / f"{stored.get('target')}.json"
+                if target.is_symlink():
+                    return False
+                record = read_json(target, {})
+                if not isinstance(record, dict):
+                    return False
+                try:
+                    inbox = self.read(record.get("id", ""))
+                except (Denied, OSError, ValueError, TypeError, AttributeError):
+                    return False
+                if record.get("rev") != _rev_of(inbox):
+                    return False
+                return record.get("action") in ("accept", "modify", "reject")
+            return False
+        except (OSError, ValueError, TypeError, AttributeError):
+            return False
+
+    def consume_waits(self, role_name: str, events) -> int:
+        """Remove acknowledged waits only if untouched since delivery.
+
+        Schema: ``events`` are payloads from ``due_waits``. Trust: called
+        only after successful processing. Retry: idempotent; a wait
+        re-registered mid-run (newer ``registered_at``) is never removed.
+        Evidence: returns the consumed count. Failure: Denied on bad role
+        name; I/O failures remove nothing silently per wait.
+        """
+        identifier(role_name)
+        consumed = 0
+        for event in (events or []):
+            if not isinstance(event, dict) or not isinstance(event.get("insight"), str):
+                continue
+            try:
+                identifier(event["insight"])
+                path = self.root / "waits" / f"{event['insight']}.json"
+                if path.is_symlink():
+                    continue
+                stored = read_json(path, {})
+            except (OSError, ValueError, TypeError, AttributeError):
+                continue
+            if (isinstance(stored, dict)
+                    and stored.get("registered_at") == event.get("registered_at")
+                    and stored.get("kind") == event.get("kind")):
+                with contextlib.suppress(OSError):
+                    path.unlink()
+                    consumed += 1
+        return consumed
 
     def withdraw(self, insight_id: str, *, source: str, reason: str,
                  expected_rev: int | None = None, run: str | None = None) -> dict:
