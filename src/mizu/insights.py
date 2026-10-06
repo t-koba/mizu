@@ -11,6 +11,14 @@ decisions bind to the reviewed ``rev`` so a prior approval never authorizes
 changed content, while a meaningful revision becomes pending again and
 advances the inbox generation. Identical retries are no-ops that do not wake.
 Revisions are durable audit like decisions (backed up, never pruned).
+
+Current transport: only the operator path exposes revise/history
+(``mizu insight revise/history`` with source ``operator``). Other sources
+supersede obsolete claims via a new insight until a reviewed release adds an
+owner revise transport; the source-match check already enforces that future.
+``run`` is revision provenance recorded only on meaningful change and never
+wakes: an identical-content retry with a different ``run`` returns current
+unchanged (stored ``run`` preserved) without bumping rev.
 """
 from __future__ import annotations
 
@@ -119,11 +127,17 @@ class Insights:
         null. Bounds: same PREVIEW_BYTES bound as submit. Trust: ``source``
         must equal the original submitter; ``expected_rev`` (when given)
         must equal the current rev (compare-and-swap). Retry: identical
-        content is a no-op returning current without bumping rev or waking.
+        content (title/body/base_snapshot) is a no-op returning current
+        without bumping rev, archiving, or waking; ``run`` is provenance
+        recorded only on meaningful change, so a same-content retry with a
+        different ``run`` preserves the stored ``run`` and repairs identity.
         Evidence: prior record archived to
         ``insight-revisions/<id>.r<rev>.json`` with superseded markers;
-        inbox generation advances only on meaningful change. Failure: Denied
-        on unknown ID, source mismatch, revision conflict, or bounds.
+        inbox generation advances only on meaningful change. Crash recovery:
+        if a prior attempt archived r<rev> but crashed before the inbox
+        write, a retry over the still-current inbox overwrites that orphan
+        archive and converges. Failure: Denied on unknown ID, source
+        mismatch, revision conflict, bounds, or a conflicting archive.
         """
         identifier(source)
         identifier(insight_id)
@@ -149,13 +163,37 @@ class Insights:
                 raise Denied("Insight revision conflict; reread the current revision")
             if (old.get("title") == title and old.get("body") == body
                     and old.get("base_snapshot") == base_snapshot):
+                stored_payload = {k: old.get(k) for k in ("id", "source", "title", "body", "base_snapshot", "run")}
+                try:
+                    write_json(self.root / "insight-ids" / f"{insight_id}.json",
+                               {"id": insight_id, "sha256": digest(canonical(stored_payload)),
+                                "created_at": old.get("created_at")})
+                except (OSError, ValueError, TypeError, AttributeError, Denied):
+                    pass
                 return _normalize(old)
             stamped = now()
             archive = {**old, "rev": current_rev,
                        "superseded_at": stamped, "superseded_by_rev": current_rev + 1}
             mkdir(self.root / "insight-revisions")
-            write_json(self.root / "insight-revisions" / f"{insight_id}.r{current_rev}.json",
-                       archive, exclusive=True)
+            archive_path = self.root / "insight-revisions" / f"{insight_id}.r{current_rev}.json"
+            existing = None if archive_path.is_symlink() else read_json(archive_path)
+            if existing is not None:
+                # A completed revise advances the inbox, so an archive for
+                # the still-current rev is an orphan from a crash between
+                # the archive and inbox writes. Overwrite it only when it
+                # archives this same inbox content; otherwise conflict.
+                if (not isinstance(existing, dict) or existing.get("id") != insight_id
+                        or _rev_of(existing) != current_rev
+                        or any(existing.get(k) != old.get(k)
+                               for k in ("source", "title", "body", "base_snapshot"))):
+                    raise Denied("Insight revision archive conflict; reread the current revision")
+                write_json(archive_path, archive)
+            else:
+                try:
+                    write_json(archive_path, archive, exclusive=True)
+                except Denied:
+                    # Lost a same-rev race under the lock; reread to converge.
+                    raise Denied("Insight revision conflict; reread the current revision")
             record = {"id": insight_id, "source": source, "title": title, "body": body,
                       "base_snapshot": base_snapshot, "run": run,
                       "created_at": old.get("created_at"), "rev": current_rev + 1,

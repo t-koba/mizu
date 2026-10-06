@@ -601,3 +601,37 @@ class InsightRevisionTests(Fixture):
         write_json(decision_path, decision)
         self.assertEqual(self.project.insights.gc_decided(), 0)
         self.assertEqual(self.project.insights.read(item["id"])["rev"], 2)
+
+    def test_crash_orphan_archive_retry_converges(self):
+        import time
+        from mizu.fs import read_json, write_json, mkdir
+        item = self.project.insights.submit(source="operator", title="T", body="v1", base_snapshot=None)
+        # Plant a stale orphan archive as if a prior attempt crashed after
+        # archiving r1 but before the inbox write (old timestamp).
+        mkdir(self.project.root / "insight-revisions")
+        orphan = {**self.project.insights.read(item["id"]), "rev": 1,
+                  "superseded_at": "2000-01-01T00:00:00+00:00", "superseded_by_rev": 2}
+        write_json(self.project.root / "insight-revisions" / f"{item['id']}.r1.json", orphan, exclusive=True)
+        revised = self.project.insights.revise(item["id"], source="operator", title="T", body="v2", base_snapshot=None)
+        self.assertEqual(revised["rev"], 2)
+        self.assertEqual(self.project.insights.read(item["id"])["body"], "v2")
+        self.assertEqual(len(self.project.insights.history(item["id"])), 1)
+
+    def test_conflicting_archive_is_rejected(self):
+        from mizu.fs import write_json, mkdir
+        item = self.project.insights.submit(source="operator", title="T", body="v1", base_snapshot=None)
+        mkdir(self.project.root / "insight-revisions")
+        other = {**self.project.insights.read(item["id"]), "rev": 1, "body": "tampered",
+                 "superseded_at": "2000-01-01T00:00:00+00:00", "superseded_by_rev": 2}
+        write_json(self.project.root / "insight-revisions" / f"{item['id']}.r1.json", other, exclusive=True)
+        with self.assertRaises(Denied):
+            self.project.insights.revise(item["id"], source="operator", title="T", body="v2", base_snapshot=None)
+
+    def test_same_content_retry_preserves_stored_run(self):
+        gen1 = self.project.insights.submit(source="operator", title="T", body="v1", base_snapshot=None, run="run-1")
+        gen = self.project.insights.generation()
+        same = self.project.insights.revise(gen1["id"], source="operator", title="T", body="v1", base_snapshot=None, run="run-2")
+        self.assertEqual(same["rev"], 1)
+        self.assertEqual(self.project.insights.read(gen1["id"])["run"], "run-1")
+        self.assertEqual(self.project.insights.history(gen1["id"]), [])
+        self.assertEqual(self.project.insights.generation(), gen)

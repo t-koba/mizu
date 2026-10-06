@@ -126,7 +126,13 @@ claims are replaced, never appended. The first submission creates `rev` 1.
 The original submitter may revise under the stable ID via compare-and-swap on
 `expected_rev`; identical retries are no-ops that do not advance the inbox
 generation, while a meaningful revision archives the prior record to
-`insight-revisions/<id>.r<rev>.json` and becomes pending again. Prior
+`insight-revisions/<id>.r<rev>.json` and becomes pending again. A crashed
+revise converges on retry: an orphan archive for the still-current rev is
+overwritten, and a same-content retry preserves the stored `run` (revision
+provenance recorded only on meaningful change). The current transport
+exposes revise/history only to the operator (`mizu insight revise/history`);
+other sources supersede obsolete claims via a new insight until a reviewed
+release adds an owner revise transport. Prior
 revisions are returned only by the explicit history path, never injected into
 routine context, and are durable audit like decisions (backed up, never
 pruned). Direct ID reuse with different content outside revise is rejected.
