@@ -346,8 +346,10 @@ def require_go_approval(project, branch: str, code_digest: str) -> dict:
     The opaque ``origin`` label is ignored here: it never grants approval.
     Model-submitted insights (source is the role name) and model decisions
     (run is the run directory name) never satisfy this gate. Use a dedicated
-    publisher role without ``submit_insight``/``decide`` (refused together
-    with ``vcs_publish`` at config load) for defense in depth.
+    publisher role without ``decide`` (refused together with lifecycle
+    capabilities at config load) for defense in depth; ``submit_insight``
+    is allowed because ordinary insights can never mint an operator-channel
+    approval.
     Retry/cancellation: pure local reads, no retry. Evidence: returned
     ``{"insight": id, "branch": ..., "code_digest": ...}`` names the
     approval bound to this publication. Failure: ``Denied`` when no matching

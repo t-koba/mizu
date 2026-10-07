@@ -234,7 +234,7 @@ class VcsDisposeTests(Fixture):
 
 
 class VcsDisposeRoleTests(Fixture):
-    def test_dispose_requires_write_workspace(self):
+    def test_dispose_role_must_not_hold_decide(self):
         text = self.file.read_text()
         needle = '[roles.maintainer]'
         segment = text.split(needle, 1)[1].split('[roles.', 1)[0]
@@ -250,6 +250,23 @@ class VcsDisposeRoleTests(Fixture):
         from mizu.config import load
         with self.assertRaisesRegex(ConfigError, "self-approval"):
             load(path)
+
+    def test_dispose_role_may_submit_insights(self):
+        text = self.file.read_text()
+        needle = '[roles.maintainer]'
+        segment = text.split(needle, 1)[1].split('[roles.', 1)[0]
+        patched = text.replace(
+            'capabilities = ["files", "read", "diff", "exec", "experiment", "verify", "insights", "decide", "consult", "finish"]',
+            'capabilities = ["files", "read", "diff", "exec", "experiment", "verify", "insights", "submit_insight", "consult", "finish", "vcs_dispose"]',
+            1)
+        if patched == text:
+            self.skipTest("maintainer capability line shape changed")
+        path = self.root / "config/dispose-submit.toml"
+        path.write_text(patched)
+        from mizu.config import load
+        config = load(path)
+        self.assertIn("vcs_dispose", config.roles["maintainer"].capabilities)
+        self.assertIn("submit_insight", config.roles["maintainer"].capabilities)
 
     def test_dispose_grants_load(self):
         text = self.file.read_text()

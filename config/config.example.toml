@@ -228,8 +228,9 @@ interval_seconds = 21600
 # project with `[vcs] command` configured; run explicitly via
 # `mizu run <project> --role publisher` after the operator records
 # `GO <branch>` approval for the current code digest (see docs/configuration.md).
-# This role never holds `submit_insight`/`decide`, so it cannot approve its own
-# push (config load refuses that combination). `workspace = "write"` below is
+# This role never holds `decide`, so it cannot approve its own push (config
+# load refuses that combination); it may hold `submit_insight` for ordinary
+# reports, which can never mint an operator-channel GO approval. `workspace = "write"` below is
 # required plumbing: config load refuses `verify`/`sync`/`vcs_publish` without
 # it. It is not an edit grant: the capability list holds no source-editing
 # tool (no `exec`, no edit engine tools), so merging stays ordinary workspace
@@ -244,8 +245,10 @@ interval_seconds = 21600
 # on a project with `[vcs]` command and grants configured; run explicitly via
 # `mizu run <project> --role integrator` after the operator records
 # `GO <branch>` approval for the current code digest (see docs/configuration.md).
-# This role never holds `submit_insight`/`decide`, so it cannot approve its own
-# disposition (config load refuses that combination). `workspace = "read"` is
+# This role never holds `decide`, so it cannot approve its own disposition
+# (config load refuses that combination); it may hold `submit_insight` for
+# ordinary integration reports, which can never mint an operator-channel
+# GO approval. `workspace = "read"` is
 # enough: integration authority is the capability plus the configured grants,
 # not source-write access. It holds no source-editing tool (no `exec`, no edit
 # engine tools) and no `verify`, so it cannot edit or complete source work.

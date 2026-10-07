@@ -197,7 +197,7 @@ class VcsApprovalChannelTests(Fixture):
         with self.assertRaisesRegex(Denied, "operator channel"):
             ctx.handle("vcs_publish", {"op": "push", "branch": "main"})
 
-    def test_publish_role_must_not_hold_decide_or_submit(self):
+    def test_publish_role_must_not_hold_decide(self):
         text = self.file.read_text()
         needle = '[roles.maintainer]'
         self.assertIn(needle, text)
@@ -214,6 +214,24 @@ class VcsApprovalChannelTests(Fixture):
         from mizu.config import load
         with self.assertRaisesRegex(ConfigError, "self-approval"):
             load(path)
+
+    def test_publish_role_may_submit_insights(self):
+        text = self.file.read_text()
+        needle = '[roles.maintainer]'
+        self.assertIn(needle, text)
+        segment = text.split(needle, 1)[1].split('[roles.', 1)[0]
+        patched = text.replace(
+            'capabilities = ["files", "read", "diff", "exec", "experiment", "verify", "insights", "decide", "consult", "finish"]',
+            'capabilities = ["files", "read", "diff", "exec", "experiment", "verify", "insights", "submit_insight", "consult", "finish", "vcs_publish"]',
+            1)
+        if patched == text:
+            self.skipTest("maintainer capability line shape changed")
+        path = self.root / "config/publish-submit.toml"
+        path.write_text(patched)
+        from mizu.config import load
+        config = load(path)
+        self.assertIn("vcs_publish", config.roles["maintainer"].capabilities)
+        self.assertIn("submit_insight", config.roles["maintainer"].capabilities)
 
 
 class VcsReservedRoleNameTests(Fixture):

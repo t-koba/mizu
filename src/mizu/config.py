@@ -710,19 +710,22 @@ def load(file: Path) -> Config:
             raise ConfigError("sync requires a writable workspace")
         if "vcs_publish" in caps and workspace != "write":
             raise ConfigError("vcs_publish requires a writable workspace")
-        if "vcs_publish" in caps and ("submit_insight" in caps or "decide" in caps):
-            raise ConfigError(f"Role {name} must not combine vcs_publish with submit_insight/decide; "
-                              "use a dedicated publisher role without self-approval")
+        if "vcs_publish" in caps and "decide" in caps:
+            raise ConfigError(f"Role {name} must not combine vcs_publish with decide; "
+                              "it may submit ordinary insights but must never approve "
+                              "its own mutation (use a dedicated publisher role without self-approval)")
         if "vcs_retire" in caps and workspace == "none":
             raise ConfigError("vcs_retire requires a visible workspace")
-        if "vcs_retire" in caps and ("submit_insight" in caps or "decide" in caps):
-            raise ConfigError(f"Role {name} must not combine vcs_retire with submit_insight/decide; "
-                              "use a dedicated integrator role without self-approval")
+        if "vcs_retire" in caps and "decide" in caps:
+            raise ConfigError(f"Role {name} must not combine vcs_retire with decide; "
+                              "it may submit ordinary insights but must never approve "
+                              "its own mutation (use a dedicated integrator role without self-approval)")
         if "vcs_dispose" in caps and workspace == "none":
             raise ConfigError("vcs_dispose requires a visible workspace")
-        if "vcs_dispose" in caps and ("submit_insight" in caps or "decide" in caps):
-            raise ConfigError(f"Role {name} must not combine vcs_dispose with submit_insight/decide; "
-                              "use a dedicated integrator role without self-approval")
+        if "vcs_dispose" in caps and "decide" in caps:
+            raise ConfigError(f"Role {name} must not combine vcs_dispose with decide; "
+                              "it may submit ordinary insights but must never approve "
+                              "its own mutation (use a dedicated integrator role without self-approval)")
         if workspace == "write" and "verify" not in caps:
             raise ConfigError(f"Writable role {name} requires the verify capability so "
                               "completion can be bound to acceptance commands")
