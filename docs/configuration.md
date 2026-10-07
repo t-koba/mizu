@@ -81,6 +81,7 @@ required). Operator tooling that concatenates configs
 | `snapshot_bytes`, `snapshot_files` | Total visible snapshot size and file-count bounds |
 | `history_index` | Maximum published snapshot IDs retained in the immutable history generation (8–1,000,000; manifests stay on disk) |
 | `prompt_snapshots` | Number of recent anchored snapshot summaries offered to prompts (1–64) |
+| `role_state_bytes` | Maximum canonical JSON bytes of one role-owned current research state record (1,024–65,536; default 8,192) |
 | `retention_days` | Retention window (days) for daily budget files and decided proposals (0 disables; 0–3,650). Reaping reports `reaped`. Snapshots, runs, decisions, and evidence are never reaped |
 | `event_log_compress_days` | Compress bulky per-run engine logs (`*-events.jsonl`, `diagnostics.txt`) at or beyond N days old to `.gz` (0 disables; 0–3,650; default 7) |
 | `event_log_retention_days` | Drop bulky per-run engine logs (raw and `.gz`) at or beyond M days old (0 disables; 0–3,650; default 31). Result/error/consultation/started/selection/usage records, snapshots, objects, sessions, decisions, and proposals are never candidates |
@@ -391,6 +392,10 @@ The four stages share one contract shape. Observation (`vcs_read` `proposals`/`a
 Receipts are scoped per mutation: `vcs-publish.json`, `vcs-dispose.json`, and `vcs-retire.json` each name the op, the exact revision (branch/sha or proposal id/sha), the terminal outcome, and the approval or grant behind it. Nothing is written on refusal; a failed call implies nothing about the remote either way, so reconcile by re-observing rather than assuming an outcome.
 
 Revalidation is re-observation: after any failed mutation, `proposals` re-reads current state before retrying at a fresh revision. Recovery follows the failure kind: a moved head means re-assess and retry at the new sha; an externally superseded proposal (terminal state the action did not produce) means stop and reconcile instead of re-issuing; a malformed adapter echo means the adapter is at fault and the remote state is unknown. A failed call never implies the remote changed; only a fresh observation or a matching receipt does.
+
+## Role research state (bounded current coverage, replacement only)
+
+Each role may hold one current research record under `role-state/<role>.json`: investigated questions with conclusions, consequential unknowns, coverage/evidence references, and explicit revisit conditions. The store is a bounded generic JSON object (nesting at most 4, keys at most 64 chars, total within `role_state_bytes`); section choice is role policy, never a hardcoded topic list. Updates replace the whole record under a generation compare-and-swap: first write expects generation 0, each replacement expects the generation its writer read, and stale expectations are refused so newer evidence is never overwritten. Reads distinguish `absent` (never written, generation 0) from `unavailable` (unreadable or malformed, no generation): absence never reads as "nothing researched", and unavailable records refuse replacement until an operator clears the file, while atomic writes keep interrupted updates from disturbing the previous record. History lives only in run records; insight submission is never a research-memory store. Retention follows run records: current state persists until replaced, audit evidence under the existing log-retention windows.
 
 ## Project metadata
 

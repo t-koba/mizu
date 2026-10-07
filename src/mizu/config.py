@@ -287,6 +287,9 @@ class Limits:
     snapshot_files: int = 20000
     history_index: int = 128
     prompt_snapshots: int = 6
+    #: Maximum canonical JSON bytes of one role-owned current research
+    #: state record (1 KiB-64 KiB; default 8 KiB).
+    role_state_bytes: int = 8192
     free_disk_mb: int = 1024
     #: Operator-selected retention window (days) for budget day-files and
     #: decided (non-deferred) proposals. 0 disables time-based reaping;
@@ -494,6 +497,7 @@ def load(file: Path) -> Config:
                      "event_stream_bytes": (1048576, 268435456),
                      "dashboard_decisions": (1, 1000), "dashboard_reason_chars": (1, 10000),
                      "dashboard_keep": (0, 1000),
+                     "role_state_bytes": (1024, 65536),
                      "session_max_tokens": (0, 1073741824), "session_max_age_seconds": (0, 31536000),
                      "default_wait_seconds": (1, MAX_WAIT_SECONDS),
                      "maximum_wait_seconds": (1, MAX_WAIT_SECONDS),

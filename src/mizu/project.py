@@ -37,6 +37,9 @@ class Project:
         self.snapshots = open_store(self.root, config)
         self.insights = Insights(self.root, retention_days=config.limits.retention_days)
         self.insights.snapshots = self.snapshots
+        from .role_state import RoleStateStore
+        self.role_state = RoleStateStore(self.root / "role-state",
+                                         max_bytes=config.limits.role_state_bytes)
 
     @property
     def goal(self) -> str:
