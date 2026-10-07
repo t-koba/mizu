@@ -106,7 +106,8 @@ def is_deferred(exc: BaseException, context=None) -> bool:
 #: stay operator choice, plus the required finish.
 CONSULT_FORBIDDEN = frozenset({"exec", "experiment", "verify", "decide",
                                "submit_insight", "consult", "report", "sync",
-                               "vcs_publish", "vcs_retire", "vcs_dispose"})
+                               "vcs_publish", "vcs_retire", "vcs_dispose",
+                               "research"})
 
 
 def check_consult_role(role_name: str, role) -> None:
@@ -433,6 +434,36 @@ class Context:
                     "trust": "external-untrusted", "refs": fetched["refs"]})
         return record
 
+    def _op_research_read(self, args: dict) -> dict:
+        # Own role's current research record with its generation: the
+        # read half of the replace cycle. No evidence file: read-only,
+        # and the run already records the call. Other roles' records
+        # are never addressable; the role name is the caller's own.
+        seen = self.project.role_state.read(self.role.name)
+        return {"role": self.role.name, **seen}
+
+    def _op_research(self, args: dict) -> dict:
+        # Replacement-only update of the own role's record: the state
+        # arrives as a JSON string (protocol schemas cannot express a
+        # free-form bounded object), parses here, then replaces under
+        # the generation the caller read. Stale, invalid, or
+        # unavailable states are Denied with the stored record
+        # untouched; the receipt carries the new generation plus the
+        # stored state as run-record audit.
+        try:
+            state = json.loads(args["state"])
+        except ValueError as exc:
+            raise Denied("Research state must parse as JSON") from exc
+        out = self.project.role_state.replace(
+            self.role.name, state,
+            expected_generation=args["expected_generation"],
+            run=self.run_dir.name)
+        record = {"role": self.role.name, "generation": out["generation"],
+                  "updated_at": out["updated_at"], "state": state,
+                  "evidence": "research-state.json"}
+        write_json(self.run_dir / "research-state.json", record)
+        return record
+
     def _op_vcs_read(self, args: dict) -> dict:
         # Read-only VCS view: CI status, logs, PR comments, external
         # proposals via the trusted adapter. Never publishes; mutating ops
@@ -583,7 +614,9 @@ class Context:
         "decide": _op_decide, "submit_insight": _op_submit_insight,
         "sync": _op_sync, "vcs_read": _op_vcs_read, "vcs_publish": _op_vcs_publish,
         "vcs_retire": _op_vcs_retire, "vcs_dispose": _op_vcs_dispose,
-        "consult": _op_consult, "report": _op_report, "finish": _op_finish,
+        "consult": _op_consult, "report": _op_report,
+        "research_read": _op_research_read, "research": _op_research,
+        "finish": _op_finish,
     }
 
 
@@ -842,6 +875,33 @@ def _prompt_clock(context: Context) -> dict:
     return {"now": _dt.datetime.now(tz).isoformat(timespec="seconds"), "timezone": str(name)}
 
 
+def _prompt_research_state(context: Context):
+    """Own role's current research record for prompt injection.
+
+    Returns None without the read capability; ``absent``/``unavailable``
+    statuses inject bare so absence never reads as "nothing
+    researched"; current records inject whole while within
+    ``role_state_prompt_bytes``, else ``truncated`` with generation
+    and sizes and no partial content. Constant-size by construction,
+    so resumed-session deltas may carry it without unbounded growth.
+    """
+    caps = set(context.role.capabilities)
+    if "research_read" not in caps and "research" not in caps:
+        return None
+    seen = context.project.role_state.read(context.role.name)
+    if seen["status"] != "current":
+        return {"status": seen["status"]}
+    record = seen["record"]
+    body = canonical(record["state"])
+    cap = context.config.limits.role_state_prompt_bytes
+    if len(body) > cap:
+        return {"status": "truncated", "generation": seen["generation"],
+                "state_bytes": len(body), "prompt_bytes": cap,
+                "updated_at": record.get("updated_at")}
+    return {"status": "current", "generation": seen["generation"],
+            "updated_at": record.get("updated_at"), "state": record["state"]}
+
+
 def prompt_for(context: Context) -> str:
     caps = set(context.role.capabilities)
     # Mechanism enforces grants, not policy choice: only capability-gated,
@@ -867,6 +927,7 @@ def prompt_for(context: Context) -> str:
                        "decision_events": list(getattr(context, "decision_events", []) or []),
                        "wait_events": list(getattr(context, "wait_events", []) or []),
                        "acceptance_commands": acceptance,
+                       "research_state": _prompt_research_state(context),
                        "ci_branch": ci_branch,
                        "previous_report": (_previous_report(context.project)
                                           if "report" in caps else None),
@@ -905,6 +966,7 @@ def prompt_delta_for(context: Context, pending: list) -> str:
                        "pending_insights": pending,
                        "decision_events": list(getattr(context, "decision_events", []) or []),
                        "wait_events": list(getattr(context, "wait_events", []) or []),
+                       "research_state": _prompt_research_state(context),
                        "workspace": "/workspace", "workspace_mode": context.role.workspace,
                        "acceptance_commands": acceptance,
                        "ci_branch": ((context.config.vcs.get("ci_branch") or None)

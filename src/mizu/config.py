@@ -15,7 +15,7 @@ from .fs import ID
 CAPABILITIES = frozenset({"diff", "files", "read", "exec", "experiment", "verify", "fetch",
                           "search", "insights", "decide", "submit_insight", "consult",
                           "report", "finish", "sync", "vcs_read", "vcs_publish",
-                          "vcs_retire", "vcs_dispose"})
+                          "vcs_retire", "vcs_dispose", "research_read", "research"})
 ENGINES = ("pi", "pi-durable", "codex", "claude")
 #: Role names that collide with insight sources owned by the host/operator
 #: channel (operator CLI, vcs CI helper, editor outbox). Model
@@ -290,6 +290,10 @@ class Limits:
     #: Maximum canonical JSON bytes of one role-owned current research
     #: state record (1 KiB-64 KiB; default 8 KiB).
     role_state_bytes: int = 8192
+    #: Maximum bytes of a role's own research state injected into its
+    #: prompt (1-64 KiB; default 4 KiB). Records over the bound inject
+    #: status/generation/sizes only, never partial content.
+    role_state_prompt_bytes: int = 4096
     free_disk_mb: int = 1024
     #: Operator-selected retention window (days) for budget day-files and
     #: decided (non-deferred) proposals. 0 disables time-based reaping;
@@ -498,6 +502,7 @@ def load(file: Path) -> Config:
                      "dashboard_decisions": (1, 1000), "dashboard_reason_chars": (1, 10000),
                      "dashboard_keep": (0, 1000),
                      "role_state_bytes": (1024, 65536),
+                     "role_state_prompt_bytes": (1, 65536),
                      "session_max_tokens": (0, 1073741824), "session_max_age_seconds": (0, 31536000),
                      "default_wait_seconds": (1, MAX_WAIT_SECONDS),
                      "maximum_wait_seconds": (1, MAX_WAIT_SECONDS),

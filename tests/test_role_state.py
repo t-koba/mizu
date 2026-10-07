@@ -139,3 +139,130 @@ class RoleStateConfigTests(Fixture):
 
 if __name__ == "__main__":
     raise SystemExit(unittest.main())
+
+
+class ResearchToolTests(Fixture):
+    def setUp(self):
+        super().setUp()
+        import dataclasses as _dc
+        self._dc = _dc
+
+    def capped(self, extra):
+        role = self.config.roles["searcher"]
+        return self._dc.replace(role, capabilities=tuple(list(role.capabilities) + extra))
+
+    def context(self, role):
+        ctx = super().context("searcher")
+        ctx.role = role
+        return ctx
+
+    def test_read_serves_own_record(self):
+        self.project.role_state.replace("searcher", STATE,
+                                        expected_generation=0)
+        ctx = self.context(self.capped(["research_read"]))
+        out = ctx.handle("research_read", {})
+        self.assertEqual(out["role"], "searcher")
+        self.assertEqual(out["status"], "current")
+        self.assertEqual(out["generation"], 1)
+        self.assertEqual(out["record"]["state"], STATE)
+
+    def test_read_reports_absent(self):
+        ctx = self.context(self.capped(["research_read"]))
+        out = ctx.handle("research_read", {})
+        self.assertEqual(out["status"], "absent")
+
+    def test_replace_writes_receipt_and_store(self):
+        import json as _json
+        ctx = self.context(self.capped(["research"]))
+        out = ctx.handle("research", {"state": _json.dumps(STATE),
+                                      "expected_generation": 0})
+        self.assertEqual(out["generation"], 1)
+        self.assertEqual(out["evidence"], "research-state.json")
+        receipt = _json.loads((ctx.run_dir / "research-state.json").read_text())
+        self.assertEqual(receipt["state"], STATE)
+        self.assertEqual(receipt["generation"], 1)
+        seen = self.project.role_state.read("searcher")
+        self.assertEqual(seen["generation"], 1)
+
+    def test_replace_stale_writes_no_receipt(self):
+        import json as _json
+        self.project.role_state.replace("searcher", STATE,
+                                        expected_generation=0)
+        ctx = self.context(self.capped(["research"]))
+        with self.assertRaisesRegex(Denied, "Stale"):
+            ctx.handle("research", {"state": _json.dumps({"other": True}),
+                                    "expected_generation": 0})
+        self.assertFalse((ctx.run_dir / "research-state.json").exists())
+
+    def test_replace_rejects_non_json(self):
+        ctx = self.context(self.capped(["research"]))
+        with self.assertRaisesRegex(Denied, "JSON"):
+            ctx.handle("research", {"state": "{not json",
+                                    "expected_generation": 0})
+
+    def test_replace_rejects_missing_generation(self):
+        import json as _json
+        ctx = self.context(self.capped(["research"]))
+        with self.assertRaises(Denied):
+            ctx.handle("research", {"state": _json.dumps(STATE)})
+
+    def test_capability_gate(self):
+        ctx = self.context(self.capped([]))
+        with self.assertRaises(Denied):
+            ctx.handle("research_read", {})
+        with self.assertRaises(Denied):
+            ctx.handle("research", {"state": "{}", "expected_generation": 0})
+
+    def test_consult_forbids_replace_but_allows_read(self):
+        from types import SimpleNamespace as _Role
+        from mizu.runtime import check_consult_role
+        from mizu.errors import ConfigError
+        with self.assertRaises(ConfigError):
+            check_consult_role("c", _Role(workspace="read",
+                                          capabilities=("finish", "research")))
+        check_consult_role("c", _Role(workspace="read",
+                                      capabilities=("finish", "research_read")))
+
+
+class ResearchPromptTests(Fixture):
+    def capped_context(self, extra):
+        import dataclasses as _dc
+        role = self.config.roles["searcher"]
+        ctx = super().context("searcher")
+        ctx.role = _dc.replace(role, capabilities=tuple(list(role.capabilities) + extra))
+        return ctx
+
+    def test_prompt_injects_current_state(self):
+        import json as _json
+        self.project.role_state.replace("searcher", STATE,
+                                        expected_generation=0)
+        from mizu.runtime import prompt_for, prompt_delta_for
+        for prompt in (prompt_for(self.capped_context(["research_read"])),
+                       prompt_delta_for(self.capped_context(["research_read"]), [])):
+            block = _json.loads(prompt)["research_state"]
+            self.assertEqual(block["status"], "current")
+            self.assertEqual(block["generation"], 1)
+            self.assertEqual(block["state"], STATE)
+
+    def test_prompt_reports_absent_not_empty(self):
+        import json as _json
+        from mizu.runtime import prompt_for
+        block = _json.loads(prompt_for(self.capped_context(["research_read"])))["research_state"]
+        self.assertEqual(block, {"status": "absent"})
+
+    def test_prompt_omits_without_capability(self):
+        import json as _json
+        from mizu.runtime import prompt_for
+        self.assertIsNone(_json.loads(prompt_for(self.capped_context([])))["research_state"])
+
+    def test_prompt_truncates_without_partial_content(self):
+        import json as _json
+        big = {"pad": "x" * 5000}
+        self.project.role_state.replace("searcher", big, expected_generation=0)
+        from mizu.runtime import prompt_for
+        block = _json.loads(prompt_for(self.capped_context(["research_read"])))["research_state"]
+        self.assertEqual(block["status"], "truncated")
+        self.assertEqual(block["generation"], 1)
+        self.assertGreater(block["state_bytes"], block["prompt_bytes"])
+        self.assertNotIn("state", block)
+        self.assertNotIn("pad", _json.dumps(block))
