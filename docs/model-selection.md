@@ -266,6 +266,19 @@ at least at its configured idle cadence so external updates can be noticed.
 This is not a new scheduling/wake policy: existing project readiness and
 on-change checks still apply.
 
+Pre-execution waits are evaluated before a run directory is allocated. The
+first wait with a given reason audits as one run (`started.json`,
+`selection.json`, `result.json`); repeated polls with the same stable reason
+return `status = "waiting"` with `coalesced = true` and the fresh
+`next_evaluation_at` without creating another run directory. Only the
+time-varying `at`/`next_evaluation_at` fields are excluded from the comparison,
+so any changed candidate, block, observation, history, attribute, task,
+classification, or recommendation reason audits again. A successful dispatch
+clears the record, and the per-project `selection/<role>-wait.json` pointer
+names the audit run. Timing stays operator policy (`retry_seconds`,
+`idle_seconds`); the mechanism only avoids idle-poll history spam while every
+tick still re-evaluates for new facts.
+
 Every attempted selection records `runs/RUN/selection.json`: definition digest,
 timestamp, task-input digest, attributes and provenance, observation freshness, prior results,
 matching rule, exclusions, selected profile and classification-run reference.

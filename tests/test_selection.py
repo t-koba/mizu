@@ -234,6 +234,37 @@ class SelectionTests(SelectionFixture):
         self.assertEqual(self.project.snapshots.get()['id'], before)
         self.assertFalse(self.project.control()['paused'])
 
+    def test_unchanged_waits_coalesce_onto_one_audit_run(self):
+        spec = specification()
+        for candidate in spec['rules'][0]['candidates']:
+            candidate['when'] = cond('attributes.missing', 'eq', True)
+        role, _ = self.setup_selection(spec)
+        driver = ScriptDriver()
+        engine = Engine(self.config, driver=driver)
+        first = engine.run(self.project, role.name)
+        self.assertEqual(first['status'], 'waiting')
+        self.assertNotIn('coalesced', first)
+        runs = lambda: sorted((self.project.root / 'runs').iterdir())
+        self.assertEqual(len(runs()), 1)
+        second = engine.run(self.project, role.name)
+        self.assertEqual(second['status'], 'waiting')
+        self.assertTrue(second['coalesced'])
+        self.assertEqual(second['run'], first['run'])
+        self.assertEqual(second['next_evaluation_at'], second['selection']['next_evaluation_at'])
+        self.assertEqual(len(runs()), 1)
+        self.assertEqual(driver.calls, [])
+        # A changed wait reason audits again; a dispatch clears the record.
+        dispatched = engine.run(self.project, role.name, attributes={'missing': True})
+        self.assertEqual(dispatched['status'], 'completed')
+        self.assertFalse((self.project.root / 'selection' / f'{role.name}-wait.json').exists())
+        third = engine.run(self.project, role.name)
+        self.assertEqual(third['status'], 'waiting')
+        self.assertNotIn('coalesced', third)
+        self.assertEqual(len(runs()), 3)
+        fourth = engine.run(self.project, role.name)
+        self.assertTrue(fourth['coalesced'])
+        self.assertEqual(len(runs()), 3)
+
     def test_session_identity_changes_with_profile(self):
         self.setup_selection()
         ctx = self.context()

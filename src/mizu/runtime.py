@@ -1148,6 +1148,32 @@ class Engine:
             if code_unchanged and not decision_events and not wait_events:
                 return {"skipped": "unchanged", "snapshot": snapshot["id"],
                         "code_digest": snapshot["code_digest"]}
+            # Pre-execution selection probe: evaluate before allocating a run
+            # directory so unchanged waits coalesce onto one audit run
+            # instead of one directory per idle poll. A changed wait reason
+            # still audits as a new run; a dispatch clears the record.
+            probed = None
+            probe_error = None
+            if role.selector:
+                try:
+                    from .classification import prepare as _prepare_selection
+                    from .selection import read_wait as _read_wait
+                    from .selection import wait_fingerprint as _wait_fingerprint
+                    probed = _prepare_selection(self, project, role, snapshot, attributes)
+                    if not probed["profile"]:
+                        _fingerprint = _wait_fingerprint(probed)
+                        _last = _read_wait(project, role_name)
+                        if (isinstance(_last, dict) and _last.get("fingerprint") == _fingerprint
+                                and isinstance(_last.get("run"), str)):
+                            return {"run": _last["run"], "role": role_name, "status": "waiting",
+                                    "finished_at": now(), "selection": probed,
+                                    "next_evaluation_at": probed["next_evaluation_at"],
+                                    "coalesced": True, "snapshot": snapshot["id"],
+                                    "code_digest": snapshot["code_digest"]}
+                except Exception as exc:
+                    if probed is not None:
+                        raise
+                    probe_error = exc
             active = project.root / "active" / f"{role_name}.json"
             run_id = uuid.uuid4().hex
             run_dir = project.root / "runs" / run_id
@@ -1186,14 +1212,24 @@ class Engine:
                                 "events": obligations})
                 if role.selector:
                     from .classification import prepare
-                    decision = prepare(self, project, role, snapshot, attributes)
+                    from .selection import clear_wait as _clear_wait
+                    from .selection import wait_fingerprint as _wait_fingerprint2
+                    from .selection import write_wait as _write_wait
+                    if probe_error is not None:
+                        raise probe_error
+                    decision = probed if probed is not None else prepare(self, project, role, snapshot, attributes)
                     write_json(run_dir / "selection.json", decision)
                     if not decision["profile"]:
                         result = {"run": run_id, "role": role_name, "status": "waiting",
                                   "finished_at": now(), "selection": decision,
                                   "next_evaluation_at": decision["next_evaluation_at"]}
                         write_json(run_dir / "result.json", result)
+                        with contextlib.suppress(OSError, ValueError, TypeError):
+                            _write_wait(project, role_name, _wait_fingerprint2(decision),
+                                        run_id, decision["next_evaluation_at"])
                         return result
+                    with contextlib.suppress(OSError, ValueError, TypeError):
+                        _clear_wait(project, role_name)
                     role = dataclasses.replace(role, profile=decision["profile"], selector="")
                 if self.stop.is_set() or not project.control().get("armed") or project.control().get("paused"):
                     raise Cancelled("Run stopped before model dispatch")

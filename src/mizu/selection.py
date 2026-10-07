@@ -5,7 +5,7 @@ import math
 import time
 
 from .errors import ConfigError, ModelFailure
-from .fs import ID, canonical, digest, lock, read_json, write_json
+from .fs import DIGEST, ID, canonical, digest, lock, read_json, write_json
 
 MAX_BYTES = 1024 * 1024
 MAX_ITEMS = 64
@@ -510,3 +510,65 @@ def select(config, role, facts, sources, *, at=None, classification=None):
         break
     decision['next_evaluation_at'] = min(times)
     return bounded(decision, 262144)
+
+
+#: Pre-execution wait coalescing: unchanged selection waits share one audit
+#: run instead of one directory per idle poll. Time-varying fields only.
+WAIT_EPOCH_FIELDS = ('at', 'next_evaluation_at')
+
+
+def wait_stable(decision):
+    """Stable wait reason: a decision without its time-varying fields."""
+    if not isinstance(decision, dict):
+        return {}
+    return {key: value for key, value in decision.items() if key not in WAIT_EPOCH_FIELDS}
+
+
+def wait_fingerprint(decision):
+    """Digest of the stable wait reason; time slides never change it."""
+    return digest(canonical(wait_stable(decision)))
+
+
+def wait_path(project, role_name):
+    """Per-project, per-role last-wait record (alongside classification caches)."""
+    return project.root / 'selection' / (role_name + '-wait.json')
+
+
+def read_wait(project, role_name):
+    """Last recorded wait, or None when absent/unreadable (never raises)."""
+    try:
+        record = read_json(wait_path(project, role_name), None)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+    if not isinstance(record, dict):
+        return None
+    if not isinstance(record.get('fingerprint'), str) or not DIGEST.fullmatch(record['fingerprint']):
+        return None
+    if not isinstance(record.get('run'), str) or not record['run']:
+        return None
+    return record
+
+
+def write_wait(project, role_name, fingerprint, run, next_evaluation_at):
+    """Record the audited wait; overwrites any prior record."""
+    from pathlib import Path as _Path
+    path = wait_path(project, role_name)
+    directory = path.parent
+    if not isinstance(directory, _Path):
+        raise ConfigError('Invalid wait record path')
+    import os as _os
+    try:
+        _os.makedirs(directory, mode=0o700, exist_ok=True)
+    except OSError as exc:
+        raise ConfigError(f'Cannot record selection wait: {exc}') from exc
+    record = {'fingerprint': fingerprint, 'run': run,
+              'next_evaluation_at': next_evaluation_at, 'version': 1}
+    write_json(path, bounded(record, 262144))
+
+
+def clear_wait(project, role_name):
+    """Forget the last wait after a dispatch; best-effort, never raises."""
+    try:
+        wait_path(project, role_name).unlink(missing_ok=True)
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
