@@ -22,12 +22,13 @@ from .bridge import Bridge
 from .config import role_policy_text
 from .drivers import EVENT_RECORD_BYTES
 from .engine_config import (MAX_SESSION_TOKENS, adapter_digest, effective,
-                             save_session, session_record, session_token_total)
+                             save_session, session_generation, session_record,
+                             session_token_total)
 from .errors import Cancelled, ConfigError, LimitExceeded, ProtocolError, ModelFailure
 from .fs import atomic_write, canonical, digest, mkdir, write_json
 from .pi_durable_store import (BACKENDS, RESUME_MODES, complete_run, complete_turn,
                                begin_run, check_grant, grant_digest, load_run,
-                               open_store, project_context, prune,
+                               open_store, project_context, prune, prune_generations,
                                record_turn, retention_candidates, store_path_for)
 from .process import environment, run
 from .protocol import tool_definitions
@@ -101,12 +102,33 @@ class PiDurableDriver:
         # The durable SQLite store (keyed by session_key) owns conversation
         # resume and supersedes native session files; the session record
         # still carries cumulative usage for rotation, like the pi engine.
+        # Conversation identity: a persistent session shares one store per
+        # rotation generation (the content-bound key alone at generation
+        # zero, suffixed after), so rotation starts a fresh conversation;
+        # every other run gets a distinct key that is stable across retries
+        # of the same run, so two runs never meet in one store while crash
+        # recovery still resumes the active run.
         path, saved = session_record(context, profile, settings)
-        session_key = path.parent.name
+        base_key = ""
+        generation = 0
+        if settings.get("session") == "persistent" and not context.ephemeral:
+            base_key = path.parent.name
+            generation = session_generation(path.parent)
+            session_key = base_key if not generation else f"{base_key}-g{generation}"
+        else:
+            session_key = f"run-{context.run_dir.name}"
         project_name = getattr(getattr(context, "project", None), "name", "unknown")
         model = self.config.model(profile)
         grant = grant_for(settings, context.role, model)
         store_path = store_path_for(self.config.data, project_name, context.role.name, session_key)
+        pruned_generations = []
+        if generation and not store_path.exists():
+            # First dispatch after rotation: retire the abandoned
+            # generation stores so the previous conversation is gone,
+            # not lingering beside the fresh one.
+            pruned_generations = prune_generations(
+                self.config.data, project=project_name, role=context.role.name,
+                base_key=base_key, generation=generation)
         conn = open_store(store_path)
         existing = 0
         try:
@@ -152,7 +174,8 @@ class PiDurableDriver:
             complete_run(conn, run_key, {"engine": outcome.get("engine"), "requests": outcome.get("requests")}, status="completed")
             outcome["durable"] = {"resumed": bool(started_record.get("resumed")), "duplicate": False,
                                   "store": str(store_path), "projection": project_context(conn, run_key),
-                                  "grant": grant, "reaped": reaped}
+                                  "grant": grant, "reaped": reaped,
+                                  "pruned_generations": pruned_generations}
             return outcome
         except (Cancelled, ProtocolError, ModelFailure, ConfigError, LimitExceeded):
             try:

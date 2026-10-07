@@ -6,9 +6,11 @@ from mizu import pi_durable
 from mizu.drivers import driver_for
 from mizu.engine_config import effective
 from mizu.errors import ConfigError, LimitExceeded, ModelFailure
+from mizu.engine_config import rotate_session, rotation_due, session_generation
 from mizu.pi_durable_store import (begin_run, check_grant, complete_run, complete_turn,
                                    grant_digest, load_run, open_store, project_context,
-                                   prune, record_turn, retention_candidates, store_path_for)
+                                   prune, prune_generations, record_turn, retention_candidates,
+                                   store_path_for)
 
 
 class SelectionTests(Fixture):
@@ -154,6 +156,141 @@ class PolicyTests(Fixture):
         self.assertEqual(record2["usage"], {"tokens": 30})
 
 
+class SessionIsolationTests(Fixture):
+    def _durable_profile(self, **options):
+        settings = dict(self.config.profiles["primary"])
+        settings["engine"] = "pi-durable"
+        merged = dict(settings.get("options", {}))
+        merged.update(options)
+        settings["options"] = merged
+        self.config.profiles["durable"] = settings
+        return "durable"
+
+    def _succeed(self, driver, tokens=15):
+        usage = {"input_tokens": tokens, "output_tokens": 0,
+                 "cache_read_tokens": 0, "cache_write_tokens": 0}
+        driver._run_once = lambda *a, **k: {"engine": "pi-durable", "requests": 1,
+                                            "usage": [dict(usage)]}
+
+    def _ephemeral(self):
+        context = self.context()
+        context.ephemeral = True
+        return context
+
+    def test_two_ephemeral_runs_use_distinct_stores(self):
+        profile = self._durable_profile()
+        driver = pi_durable.PiDurableDriver(self.config)
+        self._succeed(driver)
+        first_ctx, second_ctx = self._ephemeral(), self._ephemeral()
+        first = driver.execute(first_ctx, "one", profile=profile)
+        second = driver.execute(second_ctx, "two", profile=profile)
+        self.assertNotEqual(first["durable"]["store"], second["durable"]["store"])
+        # Each actual store holds only its own conversation: the other run
+        # key resolves in neither store.
+        from pathlib import Path
+        for own, own_ctx, other_ctx in ((first, first_ctx, second_ctx),
+                                        (second, second_ctx, first_ctx)):
+            conn = open_store(Path(own["durable"]["store"]))
+            try:
+                self.assertIsNotNone(load_run(conn, own_ctx.run_dir.name))
+                self.assertIsNone(load_run(conn, other_ctx.run_dir.name))
+            finally:
+                conn.close()
+
+    def test_ephemeral_retry_resumes_same_store(self):
+        profile = self._durable_profile()
+        driver = pi_durable.PiDurableDriver(self.config)
+        context = self._ephemeral()
+        def boom(*args, **kwargs):
+            raise ModelFailure("pi-durable", kind="error", message="boom")
+        driver._run_once = boom
+        with self.assertRaises(ModelFailure):
+            driver.execute(context, "hello", profile=profile)
+        from pathlib import Path
+        self._succeed(driver)
+        out = driver.execute(context, "hello", profile=profile)
+        self.assertTrue(out["durable"]["resumed"])
+        conn = open_store(Path(out["durable"]["store"]))
+        try:
+            record = load_run(conn, context.run_dir.name)
+        finally:
+            conn.close()
+        # Crash recovery kept the same conversation: one run row, now
+        # completed, holding a prompt turn from each attempt.
+        self.assertEqual(record["status"], "completed")
+        self.assertEqual(len(record["turns"]), 2)
+
+    def test_token_rotation_starts_a_fresh_conversation(self):
+        import json
+        import types
+        profile = self._durable_profile()
+        self.config.profiles[profile]["session"] = "persistent"
+        role = self.config.roles["worker"]
+        driver = pi_durable.PiDurableDriver(self.config)
+        self._succeed(driver, tokens=15)
+        first = driver.execute(self.context(), "one", profile=profile)
+        session_file = next((self.project.root / "sessions" / role.name).rglob("session.json"))
+        saved = json.loads(session_file.read_text())
+        limits = types.SimpleNamespace(session_max_tokens=1, session_max_cost_usd=0,
+                                       session_max_age_seconds=0)
+        due, reason = rotation_due(limits, session_file, saved, "pi-durable")
+        self.assertTrue(due, reason)
+        rotate_session(session_file, self.project.root / "runs" / "rot", reason)
+        self.assertEqual(session_generation(session_file.parent), 1)
+        out = driver.execute(self.context(), "two", profile=profile)
+        self.assertNotEqual(out["durable"]["store"], first["durable"]["store"])
+        self.assertTrue(out["durable"]["store"].endswith("-g1/store.sqlite"))
+        # The abandoned store is retired, and the fresh store holds no
+        # trace of the previous conversation.
+        from pathlib import Path
+        self.assertFalse(Path(first["durable"]["store"]).exists())
+        self.assertEqual(out["durable"]["pruned_generations"],
+                         [Path(first["durable"]["store"]).parent.name])
+        conn = open_store(Path(out["durable"]["store"]))
+        try:
+            rows = conn.execute("SELECT run_key FROM durable_runs").fetchall()
+        finally:
+            conn.close()
+        self.assertEqual(len(rows), 1)
+        fresh = json.loads(session_file.read_text())
+        self.assertEqual(fresh["usage"], {"tokens": 15})
+
+    def test_persistent_retry_keeps_crash_recovery_without_rotation(self):
+        profile = self._durable_profile()
+        self.config.profiles[profile]["session"] = "persistent"
+        driver = pi_durable.PiDurableDriver(self.config)
+        context = self.context()
+        def boom(*args, **kwargs):
+            raise ModelFailure("pi-durable", kind="error", message="boom")
+        driver._run_once = boom
+        with self.assertRaises(ModelFailure):
+            driver.execute(context, "hello", profile=profile)
+        self._succeed(driver)
+        out = driver.execute(context, "hello", profile=profile)
+        self.assertTrue(out["durable"]["resumed"])
+        self.assertEqual(out["durable"]["pruned_generations"], [])
+        from pathlib import Path
+        conn = open_store(Path(out["durable"]["store"]))
+        try:
+            record = load_run(conn, context.run_dir.name)
+        finally:
+            conn.close()
+        self.assertEqual(record["status"], "completed")
+        self.assertEqual(len(record["turns"]), 2)
+
+    def test_corrupt_generation_refuses_instead_of_resuming(self):
+        profile = self._durable_profile()
+        self.config.profiles[profile]["session"] = "persistent"
+        role = self.config.roles["worker"]
+        driver = pi_durable.PiDurableDriver(self.config)
+        self._succeed(driver)
+        driver.execute(self.context(), "one", profile=profile)
+        session_dir = next((self.project.root / "sessions" / role.name).rglob("session.json")).parent
+        (session_dir / "generation.json").write_text("{corrupt")
+        with self.assertRaises(ConfigError):
+            driver.execute(self.context(), "two", profile=profile)
+
+
 class StoreTests(unittest.TestCase):
     def test_isolation_by_project_role_session(self):
         a = store_path_for("/data", "proj", "worker", "aaa")
@@ -229,6 +366,41 @@ class StoreTests(unittest.TestCase):
             self.assertIsNotNone(load_run(conn, "active"))
             self.assertIsNotNone(load_run(conn, "broken"))
             conn.close()
+
+
+class PruneGenerationsTests(unittest.TestCase):
+    def _role_dir(self, root, project="proj", role="worker"):
+        from pathlib import Path
+        role_dir = Path(root) / "durable" / project / role
+        role_dir.mkdir(parents=True)
+        return role_dir
+
+    def test_prune_removes_only_older_generations(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as td:
+            role_dir = self._role_dir(td)
+            for name in ("aaa", "aaa-g1", "aaa-g2", "bbb", "aaa-gX", "aa", "aaa-g2-extra"):
+                (role_dir / name).mkdir()
+            (role_dir / "aaa-g1" / "store.sqlite").write_text("old")
+            removed = prune_generations(td, project="proj", role="worker",
+                                        base_key="aaa", generation=2)
+            self.assertEqual(removed, ["aaa", "aaa-g1"])
+            remaining = sorted(p.name for p in role_dir.iterdir())
+            self.assertEqual(remaining, ["aa", "aaa-g2", "aaa-g2-extra", "aaa-gX", "bbb"])
+
+    def test_prune_missing_role_dir_is_nothing(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            self.assertEqual(prune_generations(td, project="proj", role="worker",
+                                               base_key="aaa", generation=1), [])
+
+    def test_prune_rejects_bad_generation(self):
+        from mizu.errors import ConfigError
+        for bad in (0, -1, "2", None):
+            with self.assertRaises(ConfigError):
+                prune_generations("/data", project="p", role="r",
+                                  base_key="aaa", generation=bad)
 
 
 if __name__ == "__main__":

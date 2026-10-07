@@ -182,6 +182,30 @@ def session_record(context, profile, settings):
     return path, record
 
 
+def session_generation(session_dir) -> int:
+    """Conversation generation of a persistent session key directory.
+
+    Schema: ``generation.json`` holds ``{"generation": N}``; a missing
+    file is generation zero (pre-rotation sessions keep their existing
+    store). Trust: local operator state, written atomically by rotation
+    alongside ``session.json``. Failure: malformed records raise
+    ``ConfigError`` rather than silently resuming an older generation.
+    """
+    try:
+        record = read_json(Path(session_dir) / "generation.json", None)
+    except (OSError, ValueError) as exc:
+        raise ConfigError("Invalid session generation; "
+                          "resume cannot be replaced with a new conversation") from exc
+    if record is None:
+        return 0
+    if (not isinstance(record, dict) or set(record) != {"generation"}
+            or type(record.get("generation")) is not int
+            or not 0 <= record["generation"] <= 2 ** 31):
+        raise ConfigError("Invalid session generation; "
+                          "resume cannot be replaced with a new conversation")
+    return record["generation"]
+
+
 #: Persistent-session rotation: usage totals are read from the saved
 #: per-session record plus existing per-run evidence; no new counters.
 MAX_SESSION_TOKENS = 2**63 - 1
@@ -338,6 +362,10 @@ def rotate_session(path, run_dir, reason):
         path.unlink()
     except FileNotFoundError:
         pass
+    if hasattr(path, "parent"):
+        generation = session_generation(path.parent)
+        write_json(path.parent / "generation.json", {"generation": generation + 1})
+        record["generation"] = generation + 1
     return record
 
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import sqlite3
 import time
 from pathlib import Path
@@ -39,6 +40,59 @@ def store_path_for(data_dir: Path, project: str, role: str, session_key: str) ->
     return (Path(data_dir) / "durable" / _safe_name(project, "project")
             / _safe_name(role, "role") / _safe_name(session_key, "session")
             / "store.sqlite")
+
+
+#: Suffix matching an older conversation generation of one session key.
+_GENERATION = re.compile(r"-g(\d{1,10})\Z")
+
+
+def prune_generations(data_dir: Path, *, project: str, role: str,
+                      base_key: str, generation: int) -> list[str]:
+    """Remove orphaned older-generation stores of one session key.
+
+    Schema: under ``durable/<project>/<role>/``, directories named
+    exactly ``base_key`` (generation zero) or ``base_key-g<N>`` with
+    ``N`` below ``generation`` hold conversations a rotation already
+    abandoned; only whole directories this module owns are removed.
+    Bounds: names match the strict store identifier plus a numeric
+    suffix, so unrelated sessions are never touched. Trust: local
+    operator state only. Failure: a missing role directory is nothing
+    to prune; other I/O errors propagate. Returns the removed names.
+    """
+    if type(generation) is not int or generation < 1:
+        raise ConfigError("Durable prune generation must be a positive integer")
+    base = _safe_name(base_key, "session")
+    role_dir = (Path(data_dir) / "durable" / _safe_name(project, "project")
+                / _safe_name(role, "role"))
+    removed = []
+    try:
+        children = list(role_dir.iterdir())
+    except FileNotFoundError:
+        return []
+    for child in children:
+        name = child.name
+        if name == base:
+            old = 0
+        else:
+            if not name.startswith(base + "-g"):
+                continue
+            match = _GENERATION.fullmatch(name[len(base):])
+            if match is None:
+                continue
+            old = int(match.group(1))
+        if old >= generation:
+            continue
+        try:
+            if child.is_dir() and not child.is_symlink():
+                shutil.rmtree(child)
+            elif child.is_file() and not child.is_symlink():
+                child.unlink()
+            else:
+                continue
+        except FileNotFoundError:
+            continue
+        removed.append(name)
+    return sorted(removed)
 
 
 def grant_digest(*, policy_text: str, capabilities: tuple, model: dict,

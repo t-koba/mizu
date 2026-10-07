@@ -214,7 +214,13 @@ prompt. Rotation is operator policy via `[limits] session_max_tokens`,
 a due rotation removes `session.json` so the next dispatch mints a fresh
 provider session while the published snapshot and composed policy reload
 unchanged, recording the reason in `rotation.json` and the mode/key in
-`prompt_projection.json` (ADR-028).
+`prompt_projection.json` (ADR-028). Rotation also bumps the session
+`generation` counter (native engines ignore it): a pi-durable persistent
+session keeps one conversation store per generation, so rotation starts a
+fresh conversation and retires the abandoned generation stores, while an
+undisturbed retry reuses its generation and resumes the active run.
+Ephemeral and one-shot pi-durable runs never share a store: each run gets
+a distinct key that is stable across retries of the same run.
 
 Repeated failures pause a project. A restarting worker inspects actual files and
 previous failure evidence before further action. It does not resend the last
