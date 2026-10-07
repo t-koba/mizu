@@ -21,7 +21,7 @@ def _future():
 def _defer(project, source, wait, title="Finding"):
     item = project.insights.submit(source=source, title=title, body="evidence",
                                    base_snapshot=project.snapshots.get()["id"])
-    project.insights.decide(item["id"], "defer", "parked", "wait for it", "test", wait=wait)
+    project.insights.decide(item["id"], "defer", "parked", "wait for it", "test", wait=wait, expected_rev=1)
     return item
 
 
@@ -31,22 +31,22 @@ class WaitRegistrationTests(Fixture):
                                             base_snapshot=self.project.snapshots.get()["id"])
         with self.assertRaisesRegex(Denied, "deadline.*code_change.*insight_decided"):
             self.project.insights.decide(item["id"], "defer", "r", "v", "test",
-                                         wait={"kind": "ci_green"})
+                                         wait={"kind": "ci_green"}, expected_rev=1)
         with self.assertRaises(Denied):
             self.project.insights.decide(item["id"], "defer", "r", "v", "test",
-                                         wait={"kind": "deadline", "at": "soon"})
+                                         wait={"kind": "deadline", "at": "soon"}, expected_rev=1)
         with self.assertRaises(Denied):
             self.project.insights.decide(item["id"], "defer", "r", "v", "test",
-                                         wait={"kind": "deadline", "at": "2026-10-07T00:00:00"})
+                                         wait={"kind": "deadline", "at": "2026-10-07T00:00:00"}, expected_rev=1)
         with self.assertRaises(Denied):
             self.project.insights.decide(item["id"], "accept", "r", "", "test",
-                                         wait={"kind": "code_change"})
+                                         wait={"kind": "code_change"}, expected_rev=1)
         with self.assertRaises(Denied):
             self.project.insights.decide(item["id"], "defer", "r", "v", "test",
-                                         wait={"kind": "code_change", "extra": 1})
+                                         wait={"kind": "code_change", "extra": 1}, expected_rev=1)
         with self.assertRaises(Denied):
             self.project.insights.decide(item["id"], "defer", "r", "v", "test",
-                                         wait={"kind": "insight_decided"})
+                                         wait={"kind": "insight_decided"}, expected_rev=1)
 
     def test_cli_wait_spec_parsing(self):
         from mizu.cli import _parse_wait
@@ -63,7 +63,7 @@ class WaitRegistrationTests(Fixture):
 
     def test_tool_schema_accepts_wait(self):
         from mizu.protocol import DEFINITIONS, validate
-        validate({"id": "x", "action": "defer", "reason": "r", "revisit": "v",
+        validate({"id": "x", "action": "defer", "reason": "r", "revisit": "v", "rev": 3,
                   "wait": {"kind": "insight_decided", "insight": "y"}},
                  DEFINITIONS["decide"][1])
 
@@ -79,7 +79,7 @@ class WaitDispatchTests(Fixture):
         snap = self.project.snapshots.get()["id"]
         rejected = self.project.insights.submit(source="reviewer", title="First", body="evidence",
                                                 base_snapshot=snap)
-        self.project.insights.decide(rejected["id"], "reject", "not yet", "", "reviewer")
+        self.project.insights.decide(rejected["id"], "reject", "not yet", "", "reviewer", expected_rev=1)
         first = engine.run(self.project, "reviewer")
         started = read_json(self.project.root / "runs" / first["run"] / "started.json")
         self.assertEqual(started["admission"], "decision")
@@ -140,7 +140,7 @@ class WaitDispatchTests(Fixture):
         self.assertEqual(engine.run(self.project, "reviewer").get("skipped"), "unchanged")
         # Any substantive decision resolves the dependency, including rejection:
         # the waiter reassesses instead of waiting forever.
-        self.project.insights.decide(target["id"], "reject", "no", "", "test")
+        self.project.insights.decide(target["id"], "reject", "no", "", "test", expected_rev=1)
         due = self.project.insights.due_waits("reviewer", self.project.snapshots.get())
         self.assertEqual([(d["insight"], d["target"]) for d in due], [(item["id"], target["id"])])
 
@@ -162,7 +162,7 @@ class WaitDispatchTests(Fixture):
                                      base_snapshot=None)
         self.assertIsNone(self.project.insights.wait_for(item["id"]))
         item2 = _defer(self.project, "reviewer", {"kind": "deadline", "at": _past()}, title="G")
-        self.project.insights.decide(item2["id"], "accept", "done", "", "test")
+        self.project.insights.decide(item2["id"], "accept", "done", "", "test", expected_rev=1)
         self.assertEqual(self.project.insights.due_waits("reviewer", self.project.snapshots.get()), [])
         item3 = _defer(self.project, "reviewer", {"kind": "deadline", "at": _past()}, title="H")
         self.project.insights.withdraw(item3["id"], source="reviewer", reason="moot")
