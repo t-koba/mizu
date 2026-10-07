@@ -704,19 +704,24 @@ def _prefix_match(short: str, prefix: str) -> bool:
     return short == prefix or short.startswith(prefix + "/")
 
 
+def _short_branch_name(name: str) -> str:
+    """Return the short branch name for a short or ``refs/heads/`` ref."""
+    return name[len("refs/heads/"):] if name.startswith("refs/heads/") else name
+
+
 def classify_branch(ref, *, owned_prefixes=(), protected_refs=()) -> str:
     """Classify a branch/ref into its lifecycle class (pure, no I/O).
 
     Schema: ``ref`` is a short branch name or a full ref path
     (``refs/heads/<name>``); ``owned_prefixes`` is a list of literal
     namespace prefixes (``"mizu/"``), ``protected_refs`` a list of exact
-    protected names. Order: ``refs/remotes/*`` reads as ``tracking``,
-    other non-heads ``refs/`` namespaces (pull/fork) read as
-    ``external``, then exact ``protected`` wins over ``owned`` prefix
-    match, and anything else is ``other`` active work. Bounds: names per
-    ``_check_ref_name``. Trust: pure local syntax plus operator
-    namespaces; never consults the network. Failure: ``Denied`` on bad
-    refs or malformed namespace policy.
+    protected names in either short or ``refs/heads/`` form. Order:
+    ``refs/remotes/*`` reads as ``tracking``, other non-heads ``refs/``
+    namespaces (pull/fork) read as ``external``, then exact ``protected``
+    wins over ``owned`` prefix match, and anything else is ``other``
+    active work. Bounds: names per ``_check_ref_name``. Trust: pure local
+    syntax plus operator namespaces; never consults the network. Failure:
+    ``Denied`` on bad refs or malformed namespace policy.
     """
     _check_ref_name(ref)
     if (not isinstance(owned_prefixes, (list, tuple))
@@ -729,8 +734,12 @@ def classify_branch(ref, *, owned_prefixes=(), protected_refs=()) -> str:
         return "tracking"
     if ref.startswith("refs/") and not ref.startswith("refs/heads/"):
         return "external"
-    short = ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref
-    if short in protected_refs or ref in protected_refs:
+    short = _short_branch_name(ref)
+    # Protected entries match in either spelling: a full ``refs/heads/``
+    # entry protects the short branch and vice versa, so an owned-prefix
+    # match can never retire a branch the operator meant to protect.
+    protected = {_short_branch_name(entry) for entry in protected_refs}
+    if short in protected:
         return "protected"
     if any(_prefix_match(short, prefix) for prefix in owned):
         return "owned"

@@ -68,6 +68,21 @@ class ClassifyTests(Fixture):
             "mizu/main", owned_prefixes=["mizu/"],
             protected_refs=["mizu/main"]), "protected")
 
+    def test_full_form_protected_matches_short_branch(self):
+        # Either spelling protects: a full refs/heads entry must protect the
+        # short branch from retirement, and vice versa.
+        for ref, entry in (("mizu/main", "refs/heads/mizu/main"),
+                           ("refs/heads/mizu/main", "mizu/main"),
+                           ("refs/heads/mizu/main", "refs/heads/mizu/main")):
+            self.assertEqual(vcs.classify_branch(
+                ref, owned_prefixes=["mizu/"],
+                protected_refs=[entry]), "protected", f"{ref} vs {entry}")
+        settings = grant_settings(RETIRE_OK)
+        settings["protected_refs"] = ["refs/heads/mizu/main"]
+        settings["owned_prefixes"] = ["mizu/"]
+        with self.assertRaisesRegex(Denied, "protected"):
+            vcs.retire_via(settings, "mizu/main", SHA_A)
+
     def test_prefix_matches_components_not_strings(self):
         self.assertEqual(vcs.classify_branch("mizu-x", owned_prefixes=["mizu"]), "other")
         self.assertEqual(vcs.classify_branch("mizu/x", owned_prefixes=["mizu"]), "owned")
