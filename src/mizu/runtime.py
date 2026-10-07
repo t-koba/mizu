@@ -106,7 +106,7 @@ def is_deferred(exc: BaseException, context=None) -> bool:
 #: stay operator choice, plus the required finish.
 CONSULT_FORBIDDEN = frozenset({"exec", "experiment", "verify", "decide",
                                "submit_insight", "consult", "report", "sync",
-                               "vcs_publish", "vcs_retire"})
+                               "vcs_publish", "vcs_retire", "vcs_dispose"})
 
 
 def check_consult_role(role_name: str, role) -> None:
@@ -508,6 +508,35 @@ class Context:
         write_json(self.run_dir / "vcs-retire.json", data)
         return record
 
+    def _op_vcs_dispose(self, args: dict) -> dict:
+        # Proposal disposition: close/merge an external proposal at the
+        # exact assessed head sha behind the configured dispose grant plus
+        # a recorded human GO approval for the integrated tree. Approval
+        # is checked before the adapter spawns; the adapter must act only
+        # while the proposal is still open at the expected sha and echo
+        # the terminal state. Never automatic; a failed call implies
+        # nothing about the remote proposal.
+        if self.role.workspace != "write":
+            raise Denied("Proposal disposition requires a writable workspace")
+        captured = self.project.snapshots.capture_files(self.workspace)
+        if captured.get("skipped"):
+            raise Denied("Proposal disposition requires a representable snapshot")
+        code_digest = captured["code_digest"]
+        approval = _vcs.require_go_approval(self.project, args["branch"], code_digest)
+        try:
+            data = _vcs.dispose_via(self.config.vcs, args["op"], args.get("id"),
+                                    args.get("sha"))
+        except OSError as exc:
+            raise Denied(f"Proposal disposition is unavailable: {exc}") from exc
+        record = {"disposed": True, "op": args["op"], "id": data["id"],
+                  "sha": data["sha"], "state": data["state"],
+                  "branch": args["branch"], "code_digest": code_digest,
+                  "approval": approval["insight"],
+                  "trust": "external-untrusted", "evidence": "vcs-dispose.json",
+                  "result": data}
+        write_json(self.run_dir / "vcs-dispose.json", record)
+        return record
+
     def _op_consult(self, args: dict) -> dict:
         if self.consult is None:
             raise Denied("Nested consultation is disabled")
@@ -544,7 +573,7 @@ class Context:
         "fetch": _op_fetch, "search": _op_search, "insights": _op_insights,
         "decide": _op_decide, "submit_insight": _op_submit_insight,
         "sync": _op_sync, "vcs_read": _op_vcs_read, "vcs_publish": _op_vcs_publish,
-        "vcs_retire": _op_vcs_retire,
+        "vcs_retire": _op_vcs_retire, "vcs_dispose": _op_vcs_dispose,
         "consult": _op_consult, "report": _op_report, "finish": _op_finish,
     }
 

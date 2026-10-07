@@ -243,6 +243,7 @@ models are recorded. Model usage excludes unreported auxiliary billing.
 | `vcs_read` | Read CI status, logs, PR comments, external proposals, and exact-revision proposal content via the trusted VCS adapter; never publishes (read roles may hold it) |
 | `vcs_publish` | Push a branch or open a PR via the trusted VCS adapter behind a recorded human `GO <branch>` approval (writable workspace only; consultation roles cannot hold it) |
 | `vcs_retire` | Retire an owned temporary integration branch at an exact expected sha behind the configured `retire_grant` (writable workspace only; consultation roles cannot hold it; never combines with `submit_insight`/`decide`) |
+| `vcs_dispose` | Close or merge an external proposal at its exact assessed head sha behind the configured `dispose_grant` plus a recorded human `GO <branch>` approval for the integrated tree (writable workspace only; consultation roles cannot hold it; never combines with `submit_insight`/`decide`; never automatic) |
 | `finish` | Seal result; cannot acquire new permissions |
 
 A consultation names its answering role explicitly (`role`, default `consult`).
@@ -322,7 +323,7 @@ summary (`injected`, `prefix`, `trust`, `upstream` for `main`, sorted `refs`
 names); completion still binds to `code_digest` via `verify`. Failure: `ConfigError` on unknown keys, bad argv, or
 out-of-range bounds; `Denied` on unconfigured adapter, oversize request,
 timeout, oversize response, nonzero exit, or malformed/non-object JSON.
-Defaults apply when `[vcs]` is absent so existing configs keep loading. `retire_grant` (default `false`) is the explicit operator grant for branch retirement; `owned_prefixes` (default `[]`, e.g. `["mizu/"]`) names the temporary integration namespaces; `protected_refs` (default `[]`, e.g. `["main"]`) names exact long-lived refs that always win over owned prefixes. No project, bot, or provider names are hardcoded: an empty policy classifies nothing as owned, so nothing retires.
+Defaults apply when `[vcs]` is absent so existing configs keep loading. `retire_grant` (default `false`) is the explicit operator grant for branch retirement; `owned_prefixes` (default `[]`, e.g. `["mizu/"]`) names the temporary integration namespaces; `protected_refs` (default `[]`, e.g. `["main"]`) names exact long-lived refs that always win over owned prefixes. `dispose_grant` (default `false`) is the explicit operator grant for proposal disposition (`vcs_dispose` close/merge). No project, bot, or provider names are hardcoded: an empty policy classifies nothing as owned, so nothing retires.
 
 `ci_branch` (default `""`) names the operator-selected CI/reporting branch. It is exposed as `ci_branch` in full and delta prompts, but only to roles holding the `vcs_read` engine tool; every other role sees `null`, and an empty value reads as `null` everywhere. Reporters must select that branch for CI evidence and never guess one. Unknown keys still fail load; a non-string, overlong (>256), or whitespace-containing value fails load.
 
@@ -378,6 +379,10 @@ External publication requires recorded human approval (AGENTS.md: "no external p
 ## VCS retire (branch lifecycle: classify, then retire owned only)
 
 `classify_branch` sorts every ref into `owned` (temporary integration branches under configured `owned_prefixes`), `protected` (exact `protected_refs`, always wins), `external` (pull/fork namespaces outside local heads), `tracking` (`refs/remotes/*`), or `other` (active work of unknown ownership). Prefixes match on component boundaries (`mizu` owns `mizu/x` but not `mizu-x`). `vcs_retire` serves only `{"branch", "expected_sha"}`: it refuses without `retire_grant = true`, refuses every non-owned class (protected/external/tracking/other are preserved, and a failed call implies nothing about the remote ref), then sends `{"op": "retire", "branch", "expected_sha"}`. The adapter must delete only when its current head still equals `expected_sha` (compare-and-delete immediately before action) and echo `branch`/`sha` with `deleted: true`, else the call is `Denied`. Retire after confirmed terminal disposition and verified incorporation; a closed-unmerged proposal is not proof its commits are disposable. Evidence lands in `vcs-retire.json` with the classification.
+
+## VCS dispose (final disposition after approved integration)
+
+`vcs_dispose` serves only `close`/`merge` (`{"op", "id", "sha", "branch"}`): `branch` names the integration branch holding the human-approved tree, `id` names the proposal, and `sha` is the exact assessed head. It refuses without `dispose_grant = true` and without a recorded human `GO <branch>` approval for the current `code_digest` (checked before the adapter spawns), then sends `{"op", "id", "sha"}`. The adapter must act only while the proposal is still open at that sha (compare-and-dispose immediately before action: a moved head or an externally superseded proposal refuses) and echo `id`/`sha` with the terminal state (`close` ends `closed`, `merge` ends `merged`), else the call is `Denied`. Disposition is explicit per action: no automatic merges, no bot rules, and the main promotion flow is untouched. A failed call implies nothing about the remote proposal; reconcile by re-observing `proposals`, which revises the recorded observation on state change. Evidence lands in `vcs-dispose.json` with the approval. Safe mutation stays blocked when required evidence is unavailable: tombstoned heads carry no sha to dispose, and an incomplete enumeration never implies terminal disposition.
 
 ## Project metadata
 

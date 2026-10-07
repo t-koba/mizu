@@ -937,6 +937,59 @@ def retire_via(settings: dict, branch, expected_sha) -> dict:
             "classification": classification, "trust": "external-untrusted"}
 
 
+#: Mutating adapter operations that resolve an external proposal to a
+#: terminal state. Served by ``vcs_dispose`` behind a configured grant
+#: plus a recorded human ``GO <branch>`` approval for the integrated
+#: tree: disposition is explicit per action, never automatic. The main
+#: promotion flow is untouched; this only resolves the external record
+#: after approved integration.
+DISPOSE_OPS = frozenset({"close", "merge"})
+
+#: Terminal proposal states; only these confirm a final disposition.
+TERMINAL_STATES = frozenset({"closed", "merged"})
+
+
+def dispose_via(settings: dict, op: str, proposal_id: str, expected_sha) -> dict:
+    """Resolve an external proposal to its terminal state at an exact sha.
+
+    Schema: ``settings`` carries the operator grant (``dispose_grant``
+    true); ``op`` is ``close`` or ``merge``; ``proposal_id`` names the
+    proposal; ``expected_sha`` is the 40/64 hex head the caller assessed.
+    The adapter request sends ``{"op": op, "id", "sha"}``; the adapter
+    must act only while the proposal is still open at ``expected_sha``
+    (compare-and-dispose immediately before action: a moved head or an
+    externally superseded proposal refuses) and echo ``id``/``sha`` with
+    the terminal ``state`` (``close`` ends ``closed``, ``merge`` ends
+    ``merged``). Bounds: same contract as ``invoke``. Trust:
+    operator-owned adapter only; results stay external-untrusted.
+    Evidence: returned receipt names op, id, sha, and terminal state.
+    Failure: ``Denied`` without the configured grant, on unknown ops,
+    bad ids/shas, or a missing/mismatched confirmation echo. A failed
+    call implies nothing about the remote proposal; reconcile by
+    re-observing, never by assuming disposition.
+    """
+    if not isinstance(settings, dict) or settings.get("dispose_grant") is not True:
+        raise Denied("Proposal disposition is not granted in VCS configuration")
+    if op not in DISPOSE_OPS:
+        raise Denied("vcs_dispose cannot dispose with this operation")
+    if (not isinstance(proposal_id, str) or not proposal_id or len(proposal_id) > 128
+            or "\n" in proposal_id or "\x00" in proposal_id):
+        raise Denied("Invalid VCS proposal id for disposition")
+    if not isinstance(expected_sha, str) or not _SHA.fullmatch(expected_sha):
+        raise Denied("Invalid expected proposal sha")
+    data = invoke(settings, {"op": op, "id": proposal_id, "sha": expected_sha})
+    if not isinstance(data, dict) or set(data) != {"id", "sha", "state"}:
+        raise Denied("VCS adapter must confirm the disposed proposal")
+    if data.get("id") != proposal_id or data.get("sha") != expected_sha:
+        raise Denied("VCS adapter must confirm the disposed proposal at the expected sha")
+    state = data.get("state")
+    want = "merged" if op == "merge" else "closed"
+    if state != want:
+        raise Denied("VCS adapter must confirm the terminal proposal state")
+    return {"op": op, "id": proposal_id, "sha": expected_sha, "state": state,
+            "trust": "external-untrusted"}
+
+
 def ci_insight_id(branch: str, sha: str, check: str) -> str:
     """Derive a stable, deduplicating insight ID for a CI failure."""
     from .fs import digest as _digest, canonical as _canonical
