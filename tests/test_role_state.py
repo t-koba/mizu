@@ -200,6 +200,18 @@ class ResearchToolTests(Fixture):
             ctx.handle("research", {"state": "{not json",
                                     "expected_generation": 0})
 
+    def test_replace_rejects_non_finite_constants(self):
+        # NaN/Infinity parse must Deny (never leak ValueError) and
+        # leave the stored record untouched.
+        ctx = self.context(self.capped(["research"]))
+        for payload in ('{"x": NaN}', '{"x": Infinity}',
+                        '{"x": -Infinity}'):
+            with self.assertRaises(Denied):
+                ctx.handle("research", {"state": payload,
+                                        "expected_generation": 0})
+        self.assertEqual(
+            self.project.role_state.read("searcher")["status"], "absent")
+
     def test_replace_rejects_missing_generation(self):
         import json as _json
         ctx = self.context(self.capped(["research"]))

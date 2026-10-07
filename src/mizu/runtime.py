@@ -451,7 +451,7 @@ class Context:
         # untouched; the receipt carries the new generation plus the
         # stored state as run-record audit.
         try:
-            state = json.loads(args["state"])
+            state = json.loads(args["state"], parse_constant=_reject_constant)
         except ValueError as exc:
             raise Denied("Research state must parse as JSON") from exc
         out = self.project.role_state.replace(
@@ -873,6 +873,11 @@ def _prompt_clock(context: Context) -> dict:
     tz = context.config.tzinfo
     name = context.config.timezone
     return {"now": _dt.datetime.now(tz).isoformat(timespec="seconds"), "timezone": str(name)}
+
+
+def _reject_constant(value: str):
+    """Reject non-finite JSON constants at parse time (matches ``fs``)."""
+    raise ValueError(f"Non-finite JSON value: {value}")
 
 
 def _prompt_research_state(context: Context):
