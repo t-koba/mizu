@@ -444,6 +444,40 @@ class PruneGenerationsTests(unittest.TestCase):
             remaining = sorted(p.name for p in role_dir.iterdir())
             self.assertEqual(remaining, ["aaa", "aaa-g1", "aaa-g2", "aaa-g3"])
 
+    def test_prune_retains_unexpected_run_and_turn_states(self):
+        import tempfile
+        from pathlib import Path
+        from mizu.pi_durable_store import generation_terminal
+        with tempfile.TemporaryDirectory() as td:
+            role_dir = self._role_dir(td)
+            # A corrupt edit or future run status is not verifiable.
+            bogus_run = role_dir / "aaa"
+            bogus_run.mkdir()
+            conn = open_store(bogus_run / "store.sqlite")
+            conn.execute("INSERT INTO durable_runs(run_key, session_key, project, role, grant_digest, status, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                         ("r1", "s", "p", "r", "g", "bogus", 0, 0))
+            conn.commit()
+            conn.close()
+            self.assertFalse(generation_terminal(bogus_run))
+            # A non-enumerated turn state counts as unresolved evidence.
+            bogus_turn = role_dir / "aaa-g1"
+            bogus_turn.mkdir()
+            conn = open_store(bogus_turn / "store.sqlite")
+            begin_run(conn, run_key="r2", session_key="s", project="p",
+                      role="r", grant=self._grant())
+            record_turn(conn, "r2", 1, "prompt", {"text": "hi"})
+            complete_turn(conn, "r2", 1, {"ok": True})
+            complete_run(conn, "r2", {"engine": "pi-durable"})
+            conn.execute("UPDATE durable_turns SET state='bogus' WHERE run_key='r2'")
+            conn.commit()
+            conn.close()
+            self.assertFalse(generation_terminal(bogus_turn))
+            removed = prune_generations(td, project="proj", role="worker",
+                                        base_key="aaa", generation=9)
+            self.assertEqual(removed, [])
+            self.assertTrue(bogus_run.is_dir())
+            self.assertTrue(bogus_turn.is_dir())
+
     def test_prune_never_touches_files_or_symlinks(self):
         import tempfile
         from pathlib import Path

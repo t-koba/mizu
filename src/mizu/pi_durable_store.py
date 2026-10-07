@@ -46,10 +46,12 @@ def store_path_for(data_dir: Path, project: str, role: str, session_key: str) ->
 _GENERATION = re.compile(r"-g(\d{1,10})\Z")
 
 
-#: Run/turn states that still carry unresolved recovery or side-effect
-#: evidence; a generation holding any of these is never pruned.
-_UNRESOLVED_RUN = ("active",)
-_UNRESOLVED_TURN = ("started", "unknown")
+#: The only run/turn states this module ever produces as settled
+#: (``complete_run``/``complete_turn``); anything else — active,
+#: started, unknown, corrupt, or future values — still carries
+#: unresolved recovery or side-effect evidence and is never pruned.
+_TERMINAL_RUN = ("completed", "interrupted", "cancelled")
+_TERMINAL_TURN = ("completed", "cancelled")
 
 
 def generation_terminal(directory: Path) -> bool:
@@ -59,8 +61,9 @@ def generation_terminal(directory: Path) -> bool:
     directory. Bounds: read-only inspection, no writes, no WAL creation.
     Trust: local operator state only. Failure: never raises; anything that
     cannot be verified (missing/unreadable store, corrupt database,
-    unexpected shape, an active run, or a started/unknown turn) reads as
-    not terminal so the caller retains the directory for the operator.
+    unexpected shape, or any run/turn state outside the known terminal
+    sets) reads as not terminal so the caller retains the directory for
+    the operator. An empty store holds no evidence and reads as terminal.
     """
     try:
         if directory.is_symlink() or not directory.is_dir():
@@ -70,15 +73,12 @@ def generation_terminal(directory: Path) -> bool:
             return False
         conn = sqlite3.connect(f"file:{store}?mode=ro", uri=True)
         try:
-            runs = conn.execute("SELECT status FROM durable_runs").fetchall()
-            for (status,) in runs:
-                if not isinstance(status, str) or status in _UNRESOLVED_RUN:
+            for (status,) in conn.execute("SELECT status FROM durable_runs").fetchall():
+                if status not in _TERMINAL_RUN:
                     return False
-            states = ",".join(f"'{name}'" for name in _UNRESOLVED_TURN)
-            pending = conn.execute(
-                f"SELECT COUNT(*) FROM durable_turns WHERE state IN ({states})").fetchone()
-            if pending is None or pending[0] != 0:
-                return False
+            for (state,) in conn.execute("SELECT state FROM durable_turns").fetchall():
+                if state not in _TERMINAL_TURN:
+                    return False
             return True
         finally:
             try:
@@ -97,9 +97,10 @@ def prune_generations(data_dir: Path, *, project: str, role: str,
     exactly ``base_key`` (generation zero) or ``base_key-g<N>`` with
     ``N`` below ``generation`` hold conversations a rotation already
     abandoned. Rotation only freshens context: a directory is removed
-    solely when its store verifies as terminal (every run settled, no
-    started/unknown turn). Active, unknown-completion, corrupt, or
-    otherwise uninspectable generations are retained for the operator;
+    solely when its store verifies as terminal (every run and turn in
+    the known terminal sets). Active, unknown-completion, corrupt,
+    future-valued, or otherwise uninspectable generations are retained
+    for the operator;
     time-based reaping stays the separate per-store
     ``retention_candidates``/``prune`` policy, never this path.
     Bounds: one session key, older generations only, whole directories;
