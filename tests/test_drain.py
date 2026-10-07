@@ -35,6 +35,13 @@ class DrainTests(Fixture):
         self.assertTrue(status["control"].get("draining"))
         self.assertEqual(status["project"], "sample")
 
+    def test_fresh_initialize_includes_draining_false(self):
+        import json
+        raw = json.loads((self.project.root / "control.json").read_text())
+        self.assertIn("draining", raw)
+        self.assertFalse(raw["draining"])
+        self.assertIn("draining", self.project.status()["control"])
+
     def test_arm_clears_drain(self):
         self.project.set_control(draining=True)
         args = parser().parse_args(["--config", str(self.file), "arm", "sample"])

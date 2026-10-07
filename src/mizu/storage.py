@@ -965,6 +965,7 @@ def restore(config, name: str, archive_path: Path, *, max_bytes: int = 107374182
                     store.read(historical, path)
             init_managed_repo(stage / "workspace")
             write_json(stage / "control.json", {"armed": False, "paused": True,
+                       "draining": False,
                        "wake_generation": uuid.uuid4().hex, "reason": "Restored checkpoint; operator review required"})
             atomic_write(stage / "spool/editor/.mizu-outbox", b"Mizu Editor proposal outbox\n")
             store.publish(checkpoint)

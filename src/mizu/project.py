@@ -208,6 +208,7 @@ def initialize(config: Config, name: str, source: Path, goal_file: Path,
             text = "roles = " + json.dumps(roles) + "\nverify = " + json.dumps(verification) + "\n"
             atomic_write(stage / "project.toml", text.encode())
             write_json(stage / "control.json", {"armed": armed, "paused": not armed,
+                                                "draining": False,
                                                 "wake_generation": uuid.uuid4().hex, "updated_at": now(),
                                                 "reason": "Operator initialized armed" if armed else "Initialized unarmed; operator arm required"})
             mkdir(stage / "spool" / "editor")
