@@ -998,15 +998,26 @@ def retire_via(settings: dict, branch, expected_sha) -> dict:
     classify ``owned``; ``expected_sha`` is the 40/64 hex head the caller
     observed. The adapter request sends ``{"op": "retire", "branch",
     "expected_sha"}; the adapter must delete only when its current head
-    still equals ``expected_sha`` (revalidation immediately before
-    action, compare-and-delete) and echo ``branch``/``sha`` with
-    ``deleted`` true. Bounds: same contract as ``invoke``. Trust:
-    operator-owned adapter only; results stay external-untrusted.
-    Evidence: returned receipt names branch, sha, and classification.
-    Failure: ``Denied`` without the configured grant, on non-owned
-    branches (protected/external/tracking/other are preserved), on bad
-    shas, or on a missing/mismatched confirmation echo. A failed call
-    implies nothing about the remote ref; reconcile by re-observing.
+    still equals ``expected_sha`` AND no live (non-terminal) proposal
+    still references the branch (revalidation immediately before
+    action, compare-and-delete with no live refs, one atomic provider
+    step, never a separate observe-then-delete round trip) and echo
+    ``branch``/``sha`` with ``deleted`` true plus ``live_refs`` naming
+    the blocking proposal ids the provider checked (empty on success).
+    The caller's own recorded observations are only an early refusal
+    before dispatch and may be stale; the provider affirmation is the
+    fresh authoritative check. A provider that cannot enforce the atomic
+    check must answer ``deleted`` false instead of pretending: the
+    limitation surfaces as a refusal, never as an unchecked delete.
+    Bounds: same contract as ``invoke``. Trust: operator-owned adapter
+    only; results stay external-untrusted. Evidence: returned receipt
+    names branch, sha, classification, and the empty live_refs
+    affirmation. Failure: ``Denied`` without the configured grant, on
+    non-owned branches (protected/external/tracking/other are
+    preserved), on bad shas, on a missing/mismatched confirmation echo,
+    on a missing or malformed ``live_refs`` affirmation, or naming the
+    blockers when the provider reports any. A failed call implies
+    nothing about the remote ref; reconcile by re-observing.
     """
     if not isinstance(settings, dict) or settings.get("retire_grant") is not True:
         raise Denied("Branch retirement is not granted in VCS configuration")
@@ -1025,8 +1036,19 @@ def retire_via(settings: dict, branch, expected_sha) -> dict:
     if (data.get("branch") != branch or data.get("sha") != expected_sha
             or data.get("deleted") is not True):
         raise Denied("VCS adapter must confirm the retired branch at the expected sha")
+    refs = data.get("live_refs")
+    if (not isinstance(refs, list)
+            or any(not isinstance(ref, str) or not ref or len(ref) > 128
+                   or chr(10) in ref or chr(0) in ref for ref in refs)):
+        raise Denied("VCS adapter must confirm live proposal references")
+    if refs:
+        raise Denied("Branch retirement is blocked by live proposal "
+                     f"reference(s) {', '.join(sorted(refs))}; dispose the "
+                     "proposal to a terminal state and re-observe before "
+                     "retiring")
     return {"branch": branch, "sha": expected_sha, "deleted": True,
-            "classification": classification, "trust": "external-untrusted"}
+            "live_refs": [], "classification": classification,
+            "trust": "external-untrusted"}
 
 
 #: Mutating adapter operations that resolve an external proposal to a
@@ -1041,45 +1063,62 @@ DISPOSE_OPS = frozenset({"close", "merge"})
 TERMINAL_STATES = frozenset({"closed", "merged"})
 
 
-def dispose_via(settings: dict, op: str, proposal_id: str, expected_sha) -> dict:
-    """Resolve an external proposal to its terminal state at an exact sha.
+def dispose_via(settings: dict, op: str, proposal_id: str, expected_sha,
+                  base_sha, target) -> dict:
+    """Resolve an external proposal to its terminal state at exact endpoints.
 
-    Schema: ``settings`` carries the operator grant (``dispose_grant``
-    true); ``op`` is ``close`` or ``merge``; ``proposal_id`` names the
-    proposal; ``expected_sha`` is the 40/64 hex head the caller assessed.
-    The adapter request sends ``{"op": op, "id", "sha"}``; the adapter
-    must act only while the proposal is still open at ``expected_sha``
-    (compare-and-dispose immediately before action: a moved head or an
-    externally superseded proposal refuses) and echo ``id``/``sha`` with
-    the terminal ``state`` (``close`` ends ``closed``, ``merge`` ends
-    ``merged``). Bounds: same contract as ``invoke``. Trust:
-    operator-owned adapter only; results stay external-untrusted.
-    Evidence: returned receipt names op, id, sha, and terminal state.
-    Failure: ``Denied`` without the configured grant, on unknown ops,
-    bad ids/shas, or a missing/mismatched confirmation echo. A failed
-    call implies nothing about the remote proposal; reconcile by
+    Schema: ``settings`` carries the per-action operator grant
+    (``close_grant`` for ``close``, ``merge_grant`` for ``merge``; each
+    true independently); ``op`` is ``close`` or ``merge``; ``proposal_id``
+    names the proposal; ``expected_sha`` is the 40/64 hex head the caller
+    assessed; ``base_sha`` is the 40/64 hex base it was assessed against;
+    ``target`` is the target branch name the caller assessed. The adapter
+    request sends ``{"op": op, "id", "sha", "base", "target"}``; the
+    adapter must act only while the proposal is still open at all three
+    assessed endpoints (compare-and-dispose immediately before action: a
+    moved head, a moved base, a retargeted proposal, or an externally
+    superseded proposal refuses) and echo ``id``/``sha``/``base``/
+    ``target`` with the terminal ``state`` (``close`` ends ``closed``,
+    ``merge`` ends ``merged``). Tree-content approval is enforced by the
+    caller before dispatch (a ``GO <branch>`` approval for merges), never
+    by the adapter: the forge cannot interpret workspace code digests, so
+    the adapter contract binds endpoint identity only, and this
+    limitation is explicit rather than a pretended atomic content check.
+    Bounds: same contract as ``invoke``. Trust: operator-owned adapter
+    only; results stay external-untrusted. Evidence: returned receipt
+    names op, id, sha, base, target, and terminal state. Failure:
+    ``Denied`` without the matching per-action grant, on unknown ops, bad
+    ids/shas/branches, or a missing/mismatched confirmation echo. A
+    failed call implies nothing about the remote proposal; reconcile by
     re-observing, never by assuming disposition.
     """
-    if not isinstance(settings, dict) or settings.get("dispose_grant") is not True:
-        raise Denied("Proposal disposition is not granted in VCS configuration")
     if op not in DISPOSE_OPS:
         raise Denied("vcs_dispose cannot dispose with this operation")
+    grant = "close_grant" if op == "close" else "merge_grant"
+    if not isinstance(settings, dict) or settings.get(grant) is not True:
+        raise Denied(f"Proposal {op} is not granted in VCS configuration")
     if (not isinstance(proposal_id, str) or not proposal_id or len(proposal_id) > 128
             or "\n" in proposal_id or "\x00" in proposal_id):
         raise Denied("Invalid VCS proposal id for disposition")
     if not isinstance(expected_sha, str) or not _SHA.fullmatch(expected_sha):
         raise Denied("Invalid expected proposal sha")
-    data = invoke(settings, {"op": op, "id": proposal_id, "sha": expected_sha})
-    if not isinstance(data, dict) or set(data) != {"id", "sha", "state"}:
+    if not isinstance(base_sha, str) or not _SHA.fullmatch(base_sha):
+        raise Denied("Invalid expected proposal base")
+    check_branch(target)
+    data = invoke(settings, {"op": op, "id": proposal_id, "sha": expected_sha,
+                             "base": base_sha, "target": target})
+    if not isinstance(data, dict) or set(data) != {"id", "sha", "base", "target", "state"}:
         raise Denied("VCS adapter must confirm the disposed proposal")
     if data.get("id") != proposal_id or data.get("sha") != expected_sha:
         raise Denied("VCS adapter must confirm the disposed proposal at the expected sha")
+    if data.get("base") != base_sha or data.get("target") != target:
+        raise Denied("VCS adapter must confirm the disposed proposal at the expected base and target")
     state = data.get("state")
     want = "merged" if op == "merge" else "closed"
     if state != want:
         raise Denied("VCS adapter must confirm the terminal proposal state")
-    return {"op": op, "id": proposal_id, "sha": expected_sha, "state": state,
-            "trust": "external-untrusted"}
+    return {"op": op, "id": proposal_id, "sha": expected_sha, "base": base_sha,
+            "target": target, "state": state, "trust": "external-untrusted"}
 
 
 def ci_insight_id(branch: str, sha: str, check: str) -> str:

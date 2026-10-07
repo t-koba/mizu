@@ -13,6 +13,10 @@ from mizu.runtime import Context, check_consult_role
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
+BASE_A = "c" * 40
+BASE_B = "d" * 40
+TARGET = "main"
+TARGET_OTHER = "release/2"
 PROPOSAL_ID = "forge:owner/repo#1"
 
 
@@ -30,14 +34,24 @@ def dispose_code(payload):
             "print(open(%r).read())" % str(path))
 
 
-def granted(code):
+def granted(code, close=True, merge=True):
     settings = adapter_settings(code)
-    settings["dispose_grant"] = True
+    settings["close_grant"] = close
+    settings["merge_grant"] = merge
     return settings
 
 
-def echo(identity=PROPOSAL_ID, sha=SHA_A, state="closed"):
-    return {"id": identity, "sha": sha, "state": state}
+def echo(identity=PROPOSAL_ID, sha=SHA_A, state="closed",
+         base=BASE_A, target=TARGET):
+    return {"id": identity, "sha": sha, "base": base,
+            "target": target, "state": state}
+
+
+def close_args(**over):
+    args = {"op": "close", "id": PROPOSAL_ID, "sha": SHA_A,
+            "base": BASE_A, "target": TARGET, "branch": "mizu/x-1"}
+    args.update(over)
+    return args
 
 
 def with_caps(fixture, name, extra):
@@ -76,100 +90,147 @@ class VcsDisposeTests(Fixture):
     def test_dispose_refused_without_grant(self):
         with self.assertRaisesRegex(Denied, "not granted"):
             vcs.dispose_via(adapter_settings(dispose_code(echo())),
-                            "close", PROPOSAL_ID, SHA_A)
+                            "close", PROPOSAL_ID, SHA_A, BASE_A, TARGET)
 
     def test_unknown_op_refused(self):
         with self.assertRaises(Denied):
             vcs.dispose_via(granted(dispose_code(echo())),
-                            "reopen", PROPOSAL_ID, SHA_A)
+                            "reopen", PROPOSAL_ID, SHA_A, BASE_A, TARGET)
 
     def test_bad_params_refused_before_dispatch(self):
         settings = {"command": ["/nonexistent-adapter"],
                     "timeout_seconds": 5, "max_bytes": 524288,
-                    "dispose_grant": True}
-        for op, identity, sha in (("close", "", SHA_A),
-                                  ("close", PROPOSAL_ID, "xyz"),
-                                  ("close", None, SHA_A)):
+                    "close_grant": True, "merge_grant": True}
+        for op, identity, sha, base, target in (
+                ("close", "", SHA_A, BASE_A, TARGET),
+                ("close", PROPOSAL_ID, "xyz", BASE_A, TARGET),
+                ("close", PROPOSAL_ID, SHA_A, "xyz", TARGET),
+                ("close", PROPOSAL_ID, SHA_A, BASE_A, "../escape"),
+                ("close", PROPOSAL_ID, SHA_A, BASE_A, None),
+                ("close", None, SHA_A, BASE_A, TARGET)):
             with self.assertRaises(Denied):
-                vcs.dispose_via(settings, op, identity, sha)
+                vcs.dispose_via(settings, op, identity, sha, base, target)
 
     def test_close_receipt(self):
         out = vcs.dispose_via(granted(dispose_code(echo())),
-                              "close", PROPOSAL_ID, SHA_A)
+                              "close", PROPOSAL_ID, SHA_A, BASE_A, TARGET)
         self.assertEqual(out, {"op": "close", "id": PROPOSAL_ID,
-                               "sha": SHA_A, "state": "closed",
+                               "sha": SHA_A, "base": BASE_A,
+                               "target": TARGET, "state": "closed",
                                "trust": "external-untrusted"})
 
     def test_merge_receipt(self):
         out = vcs.dispose_via(
             granted(dispose_code(echo(state="merged"))),
-            "merge", PROPOSAL_ID, SHA_A)
+            "merge", PROPOSAL_ID, SHA_A, BASE_A, TARGET)
         self.assertEqual(out["state"], "merged")
+
+    def test_grants_are_per_action(self):
+        # Close and merge policies are distinct: each grant enables only
+        # its own action, never the other.
+        with self.assertRaisesRegex(Denied, "not granted"):
+            vcs.dispose_via(granted(dispose_code(echo()), close=False),
+                            "close", PROPOSAL_ID, SHA_A, BASE_A, TARGET)
+        with self.assertRaisesRegex(Denied, "not granted"):
+            vcs.dispose_via(granted(dispose_code(echo(state="merged")), merge=False),
+                            "merge", PROPOSAL_ID, SHA_A, BASE_A, TARGET)
+        out = vcs.dispose_via(granted(dispose_code(echo()), merge=False),
+                              "close", PROPOSAL_ID, SHA_A, BASE_A, TARGET)
+        self.assertEqual(out["state"], "closed")
 
     def test_moved_head_fails_closed(self):
         settings = granted(dispose_code(echo(sha=SHA_B)))
         with self.assertRaisesRegex(Denied, "expected sha"):
-            vcs.dispose_via(settings, "close", PROPOSAL_ID, SHA_A)
+            vcs.dispose_via(settings, "close", PROPOSAL_ID, SHA_A, BASE_A, TARGET)
+
+    def test_moved_base_or_target_fails_closed(self):
+        settings = granted(dispose_code(echo(base=BASE_B)))
+        with self.assertRaisesRegex(Denied, "expected base and target"):
+            vcs.dispose_via(settings, "close", PROPOSAL_ID, SHA_A, BASE_A, TARGET)
+        settings = granted(dispose_code(echo(target=TARGET_OTHER)))
+        with self.assertRaisesRegex(Denied, "expected base and target"):
+            vcs.dispose_via(settings, "close", PROPOSAL_ID, SHA_A, BASE_A, TARGET)
 
     def test_externally_superseded_fails_closed(self):
         # The forge resolved the proposal another way: a close must not
         # claim a merge, and a merge must not claim a close.
         with self.assertRaisesRegex(Denied, "terminal"):
             vcs.dispose_via(granted(dispose_code(echo(state="merged"))),
-                            "close", PROPOSAL_ID, SHA_A)
+                            "close", PROPOSAL_ID, SHA_A, BASE_A, TARGET)
         with self.assertRaisesRegex(Denied, "terminal"):
             vcs.dispose_via(granted(dispose_code(echo(state="closed"))),
-                            "merge", PROPOSAL_ID, SHA_A)
+                            "merge", PROPOSAL_ID, SHA_A, BASE_A, TARGET)
         # Still open means the action did not take.
         with self.assertRaisesRegex(Denied, "terminal"):
             vcs.dispose_via(granted(dispose_code(echo(state="open"))),
-                            "merge", PROPOSAL_ID, SHA_A)
+                            "merge", PROPOSAL_ID, SHA_A, BASE_A, TARGET)
 
     def test_malformed_echo_refused(self):
-        for payload in ({"id": PROPOSAL_ID, "sha": SHA_A},
-                        {"id": PROPOSAL_ID, "sha": SHA_A, "state": "closed",
-                         "extra": 1},
-                        {"id": PROPOSAL_ID, "sha": SHA_A, "state": "wip"},
-                        {"id": PROPOSAL_ID, "sha": SHA_A, "state": None},
+        full = {"id": PROPOSAL_ID, "sha": SHA_A, "base": BASE_A,
+                "target": TARGET, "state": "closed"}
+        partial = {"id": PROPOSAL_ID, "sha": SHA_A, "state": "closed"}
+        for payload in (partial,
+                        {**full, "extra": 1},
+                        {**full, "state": "wip"},
+                        {**full, "state": None},
                         ["closed"]):
             with self.assertRaises(Denied):
                 vcs.dispose_via(granted(dispose_code(payload)),
-                                "close", PROPOSAL_ID, SHA_A)
+                                "close", PROPOSAL_ID, SHA_A, BASE_A, TARGET)
 
-    def test_unapproved_dispose_refused_without_spawn(self):
+    def test_routine_close_resolves_without_approval(self):
+        # Close is routine terminal reconciliation behind close_grant
+        # alone: no GO approval is required and none is recorded.
         config, role = with_caps(self, "worker", ["vcs_dispose"])
-        settings = granted(dispose_code(echo()))
+        config = dataclasses.replace(config, vcs=granted(dispose_code(echo())))
+        ctx = make_context(self, config, role)
+        out = ctx.handle("vcs_dispose", close_args())
+        self.assertTrue(out["disposed"])
+        self.assertEqual(out["state"], "closed")
+        self.assertEqual(out["base"], BASE_A)
+        self.assertEqual(out["target"], TARGET)
+        self.assertNotIn("approval", out)
+        evidence = json.loads((ctx.run_dir / "vcs-dispose.json").read_text())
+        self.assertEqual(evidence["state"], "closed")
+        self.assertNotIn("approval", evidence)
+
+    def test_unapproved_merge_refused_without_spawn(self):
+        # Merge promotes the integrated tree: without a matching GO
+        # approval the adapter must never spawn (no evidence file).
+        config, role = with_caps(self, "worker", ["vcs_dispose"])
+        settings = granted(dispose_code(echo(state="merged")))
         config = dataclasses.replace(config, vcs=settings)
         ctx = make_context(self, config, role)
         with self.assertRaisesRegex(Denied, "recorded human approval"):
-            ctx.handle("vcs_dispose", {"op": "close", "id": PROPOSAL_ID,
-                                       "sha": SHA_A, "branch": "main"})
+            ctx.handle("vcs_dispose", close_args(op="merge"))
         self.assertFalse((ctx.run_dir / "vcs-dispose.json").exists())
 
     def test_stale_digest_refused(self):
         config, role = with_caps(self, "worker", ["vcs_dispose"])
-        config = dataclasses.replace(config, vcs=granted(dispose_code(echo())))
+        config = dataclasses.replace(
+            config, vcs=granted(dispose_code(echo(state="merged"))))
         approve(self, "main", "0" * 64)
         ctx = make_context(self, config, role)
         with self.assertRaisesRegex(Denied, "stale"):
-            ctx.handle("vcs_dispose", {"op": "close", "id": PROPOSAL_ID,
-                                       "sha": SHA_A, "branch": "main"})
+            ctx.handle("vcs_dispose", close_args(op="merge", branch="main",
+                                                 target="main"))
 
-    def test_approved_dispose_resolves(self):
+    def test_approved_merge_resolves(self):
         config, role = with_caps(self, "worker", ["vcs_dispose"])
-        config = dataclasses.replace(config, vcs=granted(dispose_code(echo())))
+        config = dataclasses.replace(
+            config, vcs=granted(dispose_code(echo(state="merged"))))
         digest = current_digest(self)
         rec = approve(self, "main", digest)
         ctx = make_context(self, config, role)
-        out = ctx.handle("vcs_dispose", {"op": "close", "id": PROPOSAL_ID,
-                                         "sha": SHA_A, "branch": "main"})
+        out = ctx.handle("vcs_dispose", close_args(op="merge", branch="main",
+                                                   target="main"))
         self.assertTrue(out["disposed"])
-        self.assertEqual(out["state"], "closed")
+        self.assertEqual(out["state"], "merged")
         self.assertEqual(out["approval"], rec["id"])
         self.assertEqual(out["code_digest"], digest)
         evidence = json.loads((ctx.run_dir / "vcs-dispose.json").read_text())
         self.assertEqual(evidence["approval"], rec["id"])
-        self.assertEqual(evidence["state"], "closed")
+        self.assertEqual(evidence["state"], "merged")
 
 
 class VcsDisposeRoleTests(Fixture):
@@ -190,20 +251,26 @@ class VcsDisposeRoleTests(Fixture):
         with self.assertRaisesRegex(ConfigError, "self-approval"):
             load(path)
 
-    def test_dispose_grant_loads(self):
+    def test_dispose_grants_load(self):
         text = self.file.read_text()
         self.assertIn("[vcs]", text)
         path = self.root / "config/dispose-grant.toml"
-        path.write_text(text.replace("retire_grant = false",
-                                     "retire_grant = false\ndispose_grant = true", 1))
+        path.write_text(text.replace("close_grant = false",
+                                     "close_grant = true", 1))
         from mizu.config import load
         config = load(path)
-        self.assertTrue(config.vcs["dispose_grant"])
+        self.assertTrue(config.vcs["close_grant"])
+        self.assertFalse(config.vcs["merge_grant"])
         bad = self.root / "config/dispose-grant-bad.toml"
-        bad.write_text(text.replace("retire_grant = false",
-                                    "retire_grant = false\ndispose_grant = \"yes\"", 1))
+        bad.write_text(text.replace("close_grant = false",
+                                    "close_grant = \"yes\"", 1))
         with self.assertRaises(ConfigError):
             load(bad)
+        stale = self.root / "config/dispose-grant-stale.toml"
+        stale.write_text(text.replace("retire_grant = false",
+                                      "retire_grant = false\ndispose_grant = true", 1))
+        with self.assertRaisesRegex(ConfigError, "Unknown keys"):
+            load(stale)
 
     def test_consult_cannot_hold_dispose(self):
         base = self.config.roles["consult"]
@@ -225,14 +292,12 @@ class VcsDisposeRecoveryTests(Fixture):
         code = ("import sys,json; req=json.load(sys.stdin); "
                 "echo = %r if req['sha'] == %r else req['sha']; "
                 "print(json.dumps({'id': req['id'], 'sha': echo, "
+                "'base': req['base'], 'target': req['target'], "
                 "'state': 'closed'}))" % (SHA_B, SHA_A))
         config, role = with_caps(self, "worker", ["vcs_dispose"])
         config = dataclasses.replace(config, vcs=granted(code))
-        digest = current_digest(self)
-        approve(self, "main", digest)
         ctx = make_context(self, config, role)
-        args = {"op": "close", "id": PROPOSAL_ID,
-                "sha": SHA_A, "branch": "main"}
+        args = close_args()
         with self.assertRaisesRegex(Denied, "expected sha"):
             ctx.handle("vcs_dispose", dict(args))
         self.assertFalse((ctx.run_dir / "vcs-dispose.json").exists())

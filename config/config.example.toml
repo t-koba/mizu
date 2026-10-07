@@ -150,6 +150,8 @@ timeout_seconds = 20         # Per-invocation deadline for the adapter.
 max_bytes = 524288           # Maximum adapter response payload (512 KiB).
 ci_branch = ""               # Authoritative CI/reporting branch exposed as ci_branch to vcs_read roles (e.g. "mizu"); empty disables.
 retire_grant = false         # Explicit operator grant for vcs_retire; false disables retirement.
+close_grant = false          # Explicit operator grant for routine vcs_dispose close; false disables close.
+merge_grant = false          # Explicit operator grant for vcs_dispose merge; false disables merge (merges also need a GO approval).
 owned_prefixes = []          # Temporary integration namespaces (e.g. ["mizu/"]); only these retire.
 protected_refs = []          # Exact long-lived refs that always win (e.g. ["main"]); never retire.
 poll_enabled = false         # Explicit opt-in for daemon upstream/CI polling; false disables.
@@ -237,6 +239,21 @@ interval_seconds = 21600
 # policy = "policies/publisher.md"
 # workspace = "write"
 # capabilities = ["files", "read", "diff", "verify", "sync", "vcs_read", "vcs_publish", "insights", "finish"]
+
+# Dedicated integrator for external PR/ref operations only. Uncomment to enable
+# on a project with `[vcs]` command and grants configured; run explicitly via
+# `mizu run <project> --role integrator` after the operator records
+# `GO <branch>` approval for the current code digest (see docs/configuration.md).
+# This role never holds `submit_insight`/`decide`, so it cannot approve its own
+# disposition (config load refuses that combination). `workspace = "read"` is
+# enough: integration authority is the capability plus the configured grants,
+# not source-write access. It holds no source-editing tool (no `exec`, no edit
+# engine tools) and no `verify`, so it cannot edit or complete source work.
+# [roles.integrator]
+# profile = "alternate"
+# policy = "policies/integrator.md"
+# workspace = "read"
+# capabilities = ["files", "read", "vcs_read", "vcs_dispose", "vcs_retire", "insights", "finish"]
 
 # Optional dynamic selection. Replace a role's profile with selector = "adaptive".
 # Existing profiles above remain unchanged; set exact provider/model IDs yourself.

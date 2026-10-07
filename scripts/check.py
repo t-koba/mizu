@@ -117,8 +117,16 @@ def main():
         print(f'== {name} ==', flush=True)
         chunks: list[str] = []
         def pump(stream):
+            # Relay each line immediately with its arrival time: the
+            # parent flushes per line (never only at EOF) and every line
+            # carries monotonic elapsed, so a killed step's log shows
+            # whether progress was steady until the budget ran out or one
+            # line went quiet (a genuine stall). Chunks stay unprefixed so
+            # counts and receipts parse the raw child output.
             for line in stream:
-                sys.stdout.write(line)
+                elapsed = time.monotonic() - started
+                sys.stdout.write(f'[+{elapsed:8.1f}s] {line}')
+                sys.stdout.flush()
                 chunks.append(line)
             sys.stdout.flush()
         status, exit_code, details = 'pass', 0, ''
@@ -133,8 +141,9 @@ def main():
                 exit_code = process.wait(timeout=30)
                 status = 'fail'
                 # A killed step prints no summary, so the report carries the
-                # last output: with unbuffered verbose progress this names the
-                # test that never finished instead of a bare run:0.
+                # last output: with timestamped verbose progress this names
+                # the test that never finished (and its quiet duration)
+                # instead of a bare run:0.
                 tail = ''.join(chunks)[-1500:]
                 details = f'timed out after {timeout} s; output tail: {tail.strip()}'
             reader.join(timeout=30)
@@ -170,10 +179,14 @@ def main():
         return {'run': int(passed.group(1)) if passed else 0,
                 'failed': int(failed.group(1)) if failed else 0,
                 'skipped': int(re.search(r'^# skipped (\d+)', output, re.M).group(1)) if re.search(r'^# skipped (\d+)', output, re.M) else 0}
-    # Unbuffered verbose progress: on a timeout the killed step leaves the
-    # hanging test as the last unfinished line (see output-tail details).
+    # Timestamped verbose progress: on a timeout the killed step leaves the
+    # unfinished test as the last timestamped line (see output-tail
+    # details). Step budget 780 s: the suite measured 403-510 s on Windows
+    # legs (775 tests) at b80b2379, so 780 s keeps ~50% headroom while
+    # staying inside the 900 s job timeout; a true hang still dies here
+    # with per-line arrival times as evidence, not a silent raise.
     execute('python-unit-and-contract-tests', [sys.executable, '-u', '-m', 'unittest', 'discover', '-s', 'tests', '-v'],
-            count=unittest_counts)
+            count=unittest_counts, timeout=780)
     if not shutil.which('node'):
         checks.append({'name': 'node-available', 'status': 'fail'})
     # bash is a POSIX convenience for shell-syntax checks, not a runtime
@@ -207,6 +220,15 @@ def main():
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(json.dumps(receipt, indent=2) + '\n')
     print(json.dumps(receipt, indent=2))
+    if not receipt['ok']:
+        # Tail-visible diagnosis: the VCS log view truncates to the tail,
+        # which hides the failing entry at the head of the receipt checks
+        # array (verbose progress plus later suites bury it). Re-print each
+        # failure last so a timeout names the hanging test in the tail.
+        print('FAILED CHECKS SUMMARY (tail-visible):', flush=True)
+        for failed in [c for c in checks if c.get('status') == 'fail']:
+            detail = str(failed.get('details', '')).strip().replace('\n', ' | ')[-1500:]
+            print(f"- {failed.get('name')}: exit={failed.get('exit_code', '?')} {detail}", flush=True)
     return 0 if receipt['ok'] else 1
 
 

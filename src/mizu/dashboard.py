@@ -87,6 +87,8 @@ def collect(project) -> dict:
         if wait is not None:
             entry["wait"] = {"kind": wait.get("kind"), "at": wait.get("at"),
                              "target": wait.get("target"),
+                             "recipient": wait.get("recipient"),
+                             "requires": wait.get("requires"),
                              "registered_at": wait.get("registered_at")}
         else:
             entry["wait"] = None

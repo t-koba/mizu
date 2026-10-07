@@ -225,14 +225,22 @@ def free_disk(config: Config) -> dict:
 
 
 def budget_file(config: Config) -> dict:
-    usage = Budget(config.data / "budget", config.limits.daily_requests,
+    """Diagnose the budget ledger with scope-correct limits.
+
+    Each scope is judged against its own cap -- per-project counts against
+    ``daily_requests``, the shared day total against
+    ``shared_daily_requests`` -- so projects whose sum exceeds one
+    project's cap never read as corruption. Over-limit counts are
+    legitimate exhaustion (or a later config reduction), reported as data
+    for admission to enforce; only a malformed ledger shape fails.
+    """
+    audit = Budget(config.data / "budget", config.limits.daily_requests,
                    config.limits.retention_days,
-                   config.limits.shared_daily_requests, config.timezone).usage()
-    if not isinstance(usage["used"], int) or usage["used"] < 0 or usage["used"] > max(usage["limit"], 0):
-        raise ConfigError("Budget file is corrupt; inspect data/budget/<day>.json")
-    if usage["shared_limit"] > 0 and (usage["shared_used"] < 0 or usage["shared_used"] > usage["shared_limit"]):
-        raise ConfigError("Budget file is corrupt; inspect data/budget/<day>.json")
-    return usage
+                   config.limits.shared_daily_requests, config.timezone).audit()
+    if audit["malformed"]:
+        raise ConfigError("Budget file is corrupt; inspect data/budget/<day>.json: "
+                          + ", ".join(audit["malformed"]))
+    return audit
 
 
 def help_has_flag(text: str, flag: str) -> bool:

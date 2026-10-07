@@ -215,6 +215,24 @@ def popen_kwargs() -> dict:
 
 
 
+#: Reap bound for a process that failed secured startup: matches the
+#: reap bound in terminate_process, never a knob.
+_SPAWN_REAP_TIMEOUT = 5.0
+
+
+def _reap_half_started(process: "subprocess.Popen") -> None:
+    """Kill and reap a process that failed secured startup.
+
+    A half-started process must never outlive its failed launch, and its
+    cleanup must never mask the launch error: kill, reap under a fixed
+    bound, and suppress only lookup/timeout noise. Failure: never raises.
+    """
+    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+        process.kill()
+    with contextlib.suppress(subprocess.TimeoutExpired, OSError):
+        process.wait(timeout=_SPAWN_REAP_TIMEOUT)
+
+
 def spawn(argv, **kwargs):
     """Spawn a bounded process tree. Windows starts suspended until assigned
     to a kill-on-close Job Object; failure terminates before model code runs.
@@ -296,8 +314,7 @@ def spawn(argv, **kwargs):
         return process
     except BaseException:
         if process is not None:
-            process.kill()
-            process.wait(timeout=.2 if grace == 0 else 5)
+            _reap_half_started(process)
         kernel.CloseHandle(job)
         raise
 

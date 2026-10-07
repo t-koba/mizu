@@ -70,6 +70,22 @@ class PlatformContractTests(unittest.TestCase):
         _platform.terminate_process(proc)
         self.assertIsNotNone(proc.poll())
 
+    def test_half_started_reap_is_portable(self):
+        # Secured-startup cleanup (Windows job assignment failure path) must
+        # kill, reap under a fixed bound, and never raise: a raising cleanup
+        # would mask the launch error it was handling.
+        import subprocess
+        import time
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                **_platform.popen_kwargs())
+        started = time.monotonic()
+        _platform._reap_half_started(proc)
+        self.assertLess(time.monotonic() - started, _platform._SPAWN_REAP_TIMEOUT)
+        self.assertIsNotNone(proc.poll())
+        # Reaping an already-dead process stays a silent no-op.
+        _platform._reap_half_started(proc)
+
 
 class PortablePrimitiveTests(unittest.TestCase):
     def setUp(self):

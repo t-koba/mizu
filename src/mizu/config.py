@@ -713,13 +713,13 @@ def load(file: Path) -> Config:
         if "vcs_publish" in caps and ("submit_insight" in caps or "decide" in caps):
             raise ConfigError(f"Role {name} must not combine vcs_publish with submit_insight/decide; "
                               "use a dedicated publisher role without self-approval")
-        if "vcs_retire" in caps and workspace != "write":
-            raise ConfigError("vcs_retire requires a writable workspace")
+        if "vcs_retire" in caps and workspace == "none":
+            raise ConfigError("vcs_retire requires a visible workspace")
         if "vcs_retire" in caps and ("submit_insight" in caps or "decide" in caps):
             raise ConfigError(f"Role {name} must not combine vcs_retire with submit_insight/decide; "
                               "use a dedicated integrator role without self-approval")
-        if "vcs_dispose" in caps and workspace != "write":
-            raise ConfigError("vcs_dispose requires a writable workspace")
+        if "vcs_dispose" in caps and workspace == "none":
+            raise ConfigError("vcs_dispose requires a visible workspace")
         if "vcs_dispose" in caps and ("submit_insight" in caps or "decide" in caps):
             raise ConfigError(f"Role {name} must not combine vcs_dispose with submit_insight/decide; "
                               "use a dedicated integrator role without self-approval")
@@ -798,14 +798,14 @@ def load(file: Path) -> Config:
                "poll_interval_seconds", "poll_max_branches",
                "poll_fetch_timeout_seconds", "poll_status_timeout_seconds",
                "retire_grant", "owned_prefixes", "protected_refs",
-               "dispose_grant"}, "vcs")
+               "close_grant", "merge_grant"}, "vcs")
     vcs = {"command": [], "timeout_seconds": 20,
            "max_bytes": 524288, "ci_branch": "", "poll_enabled": False,
            "poll_interval_seconds": 300, "poll_max_branches": 4,
            "poll_fetch_timeout_seconds": 30,
            "poll_status_timeout_seconds": 15, "retire_grant": False,
            "owned_prefixes": [], "protected_refs": [],
-           "dispose_grant": False, **vcs}
+           "close_grant": False, "merge_grant": False, **vcs}
     strings(vcs["command"], "vcs.command")
     if vcs["command"] and any(not s or "\n" in s for s in vcs["command"]):
         raise ConfigError("vcs.command must be a nonempty argv array without newlines")
@@ -815,7 +815,8 @@ def load(file: Path) -> Config:
     if vcs["ci_branch"] and (len(vcs["ci_branch"]) > 256 or any(c.isspace() for c in vcs["ci_branch"])):
         raise ConfigError("vcs.ci_branch must be empty or a branch name without whitespace (at most 256 chars)")
     vcs["retire_grant"] = boolean(vcs["retire_grant"], "vcs.retire_grant")
-    vcs["dispose_grant"] = boolean(vcs["dispose_grant"], "vcs.dispose_grant")
+    vcs["close_grant"] = boolean(vcs["close_grant"], "vcs.close_grant")
+    vcs["merge_grant"] = boolean(vcs["merge_grant"], "vcs.merge_grant")
     vcs["owned_prefixes"] = strings(vcs["owned_prefixes"], "vcs.owned_prefixes")
     for prefix in vcs["owned_prefixes"]:
         _vcs_prefix(prefix, "vcs.owned_prefixes")

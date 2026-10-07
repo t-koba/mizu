@@ -77,13 +77,21 @@ DEFINITIONS = {
                  obj({"id": text(64), **PAGE_FIELDS})),
     "decide": ("Record a proposal decision with action, reason and revisit fields. The defer action requires a revisit value. "
                "A defer may register one structured wait as {kind} with kind deadline (plus at: timezone-aware ISO "
-               "timestamp), code_change, or insight_decided (plus insight: proposal id); waits bind to the current "
+               "timestamp), code_change, insight_decided (plus insight: proposal id), or dependency (plus recipient: "
+               "responsible role and requires: {insight, rev, action} binding the exact assessed result revision and "
+               "required substantive decision); waits bind to the current "
                "revision and are refused for other actions or unsupported kinds.",
                obj({"id": text(64), "action": {"type": "string", "enum": ["accept", "modify", "defer", "reject"]},
                     "reason": text(4000), "revisit": text(2000),
                     "rev": {"type": "integer", "minimum": 1},
-                    "wait": obj({"kind": {"type": "string", "enum": ["deadline", "code_change", "insight_decided"]},
-                                 "at": text(64), "insight": text(64)}, ("kind",))}, ("id", "action", "reason", "rev"))),
+                    "wait": obj({"kind": {"type": "string", "enum": ["deadline", "code_change", "insight_decided",
+                                                                            "dependency"]},
+                                 "at": text(64), "insight": text(64), "recipient": text(64),
+                                 "requires": obj({"insight": text(64),
+                                                  "rev": {"type": "integer", "minimum": 1},
+                                                  "action": {"type": "string", "enum": ["accept", "modify", "reject"]}},
+                                                 ("insight", "rev", "action"))}, ("kind",))},
+                   ("id", "action", "reason", "rev"))),
     "submit_insight": ("Submit an immutable proposal. Sender identity is assigned by the runtime, not the model.",
                        obj({"title": text(200), "body": text(60000)}, ("title", "body"))),
     "consult": ("Ask configured models independently about the SAME immutable code snapshot. Nested consultation is disabled by the runtime.",
@@ -103,10 +111,11 @@ DEFINITIONS = {
                     "branch": text(256)}, ("op", "branch"))),
     "vcs_retire": ("Retire an owned temporary integration branch at an exact expected sha through the trusted VCS adapter. Requires the configured retire grant; only owned branches retire, everything else is preserved.",
                obj({"branch": text(256), "expected_sha": text(64)}, ("branch", "expected_sha"))),
-    "vcs_dispose": ("Close or merge an external proposal at its exact assessed head sha through the trusted VCS adapter. Requires the configured dispose grant plus recorded human GO approval for the integrated tree; never automatic.",
+    "vcs_dispose": ("Close or merge an external proposal at its exact assessed head, base, and target through the trusted VCS adapter. Close is routine terminal reconciliation behind the configured close grant. Merge promotes the integrated tree behind the configured merge grant plus recorded human GO approval for that tree; never automatic, never inferred.",
                obj({"op": {"type": "string", "enum": ["close", "merge"]},
-                    "id": text(128), "sha": text(64), "branch": text(256)},
-                   ("op", "id", "sha", "branch"))),
+                    "id": text(128), "sha": text(64), "base": text(64),
+                    "target": text(256), "branch": text(256)},
+                   ("op", "id", "sha", "base", "target", "branch"))),
     "research_read": ("Read this role's own current research state record with its generation. Never touches other roles.",
                obj()),
     "research": ("Replace this role's own current research state record with a full new JSON object state at the read generation; stale generations are refused. Audit evidence lands in research-state.json.",

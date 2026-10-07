@@ -149,6 +149,7 @@ class Context:
         self.admission_wait = False
         self.decision_events: list = []
         self.wait_events: list = []
+        self.obligations: list = []
         self.closed = False
         self.operations_stopped = threading.Event()
         self.verification: dict | None = None
@@ -531,11 +532,15 @@ class Context:
         # protected, external, tracking, and other refs are preserved.
         # A failed call implies nothing about the remote ref: reconcile by
         # re-observing, never by assuming deletion. Retirement is tied to
-        # terminal disposition: while a recorded proposal still openly
-        # references the branch, retire refuses and names the blocking
-        # proposal ids instead of deleting under a live review.
-        if self.role.workspace != "write":
-            raise Denied("Branch retirement requires a writable workspace")
+        # terminal disposition twice: recorded observations refuse early
+        # before dispatch (they may be stale), and the provider must
+        # affirm atomically with the delete that no live proposal
+        # references the branch, naming blockers in live_refs.
+        # Integration authority is the capability plus the configured
+        # grant, never source-write access: read-workspace integrators
+        # retire without touching the shared workspace.
+        if self.role.workspace == "none":
+            raise Denied("Branch retirement requires a visible workspace")
         blocking = _vcs.live_proposal_refs(self.project, args.get("branch"))
         if blocking:
             raise Denied("Branch retirement is blocked by open proposal "
@@ -549,6 +554,7 @@ class Context:
             raise Denied(f"Branch retirement is unavailable: {exc}") from exc
         record = {"retired": True, "branch": data["branch"], "sha": data["sha"],
                   "classification": data["classification"],
+                  "live_refs": data["live_refs"],
                   "trust": "external-untrusted", "evidence": "vcs-retire.json",
                   "result": data}
         write_json(self.run_dir / "vcs-retire.json", data)
@@ -556,30 +562,46 @@ class Context:
 
     def _op_vcs_dispose(self, args: dict) -> dict:
         # Proposal disposition: close/merge an external proposal at the
-        # exact assessed head sha behind the configured dispose grant plus
-        # a recorded human GO approval for the integrated tree. Approval
-        # is checked before the adapter spawns; the adapter must act only
-        # while the proposal is still open at the expected sha and echo
-        # the terminal state. Never automatic; a failed call implies
-        # nothing about the remote proposal.
-        if self.role.workspace != "write":
-            raise Denied("Proposal disposition requires a writable workspace")
-        captured = self.project.snapshots.capture_files(self.workspace)
-        if captured.get("skipped"):
-            raise Denied("Proposal disposition requires a representable snapshot")
-        code_digest = captured["code_digest"]
-        approval = _vcs.require_go_approval(self.project, args["branch"], code_digest)
+        # exact assessed head, base, and target behind the matching
+        # per-action grant. Close is routine terminal reconciliation
+        # behind close_grant alone. Merge promotes the integrated tree:
+        # it additionally requires a recorded human GO approval for the
+        # tree, checked before the adapter spawns, so main/release
+        # promotion without a matching approval is refused and approval
+        # is never inferred from a role or CI. The adapter must act only
+        # while the proposal is still open at all assessed endpoints and
+        # echo them with the terminal state. Never automatic; a failed
+        # call implies nothing about the remote proposal.
+        # Integration authority is the capability plus the configured
+        # grant (and approval for merges), never source-write access:
+        # read-workspace integrators dispose from their materialized
+        # input, whose digest binds a merge approval exactly like a
+        # writable workspace capture.
+        if self.role.workspace == "none":
+            raise Denied("Proposal disposition requires a visible workspace")
+        approval = None
+        code_digest = None
+        if args["op"] == "merge":
+            captured = self.project.snapshots.capture_files(self.workspace)
+            if captured.get("skipped"):
+                raise Denied("Proposal disposition requires a representable snapshot")
+            code_digest = captured["code_digest"]
+            approval = _vcs.require_go_approval(self.project, args["branch"], code_digest)
         try:
             data = _vcs.dispose_via(self.config.vcs, args["op"], args.get("id"),
-                                    args.get("sha"))
+                                    args.get("sha"), args.get("base"),
+                                    args.get("target"))
         except OSError as exc:
             raise Denied(f"Proposal disposition is unavailable: {exc}") from exc
         record = {"disposed": True, "op": args["op"], "id": data["id"],
-                  "sha": data["sha"], "state": data["state"],
-                  "branch": args["branch"], "code_digest": code_digest,
-                  "approval": approval["insight"],
+                  "sha": data["sha"], "base": data["base"],
+                  "target": data["target"], "state": data["state"],
+                  "branch": args["branch"],
                   "trust": "external-untrusted", "evidence": "vcs-dispose.json",
                   "result": data}
+        if approval is not None:
+            record["code_digest"] = code_digest
+            record["approval"] = approval["insight"]
         write_json(self.run_dir / "vcs-dispose.json", record)
         return record
 
@@ -944,6 +966,7 @@ def prompt_for(context: Context) -> str:
                        "pending_insights": pending,
                        "decision_events": list(getattr(context, "decision_events", []) or []),
                        "wait_events": list(getattr(context, "wait_events", []) or []),
+                       "obligations": list(getattr(context, "obligations", []) or []),
                        "acceptance_commands": acceptance,
                        "research_state": _prompt_research_state(context),
                        "ci_branch": ci_branch,
@@ -984,6 +1007,7 @@ def prompt_delta_for(context: Context, pending: list) -> str:
                        "pending_insights": pending,
                        "decision_events": list(getattr(context, "decision_events", []) or []),
                        "wait_events": list(getattr(context, "wait_events", []) or []),
+                       "obligations": list(getattr(context, "obligations", []) or []),
                        "research_state": _prompt_research_state(context),
                        "workspace": "/workspace", "workspace_mode": context.role.workspace,
                        "acceptance_commands": acceptance,
@@ -1111,6 +1135,10 @@ class Engine:
             triggers = tuple(getattr(role, "decision_events", ()) or ())
             decision_events = project.insights.decision_events(role_name, triggers) if triggers else []
             wait_events = project.insights.due_waits(role_name, snapshot)
+            # Dependency obligations addressed to this role ride along when
+            # it runs for other reasons; they never admit a run on their
+            # own, so no new wake source is implied.
+            obligations = project.insights.pending_obligations(role_name)
             if code_unchanged and not decision_events and not wait_events:
                 return {"skipped": "unchanged", "snapshot": snapshot["id"],
                         "code_digest": snapshot["code_digest"]}
@@ -1135,6 +1163,7 @@ class Engine:
                             "snapshot": snapshot["id"], "started_at": now(),
                             "admission": admission, "decision_events": len(decision_events),
                             "wait_events": len(wait_events),
+                            "obligation_events": len(obligations),
                             "config_sha256": digest(self.config.file.read_bytes()),
                             "policy_sha256": digest(role_policy_bytes(role))})
                 if decision_events:
@@ -1145,6 +1174,10 @@ class Engine:
                     write_json(run_dir / "wait-events.json",
                                {"run": run_id, "role": role_name, "admission": admission,
                                 "events": wait_events})
+                if obligations:
+                    write_json(run_dir / "obligation-events.json",
+                               {"run": run_id, "role": role_name, "admission": admission,
+                                "events": obligations})
                 if role.selector:
                     from .classification import prepare
                     decision = prepare(self, project, role, snapshot, attributes)
@@ -1174,6 +1207,7 @@ class Engine:
                 context.ephemeral = self.ephemeral
                 context.decision_events = decision_events
                 context.wait_events = wait_events
+                context.obligations = obligations
                 prompt, prompt_mode, session_key, rotation, session_dir = session_prompt(context, role, run_dir)
                 decoded = json.loads(prompt)
                 write_json(run_dir / "prompt_projection.json",

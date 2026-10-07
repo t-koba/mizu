@@ -159,11 +159,19 @@ restart keep their authority and nothing is lost or repeated. Withdrawn or
 superseded decisions never emit, and a substantive decision never lands on a
 withdrawn revision. Deferral delivery is one-shot per decision: the revisit
 prose is never parsed as an executable condition. A deferral may instead
-register one structured wait (``deadline``, ``code_change``, or
-``insight_decided``) through the decision interface; the wait binds to the
+register one structured wait (``deadline``, ``code_change``,
+``insight_decided``, or ``dependency``) through the decision interface; the wait binds to the
 current revision and decision, survives restarts as a recorded file, and is
 checked lazily at dispatch, so a satisfied wait admits one focused
-reconsideration without polling or model calls. Triggers reach scheduling
+reconsideration without polling or model calls. A ``dependency`` wait names an explicit
+``recipient`` role responsible for the external work and binds the assessed requirement as
+``requires`` (result insight, exact revision, required substantive decision): the completion
+is satisfied only by a revision-current decision matching all three, so a moved result never
+satisfies a stale requirement and dispatch alone never counts as fulfillment. Unsatisfied
+obligations are visible to the named recipient when it runs for other reasons but never admit
+a run on their own, so scheduling the fulfiller stays operator configuration and no new wake
+source is implied; the satisfied completion reaches the requester idempotently with current
+result evidence. Triggers reach scheduling
 without a model poll loop: the writer gate consults decision events and due
 waits before suppressing dispatch, and rendered service definitions add
 platform file triggers (systemd path units, launchd WatchPaths) that invoke

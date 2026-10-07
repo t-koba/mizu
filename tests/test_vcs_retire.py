@@ -21,7 +21,8 @@ def adapter_settings(code, timeout=5, maximum=524288):
 
 RETIRE_OK = ("import sys,json; req=json.load(sys.stdin); "
              "print(json.dumps({'op': req['op'], 'branch': req['branch'], "
-             "'sha': req['expected_sha'], 'deleted': True}))")
+             "'sha': req['expected_sha'], 'deleted': True, "
+             "'live_refs': []}))")
 RETIRE_WRONG_SHA = ("import sys,json; req=json.load(sys.stdin); "
              "print(json.dumps({'op': req['op'], 'branch': req['branch'], "
              "'sha': '%s', 'deleted': True}))" % SHA_B)
@@ -124,10 +125,44 @@ class RetireGrantTests(Fixture):
     def test_owned_retire_receipt(self):
         code = ("import sys,json; req=json.load(sys.stdin); "
                 "print(json.dumps({'op': req['op'], 'branch': req['branch'], "
-                "'sha': req['expected_sha'], 'deleted': True}))")
+                "'sha': req['expected_sha'], 'deleted': True, "
+                "'live_refs': []}))")
         out = vcs.retire_via(grant_settings(code), "mizu/x-1", SHA_A)
         self.assertEqual(out, {"branch": "mizu/x-1", "sha": SHA_A, "deleted": True,
-                               "classification": "owned", "trust": "external-untrusted"})
+                               "live_refs": [], "classification": "owned",
+                               "trust": "external-untrusted"})
+
+    def test_provider_blockers_refused(self):
+        # The fresh provider check is authoritative: reported live refs
+        # block even with no recorded observation, and a contradictory
+        # deleted:true alongside blockers is still refused.
+        template = ("import sys,json; "
+                    "print(json.dumps({'branch': 'mizu/x-1', "
+                    "'sha': %r, 'deleted': %s, "
+                    "'live_refs': ['forge:owner/repo#7']}))")
+        with self.assertRaisesRegex(Denied, "confirm"):
+            vcs.retire_via(grant_settings(template % (SHA_A, False)),
+                           "mizu/x-1", SHA_A)
+        with self.assertRaisesRegex(Denied, "forge:owner/repo#7"):
+            vcs.retire_via(grant_settings(template % (SHA_A, True)),
+                           "mizu/x-1", SHA_A)
+
+    def test_missing_or_malformed_affirmation_refused(self):
+        # A provider that cannot affirm the atomic live-ref check fails
+        # closed: the old echo shape without live_refs no longer retires.
+        no_key = ("import sys,json; "
+                  "print(json.dumps({'branch': 'mizu/x-1', 'sha': %r, "
+                  "'deleted': True}))" % SHA_A)
+        with self.assertRaisesRegex(Denied, "live proposal references"):
+            vcs.retire_via(grant_settings(no_key), "mizu/x-1", SHA_A)
+        for refs in ("forge:owner/repo#7", [None], [""], ["x" * 129],
+                     ["ok", 7]):
+            code = ("import sys,json; "
+                    "print(json.dumps({'branch': 'mizu/x-1', 'sha': %r, "
+                    "'deleted': True, 'live_refs': %r}))" % (SHA_A, refs))
+            with self.assertRaisesRegex(Denied, "live proposal references",
+                                        msg=repr(refs)):
+                vcs.retire_via(grant_settings(code), "mizu/x-1", SHA_A)
 
 
 class RetireOpTests(Fixture):

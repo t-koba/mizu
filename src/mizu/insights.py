@@ -98,7 +98,7 @@ def _effective_decision(item_rev: int, decision) -> dict | None:
 #: dispatch from local recorded state, so waits survive restarts without
 #: polling or model calls. Anything else is refused at registration with
 #: this list, exposing the missing wake source instead of implying it.
-WAIT_KINDS = ("deadline", "code_change", "insight_decided")
+WAIT_KINDS = ("deadline", "code_change", "insight_decided", "dependency")
 
 
 class Insights:
@@ -419,9 +419,11 @@ replacement insight without implying rejected substance.
         Schema: None, or ``{"kind": ...}`` with kind-specific fields:
         ``deadline`` needs tz-aware ISO ``at``; ``code_change`` needs no
         fields (the current published digest is the baseline);
-        ``insight_decided`` needs an ``insight`` id. Bounds: at most one
-        wait per insight; unknown kinds, bad params, and waits on
-        non-defer actions are Denied naming the supported set. Trust:
+        ``insight_decided`` needs an ``insight`` id; ``dependency`` needs
+        a ``recipient`` role and ``requires`` with the assessed result
+        ``insight``, exact ``rev``, and substantive ``action``. Bounds: at
+        most one wait per insight; unknown kinds, bad params, and waits
+        on non-defer actions are Denied naming the supported set. Trust:
         recorded state only. Failure: Denied, never a silent downgrade
         to prose.
         """
@@ -449,6 +451,32 @@ replacement insight without implying rejected substance.
                 raise Denied("An insight_decided wait needs an 'insight' id")
             identifier(target)
             return {"kind": kind, "target": target}
+        if kind == "dependency":
+            recipient = wait.get("recipient")
+            if not isinstance(recipient, str) or not recipient:
+                raise Denied("A dependency wait needs a 'recipient' role")
+            identifier(recipient)
+            requires = wait.get("requires")
+            if not isinstance(requires, dict):
+                raise Denied("A dependency wait needs 'requires' with insight, rev, and action")
+            target = requires.get("insight")
+            if not isinstance(target, str) or not target:
+                raise Denied("A dependency wait needs a 'requires.insight' id")
+            identifier(target)
+            required_rev = requires.get("rev")
+            if type(required_rev) is not int or required_rev < 1:
+                raise Denied("A dependency wait binds the required result revision in 'requires.rev'")
+            required_action = requires.get("action")
+            if required_action not in ("accept", "modify", "reject"):
+                raise Denied("A dependency wait needs a substantive 'requires.action'")
+            if set(wait) - {"kind", "recipient", "requires"}:
+                raise Denied("A dependency wait takes only recipient and requires")
+            if set(requires) - {"insight", "rev", "action"}:
+                raise Denied("A dependency wait requires only insight, rev, and action")
+            return {"kind": kind, "recipient": recipient,
+                    "requires": {"insight": target, "rev": required_rev, "action": required_action}}
+        # code_change falls through: no fields beyond kind, baseline is the
+        # current published digest.
         if set(wait) - {"kind"}:
             raise Denied("A code_change wait takes no fields")
         try:
@@ -554,8 +582,102 @@ replacement insight without implying rejected substance.
                 payload["at"] = stored.get("at")
             if stored.get("kind") == "insight_decided":
                 payload["target"] = stored.get("target")
+            if stored.get("kind") == "dependency":
+                payload["recipient"] = stored.get("recipient")
+                payload["requires"] = stored.get("requires")
+                evidence = self._satisfaction_evidence(stored)
+                if evidence is None:
+                    # A satisfaction claim without current result
+                    # evidence never dispatches; retry at next dispatch.
+                    continue
+                payload["result"] = evidence
             due.append(payload)
         return due
+
+    def _satisfaction_evidence(self, stored: dict) -> dict | None:
+        """Current result evidence for a satisfied dependency (None when unreadable)."""
+        try:
+            requires = stored.get("requires")
+            if not isinstance(requires, dict):
+                return None
+            result = self.read(requires.get("insight", ""))
+            raw = self.root / "decisions" / f"{result['id']}.json"
+            if raw.is_symlink():
+                return None
+            record = read_json(raw, {})
+            if not isinstance(record, dict):
+                return None
+            if record.get("rev") != _rev_of(result):
+                return None
+            decided_at = record.get("created_at")
+            if not isinstance(decided_at, str) or not decided_at:
+                return None
+            return {"insight": result["id"], "rev": _rev_of(result),
+                    "action": record.get("action"), "decided_at": decided_at,
+                    "title": result.get("title", "")}
+        except (Denied, OSError, ValueError, TypeError, AttributeError):
+            return None
+
+    def pending_obligations(self, role_name: str, *, limit: int = 10) -> list:
+        """List bound-but-unsatisfied dependency waits addressed to one role.
+
+        Schema: oldest-registered-first payloads with insight, rev, title,
+        body, recipient, requires, reason, revisit, and registered_at (at
+        most ``limit``). These make an explicit recipient's obligation
+        visible when the recipient runs for other reasons; they never
+        admit a run on their own, so no new wake source or scheduler is
+        implied: scheduling the fulfiller stays operator configuration.
+        Bounds: ``limit`` in [1, 100]. Trust: recorded decisions and inbox
+        only. Retry: read-only except best-effort pruning of unbound
+        waits, mirroring ``due_waits`` so restart recovery keeps the same
+        pending set. Evidence: none written; dispatch logs a delivered
+        copy under the run directory. Failure: Denied on bad role name
+        or limit; satisfied, unbound, and malformed waits never list.
+        """
+        identifier(role_name)
+        if type(limit) is not int or limit < 1 or limit > 100:
+            raise Denied("Obligation limit must be an integer in [1, 100]")
+        directory = self.root / "waits"
+        if not directory.is_dir() or directory.is_symlink():
+            return []
+        candidates = []
+        for path in sorted(directory.glob("*.json")):
+            if path.is_symlink():
+                continue
+            try:
+                stored = read_json(path, {})
+            except (OSError, ValueError, TypeError, AttributeError):
+                continue
+            if not isinstance(stored, dict) or stored.get("kind") != "dependency":
+                continue
+            if stored.get("recipient") != role_name:
+                continue
+            try:
+                current = self.read(stored.get("owner", ""))
+            except (Denied, OSError, ValueError, TypeError, AttributeError):
+                continue
+            if not self._wait_bound(stored, current):
+                with contextlib.suppress(OSError):
+                    path.unlink()
+                continue
+            if not isinstance(stored.get("requires"), dict):
+                continue
+            if self._wait_due(stored, None):
+                # Satisfied obligations belong to the requester's
+                # completion wake, not the recipient's pending list.
+                continue
+            defer = stored.get("decision", {})
+            if not isinstance(defer, dict):
+                defer = {}
+            candidates.append((stored.get("registered_at", ""),
+                               {"insight": current["id"], "rev": _rev_of(current),
+                                "title": current.get("title", ""), "body": current.get("body", ""),
+                                "recipient": role_name, "requires": stored.get("requires"),
+                                "reason": defer.get("reason", ""), "revisit": defer.get("revisit", ""),
+                                "registered_at": stored.get("registered_at", "")}))
+            if len(candidates) >= limit:
+                break
+        return [payload for _, payload in sorted(candidates, key=lambda item: item[0])]
 
     def _wait_due(self, stored: dict, snapshot: dict) -> bool:
         """True when a bound wait's observable condition is met (never raises)."""
@@ -567,6 +689,26 @@ replacement insight without implying rejected substance.
             if kind == "code_change":
                 current = snapshot.get("code_digest") if isinstance(snapshot, dict) else None
                 return isinstance(current, str) and bool(current) and current != stored.get("digest")
+            if kind == "dependency":
+                requires = stored.get("requires")
+                if not isinstance(requires, dict):
+                    return False
+                try:
+                    result = self.read(requires.get("insight", ""))
+                except (Denied, OSError, ValueError, TypeError, AttributeError):
+                    return False
+                if _rev_of(result) != requires.get("rev"):
+                    # A moved result is stale against the assessed
+                    # requirement: never satisfy, wait for reassessment.
+                    return False
+                raw = self.root / "decisions" / f"{result['id']}.json"
+                if raw.is_symlink():
+                    return False
+                record = read_json(raw, {})
+                if not isinstance(record, dict):
+                    return False
+                return (record.get("rev") == _rev_of(result)
+                        and record.get("action") == requires.get("action"))
             if kind == "insight_decided":
                 target = self.root / "decisions" / f"{stored.get('target')}.json"
                 if target.is_symlink():

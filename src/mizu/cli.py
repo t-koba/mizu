@@ -80,7 +80,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--decision", help="Decision action for decide (accept/modify/defer/reject)")
     p.add_argument("--reason", default="", help="Decision reason for decide, withdrawal reason for withdraw")
     p.add_argument("--revisit", default="", help="Revisit condition for defer")
-    p.add_argument("--wait", default=None, help="Structured defer wait as kind[:arg]: deadline:<ISO-at> | code_change | insight_decided:<id>")
+    p.add_argument("--wait", default=None, help="Structured defer wait: deadline:<ISO-at> | code_change | insight_decided:<id> | dependency:<recipient>:<insight>:<rev>:<accept|modify|reject>")
     p.add_argument("--expected-rev", type=int, default=None, help="Compare-and-swap revision for revise/decide/withdraw")
     p.add_argument("--origin", default=None, help="Opaque origin label recorded alongside the operator authority (submit only)")
     p = sub.add_parser("editor", help="Export a capsule or serve the Editor MCP")
@@ -234,7 +234,20 @@ def _parse_wait(spec):
         return {"kind": "code_change"}
     if kind == "insight_decided" and arg:
         return {"kind": "insight_decided", "insight": arg}
-    raise ConfigError("Insight wait must be deadline:<ISO-at>, code_change, or insight_decided:<id>")
+    if kind == "dependency" and arg:
+        parts = arg.split(":")
+        if len(parts) == 4:
+            recipient, target, rev, action = parts
+            try:
+                required_rev = int(rev)
+            except (ValueError, TypeError):
+                required_rev = 0
+            if (recipient and target and required_rev >= 1
+                    and action in ("accept", "modify", "reject")):
+                return {"kind": "dependency", "recipient": recipient,
+                        "requires": {"insight": target, "rev": required_rev, "action": action}}
+    raise ConfigError("Insight wait must be deadline:<ISO-at>, code_change, insight_decided:<id>, "
+                      "or dependency:<recipient>:<insight>:<rev>:<accept|modify|reject>")
 
 
 def _cmd_insight(config, project, args):

@@ -129,6 +129,67 @@ class Budget:
         self.gc()
         return count
 
+    def audit(self) -> dict:
+        """Scope-correct structural diagnosis of today's ledger.
+
+        Schema: reports the shared day total against ``shared_daily`` plus
+        each project's own count against ``daily``. Bounds: reads today's
+        day-file only. Trust: local operator state. Failure: never raises;
+        structural problems are returned as ``malformed`` entries for the
+        caller (doctor) to fail loudly on. Over-limit counts -- legitimate
+        exhaustion or a later config reduction -- are reported as data, not
+        corruption: only the ledger shape is judged here, never the policy
+        values.
+        """
+        day = self._today()
+        path = self.root / f"{day}.json"
+        unreadable = False
+        try:
+            record = read_json(path, None)
+        except (OSError, ValueError):
+            record, unreadable = None, True
+        malformed: list[str] = []
+        projects: dict[str, int] = {}
+        shared = 0
+        if unreadable:
+            malformed.append("record-unreadable")
+        elif record is None:
+            pass
+        elif not isinstance(record, dict):
+            malformed.append("record-must-be-object")
+        else:
+            requests = record.get("requests", [])
+            if not isinstance(requests, list):
+                malformed.append("requests-must-be-list")
+            else:
+                shared = len(requests)
+                if any(not isinstance(entry, str) for entry in requests):
+                    malformed.append("requests-entries-must-be-strings")
+            raw_projects = record.get("projects", {})
+            if not isinstance(raw_projects, dict):
+                malformed.append("projects-must-be-object")
+            else:
+                for name, entries in raw_projects.items():
+                    if not isinstance(name, str) or not isinstance(entries, list):
+                        malformed.append(f"project-{name}-must-be-list")
+                        continue
+                    if any(not isinstance(entry, str) for entry in entries):
+                        malformed.append(f"project-{name}-entries-must-be-strings")
+                    projects[name] = len(entries)
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = 0
+        reaped = self.gc()
+        exhausted = sorted(name for name, count in projects.items()
+                           if isinstance(count, int) and 0 < self.daily <= count)
+        return {"day": day, "zone": self.timezone, "shared_used": shared,
+                "shared_limit": self.shared_daily, "limit": self.daily,
+                "projects": projects, "malformed": malformed,
+                "exhausted_projects": exhausted,
+                "shared_exhausted": bool(self.shared_daily > 0 and shared >= self.shared_daily),
+                "bytes": size, "reaped": reaped}
+
     def usage(self, project: str = "") -> dict:
         """Report per-project usage plus the shared day total.
 
