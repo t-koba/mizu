@@ -258,17 +258,77 @@ class PiDurableDriver:
             return {**context.model_evidence, "seconds": round(time.monotonic() - started, 3)}
 
 
+def _runtime_evidence(context, model, thinking_level) -> dict | None:
+    """Host-recorded per-request evidence, like the pi engine.
+
+    Schema: reads ``context.runtime_usage`` (``_model_usage`` reports also
+    persisted in ``runtime-usage.json``) plus ``context.runtime_models``
+    identity and the host admission count. Returns None when no
+    per-request usage was reported, so callers fall back to the
+    launcher-aggregated document. Trust: local host evidence only.
+    Failure: never raises; malformed state reads as absent.
+    """
+    try:
+        items = sorted(getattr(context, "runtime_usage", {}).items())
+    except Exception:
+        return None
+    if not items:
+        return None
+    try:
+        models = getattr(context, "runtime_models", {}) or {}
+    except Exception:
+        models = {}
+    usages = [value for _, value in items]
+    observations = []
+    for seq, value in items:
+        try:
+            identity = models.get(seq) or {}
+        except Exception:
+            identity = {}
+        observations.append({"usage": value,
+                             "provider": identity.get("provider"),
+                             "model": identity.get("model")})
+    try:
+        observed = list(models.values())
+    except Exception:
+        observed = []
+    if not observed:
+        observed = [{**model, "thinkingLevel": thinking_level}]
+    try:
+        requests = int(getattr(context, "request_count", 0) or 0)
+    except Exception:
+        requests = 0
+    return {"requests": requests, "usage": usages, "usage_known": True,
+            "observed_models": observed, "usage_observations": observations}
+
+
 def _record_launcher_evidence(reported, context, model, thinking_level) -> None:
-    """Record launcher requests/usage into run evidence (shared mapping)."""
+    """Record launcher requests/usage into run evidence (raw shapes).
+
+    Schema: prefers host-recorded per-request ``runtime_usage`` (the same
+    source the pi engine records, also persisted in
+    ``runtime-usage.json``); the launcher-aggregated ``harness.usage``
+    document is only a fallback when no per-request report arrived.
+    Raw provider shapes are stored as-is so ``usage.normalize`` counts
+    them under this engine; nothing is remapped to canonical keys here.
+    Bounds: evidence stays local. Failure: never invents tokens.
+    """
+    runtime = _runtime_evidence(context, model, thinking_level)
+    if runtime is not None:
+        if not runtime["requests"]:
+            try:
+                reported_requests = int((reported.get("requests", 0) if isinstance(reported, dict) else 0) or 0)
+            except Exception:
+                reported_requests = 0
+            runtime["requests"] = reported_requests
+        context.model_evidence.update(runtime)
+        return
     usage = reported.get("usage") if isinstance(reported, dict) else None
     if isinstance(usage, dict):
-        mapped = {"input_tokens": usage.get("input", 0), "output_tokens": usage.get("output", 0),
-                  "cache_read_tokens": usage.get("cacheRead", 0),
-                  "cache_write_tokens": usage.get("cacheWrite", 0)}
         context.model_evidence.update(requests=int(reported.get("requests", 0) or 0),
-                                      usage=[mapped], usage_known=True,
+                                      usage=[dict(usage)], usage_known=True,
                                       observed_models=[{**model, "thinkingLevel": thinking_level}],
-                                      usage_observations=[{"usage": mapped, **model}])
+                                      usage_observations=[{"usage": dict(usage), **model}])
     else:
         context.model_evidence.update(requests=int((reported.get("requests", 0) if isinstance(reported, dict) else 0) or 0))
 
@@ -299,15 +359,16 @@ def interpret_result(reported, context, model, thinking_level) -> None:
         raise ProtocolError("Pi-durable settled without mizu_finish")
     if context.request_count == 0:
         raise ProtocolError("No runtime request admission observed")
+    runtime = _runtime_evidence(context, model, thinking_level)
+    if runtime is not None:
+        context.model_evidence.update(runtime)
+        return
     usage = reported.get("usage")
     if isinstance(usage, dict):
-        mapped = {"input_tokens": usage.get("input", 0), "output_tokens": usage.get("output", 0),
-                  "cache_read_tokens": usage.get("cacheRead", 0),
-                  "cache_write_tokens": usage.get("cacheWrite", 0)}
         context.model_evidence.update(requests=int(reported.get("requests", 0) or 0),
-                                      usage=[mapped], usage_known=True,
+                                      usage=[dict(usage)], usage_known=True,
                                       observed_models=[{**model, "thinkingLevel": thinking_level}],
-                                      usage_observations=[{"usage": mapped, **model}])
+                                      usage_observations=[{"usage": dict(usage), **model}])
     else:
         context.model_evidence.update(requests=int(reported.get("requests", 0) or 0))
 
@@ -315,25 +376,39 @@ def interpret_result(reported, context, model, thinking_level) -> None:
 def _cumulative_tokens(saved, outcome) -> int:
     """Cumulative durable session tokens: saved total plus this run's usage.
 
-    Schema: reads the bounded saved record plus the mapped launcher usage
-    (``input_tokens``/``output_tokens``/``cache_read_tokens``/
-    ``cache_write_tokens``). Bounds: capped at 2**63-1. Trust: local
-    evidence only. Failure: unknown shapes add nothing, so rotation stays
-    age-driven when the launcher reports no recognized counters.
+    Schema: reads the bounded saved record plus this run's usage entries
+    in either raw provider shape (``input``/``output``/``cacheRead``/
+    ``cacheWrite``, as recorded from per-request runtime evidence) or
+    canonical shape (``input_tokens``/..., as kept by older evidence).
+    Bounds: capped at 2**63-1. Trust: local evidence only. Failure:
+    unknown shapes add nothing, so rotation stays age-driven when the
+    launcher reports no recognized counters.
     """
+    from .usage import normalize as _normalize
     run_total = 0
-    # The run outcome carries model_evidence usage: a list with one mapped
-    # entry (or empty when the launcher reported no usage).
+    # The run outcome carries model_evidence usage: per-request raw entries
+    # (or one fallback entry, or empty when no usage was reported).
     items = outcome.get("usage") if isinstance(outcome, dict) else None
     entries = items if isinstance(items, list) else ([items] if isinstance(items, dict) else [])
     for value in entries[:4096]:
         if not isinstance(value, dict):
             continue
-        for field in ("input_tokens", "output_tokens", "cache_read_tokens",
-                      "cache_write_tokens", "other_tokens"):
-            piece = value.get(field, 0)
-            if type(piece) is int and piece > 0:
-                run_total = min(run_total + piece, MAX_SESSION_TOKENS)
+        try:
+            part = _normalize(value, ENGINE)
+        except Exception:
+            part = None
+        if isinstance(part, dict) and not part.get("unknown_shape"):
+            for field in ("input_tokens", "output_tokens", "cache_read_tokens",
+                          "cache_write_tokens", "other_tokens"):
+                piece = part.get(field, 0)
+                if type(piece) is int and piece > 0:
+                    run_total = min(run_total + piece, MAX_SESSION_TOKENS)
+        else:
+            for field in ("input_tokens", "output_tokens", "cache_read_tokens",
+                          "cache_write_tokens", "other_tokens"):
+                piece = value.get(field, 0)
+                if type(piece) is int and piece > 0:
+                    run_total = min(run_total + piece, MAX_SESSION_TOKENS)
     try:
         previous = session_token_total(saved, ENGINE)
     except Exception:

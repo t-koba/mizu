@@ -106,6 +106,7 @@ class PolicyTests(Fixture):
 
     def test_turn_bound_result_maps_to_limit(self):
         from mizu.errors import ProtocolError
+        from mizu.usage import normalize
         context = self.context()
         context.handle("_hello", {})
         context.handle("_budget", {"sequence": 1})
@@ -117,10 +118,12 @@ class PolicyTests(Fixture):
                                          "reason": "spent", "requests": 5,
                                          "usage": {"input": 10, "output": 5}}, context, model, None)
         # The bound-exhausted path keeps launcher accounting, like the done path.
+        # Fallback usage stays in raw provider shape so usage accounting counts it.
         self.assertEqual(context.model_evidence["requests"], 5)
         self.assertTrue(context.model_evidence["usage_known"])
-        self.assertEqual(context.model_evidence["usage"][0]["input_tokens"], 10)
-        self.assertEqual(context.model_evidence["usage"][0]["output_tokens"], 5)
+        self.assertEqual(context.model_evidence["usage"][0]["input"], 10)
+        self.assertEqual(context.model_evidence["usage"][0]["output"], 5)
+        self.assertEqual(normalize(context.model_evidence["usage"][0], "pi-durable")["input_tokens"], 10)
         with self.assertRaises(ProtocolError):
             pi_durable.interpret_result({"durable_result": True, "status": "done",
                                          "finish_called": False}, context, model, None)
@@ -129,7 +132,43 @@ class PolicyTests(Fixture):
                                      "usage": {"input": 3, "output": 4}},
                                     context, model, None)
         self.assertTrue(context.model_evidence["usage_known"])
-        self.assertEqual(context.model_evidence["usage"][0]["input_tokens"], 3)
+        self.assertEqual(normalize(context.model_evidence["usage"][0], "pi-durable")["input_tokens"], 3)
+
+    def test_runtime_usage_preferred_over_aggregated(self):
+        from mizu.usage import normalize, summarize
+        from mizu.fs import mkdir, write_json
+        context = self.context()
+        context.handle("_hello", {})
+        context.handle("_budget", {"sequence": 1})
+        context.handle("_model_usage", {"sequence": 2, "usage": {"input": 7, "output": 3},
+                                        "model": {"provider": "p", "model": "m"}})
+        context.handle("_budget", {"sequence": 3})
+        context.handle("_model_usage", {"sequence": 4, "usage": {"input": 11, "output": 5},
+                                        "model": {"provider": "p", "model": "m"}})
+        context.handle("finish", {"outcome": "wait", "summary": "s", "state": "n"})
+        context.model_evidence = {"profile": "durable", "provider": "p", "model": "m",
+                                  "engine": "pi-durable", "requests": 0,
+                                  "request_unit": "model_request", "usage": [], "usage_known": False}
+        model = {"provider": "p", "model": "m"}
+        pi_durable.interpret_result({"durable_result": True, "status": "done",
+                                     "finish_called": True, "requests": 2,
+                                     "usage": {"input": 999, "output": 999}},
+                                    context, model, None)
+        # Per-request host evidence wins over the aggregated launcher document.
+        self.assertEqual(context.model_evidence["requests"], 2)
+        self.assertEqual(len(context.model_evidence["usage"]), 2)
+        self.assertEqual(normalize(context.model_evidence["usage"][0], "pi-durable")["input_tokens"], 7)
+        self.assertEqual(normalize(context.model_evidence["usage"][1], "pi-durable")["input_tokens"], 11)
+        # The same evidence is countable through the shared usage summary.
+        run_dir = context.run_dir
+        write_json(run_dir / "started.json", {"run": run_dir.name, "started_at": "2026-10-07T17:38:00+00:00"})
+        write_json(run_dir / "result.json", {"run": run_dir.name, "role": "worker", "status": "completed",
+                                             "finished_at": "2026-10-07T17:38:00+00:00",
+                                             "model": dict(context.model_evidence)})
+        facts = summarize(self.project)
+        self.assertEqual(facts["totals"]["input_tokens"], 18)
+        self.assertEqual(facts["totals"]["output_tokens"], 8)
+        self.assertEqual(facts["totals"]["requests"], 2)
 
     def test_persistent_session_saves_cumulative_tokens(self):
         profile = self._durable_profile()
