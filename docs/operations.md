@@ -187,7 +187,7 @@ mizu status demo-restored
 mizu service demo  # スケジュール設定を変更した場合は再生成 (OS既定のディレクトリへ出力。--directory で指定も可能)
 systemctl --user daemon-reload
 mizu doctor --sandbox --sandbox-image <digest-pinned-candidate>
-mizu smoke --live --sandbox-image <digest-pinned-candidate>
+mizu smoke --live
 # 各種テストの成功を確認した後、必要なサービスを起動してプロジェクトを resume します
 ```
 

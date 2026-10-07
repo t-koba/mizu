@@ -73,7 +73,6 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--live", action="store_true", required=True, help="Explicit consent to a paid, read-only Pi/provider probe")
     p.add_argument("--profile", help="Model profile for the probe")
     p.add_argument("--role", default=None, help="Read-only probe role (default: consult when present, else single role)")
-    p.add_argument("--sandbox-image", default=None, help="Ephemeral candidate image for this probe only; never writes config")
     p = sub.add_parser("insight", help="Submit, list, read, decide or ingest proposals")
     p.add_argument("action", choices=("submit", "list", "read", "decide", "ingest", "revise", "history", "withdraw"), help="Proposal operation")
     p.add_argument("project", help="Managed project name")
@@ -378,7 +377,7 @@ def _attribute_input(path):
 
 
 def _with_sandbox_image(config, image):
-    """Ephemeral candidate image for doctor/smoke only; never writes config.
+    """Ephemeral candidate image for doctor only; never writes config.
 
     Schema: digest-pinned image ID or reference, same rule as sandbox.image.
     Bounds: in-memory dataclass replace only. Trust: operator CLI flag.
@@ -419,7 +418,7 @@ def execute(args):
         return check(_with_sandbox_image(config, getattr(args, "sandbox_image", None)), sandbox=args.sandbox)
     if args.command == "smoke":
         from .smoke import live
-        return live(_with_sandbox_image(config, getattr(args, "sandbox_image", None)), args.profile, _resolve_role(config, args.role, probe=True))
+        return live(config, args.profile, _resolve_role(config, args.role, probe=True))
     from .project import Project, initialize
     if args.command == "init":
         roles = args.roles.split(",") if args.roles else _resolve_role(config, None).split(",")

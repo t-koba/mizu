@@ -67,5 +67,11 @@ class SandboxImageTests(Fixture):
     def test_doctor_parser_accepts_candidate_image(self):
         args = parser().parse_args(["--config", str(self.file), "doctor", "--sandbox-image", "sha256:" + "c" * 64])
         self.assertTrue(args.sandbox_image.endswith("c" * 64))
-        args = parser().parse_args(["--config", str(self.file), "smoke", "--live", "--sandbox-image", "sha256:" + "d" * 64])
-        self.assertTrue(args.sandbox_image.endswith("d" * 64))
+
+    def test_smoke_has_no_sandbox_image_flag(self):
+        # Read-only probe never consults the sandbox image; the flag was removed
+        # so the promote flow cannot give false confidence.
+        args = parser().parse_args(["--config", str(self.file), "smoke", "--live"])
+        self.assertFalse(hasattr(args, "sandbox_image"))
+        with self.assertRaises(SystemExit):
+            parser().parse_args(["--config", str(self.file), "smoke", "--live", "--sandbox-image", "sha256:" + "d" * 64])
