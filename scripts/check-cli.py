@@ -27,7 +27,7 @@ def probe(engine, prefix):
             flags.extend(item['required_flags'])
         return argv, None, ('codex_flags', sorted(set(flags)))
     launcher = str(ROOT/'adapters'/engine/contract['entrypoint'])
-    dependency = ROOT/'adapters/pi/node_modules' if engine in ('pi', 'pi-durable') else None
+    dependency = ROOT/'adapters'/engine/'node_modules' if engine in ('pi', 'pi-durable') else None
     return [*prefix, launcher, '--check-contract'], dependency, ('launcher_exports', list(contract['exports']))
 
 
@@ -37,7 +37,7 @@ def main():
     parser.add_argument('--claude-python',help='Interpreter of the isolated SDK environment')
     parser.add_argument('--codex',default='codex',help='Operator-selected app-server executable')
     args=parser.parse_args()
-    prefixes={'pi':['node'],'codex':[args.codex],'claude':[args.claude_python or sys.executable]}
+    prefixes={'pi':['node'],'pi-durable':['node'],'codex':[args.codex],'claude':[args.claude_python or sys.executable]}
     checks=[]
     for engine in ('pi','pi-durable','codex','claude'):
         try:

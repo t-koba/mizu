@@ -1,90 +1,191 @@
-/** Managed pi-durable entry point. stdout belongs exclusively to runRpcMode.
+/** Managed pi-durable entry point: real durable Harness over file-backed SQLite.
  *
- * Compat backend: the pinned pi-durable package lands via operator image
- * rebuild (open Q). Until then this launcher uses the pinned pi SDK from
- * the pi adapter tree explicitly and reports backend pi-compat, never a
- * silent fallback. The Python driver owns durable turns/tasks, grant
- * binding, and replay safety; this process only runs the agent protocol.
+ * One-shot protocol: `node launcher.mjs <effective.json>` runs one admitted
+ * submission to settlement and prints a single JSON result document to
+ * stdout (stderr carries progress only). No RPC, no JSONL event stream.
+ *
+ * Durable contracts (from @earendil-works/pi-durable 1.0.4):
+ * - openNodeSqliteStorage(file): WAL SQLite; commits survive process crashes.
+ * - Harness.open(storage, {models, registry}): one Session line of commits.
+ * - root.submit({type:'input', content, requestId}): retried requestId
+ *   returns the existing submission instead of submitting twice.
+ * - submission.wait(): resolves done/unanswered. Interrupted tool calls are
+ *   never rerun (default replay unsafe): the model gets an `interrupted`
+ *   result, matching the Python driver's unknown-completion rule.
+ * - harness.resume(): continue work a dead process left unfinished.
+ * - harness.usage(): per provider/model + per tool spend.
+ *
+ * Authority preserved from the pi engine: exact provider/model pin (built-in
+ * providers only; custom models.json providers refuse loudly), bridge tools
+ * only (native host tools refused Python-side), per-request budget admission
+ * and usage reporting around every provider call, mizu_finish seal required.
  */
-import { readFileSync, existsSync } from 'node:fs';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
+import { Type } from '@earendil-works/pi-ai';
+import { builtinModels } from '@earendil-works/pi-ai/providers/all';
+import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
+import { AssistantEntry, createRegistry, defineExtension, defineTool, Harness } from '@earendil-works/pi-durable';
+import { openNodeSqliteStorage } from '@earendil-works/pi-durable/storage/sqlite/node';
+import { request, typeSchema } from './bridge-client.mjs';
 
-const here = dirname(fileURLToPath(import.meta.url));
-const require = createRequire(import.meta.url);
-function loadPi() {
-  const candidates = [
-    join(here, 'node_modules/@earendil-works/pi-coding-agent'),
-    join(here, '..', 'pi/node_modules/@earendil-works/pi-coding-agent'),
-  ];
-  const aiCandidates = [
-    join(here, 'node_modules/@earendil-works/pi-ai'),
-    join(here, '..', 'pi/node_modules/@earendil-works/pi-ai'),
-  ];
-  let agentPath = candidates.find(p => existsSync(p));
-  let aiPath = aiCandidates.find(p => existsSync(p));
-  if (!agentPath || !aiPath) throw new Error('Pinned Pi SDK not installed; operator image rebuild required');
-  return { agent: require(agentPath), ai: require(aiPath), backend: agentPath.includes('pi-durable') ? 'pi-durable' : 'pi-compat' };
+const CONTRACT_EXPORTS = ['Harness', 'createRegistry', 'defineExtension', 'defineTool', 'openNodeSqliteStorage', 'builtinModels'];
+
+function fail(message) {
+  process.stderr.write(`pi-durable: ${message}\n`);
+  process.exit(1);
 }
-const { agent, ai, backend } = loadPi();
-const { Type } = ai;
-const { ModelRuntime, SettingsManager, SessionManager, createAgentSession,
-  createAgentSessionRuntime, createAgentSessionServices, createCodemodeExtension,
-  createToolSearchExtension, createMcpExtension, runRpcMode } = agent;
-const { register } = await import('../pi/register.mjs');
-const { meterRuntime } = await import('../pi/model-runtime.mjs');
 
 if (process.argv.includes('--check-contract')) {
-  const checked = { 'ModelRuntime': ModelRuntime.create, 'createAgentSession': createAgentSession,
-    'createAgentSessionRuntime': createAgentSessionRuntime, 'runRpcMode': runRpcMode,
-    'createMcpExtension': createMcpExtension };
-  for (const fn of Object.values(checked)) {
-    if (typeof fn !== 'function') throw new Error('Required SDK capability missing');
-  }
-  process.stdout.write(JSON.stringify({ contract: 'managed-pi-durable-sdk', backend, exports: Object.keys(checked),
-    inference: 'not_run' })+'\n');
+  const missing = [];
+  for (const [name, fn] of [
+    ['Harness', Harness?.open], ['createRegistry', createRegistry],
+    ['defineExtension', defineExtension], ['defineTool', defineTool],
+    ['openNodeSqliteStorage', openNodeSqliteStorage], ['builtinModels', builtinModels],
+  ]) if (typeof fn !== 'function') missing.push(name);
+  if (missing.length) fail(`Required durable capability missing: ${missing.join(', ')}`);
+  process.stdout.write(JSON.stringify({ contract: 'managed-pi-durable-sdk', backend: 'pi-durable',
+    exports: CONTRACT_EXPORTS, inference: 'not_run' }) + '\n');
 } else {
-  const cfg = JSON.parse(readFileSync(process.argv[2], 'utf8'));
+  let cfg;
+  try {
+    cfg = JSON.parse(readFileSync(process.argv[2], 'utf8'));
+  } catch (error) {
+    fail(`Cannot read effective configuration: ${error.message}`);
+  }
+  const watchdog = setTimeout(() => fail('Launcher watchdog deadline exceeded'), Number(cfg.deadline_ms) || 600000);
+  watchdog.unref?.();
+  try {
+    process.stdout.write(JSON.stringify(await runOnce(cfg)) + '\n');
+  } catch (error) {
+    fail(error?.message || String(error));
+  } finally {
+    clearTimeout(watchdog);
+  }
+}
+
+async function runOnce(cfg) {
+  for (const field of ['provider', 'model', 'instructions', 'store', 'requestId', 'prompt', 'cwd']) {
+    if (typeof cfg[field] !== 'string' || !cfg[field]) throw new Error(`Effective configuration lacks ${field}`);
+  }
+  if (!Array.isArray(cfg.tools) || !cfg.tools.length) throw new Error('Effective configuration carries no bridge tools');
+  if (cfg.engine_tools?.length) throw new Error('Native host tools bypass the OCI bridge');
+  if (cfg.resources?.length) throw new Error('Resource kinds are unsupported on pi-durable');
+  if (cfg.mcp_servers && Object.keys(cfg.mcp_servers).length) throw new Error('MCP servers are unsupported on pi-durable');
   const bridge = JSON.parse(readFileSync(process.env.MIZU_BRIDGE_CONFIG, 'utf8'));
-  bridge.engine_tools = cfg.engine_tools;
-  const modelRuntime = await ModelRuntime.create({ authPath: join(cfg.agentDir, 'auth.json'),
-    modelsPath: join(cfg.agentDir, 'models.json'), modelsStorePath: join(cfg.agentDir, 'models-cache.json'),
-    allowModelNetwork: false });
-  const meter = meterRuntime(modelRuntime, bridge);
-  if (cfg.resources.some(r => !['extension','skill','prompt','theme'].includes(r.kind))) throw new Error('Unsupported Pi resource kind');
-  const factories = [{ name: 'mizu', factory: pi => register(pi, Type, bridge) }];
-  if (cfg.options.codemode) factories.push({ name: 'codemode', factory: createCodemodeExtension(), builtin: true });
-  if (cfg.options.toolSearch) factories.push({ name: 'tool-search', factory: createToolSearchExtension(), builtin: true });
-  if (Object.keys(cfg.mcp_servers).length) factories.push({ name: 'mcp', builtin: true,
-    factory: createMcpExtension({ loadConfig: () => ({ servers: Object.entries(cfg.mcp_servers).map(([name, config]) =>
-      ({ name, config, source: 'mizu-profile', scope: 'extension' })), errors: [], autoEnableCodemode: Boolean(cfg.options.codemode) }) }) });
-  const manager = cfg.resume ? SessionManager.open(cfg.resume, cfg.sessionDir, cfg.cwd) : SessionManager.create(cfg.cwd, cfg.sessionDir);
-  const runtime = await createAgentSessionRuntime(async ({ cwd, agentDir, sessionManager }) => {
-    const settingsManager = SettingsManager.inMemory(cfg.options.settings ?? {});
-    const paths = kind => cfg.resources.filter(r => r.kind === kind).map(r => r.path);
-    const services = await createAgentSessionServices({ cwd, agentDir, settingsManager, modelRuntime, resourceLoaderOptions: {
-      noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-      additionalExtensionPaths: paths('extension'), additionalSkillPaths: paths('skill'),
-      additionalPromptTemplatePaths: paths('prompt'), additionalThemePaths: paths('theme'),
-      extensionFactories: factories, systemPrompt: cfg.systemPrompt } });
-    const extensionErrors = services.resourceLoader.getExtensions().errors;
-    services.diagnostics.push(...services.resourceLoader.getSkills().diagnostics,
-      ...services.resourceLoader.getPrompts().diagnostics, ...services.resourceLoader.getThemes().diagnostics);
-    if (extensionErrors.length || services.diagnostics.some(item => item.type === 'error')) {
-      throw new Error(JSON.stringify({ message: 'Pi resource/provider setup failed', extensionErrors, diagnostics: services.diagnostics }));
+
+  // Exact-model pin over built-in providers only. Custom models.json
+  // providers stay on pi; here they refuse loudly instead of guessing.
+  const models = builtinModels();
+  const model = models.getModel(cfg.provider, cfg.model);
+  if (!model) throw new Error(`Configured exact model is unavailable on pi-durable: ${cfg.provider}/${cfg.model}`);
+  const auth = await models.checkAuth(cfg.provider).catch(() => undefined);
+  if (!auth) throw new Error(`Provider auth is not configured for ${cfg.provider}`);
+
+  // Admission + usage metering around every provider call, mirroring the
+  // pi engine: one _budget reservation before dispatch, one _model_usage
+  // report after. complete* delegate to stream*, so wrapping the three
+  // stream entry points meters each provider request exactly once.
+  let sequence = 0;
+  let requests = 0;
+  const observations = [];
+  async function admit() {
+    await request(bridge, '_budget', { sequence: ++sequence });
+    requests++;
+  }
+  async function reportUsage(usage, shape) {
+    if (!usage) return;
+    observations.push({ provider: shape?.provider ?? cfg.provider, model: shape?.model ?? cfg.model,
+      thinkingLevel: shape?.thinkingLevel ?? cfg.thinkingLevel ?? null });
+    await request(bridge, '_model_usage', { sequence: ++sequence, usage,
+      model: { provider: cfg.provider, model: cfg.model, thinkingLevel: cfg.thinkingLevel ?? null } });
+  }
+  for (const name of ['stream', 'streamSimple', 'streamDeferred']) {
+    const original = models[name].bind(models);
+    models[name] = (...args) => {
+      const source = (async () => { await admit(); return original(...args); })();
+      const pending = source.then(stream => stream.result()).then(async value => {
+        await reportUsage(value?.usage, value);
+        return value;
+      });
+      return {
+        result: () => pending,
+        async *[Symbol.asyncIterator]() {
+          const stream = await source;
+          yield* stream;
+          await pending;
+        },
+      };
+    };
+  }
+  for (const name of ['classify', 'generateImages']) {
+    const original = models[name].bind(models);
+    models[name] = async (...args) => {
+      await admit();
+      const result = await original(...args);
+      await reportUsage(result?.usage, result);
+      return result;
+    };
+  }
+
+  // Bridge tools as one durable extension. Intent commits before execute;
+  // interrupted executions are never rerun (replay unsafe default), so an
+  // uncertain side effect surfaces as `interrupted`, never a blind repeat.
+  let finishCalled = false;
+  let sealed = null;
+  const tools = cfg.tools.map(tool => defineTool({
+    name: tool.name,
+    description: tool.description,
+    parameters: typeSchema(Type, tool.inputSchema),
+    execute: async (args) => {
+      const result = await request(bridge, tool.operation, args);
+      if (tool.operation === 'finish') {
+        finishCalled = true;
+        sealed = result;
+        return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result,
+          control: { terminate: true } };
+      }
+      return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result };
+    },
+  }));
+  const registry = createRegistry();
+  registry.install(defineExtension({ name: 'mizu', tools }));
+
+  const storage = await openNodeSqliteStorage(cfg.store);
+  const context = BACKGROUND_CONTEXT;
+  const harness = await Harness.open(storage, { models, registry }, context);
+  try {
+    harness.resume(); // continue work a dead process left unfinished
+    // Agent tools take the installed tool registrations (not bare names);
+    // the registry holds the same objects installed above.
+    const agent = { model: { provider: cfg.provider, modelId: cfg.model },
+      tools, instructions: cfg.instructions, cwd: cfg.cwd };
+    if (cfg.thinkingLevel) agent.thinkingLevel = cfg.thinkingLevel;
+    const root = await harness.root(context, { agent });
+    const resolved = await root.agent(context);
+    if (resolved?.model?.provider !== cfg.provider || resolved?.model?.modelId !== cfg.model) {
+      throw new Error('Durable session resolved a different model/provider');
     }
-    const resourceLoader = services.resourceLoader;
-    const model = modelRuntime.getModel(cfg.provider, cfg.model);
-    if (!model) throw new Error('Configured exact model is unavailable');
-    const result = await createAgentSession({ cwd, agentDir, modelRuntime, model,
-      thinkingLevel: cfg.options.thinkingLevel, excludeTools: cfg.options.excludeTools, scopedModels: cfg.options.scopedModels, settingsManager, sessionManager, resourceLoader,
-      noTools: 'builtin', tools: [...bridge.tools.map(t => t.name), ...cfg.engine_tools] });
-    if (result.modelFallbackMessage) throw new Error('Session resume changed the selected model');
-    result.session.subscribe(event => {
-      if (event.type === 'agent_settled') meter.flush().catch(error => { process.stderr.write(String(error)); process.exitCode = 1; });
-    });
-    return { ...result, services, diagnostics: services.diagnostics };
-  }, { cwd: cfg.cwd, agentDir: cfg.agentDir, sessionManager: manager });
-  await runRpcMode(runtime);
+    const submission = await root.submit({ type: 'input', content: cfg.prompt, requestId: cfg.requestId }, context);
+    const settled = await submission.wait(context);
+    const usage = await harness.usage(context);
+    const key = `${cfg.provider}/${cfg.model}`;
+    let answer = null;
+    if (settled.status === 'done' && settled.type === 'input' && settled.answer !== undefined) {
+      try {
+        const entry = await root.commit(tx => tx.entry(AssistantEntry, settled.answer), context);
+        const text = JSON.stringify(entry?.model ?? entry ?? null);
+        answer = text.length > 4096 ? text.slice(0, 4096) : text;
+      } catch {
+        answer = null; // transcript stays in storage; evidence stays bounded
+      }
+    }
+    return { durable_result: true, status: settled.status,
+      reason: settled.status === 'done' ? null : (settled.reason ?? 'unanswered'),
+      finish_called: finishCalled, sealed,
+      requests, observed: observations,
+      usage: usage?.models?.[key] ?? null,
+      usage_models: Object.keys(usage?.models ?? {}), answer };
+  } finally {
+    await harness.close(context).catch(() => {});
+  }
 }

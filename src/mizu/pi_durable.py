@@ -1,33 +1,40 @@
 """Managed pi-durable driver: distinct engine with persisted turns/tasks.
 
-Preserves every Pi authority boundary (sandbox, admission/budget
-accounting, cancellation, single-writer, verification/publication) by
-reusing the Pi channel protocol; persistence only adds idempotent
-recovery around it. Resume binds to valid current authority; persisted
-state never revives obsolete grants or bypasses pause/stop. Interrupted
-side effects are marked unknown, never blindly repeated.
+Runs one admitted durable submission per call through the pinned
+pi-durable Harness over file-backed SQLite (adapters/pi-durable). The
+launcher speaks a one-shot protocol: effective file in, a single JSON
+result document on stdout, no RPC or event stream. This preserves every
+Pi authority boundary (sandbox, admission/budget accounting,
+cancellation, single-writer, verification/publication) while durable
+commits add idempotent recovery around it. Resume binds to valid
+current authority; persisted state never revives obsolete grants or
+bypasses pause/stop. Interrupted side effects are marked unknown,
+never blindly repeated.
 """
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
 from . import pi as _pi
 from .bridge import Bridge
 from .config import role_policy_text
-from .engine_channel import Channel
-from .engine_config import (adapter_digest, connected_servers, effective,
-                            session_record, save_session)
-from .errors import Cancelled, ConfigError, ProtocolError, ModelFailure
+from .drivers import EVENT_RECORD_BYTES
+from .engine_config import adapter_digest, effective, session_record
+from .errors import Cancelled, ConfigError, LimitExceeded, ProtocolError, ModelFailure
 from .fs import atomic_write, canonical, digest, mkdir, write_json
 from .pi_durable_store import (BACKENDS, RESUME_MODES, complete_run, complete_turn,
                                begin_run, check_grant, grant_digest, load_run,
-                               open_store, project_context, record_turn, store_path_for)
-from .process import environment
+                               open_store, project_context, prune,
+                               record_turn, retention_candidates, store_path_for)
+from .process import environment, run
 from .protocol import tool_definitions
 
 ROOT = Path(__file__).resolve().parents[2]
 ENGINE = "pi-durable"
+#: Single bounded result document from the one-shot launcher.
+RESULT_BYTES = 1024 * 1024
 
 
 def durable_options(settings: dict) -> dict:
@@ -51,8 +58,8 @@ def durable_options(settings: dict) -> dict:
 def grant_for(settings: dict, role, model: dict) -> str:
     policy = role_policy_text(role)
     options_digest = digest(canonical({k: v for k, v in settings.get("options", {}).items()
-                                       if k in ("thinkingLevel", "settings", "codemode", "toolSearch",
-                                                "excludeTools", "scopedModels")}))
+                                       if k in ("thinkingLevel", "durable_backend", "durable_resume",
+                                                "durable_retention_days", "durable_max_turns")}))
     return grant_digest(policy_text=policy, capabilities=tuple(role.capabilities),
                         model=model, adapter_digest_value=adapter_digest(ENGINE),
                         options_digest=options_digest)
@@ -73,23 +80,34 @@ class PiDurableDriver:
         settings = effective(self.config, context.role, profile)
         if settings.get("engine") != ENGINE:
             raise ConfigError("pi-durable driver requires a pi-durable profile")
-        policy_text = durable_options(settings)
+        policy = durable_options(settings)
         # Capability/extension incompatibility is explicit: durable refuses
-        # native host tools that bypass the bridge (same floor as Pi).
+        # native host tools that bypass the bridge (same floor as Pi), and
+        # the durable launcher owns no MCP/resource surface to grant.
         for tool in context.role.engine_tools:
             if tool in ("bash", "powershell", "edit", "write", "read", "Bash", "Read", "Edit",
                         "Write", "NotebookEdit", "Computer", "Glob", "Grep"):
                 raise ConfigError("Native host tools bypass the OCI bridge; grant mizu operations instead")
-        path, saved = session_record(context, profile, settings)
+        if settings.get("mcp_servers"):
+            raise ConfigError("MCP servers are unsupported on pi-durable")
+        if settings.get("resources"):
+            raise ConfigError("Resource kinds are unsupported on pi-durable")
+        prompt_bytes = prompt.encode()
+        if not prompt_bytes:
+            raise ConfigError("Durable prompt must be nonempty")
+        if len(prompt_bytes) > EVENT_RECORD_BYTES:
+            raise ConfigError("Durable prompt exceeds the bounded record")
+        path, _ = session_record(context, profile, settings)
         session_key = path.parent.name
         project_name = getattr(getattr(context, "project", None), "name", "unknown")
         model = self.config.model(profile)
         grant = grant_for(settings, context.role, model)
         store_path = store_path_for(self.config.data, project_name, context.role.name, session_key)
         conn = open_store(store_path)
+        existing = 0
         try:
             run_key = context.run_dir.name
-            if policy_text["resume"] == "fresh" and load_run(conn, run_key) is not None:
+            if policy["resume"] == "fresh" and load_run(conn, run_key) is not None:
                 raise ConfigError("Durable resume mode is fresh; retry with a new run")
             started_record = begin_run(conn, run_key=run_key, session_key=session_key,
                                        project=project_name, role=context.role.name, grant=grant)
@@ -101,25 +119,34 @@ class PiDurableDriver:
                 return result
             if started_record.get("resumed"):
                 check_grant(conn, run_key, grant)
+            existing = len((load_run(conn, run_key) or {}).get("turns", []))
+            if existing >= policy["max_turns"]:
+                raise LimitExceeded("Durable turn bound exhausted for this run")
+            reaped = None
+            if policy["retention_days"] is not None:
+                # Reap only terminal runs of this session store; the active
+                # run is never a candidate. Accounting is reported, not silent.
+                candidates = retention_candidates(conn, retention_days=policy["retention_days"])
+                reaped = prune(conn, candidates, dry_run=False)
             if context.cancelled():
                 complete_run(conn, run_key, {"cancelled": True}, status="cancelled")
                 raise Cancelled("Run cancelled before durable dispatch")
-            record_turn(conn, run_key, 1, "prompt", {"bytes": len(prompt.encode())})
-            if len(prompt.encode()) == 0:
-                raise ConfigError("Durable prompt must be nonempty")
-            outcome = self._run_channel(context, settings, saved, path, model, prompt, profile, conn, run_key)
-            complete_turn(conn, run_key, 1, {"engine": ENGINE}, state="completed")
+            record_turn(conn, run_key, existing + 1, "prompt", {"bytes": len(prompt_bytes)})
+            outcome = self._run_once(context, settings, model, prompt, profile, run_key, store_path)
+            complete_turn(conn, run_key, existing + 1, {"engine": ENGINE}, state="completed")
             complete_run(conn, run_key, {"engine": outcome.get("engine"), "requests": outcome.get("requests")}, status="completed")
             outcome["durable"] = {"resumed": bool(started_record.get("resumed")), "duplicate": False,
-                                  "store": str(store_path), "projection": project_context(conn, run_key)}
+                                  "store": str(store_path), "projection": project_context(conn, run_key),
+                                  "grant": grant, "reaped": reaped}
             return outcome
-        except (Cancelled, ProtocolError, ModelFailure, ConfigError):
+        except (Cancelled, ProtocolError, ModelFailure, ConfigError, LimitExceeded):
             try:
                 record = load_run(conn, run_key)
                 if record is not None and record["status"] == "active":
                     # Uncertain side-effect completion: mark unknown, never assume.
                     try:
-                        complete_turn(conn, run_key, 1, {"uncertain": True}, state="unknown")
+                        complete_turn(conn, run_key, existing + 1,
+                                      {"uncertain": True}, state="unknown")
                     except Exception:
                         pass
                     try:
@@ -135,78 +162,70 @@ class PiDurableDriver:
             except Exception:
                 pass
 
-    def _run_channel(self, context, settings, saved, path, model, prompt, profile, conn, run_key) -> dict:
-        # Shared Pi protocol: handshake, exact-model pin, settlement seal.
-        # Durable turns persist the prompt; per-message persistence stays in
-        # the store's turn record (started/unknown/completed) while the live
-        # event stream remains the channel's bounded evidence.
+    def _run_once(self, context, settings, model, prompt, profile, run_key, store_path) -> dict:
+        # One admitted durable submission: effective file in, one bounded
+        # JSON result document out. The bridge stays open for the whole
+        # submission so tool callbacks and admission share one deadline.
         policy = role_policy_text(context.role)
         atomic_write(context.run_dir / "system.md", policy.encode())
         cwd = context.run_dir / "controller"
         mkdir(cwd)
-        agent_dir = self.config.agent_dir(ENGINE)
-        mkdir(agent_dir)
-        write_json(context.run_dir / "pi-durable-effective.json",
-                   {**settings, "mcp_servers": connected_servers(context, settings),
-                    "agentDir": str(agent_dir), "cwd": str(cwd), "sessionDir": str(path.parent),
-                    "resume": saved["id"] if saved else None, "systemPrompt": policy,
-                    "durable": {"run_key": run_key, "store": str(store_path_for(
-                        self.config.data, getattr(getattr(context, "project", None), "name", "unknown"),
-                        context.role.name, path.parent.name))}})
+        options = dict(settings.get("options", {}))
+        effective_config = {
+            "provider": model["provider"], "model": model["model"],
+            "instructions": policy, "tools": tool_definitions(context.role.capabilities),
+            "cwd": str(cwd), "store": str(store_path), "requestId": run_key, "prompt": prompt,
+        }
+        if options.get("thinkingLevel") is not None:
+            effective_config["thinkingLevel"] = options["thinkingLevel"]
+        deadline_ms = max(1, int(1000 * min(context.deadline - time.monotonic(),
+                                            self.config.limits.run_seconds)))
+        effective_config["deadline_ms"] = deadline_ms
+        write_json(context.run_dir / "pi-durable-effective.json", effective_config)
         started = time.monotonic()
-        session_file = None
-        observed = []
         context.model_evidence = {"profile": profile, **model, "engine": ENGINE, "requests": 0,
                                   "request_unit": "model_request", "usage": [], "usage_known": False}
-        import contextlib
         with Bridge(context.handle, tool_definitions(context.role.capabilities), timeout=self.config.limits.run_seconds,
                     on_close=context.cancel_operations) as bridge:
             env = environment(extra={"MIZU_BRIDGE_CONFIG": str(bridge.config_file)})
             env.update(_pi.credentials(self.config.file.parent / "credentials.env"))
-            channel = Channel(context, self.argv(context.role, context.run_dir, profile, context.goal_digest), env, cwd, "pi-durable")
+            result = run(self.argv(context.role, context.run_dir, profile, context.goal_digest),
+                         timeout=min(max(0.0, context.deadline - time.monotonic()),
+                                     self.config.limits.run_seconds),
+                         maximum=RESULT_BYTES, cwd=cwd, env=env, cancel=context.cancelled)
+            if context.cancelled() or result.reason == "cancelled":
+                raise Cancelled("Durable run cancelled")
+            if result.reason == "timeout":
+                raise LimitExceeded("Durable run exceeded its deadline")
+            if result.reason == "output_limit":
+                raise ProtocolError("Durable result exceeded its bound")
+            if result.reason == "input_error" or result.reason == "output_error":
+                raise ProtocolError(f"Durable transport failed: {result.reason}")
+            if result.exit_code != 0:
+                tail = (result.stderr or result.stdout or "").strip()[-2000:]
+                raise ModelFailure("pi-durable", kind="launcher", message=tail or "launcher failed")
             try:
-                channel.send({"id": "state", "type": "get_state"})
-                while True:
-                    event = channel.receive(until=min(context.deadline, started+30))
-                    if event.get("id") != "state":
-                        continue
-                    if not event.get("success") or not context.hello.is_set():
-                        raise ProtocolError("Pi-durable managed SDK handshake failed")
-                    actual = event.get("data", {}).get("model") or {}
-                    if actual.get("id") != model["model"] or actual.get("provider") != model["provider"]:
-                        raise ProtocolError("Pi-durable selected a different model/provider")
-                    session_file = event.get("data", {}).get("sessionFile")
-                    break
-                channel.send({"id": "work", "type": "prompt", "message": prompt})
-                while True:
-                    event = channel.receive()
-                    kind = event.get("type")
-                    if kind == "response" and event.get("id") == "work":
-                        if not event.get("success") or event.get("data", {}).get("disposition") == "handled":
-                            raise ProtocolError("Pi-durable prompt did not start an agent run")
-                    elif kind == "message_end":
-                        message = event.get("message", {})
-                        if message.get("role") == "assistant":
-                            if message.get("stopReason") == "error":
-                                raise ModelFailure("pi-durable", kind="error", message=message.get("errorMessage", "error"))
-                            if message.get("stopReason") == "aborted":
-                                raise ProtocolError("Pi-durable request aborted")
-                            observed.append({key: message.get(key) for key in ("provider", "api", "model", "thinkingLevel")})
-                    elif kind == "agent_settled":
-                        if context.request_count == 0:
-                            raise ProtocolError("No runtime request admission observed")
-                        if context.finished is None:
-                            raise ProtocolError("Pi-durable settled without mizu_finish")
-                        if settings["session"] == "persistent" and not context.ephemeral:
-                            save_session(path, session_file, {"tokens": _pi._cumulative_tokens(saved, context)})
-                        break
-            finally:
-                context.model_evidence.update(requests=context.request_count, usage=list(context.runtime_usage.values()),
-                                              usage_known=bool(context.runtime_usage), observed_models=observed+list(context.runtime_models.values()),
-                                              usage_observations=[{"usage": value, "provider": context.runtime_models.get(seq, {}).get("provider"),
-                                                                   "model": context.runtime_models.get(seq, {}).get("model")}
-                                                                  for seq, value in context.runtime_usage.items()])
-                with contextlib.suppress(Exception):
-                    channel.send({"type": "abort"})
-                channel.close()
-        return {**context.model_evidence, "seconds": round(time.monotonic()-started, 3)}
+                reported = json.loads(result.stdout.strip())
+            except (ValueError, UnicodeError) as exc:
+                raise ProtocolError("Durable launcher returned an invalid result") from exc
+            if not isinstance(reported, dict) or reported.get("durable_result") is not True:
+                raise ProtocolError("Durable launcher returned an invalid result")
+            if reported.get("status") != "done":
+                raise ModelFailure("pi-durable", kind="unanswered",
+                                   message=str(reported.get("reason") or "submission unanswered"))
+            if not reported.get("finish_called") or context.finished is None:
+                raise ProtocolError("Pi-durable settled without mizu_finish")
+            if context.request_count == 0:
+                raise ProtocolError("No runtime request admission observed")
+            usage = reported.get("usage")
+            if isinstance(usage, dict):
+                mapped = {"input_tokens": usage.get("input", 0), "output_tokens": usage.get("output", 0),
+                          "cache_read_tokens": usage.get("cacheRead", 0),
+                          "cache_write_tokens": usage.get("cacheWrite", 0)}
+                context.model_evidence.update(requests=int(reported.get("requests", 0) or 0),
+                                              usage=[mapped], usage_known=True,
+                                              observed_models=[{**model, "thinkingLevel": options.get("thinkingLevel")}],
+                                              usage_observations=[{"usage": mapped, **model}])
+            else:
+                context.model_evidence.update(requests=int(reported.get("requests", 0) or 0))
+            return {**context.model_evidence, "seconds": round(time.monotonic() - started, 3)}

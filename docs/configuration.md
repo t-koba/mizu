@@ -169,9 +169,12 @@ Only roles with `selector` enable it; fixed profiles keep their existing behavio
 A profile explicitly selects `engine`, `provider`, `model`, and `session`
 (`ephemeral` or `persistent`). IDs remain exact. Native `options` belong to
 that engine: Pi `thinkingLevel`, `settings`, `codemode`, `toolSearch`,
-`excludeTools`, `scopedModels` (pi-durable adds `durable_backend` (`sqlite`),
-`durable_resume` (`compatible`|`fresh`), `durable_retention_days` (0-3650),
-`durable_max_turns` (1-1024)); Codex native configuration keys plus `options.turn` for native turn fields
+`excludeTools`, `scopedModels`; pi-durable `thinkingLevel` plus
+`durable_backend` (`sqlite`), `durable_resume` (`compatible`|`fresh`),
+`durable_retention_days` (0-3650), `durable_max_turns` (1-1024). Pi SDK knobs
+are refused on pi-durable profiles and durable policy is refused on pi
+profiles instead of silently ignored. pi-durable resolves the exact model
+over built-in providers only; custom provider setups stay on pi. Codex native configuration keys plus `options.turn` for native turn fields
 (such as `outputSchema`, `effort`, `serviceTier`); Claude
 `ClaudeAgentOptions` fields. Effort values are validated by the selected engine,
 not a Mizu enum. Models/providers have no fixed allowlist.
@@ -203,7 +206,7 @@ the bridge and publication contract.
 | Engine | Managed interface | Completion | Admission unit |
 |---|---|---|---|
 | Pi | `createAgentSession`, `ModelRuntime`, `runRpcMode` | `agent_settled` and seal | Logical model request (includes auxiliary inference) |
-| Pi-durable | Same Pi protocol plus SQLite persisted turns/tasks with compatible-grant resume binding | `agent_settled` and seal | Logical model request (includes auxiliary inference) |
+| Pi-durable | Pinned pi-durable Harness over file-backed SQLite, one admitted submission per run with requestId resume binding | Settled submission and seal | Logical model request (includes auxiliary inference) |
 | Codex | `app-server --listen stdio://` | `turn/completed` with completed status and seal | Turn |
 | Claude | Official Python Agent SDK in separate interpreter | `terminal_reason=completed`, successful subtype, no error and seal | Query |
 

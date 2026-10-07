@@ -52,11 +52,18 @@ def effective(config, role, profile):
     }[raw['engine']]
     if set(options) & owned:
         raise ConfigError('Engine options conflict with runtime-owned configuration: ' + ', '.join(sorted(set(options) & owned)))
-    if raw['engine'] in ('pi', 'pi-durable'):
-        allowed = {'thinkingLevel', 'settings', 'codemode', 'toolSearch', 'excludeTools', 'scopedModels',
-                   'durable_backend', 'durable_resume', 'durable_retention_days', 'durable_max_turns'}
+    if raw['engine'] == 'pi':
+        allowed = {'thinkingLevel', 'settings', 'codemode', 'toolSearch', 'excludeTools', 'scopedModels'}
         if set(options) - allowed:
             raise ConfigError('Unknown Pi SDK configuration field')
+    if raw['engine'] == 'pi-durable':
+        # The durable Harness owns its own generation loop: Pi SDK knobs are
+        # refused here instead of silently ignored, and pi profiles cannot
+        # carry durable policy that the pi engine never enforces.
+        allowed = {'thinkingLevel', 'durable_backend', 'durable_resume',
+                   'durable_retention_days', 'durable_max_turns'}
+        if set(options) - allowed:
+            raise ConfigError('Unknown pi-durable configuration field')
         settings = options.get('settings', {})
         if not isinstance(settings, dict) or settings.get('packages'):
             raise ConfigError('Use reviewed local resources; runtime package acquisition is unavailable')
@@ -138,7 +145,8 @@ def adapter_contract(engine, root=None):
 
 def adapter_digest(engine):
     root = Path(__file__).resolve().parents[2]
-    paths = [Path(__file__), Path(__file__).with_name(engine+'.py'), Path(__file__).with_name('engine_channel.py')]
+    module = {'pi-durable': 'pi_durable'}.get(engine, engine)
+    paths = [Path(__file__), Path(__file__).with_name(module+'.py'), Path(__file__).with_name('engine_channel.py')]
     paths.extend(path for path in (root/'adapters'/engine).iterdir() if path.is_file())
     return digest(canonical({str(path.relative_to(root)): digest(path.read_bytes()) for path in sorted(paths)}))
 

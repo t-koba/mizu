@@ -5,7 +5,7 @@ from support import Fixture
 from mizu import pi_durable
 from mizu.drivers import driver_for
 from mizu.engine_config import effective
-from mizu.errors import ConfigError
+from mizu.errors import ConfigError, LimitExceeded, ModelFailure
 from mizu.pi_durable_store import (begin_run, check_grant, complete_run, complete_turn,
                                    grant_digest, load_run, open_store, project_context,
                                    prune, record_turn, retention_candidates, store_path_for)
@@ -28,6 +28,54 @@ class SelectionTests(Fixture):
     def test_unknown_resume_refused(self):
         with self.assertRaises(ConfigError):
             pi_durable.durable_options({"options": {"durable_resume": "always"}})
+
+
+class PolicyTests(Fixture):
+    def _durable_profile(self, **options):
+        settings = dict(self.config.profiles["primary"])
+        settings["engine"] = "pi-durable"
+        merged = dict(settings.get("options", {}))
+        merged.update(options)
+        settings["options"] = merged
+        self.config.profiles["durable"] = settings
+        return "durable"
+
+    def test_grant_binds_durable_policy(self):
+        role = self.config.roles["worker"]
+        model = {"provider": "p", "model": "m"}
+        base = pi_durable.grant_for({"options": {}}, role, model)
+        for key, value in (("durable_backend", "sqlite"), ("durable_resume", "fresh"),
+                           ("durable_retention_days", 30), ("durable_max_turns", 7)):
+            changed = pi_durable.grant_for({"options": {key: value}}, role, model)
+            self.assertNotEqual(base, changed, key)
+
+    def test_pi_rejects_durable_options(self):
+        settings = dict(self.config.profiles["primary"])
+        merged = dict(settings.get("options", {}))
+        merged["durable_resume"] = "fresh"
+        settings["options"] = merged
+        self.config.profiles["bad"] = settings
+        with self.assertRaises(ConfigError):
+            effective(self.config, self.config.roles["worker"], "bad")
+
+    def test_pi_durable_rejects_pi_sdk_knobs(self):
+        profile = self._durable_profile(codemode=True)
+        with self.assertRaises(ConfigError):
+            effective(self.config, self.config.roles["worker"], profile)
+
+    def test_turn_bound_enforced(self):
+        profile = self._durable_profile(durable_max_turns=1)
+        driver = pi_durable.PiDurableDriver(self.config)
+        context = self.context()
+        def boom(*args, **kwargs):
+            raise ModelFailure("pi-durable", kind="error", message="boom")
+        driver._run_once = boom
+        with self.assertRaises(ModelFailure):
+            driver.execute(context, "hello", profile=profile)
+        # The interrupted attempt left one persisted unknown turn; the bound
+        # of one is now exhausted, so resume is refused instead of retried.
+        with self.assertRaises(LimitExceeded):
+            driver.execute(context, "hello", profile=profile)
 
 
 class StoreTests(unittest.TestCase):

@@ -1,12 +1,15 @@
 {
   "entrypoint": "launcher.mjs",
   "exports": [
-    "createAgentSession",
-    "ModelRuntime",
-    "runRpcMode"
+    "Harness",
+    "createRegistry",
+    "defineExtension",
+    "defineTool",
+    "openNodeSqliteStorage",
+    "builtinModels"
   ],
-  "completion": "agent_settled + mizu seal",
+  "completion": "settled submission + mizu seal",
   "request_unit": "model_request",
   "dependency_evidence": "package-lock.json",
-  "durable": "persisted turns/tasks with compatible-grant resume binding; experimental API pinned separately"
+  "durable": "pi-durable 1.0.4 Harness over file-backed SQLite with requestId resume binding; replay unsafe by default"
 }
