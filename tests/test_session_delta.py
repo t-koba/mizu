@@ -139,3 +139,28 @@ class SessionTotalsTests(unittest.TestCase):
         self.assertEqual(session_cost_total(saved), 2.0)
         saved = {"usage": {"m": {"costUSD": 1.0, "cost_estimate_usd": 1.0}}}
         self.assertEqual(session_cost_total(saved), 1.0)
+
+
+class SnapshotRevivalTests(Fixture):
+    def test_omitted_snapshot_revives_by_exact_id(self):
+        # The recent window omits old snapshots, but an exact pinned id
+        # revives the full integrity-checked record: omitted blocks
+        # return without re-deriving them.
+        ids = []
+        for i in range(8):
+            (self.project.workspace / "app.py").write_bytes(
+                f"VALUE = {i}\n".encode())
+            record = self.project.snapshots.create(
+                self.project.snapshots.capture_files(
+                    self.project.workspace),
+                goal=self.project.goal, state="next", run=None,
+                outcome="wait", summary=f"snap {i}")
+            self.project.snapshots.publish(record)
+            ids.append(record["id"])
+        current = self.project.snapshots.get()
+        window = self.project.snapshots.history(
+            current["id"], self.config.limits.prompt_snapshots)
+        self.assertNotIn(ids[0], [entry["id"] for entry in window])
+        revived = self.project.snapshots.get(ids[0])
+        self.assertEqual(revived["id"], ids[0])
+        self.assertEqual(revived["summary"], "snap 0")

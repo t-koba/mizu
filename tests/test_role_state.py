@@ -456,3 +456,42 @@ class RoleStateSessionTests(Fixture):
             self.assertEqual(parsed["generation"], 1)
             self.assertNotIn("state", parsed)
             self.assertLessEqual(len(prompt.encode()), 10000)
+
+
+class RoleStateCommitmentTests(Fixture):
+    def test_unverified_content_never_becomes_memory(self):
+        # Recall is not commitment: reading own (absent) state,
+        # serving external-untrusted proposals, and rendering prompts
+        # leave the store untouched; only an explicit replacement
+        # behind a generation commits to memory.
+        import dataclasses as _dc
+        import sys as _sys
+        import uuid as _uuid
+        from mizu.fs import mkdir as _mkdir
+        from mizu.runtime import Context as _Context
+        from mizu.runtime import prompt_for as _prompt_for
+        adapter = {"command": [_sys.executable, "-c",
+                               "import sys,json; json.load(sys.stdin); "
+                               "print(json.dumps({'proposals': [], "
+                               "'complete': True}))"],
+                   "timeout_seconds": 5, "max_bytes": 524288}
+        config = _dc.replace(self.config, vcs=adapter)
+        role = config.roles["searcher"]
+        role = _dc.replace(role, capabilities=tuple(
+            list(role.capabilities) + ["research_read", "vcs_read",
+                                       "research"]))
+        run = self.project.root / "runs" / _uuid.uuid4().hex
+        _mkdir(run)
+        ctx = _Context(config, self.project, role, run,
+                       self.project.snapshots.get(),
+                       self.project.workspace)
+        ctx.handle("research_read", {})
+        out = ctx.handle("vcs_read", {"op": "proposals"})
+        self.assertTrue(out["result"]["complete"])
+        _prompt_for(ctx)
+        self.assertEqual(
+            self.project.role_state.read("searcher")["status"], "absent")
+        ctx.handle("research", {"state": '{"conclusions": ["committed"]}',
+                                "expected_generation": 0})
+        self.assertEqual(
+            self.project.role_state.read("searcher")["generation"], 1)
