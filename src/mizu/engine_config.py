@@ -347,25 +347,35 @@ def rotation_due(limits, path, saved, engine="unknown"):
 def rotate_session(path, run_dir, reason):
     """Restart a persistent session, keeping the published snapshot.
 
-    Schema: removes ``session.json`` so the next dispatch mints a fresh
-    provider session under the same content-bound key directory; writes
-    ``rotation.json`` evidence into the current run directory. The published
-    snapshot and composed policy reload on the next unit (callers reuse the
-    exact published snapshot id). Failure: missing session files are
-    tolerated; other I/O errors propagate.
+    Schema: bumps the session ``generation.json`` before removing
+    ``session.json`` so the next dispatch mints a fresh provider session
+    under the same content-bound key directory; writes ``rotation.json``
+    evidence into the current run directory. The published snapshot and
+    composed policy reload on the next unit (callers reuse the exact
+    published snapshot id). Retry/cancellation: the generation bump
+    lands first, so any crash or failure resolves toward the fresh
+    conversation, never a silent resume of the prior one: a failed bump
+    changes nothing (the error propagates and the next dispatch retries
+    the due rotation), while a failure after the bump already points the
+    next dispatch at the new generation; the rotation evidence is
+    written last. Failure: missing session files are tolerated; other
+    I/O errors propagate.
     """
     from .fs import now, write_json
     key = path.parent.name if hasattr(path, "parent") else ""
-    record = {"rotated": True, "reason": reason, "session_key": key, "created_at": now()}
-    write_json(run_dir / "rotation.json", record)
+    if hasattr(path, "parent"):
+        generation = session_generation(path.parent)
+        write_json(path.parent / "generation.json", {"generation": generation + 1})
+    else:
+        generation = None
     try:
         path.unlink()
     except FileNotFoundError:
         pass
-    if hasattr(path, "parent"):
-        generation = session_generation(path.parent)
-        write_json(path.parent / "generation.json", {"generation": generation + 1})
+    record = {"rotated": True, "reason": reason, "session_key": key, "created_at": now()}
+    if generation is not None:
         record["generation"] = generation + 1
+    write_json(run_dir / "rotation.json", record)
     return record
 
 

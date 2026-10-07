@@ -375,19 +375,93 @@ class PruneGenerationsTests(unittest.TestCase):
         role_dir.mkdir(parents=True)
         return role_dir
 
-    def test_prune_removes_only_older_generations(self):
+    def _grant(self):
+        return grant_digest(policy_text="p", capabilities=("a",),
+                            model={"provider": "x", "model": "y"},
+                            adapter_digest_value="d", options_digest="o")
+
+    def _terminal_store(self, directory):
+        from pathlib import Path
+        directory = Path(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        conn = open_store(directory / "store.sqlite")
+        try:
+            begin_run(conn, run_key="r1", session_key="s", project="p",
+                      role="r", grant=self._grant())
+            record_turn(conn, "r1", 1, "prompt", {"text": "hi"})
+            complete_turn(conn, "r1", 1, {"ok": True})
+            complete_run(conn, "r1", {"engine": "pi-durable"})
+        finally:
+            conn.close()
+
+    def test_prune_removes_only_terminal_older_generations(self):
         import tempfile
         from pathlib import Path
         with tempfile.TemporaryDirectory() as td:
             role_dir = self._role_dir(td)
-            for name in ("aaa", "aaa-g1", "aaa-g2", "bbb", "aaa-gX", "aa", "aaa-g2-extra"):
+            for name in ("aaa", "aaa-g1"):
+                self._terminal_store(role_dir / name)
+            for name in ("aaa-g2", "bbb", "aaa-gX", "aa", "aaa-g2-extra"):
                 (role_dir / name).mkdir()
-            (role_dir / "aaa-g1" / "store.sqlite").write_text("old")
             removed = prune_generations(td, project="proj", role="worker",
                                         base_key="aaa", generation=2)
             self.assertEqual(removed, ["aaa", "aaa-g1"])
             remaining = sorted(p.name for p in role_dir.iterdir())
             self.assertEqual(remaining, ["aa", "aaa-g2", "aaa-g2-extra", "aaa-gX", "bbb"])
+
+    def test_prune_retains_unresolved_recovery_evidence(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as td:
+            role_dir = self._role_dir(td)
+            # Active run: recovery evidence still needed.
+            active = role_dir / "aaa"
+            active.mkdir()
+            conn = open_store(active / "store.sqlite")
+            begin_run(conn, run_key="r1", session_key="s", project="p",
+                      role="r", grant=self._grant())
+            conn.close()
+            # Unknown-completion turn: side effects unaccounted.
+            unknown = role_dir / "aaa-g1"
+            unknown.mkdir()
+            conn = open_store(unknown / "store.sqlite")
+            begin_run(conn, run_key="r2", session_key="s", project="p",
+                      role="r", grant=self._grant())
+            record_turn(conn, "r2", 1, "prompt", {"text": "hi"})
+            complete_run(conn, "r2", {"engine": "pi-durable"})
+            conn.execute("UPDATE durable_turns SET state='unknown' WHERE run_key='r2'")
+            conn.commit()
+            conn.close()
+            # Corrupt and missing stores cannot be verified: retained.
+            corrupt = role_dir / "aaa-g2"
+            corrupt.mkdir()
+            (corrupt / "store.sqlite").write_bytes(b"not a database")
+            missing = role_dir / "aaa-g3"
+            missing.mkdir()
+            removed = prune_generations(td, project="proj", role="worker",
+                                        base_key="aaa", generation=9)
+            self.assertEqual(removed, [])
+            remaining = sorted(p.name for p in role_dir.iterdir())
+            self.assertEqual(remaining, ["aaa", "aaa-g1", "aaa-g2", "aaa-g3"])
+
+    def test_prune_never_touches_files_or_symlinks(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as td:
+            role_dir = self._role_dir(td)
+            (role_dir / "aaa-g1").write_text("stray")
+            real = role_dir / "real"
+            self._terminal_store(real)
+            link = role_dir / "aaa-g2"
+            try:
+                link.symlink_to(real, target_is_directory=True)
+            except OSError:
+                self.skipTest("symlinks unavailable")
+            removed = prune_generations(td, project="proj", role="worker",
+                                        base_key="aaa", generation=9)
+            self.assertEqual(removed, [])
+            self.assertTrue((role_dir / "aaa-g1").is_file())
+            self.assertTrue(link.is_symlink())
 
     def test_prune_missing_role_dir_is_nothing(self):
         import tempfile
@@ -401,6 +475,62 @@ class PruneGenerationsTests(unittest.TestCase):
             with self.assertRaises(ConfigError):
                 prune_generations("/data", project="p", role="r",
                                   base_key="aaa", generation=bad)
+
+
+class RotationTransitionTests(unittest.TestCase):
+    def _session_dir(self, root):
+        import json
+        from pathlib import Path
+        directory = Path(root) / "sess"
+        directory.mkdir(parents=True)
+        (directory / "session.json").write_text(json.dumps(
+            {"engine": "pi", "session_id": "s", "totals": {}}))
+        run = Path(root) / "run"
+        run.mkdir()
+        return directory, run
+
+    def _fail_on(self, name):
+        from pathlib import Path
+        from mizu import fs as fs_mod
+        real = fs_mod.write_json
+
+        def guarded(path, *args, **kwargs):
+            if Path(path).name == name:
+                raise OSError(f"injected {name} failure")
+            return real(path, *args, **kwargs)
+        return guarded
+
+    def test_failed_generation_bump_changes_nothing(self):
+        import tempfile
+        from unittest import mock
+        from mizu import fs as fs_mod
+        with tempfile.TemporaryDirectory() as td:
+            directory, run = self._session_dir(td)
+            with mock.patch.object(fs_mod, "write_json",
+                                   side_effect=self._fail_on("generation.json")):
+                with self.assertRaises(OSError):
+                    rotate_session(directory / "session.json", run, "test")
+            # Nothing moved: the next dispatch retries the due rotation
+            # instead of silently resuming or half-rotating.
+            self.assertTrue((directory / "session.json").is_file())
+            self.assertFalse((directory / "generation.json").exists())
+            self.assertFalse((run / "rotation.json").exists())
+            self.assertEqual(session_generation(directory), 0)
+
+    def test_post_bump_failure_still_points_at_fresh_generation(self):
+        import tempfile
+        from unittest import mock
+        from mizu import fs as fs_mod
+        with tempfile.TemporaryDirectory() as td:
+            directory, run = self._session_dir(td)
+            with mock.patch.object(fs_mod, "write_json",
+                                   side_effect=self._fail_on("rotation.json")):
+                with self.assertRaises(OSError):
+                    rotate_session(directory / "session.json", run, "test")
+            # The bump already landed: the next dispatch mints its fresh
+            # conversation under the new generation, never the prior one.
+            self.assertEqual(session_generation(directory), 1)
+            self.assertFalse((directory / "session.json").exists())
 
 
 if __name__ == "__main__":

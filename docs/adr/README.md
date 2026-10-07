@@ -181,6 +181,12 @@ Bounds (fixed): at most 16 parts, each at most 64 KiB, 256 KiB total; see "Roles
 A resumed persistent session receives only what changed since its last unit; new, compacted,
 or rotated sessions get the full prompt with the exact published state and composed policy text.
 Rotation past token, cost, or age `[limits]` keys records the new session key and reason.
+Rotation only freshens context: the generation bump lands before the old
+session record is removed, so a failed transition never silently resumes
+the prior conversation, and an abandoned generation store is retired only
+after it verifies as terminal (every run settled, no started/unknown
+turn) — active, unknown-completion, corrupt, or uninspectable stores are
+retained for the operator while time-based reaping stays per-store.
 
 ## ADR-029 — Budget day follows the configured timezone
 Day-files name the date in `timezone` (UTC default unchanged when unset) via

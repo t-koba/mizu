@@ -46,18 +46,67 @@ def store_path_for(data_dir: Path, project: str, role: str, session_key: str) ->
 _GENERATION = re.compile(r"-g(\d{1,10})\Z")
 
 
+#: Run/turn states that still carry unresolved recovery or side-effect
+#: evidence; a generation holding any of these is never pruned.
+_UNRESOLVED_RUN = ("active",)
+_UNRESOLVED_TURN = ("started", "unknown")
+
+
+def generation_terminal(directory: Path) -> bool:
+    """True only when a generation directory holds verified terminal state.
+
+    Schema: ``directory`` is one ``durable/<project>/<role>/<key>`` store
+    directory. Bounds: read-only inspection, no writes, no WAL creation.
+    Trust: local operator state only. Failure: never raises; anything that
+    cannot be verified (missing/unreadable store, corrupt database,
+    unexpected shape, an active run, or a started/unknown turn) reads as
+    not terminal so the caller retains the directory for the operator.
+    """
+    try:
+        if directory.is_symlink() or not directory.is_dir():
+            return False
+        store = directory / "store.sqlite"
+        if store.is_symlink() or not store.is_file():
+            return False
+        conn = sqlite3.connect(f"file:{store}?mode=ro", uri=True)
+        try:
+            runs = conn.execute("SELECT status FROM durable_runs").fetchall()
+            for (status,) in runs:
+                if not isinstance(status, str) or status in _UNRESOLVED_RUN:
+                    return False
+            states = ",".join(f"'{name}'" for name in _UNRESOLVED_TURN)
+            pending = conn.execute(
+                f"SELECT COUNT(*) FROM durable_turns WHERE state IN ({states})").fetchone()
+            if pending is None or pending[0] != 0:
+                return False
+            return True
+        finally:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+    except (OSError, ValueError, sqlite3.Error):
+        return False
+
+
 def prune_generations(data_dir: Path, *, project: str, role: str,
                       base_key: str, generation: int) -> list[str]:
-    """Remove orphaned older-generation stores of one session key.
+    """Remove verified-terminal older-generation stores of one session key.
 
     Schema: under ``durable/<project>/<role>/``, directories named
     exactly ``base_key`` (generation zero) or ``base_key-g<N>`` with
     ``N`` below ``generation`` hold conversations a rotation already
-    abandoned; only whole directories this module owns are removed.
-    Bounds: names match the strict store identifier plus a numeric
-    suffix, so unrelated sessions are never touched. Trust: local
+    abandoned. Rotation only freshens context: a directory is removed
+    solely when its store verifies as terminal (every run settled, no
+    started/unknown turn). Active, unknown-completion, corrupt, or
+    otherwise uninspectable generations are retained for the operator;
+    time-based reaping stays the separate per-store
+    ``retention_candidates``/``prune`` policy, never this path.
+    Bounds: one session key, older generations only, whole directories;
+    symlinks and non-directories are never touched. Trust: local
     operator state only. Failure: a missing role directory is nothing
-    to prune; other I/O errors propagate. Returns the removed names.
+    to prune; removal I/O errors propagate; unverifiable candidates are
+    retained, not forced. Returns the removed names.
     """
     if type(generation) is not int or generation < 1:
         raise ConfigError("Durable prune generation must be a positive integer")
@@ -82,13 +131,12 @@ def prune_generations(data_dir: Path, *, project: str, role: str,
             old = int(match.group(1))
         if old >= generation:
             continue
+        if child.is_symlink() or not child.is_dir():
+            continue
+        if not generation_terminal(child):
+            continue
         try:
-            if child.is_dir() and not child.is_symlink():
-                shutil.rmtree(child)
-            elif child.is_file() and not child.is_symlink():
-                child.unlink()
-            else:
-                continue
+            shutil.rmtree(child)
         except FileNotFoundError:
             continue
         removed.append(name)
