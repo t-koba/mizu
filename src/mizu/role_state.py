@@ -8,10 +8,11 @@ insight submission is never a research-memory store.
 """
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
-from .errors import Denied
-from .fs import canonical, identifier, now, read_json, write_json
+from .errors import Busy, Denied
+from .fs import canonical, identifier, lock, now, read_json, write_json
 
 
 #: Distinct read outcomes: ``absent`` (never written), ``unavailable``
@@ -26,9 +27,12 @@ MAX_DEPTH = 4
 #: Maximum key length inside a stored state object.
 MAX_KEY_CHARS = 64
 
+#: Maximum length of the run token naming a replacement's author.
+MAX_RUN_CHARS = 128
 
-def _check_state(state, max_bytes: int) -> dict:
-    """Validate a replacement state object; ``Denied`` leaves stored state untouched."""
+
+def _check_state(state) -> dict:
+    """Validate a replacement state object's shape; ``Denied`` never touches stored state."""
     if not isinstance(state, dict):
         raise Denied("Role research state must be a JSON object")
     def depth(value, level: int) -> None:
@@ -43,12 +47,23 @@ def _check_state(state, max_bytes: int) -> dict:
         elif isinstance(value, list):
             for item in value:
                 depth(item, level + 1)
-        elif not isinstance(value, (str, int, float, bool)) and value is not None:
+        elif isinstance(value, float):
+            if not math.isfinite(value):
+                raise Denied("Role research state holds only finite numbers")
+        elif not isinstance(value, (str, int, bool)) and value is not None:
             raise Denied("Role research state holds only JSON values")
     depth(state, 1)
-    if len(canonical(state)) > max_bytes:
-        raise Denied("Role research state exceeds the configured byte bound")
     return state
+
+
+def _check_run(run):
+    """Validate the authoring run token: ``None`` or a short text token."""
+    if run is None:
+        return None
+    if (not isinstance(run, str) or not run or len(run) > MAX_RUN_CHARS
+            or "\n" in run or "\x00" in run):
+        raise Denied("Invalid role research state run")
+    return run
 
 
 class RoleStateStore:
@@ -94,25 +109,39 @@ class RoleStateStore:
         Schema: ``state`` is the full new state object (validated before
         any read of stored generations, so invalid input never disturbs
         stored state); ``expected_generation`` is the generation the
-        caller read (0 when absent). A mismatch refuses as stale: the
-        caller re-reads and merges instead of overwriting newer
-        evidence. Corrupt stored files refuse every replacement until
-        cleared. Writes are atomic, so an interrupted update leaves the
-        previous record intact. Evidence: returned ``{"role",
-        "generation", "updated_at"}`` names the new generation.
-        Failure: ``Denied`` on bad roles, invalid states, stale
-        expectations, or unavailable stored files.
+        caller read (0 when absent, an exact ``int``: booleans refuse).
+        The read-compare-write runs under a per-role non-blocking lock,
+        so overlapping writers never share a generation: the loser is
+        ``Denied`` (stale or busy) and re-reads instead of overwriting
+        newer evidence. Corrupt stored files refuse every replacement
+        until cleared. Writes are atomic, so an interrupted update
+        leaves the previous record intact; the byte bound covers the
+        full stored record (envelope plus authoring run token), not just
+        the state object. Evidence: returned ``{"role", "generation",
+        "updated_at"}`` names the new generation. Failure: ``Denied``
+        on bad roles, invalid states, bad runs, oversize records, stale
+        expectations, contention, or unavailable stored files.
         """
-        _check_state(state, self.max_bytes)
-        if not isinstance(expected_generation, int) or expected_generation < 0:
+        _check_state(state)
+        run = _check_run(run)
+        if type(expected_generation) is not int or expected_generation < 0:
             raise Denied("Role research state replacement needs a generation")
-        seen = self.read(role)
-        if seen["status"] == "unavailable":
-            raise Denied("Role research state is unavailable; clear it before replacing")
-        if seen["generation"] != expected_generation:
-            raise Denied("Stale role research state; re-read before replacing")
-        record = {"role": role, "generation": expected_generation + 1,
-                  "updated_at": now(), "updated_by_run": run, "state": state}
-        write_json(self._path(role), record)
+        try:
+            with lock(self.root / f"{identifier(role)}.lock", blocking=False):
+                seen = self.read(role)
+                if seen["status"] == "unavailable":
+                    raise Denied("Role research state is unavailable; "
+                                 "clear it before replacing")
+                if seen["generation"] != expected_generation:
+                    raise Denied("Stale role research state; re-read before replacing")
+                record = {"role": role, "generation": expected_generation + 1,
+                          "updated_at": now(), "updated_by_run": run,
+                          "state": state}
+                if len(canonical(record)) > self.max_bytes:
+                    raise Denied("Role research state exceeds the configured byte bound")
+                write_json(self._path(role), record)
+        except Busy as exc:
+            raise Denied("Concurrent role research state update; "
+                         "re-read before replacing") from exc
         return {"role": role, "generation": record["generation"],
                 "updated_at": record["updated_at"]}

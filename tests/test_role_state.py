@@ -266,3 +266,76 @@ class ResearchPromptTests(Fixture):
         self.assertGreater(block["state_bytes"], block["prompt_bytes"])
         self.assertNotIn("state", block)
         self.assertNotIn("pad", _json.dumps(block))
+
+
+class RoleStateRaceTests(Fixture):
+    def test_overlapping_writers_share_no_generation(self):
+        import threading
+        store = self.project.role_state
+        store.replace("searcher", {"seed": True}, expected_generation=0)
+        barrier = threading.Barrier(2, timeout=30)
+        outcomes = []
+
+        def writer(value):
+            try:
+                seen = store.read("searcher")
+                barrier.wait(timeout=30)
+                store.replace("searcher", {"by": value},
+                              expected_generation=seen["generation"])
+                outcomes.append(("ok", value))
+            except Denied as exc:
+                outcomes.append(("denied", str(exc)))
+            except Exception as exc:  # noqa: BLE001 - surfaced below
+                outcomes.append(("leak", f"{type(exc).__name__}: {exc}"))
+
+        threads = [threading.Thread(target=writer, args=(name,))
+                   for name in ("first", "second")]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=60)
+        self.assertEqual(len(outcomes), 2)
+        self.assertEqual(sorted(kind for kind, _ in outcomes),
+                         ["denied", "ok"], outcomes)
+        seen = store.read("searcher")
+        self.assertEqual(seen["generation"], 2)
+        self.assertIn(seen["record"]["state"], ({"by": "first"},
+                                                {"by": "second"}))
+
+    def test_non_finite_floats_refused(self):
+        store = self.project.role_state
+        store.replace("searcher", STATE, expected_generation=0)
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with self.assertRaisesRegex(Denied, "finite"):
+                store.replace("searcher", {"x": bad}, expected_generation=1)
+            with self.assertRaisesRegex(Denied, "finite"):
+                store.replace("searcher", {"x": [bad]}, expected_generation=1)
+        self.assertEqual(store.read("searcher")["record"]["state"], STATE)
+
+    def test_bad_run_refused_and_good_run_recorded(self):
+        store = self.project.role_state
+        for bad in (object(), "", "x" * 9000, "has\nnewline", 123):
+            with self.assertRaises(Denied):
+                store.replace("searcher", STATE, expected_generation=0,
+                              run=bad)
+        self.assertEqual(store.read("searcher")["status"], "absent")
+        store.replace("searcher", STATE, expected_generation=0, run="run-9")
+        self.assertEqual(store.read("searcher")["record"]["updated_by_run"],
+                         "run-9")
+
+    def test_envelope_counts_against_bound(self):
+        from mizu.fs import canonical
+        from mizu.role_state import RoleStateStore
+        store = RoleStateStore(self.project.root / "role-state",
+                               max_bytes=512)
+        state = {"pad": "x" * 420}
+        self.assertLessEqual(len(canonical(state)), 512)
+        with self.assertRaisesRegex(Denied, "byte bound"):
+            store.replace("searcher", state, expected_generation=0)
+        self.assertEqual(store.read("searcher")["status"], "absent")
+
+    def test_bool_generation_refused(self):
+        store = self.project.role_state
+        with self.assertRaisesRegex(Denied, "generation"):
+            store.replace("searcher", STATE, expected_generation=True)
+        self.assertEqual(store.read("searcher")["status"], "absent")
