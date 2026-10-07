@@ -295,7 +295,7 @@ def read_ref(workspace: Path, name: str) -> str:
 
 #: Read-only adapter operations served by ``vcs_read``. Publishing
 #: operations (``push``/``pr``) are never served through this path.
-READ_OPS = frozenset({"status", "log", "comments"})
+READ_OPS = frozenset({"status", "log", "comments", "proposals"})
 #: Mutating adapter operations served by ``vcs_publish`` behind a recorded
 #: human ``GO <branch>`` approval bound to branch and code digest.
 PUBLISH_OPS = frozenset({"push", "pr"})
@@ -432,8 +432,16 @@ def read_via(settings: dict, op: str, params: dict) -> dict:
     if not isinstance(params, dict):
         raise Denied("Invalid VCS read parameters")
     branch = params.get("branch")
-    check_branch(branch)
-    request = {"op": op, "branch": branch}
+    request = {"op": op}
+    if op == "proposals":
+        # Proposals are enumerated, not addressed: an optional branch only
+        # filters the adapter query, so head/base movement is observable.
+        if branch is not None:
+            check_branch(branch)
+            request["branch"] = branch
+    else:
+        check_branch(branch)
+        request["branch"] = branch
     sha = params.get("sha")
     if sha is not None:
         if not isinstance(sha, str) or not _SHA.fullmatch(sha):
@@ -442,6 +450,9 @@ def read_via(settings: dict, op: str, params: dict) -> dict:
     data = invoke(settings, request)
     if op == "status":
         return {"op": op, "branch": branch, "checks": parse_status_checks(data),
+                "trust": "external-untrusted"}
+    if op == "proposals":
+        return {"op": op, "branch": branch, "proposals": parse_proposals(data),
                 "trust": "external-untrusted"}
     return {**data, "trust": "external-untrusted"}
 
@@ -485,6 +496,154 @@ def parse_status_checks(data: dict) -> list:
             raise Denied("Invalid CI log URL")
         out.append({"check": check, "state": state, "sha": sha, "url": url})
     return out
+
+
+#: Maximum external proposals per ``proposals`` response.
+MAX_PROPOSALS = 256
+#: Closed-form proposal states; ``draft`` rides alongside ``open``.
+PROPOSAL_STATES = frozenset({"open", "closed", "merged"})
+
+
+def _check_repo(repo) -> str:
+    if (not isinstance(repo, str) or not repo or len(repo) > 256
+            or "\n" in repo or "\x00" in repo or not repo.strip()):
+        raise Denied("Invalid VCS proposal repo")
+    return repo
+
+
+def _check_endpoint(value) -> dict:
+    if not isinstance(value, dict) or set(value) != {"repo", "ref", "sha"}:
+        raise Denied("Invalid VCS proposal endpoint")
+    repo = _check_repo(value.get("repo"))
+    check_branch(value.get("ref"))
+    sha = value.get("sha")
+    if not isinstance(sha, str) or not _SHA.fullmatch(sha):
+        raise Denied("Invalid VCS sha for proposal endpoint")
+    return {"repo": repo, "ref": value["ref"], "sha": sha}
+
+
+def parse_proposals(data: dict) -> list:
+    """Validate a ``proposals`` adapter response into normalized rows.
+
+    Schema: ``{"proposals": [{id, state, head, base, draft, mergeable?,
+    checks?, url?}]}``; ``id`` 1-128 chars without newline/NUL, ``state``
+    one of ``open``/``closed``/``merged``, ``head``/``base`` are
+    ``{repo, ref, sha}`` endpoints (repo 1-256 chars, ref per
+    ``check_branch``, sha 40/64 hex), ``draft`` a bool, ``mergeable`` a
+    bool or absent/null (unknown), ``checks`` CI rows per
+    ``parse_status_checks``, ``url`` at most 4096 chars without
+    newline/NUL. Bounds: at most 256 proposals. Trust: adapter facts stay
+    external-untrusted; this only validates shape. Failure: ``Denied``.
+    """
+    if not isinstance(data, dict):
+        raise Denied("VCS proposals must be a JSON object")
+    proposals = data.get("proposals")
+    if not isinstance(proposals, list) or len(proposals) > MAX_PROPOSALS:
+        raise Denied("VCS proposals must carry an array with at most 256 entries")
+    out = []
+    for entry in proposals:
+        if not isinstance(entry, dict) or set(entry) - {
+                "id", "state", "head", "base", "draft", "mergeable",
+                "checks", "url"}:
+            raise Denied("Invalid VCS proposal entry")
+        identity = entry.get("id")
+        if (not isinstance(identity, str) or not identity or len(identity) > 128
+                or "\n" in identity or "\x00" in identity):
+            raise Denied("Invalid VCS proposal id")
+        state = entry.get("state")
+        if state not in PROPOSAL_STATES:
+            raise Denied("Invalid VCS proposal state")
+        head = _check_endpoint(entry.get("head"))
+        base = _check_endpoint(entry.get("base"))
+        draft = entry.get("draft")
+        if not isinstance(draft, bool):
+            raise Denied("Invalid VCS proposal draft flag")
+        mergeable = entry.get("mergeable", None)
+        if mergeable is not None and not isinstance(mergeable, bool):
+            raise Denied("Invalid VCS proposal mergeable flag")
+        raw_checks = entry.get("checks", [])
+        if not isinstance(raw_checks, list):
+            raise Denied("Invalid VCS proposal checks")
+        checks = parse_status_checks({"checks": raw_checks})
+        url = entry.get("url", "")
+        if not isinstance(url, str) or len(url) > 4096 or "\x00" in url or "\n" in url:
+            raise Denied("Invalid VCS proposal URL")
+        out.append({"id": identity, "state": state, "head": head,
+                    "base": base, "draft": draft, "mergeable": mergeable,
+                    "checks": checks, "url": url})
+    return out
+
+
+def proposal_insight_id(proposal_id: str) -> str:
+    """Derive a stable, deduplicating insight ID for an external proposal."""
+    from .fs import digest as _digest, canonical as _canonical
+    if (not isinstance(proposal_id, str) or not proposal_id
+            or len(proposal_id) > 128 or "\n" in proposal_id
+            or "\x00" in proposal_id):
+        raise Denied("Invalid VCS proposal id")
+    return "proposal-" + _digest(_canonical({"proposal": proposal_id}))[:32]
+
+
+def proposal_facts(proposal: dict) -> tuple[str, str]:
+    """Render the stable title and facts body for a validated proposal.
+
+    The body covers identity, state, draft/mergeable flags, head/base
+    endpoints and check rows only: per-run log URLs vary without meaning
+    and stay available via ``vcs_read`` ``proposals``. Repeats with
+    identical facts resubmit identical content, so unchanged observations
+    never wake new work.
+    """
+    row = parse_proposals({"proposals": [proposal]})[0]
+    title = f"Proposal {row['id']} {row['state']}"
+    if len(title) > 200:
+        title = title[:200]
+    lines = [f"id: {row['id']}", f"state: {row['state']}",
+             f"draft: {row['draft']}",
+             f"mergeable: {row['mergeable'] if row['mergeable'] is not None else 'unknown'}",
+             f"head: {row['head']['repo']} {row['head']['ref']} {row['head']['sha']}",
+             f"base: {row['base']['repo']} {row['base']['ref']} {row['base']['sha']}"]
+    for check in row["checks"]:
+        lines.append(f"check: {check['check']} {check['state']} {check['sha']}")
+    lines.append("trust: external-untrusted")
+    return title, "\n".join(lines) + "\n"
+
+
+def record_proposal_state(project, proposal: dict, *,
+                          run: str | None = None,
+                          origin: str | None = None) -> dict:
+    """Record an external proposal observation; revise only on change.
+
+    Schema: ``proposal`` is one validated ``parse_proposals`` row.
+    ``origin`` is an opaque trusted-caller label stored alongside the
+    ``vcs`` authority; it never affects approval, routing, or dedup (the
+    first-stored origin/run is preserved on repeats). Bounds: title <=
+    200 chars, body within the insight byte limit. Trust: adapter-derived
+    facts labeled external-untrusted in the body; the stable ID lets
+    repeats return the existing record instead of spamming the inbox.
+    Retry/cancellation: pure local insight reads/writes; identical facts
+    are a read-only no-op (no rev bump, no wake), changed facts revise
+    with an expected-rev compare-and-swap. Evidence: returned
+    ``{"id": ..., "changed": bool}`` names the observation. Failure:
+    ``Denied`` on bad proposals or a foreign record under the stable ID.
+    """
+    row = parse_proposals({"proposals": [proposal]})[0]
+    title, body = proposal_facts(row)
+    insight_id = proposal_insight_id(row["id"])
+    try:
+        current = project.insights.read(insight_id)
+    except Denied:
+        current = None
+    if current is None:
+        record = project.insights.submit(source="vcs", title=title, body=body,
+                                         base_snapshot=None, run=run,
+                                         origin=origin, insight_id=insight_id)
+        return {"id": record["id"], "changed": True}
+    if current.get("body") == body and current.get("title") == title:
+        return {"id": current["id"], "changed": False}
+    record = project.insights.revise(insight_id, source="vcs", title=title,
+                                     body=body, base_snapshot=None, run=run,
+                                     expected_rev=current.get("rev"))
+    return {"id": record["id"], "changed": True}
 
 
 def publish_via(settings: dict, op: str, params: dict) -> dict:

@@ -434,17 +434,24 @@ class Context:
         return record
 
     def _op_vcs_read(self, args: dict) -> dict:
-        # Read-only VCS view: CI status, logs, PR comments via the trusted
-        # adapter. Never publishes; mutating ops are refused here even if
-        # the adapter would serve them. Requires a visible workspace.
+        # Read-only VCS view: CI status, logs, PR comments, external
+        # proposals via the trusted adapter. Never publishes; mutating ops
+        # are refused here even if the adapter would serve them. Requires
+        # a visible workspace. Branch stays required for addressed reads
+        # (status/log/comments) inside read_via; proposals enumerate with
+        # an optional branch filter.
         if self.role.workspace == "none":
             raise Denied("This role has no workspace")
+        params = {}
+        if "branch" in args:
+            params["branch"] = args["branch"]
+        if "sha" in args:
+            params["sha"] = args["sha"]
         try:
-            data = _vcs.read_via(self.config.vcs, args["op"],
-                                 {"branch": args["branch"], **({"sha": args["sha"]} if "sha" in args else {})})
+            data = _vcs.read_via(self.config.vcs, args["op"], params)
         except OSError as exc:
             raise Denied(f"VCS read is unavailable: {exc}") from exc
-        record = {"op": args["op"], "branch": args["branch"], "trust": "external-untrusted",
+        record = {"op": args["op"], "branch": args.get("branch"), "trust": "external-untrusted",
                   "evidence": "vcs-read.json", "result": data}
         write_json(self.run_dir / "vcs-read.json", data)
         return record
