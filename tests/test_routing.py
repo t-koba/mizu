@@ -54,6 +54,13 @@ class RoutingValidationTests(RoutingFixture):
         self.assertEqual(ctx.finished["next_profile"], "deep")
         self.assertEqual(ctx.finished["next_reason"], "needs depth")
 
+    def test_whitespace_reason_without_profile_leaves_no_trace(self):
+        ctx = self.context("worker")
+        ctx.handle("finish", {"outcome": "continue", "summary": "work", "state": "next",
+                              "next_reason": "   "})
+        self.assertNotIn("next_profile", ctx.finished)
+        self.assertNotIn("next_reason", ctx.finished)
+
     def test_absent_recommendation_leaves_ordinary_selection(self):
         role = self.setup_selection()
         decision = self.prepare(role)
@@ -133,6 +140,15 @@ class RoutingLifecycleTests(RoutingFixture):
         self.assertEqual(decision["recommendation"]["status"], "fresh")
         self.assertEqual(decision["recommendation"]["recommendation"]["profile"], "primary")
         self.assertEqual(decision["profile"], "primary")
+
+    def test_blocked_routing_write_keeps_completed_unit(self):
+        from mizu.runtime import Engine
+        (self.project.root / "routing").write_bytes(b"blocked")
+        def callback(context, prompt, _profile):
+            context.handle("finish", {"outcome": "continue", "summary": "unit done",
+                                      "state": "next", "next_profile": "deep"})
+        result = Engine(self.config, driver=ScriptDriver(callback)).run(self.project, "worker")
+        self.assertEqual(result["status"], "completed")
 
     def test_recommendation_adds_no_inference(self):
         role = self.setup_selection()
