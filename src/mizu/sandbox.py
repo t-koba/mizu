@@ -36,6 +36,12 @@ _PREPARED_SINGLE: set[str] = set()
 #: the annotation is refused unconditionally (no version parsing, no knob).
 CHECKPOINT_ANNOTATION = "io.podman.annotations.checkpoint.runtime.name"
 
+#: Bound for the checkpoint `image inspect` probe. Full pretty-printed
+#: inspect routinely exceeds 8 KiB, and a supply-chain author can pad
+#: prefix fields to push the marker past any cut, so the probe must both
+#: fit ordinary output and refuse truncated output (see below).
+CHECKPOINT_INSPECT_MAXIMUM = 262144
+
 
 def _has_checkpoint_key(node) -> bool:
     """Recursively search decoded `image inspect` JSON for the marker key."""
@@ -56,7 +62,9 @@ def inspect_text_is_checkpoint(stdout: str) -> bool:
 
     Schema/bounds: decoded JSON searched recursively; unparseable output
     falls back to a literal substring search so a format change cannot hide
-    the marker. Trust: local runtime output. Failure: False (not proven).
+    the marker. Trust: local runtime output from a complete (non-truncated)
+    inspect only. Failure: False on complete output without the marker;
+    the caller must deny truncated/failed inspects before trusting False.
     """
     try:
         return _has_checkpoint_key(json.loads(stdout))
@@ -72,23 +80,30 @@ def checkpoint_inspect_argv(config: Config) -> list[str]:
 def assert_no_checkpoint(config: Config, env: dict[str, str]) -> None:
     """Fail closed when the configured image is a Podman checkpoint image.
 
-    Schema/bounds: one bounded `image inspect` (15 s, 8 KiB). Trust: local
-    runtime output only. Retry: none. Evidence: Denied message names the
-    annotation. Failure: Denied on positive evidence; infrastructure
-    failures (missing runtime, timeout, cancel) return silently so the
-    normal run path records its own startup/timeout evidence instead of
-    masking it as a checkpoint refusal.
+    Schema/bounds: one bounded `image inspect` (15 s, 256 KiB). Trust:
+    local runtime output only. Retry: none. Evidence: Denied message names
+    the annotation, or the inspect reason/exit for unverifiable output.
+    Failure: Denied on positive evidence and on any unverifiable inspect
+    (truncated output, timeout, cancel, nonzero exit, missing runtime):
+    a prefix cut can hide the marker, so truncated output must never read
+    as clean.
     """
     if not config.sandbox.image:
         raise ConfigError("Build and pin sandbox.image before running commands")
     try:
-        result = run(checkpoint_inspect_argv(config), timeout=15, maximum=8192, env=env)
-    except OSError:
-        return
-    if result.reason != "exited" or result.exit_code is None:
-        return
-    if result.exit_code != 0:
-        return
+        result = run(checkpoint_inspect_argv(config), timeout=15,
+                     maximum=CHECKPOINT_INSPECT_MAXIMUM, env=env)
+    except OSError as exc:
+        raise Denied(
+            "Cannot verify sandbox.image is not a Podman checkpoint image "
+            "(inspect failed: %s); refusing to launch" % exc) from exc
+    if result.reason != "exited" or result.exit_code is None or result.exit_code != 0:
+        raise Denied(
+            "Cannot verify sandbox.image is not a Podman checkpoint image "
+            "(inspect %s%s); refusing to launch"
+            % (result.reason,
+               "" if result.exit_code in (None, 0)
+               else " exit %s: %s" % (result.exit_code, result.stderr[-500:])))
     if inspect_text_is_checkpoint(result.stdout):
         raise Denied(
             "sandbox.image is a Podman checkpoint image (annotation %s); " % CHECKPOINT_ANNOTATION

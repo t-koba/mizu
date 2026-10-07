@@ -324,9 +324,11 @@ class ContainerArgvTests(unittest.TestCase):
         self.assertEqual(podman[-3:], ["--force", "--ignore", "mizu-x"])
         self.assertIsNone(remove_argv(self.config("docker"), "mizu-x"))
 
-    def test_execute_records_startup_error_without_runtime(self):
-        import json
+    def test_execute_refuses_launch_without_runtime(self):
+        # Fail closed: an unverifiable inspect (missing runtime) denies
+        # launch instead of recording a startup_error run.
         from unittest.mock import patch
+        from mizu.errors import Denied
         from mizu.process import Result
         from mizu.sandbox import Sandbox
         work = self.root / "work"
@@ -336,11 +338,9 @@ class ContainerArgvTests(unittest.TestCase):
                    side_effect=[Result(None, "", "missing", "startup_error", 0),
                                 Result(None, "", "missing", "startup_error", 0),
                                 Result(0, "", "", "exited", 0)]):
-            record = engine.execute(work, "echo hi", writable=False)
-        self.assertEqual(record["reason"], "startup_error")
-        self.assertNotIn("cleanup_error", record)
-        started = json.loads((self.root / "run" / "commands" / f"{record['id']}.started.json").read_text())
-        self.assertEqual(started["script"], "echo hi")
+            with self.assertRaises(Denied) as caught:
+                engine.execute(work, "echo hi", writable=False)
+        self.assertIn("cannot verify", str(caught.exception).lower())
 
 
 class ServiceRendererTests(unittest.TestCase):

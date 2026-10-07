@@ -17,7 +17,7 @@ from .errors import ConfigError, Denied, MizuError
 from .fs import digest, mkdir, read_json
 from .pi import credentials
 from .process import run
-from .sandbox import CHECKPOINT_ANNOTATION, Sandbox, ensure_single, inspect_text_is_checkpoint, runtime_base, runtime_env
+from .sandbox import CHECKPOINT_ANNOTATION, CHECKPOINT_INSPECT_MAXIMUM, Sandbox, ensure_single, inspect_text_is_checkpoint, runtime_base, runtime_env
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -128,9 +128,15 @@ def check(config: Config, *, sandbox: bool = False) -> dict:
             raise ConfigError("Set a digest-pinned sandbox.image")
         env = runtime_env(config)
         # `image inspect` is the portable presence check; `image exists` is Podman-only.
+        # A prefix cut can hide the checkpoint marker, so any truncated or
+        # failed inspect is unverifiable and must fail, never read as clean.
         result = run([*runtime_base(config), "image", "inspect", config.sandbox.image],
-                     timeout=15, maximum=8192, env=env)
-        if result.exit_code:
+                     timeout=15, maximum=CHECKPOINT_INSPECT_MAXIMUM, env=env)
+        if result.reason != "exited" or result.exit_code is None:
+            raise ConfigError(
+                "Cannot verify sandbox.image is not a Podman checkpoint image "
+                "(inspect %s); refusing clean verdict" % result.reason)
+        if result.exit_code != 0:
             raise ConfigError("Configured image is not present locally; automatic pulls are disabled")
         if inspect_text_is_checkpoint(result.stdout):
             raise ConfigError(

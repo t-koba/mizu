@@ -88,20 +88,62 @@ class CheckpointExecuteTests(unittest.TestCase):
             record = box.execute(work, "echo hi", writable=False)
         self.assertEqual(record["exit_code"], 0)
 
-    def test_infra_failure_does_not_mask_as_checkpoint(self):
+    def test_unverifiable_inspect_refuses_launch(self):
+        # Fail closed: a truncated/failed inspect must deny launch, never
+        # read a prefix cut as clean. The refusal names verification, not
+        # a false checkpoint positive.
         from mizu.sandbox import Sandbox
         config = _config(self.temp.name, executable="mizu-missing-runtime-xyz")
         work = self.root / "work"
         work.mkdir()
         box = Sandbox(config, self.root, "worker", self.root / "run")
-        # Inspect cannot run (missing runtime) so the preflight yields to the
-        # normal path, which records its own startup evidence.
         with patch("mizu.sandbox.run",
                    side_effect=[Result(None, "", "missing", "startup_error", 0),
                                 Result(None, "", "missing", "startup_error", 0),
                                 Result(0, "", "", "exited", 0)]):
-            record = box.execute(work, "echo hi", writable=False)
-        self.assertEqual(record["reason"], "startup_error")
+            with self.assertRaises(Denied) as caught:
+                box.execute(work, "echo hi", writable=False)
+        self.assertIn("cannot verify", str(caught.exception).lower())
+
+    def test_truncated_clean_prefix_refuses_launch(self):
+        # Attacker-padded prefix: full payload carries the marker past the
+        # cut, so the visible prefix looks clean. Truncation must deny.
+        import json as _json
+        from mizu.sandbox import Sandbox, CHECKPOINT_INSPECT_MAXIMUM
+        config = _config(self.temp.name)
+        work = self.root / "work"
+        work.mkdir()
+        box = Sandbox(config, self.root, "worker", self.root / "run")
+        prefix = _json.dumps([{"Id": "sha256:x", "Labels": {"pad": "P" * CHECKPOINT_INSPECT_MAXIMUM}}])
+        self.assertFalse(inspect_text_is_checkpoint(prefix))
+        with patch("mizu.sandbox.run",
+                   side_effect=[Result(0, prefix, "", "output_limit", 0.1),
+                                Result(0, "", "", "exited", 0.0)]):
+            with self.assertRaises(Denied) as caught:
+                box.execute(work, "echo hi", writable=False)
+        self.assertIn("cannot verify", str(caught.exception).lower())
+
+    def test_failed_inspect_exit_refuses_launch(self):
+        # Missing image (nonzero inspect exit) is unverifiable: deny rather
+        # than treat the absent output as clean.
+        from mizu.sandbox import Sandbox
+        config = _config(self.temp.name)
+        work = self.root / "work"
+        work.mkdir()
+        box = Sandbox(config, self.root, "worker", self.root / "run")
+        with patch("mizu.sandbox.run",
+                   side_effect=[Result(1, "", "no such image", "exited", 0.1),
+                                Result(0, "", "", "exited", 0.0)]):
+            with self.assertRaises(Denied) as caught:
+                box.execute(work, "echo hi", writable=False)
+        self.assertIn("cannot verify", str(caught.exception).lower())
+
+    def test_missing_runtime_refuses_launch(self):
+        config = _config(self.temp.name)
+        with patch("mizu.sandbox.run", side_effect=OSError("no runtime")):
+            with self.assertRaises(Denied) as caught:
+                assert_no_checkpoint(config, {})
+        self.assertIn("cannot verify", str(caught.exception).lower())
 
     def test_assert_no_checkpoint_needs_image(self):
         import dataclasses
