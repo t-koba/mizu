@@ -510,9 +510,17 @@ def read_via(settings: dict, op: str, params: dict) -> dict:
     if op == "proposals":
         # Proposals are enumerated, not addressed: an optional branch only
         # filters the adapter query, so head/base movement is observable.
+        # An optional cursor resumes a truncated enumeration; the response
+        # reports completeness, never inferred from row counts.
         if branch is not None:
             check_branch(branch)
             request["branch"] = branch
+        cursor = params.get("cursor")
+        if cursor is not None:
+            if (not isinstance(cursor, str) or not cursor or len(cursor) > 256
+                    or "\n" in cursor or "\x00" in cursor):
+                raise Denied("Invalid VCS proposals cursor")
+            request["cursor"] = cursor
     else:
         check_branch(branch)
         request["branch"] = branch
@@ -526,7 +534,16 @@ def read_via(settings: dict, op: str, params: dict) -> dict:
         return {"op": op, "branch": branch, "checks": parse_status_checks(data),
                 "trust": "external-untrusted"}
     if op == "proposals":
+        complete = data.get("complete", None)
+        if complete is not None and not isinstance(complete, bool):
+            raise Denied("Invalid VCS proposals completeness flag")
+        cursor_out = data.get("cursor", None)
+        if cursor_out is not None and (
+                not isinstance(cursor_out, str) or not cursor_out
+                or len(cursor_out) > 256 or "\n" in cursor_out or "\x00" in cursor_out):
+            raise Denied("Invalid VCS proposals cursor")
         return {"op": op, "branch": branch, "proposals": parse_proposals(data),
+                "complete": complete, "cursor": cursor_out,
                 "trust": "external-untrusted"}
     return {**data, "trust": "external-untrusted"}
 
@@ -586,7 +603,18 @@ def _check_repo(repo) -> str:
 
 
 def _check_endpoint(value) -> dict:
-    if not isinstance(value, dict) or set(value) != {"repo", "ref", "sha"}:
+    # Either a live ``{"repo", "ref", "sha"}`` endpoint or an explicit
+    # tombstone ``{"deleted": true, "repo", "ref"}`` for a removed fork:
+    # positive deletion evidence, never inferred from a missing row.
+    # Tombstoned endpoints carry no sha, so no revision can be assessed,
+    # acquired, or disposed from them.
+    if not isinstance(value, dict):
+        raise Denied("Invalid VCS proposal endpoint")
+    if set(value) == {"deleted", "repo", "ref"} and value.get("deleted") is True:
+        repo = _check_repo(value.get("repo"))
+        check_branch(value.get("ref"))
+        return {"deleted": True, "repo": repo, "ref": value["ref"]}
+    if set(value) != {"repo", "ref", "sha"}:
         raise Denied("Invalid VCS proposal endpoint")
     repo = _check_repo(value.get("repo"))
     check_branch(value.get("ref"))
@@ -596,18 +624,47 @@ def _check_endpoint(value) -> dict:
     return {"repo": repo, "ref": value["ref"], "sha": sha}
 
 
+#: Maximum independent reviews per proposal row.
+MAX_REVIEWS = 64
+#: Closed-form review verdicts; a dismissed approval no longer approves.
+REVIEW_VERDICTS = frozenset({"approved", "changes_requested", "dismissed"})
+
+
+def _check_review(value) -> dict:
+    # One revision-bound review: who decided, what the verdict was, and
+    # the exact revision reviewed. The reviewed sha stays put even when it
+    # differs from the current head: stale approvals never reattach.
+    if not isinstance(value, dict) or set(value) != {"reviewer", "verdict", "sha"}:
+        raise Denied("Invalid VCS proposal review")
+    reviewer = value.get("reviewer")
+    if (not isinstance(reviewer, str) or not reviewer or len(reviewer) > 128
+            or "\n" in reviewer or "\x00" in reviewer):
+        raise Denied("Invalid VCS proposal reviewer")
+    verdict = value.get("verdict")
+    if verdict not in REVIEW_VERDICTS:
+        raise Denied("Invalid VCS proposal review verdict")
+    sha = value.get("sha")
+    if not isinstance(sha, str) or not _SHA.fullmatch(sha):
+        raise Denied("Invalid VCS sha for proposal review")
+    return {"reviewer": reviewer, "verdict": verdict, "sha": sha}
+
+
 def parse_proposals(data: dict) -> list:
     """Validate a ``proposals`` adapter response into normalized rows.
 
     Schema: ``{"proposals": [{id, state, head, base, draft, mergeable?,
-    checks?, url?}]}``; ``id`` 1-128 chars without newline/NUL, ``state``
-    one of ``open``/``closed``/``merged``, ``head``/``base`` are
-    ``{repo, ref, sha}`` endpoints (repo 1-256 chars, ref per
-    ``check_branch``, sha 40/64 hex), ``draft`` a bool, ``mergeable`` a
-    bool or absent/null (unknown), ``checks`` CI rows per
-    ``parse_status_checks``, ``url`` at most 4096 chars without
-    newline/NUL. Bounds: at most 256 proposals. Trust: adapter facts stay
-    external-untrusted; this only validates shape. Failure: ``Denied``.
+    checks?, reviews?, url?}]}``; ``id`` 1-128 chars without newline/NUL,
+    ``state`` one of ``open``/``closed``/``merged``, ``head``/``base``
+    are live ``{repo, ref, sha}`` endpoints (repo 1-256 chars, ref per
+    ``check_branch``, sha 40/64 hex) or explicit tombstones
+    ``{deleted: true, repo, ref}`` for removed forks, ``draft`` a bool,
+    ``mergeable`` a bool or absent/null (unknown), ``checks`` CI rows per
+    ``parse_status_checks`` (each row carries its own tested sha, which
+    may differ from the head sha for merge-commit rollups), ``reviews``
+    revision-bound review rows or absent/null (unknown), ``url`` at most
+    4096 chars without newline/NUL. Bounds: at most 256 proposals, at
+    most 64 reviews each. Trust: adapter facts stay external-untrusted;
+    this only validates shape. Failure: ``Denied``.
     """
     if not isinstance(data, dict):
         raise Denied("VCS proposals must be a JSON object")
@@ -618,7 +675,7 @@ def parse_proposals(data: dict) -> list:
     for entry in proposals:
         if not isinstance(entry, dict) or set(entry) - {
                 "id", "state", "head", "base", "draft", "mergeable",
-                "checks", "url"}:
+                "checks", "reviews", "url"}:
             raise Denied("Invalid VCS proposal entry")
         identity = entry.get("id")
         if (not isinstance(identity, str) or not identity or len(identity) > 128
@@ -639,12 +696,19 @@ def parse_proposals(data: dict) -> list:
         if not isinstance(raw_checks, list):
             raise Denied("Invalid VCS proposal checks")
         checks = parse_status_checks({"checks": raw_checks})
+        raw_reviews = entry.get("reviews", None)
+        if raw_reviews is None:
+            reviews = None
+        else:
+            if not isinstance(raw_reviews, list) or len(raw_reviews) > MAX_REVIEWS:
+                raise Denied("Invalid VCS proposal reviews")
+            reviews = [_check_review(item) for item in raw_reviews]
         url = entry.get("url", "")
         if not isinstance(url, str) or len(url) > 4096 or "\x00" in url or "\n" in url:
             raise Denied("Invalid VCS proposal URL")
         out.append({"id": identity, "state": state, "head": head,
                     "base": base, "draft": draft, "mergeable": mergeable,
-                    "checks": checks, "url": url})
+                    "checks": checks, "reviews": reviews, "url": url})
     return out
 
 
@@ -674,12 +738,25 @@ def proposal_facts(proposal: dict) -> tuple[str, str]:
     lines = [f"id: {row['id']}", f"state: {row['state']}",
              f"draft: {row['draft']}",
              f"mergeable: {row['mergeable'] if row['mergeable'] is not None else 'unknown'}",
-             f"head: {row['head']['repo']} {row['head']['ref']} {row['head']['sha']}",
-             f"base: {row['base']['repo']} {row['base']['ref']} {row['base']['sha']}"]
+             _format_endpoint("head", row["head"]),
+             _format_endpoint("base", row["base"])]
     for check in row["checks"]:
         lines.append(f"check: {check['check']} {check['state']} {check['sha']}")
+    if row["reviews"] is None:
+        lines.append("reviews: unknown")
+    elif not row["reviews"]:
+        lines.append("reviews: none")
+    for review in row["reviews"] or []:
+        lines.append(f"review: {review['reviewer']} {review['verdict']} {review['sha']}")
     lines.append("trust: external-untrusted")
     return title, "\n".join(lines) + "\n"
+
+
+def _format_endpoint(role: str, endpoint: dict) -> str:
+    """Render one endpoint fact line, tombstones included."""
+    if endpoint.get("deleted") is True:
+        return f"{role}: {endpoint['repo']} {endpoint['ref']} deleted"
+    return f"{role}: {endpoint['repo']} {endpoint['ref']} {endpoint['sha']}"
 
 
 def record_proposal_state(project, proposal: dict, *,

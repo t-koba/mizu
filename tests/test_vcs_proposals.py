@@ -157,5 +157,139 @@ class ProposalRecordTests(Fixture):
             vcs.proposal_insight_id("")
 
 
+def tombstoned_proposal(state="closed"):
+    row = proposal(state=state)
+    row["head"] = {"deleted": True, "repo": "fork-owner/repo",
+                   "ref": "feature"}
+    row["checks"] = []
+    return row
+
+
+def reviewed_proposal():
+    row = proposal()
+    row["reviews"] = [{"reviewer": "octo", "verdict": "approved",
+                       "sha": SHA_A}]
+    return row
+
+
+class ProposalSchemaV2Tests(Fixture):
+    def test_deleted_fork_head_is_explicit_tombstone(self):
+        config = dataclasses.replace(
+            self.config, vcs=adapter_settings(
+                proposals_code({"proposals": [tombstoned_proposal()]})))
+        out = vcs.read_via(config.vcs, "proposals", {})
+        (row,) = out["proposals"]
+        self.assertTrue(row["head"].get("deleted"))
+        self.assertNotIn("sha", row["head"])
+        title, body = vcs.proposal_facts(row)
+        self.assertIn("head: fork-owner/repo feature deleted", body)
+        self.assertIn("closed", title)
+
+    def test_tombstone_forms_refused(self):
+        bad_heads = ({"deleted": False, "repo": "r", "ref": "f"},
+                     {"deleted": True, "repo": "r", "ref": "f",
+                      "sha": SHA_A},
+                     {"deleted": True, "repo": "r"},
+                     {"repo": "r", "ref": "f"})
+        for head in bad_heads:
+            row = proposal()
+            row["head"] = head
+            with self.assertRaises(Denied, msg=json.dumps(head)):
+                vcs.parse_proposals({"proposals": [row]})
+
+    def test_deleted_fork_does_not_block_open_proposals(self):
+        payload = {"proposals": [tombstoned_proposal(), proposal()],
+                   "complete": True}
+        config = dataclasses.replace(
+            self.config, vcs=adapter_settings(proposals_code(payload)))
+        out = vcs.read_via(config.vcs, "proposals", {})
+        self.assertEqual(len(out["proposals"]), 2)
+        self.assertTrue(out["complete"])
+        # The open row still records under its stable id.
+        recorded = vcs.record_proposal_state(self.project, out["proposals"][1])
+        self.assertTrue(recorded["changed"])
+        stored = self.project.insights.read(recorded["id"])
+        self.assertIn(SHA_A, stored["body"])
+
+    def test_reviews_are_revision_bound(self):
+        config = dataclasses.replace(
+            self.config, vcs=adapter_settings(
+                proposals_code({"proposals": [reviewed_proposal()]})))
+        out = vcs.read_via(config.vcs, "proposals", {})
+        (row,) = out["proposals"]
+        self.assertEqual(row["reviews"],
+                         [{"reviewer": "octo", "verdict": "approved",
+                           "sha": SHA_A}])
+        _, body = vcs.proposal_facts(row)
+        self.assertIn(f"review: octo approved {SHA_A}", body)
+
+    def test_stale_review_sha_stays_put(self):
+        row = reviewed_proposal()
+        row["head"]["sha"] = SHA_B
+        parsed = vcs.parse_proposals({"proposals": [row]})[0]
+        self.assertEqual(parsed["reviews"][0]["sha"], SHA_A)
+        self.assertEqual(parsed["head"]["sha"], SHA_B)
+
+    def test_missing_reviews_read_unknown_not_none(self):
+        _, body = vcs.proposal_facts(proposal())
+        self.assertIn("reviews: unknown", body)
+        _, body = vcs.proposal_facts(dict(proposal(), reviews=[]))
+        self.assertIn("reviews: none", body)
+        for reviews in ([{"reviewer": "", "verdict": "approved",
+                          "sha": SHA_A}],
+                        [{"reviewer": "o", "verdict": "commented",
+                          "sha": SHA_A}],
+                        [{"reviewer": "o", "verdict": "approved",
+                          "sha": "xyz"}],
+                        [{"reviewer": "o", "verdict": "approved"}],
+                        "yes",
+                        [{}] * 65):
+            with self.assertRaises(Denied):
+                vcs.parse_proposals(
+                    {"proposals": [dict(proposal(), reviews=reviews)]})
+
+    def test_check_sha_keeps_tested_revision_provenance(self):
+        # Rollup checks may run on a merge commit, not the head sha: the
+        # row keeps the tested revision instead of reattaching it.
+        row = proposal()
+        row["checks"] = [{"check": "rollup", "state": "success",
+                          "sha": SHA_B}]
+        parsed = vcs.parse_proposals({"proposals": [row]})[0]
+        self.assertEqual(parsed["checks"][0]["sha"], SHA_B)
+        _, body = vcs.proposal_facts(row)
+        self.assertIn(f"check: rollup success {SHA_B}", body)
+
+    def test_completeness_and_cursor_round_trip(self):
+        code = ("import sys,json; req=json.load(sys.stdin); "
+                "assert req == {'op': 'proposals', 'cursor': 'c1'}, req; "
+                "print(json.dumps({'proposals': [], 'complete': False, "
+                "'cursor': 'c2'}))")
+        config = dataclasses.replace(
+            self.config, vcs=adapter_settings(code))
+        out = vcs.read_via(config.vcs, "proposals", {"cursor": "c1"})
+        self.assertFalse(out["complete"])
+        self.assertEqual(out["cursor"], "c2")
+
+    def test_partial_envelope_shapes_refused(self):
+        for payload in ({"proposals": [], "complete": "yes"},
+                        {"proposals": [], "cursor": ""},
+                        {"proposals": [], "cursor": "x" * 257}):
+            config = dataclasses.replace(
+                self.config, vcs=adapter_settings(proposals_code(payload)))
+            with self.assertRaises(Denied, msg=json.dumps(payload)[:60]):
+                vcs.read_via(config.vcs, "proposals", {})
+
+    def test_current_shape_still_validates(self):
+        # The working adapter shape gains unknown reviews/completeness,
+        # never a validation failure.
+        config = dataclasses.replace(
+            self.config, vcs=adapter_settings(
+                proposals_code({"proposals": [proposal()]})))
+        out = vcs.read_via(config.vcs, "proposals", {})
+        self.assertIsNone(out["complete"])
+        self.assertIsNone(out["cursor"])
+        self.assertIsNone(out["proposals"][0]["reviews"])
+
+
 if __name__ == "__main__":
     raise SystemExit(unittest.main())

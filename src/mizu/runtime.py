@@ -450,6 +450,8 @@ class Context:
             params["sha"] = args["sha"]
         if "id" in args:
             params["id"] = args["id"]
+        if "cursor" in args:
+            params["cursor"] = args["cursor"]
         try:
             data = _vcs.read_via(self.config.vcs, args["op"], params)
         except OSError as exc:
