@@ -169,7 +169,9 @@ Only roles with `selector` enable it; fixed profiles keep their existing behavio
 A profile explicitly selects `engine`, `provider`, `model`, and `session`
 (`ephemeral` or `persistent`). IDs remain exact. Native `options` belong to
 that engine: Pi `thinkingLevel`, `settings`, `codemode`, `toolSearch`,
-`excludeTools`, `scopedModels`; Codex native configuration keys plus `options.turn` for native turn fields
+`excludeTools`, `scopedModels` (pi-durable adds `durable_backend` (`sqlite`),
+`durable_resume` (`compatible`|`fresh`), `durable_retention_days` (0-3650),
+`durable_max_turns` (1-1024)); Codex native configuration keys plus `options.turn` for native turn fields
 (such as `outputSchema`, `effort`, `serviceTier`); Claude
 `ClaudeAgentOptions` fields. Effort values are validated by the selected engine,
 not a Mizu enum. Models/providers have no fixed allowlist.
@@ -201,6 +203,7 @@ the bridge and publication contract.
 | Engine | Managed interface | Completion | Admission unit |
 |---|---|---|---|
 | Pi | `createAgentSession`, `ModelRuntime`, `runRpcMode` | `agent_settled` and seal | Logical model request (includes auxiliary inference) |
+| Pi-durable | Same Pi protocol plus SQLite persisted turns/tasks with compatible-grant resume binding | `agent_settled` and seal | Logical model request (includes auxiliary inference) |
 | Codex | `app-server --listen stdio://` | `turn/completed` with completed status and seal | Turn |
 | Claude | Official Python Agent SDK in separate interpreter | `terminal_reason=completed`, successful subtype, no error and seal | Query |
 

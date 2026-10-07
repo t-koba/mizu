@@ -27,7 +27,7 @@ def probe(engine, prefix):
             flags.extend(item['required_flags'])
         return argv, None, ('codex_flags', sorted(set(flags)))
     launcher = str(ROOT/'adapters'/engine/contract['entrypoint'])
-    dependency = ROOT/'adapters/pi/node_modules' if engine == 'pi' else None
+    dependency = ROOT/'adapters/pi/node_modules' if engine in ('pi', 'pi-durable') else None
     return [*prefix, launcher, '--check-contract'], dependency, ('launcher_exports', list(contract['exports']))
 
 
@@ -39,7 +39,7 @@ def main():
     args=parser.parse_args()
     prefixes={'pi':['node'],'codex':[args.codex],'claude':[args.claude_python or sys.executable]}
     checks=[]
-    for engine in ('pi','codex','claude'):
+    for engine in ('pi','pi-durable','codex','claude'):
         try:
             command,dependency,(_,expected)=probe(engine,prefixes[engine])
         except ConfigError as exc:

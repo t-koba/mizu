@@ -119,7 +119,7 @@ def main():
     if shutil.which('node'):
         execute('node-transport-and-extension-tests', ['node', '--test', 'tests/bridge.test.mjs'],
                 count=node_counts)
-        for path in sorted([*(ROOT / 'adapters/pi').glob('*.mjs'), *(ROOT / 'scripts').glob('*.mjs')]):
+        for path in sorted([*(ROOT / 'adapters/pi').glob('*.mjs'), *(ROOT / 'adapters/pi-durable').glob('*.mjs'), *(ROOT / 'scripts').glob('*.mjs')]):
             execute('javascript-syntax:' + path.name, ['node', '--check', str(path)])
     if has_bash:
         for path in sorted((ROOT / 'scripts').glob('*.sh')):

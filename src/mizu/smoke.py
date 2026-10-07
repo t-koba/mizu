@@ -93,6 +93,9 @@ def live(config: Config, profile: str | None = None, role_name: str = "consult")
                 raise Denied("Engine ran, but the live smoke did not return the requested evidence")
             engine = config.engine(role.profile)
             checks = {
+                "pi-durable": ["trusted extension handshake", "exact model selection",
+                       "provider-request admission", "custom tool round trip",
+                       "finish followed by agent_settled", "durable turn persistence"],
                 "pi": ["trusted extension handshake", "exact model selection",
                        "provider-request admission", "custom tool round trip",
                        "finish followed by agent_settled"],

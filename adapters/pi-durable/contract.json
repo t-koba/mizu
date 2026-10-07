@@ -1,0 +1,12 @@
+{
+  "entrypoint": "launcher.mjs",
+  "exports": [
+    "createAgentSession",
+    "ModelRuntime",
+    "runRpcMode"
+  ],
+  "completion": "agent_settled + mizu seal",
+  "request_unit": "model_request",
+  "dependency_evidence": "package-lock.json",
+  "durable": "persisted turns/tasks with compatible-grant resume binding; experimental API pinned separately"
+}

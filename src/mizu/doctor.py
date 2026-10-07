@@ -111,9 +111,9 @@ def check(config: Config, *, sandbox: bool = False) -> dict:
         return {"request_unit": contract["request_unit"], "exports": sorted(set(verified)),
                 "inference": "not_run"}
     engines = {config.engine(p) for p in config.profiles}
-    if "pi" in engines:
+    if "pi" in engines or "pi-durable" in engines:
         checked("node", node)
-    for engine in ("pi", "codex", "claude"):
+    for engine in ("pi", "pi-durable", "codex", "claude"):
         if engine in engines:
             checked(f"{engine} adapter", lambda engine=engine: engine_contract(engine))
         else:

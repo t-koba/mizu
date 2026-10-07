@@ -15,7 +15,7 @@ from .fs import ID
 CAPABILITIES = frozenset({"diff", "files", "read", "exec", "experiment", "verify", "fetch",
                           "search", "insights", "decide", "submit_insight", "consult",
                           "report", "finish", "sync", "vcs_read", "vcs_publish"})
-ENGINES = ("pi", "codex", "claude")
+ENGINES = ("pi", "pi-durable", "codex", "claude")
 #: Role names that collide with insight sources owned by the host/operator
 #: channel (operator CLI, vcs CI helper, editor outbox). Model
 #: `submit_insight` fixes source to the role name, so these are refused

@@ -18,6 +18,7 @@ MAX_UNKNOWN_KEYS = 20
 _FIELDS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "other_tokens")
 _KEYS = {
     "pi": {"input": "input_tokens", "output": "output_tokens", "cacheRead": "cache_read_tokens", "cacheWrite": "cache_write_tokens"},
+    "pi-durable": {"input": "input_tokens", "output": "output_tokens", "cacheRead": "cache_read_tokens", "cacheWrite": "cache_write_tokens"},
     "codex": {"input_tokens": "input_tokens", "output_tokens": "output_tokens", "cached_input_tokens": "cache_read_tokens"},
     "claude": {"inputTokens": "input_tokens", "outputTokens": "output_tokens", "cacheReadInputTokens": "cache_read_tokens", "cacheCreationInputTokens": "cache_write_tokens"},
 }

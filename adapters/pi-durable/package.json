@@ -1,0 +1,13 @@
+{
+  "name": "mizu-pi-durable-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Managed pi-durable adapter (compat SDK until pinned durable dependency lands)",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "1.0.4",
+    "@earendil-works/pi-ai": "1.0.4"
+  }
+}

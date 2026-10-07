@@ -46,13 +46,15 @@ def effective(config, role, profile):
     options = dict(config.options(profile))
     owned = {
         'pi': {'cwd', 'agentDir', 'modelRuntime', 'model', 'tools', 'customTools', 'resourceLoader', 'sessionManager', 'systemPrompt'},
+        'pi-durable': {'cwd', 'agentDir', 'modelRuntime', 'model', 'tools', 'customTools', 'resourceLoader', 'sessionManager', 'systemPrompt'},
         'codex': {'model', 'model_provider', 'model_instructions_file', 'mcp_servers', 'cwd', 'base_instructions', 'developer_instructions'},
         'claude': {'strict_mcp_config', 'continue_conversation', 'fork_session', 'hooks', 'permission_prompt_tool_name', 'model', 'system_prompt', 'cwd', 'mcp_servers', 'can_use_tool', 'resume', 'session_id', 'permission_mode', 'tools', 'allowed_tools'},
     }[raw['engine']]
     if set(options) & owned:
         raise ConfigError('Engine options conflict with runtime-owned configuration: ' + ', '.join(sorted(set(options) & owned)))
-    if raw['engine'] == 'pi':
-        allowed = {'thinkingLevel', 'settings', 'codemode', 'toolSearch', 'excludeTools', 'scopedModels'}
+    if raw['engine'] in ('pi', 'pi-durable'):
+        allowed = {'thinkingLevel', 'settings', 'codemode', 'toolSearch', 'excludeTools', 'scopedModels',
+                   'durable_backend', 'durable_resume', 'durable_retention_days', 'durable_max_turns'}
         if set(options) - allowed:
             raise ConfigError('Unknown Pi SDK configuration field')
         settings = options.get('settings', {})
@@ -112,7 +114,7 @@ def adapter_contract(engine, root=None):
     for key in ('request_unit', 'completion'):
         if not isinstance(contract.get(key), str) or not contract[key]:
             raise ConfigError(f'Invalid {engine} adapter contract: {key} must be a nonempty string')
-    if engine in ('pi', 'claude'):
+    if engine in ('pi', 'pi-durable', 'claude'):
         entry = contract.get('entrypoint')
         if not isinstance(entry, str) or not entry or '/' in entry or entry.startswith('.'):
             raise ConfigError(f'Invalid {engine} adapter contract: entrypoint must be a plain filename')
@@ -143,7 +145,7 @@ def adapter_digest(engine):
 
 def local_settings_digest(config, engine):
     # Credentials are never part of evidence or content hashing.
-    names = {'pi': ('models.json',), 'codex': (), 'claude': ()}[engine]
+    names = {'pi': ('models.json',), 'pi-durable': ('models.json',), 'codex': (), 'claude': ()}[engine]
     result = {}
     for name in names:
         path = config.agent_dir(engine)/name

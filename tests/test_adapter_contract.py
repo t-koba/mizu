@@ -16,11 +16,12 @@ from mizu.errors import ConfigError
 class AdapterContractTests(unittest.TestCase):
     def test_contracts_load_with_expected_units(self):
         self.assertEqual(adapter_contract('pi')['request_unit'], 'model_request')
+        self.assertEqual(adapter_contract('pi-durable')['request_unit'], 'model_request')
         self.assertEqual(adapter_contract('codex')['request_unit'], 'turn')
         self.assertEqual(adapter_contract('claude')['request_unit'], 'query')
 
     def test_entrypoints_exist_and_exports_declared(self):
-        for engine in ('pi', 'claude'):
+        for engine in ('pi', 'pi-durable', 'claude'):
             contract = adapter_contract(engine)
             self.assertTrue((ROOT / 'adapters' / engine / contract['entrypoint']).is_file())
             self.assertTrue(contract['exports'])
@@ -37,7 +38,7 @@ class AdapterContractTests(unittest.TestCase):
         from pathlib import Path
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            for engine in ('pi', 'codex', 'claude'):
+            for engine in ('pi', 'pi-durable', 'codex', 'claude'):
                 target = root / 'adapters' / engine
                 target.mkdir(parents=True)
                 contract = copy.deepcopy(adapter_contract(engine))

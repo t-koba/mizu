@@ -48,6 +48,9 @@ def driver_for(config, profile: str, cache: dict):
         if engine == "pi":
             from .pi import PiDriver
             cache[engine] = PiDriver(config)
+        elif engine == "pi-durable":
+            from .pi_durable import PiDurableDriver
+            cache[engine] = PiDurableDriver(config)
         elif engine == "codex":
             from .codex import CodexDriver
             cache[engine] = CodexDriver(config)

@@ -83,6 +83,10 @@ mode = "rootless"                 # rootless on every OS, or single on Linux hos
 command = ["node"]
 directory = "pi"
 
+[engines.pi-durable]
+command = ["node"]
+directory = "pi-durable"
+
 [engines.codex]
 command = ["codex"]
 directory = "codex"
@@ -107,6 +111,19 @@ model = ""
 session = "ephemeral"
 [profiles.alternate.options]
 thinkingLevel = "off"
+
+# Durable execution: selectable via engine = "pi-durable" (no live switch here).
+# [profiles.durable]
+# engine = "pi-durable"
+# provider = ""
+# model = ""
+# session = "persistent"
+# [profiles.durable.options]
+# thinkingLevel = "off"
+# durable_backend = "sqlite"       # Only backend; unknown values are refused.
+# durable_resume = "compatible"    # compatible binds resume to current grants; fresh refuses resume.
+# durable_retention_days = 31      # Terminal-store retention; 0 disables time-based reaping.
+# durable_max_turns = 128          # Per-run persisted turn bound (1-1024).
 
 # Native options belong to the selected engine; Mizu has no effort enum.
 # [profiles.codex]
