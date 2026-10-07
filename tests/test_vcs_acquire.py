@@ -131,3 +131,34 @@ class AcquireTests(Fixture):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AcquireToolTests(Fixture):
+    def test_tool_serves_acquire_by_id_and_sha(self):
+        # Regression: id/acquire were unreachable through the tool
+        # schema even though read_via served them. The adapter echoes
+        # the requested id/sha with digest-bound content.
+        import uuid
+        from mizu.fs import mkdir
+        from mizu.runtime import Context
+        digest = vcs.acquire_digest(CONTENT)
+        code = ("import sys,json; req=json.load(sys.stdin); "
+                "print(json.dumps({'id': req['id'], 'sha': req['sha'], "
+                "'digest': %r, 'content': %r}))" % (digest, CONTENT))
+        config = dataclasses.replace(
+            self.config, vcs=adapter_settings(code))
+        role = config.roles["worker"]
+        role = dataclasses.replace(
+            role, capabilities=tuple(list(role.capabilities) + ["vcs_read"]))
+        config = dataclasses.replace(
+            config, roles={**config.roles, "worker": role})
+        run = self.project.root / "runs" / uuid.uuid4().hex
+        mkdir(run)
+        ctx = Context(config, self.project, role, run,
+                      self.project.snapshots.get(), self.project.workspace)
+        out = ctx.handle("vcs_read", {"op": "acquire",
+                                      "id": PROPOSAL_ID, "sha": SHA_A})
+        self.assertEqual(out["result"]["id"], PROPOSAL_ID)
+        self.assertEqual(out["result"]["sha"], SHA_A)
+        self.assertEqual(out["result"]["digest"], digest)
+        self.assertEqual(out["result"]["content"], CONTENT)

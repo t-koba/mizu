@@ -111,6 +111,32 @@ class ProposalToolTests(Fixture):
         with self.assertRaises(Denied):
             ctx.handle("vcs_read", {"op": "status"})
 
+    def test_tool_passes_cursor_through(self):
+        # Regression: the cursor reached read_via but the tool schema
+        # denied it, so Context.handle never dispatched. The adapter
+        # echoes the request cursor; the envelope must surface it.
+        code = ("import sys,json; req=json.load(sys.stdin); "
+                "print(json.dumps({'proposals': [], "
+                "'cursor': 'next:' + req.get('cursor', ''), "
+                "'complete': False}))")
+        import uuid
+        from mizu.fs import mkdir
+        from mizu.runtime import Context
+        config = dataclasses.replace(
+            self.config, vcs=adapter_settings(code))
+        role = config.roles["worker"]
+        role = dataclasses.replace(
+            role, capabilities=tuple(list(role.capabilities) + ["vcs_read"]))
+        config = dataclasses.replace(
+            config, roles={**config.roles, "worker": role})
+        run = self.project.root / "runs" / uuid.uuid4().hex
+        mkdir(run)
+        ctx = Context(config, self.project, role, run,
+                      self.project.snapshots.get(), self.project.workspace)
+        out = ctx.handle("vcs_read", {"op": "proposals", "cursor": "c1"})
+        self.assertEqual(out["result"]["cursor"], "next:c1")
+        self.assertFalse(out["result"]["complete"])
+
 
 class ProposalRecordTests(Fixture):
     def test_record_creates_dedupes_and_revises_on_change(self):
