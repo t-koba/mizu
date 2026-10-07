@@ -222,6 +222,22 @@ class RetireLiveRefTests(Fixture):
                                       "expected_sha": SHA_A})
         self.assertFalse((ctx.run_dir / "vcs-retire.json").exists())
 
+    def test_full_ref_spelling_blocks(self):
+        # Either spelling deletes the same branch, so either spelling
+        # must see the live reference: refs/heads/mizu/x-1 blocks
+        # exactly like mizu/x-1.
+        vcs.record_proposal_state(self.project, observed_proposal())
+        self.assertEqual(vcs.live_proposal_refs(self.project, "mizu/x-1"),
+                         ["forge:owner/repo#1"])
+        self.assertEqual(
+            vcs.live_proposal_refs(self.project, "refs/heads/mizu/x-1"),
+            ["forge:owner/repo#1"])
+        ctx = self.retire()
+        with self.assertRaisesRegex(Denied, "forge:owner/repo#1"):
+            ctx.handle("vcs_retire", {"branch": "refs/heads/mizu/x-1",
+                                      "expected_sha": SHA_A})
+        self.assertFalse((ctx.run_dir / "vcs-retire.json").exists())
+
     def test_open_base_reference_blocks(self):
         vcs.record_proposal_state(self.project,
                                   observed_proposal(ref="feature",

@@ -806,7 +806,10 @@ def live_proposal_refs(project, branch: str) -> list:
     latest recorded state is outside ``TERMINAL_STATES`` and a
     non-deleted head or base endpoint names ``branch``. Refs are the
     second-to-last line token (repos may hold spaces; ref names never
-    do); ``deleted`` endpoints reference nothing live. Bounds: unknown
+    do); ``deleted`` endpoints reference nothing live. Both the queried
+    branch and recorded refs normalize through ``_short_branch_name``,
+    so full ``refs/heads/`` spellings block exactly like short names.
+    Bounds: unknown
     states block (fail closed toward preservation); unparseable bodies
     are skipped, never treated as references. Trust: recorded local
     observations only, no adapter call. Failure: never raises for
@@ -814,6 +817,7 @@ def live_proposal_refs(project, branch: str) -> list:
     branch name.
     """
     check_branch(branch)
+    want = _short_branch_name(branch)
     blocking = set()
     for record in project.insights.scan_source("vcs"):
         if not record.get("id", "").startswith("proposal-"):
@@ -829,8 +833,8 @@ def live_proposal_refs(project, branch: str) -> list:
             elif line.startswith("head: ") or line.startswith("base: "):
                 parts = line.split(" ")[1:]
                 if len(parts) >= 2 and parts[-1] != "deleted":
-                    refs.add(parts[-2])
-        if state is not None and state not in TERMINAL_STATES and branch in refs:
+                    refs.add(_short_branch_name(parts[-2]))
+        if state is not None and state not in TERMINAL_STATES and want in refs:
             for line in body.splitlines():
                 if line.startswith("id: "):
                     blocking.add(line[len("id: "):])
