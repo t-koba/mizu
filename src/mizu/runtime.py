@@ -595,6 +595,14 @@ class Context:
     def _op_finish(self, args: dict) -> dict:
         if not args["summary"].strip():
             raise Denied("A nonempty work summary is required")
+        from .routing import check_recommendation
+        profile, reason = check_recommendation(args.get("next_profile"), args.get("next_reason"))
+        if profile is not None:
+            args = {**args, "next_profile": profile}
+            if reason is not None:
+                args = {**args, "next_reason": reason}
+            else:
+                args = {k: v for k, v in args.items() if k != "next_reason"}
         if self.role.workspace == "write":
             if not args.get("state", "").strip():
                 raise Denied("Writable roles must provide the updated short state")
@@ -1206,6 +1214,8 @@ class Engine:
                 write_json(run_dir / "result.json", result)
                 if role.workspace == "write":
                     project.snapshots.publish(snapshot)
+                from .routing import record as record_routing
+                record_routing(project, role_name, finished, snapshot, context.goal_digest, run_id)
                 if context.commentary is not None:
                     result["artifact"] = publish(project, snapshot, context.commentary, run_id=run_id)
                 if session_dir is not None:

@@ -174,7 +174,14 @@ def classify(engine, project, role, snapshot, facts, *, preview=False):
 
 def prepare(engine, project, role, snapshot, explicit=None, *, preview=False):
     from .selection import base_facts, rule_attributes, select
+    from .fs import digest
+    from .routing import current as routing_current
     facts, sources = base_facts(project, role, snapshot, explicit)
+    routing = routing_current(project, role.name, digest(project.goal.encode()), snapshot["id"])
+    if routing["status"] == "fresh":
+        facts["recommendation"] = {"profile": routing["recommendation"]["profile"]}
+        if routing["recommendation"].get("reason"):
+            facts["recommendation"]["reason"] = routing["recommendation"]["reason"]
     spec = engine.config.selectors[role.selector]
     rule_attributes(spec, facts, sources)
     definition = spec.get('classifier')
@@ -200,6 +207,10 @@ def prepare(engine, project, role, snapshot, explicit=None, *, preview=False):
     from .selection import attributes
     attributes(facts["attributes"])
     decision = select(engine.config, role, facts, sources, classification=classification)
+    decision["recommendation"] = ({"status": routing["status"]}
+                                  if routing["recommendation"] is None
+                                  else {"status": routing["status"],
+                                        "recommendation": routing["recommendation"]})
     if classification and classification.get('waiting'):
         decision.update(profile=None, reason='classification_wait',
                         next_evaluation_at=min(decision['next_evaluation_at'], classification['retry_at']))

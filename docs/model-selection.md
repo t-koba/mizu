@@ -90,7 +90,7 @@ Available paths:
 | Context | Facts |
 |---|---|
 | Classification rules | `role`, `project` (names), `attributes.NAME`, `task.goal`, `task.state` |
-| Selection rules | Above, plus `observations.GROUP.fresh/observed_at/expires_at/facts.NAME`, `history.PROFILE.status/at/run/error` |
+| Selection rules | Above, plus `observations.GROUP.fresh/observed_at/expires_at/facts.NAME`, `history.PROFILE.status/at/run/error`, `recommendation.profile/reason` (fresh only; absent otherwise) |
 | Candidate conditions | Above, plus `candidate.profile/group/history` |
 | Error rules | Recorded selection facts (excluding task text), plus `error.source/kind/code/message/retry_at/details` |
 
@@ -174,6 +174,47 @@ existing attributes or waits, according to `on_failure`; retries are throttled
 by `retry_seconds`. Local config/permission/protocol integrity failures, budget
 exhaustion and cancellation propagate normally, rather than selecting around
 a broken execution contract. Corrupt cache/state files fail explicitly.
+
+## Worker-directed next-unit routing
+
+A finishing unit can recommend the profile the next unit should use, with
+no extra model call: the recommendation rides on the existing `finish`
+tool, which accepts optional `next_profile` (a profile identifier) and
+`next_reason` (bounded text, requires `next_profile`). Malformed values
+are refused at finish time.
+
+The runtime records the recommendation under the run lock in
+`routing/ROLE.json`, bound to the finished task inputs: the goal digest
+and the published snapshot id. The next unit's selection exposes it as
+`recommendation.profile`/`recommendation.reason` facts only while the
+binding still matches the current goal and snapshot. A goal edit or a new
+publication makes it stale; a missing file reads as absent; a corrupt file
+reads as invalid. Stale, absent, and invalid records fall back to ordinary
+selection and are reported in the decision's `recommendation` status, never
+fatal. Recommendations stay valid while the task is unchanged, so a unit
+countermands by recommending again, including back to the default profile.
+
+The recommendation-to-profile mapping is operator policy: ordinary
+selector rules match on it, so blocks, availability, and candidate order
+keep working unchanged. No profile names or difficulty criteria live in
+the product; the recommended string is only validated as an identifier:
+
+```toml
+[[selectors.coding.rules]]
+when = {path = "recommendation.profile", op = "eq", value = "deep"}
+candidates = [
+  {profile = "deep-reasoning"},
+  {profile = "main"},
+]
+```
+
+A profile switch starts a fresh bounded session (sessions are namespaced
+by effective profile settings, so conversations are never transplanted);
+returning to the earlier profile resumes its conversation. Routing applies
+to selector roles; fixed-profile roles ignore recorded recommendations.
+Deployment and routing policy activation remain operator work: without
+selector rules matching `recommendation.*`, recorded recommendations change
+nothing.
 
 ## External observations and preview
 
