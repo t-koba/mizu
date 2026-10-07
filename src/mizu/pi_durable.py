@@ -21,7 +21,8 @@ from . import pi as _pi
 from .bridge import Bridge
 from .config import role_policy_text
 from .drivers import EVENT_RECORD_BYTES
-from .engine_config import adapter_digest, effective, session_record
+from .engine_config import (MAX_SESSION_TOKENS, adapter_digest, effective,
+                             save_session, session_record, session_token_total)
 from .errors import Cancelled, ConfigError, LimitExceeded, ProtocolError, ModelFailure
 from .fs import atomic_write, canonical, digest, mkdir, write_json
 from .pi_durable_store import (BACKENDS, RESUME_MODES, complete_run, complete_turn,
@@ -97,7 +98,10 @@ class PiDurableDriver:
             raise ConfigError("Durable prompt must be nonempty")
         if len(prompt_bytes) > EVENT_RECORD_BYTES:
             raise ConfigError("Durable prompt exceeds the bounded record")
-        path, _ = session_record(context, profile, settings)
+        # The durable SQLite store (keyed by session_key) owns conversation
+        # resume and supersedes native session files; the session record
+        # still carries cumulative usage for rotation, like the pi engine.
+        path, saved = session_record(context, profile, settings)
         session_key = path.parent.name
         project_name = getattr(getattr(context, "project", None), "name", "unknown")
         model = self.config.model(profile)
@@ -132,8 +136,12 @@ class PiDurableDriver:
                 complete_run(conn, run_key, {"cancelled": True}, status="cancelled")
                 raise Cancelled("Run cancelled before durable dispatch")
             record_turn(conn, run_key, existing + 1, "prompt", {"bytes": len(prompt_bytes)})
-            outcome = self._run_once(context, settings, model, prompt, profile, run_key, store_path)
+            outcome = self._run_once(context, settings, model, prompt, profile, run_key, store_path,
+                                     remaining=policy["max_turns"] - existing)
             complete_turn(conn, run_key, existing + 1, {"engine": ENGINE}, state="completed")
+            if settings["session"] == "persistent" and not context.ephemeral:
+                save_session(path, f"pi-durable:{session_key}",
+                             {"tokens": _cumulative_tokens(saved, outcome)})
             complete_run(conn, run_key, {"engine": outcome.get("engine"), "requests": outcome.get("requests")}, status="completed")
             outcome["durable"] = {"resumed": bool(started_record.get("resumed")), "duplicate": False,
                                   "store": str(store_path), "projection": project_context(conn, run_key),
@@ -162,7 +170,8 @@ class PiDurableDriver:
             except Exception:
                 pass
 
-    def _run_once(self, context, settings, model, prompt, profile, run_key, store_path) -> dict:
+    def _run_once(self, context, settings, model, prompt, profile, run_key, store_path,
+                   remaining: int = 128) -> dict:
         # One admitted durable submission: effective file in, one bounded
         # JSON result document out. The bridge stays open for the whole
         # submission so tool callbacks and admission share one deadline.
@@ -171,10 +180,14 @@ class PiDurableDriver:
         cwd = context.run_dir / "controller"
         mkdir(cwd)
         options = dict(settings.get("options", {}))
+        # The turn budget is shared: persisted turns already spent on this
+        # run leave `remaining` admissions for the Harness submission, so
+        # retries and Harness-internal steps draw from one bound.
         effective_config = {
             "provider": model["provider"], "model": model["model"],
             "instructions": policy, "tools": tool_definitions(context.role.capabilities),
             "cwd": str(cwd), "store": str(store_path), "requestId": run_key, "prompt": prompt,
+            "max_turns": max(1, remaining),
         }
         if options.get("thinkingLevel") is not None:
             effective_config["thinkingLevel"] = options["thinkingLevel"]
@@ -208,24 +221,70 @@ class PiDurableDriver:
                 reported = json.loads(result.stdout.strip())
             except (ValueError, UnicodeError) as exc:
                 raise ProtocolError("Durable launcher returned an invalid result") from exc
-            if not isinstance(reported, dict) or reported.get("durable_result") is not True:
-                raise ProtocolError("Durable launcher returned an invalid result")
-            if reported.get("status") != "done":
-                raise ModelFailure("pi-durable", kind="unanswered",
-                                   message=str(reported.get("reason") or "submission unanswered"))
-            if not reported.get("finish_called") or context.finished is None:
-                raise ProtocolError("Pi-durable settled without mizu_finish")
-            if context.request_count == 0:
-                raise ProtocolError("No runtime request admission observed")
-            usage = reported.get("usage")
-            if isinstance(usage, dict):
-                mapped = {"input_tokens": usage.get("input", 0), "output_tokens": usage.get("output", 0),
-                          "cache_read_tokens": usage.get("cacheRead", 0),
-                          "cache_write_tokens": usage.get("cacheWrite", 0)}
-                context.model_evidence.update(requests=int(reported.get("requests", 0) or 0),
-                                              usage=[mapped], usage_known=True,
-                                              observed_models=[{**model, "thinkingLevel": options.get("thinkingLevel")}],
-                                              usage_observations=[{"usage": mapped, **model}])
-            else:
-                context.model_evidence.update(requests=int(reported.get("requests", 0) or 0))
+            interpret_result(reported, context, model, options.get("thinkingLevel"))
             return {**context.model_evidence, "seconds": round(time.monotonic() - started, 3)}
+
+
+def interpret_result(reported, context, model, thinking_level) -> None:
+    """Validate the launcher result document and record usage evidence.
+
+    Schema: ``reported`` is the parsed one-shot result (``durable_result``
+    true, ``status`` done/turn_bound/other). ``turn_bound`` maps to
+    ``LimitExceeded`` so the spent budget surfaces as a bound, never a
+    silent stop; other non-done statuses map to ``ModelFailure``. A done
+    result still requires the ``mizu_finish`` seal and at least one
+    admitted request, like the pi engine. Bounds: usage counters pass
+    through as-is; evidence stays local. Failure: ``ProtocolError``,
+    ``ModelFailure`` or ``LimitExceeded``.
+    """
+    if not isinstance(reported, dict) or reported.get("durable_result") is not True:
+        raise ProtocolError("Durable launcher returned an invalid result")
+    if reported.get("status") == "turn_bound":
+        raise LimitExceeded("Durable turn bound exhausted")
+    if reported.get("status") != "done":
+        raise ModelFailure("pi-durable", kind="unanswered",
+                           message=str(reported.get("reason") or "submission unanswered"))
+    if not reported.get("finish_called") or context.finished is None:
+        raise ProtocolError("Pi-durable settled without mizu_finish")
+    if context.request_count == 0:
+        raise ProtocolError("No runtime request admission observed")
+    usage = reported.get("usage")
+    if isinstance(usage, dict):
+        mapped = {"input_tokens": usage.get("input", 0), "output_tokens": usage.get("output", 0),
+                  "cache_read_tokens": usage.get("cacheRead", 0),
+                  "cache_write_tokens": usage.get("cacheWrite", 0)}
+        context.model_evidence.update(requests=int(reported.get("requests", 0) or 0),
+                                      usage=[mapped], usage_known=True,
+                                      observed_models=[{**model, "thinkingLevel": thinking_level}],
+                                      usage_observations=[{"usage": mapped, **model}])
+    else:
+        context.model_evidence.update(requests=int(reported.get("requests", 0) or 0))
+
+
+def _cumulative_tokens(saved, outcome) -> int:
+    """Cumulative durable session tokens: saved total plus this run's usage.
+
+    Schema: reads the bounded saved record plus the mapped launcher usage
+    (``input_tokens``/``output_tokens``/``cache_read_tokens``/
+    ``cache_write_tokens``). Bounds: capped at 2**63-1. Trust: local
+    evidence only. Failure: unknown shapes add nothing, so rotation stays
+    age-driven when the launcher reports no recognized counters.
+    """
+    run_total = 0
+    # The run outcome carries model_evidence usage: a list with one mapped
+    # entry (or empty when the launcher reported no usage).
+    items = outcome.get("usage") if isinstance(outcome, dict) else None
+    entries = items if isinstance(items, list) else ([items] if isinstance(items, dict) else [])
+    for value in entries[:4096]:
+        if not isinstance(value, dict):
+            continue
+        for field in ("input_tokens", "output_tokens", "cache_read_tokens",
+                      "cache_write_tokens", "other_tokens"):
+            piece = value.get(field, 0)
+            if type(piece) is int and piece > 0:
+                run_total = min(run_total + piece, MAX_SESSION_TOKENS)
+    try:
+        previous = session_token_total(saved, ENGINE)
+    except Exception:
+        previous = 0
+    return min(previous + run_total, MAX_SESSION_TOKENS)

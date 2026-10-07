@@ -123,7 +123,7 @@ thinkingLevel = "off"
 # durable_backend = "sqlite"       # Only backend; unknown values are refused.
 # durable_resume = "compatible"    # compatible binds resume to current grants; fresh refuses resume.
 # durable_retention_days = 31      # Terminal-store retention applied per execute with accounting; omit to disable.
-# durable_max_turns = 128          # Per-run persisted turn bound (1-1024).
+# durable_max_turns = 128          # Shared per-run turn budget (1-1024): persisted turns plus Harness steps.
 
 # Native options belong to the selected engine; Mizu has no effort enum.
 # [profiles.codex]

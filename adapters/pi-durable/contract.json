@@ -11,5 +11,7 @@
   "completion": "settled submission + mizu seal",
   "request_unit": "model_request",
   "dependency_evidence": "package-lock.json",
-  "durable": "pi-durable 1.0.4 Harness over file-backed SQLite with requestId resume binding; replay unsafe by default"
+  "durable": "pi-durable 1.0.4 Harness over file-backed SQLite with requestId resume binding; replay unsafe by default",
+  "bridge_client": "vendored copy of adapters/pi/bridge-client.mjs: the pinned adapter digest covers its own protocol bytes, so framing and caps stay inside this contract instead of a shared import",
+  "turn_bound": "max_turns carries the grant's remaining turn budget; the launcher aborts the submission past it (turn_bound)"
 }

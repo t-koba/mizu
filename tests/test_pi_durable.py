@@ -67,15 +67,64 @@ class PolicyTests(Fixture):
         profile = self._durable_profile(durable_max_turns=1)
         driver = pi_durable.PiDurableDriver(self.config)
         context = self.context()
+        seen = {}
         def boom(*args, **kwargs):
+            seen.update(kwargs)
             raise ModelFailure("pi-durable", kind="error", message="boom")
         driver._run_once = boom
         with self.assertRaises(ModelFailure):
             driver.execute(context, "hello", profile=profile)
+        # The launcher gets the remaining budget (one turn, nothing spent).
+        self.assertEqual(seen.get("remaining"), 1)
         # The interrupted attempt left one persisted unknown turn; the bound
         # of one is now exhausted, so resume is refused instead of retried.
         with self.assertRaises(LimitExceeded):
             driver.execute(context, "hello", profile=profile)
+
+    def test_turn_bound_result_maps_to_limit(self):
+        from mizu.errors import ProtocolError
+        context = self.context()
+        context.handle("_hello", {})
+        context.handle("_budget", {"sequence": 1})
+        context.handle("finish", {"outcome": "wait", "summary": "s", "state": "n"})
+        context.model_evidence = {"requests": 0, "usage": [], "usage_known": False}
+        model = {"provider": "p", "model": "m"}
+        with self.assertRaises(LimitExceeded):
+            pi_durable.interpret_result({"durable_result": True, "status": "turn_bound",
+                                         "reason": "spent"}, context, model, None)
+        with self.assertRaises(ProtocolError):
+            pi_durable.interpret_result({"durable_result": True, "status": "done",
+                                         "finish_called": False}, context, model, None)
+        pi_durable.interpret_result({"durable_result": True, "status": "done",
+                                     "finish_called": True, "requests": 2,
+                                     "usage": {"input": 3, "output": 4}},
+                                    context, model, None)
+        self.assertTrue(context.model_evidence["usage_known"])
+        self.assertEqual(context.model_evidence["usage"][0]["input_tokens"], 3)
+
+    def test_persistent_session_saves_cumulative_tokens(self):
+        profile = self._durable_profile()
+        role = self.config.roles["worker"]
+        self.config.profiles[profile]["session"] = "persistent"
+        driver = pi_durable.PiDurableDriver(self.config)
+        context = self.context()
+        usage = {"input_tokens": 10, "output_tokens": 5,
+                 "cache_read_tokens": 0, "cache_write_tokens": 0}
+        driver._run_once = lambda *a, **k: {"engine": "pi-durable", "requests": 1,
+                                            "usage": [dict(usage)]}
+        out = driver.execute(context, "hello", profile=profile)
+        self.assertEqual(out["requests"], 1)
+        parallel = context.run_dir.parents[1] / "sessions" / role.name
+        saved = [p for p in parallel.rglob("session.json")]
+        self.assertEqual(len(saved), 1)
+        import json
+        record = json.loads(saved[0].read_text())
+        self.assertEqual(record["usage"], {"tokens": 15})
+        # A second run carries the saved total forward.
+        context2 = self.context()
+        driver.execute(context2, "again", profile=profile)
+        record2 = json.loads(saved[0].read_text())
+        self.assertEqual(record2["usage"], {"tokens": 30})
 
 
 class StoreTests(unittest.TestCase):

@@ -21,6 +21,8 @@
  * and usage reporting around every provider call, mizu_finish seal required.
  */
 import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Type } from '@earendil-works/pi-ai';
 import { builtinModels } from '@earendil-works/pi-ai/providers/all';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
@@ -30,12 +32,63 @@ import { request, typeSchema } from './bridge-client.mjs';
 
 const CONTRACT_EXPORTS = ['Harness', 'createRegistry', 'defineExtension', 'defineTool', 'openNodeSqliteStorage', 'builtinModels'];
 
+export function meterModels(models, hooks) {
+  // Guarded provider metering shared by the one-shot submission path.
+  // Each entry point is wrapped only when the pinned SDK provides it as a
+  // function; a renamed or dropped method fails closed here instead of
+  // crashing mid-run on undefined. Not shared with the pi engine's
+  // meterRuntime: that wraps the Runtime (model, context, options) facade
+  // with pi-virtual admission dedup, while this wraps the Models facade
+  // where every stream* call is one provider request.
+  if (!hooks || typeof hooks.admit !== 'function' || typeof hooks.report !== 'function') {
+    throw new Error('Durable metering requires admit/report hooks');
+  }
+  const streams = ['stream', 'streamSimple', 'streamDeferred']
+    .filter(name => typeof models?.[name] === 'function');
+  if (!streams.length) throw new Error('No meterable provider entry point on pi-durable models');
+  for (const name of streams) {
+    const original = models[name].bind(models);
+    models[name] = (...args) => {
+      const source = (async () => { await hooks.admit(); return original(...args); })();
+      const pending = source.then(stream => stream.result()).then(async value => {
+        await hooks.report(value?.usage, value);
+        return value;
+      });
+      // The rejection stays visible to result()/iterator consumers; this
+      // empty branch only stops an unconsumed stream from crashing the
+      // process after the bound already tripped.
+      pending.catch(() => {});
+      return {
+        result: () => pending,
+        async *[Symbol.asyncIterator]() {
+          const stream = await source;
+          yield* stream;
+          await pending;
+        },
+      };
+    };
+  }
+  for (const name of ['classify', 'generateImages']
+    .filter(name => typeof models?.[name] === 'function')) {
+    const original = models[name].bind(models);
+    models[name] = async (...args) => {
+      await hooks.admit();
+      const result = await original(...args);
+      await hooks.report(result?.usage, result);
+      return result;
+    };
+  }
+}
+
 function fail(message) {
   process.stderr.write(`pi-durable: ${message}\n`);
   process.exit(1);
 }
 
-if (process.argv.includes('--check-contract')) {
+const invokedAsMain = process.argv[1] !== undefined
+  && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (process.argv.includes('--check-contract') && invokedAsMain) {
   const missing = [];
   for (const [name, fn] of [
     ['Harness', Harness?.open], ['createRegistry', createRegistry],
@@ -45,7 +98,7 @@ if (process.argv.includes('--check-contract')) {
   if (missing.length) fail(`Required durable capability missing: ${missing.join(', ')}`);
   process.stdout.write(JSON.stringify({ contract: 'managed-pi-durable-sdk', backend: 'pi-durable',
     exports: CONTRACT_EXPORTS, inference: 'not_run' }) + '\n');
-} else {
+} else if (invokedAsMain) {
   let cfg;
   try {
     cfg = JSON.parse(readFileSync(process.argv[2], 'utf8'));
@@ -68,6 +121,8 @@ async function runOnce(cfg) {
     if (typeof cfg[field] !== 'string' || !cfg[field]) throw new Error(`Effective configuration lacks ${field}`);
   }
   if (!Array.isArray(cfg.tools) || !cfg.tools.length) throw new Error('Effective configuration carries no bridge tools');
+  if (!Number.isInteger(cfg.max_turns) || cfg.max_turns < 1) throw new Error('Effective configuration lacks max_turns');
+  const maxTurns = cfg.max_turns;
   if (cfg.engine_tools?.length) throw new Error('Native host tools bypass the OCI bridge');
   if (cfg.resources?.length) throw new Error('Resource kinds are unsupported on pi-durable');
   if (cfg.mcp_servers && Object.keys(cfg.mcp_servers).length) throw new Error('MCP servers are unsupported on pi-durable');
@@ -87,10 +142,22 @@ async function runOnce(cfg) {
   // stream entry points meters each provider request exactly once.
   let sequence = 0;
   let requests = 0;
+  let boundTripped = false;
+  let submission = null;
   const observations = [];
   async function admit() {
     await request(bridge, '_budget', { sequence: ++sequence });
     requests++;
+    if (requests > maxTurns && !boundTripped) {
+      // The grant's remaining turn budget is spent: stop Harness work
+      // instead of running unbounded inside one submission. wait() below
+      // settles the aborted submission; the flag maps it to turn_bound.
+      boundTripped = true;
+      try { if (submission) await submission.abort(context); } catch {}
+      const error = new Error('Durable turn bound exhausted');
+      error.code = 'TURN_BOUND';
+      throw error;
+    }
   }
   async function reportUsage(usage, shape) {
     if (!usage) return;
@@ -99,33 +166,7 @@ async function runOnce(cfg) {
     await request(bridge, '_model_usage', { sequence: ++sequence, usage,
       model: { provider: cfg.provider, model: cfg.model, thinkingLevel: cfg.thinkingLevel ?? null } });
   }
-  for (const name of ['stream', 'streamSimple', 'streamDeferred']) {
-    const original = models[name].bind(models);
-    models[name] = (...args) => {
-      const source = (async () => { await admit(); return original(...args); })();
-      const pending = source.then(stream => stream.result()).then(async value => {
-        await reportUsage(value?.usage, value);
-        return value;
-      });
-      return {
-        result: () => pending,
-        async *[Symbol.asyncIterator]() {
-          const stream = await source;
-          yield* stream;
-          await pending;
-        },
-      };
-    };
-  }
-  for (const name of ['classify', 'generateImages']) {
-    const original = models[name].bind(models);
-    models[name] = async (...args) => {
-      await admit();
-      const result = await original(...args);
-      await reportUsage(result?.usage, result);
-      return result;
-    };
-  }
+  meterModels(models, { admit, report: reportUsage });
 
   // Bridge tools as one durable extension. Intent commits before execute;
   // interrupted executions are never rerun (replay unsafe default), so an
@@ -165,8 +206,15 @@ async function runOnce(cfg) {
     if (resolved?.model?.provider !== cfg.provider || resolved?.model?.modelId !== cfg.model) {
       throw new Error('Durable session resolved a different model/provider');
     }
-    const submission = await root.submit({ type: 'input', content: cfg.prompt, requestId: cfg.requestId }, context);
+    submission = await root.submit({ type: 'input', content: cfg.prompt, requestId: cfg.requestId }, context);
     const settled = await submission.wait(context);
+    if (boundTripped) {
+      const usage = await harness.usage(context).catch(() => null);
+      return { durable_result: true, status: 'turn_bound', reason: 'Durable turn bound exhausted',
+        finish_called: finishCalled, sealed, requests, observed: observations,
+        usage: usage?.models?.[`${cfg.provider}/${cfg.model}`] ?? null,
+        usage_models: Object.keys(usage?.models ?? {}), answer: null };
+    }
     const usage = await harness.usage(context);
     const key = `${cfg.provider}/${cfg.model}`;
     let answer = null;

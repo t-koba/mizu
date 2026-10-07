@@ -171,7 +171,10 @@ A profile explicitly selects `engine`, `provider`, `model`, and `session`
 that engine: Pi `thinkingLevel`, `settings`, `codemode`, `toolSearch`,
 `excludeTools`, `scopedModels`; pi-durable `thinkingLevel` plus
 `durable_backend` (`sqlite`), `durable_resume` (`compatible`|`fresh`),
-`durable_retention_days` (0-3650), `durable_max_turns` (1-1024). Pi SDK knobs
+`durable_retention_days` (0-3650), `durable_max_turns` (1-1024). The turn
+budget is shared per run: persisted turns already spent leave the remainder
+for the launcher, which aborts the Harness submission past it (`turn_bound`
+maps to a bound error, never a silent stop). Pi SDK knobs
 are refused on pi-durable profiles and durable policy is refused on pi
 profiles instead of silently ignored. pi-durable resolves the exact model
 over built-in providers only; custom provider setups stay on pi. Codex native configuration keys plus `options.turn` for native turn fields

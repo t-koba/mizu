@@ -10,6 +10,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
+import { spawnSync } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join as joinPath } from 'node:path';
+import { meterModels } from '../adapters/pi-durable/launcher.mjs';
 import { AssistantEntry, BACKGROUND_CONTEXT, Harness, Type, createModels, createRegistry,
   defineExtension, defineTool, fauxAssistantMessage, fauxProvider, fauxToolCall,
   openNodeSqliteStorage } from '../adapters/pi-durable/test-support.mjs';
@@ -39,8 +44,11 @@ function backend(directory) {
     },
   });
   const registry = createRegistry();
-  registry.install(defineExtension({ name: 'test', tools: [probe, finish] }));
-  return { models, faux, registry, calls: () => calls, seen };
+  const tools = [probe, finish];
+  registry.install(defineExtension({ name: 'test', tools }));
+  // Return the installed registrations: agent tools take the tool objects,
+  // exactly as the launcher passes them — never bare names or undefined.
+  return { models, faux, registry, tools, calls: () => calls, seen };
 }
 
 test('requestId submit is idempotent and settles with usage', async () => {
@@ -93,6 +101,57 @@ test('close/reopen resumes pending work exactly once', async () => {
     const answer = await root2.commit(tx => tx.entry(AssistantEntry, settled.answer), context);
     assert.ok(answer);
     await two.close(context);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('metering guards entry points and stops past the turn bound', async () => {
+  assert.throws(() => meterModels({}, { admit: async () => {}, report: async () => {} }),
+    /No meterable provider entry point/);
+  assert.throws(() => meterModels({ stream: async () => {} }, {}), /admit\/report hooks/);
+  let dispatched = 0;
+  let admitted = 0;
+  const reported = [];
+  let tripped = false;
+  const fake = {
+    stream: async () => {
+      dispatched++;
+      return { result: async () => ({ usage: { input: 1 } }),
+        [Symbol.asyncIterator]() { return (async function* () {})(); } };
+    },
+  };
+  meterModels(fake, {
+    admit: async () => {
+      if (++admitted > 1 && !tripped) {
+        tripped = true;
+        const error = new Error('Durable turn bound exhausted');
+        error.code = 'TURN_BOUND';
+        throw error;
+      }
+    },
+    report: async (usage) => { reported.push(usage); },
+  });
+  await (await fake.stream()).result();
+  assert.equal(dispatched, 1);
+  await assert.rejects((await fake.stream()).result(), /Durable turn bound exhausted/);
+  assert.equal(dispatched, 1); // the over-budget call never dispatches
+  assert.ok(tripped);
+  assert.deepEqual(reported, [{ input: 1 }]);
+});
+
+test('launcher refuses effective configuration without max_turns', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'mizu-durable-'));
+  try {
+    // Every field but max_turns: the gate must name the missing bound.
+    const cfg = { provider: 'p', model: 'm', instructions: 'i', store: join(directory, 's.sqlite'),
+      requestId: 'r', prompt: 'go', cwd: directory, tools: [{ name: 't' }] };
+    const file = join(directory, 'effective.json');
+    writeFileSync(file, JSON.stringify(cfg));
+    const launcher = joinPath(dirname(fileURLToPath(import.meta.url)), '..', 'adapters', 'pi-durable', 'launcher.mjs');
+    const child = spawnSync(process.execPath, [launcher, file], { encoding: 'utf8' });
+    assert.notEqual(child.status, 0);
+    assert.match(child.stderr, /max_turns/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
