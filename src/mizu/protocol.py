@@ -111,8 +111,8 @@ DEFINITIONS = {
     "research": ("Replace this role's own current research state record with a full new JSON object state at the read generation; stale generations are refused. Audit evidence lands in research-state.json.",
                obj({"state": text(65536), "expected_generation": {"type": "integer", "minimum": 0}}, ("state", "expected_generation"))),
     "finish": ("End this work unit. Call after all other tools. 'done' on writable roles requires successful verification. "
-               "next_profile optionally recommends the profile the next unit should use; next_reason needs next_profile. "
-               "The recommendation binds to the finished task inputs and is honored only while fresh, per operator selector rules; no extra model call is spent.",
+               "next_profile optionally names the recommended profile for the following unit; next_reason needs next_profile. "
+               "The recommendation binds to the finished task inputs and applies only while fresh, per operator selector rules; no extra model call is spent.",
                obj({"outcome": {"type": "string", "enum": ["continue", "wait", "blocked", "done"]},
                     "summary": text(12000), "state": text(32000),
                     "wait_seconds": {"type": "integer", "minimum": 1, "maximum": MAX_WAIT_SECONDS},
