@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Run network-free quality gates. Missing required tools fail, never silently skip."""
+"""Run network-free quality gates. Missing required tools fail; absent
+operator-provisioned adapter dependencies are recorded not_run with the
+reason, never silently skipped."""
 from __future__ import annotations
 import argparse
 import ast
@@ -34,6 +36,39 @@ def bash_available() -> bool:
     except (OSError, subprocess.SubprocessError):
         return False
     return probe.returncode == 0
+
+
+def durable_deps_status(adapter: Path) -> tuple:
+    """Check pinned adapter dependencies are installed at pinned versions.
+
+    The durable contract suite imports the operator-verified Pi SDK, which is
+    provisioned through the offline npm cache and never vendored into git.
+    Returns ("ready", "") when every pinned dependency resolves at its pinned
+    version, ("absent", reason) when nothing usable is installed, and
+    ("mismatch", reason) when the manifest is unreadable or an installed
+    version differs from the pin. Absent inputs are environment provisioning,
+    reported as not_run; a version mismatch fails closed like any contract
+    violation.
+    """
+    try:
+        manifest = json.loads((adapter / "package.json").read_text(encoding="utf-8"))
+        pinned = manifest["dependencies"]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return ("mismatch", f"pinned dependency manifest unreadable: {exc}")
+    if not isinstance(pinned, dict) or not pinned:
+        return ("mismatch", "pinned dependency manifest holds no dependencies")
+    modules = adapter / "node_modules"
+    for name, version in pinned.items():
+        try:
+            found = json.loads((modules / name / "package.json").read_text(encoding="utf-8")).get("version")
+        except (OSError, ValueError, AttributeError):
+            found = None
+        if found is None:
+            return ("absent", f"{name}@{version} is not installed; provision the pinned Pi "
+                              "dependencies via the offline npm cache before running the durable contract suite")
+        if not isinstance(version, str) or found != version:
+            return ("mismatch", f"{name} installed at {found}, pinned at {version}")
+    return ("ready", "")
 
 
 def main():
@@ -119,8 +154,16 @@ def main():
     if shutil.which('node'):
         execute('node-transport-and-extension-tests', ['node', '--test', 'tests/bridge.test.mjs'],
                 count=node_counts)
-        execute('node-durable-contract-tests', ['node', '--test', 'tests/durable.test.mjs'],
-                count=node_counts)
+        durable_state, durable_details = durable_deps_status(ROOT / 'adapters/pi-durable')
+        if durable_state == 'ready':
+            execute('node-durable-contract-tests', ['node', '--test', 'tests/durable.test.mjs'],
+                    count=node_counts)
+        elif durable_state == 'absent':
+            checks.append({'name': 'node-durable-contract-tests', 'status': 'not_run',
+                           'details': durable_details})
+        else:
+            checks.append({'name': 'node-durable-contract-tests', 'status': 'fail',
+                           'details': durable_details})
         for path in sorted([*(ROOT / 'adapters/pi').glob('*.mjs'), *(ROOT / 'adapters/pi-durable').glob('*.mjs'), *(ROOT / 'scripts').glob('*.mjs')]):
             execute('javascript-syntax:' + path.name, ['node', '--check', str(path)])
     if has_bash:

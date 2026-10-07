@@ -134,7 +134,8 @@ class StoreTests(unittest.TestCase):
         c = store_path_for("/data", "proj", "other", "aaa")
         self.assertNotEqual(a, b)
         self.assertNotEqual(a, c)
-        self.assertTrue(str(a).startswith("/data/durable/proj/worker/aaa"))
+        self.assertEqual(a.parent.parts[-4:], ("durable", "proj", "worker", "aaa"))
+        self.assertEqual(a.name, "store.sqlite")
 
     def test_real_persistence_recovery_and_replay_safety(self):
         import tempfile
