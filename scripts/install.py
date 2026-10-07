@@ -254,7 +254,11 @@ def stage(args):
                 command([node, str(adapter / "launcher.mjs"), "--check-contract"], cwd=adapter)
                 pi_lock = digest((adapter / "package-lock.json").read_bytes())
             # Offline source tests are a release gate. They do not claim live Pi/Podman validation.
-            command([sys.executable, "scripts/check.py", "--report", "installation-checks.json"], cwd=temporary, timeout=240)
+            # The staged tree never carries provisioned pi-durable dependencies (sources exclude
+            # node_modules; install provisions adapters/pi only), so the gate waives that suite
+            # explicitly here instead of failing for provisioning; the receipt records the waiver.
+            command([sys.executable, "scripts/check.py", "--report", "installation-checks.json",
+                     "--allow-not-run", "node-durable-contract-tests"], cwd=temporary, timeout=240)
             checks = read_json(temporary / "installation-checks.json")
             write_json(temporary / "source-manifest.json", manifest)
             write_json(temporary / "installation.json", {"version": __version__, "source_sha256": sha,
