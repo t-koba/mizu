@@ -426,6 +426,14 @@ def require_go_approval(project, branch: str, code_digest: str) -> dict:
 MAX_ACQUIRE_CONTENT = 524288
 
 
+#: Content scopes for ``acquire``. ``head`` materializes the head commit
+#: only: immutable for the sha but omits earlier proposal commits, so it
+#: must never be treated as the whole proposal. ``full`` materializes
+#: the base revision through the head (every proposal commit) and binds
+#: the base revision it was computed against.
+ACQUIRE_SCOPES = frozenset({"head", "full"})
+
+
 def acquire_digest(content: str) -> str:
     """Bind acquired content to its digest (recomputed locally, never trusted).
 
@@ -439,16 +447,23 @@ def acquire_digest(content: str) -> str:
     return _digest(_canonical(content))
 
 
-def parse_acquired(data: dict) -> dict:
+def parse_acquired(data: dict, *, scope: str, base_sha=None) -> dict:
     """Validate an ``acquire`` adapter response into a normalized receipt.
 
-    Schema: ``{"id", "sha", "digest", "content"}``; ``id`` 1-128 chars
-    without newline/NUL, ``sha`` 40/64 lowercase hex of the materialized
-    revision, ``digest`` 64 lowercase hex, ``content`` text at most
-    524288 chars. Trust: shape only; echo and digest binding are checked
-    by the caller against the request. Failure: ``Denied``.
+    Schema: ``{"id", "sha", "scope", "digest", "content"}`` plus
+    ``"base_sha"`` exactly when ``scope`` is ``"full"``; ``id`` 1-128
+    chars without newline/NUL, ``sha``/``base_sha`` 40/64 lowercase hex,
+    ``digest`` 64 lowercase hex, ``content`` text at most 524288 chars.
+    The echo must name the requested scope, and a pinned ``base_sha``
+    must echo back unchanged; an unpinned ``full`` acquisition binds
+    whatever base the adapter served. Trust: shape only; echo and
+    digest binding are checked by the caller against the request.
+    Failure: ``Denied``.
     """
-    if not isinstance(data, dict) or set(data) != {"id", "sha", "digest", "content"}:
+    keys = {"id", "sha", "scope", "digest", "content"}
+    if scope == "full":
+        keys.add("base_sha")
+    if not isinstance(data, dict) or set(data) != keys:
         raise Denied("Invalid VCS acquired content entry")
     identity = data.get("id")
     if (not isinstance(identity, str) or not identity or len(identity) > 128
@@ -457,13 +472,24 @@ def parse_acquired(data: dict) -> dict:
     sha = data.get("sha")
     if not isinstance(sha, str) or not _SHA.fullmatch(sha):
         raise Denied("Invalid VCS sha for acquisition")
+    if data.get("scope") != scope:
+        raise Denied("Acquired content scope must match the request")
+    bound = data.get("base_sha")
+    if scope == "full":
+        if not isinstance(bound, str) or not _SHA.fullmatch(bound):
+            raise Denied("Invalid VCS base sha for acquisition")
+        if base_sha is not None and bound != base_sha:
+            raise Denied("Acquired base revision must match the request")
+    else:
+        bound = None
     content_digest = data.get("digest")
     if not isinstance(content_digest, str) or len(content_digest) != 64 or not _SHA.fullmatch(content_digest):
         raise Denied("Invalid VCS acquired content digest")
     content = data.get("content")
     if not isinstance(content, str) or len(content) > MAX_ACQUIRE_CONTENT:
         raise Denied("Invalid VCS acquired content")
-    return {"id": identity, "sha": sha, "digest": content_digest, "content": content}
+    return {"id": identity, "sha": sha, "scope": scope, "base_sha": bound,
+            "digest": content_digest, "content": content}
 
 
 def read_via(settings: dict, op: str, params: dict) -> dict:
@@ -472,24 +498,32 @@ def read_via(settings: dict, op: str, params: dict) -> dict:
     Schema: ``params`` must include ``branch`` for addressed reads
     (``status``/``log``/``comments``); optional ``sha`` passes through
     when given. ``proposals`` enumerates with an optional ``branch``
-    filter. ``acquire`` takes ``id`` (proposal id) plus the exact head
-    ``sha`` to materialize and needs no branch: the endpoint travels in
-    the proposal record, so fork heads acquire by id and sha alone.
+    filter. ``acquire`` takes ``id`` (proposal id), the exact head
+    ``sha``, and the explicit content ``scope`` (``"head"`` for the head
+    commit only, ``"full"`` for the base revision through the head),
+    plus an optional ``base_sha`` pin with ``"full"``; it needs no
+    branch: the endpoint travels in the proposal record, so fork heads
+    acquire by id and sha alone. A pinned base must echo back
+    unchanged; an unpinned ``"full"`` acquisition binds whatever base
+    the adapter served, so review evidence always names both revisions.
     Bounds: same ``max_bytes``/timeout contract as ``invoke``. Trust:
     operator-owned adapter; results are external-untrusted. Failure:
-    ``Denied`` on publish ops, bad params, a moved head (echo mismatch),
-    a digest mismatch, or any adapter contract violation. Never publishes.
+    ``Denied`` on publish ops, bad params, a moved head or base (echo
+    mismatch), a scope mismatch, a digest mismatch, or any adapter
+    contract violation. Never publishes.
     """
     if op not in READ_OPS:
         raise Denied("vcs_read cannot publish; unknown or mutating operation")
     if not isinstance(params, dict):
         raise Denied("Invalid VCS read parameters")
     if op == "acquire":
-        # Exact-revision acquisition: the adapter materializes the head
-        # revision named by (id, sha) and echoes both plus the content
-        # digest. A moved head fails closed here (echo mismatch), so the
-        # caller re-observes proposals and retries with the fresh sha;
-        # identical repeats re-acquire identical content.
+        # Exact-revision acquisition: the adapter materializes the
+        # (id, sha, scope) content named here and echoes the bound
+        # revisions plus the content digest. A moved head fails closed
+        # here (echo mismatch), so the caller re-observes proposals and
+        # retries with the fresh sha; a moved base fails the same way,
+        # so the caller re-acquires at the fresh base revision.
+        # Identical repeats re-acquire identical content.
         proposal_id = params.get("id")
         if (not isinstance(proposal_id, str) or not proposal_id or len(proposal_id) > 128
                 or "\n" in proposal_id or "\x00" in proposal_id):
@@ -497,12 +531,25 @@ def read_via(settings: dict, op: str, params: dict) -> dict:
         acquire_sha = params.get("sha")
         if not isinstance(acquire_sha, str) or not _SHA.fullmatch(acquire_sha):
             raise Denied("Invalid VCS sha for acquisition")
-        acquired = parse_acquired(invoke(settings, {"op": op, "id": proposal_id, "sha": acquire_sha}))
+        scope = params.get("scope")
+        if scope not in ACQUIRE_SCOPES:
+            raise Denied("Acquisition needs an explicit content scope")
+        base_sha = params.get("base_sha")
+        if scope == "head":
+            if base_sha is not None:
+                raise Denied("Head acquisition binds no base revision")
+        elif base_sha is not None and (not isinstance(base_sha, str) or not _SHA.fullmatch(base_sha)):
+            raise Denied("Invalid VCS base sha for acquisition")
+        request = {"op": op, "id": proposal_id, "sha": acquire_sha, "scope": scope}
+        if base_sha is not None:
+            request["base_sha"] = base_sha
+        acquired = parse_acquired(invoke(settings, request), scope=scope, base_sha=base_sha)
         if acquired["id"] != proposal_id or acquired["sha"] != acquire_sha:
             raise Denied("Acquired content must match the requested proposal revision")
         if acquired["digest"] != acquire_digest(acquired["content"]):
             raise Denied("Acquired content digest mismatch")
         return {"op": op, "id": proposal_id, "sha": acquire_sha,
+                "scope": scope, "base_sha": acquired["base_sha"],
                 "digest": acquired["digest"], "content": acquired["content"],
                 "trust": "external-untrusted"}
     branch = params.get("branch")
