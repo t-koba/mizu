@@ -36,13 +36,14 @@ def parser() -> argparse.ArgumentParser:
     initialize.add_argument("--armed", action="store_true",
                             help="Start armed (operator has reviewed the source at init time)")
     initialize.add_argument("--verify", action="append", default=[], help="Operator-owned acceptance command; repeatable")
-    for name in ("status", "arm", "pause", "resume", "wake", "disarm"):
+    for name in ("status", "arm", "pause", "resume", "wake", "disarm", "drain"):
         p = sub.add_parser(name, help={"status": "Show control, snapshot, budget and health",
                                        "arm": "Arm after reviewing configuration",
                                        "pause": "Pause without disarming",
                                        "resume": "Resume an armed project",
                                        "wake": "Request another work unit",
-                                       "disarm": "Disarm and pause"}[name])
+                                       "disarm": "Disarm and pause",
+                                       "drain": "Stop new runs; active runs finish undisturbed"}[name])
         p.add_argument("project", help="Managed project name")
     for name in ("run", "daemon", "cleanup"):
         p = sub.add_parser(name, help={"run": "Run one work unit (single JSON to stdout)",
@@ -67,10 +68,12 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("group")
     p = sub.add_parser("doctor", help="Check platform, versions, isolation prerequisites and budget file")
     p.add_argument("--sandbox", action="store_true", help="Actually execute the rootless isolation smoke")
+    p.add_argument("--sandbox-image", default=None, help="Ephemeral candidate image for this check only; never writes config")
     p = sub.add_parser("smoke", help="Paid read-only live probe; never touches a real project")
     p.add_argument("--live", action="store_true", required=True, help="Explicit consent to a paid, read-only Pi/provider probe")
     p.add_argument("--profile", help="Model profile for the probe")
     p.add_argument("--role", default=None, help="Read-only probe role (default: consult when present, else single role)")
+    p.add_argument("--sandbox-image", default=None, help="Ephemeral candidate image for this probe only; never writes config")
     p = sub.add_parser("insight", help="Submit, list, read, decide or ingest proposals")
     p.add_argument("action", choices=("submit", "list", "read", "decide", "ingest", "revise", "history", "withdraw"), help="Proposal operation")
     p.add_argument("project", help="Managed project name")
@@ -171,7 +174,7 @@ def _cmd_arm(config, project, args):
     for name in project.roles:
         for profile in role_profiles(config, config.roles[name]):
             config.model(profile)
-    return project.set_control(armed=True, paused=False, reason="Operator armed", wake_generation=uuid.uuid4().hex)
+    return project.set_control(armed=True, paused=False, draining=False, reason="Operator armed", wake_generation=uuid.uuid4().hex)
 
 
 def _cmd_disarm(config, project, args):
@@ -182,11 +185,15 @@ def _cmd_pause(config, project, args):
     return project.set_control(paused=True, reason="Operator paused")
 
 
+def _cmd_drain(config, project, args):
+    return project.set_control(draining=True, reason="Operator drained new runs; active runs finish undisturbed")
+
+
 def _cmd_resume(config, project, args):
     if not project.control().get("armed"):
         raise Denied("Project is unarmed; use arm after reviewing its configuration")
     project.reset_health()
-    return project.set_control(paused=False, reason="Operator resumed", wake_generation=uuid.uuid4().hex)
+    return project.set_control(paused=False, draining=False, reason="Operator resumed", wake_generation=uuid.uuid4().hex)
 
 
 def _cmd_wake(config, project, args):
@@ -340,7 +347,7 @@ def _cmd_storage(config, project, args):
 
 _PROJECT_COMMANDS = {
     "status": _cmd_status, "arm": _cmd_arm, "disarm": _cmd_disarm,
-    "pause": _cmd_pause, "resume": _cmd_resume, "wake": _cmd_wake,
+    "pause": _cmd_pause, "resume": _cmd_resume, "wake": _cmd_wake, "drain": _cmd_drain,
     "run": _cmd_run, "daemon": _cmd_daemon, "cleanup": _cmd_cleanup,
     "insight": _cmd_insight, "service": _cmd_service, "report": _cmd_report,
     "usage": _cmd_usage, "backup": _cmd_backup,
@@ -370,6 +377,23 @@ def _attribute_input(path):
     return attributes(_selection_json(path)) if path else {}
 
 
+def _with_sandbox_image(config, image):
+    """Ephemeral candidate image for doctor/smoke only; never writes config.
+
+    Schema: digest-pinned image ID or reference, same rule as sandbox.image.
+    Bounds: in-memory dataclass replace only. Trust: operator CLI flag.
+    Failure: ConfigError on anything unpinned; the caller never persists it.
+    """
+    import dataclasses
+    import re
+    if image is None:
+        return config
+    if not isinstance(image, str) or not (re.fullmatch(r"sha256:[0-9a-f]{64}", image)
+                                          or re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}", image)):
+        raise ConfigError("sandbox image must be a local sha256 image ID or a digest-pinned reference")
+    return dataclasses.replace(config, sandbox=dataclasses.replace(config.sandbox, image=image))
+
+
 def execute(args):
     if args.command == "configure":
         return configure(args.config, args.pi_command_json)
@@ -392,10 +416,10 @@ def execute(args):
         return Engine(config).preview(Project(config, args.project), _resolve_role(config, args.role), _attribute_input(args.attributes))
     if args.command == "doctor":
         from .doctor import check
-        return check(config, sandbox=args.sandbox)
+        return check(_with_sandbox_image(config, getattr(args, "sandbox_image", None)), sandbox=args.sandbox)
     if args.command == "smoke":
         from .smoke import live
-        return live(config, args.profile, _resolve_role(config, args.role, probe=True))
+        return live(_with_sandbox_image(config, getattr(args, "sandbox_image", None)), args.profile, _resolve_role(config, args.role, probe=True))
     from .project import Project, initialize
     if args.command == "init":
         roles = args.roles.split(",") if args.roles else _resolve_role(config, None).split(",")

@@ -46,7 +46,7 @@ class Project:
         return read_goal(self.root / "PROJECT.md", "PROJECT.md must contain a nonempty goal within 64 KiB")
 
     def control(self) -> dict:
-        return read_json(self.root / "control.json", {"armed": False, "paused": True, "wake_generation": ""})
+        return read_json(self.root / "control.json", {"armed": False, "paused": True, "wake_generation": "", "draining": False})
 
     def set_control(self, **updates) -> dict:
         with lock(self.root / "locks" / "control.lock"):

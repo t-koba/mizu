@@ -9,7 +9,8 @@
 ```sh
 mizu status demo   # プロジェクトの制御状態、スナップショット、予算、ヘルスを表示
 mizu pause demo    # タスクを一時停止（協調的キャンセルを通知、arm 状態は維持）
-mizu resume demo   # 一時停止を解除してタスクを再開
+mizu drain demo    # 新規実行だけを止め、実行中はそのまま完了させる (mizu status の active が空で静止)
+mizu resume demo   # 一時停止・drain を解除してタスクを再開
 mizu disarm demo   # arm 状態を解除して安全な停止状態にする
 mizu wake demo     # completed や blocked 状態のタスクに対して目標の再検討を指示
 mizu cleanup demo  # 終了後に残存したラベル付きコンテナを停止・削除
@@ -185,8 +186,8 @@ mizu status demo-restored
 ./scripts/setup.sh --promote /absolute/path/to/releases/CANDIDATE
 mizu service demo  # スケジュール設定を変更した場合は再生成 (OS既定のディレクトリへ出力。--directory で指定も可能)
 systemctl --user daemon-reload
-mizu doctor --sandbox
-mizu smoke --live
+mizu doctor --sandbox --sandbox-image <digest-pinned-candidate>
+mizu smoke --live --sandbox-image <digest-pinned-candidate>
 # 各種テストの成功を確認した後、必要なサービスを起動してプロジェクトを resume します
 ```
 

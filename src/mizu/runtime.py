@@ -1120,6 +1120,8 @@ class Engine:
         control = project.control()
         if not control.get("armed") or control.get("paused"):
             raise Denied("Project is unarmed or paused")
+        if control.get("draining"):
+            raise Busy("Project is draining; active runs finish undisturbed")
         usage = Budget(self.config.data / "budget", self.config.limits.daily_requests,
                        self.config.limits.retention_days,
                        self.config.limits.shared_daily_requests, self.config.timezone).usage(project.name)
@@ -1517,7 +1519,7 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
     """
     current_time = time.time() if current_time is None else current_time
     control = project.control()
-    if not control.get("armed") or control.get("paused"):
+    if not control.get("armed") or control.get("paused") or control.get("draining"):
         return False
     if digest(project.goal.encode()) != snapshot["goal_digest"]:
         return True
@@ -1627,7 +1629,7 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                             print(json.dumps(event, ensure_ascii=False), flush=True)
                     role = config.roles[role_name]
                     ready = should_run(project, project.snapshots.get(), role_name=role_name) if role.workspace == "write" else (
-                        project.control().get("armed") and not project.control().get("paused"))
+                        project.control().get("armed") and not project.control().get("paused") and not project.control().get("draining"))
                     if ready:
                         result = Engine(config, stop=stop).run(project, role_name)
                         print(json.dumps(result, ensure_ascii=False), flush=True)
