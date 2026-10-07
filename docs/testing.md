@@ -30,7 +30,7 @@ On Linux:
 ./scripts/test-install.sh
 ```
 
-On Windows without bash: run `python scripts/install.py --core-only ...` and test via `bin\mizu.cmd`. Missing bash marks shell-syntax checks as `not_run`; missing Node fails the suite. The durable contract suite additionally needs the pinned Pi SDK installed via the offline npm cache: absent dependencies fail closed with the provisioning remedy, unless explicitly waived with `python scripts/check.py --allow-not-run node-durable-contract-tests` (which CI sets and the receipt records); a version mismatch always fails. Podman and systemd validations only run on Linux.
+On Windows without bash: run `python scripts/install.py --core-only ...` and test via `bin\mizu.cmd`. Missing bash marks shell-syntax checks as `not_run`; missing Node fails the suite. The durable contract suite additionally needs the pinned Pi SDK installed via the offline npm cache: absent dependencies fail closed with the provisioning remedy, unless explicitly waived with `python scripts/check.py --allow-not-run node-durable-contract-tests` (which the CI matrix sets and the receipt records); a version mismatch always fails. Authoritative durable coverage lives in the required `durable-contract` CI job: it provisions the pinned Pi SDK from the committed lockfile in a network-enabled setup step, then runs the whole gate unwaived and offline, so absent or mismatched dependencies fail promotion. The matrix and installer-staging waivers are scoped fallbacks for environments that cannot provision, not substitutes for that job. Podman and systemd validations only run on Linux.
 
 Offline tests require no API credentials, internet access, or running container daemons. The CI matrix targets Python 3.11–3.14; the recorded local result is Linux 3.14.
 
