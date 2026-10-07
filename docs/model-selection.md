@@ -275,7 +275,11 @@ time-varying `at`/`next_evaluation_at` fields are excluded from the comparison,
 so any changed candidate, block, observation, history, attribute, task,
 classification, or recommendation reason audits again. A successful dispatch
 clears the record, and the per-project `selection/<role>-wait.json` pointer
-names the audit run. Timing stays operator policy (`retry_seconds`,
+names the audit run. The pointer is validated before reuse: when the audit
+run no longer carries its `selection.json`/`result.json` wait evidence
+(retention, restore, or manual cleanup), the next wait audits a fresh run
+instead of coalescing onto a missing one, and a failed clear poisons the
+record for the same reason. Timing stays operator policy (`retry_seconds`,
 `idle_seconds`); the mechanism only avoids idle-poll history spam while every
 tick still re-evaluates for new facts.
 

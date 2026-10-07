@@ -1213,6 +1213,7 @@ class Engine:
                 if role.selector:
                     from .classification import prepare
                     from .selection import clear_wait as _clear_wait
+                    from .selection import invalidate_wait as _invalidate_wait
                     from .selection import wait_fingerprint as _wait_fingerprint2
                     from .selection import write_wait as _write_wait
                     if probe_error is not None:
@@ -1228,8 +1229,13 @@ class Engine:
                             _write_wait(project, role_name, _wait_fingerprint2(decision),
                                         run_id, decision["next_evaluation_at"])
                         return result
-                    with contextlib.suppress(OSError, ValueError, TypeError):
+                    try:
                         _clear_wait(project, role_name)
+                    except (OSError, ValueError, TypeError):
+                        # A failed clear must not leave a stale pointer that
+                        # falsely coalesces the next wait onto a pre-dispatch
+                        # audit run; poison the record so it re-audits.
+                        _invalidate_wait(project, role_name)
                     role = dataclasses.replace(role, profile=decision["profile"], selector="")
                 if self.stop.is_set() or not project.control().get("armed") or project.control().get("paused"):
                     raise Cancelled("Run stopped before model dispatch")

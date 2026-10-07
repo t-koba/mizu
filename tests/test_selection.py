@@ -264,6 +264,17 @@ class SelectionTests(SelectionFixture):
         fourth = engine.run(self.project, role.name)
         self.assertTrue(fourth['coalesced'])
         self.assertEqual(len(runs()), 3)
+        # A dangling pointer (audit run removed by retention/restore/cleanup)
+        # re-audits instead of coalescing onto a missing run.
+        import shutil
+        shutil.rmtree(self.project.root / 'runs' / fourth['run'])
+        fifth = engine.run(self.project, role.name)
+        self.assertEqual(fifth['status'], 'waiting')
+        self.assertNotIn('coalesced', fifth)
+        self.assertTrue((self.project.root / 'runs' / fifth['run']).is_dir())
+        sixth = engine.run(self.project, role.name)
+        self.assertTrue(sixth['coalesced'])
+        self.assertEqual(sixth['run'], fifth['run'])
 
     def test_session_identity_changes_with_profile(self):
         self.setup_selection()

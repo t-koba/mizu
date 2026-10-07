@@ -534,8 +534,33 @@ def wait_path(project, role_name):
     return project.root / 'selection' / (role_name + '-wait.json')
 
 
+def _audit_run_intact(project, run):
+    """True when the named audit run still carries its wait evidence."""
+    try:
+        run_dir = project.root / 'runs' / run
+        selection = run_dir / 'selection.json'
+        result = run_dir / 'result.json'
+        for path in (selection, result):
+            if path.is_symlink() or not path.is_file():
+                return False
+        saved = read_json(result, None)
+        if not isinstance(saved, dict):
+            return False
+        if saved.get('run') != run or saved.get('status') != 'waiting':
+            return False
+        return True
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+
+
 def read_wait(project, role_name):
-    """Last recorded wait, or None when absent/unreadable (never raises)."""
+    """Last recorded wait whose audit run is still intact, else None.
+
+    Never raises: a missing/unreadable record, a dangling pointer (audit
+    run removed by retention/GC/restore/cleanup), or a record naming a
+    non-waiting run all read as "no coalescible wait" so the caller
+    audits a fresh run instead of reusing a stale pointer.
+    """
     try:
         record = read_json(wait_path(project, role_name), None)
     except (OSError, ValueError, TypeError, AttributeError):
@@ -545,6 +570,11 @@ def read_wait(project, role_name):
     if not isinstance(record.get('fingerprint'), str) or not DIGEST.fullmatch(record['fingerprint']):
         return None
     if not isinstance(record.get('run'), str) or not record['run']:
+        return None
+    try:
+        if not _audit_run_intact(project, record['run']):
+            return None
+    except (OSError, ValueError, TypeError, AttributeError):
         return None
     return record
 
@@ -567,8 +597,17 @@ def write_wait(project, role_name, fingerprint, run, next_evaluation_at):
 
 
 def clear_wait(project, role_name):
-    """Forget the last wait after a dispatch; best-effort, never raises."""
+    """Forget the last wait after a dispatch; raises on failure.
+
+    Callers must fall back to :func:`invalidate_wait` so a failed clear
+    never leaves a stale pointer that falsely coalesces the next wait.
+    """
+    wait_path(project, role_name).unlink(missing_ok=True)
+
+
+def invalidate_wait(project, role_name):
+    """Poison the wait record so the next wait re-audits; never raises."""
     try:
-        wait_path(project, role_name).unlink(missing_ok=True)
+        write_wait(project, role_name, digest(canonical({})), '', 0)
     except (OSError, ValueError, TypeError, AttributeError):
         pass
