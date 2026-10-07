@@ -3,7 +3,6 @@ import json
 from pathlib import Path
 from support import Fixture
 from mizu.cli import execute, parser
-from mizu.dashboard import publish
 from mizu.fs import mkdir, write_json
 from mizu.usage import normalize, summarize
 
@@ -85,7 +84,6 @@ class UsageTests(Fixture):
         target = self.project.root / "runs" / ("h" * 32) / "result.json"
         before = hashlib.sha256(target.read_bytes()).hexdigest()
         summarize(self.project)
-        publish(self.project)
         self.assertEqual(hashlib.sha256(target.read_bytes()).hexdigest(), before)
 
     def test_cli_usage(self):
@@ -96,12 +94,12 @@ class UsageTests(Fixture):
         self.assertEqual(result["totals"]["input_tokens"], 11)
         self.assertIn("Not a bill", result["note"])
 
-    def test_dashboard_embeds_usage_entries(self):
+    def test_usage_entries_keep_timestamps(self):
         self.write_run("j" * 32, finished_at="2026-09-06T22:30:00+00:00",
                        usage=[{"input_tokens": 4, "output_tokens": 1}])
-        payload = json.loads(Path(publish(self.project)["document"]).read_text())
-        self.assertEqual(payload["usage"]["totals"]["input_tokens"], 4)
-        self.assertEqual(payload["usage"]["recent_entries"][0]["finished_at"],
+        facts = summarize(self.project)
+        self.assertEqual(facts["totals"]["input_tokens"], 4)
+        self.assertEqual(facts["recent_entries"][0]["finished_at"],
                          "2026-09-06T22:30:00+00:00")
 
     def test_day_buckets_follow_configured_timezone(self):

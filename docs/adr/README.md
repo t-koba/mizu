@@ -142,7 +142,7 @@ same digest and observers keep skipping instead of looping model calls.
 ## ADR-024 — Bounded run-evidence retention for bulky engine logs
 Operator-set `[limits]` day counts gzip raw run event logs at N days and drop them at M days
 (0 disables a stage); `mizu prune` reports and applies both stages. Result, error, snapshot, and
-decision records are never candidates, so usage and dashboards keep working. Defaults
+decision records are never candidates, so usage keeps working. Defaults
 `event_log_compress_days` 7 / `event_log_retention_days` 31; age is file mtime, the `.gz`
 keeps the raw mtime so the drop clock does not restart, and only top-level
 `runs/*/` `*-events.jsonl` and `diagnostics.txt` (plus `.gz`) are candidates.
@@ -161,7 +161,7 @@ framing/memory bounds, sandbox floors, and liveness bounds stay fixed in code.
 | `poll_interval_seconds`, `pending_insights`, `prompt_snapshots`, `history_index`, `retention_days`, event-log days | configured | Already policy | Existing `[limits]`/`[vcs]` knobs with documented defaults |
 | `PREVIEW_BYTES`, `MAX_FRAME`, `SCRIPT_MAX`, insight/report/finish/consult/search sizes | 128 KiB / 1 MiB / 64 KiB / 60 KiB / 48 KiB / 12+32 KiB / 8 KiB+8 / 1k+4k | Stays fixed | Framing and memory safety: unbounded reads or messages risk OOM and protocol desync |
 | Sandbox termination, `MAX_VERIFY_COMMANDS`, include depth/files/bytes, web redirect/media, restore `--max-bytes` | 1 s+5 s / 32 / 8+32+1 MiB / 3 / 1 GiB | Stays fixed | Termination, fan-out, recursion, and archive-bomb safety floors |
-| `MAX_RUNS_SCANNED`, `MAX_RECENT_ENTRIES`, record size caps (`usage.py`) | 5000 / 200 / 1 MiB | Stays fixed | Unbounded run scans stall usage/dashboard; records stay complete on disk |
+| `MAX_RUNS_SCANNED`, `MAX_RECENT_ENTRIES`, record size caps (`usage.py`) | 5000 / 200 / 1 MiB | Stays fixed | Unbounded run scans stall usage; records stay complete on disk |
 | `MAX_DECISIONS`, `REASON_TRUNCATE` (`dashboard.py`) | 10 / 500 | Moves to policy | Pure projection: raw decisions stay on disk, only the small-screen slice changes (`[limits] dashboard_decisions`, `dashboard_reason_chars`) |
 
 ## ADR-026 — In-process lock guard with a fixed 30 s liveness bound

@@ -61,7 +61,7 @@ def slot(config: Config):
 INFRA_WAIT = (Busy, InfraExceeded)
 
 #: Explicit paged insight retrieval may walk the whole pending set (tool
-#: page limit, same bound as `mizu insight list`); prompt and dashboard
+#: page limit, same bound as `mizu insight list`); prompt
 #: selection stays bounded by `[limits] pending_insights`.
 INSIGHT_RETRIEVAL_LIMIT = 1000
 

@@ -193,14 +193,12 @@ class DependencyDispatchTests(Fixture):
         self.assertFalse((self.project.root / "waits" / f"{item['id']}.json").exists())
         self.assertEqual(engine.run(self.project, "reviewer").get("skipped"), "unchanged")
 
-    def test_dashboard_exposes_dependency_wait(self):
-        from mizu.dashboard import collect
+    def test_dependency_wait_is_readable_from_store(self):
         result = _submit(self.project, "worker", "Result")
         item = _defer(self.project, "reviewer", _wait(target=result["id"]))
-        core = collect(self.project)
-        entry = next(e for e in core["pending_insights"] if e["id"] == item["id"])
-        self.assertEqual((entry["wait"]["kind"], entry["wait"]["recipient"]), ("dependency", "worker"))
-        self.assertEqual(entry["wait"]["requires"]["insight"], result["id"])
+        wait = self.project.insights.wait_for(item["id"])
+        self.assertEqual((wait["kind"], wait["recipient"]), ("dependency", "worker"))
+        self.assertEqual(wait["requires"]["insight"], result["id"])
 
 
 if __name__ == "__main__":

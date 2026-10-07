@@ -25,7 +25,7 @@ copying complete reports.
 When you finish `blocked`, list each question as `Qn:` with tried, needs, and
 resume on one line per item: what was tried, what operator input unblocks it,
 and what you will do once it arrives. The operator reads this state from the
-static dashboard (`mizu dashboard` plus an operator-rendered page), not from a
+static report (`mizu report` plus an operator-rendered page), not from a
 chat thread, so make each question answerable without the missing context you
 already hold.
 

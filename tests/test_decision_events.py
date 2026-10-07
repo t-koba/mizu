@@ -162,12 +162,10 @@ class DeferRefinementTests(Fixture):
         self.assertEqual((pending["decision"]["action"], pending["decision"]["rev"]), ("defer", 1))
 
     def test_deferred_gap_stays_visible_with_revisit(self):
-        from mizu.dashboard import collect
         item = self.project.insights.submit(source="reviewer", title="Finding", body="v1",
                                             base_snapshot=self.project.snapshots.get()["id"])
         self.project.insights.decide(item["id"], "defer", "blocked on release", "wait for v2", "test", expected_rev=1)
-        core = collect(self.project)
-        entries = [e for e in core["pending_insights"] if e["id"] == item["id"]]
+        entries = [e for e in self.project.insights.list() if e["id"] == item["id"]]
         self.assertEqual(len(entries), 1)
-        self.assertEqual((entries[0]["decision"]["action"], entries[0]["decision"]["revisit"]["text"]),
+        self.assertEqual((entries[0]["decision"]["action"], entries[0]["decision"]["revisit"]),
                          ("defer", "wait for v2"))

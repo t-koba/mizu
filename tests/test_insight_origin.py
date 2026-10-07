@@ -1,6 +1,5 @@
 """Origin vs authority attribution for insights (small provenance contract)."""
 from support import Fixture
-from mizu.dashboard import collect
 from mizu.errors import Denied
 
 
@@ -16,8 +15,7 @@ class InsightOriginTests(Fixture):
         listed = {i["id"]: i for i in self.project.insights.list(pending=False)}
         self.assertEqual(listed[human["id"]]["origin"], "human:alice")
         self.assertEqual(listed[auto["id"]]["origin"], "automation:ci-forward")
-        core = collect(self.project)
-        pending = {e["id"]: e for e in core["pending_insights"]}
+        pending = {i["id"]: i for i in self.project.insights.list(pending=False)}
         self.assertEqual(pending[human["id"]]["origin"], "human:alice")
         self.assertEqual(pending[auto["id"]]["origin"], "automation:ci-forward")
         self.assertEqual(pending[human["id"]]["source"], "operator")

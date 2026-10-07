@@ -97,8 +97,6 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--executable", type=Path, default=Path(sys.argv[0]).resolve(), help="mizu executable")
     p = sub.add_parser("report", help="Materialize the latest recorded snapshot as a static artifact; no LLM required")
     p.add_argument("project", help="Managed project name")
-    p = sub.add_parser("dashboard", help="Publish a bounded static dashboard payload from already-recorded facts; no LLM required")
-    p.add_argument("project", help="Managed project name")
     p = sub.add_parser("usage", help="Summarize provider-reported token facts from completed runs; no LLM required")
     p.add_argument("project", help="Managed project name")
     p = sub.add_parser("backup", help="Write a paused checkpoint archive outside the tree")
@@ -112,7 +110,7 @@ def parser() -> argparse.ArgumentParser:
     p = sub.add_parser("storage", help="Report snapshot/object retention accounting; dry-run preview unless --apply")
     p.add_argument("project", help="Managed project name")
     p.add_argument("--apply", action="store_true", help="Remove unreferenced manifests and orphan objects under quiescence")
-    p = sub.add_parser("prune", help="List (or apply) removal of reproducible inputs, old dashboard generations, and expired web cache")
+    p = sub.add_parser("prune", help="List (or apply) removal of reproducible inputs, bulky logs, and expired web cache")
     p.add_argument("project", help="Managed project name")
     p.add_argument("--apply", action="store_true", help="Actually remove candidates")
     from .storage import DEFAULT_KEEP_ARTIFACTS
@@ -318,11 +316,6 @@ def _cmd_report(config, project, args):
     return publish(project, project.snapshots.get(), None, run_id=None)
 
 
-def _cmd_dashboard(config, project, args):
-    from .dashboard import publish
-    return publish(project)
-
-
 def _cmd_usage(config, project, args):
     from .usage import summarize
     return summarize(project)
@@ -350,7 +343,7 @@ _PROJECT_COMMANDS = {
     "pause": _cmd_pause, "resume": _cmd_resume, "wake": _cmd_wake,
     "run": _cmd_run, "daemon": _cmd_daemon, "cleanup": _cmd_cleanup,
     "insight": _cmd_insight, "service": _cmd_service, "report": _cmd_report,
-    "dashboard": _cmd_dashboard, "usage": _cmd_usage, "backup": _cmd_backup,
+    "usage": _cmd_usage, "backup": _cmd_backup,
     "prune": _cmd_prune, "storage": _cmd_storage,
 }
 

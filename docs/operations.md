@@ -107,7 +107,7 @@ mizu cleanup demo
 - `health/`: ヘルスチェック記録 ★
 - `observed/`, `spool/`, `maintenance/`: 観測状態、Editorキュー、保守監査記録 ★
 - `artifacts/`: 生成された成果物（Markdown + 根拠データ） ★
-- `active/`, `dashboard/`, `locks/`: 実行中ステータス、ダッシュボード投影、排他ロック（backup対象外：live状態）
+- `active/`, `locks/`: 実行中ステータス、排他ロック（backup対象外：live状態）
 
 各 run の記録には、開始条件、適用された policy や config の識別情報、実行コマンドや実験の結果、検証の証跡、モデルのトークン使用量、完了ステータスまたはエラー情報が保存されます。なお、run ステータスの `prepared` は公開（publish）が完了したことを意味するものではありません。`current.json` およびそれが参照するマニフェストのみがプロジェクトの「確定状態」として扱われます。`active/` は現在実行中の状態を示す一時的な表示領域であり、直前の確定状態とは厳密に分離されています。
 
@@ -138,23 +138,18 @@ mizu prune demo                                # 削除対象のプレビュー�
 mizu prune demo --apply --keep-artifacts 30   # 最新30件を残して古い成果物・再現可能入力を削除
 ```
 
-`--keep-artifacts N` は最新の成果物を含め N 件を保持します。`[limits] dashboard_keep`（既定 30、0 は全保持）は最新のダッシュボード世代を含め N 件を保持し、現行 `latest.json` の指す世代は常に保護されます。`[web] cache_seconds` を過ぎた共有 web-cache（`data_dir/web-cache/*.json`）の期限切れエントリも候補となり、次回 fetch で再取得されるため削除は安全に再試行できます。セッション（`sessions/`）は監査証跡として保持され、削除対象になりません（`mizu storage` で件数・バイト数を報告）。削除ログは `maintenance/prune-*.json` に記録され、バックアップ対象となります。
+`--keep-artifacts N` は最新の成果物を含め N 件を保持します。`[web] cache_seconds` を過ぎた共有 web-cache（`data_dir/web-cache/*.json`）の期限切れエントリも候補となり、次回 fetch で再取得されるため削除は安全に再試行できます。セッション（`sessions/`）は監査証跡として保持され、削除対象になりません（`mizu storage` で件数・バイト数を報告）。削除ログは `maintenance/prune-*.json` に記録され、バックアップ対象となります。
 
 ```sh
 mizu storage demo                             # スナップショット/オブジェクトの参照別集計（読み取り専用プレビュー、削除なし）
 mizu storage demo --apply                   # 未参照マニフェストと孤立オブジェクトを削除（要 pause、監査記録あり）
 ```
 
-`mizu storage` は履歴・run・成果物・提案が参照するスナップショットと、未参照マニフェストおよび孤立オブジェクトの件数・バイト数・ bounded sample を報告します。あわせて使い捨て投影（ダッシュボード世代：件数・バイト・`dashboard_keep` に対する候補）と共有 web-cache（件数・バイト・`cache_seconds` に対する期限切れ）の容量、および durable なセッション証跡（`session.json` 件数・ファイル数・バイト数、削除対象外）の容量を報告します。既定（`--apply` なし）は何も削除・移動・書換えしないため、writer 実行中でも安全に再試行できます。`--apply` は pause したプロジェクトでのみ実行でき、未参照マニフェストと孤立オブジェクトだけを削除します（履歴世代・run・成果物・セッション・判断・提案は保持）。削除内容は `maintenance/storage-*.json` に記録され、バックアップ対象となります。2 回目の実行で新規の孤立オブジェクトまで収束します。
+`mizu storage` は履歴・run・成果物・提案が参照するスナップショットと、未参照マニフェストおよび孤立オブジェクトの件数・バイト数・ bounded sample を報告します。あわせて共有 web-cache（件数・バイト・`cache_seconds` に対する期限切れ）の容量、および durable なセッション証跡（`session.json` 件数・ファイル数・バイト数、削除対象外）の容量を報告します。既定（`--apply` なし）は何も削除・移動・書換えしないため、writer 実行中でも安全に再試行できます。`--apply` は pause したプロジェクトでのみ実行でき、未参照マニフェストと孤立オブジェクトだけを削除します（履歴世代・run・成果物・セッション・判断・提案は保持）。削除内容は `maintenance/storage-*.json` に記録され、バックアップ対象となります。2 回目の実行で新規の孤立オブジェクトまで収束します。
 
-## ダッシュボードと人間からの提案 (Insight)
+## 人間からの提案 (Insight)
 
-確定した事実データは `mizu dashboard` により静的 JSON として出力されます（外部チャットツール非依存）。
-
-```sh
-mizu dashboard demo
-python3 examples/render-dashboard.py ~/.local/state/mizu/projects/demo  # 事前確認用 HTML 描画
-```
+確定した事実は `mizu status`・`mizu usage`・`mizu insight list/read`・`mizu report` と run 記録から読み取ります（外部チャットツール非依存）。表示は各プロジェクト側で作ります。
 
 人間からの回答や指示は、Insight として投入し、`wake` で再開させます:
 

@@ -28,7 +28,7 @@ later read or run. Each consumer, what it trusts, and the gate:
 | Host consumer | Writer-influenced input | Host trust and gate |
 |---|---|---|
 | `verify` command | Agent-influenced worktree at a captured digest | Operator-owned argv only; proves command results on the digest, not oracle completeness |
-| Publish pointers (`snapshot`, `report`, `dashboard`) | Snapshot content and report body | Pointer moves atomically only after the entry is complete; report renders Markdown, never HTML; bounded JSON |
+| Publish pointers (`snapshot`, `report`) | Snapshot content and report body | Pointer moves atomically only after the entry is complete; report renders Markdown, never HTML; bounded JSON |
 | Service renderer | Staged unit definitions | Text rendering only; staged units must pass `systemd-analyze verify` (where available) and operator review before arming |
 | Backup, VCS publish, editor ingest | Published tree and outbox spool | Operator-owned destinations and commands; review the published tree before opening or executing anything from it |
 | Control plane (host bridge) | Nothing model-supplied | Per-run 256-bit token plus loopback-only bind and strict shape checks (`hmac.compare_digest`, `src/mizu/bridge.py`); never trust a client-supplied `Host` header. This token-and-peer design avoids the CVE-2026-82533 class (Host-header trust with loopback left open) |

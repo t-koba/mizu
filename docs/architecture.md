@@ -39,7 +39,6 @@ inputs. The trusted host adapter never executes model-provided host commands.
 | `web.py` | Allowed retrieval and external source receipts | Scientific truth |
 | `editor.py` | Snapshot export and read/propose MCP | Code editing |
 | `report.py` | Escaped static artifact (Markdown + evidence) with atomic latest pointer | Presentation, retention policy |
-| `dashboard.py` | Bounded static JSON of recorded facts with atomic latest pointer | Presentation, per-project panels |
 | `services.py` | Render OS service definitions (systemd / launchd / Task Scheduler) | Implicitly start or arm |
 | `storage.py` | Paused backup, bounded restore, conservative pruning | Evidence retention policy |
 | `budget.py` | Shared day request budget (configured timezone) and retention reaping | Monetary spending caps |
@@ -107,7 +106,7 @@ summarized. `diff` compares the anchored
 snapshot with the preceding distinct code digest. Large and binary files are
 listed rather than inserted into a huge diff. This is bounded context, not a
 vector database or an automatically complete history search. Usage day buckets
-and the dashboard window edge use the configured `timezone` day boundary so
+and the usage window edge use the configured `timezone` day boundary so
 `mizu usage` groups agree with `mizu budget` for the same day.
 
 `continue` starts another meaningful unit. `wait` sleeps until its deadline,
@@ -123,7 +122,7 @@ The submitting route assigns the source identity. A record contains ID, source
 means unknown and never guessed), created time, base snapshot, title, Markdown
 body, revision identity (`rev`) and update time. Origin is set once at submit by
 trusted host callers, preserved across revisions, never routed on, and never
-grants operator approval. Ordinary prompts, lists, reads and the dashboard expose only
+grants operator approval. Ordinary prompts, lists, and reads expose only
 the current content, its current decision/evidence gap and `rev`; obsolete
 claims are replaced, never appended. The first submission creates `rev` 1.
 The original submitter may revise under the stable ID via compare-and-swap on

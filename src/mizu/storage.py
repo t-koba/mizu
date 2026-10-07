@@ -2,7 +2,7 @@
 
 Evidence, snapshot manifests, objects and persistent sessions are never silently
 removed. Pruning removes only reproducible run inputs, old artifact documents,
-bulky per-run engine logs, disposable dashboard generations, and expired
+bulky per-run engine logs, and expired
 web-cache entries under operator-set retention; result, error,
 consultation, started, selection, and usage records are retained.
 Sessions are durable audit evidence: they are accounted, never reclaimed.
@@ -218,136 +218,6 @@ def _compress_event_log(raw: Path) -> Path:
     return target
 
 
-#: Default dashboard generation retention ([limits] dashboard_keep fallback).
-#: The live ``latest.json`` target is always protected; 0 keeps all.
-DEFAULT_KEEP_DASHBOARD = 30
-
-
-def _dashboard_keep(project: Project) -> int:
-    """Operator-selected dashboard generation keep-count (0 keeps all)."""
-    limits = getattr(project.config, "limits", None)
-    keep = getattr(limits, "dashboard_keep", DEFAULT_KEEP_DASHBOARD)
-    try:
-        keep = int(keep)
-    except (TypeError, ValueError) as exc:
-        raise Denied(f"Invalid dashboard retention: {exc}") from exc
-    if keep < 0:
-        raise Denied("Dashboard retention must not be negative")
-    return keep
-
-
-def dashboard_candidates(project: Project, keep: int) -> list[Path]:
-    """Oldest dashboard generations beyond the kept count.
-
-    The live ``latest.json`` target is never a candidate; only
-    content-addressed ``<sha256>.json`` regular files are considered.
-    ``keep`` counts the live target when it exists (0 keeps all).
-    Symlinks, ``latest.json``, ``index.html``, locks, and non-digest names
-    are never candidates.
-    """
-    if keep <= 0:
-        return []
-    root = project.root / "dashboard"
-    try:
-        pointer = read_json(root / "latest.json", {})
-    except (OSError, ValueError):
-        pointer = {}
-    live = pointer.get("dashboard") if isinstance(pointer, dict) else None
-    if not (isinstance(live, str) and DIGEST.fullmatch(live)):
-        live = None
-    dated: list[tuple[float, Path]] = []
-    try:
-        children = sorted(root.glob("*.json")) if root.is_dir() else []
-    except OSError:
-        return []
-    for child in children:
-        try:
-            if child.is_symlink() or not child.is_file():
-                continue
-            if child.name == "latest.json" or not DIGEST.fullmatch(child.stem):
-                continue
-            if live is not None and child.name == f"{live}.json":
-                continue
-            try:
-                mtime = child.stat().st_mtime
-            except OSError:
-                continue
-            dated.append((mtime, child))
-        except OSError:
-            continue
-    dated.sort(key=lambda item: (item[0], item[1].name))
-    live_entry = root / f"{live}.json" if live is not None else None
-    reserve = 0
-    try:
-        if live_entry is not None and live_entry.is_file() and not live_entry.is_symlink():
-            reserve = 1
-    except OSError:
-        reserve = 0
-    drop = max(0, len(dated) - keep + reserve)
-    return [child for _, child in dated[:drop]]
-
-
-def _dashboard_accounting(project: Project) -> dict:
-    """Capacity accounting for disposable dashboard generations."""
-    root = project.root / "dashboard"
-    try:
-        keep = _dashboard_keep(project)
-    except Denied:
-        keep = DEFAULT_KEEP_DASHBOARD
-    try:
-        pointer = read_json(root / "latest.json", {})
-    except (OSError, ValueError):
-        pointer = {}
-    live = pointer.get("dashboard") if isinstance(pointer, dict) else None
-    if not (isinstance(live, str) and DIGEST.fullmatch(live)):
-        live = None
-    documents = 0
-    total_bytes = 0
-    skipped = 0
-    try:
-        children = sorted(root.glob("*.json")) if root.is_dir() else []
-    except OSError:
-        children = []
-    for child in children:
-        try:
-            if child.is_symlink() or not child.is_file():
-                skipped += 1
-                continue
-            if child.name == "latest.json" or not DIGEST.fullmatch(child.stem):
-                skipped += 1
-                continue
-            try:
-                total_bytes += child.stat().st_size
-            except OSError:
-                skipped += 1
-                continue
-            documents += 1
-        except OSError:
-            skipped += 1
-    try:
-        victims = dashboard_candidates(project, keep)
-    except Denied:
-        victims = []
-    victim_names = sorted(f"dashboard/{p.name}" for p in victims)
-    victim_bytes = 0
-    for path in victims:
-        try:
-            victim_bytes += path.stat().st_size
-        except OSError:
-            continue
-    return {
-        "documents": documents,
-        "bytes": total_bytes,
-        "live": live,
-        "keep": keep,
-        "candidates": len(victims),
-        "candidate_bytes": victim_bytes,
-        "candidate_sample": victim_names[:_AUDIT_SAMPLE],
-        "candidate_truncated": len(victim_names) > _AUDIT_SAMPLE,
-        "skipped": skipped,
-    }
-
-
 def _web_cache_seconds(project: Project) -> int:
     """Operator-selected web-cache reuse TTL ([web] cache_seconds)."""
     web = getattr(project.config, "web", None)
@@ -473,21 +343,18 @@ def _session_accounting(project: Project) -> dict:
 
 
 def prune(project: Project, *, apply: bool = False, keep_artifacts: int = DEFAULT_KEEP_ARTIFACTS) -> dict:
-    """List (or apply) removal of reproducible inputs, old artifacts, bulky logs, dashboard generations, and expired web cache.
+    """List (or apply) removal of reproducible inputs, old artifacts, bulky logs, and expired web cache.
 
     Schema/bounds: ``keep_artifacts`` counts the live pointer when it exists.
     ``[limits] event_log_compress_days`` (0 disables, 0-3650) gzips raw
     ``*-events.jsonl``/``diagnostics.txt``/``*-events-truncated.json`` at or
     beyond N days old;
     ``[limits] event_log_retention_days`` (0 disables, 0-3650) drops raw and
-    ``.gz`` logs at or beyond M days old. ``[limits] dashboard_keep``
-    (0 keeps all, 0-1000) keeps the newest N dashboard generations plus the
-    live ``latest.json`` target; older content-addressed generations are
-    disposable candidates. ``[web] cache_seconds`` decides web-cache expiry
+    ``.gz`` logs at or beyond M days old. ``[web] cache_seconds`` decides web-cache expiry
     from ``retrieved_epoch`` age (entries without a usable epoch fall back to mtime).
     Age is file mtime vs now unless noted; the compressed copy keeps the raw
     mtime so the drop clock does not restart.
-    Only top-level run-dir logs, non-live dashboard generations, and expired
+    Only top-level run-dir logs and expired
     web-cache entries are candidates; result/error/consultation/
     started/selection/admission/usage records, snapshots, objects, sessions,
     decisions, and proposals are never candidates.
@@ -515,7 +382,6 @@ def prune(project: Project, *, apply: bool = False, keep_artifacts: int = DEFAUL
     victims: list[Path] = []
     to_compress: list[Path] = []
     to_drop: list[Path] = []
-    dashboard_keep = _dashboard_keep(project)
     cache_seconds = _web_cache_seconds(project)
     with quiescent(project):
         for run_dir in sorted((project.root / "runs").glob("*")):
@@ -550,14 +416,12 @@ def prune(project: Project, *, apply: bool = False, keep_artifacts: int = DEFAUL
         to_drop.sort()
         if keep_artifacts:
             victims = artifact_candidates(project, keep_artifacts)
-        dashboard_victims = dashboard_candidates(project, dashboard_keep)
         web_victims, _web_accounting = _web_cache_candidates(project)
         data_base = project.config.data
         removed = {"reproducible_inputs": [p.relative_to(project.root).as_posix() for p in candidates],
                    "artifacts": [p.relative_to(project.root).as_posix() for p in victims],
                    "event_logs_compressed": [p.relative_to(project.root).as_posix() for p in to_compress],
                    "event_logs_removed": [p.relative_to(project.root).as_posix() for p in to_drop],
-                   "dashboard_generations": [p.relative_to(project.root).as_posix() for p in dashboard_victims],
                    "web_cache": [p.relative_to(data_base).as_posix() for p in web_victims]}
         if apply:
             for candidate in candidates:
@@ -580,15 +444,11 @@ def prune(project: Project, *, apply: bool = False, keep_artifacts: int = DEFAUL
                     raise Denied("Refusing a symlink during prune")
                 candidate.unlink()
                 dropped_names.append(candidate.relative_to(project.root).as_posix())
-            for candidate in dashboard_victims:
-                if candidate.is_symlink():
-                    raise Denied("Refusing a symlink during prune")
-                candidate.unlink()
             for candidate in web_victims:
                 if candidate.is_symlink():
                     raise Denied("Refusing a symlink during prune")
                 candidate.unlink()
-            for parent in {c.parent for c in (*candidates, *victims, *to_compress, *to_drop, *dashboard_victims, *web_victims)}:
+            for parent in {c.parent for c in (*candidates, *victims, *to_compress, *to_drop, *web_victims)}:
                 try:
                     sync_dir(parent)
                 except OSError:
@@ -597,7 +457,6 @@ def prune(project: Project, *, apply: bool = False, keep_artifacts: int = DEFAUL
             removed["event_logs_removed"] = dropped_names
             audit = project.root / "maintenance" / f"prune-{int(time.time())}-{uuid.uuid4().hex[:8]}.json"
             write_json(audit, {"applied_at": now(), "keep_artifacts": keep_artifacts,
-                               "dashboard_keep": dashboard_keep,
                                "event_log_compress_days": compress_days,
                                "event_log_retention_days": retention_days,
                                "cache_seconds": cache_seconds, **removed})
@@ -606,8 +465,8 @@ def prune(project: Project, *, apply: bool = False, keep_artifacts: int = DEFAUL
     return {"applied": apply, **removed,
             "retained": "All result/error/consultation/started/selection/usage records, snapshots, "
                         "content objects, sessions, decisions, proposals, and insight revisions. "
-                        "Artifact documents beyond the kept count, dashboard generations beyond "
-                        "dashboard_keep, bulky engine logs beyond operator retention, and "
+                        "Artifact documents beyond the kept count, "
+                        "bulky engine logs beyond operator retention, and "
                         "web-cache entries expired past cache_seconds are disposable projections; "
                         "their evidence remains in snapshots and run records. "
                         "Sessions are durable audit evidence and are accounted, never reclaimed."}
@@ -851,9 +710,7 @@ def _audit_collect(project: Project) -> dict:
 def audit(project: Project) -> dict:
     """Report snapshot/object retention accounting; read-only preview only.
 
-    Schema: ``{dashboard: {documents, bytes, live, keep, candidates,
-    candidate_bytes, candidate_sample, candidate_truncated, skipped},
-    sessions: {records, files, bytes, skipped},
+    Schema: ``{sessions: {records, files, bytes, skipped},
     web_cache: {entries, bytes, expired, expired_bytes, expired_sample,
     expired_truncated, skipped, cache_seconds},
     snapshots: {manifests, bytes, live, referenced,
@@ -887,12 +744,6 @@ def audit(project: Project) -> dict:
     object_sizes = collected["object_sizes"]
     orphan = collected["orphan"]
     try:
-        dashboard = _dashboard_accounting(project)
-    except (OSError, ValueError):
-        dashboard = {"documents": 0, "bytes": 0, "live": None, "keep": DEFAULT_KEEP_DASHBOARD,
-                     "candidates": 0, "candidate_bytes": 0, "candidate_sample": [],
-                     "candidate_truncated": False, "skipped": 0}
-    try:
         sessions = _session_accounting(project)
     except (OSError, ValueError):
         sessions = {"records": 0, "files": 0, "bytes": 0, "skipped": 0}
@@ -903,7 +754,6 @@ def audit(project: Project) -> dict:
                      "expired_sample": [], "expired_truncated": False, "skipped": 0,
                      "cache_seconds": 1800}
     return {
-        "dashboard": dashboard,
         "sessions": sessions,
         "web_cache": web_cache,
         "snapshots": {
@@ -937,7 +787,7 @@ def audit(project: Project) -> dict:
         },
         "preview_only": True,
         "retained": "All manifests, history generations, objects, runs, artifacts, sessions, decisions, proposals, and insight revisions are retained; this preview removes nothing. "
-                    "Dashboard generations beyond dashboard_keep and web-cache entries expired past cache_seconds are disposable (see dashboard/sessions/web_cache); "
+                    "Web-cache entries expired past cache_seconds are disposable (see sessions/web_cache); "
                     "sessions are durable audit evidence and are accounted, never reclaimed.",
     }
 

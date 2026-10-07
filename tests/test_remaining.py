@@ -128,14 +128,6 @@ class RemainingTests(Fixture):
                 self.assertIn(result.returncode,(0,86))
                 check_recovered(root)
 
-    def test_decision_order_normalizes_timezone_offsets(self):
-        from mizu.dashboard import collect
-        directory=self.project.root/'decisions';directory.mkdir(parents=True,exist_ok=True)
-        for n in range(10):
-            write_json(directory/f'old-{n}.json',{'id':f'old-{n}','created_at':'2026-10-03T01:00:00+14:00','action':'reject','reason':'test'})
-        write_json(directory/'zzz.json',{'id':'zzz','created_at':'2026-10-02T23:00:00+00:00','action':'reject','reason':'test'})
-        self.assertIn('zzz',[r['id'] for r in collect(self.project)['recent_decisions']])
-
     def test_special_file_after_finish_refuses_done(self):
         if not hasattr(os,'mkfifo'):self.skipTest('POSIX FIFO')
         from support import ScriptDriver

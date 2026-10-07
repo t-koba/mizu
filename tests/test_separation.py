@@ -438,16 +438,15 @@ class PresentationSeparationTests(Fixture):
         self.assertNotIn("Snapshot:", text)
         self.assertNotIn("As of:", text)
 
-    def test_dashboard_respects_pending_and_retention_knobs(self):
+    def test_prompt_respects_pending_knob(self):
         import dataclasses
-        from mizu.dashboard import collect
         for n in range(5):
             self.project.insights.submit(source="s", title=f"D{n}", body="b", base_snapshot=None)
         small = dataclasses.replace(self.config, limits=dataclasses.replace(
             self.config.limits, pending_insights=2, retention_days=60))
         self.project.config = small
-        core = collect(self.project)
-        self.assertLessEqual(len(core["pending_insights"]), 2)
+        projection = self.project.insights.projection(limit=small.limits.pending_insights)
+        self.assertLessEqual(len(projection["items"]), 2)
 
     def test_cli_single_role_fallback(self):
         import dataclasses

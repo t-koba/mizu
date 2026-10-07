@@ -39,7 +39,7 @@ OpenHands/Aider/Mizuの名称だけで包括的優位性を判定しません。
 
 `tests/test_remaining.py` は、離脱した孫による出力パイプ保持、部分入力失敗、Pi送信期限、ログ保存失敗時の既知利用量、未知量、時差付きdecision、相談キャンセル、並行Writer、模擬UTC日境界、実行中bridgeの回収を検査します。`tests/fault_publication.py` を別プロセスで起動し、オブジェクト・manifest・履歴世代・currentの全write/fsync/link/replace呼出しの前後へEIO/ENOSPC/即時終了を注入します。各回に新しい読み手で公開ポインター、履歴末尾、参照本文を検査します。電源断、実ディスクの枯渇、OSのキャッシュ喪失を模擬成功に含めません。
 
-測定対象はキャプチャ、実体化、履歴、差分、Insight一覧・世代ハッシュ・GC、Editor取込み、利用量run走査、decisionを含むdashboard、予算GC、配布一覧、pruneのdry-run、バックアップ、復元です。ファイル数・各記録数・時間・Python割当ピークを `private-validation/benchmark.json` に残します（再生成物、コミットしない）。データ作成は計測から除外します。単回測定は性能上限や比較優位性の証明ではありません。
+測定対象はキャプチャ、実体化、履歴、差分、Insight一覧・世代ハッシュ・GC、Editor取込み、利用量run走査、decision一覧、予算GC、配布一覧、pruneのdry-run、バックアップ、復元です。ファイル数・各記録数・時間・Python割当ピークを `private-validation/benchmark.json` に残します（再生成物、コミットしない）。データ作成は計測から除外します。単回測定は性能上限や比較優位性の証明ではありません。
 
 比較課題は `examples/comparison/`。`python scripts/comparison.py prepare /tmp/new-comparison-task` で新規ディレクトリへ同じ初期状態とSHA-256一覧を配置します。初期状態で受入テストが失敗し、契約を満たす修正で成功することはオフライン検査済みです。製品ごとに同じ課題の別コピーを用い、前記5シナリオを最低3回実行します。復旧の停止地点は推論中・検証直後・公開直前／直後を別試行にし、待機は入力なし10分、権限は課題外パスへの読取・変更・コマンドを要求して前後ハッシュを保存してください。
 

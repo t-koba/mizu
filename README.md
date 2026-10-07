@@ -102,6 +102,6 @@ Editor用のMCPサーバーは読み取り専用のAPIを提供しますが、**
 
 ## ドキュメント
 
-[設計](docs/architecture.md) · [セットアップ](docs/setup.md) · [設定](docs/configuration.md) · [運用](docs/operations.md) · [ダッシュボード](docs/dashboard.md) · [Editor](docs/editor.md) · [セキュリティ](docs/security.md) · [拡張機能](docs/extensions.md) · [検証](docs/testing.md) · [公開](docs/releasing.md) · [設計判断 (ADR)](docs/adr/README.md)
+[設計](docs/architecture.md) · [セットアップ](docs/setup.md) · [設定](docs/configuration.md) · [運用](docs/operations.md) · [Editor](docs/editor.md) · [セキュリティ](docs/security.md) · [拡張機能](docs/extensions.md) · [検証](docs/testing.md) · [公開](docs/releasing.md) · [設計判断 (ADR)](docs/adr/README.md)
 
 本プロジェクトが依存する外部プロダクトの名称・ライセンス・商標は、それぞれの権利者に帰属します。本リポジトリには、製品名の法的な使用可否や商標登録に関する調査結果は含まれていません。

@@ -313,21 +313,10 @@ class Limits:
     #: discard already-sealed publishable work. The per-record transport
     #: bound stays fixed mechanism, never policy.
     event_stream_bytes: int = 4 * 1024 * 1024
-    #: Operator-selected bound on pending proposals offered per prompt /
-    #: dashboard projection. Raw inbox/decisions stay on disk; the operator
+    #: Operator-selected bound on pending proposals offered per prompt.
+    #: Raw inbox/decisions stay on disk; the operator
     #: review path (`mizu insight list`) uses a separate 1000-item bound.
     pending_insights: int = 30
-    #: Operator-selected dashboard projection bounds. Raw
-    #: decisions stay on disk; the dashboard shows the newest N with
-    #: reasons truncated to M chars (flagged).
-    dashboard_decisions: int = 10
-    dashboard_reason_chars: int = 500
-    #: Operator-selected retention for disposable dashboard generations
-    #: (content-addressed ``dashboard/<sha256>.json`` projections). The live
-    #: ``latest.json`` target is always protected; the newest generations up
-    #: to this count are kept, older ones are disposable candidates for
-    #: ``prune``. 0 keeps all (disables reclamation).
-    dashboard_keep: int = 30
     #: Operator-selected persistent-session rotation bounds. A resumed
     #: persistent session restarts with a fresh session key once cumulative
     #: usage or wall-clock session age reaches a bound, carrying the
@@ -499,8 +488,6 @@ def load(file: Path) -> Config:
                      "retention_days": (0, 3650), "pending_insights": (1, 1000),
                      "event_log_compress_days": (0, 3650), "event_log_retention_days": (0, 3650),
                      "event_stream_bytes": (1048576, 268435456),
-                     "dashboard_decisions": (1, 1000), "dashboard_reason_chars": (1, 10000),
-                     "dashboard_keep": (0, 1000),
                      "role_state_bytes": (1024, 65536),
                      "role_state_prompt_bytes": (1, 65536),
                      "session_max_tokens": (0, 1073741824), "session_max_age_seconds": (0, 31536000),

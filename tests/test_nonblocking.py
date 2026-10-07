@@ -7,7 +7,6 @@ worker finish ``blocked``, which preserves ``needs_operator_input`` and still
 resumes on the operator's answer.
 """
 from support import Fixture, ScriptDriver
-from mizu.dashboard import collect
 from mizu.runtime import Engine, should_run
 
 
@@ -27,8 +26,7 @@ class ParkAndContinueTests(Fixture):
         self.assertIn("Q1 (parked)", parked["state"])
         # Daemon continues: runnable work is not held by the parked item.
         self.assertTrue(should_run(self.project, parked))
-        core = collect(self.project)
-        self.assertFalse(core["needs_operator_input"])
+        self.assertNotEqual(self.project.snapshots.get()["outcome"], "blocked")
 
         # Unit 2: B done, only parked A remains -> finish blocked.
         def all_stalled(ctx, *_):
@@ -41,7 +39,7 @@ class ParkAndContinueTests(Fixture):
         Engine(self.config, driver=ScriptDriver(all_stalled)).run(self.project, "worker")
         stalled = self.project.snapshots.get()
         self.assertEqual(stalled["outcome"], "blocked")
-        self.assertTrue(collect(self.project)["needs_operator_input"])
+        self.assertEqual(self.project.snapshots.get()["outcome"], "blocked")
         # Blocked idles until operator input ...
         self.assertFalse(should_run(self.project, stalled))
         # ... and the operator's answer resumes it.
@@ -61,7 +59,7 @@ class ParkAndContinueTests(Fixture):
         Engine(self.config, driver=ScriptDriver(stalled)).run(self.project, "worker")
         snap = self.project.snapshots.get()
         self.assertFalse(should_run(self.project, snap))
-        self.assertTrue(collect(self.project)["needs_operator_input"])
+        self.assertEqual(self.project.snapshots.get()["outcome"], "blocked")
 
 
 if __name__ == "__main__":

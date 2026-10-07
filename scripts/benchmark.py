@@ -18,7 +18,6 @@ from mizu.config import load
 from mizu.project import initialize
 from mizu.fs import write_json
 from mizu.usage import summarize
-from mizu.dashboard import collect
 from mizu.storage import backup, restore, prune
 from mizu.budget import Budget
 from mizu.distribution import source_files
@@ -82,7 +81,6 @@ def main():
         _, difference = timed(lambda:snapshots.changes(snap['id']))
         _, insights = timed(lambda:project.insights.projection(limit=30))
         _, usage = timed(lambda:summarize(project))
-        _, dashboard = timed(lambda:collect(project))
         _, generation = timed(project.insights.generation)
         _, gc = timed(project.insights.gc_decided)
         for n in range(args.records):
@@ -107,7 +105,7 @@ def main():
                           'records_per_insight_decision_run':args.records,'spool_artifact_budget_records':args.records,'history_records':min(args.records,128),
                           'measurements':{'initial_capture':initial,'unchanged_capture':unchanged,
                                           'materialize':materialize,'history':history,'diff':difference,
-                                          'insight_projection':insights,'usage_scan':usage,'dashboard_decisions':dashboard,
+                                          'insight_projection':insights,'usage_scan':usage,
                                           'backup':archived,'restore':restored,'insight_generation':generation,'insight_gc':gc,
                                           'editor_ingest':ingest,'source_inventory':inventory,'budget_gc':budget_gc,'prune_dry_run':pruning},
                           'objects_after_two_captures':objects,'public_source_files':len(inventory_files),

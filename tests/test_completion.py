@@ -304,15 +304,6 @@ class BoundaryTests(Fixture):
         self.assertEqual(worker.find('t:Settings/t:RestartOnFailure/t:Interval',ns).text,'PT1M')
         self.assertEqual(worker.find('t:Settings/t:ExecutionTimeLimit',ns).text,'PT0S')
 
-    def test_recent_decisions_select_chronology_before_limit(self):
-        from mizu.dashboard import collect
-        for i in range(12):
-            write_json(self.project.root / 'decisions' / f'{i:02d}.json',{'id':f'{i:02d}','action':'reject','reason':'no','created_at':f'2026-09-{30-i:02d}T00:00:00+00:00'})
-        payload=collect(self.project)
-        self.assertEqual(payload['answered_count'],12)
-        self.assertIn('00',[r['id'] for r in payload['recent_decisions']])
-        self.assertNotIn('11',[r['id'] for r in payload['recent_decisions']])
-
     def test_every_publication_sync_failure_has_observable_commit_state(self):
         if os.name != "posix":
             self.skipTest("directory synchronization is POSIX-specific")

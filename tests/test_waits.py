@@ -190,13 +190,9 @@ class WaitDispatchTests(Fixture):
             engine.run(self.project, "reviewer")
         self.assertIsNotNone(self.project.insights.wait_for(item["id"]))
 
-    def test_dashboard_exposes_registered_wait(self):
-        from mizu.dashboard import collect
-        _defer(self.project, "reviewer", {"kind": "deadline", "at": _future()})
-        core = collect(self.project)
-        entries = [e for e in core["pending_insights"] if e["decision"] is not None]
-        self.assertEqual(len(entries), 1)
-        self.assertEqual(entries[0]["wait"]["kind"], "deadline")
+    def test_registered_wait_is_readable_from_store(self):
+        item = _defer(self.project, "reviewer", {"kind": "deadline", "at": _future()})
+        self.assertEqual(self.project.insights.wait_for(item["id"])["kind"], "deadline")
 
 
 if __name__ == "__main__":
