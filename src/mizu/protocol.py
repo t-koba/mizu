@@ -81,6 +81,7 @@ DEFINITIONS = {
                "revision and are refused for other actions or unsupported kinds.",
                obj({"id": text(64), "action": {"type": "string", "enum": ["accept", "modify", "defer", "reject"]},
                     "reason": text(4000), "revisit": text(2000),
+                    "rev": {"type": "integer", "minimum": 1},
                     "wait": obj({"kind": {"type": "string", "enum": ["deadline", "code_change", "insight_decided"]},
                                  "at": text(64), "insight": text(64)}, ("kind",))}, ("id", "action", "reason"))),
     "submit_insight": ("Submit an immutable proposal. Sender identity is assigned by the runtime, not the model.",

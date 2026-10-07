@@ -381,15 +381,21 @@ replacement insight without implying rejected substance.
                 continue
         return digest(canonical(sorted(parts)))
 
-    def decide(self, insight_id: str, action: str, reason: str, revisit: str, run: str, wait=None) -> dict:
+    def decide(self, insight_id: str, action: str, reason: str, revisit: str, run: str, wait=None,
+               expected_rev: int | None = None) -> dict:
         if action not in ("accept", "modify", "defer", "reject") or not reason.strip():
             raise Denied("Decision requires a supported action and a reason")
         if action == "defer" and not revisit.strip():
             raise Denied("Deferred proposals require a revisit condition")
+        if expected_rev is not None and (isinstance(expected_rev, bool) or not isinstance(expected_rev, int)
+                                         or expected_rev < 1):
+            raise Denied("Decision revision must be a positive revision number")
         registered = self._normalize_wait(wait, action)
         with lock(self.root / "locks" / "insights.lock"):
             current = self.read(insight_id)
             rev = _rev_of(current)
+            if expected_rev is not None and expected_rev != rev:
+                raise Denied(f"Insight revised since read (now rev {rev}); re-read before deciding")
             raw = self.root / "decisions" / f"{insight_id}.json"
             prior = _effective_decision(rev, None if raw.is_symlink() else read_json(raw, {}))
             if prior is not None and prior.get("action") == "withdraw":

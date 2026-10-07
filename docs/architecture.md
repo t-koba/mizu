@@ -135,7 +135,11 @@ overwritten, and a same-content retry preserves the stored `run` (revision
 provenance recorded only on meaningful change). The current transport
 exposes revise/history/withdraw only to the operator (`mizu insight revise/history/withdraw`);
 other sources supersede obsolete claims via a new insight until a reviewed
-release adds an owner revise transport. Prior
+release adds an owner revise transport. Decisions carry the same binding:
+the decide interface accepts the `rev` from the read, and a decision naming
+a superseded revision is rejected without writing anything, so a prior
+rationale never authorizes changed content while the current revision stays
+pending for reassessment. Prior
 revisions are returned only by the explicit history path, never injected into
 routine context, and are durable audit like decisions (backed up, never
 pruned). Direct ID reuse with different content outside revise is rejected.

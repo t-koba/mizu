@@ -398,7 +398,8 @@ class Context:
     def _op_decide(self, args: dict) -> dict:
         return self.project.insights.decide(args["id"], args["action"], args["reason"],
                                             args.get("revisit", ""), self.run_dir.name,
-                                            wait=args.get("wait"))
+                                            wait=args.get("wait"),
+                                            expected_rev=args.get("rev"))
 
     def _op_submit_insight(self, args: dict) -> dict:
         # Model submissions carry runtime-bound provenance only (source/run);
