@@ -97,6 +97,8 @@ DEFINITIONS = {
     "vcs_publish": ("Push a branch or open a PR through the trusted VCS adapter. Requires recorded human GO approval for the branch and code digest.",
                obj({"op": {"type": "string", "enum": ["push", "pr"]},
                     "branch": text(256)}, ("op", "branch"))),
+    "vcs_retire": ("Retire an owned temporary integration branch at an exact expected sha through the trusted VCS adapter. Requires the configured retire grant; only owned branches retire, everything else is preserved.",
+               obj({"branch": text(256), "expected_sha": text(64)}, ("branch", "expected_sha"))),
     "finish": ("End this work unit. Call after all other tools. 'done' on writable roles requires successful verification.",
                obj({"outcome": {"type": "string", "enum": ["continue", "wait", "blocked", "done"]},
                     "summary": text(12000), "state": text(32000),

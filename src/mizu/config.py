@@ -14,7 +14,8 @@ from .errors import ConfigError
 from .fs import ID
 CAPABILITIES = frozenset({"diff", "files", "read", "exec", "experiment", "verify", "fetch",
                           "search", "insights", "decide", "submit_insight", "consult",
-                          "report", "finish", "sync", "vcs_read", "vcs_publish"})
+                          "report", "finish", "sync", "vcs_read", "vcs_publish",
+                          "vcs_retire"})
 ENGINES = ("pi", "pi-durable", "codex", "claude")
 #: Role names that collide with insight sources owned by the host/operator
 #: channel (operator CLI, vcs CI helper, editor outbox). Model
@@ -91,6 +92,18 @@ def strings(value: Any, name: str) -> tuple[str, ...]:
     if not isinstance(value, list) or any(not isinstance(x, str) or "\x00" in x for x in value):
         raise ConfigError(f"{name} must be an array of strings")
     return tuple(value)
+
+
+def _vcs_prefix(value, name):
+    """Validate one owned-branch namespace prefix (literal, no wildcards)."""
+    if (not isinstance(value, str) or not value or len(value) > 256
+            or value.startswith("/") or any(c.isspace() or c in "\x00\\:" for c in value)):
+        raise ConfigError(f"{name} must hold nonempty prefixes without whitespace (at most 256 chars)")
+    parts = value.split("/")
+    if any(part in (".", "..") for part in parts):
+        raise ConfigError(f"{name} must not hold dot or dot-dot components")
+    if any(part == "" for part in parts[:-1]):
+        raise ConfigError(f"{name} must not hold empty components except one trailing slash")
 
 
 def boolean(value: Any, name: str) -> bool:
@@ -691,6 +704,11 @@ def load(file: Path) -> Config:
         if "vcs_publish" in caps and ("submit_insight" in caps or "decide" in caps):
             raise ConfigError(f"Role {name} must not combine vcs_publish with submit_insight/decide; "
                               "use a dedicated publisher role without self-approval")
+        if "vcs_retire" in caps and workspace != "write":
+            raise ConfigError("vcs_retire requires a writable workspace")
+        if "vcs_retire" in caps and ("submit_insight" in caps or "decide" in caps):
+            raise ConfigError(f"Role {name} must not combine vcs_retire with submit_insight/decide; "
+                              "use a dedicated integrator role without self-approval")
         if workspace == "write" and "verify" not in caps:
             raise ConfigError(f"Writable role {name} requires the verify capability so "
                               "completion can be bound to acceptance commands")
@@ -764,12 +782,14 @@ def load(file: Path) -> Config:
     vcs = data.get("vcs", {})
     keys(vcs, {"command", "timeout_seconds", "max_bytes", "ci_branch", "poll_enabled",
                "poll_interval_seconds", "poll_max_branches",
-               "poll_fetch_timeout_seconds", "poll_status_timeout_seconds"}, "vcs")
+               "poll_fetch_timeout_seconds", "poll_status_timeout_seconds",
+               "retire_grant", "owned_prefixes", "protected_refs"}, "vcs")
     vcs = {"command": [], "timeout_seconds": 20,
            "max_bytes": 524288, "ci_branch": "", "poll_enabled": False,
            "poll_interval_seconds": 300, "poll_max_branches": 4,
            "poll_fetch_timeout_seconds": 30,
-           "poll_status_timeout_seconds": 15, **vcs}
+           "poll_status_timeout_seconds": 15, "retire_grant": False,
+           "owned_prefixes": [], "protected_refs": [], **vcs}
     strings(vcs["command"], "vcs.command")
     if vcs["command"] and any(not s or "\n" in s for s in vcs["command"]):
         raise ConfigError("vcs.command must be a nonempty argv array without newlines")
@@ -778,6 +798,14 @@ def load(file: Path) -> Config:
     vcs["ci_branch"] = string(vcs["ci_branch"], "vcs.ci_branch")
     if vcs["ci_branch"] and (len(vcs["ci_branch"]) > 256 or any(c.isspace() for c in vcs["ci_branch"])):
         raise ConfigError("vcs.ci_branch must be empty or a branch name without whitespace (at most 256 chars)")
+    vcs["retire_grant"] = boolean(vcs["retire_grant"], "vcs.retire_grant")
+    vcs["owned_prefixes"] = strings(vcs["owned_prefixes"], "vcs.owned_prefixes")
+    for prefix in vcs["owned_prefixes"]:
+        _vcs_prefix(prefix, "vcs.owned_prefixes")
+    vcs["protected_refs"] = strings(vcs["protected_refs"], "vcs.protected_refs")
+    for ref in vcs["protected_refs"]:
+        if len(ref) > 256 or not ref or any(c.isspace() for c in ref):
+            raise ConfigError("vcs.protected_refs must hold branch names without whitespace (at most 256 chars)")
     vcs["poll_enabled"] = boolean(vcs["poll_enabled"], "vcs.poll_enabled")
     number(vcs["poll_interval_seconds"], "vcs.poll_interval_seconds", 15, 86400)
     number(vcs["poll_max_branches"], "vcs.poll_max_branches", 1, 64)

@@ -677,6 +677,106 @@ def publish_via(settings: dict, op: str, params: dict) -> dict:
     return {**data, "trust": "external-untrusted"}
 
 
+#: Branch lifecycle classes for the retire path. Only ``owned`` temporary
+#: integration branches are retire-eligible; every other class is
+#: preserved: ``protected`` long-lived development/release refs,
+#: ``external`` fork/pull namespaces outside local heads, ``tracking``
+#: remote-tracking refs, and ``other`` active work of unknown ownership.
+BRANCH_CLASSES = frozenset({"owned", "protected", "external", "tracking", "other"})
+
+
+def _check_prefix(prefix) -> str:
+    if (not isinstance(prefix, str) or not prefix or len(prefix) > 256
+            or any(char.isspace() or char in "\x00\\:" for char in prefix)
+            or prefix.startswith("/")):
+        raise Denied("Invalid VCS owned prefix")
+    parts = prefix.split("/")
+    if any(part in (".", "..") for part in parts):
+        raise Denied("Invalid VCS owned prefix")
+    if any(part == "" for part in parts[:-1]) or (parts[-1] == "" and len(parts) < 2):
+        raise Denied("Invalid VCS owned prefix")
+    return prefix
+
+
+def _prefix_match(short: str, prefix: str) -> bool:
+    if prefix.endswith("/"):
+        return short.startswith(prefix)
+    return short == prefix or short.startswith(prefix + "/")
+
+
+def classify_branch(ref, *, owned_prefixes=(), protected_refs=()) -> str:
+    """Classify a branch/ref into its lifecycle class (pure, no I/O).
+
+    Schema: ``ref`` is a short branch name or a full ref path
+    (``refs/heads/<name>``); ``owned_prefixes`` is a list of literal
+    namespace prefixes (``"mizu/"``), ``protected_refs`` a list of exact
+    protected names. Order: ``refs/remotes/*`` reads as ``tracking``,
+    other non-heads ``refs/`` namespaces (pull/fork) read as
+    ``external``, then exact ``protected`` wins over ``owned`` prefix
+    match, and anything else is ``other`` active work. Bounds: names per
+    ``_check_ref_name``. Trust: pure local syntax plus operator
+    namespaces; never consults the network. Failure: ``Denied`` on bad
+    refs or malformed namespace policy.
+    """
+    _check_ref_name(ref)
+    if (not isinstance(owned_prefixes, (list, tuple))
+            or not isinstance(protected_refs, (list, tuple))):
+        raise Denied("Invalid VCS branch namespace policy")
+    owned = [_check_prefix(entry) for entry in owned_prefixes]
+    for entry in protected_refs:
+        check_branch(entry)
+    if ref.startswith("refs/remotes/"):
+        return "tracking"
+    if ref.startswith("refs/") and not ref.startswith("refs/heads/"):
+        return "external"
+    short = ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref
+    if short in protected_refs or ref in protected_refs:
+        return "protected"
+    if any(_prefix_match(short, prefix) for prefix in owned):
+        return "owned"
+    return "other"
+
+
+def retire_via(settings: dict, branch, expected_sha) -> dict:
+    """Delete an owned temporary integration branch with expected-SHA protection.
+
+    Schema: ``settings`` carries the operator grant (``retire_grant``
+    true), the namespace policy (``owned_prefixes``/``protected_refs``),
+    and the adapter contract. ``branch`` per ``check_branch`` must
+    classify ``owned``; ``expected_sha`` is the 40/64 hex head the caller
+    observed. The adapter request sends ``{"op": "retire", "branch",
+    "expected_sha"}; the adapter must delete only when its current head
+    still equals ``expected_sha`` (revalidation immediately before
+    action, compare-and-delete) and echo ``branch``/``sha`` with
+    ``deleted`` true. Bounds: same contract as ``invoke``. Trust:
+    operator-owned adapter only; results stay external-untrusted.
+    Evidence: returned receipt names branch, sha, and classification.
+    Failure: ``Denied`` without the configured grant, on non-owned
+    branches (protected/external/tracking/other are preserved), on bad
+    shas, or on a missing/mismatched confirmation echo. A failed call
+    implies nothing about the remote ref; reconcile by re-observing.
+    """
+    if not isinstance(settings, dict) or settings.get("retire_grant") is not True:
+        raise Denied("Branch retirement is not granted in VCS configuration")
+    check_branch(branch)
+    if not isinstance(expected_sha, str) or not _SHA.fullmatch(expected_sha):
+        raise Denied("Invalid expected branch sha")
+    classification = classify_branch(
+        branch, owned_prefixes=settings.get("owned_prefixes", ()),
+        protected_refs=settings.get("protected_refs", ()))
+    if classification != "owned":
+        raise Denied(f"Only owned integration branches retire; '{branch}' is {classification}")
+    data = invoke(settings, {"op": "retire", "branch": branch,
+                             "expected_sha": expected_sha})
+    if not isinstance(data, dict):
+        raise Denied("VCS adapter must return a JSON object")
+    if (data.get("branch") != branch or data.get("sha") != expected_sha
+            or data.get("deleted") is not True):
+        raise Denied("VCS adapter must confirm the retired branch at the expected sha")
+    return {"branch": branch, "sha": expected_sha, "deleted": True,
+            "classification": classification, "trust": "external-untrusted"}
+
+
 def ci_insight_id(branch: str, sha: str, check: str) -> str:
     """Derive a stable, deduplicating insight ID for a CI failure."""
     from .fs import digest as _digest, canonical as _canonical

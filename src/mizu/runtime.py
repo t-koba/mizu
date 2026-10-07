@@ -106,7 +106,7 @@ def is_deferred(exc: BaseException, context=None) -> bool:
 #: stay operator choice, plus the required finish.
 CONSULT_FORBIDDEN = frozenset({"exec", "experiment", "verify", "decide",
                                "submit_insight", "consult", "report", "sync",
-                               "vcs_publish"})
+                               "vcs_publish", "vcs_retire"})
 
 
 def check_consult_role(role_name: str, role) -> None:
@@ -482,6 +482,27 @@ class Context:
                     "trust": "external-untrusted", "result": data})
         return record
 
+    def _op_vcs_retire(self, args: dict) -> dict:
+        # Branch retirement: delete an owned temporary integration branch
+        # at an exact expected sha behind the configured retire grant.
+        # Classification is enforced inside retire_via (owned only);
+        # protected, external, tracking, and other refs are preserved.
+        # A failed call implies nothing about the remote ref: reconcile by
+        # re-observing, never by assuming deletion.
+        if self.role.workspace != "write":
+            raise Denied("Branch retirement requires a writable workspace")
+        try:
+            data = _vcs.retire_via(self.config.vcs, args.get("branch"),
+                                   args.get("expected_sha"))
+        except OSError as exc:
+            raise Denied(f"Branch retirement is unavailable: {exc}") from exc
+        record = {"retired": True, "branch": data["branch"], "sha": data["sha"],
+                  "classification": data["classification"],
+                  "trust": "external-untrusted", "evidence": "vcs-retire.json",
+                  "result": data}
+        write_json(self.run_dir / "vcs-retire.json", data)
+        return record
+
     def _op_consult(self, args: dict) -> dict:
         if self.consult is None:
             raise Denied("Nested consultation is disabled")
@@ -518,6 +539,7 @@ class Context:
         "fetch": _op_fetch, "search": _op_search, "insights": _op_insights,
         "decide": _op_decide, "submit_insight": _op_submit_insight,
         "sync": _op_sync, "vcs_read": _op_vcs_read, "vcs_publish": _op_vcs_publish,
+        "vcs_retire": _op_vcs_retire,
         "consult": _op_consult, "report": _op_report, "finish": _op_finish,
     }
 
