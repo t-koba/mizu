@@ -239,7 +239,10 @@ class SessionIsolationTests(Fixture):
         self.assertEqual(session_generation(session_file.parent), 1)
         out = driver.execute(self.context(), "two", profile=profile)
         self.assertNotEqual(out["durable"]["store"], first["durable"]["store"])
-        self.assertTrue(out["durable"]["store"].endswith("-g1/store.sqlite"))
+        from pathlib import Path as _Path
+        _store = _Path(out["durable"]["store"])
+        self.assertEqual(_store.name, "store.sqlite")
+        self.assertTrue(_store.parent.name.endswith("-g1"))
         # The abandoned store is retired, and the fresh store holds no
         # trace of the previous conversation.
         from pathlib import Path
