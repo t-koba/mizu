@@ -105,7 +105,7 @@ def main():
     allowed_not_run = _allow_list(args.allow_not_run)
     checks = []
     counts = {}
-    env = {**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'}
+    env = {**os.environ, 'PYTHONDONTWRITEBYTECODE': '1', 'PYTHONFAULTHANDLER': '1'}
     # The offline suite is process-spawn heavy (~75 s on Linux); Windows
     # runners need substantially more headroom than 300 s, well within the
     # 15-minute CI job budget. Step output streams live (merged in order) so
@@ -132,7 +132,11 @@ def main():
                 process.kill()
                 exit_code = process.wait(timeout=30)
                 status = 'fail'
-                details = f'timed out after {timeout} s'
+                # A killed step prints no summary, so the report carries the
+                # last output: with unbuffered verbose progress this names the
+                # test that never finished instead of a bare run:0.
+                tail = ''.join(chunks)[-1500:]
+                details = f'timed out after {timeout} s; output tail: {tail.strip()}'
             reader.join(timeout=30)
         text = ''.join(chunks)
         if exit_code != 0:
@@ -166,7 +170,9 @@ def main():
         return {'run': int(passed.group(1)) if passed else 0,
                 'failed': int(failed.group(1)) if failed else 0,
                 'skipped': int(re.search(r'^# skipped (\d+)', output, re.M).group(1)) if re.search(r'^# skipped (\d+)', output, re.M) else 0}
-    execute('python-unit-and-contract-tests', [sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-q'],
+    # Unbuffered verbose progress: on a timeout the killed step leaves the
+    # hanging test as the last unfinished line (see output-tail details).
+    execute('python-unit-and-contract-tests', [sys.executable, '-u', '-m', 'unittest', 'discover', '-s', 'tests', '-v'],
             count=unittest_counts)
     if not shutil.which('node'):
         checks.append({'name': 'node-available', 'status': 'fail'})
