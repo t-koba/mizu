@@ -118,9 +118,12 @@ paused/disarmed.
 
 ## Insight handoff
 
-The submitting route assigns the source identity. A record contains ID, source,
-created time, base snapshot, title, Markdown body, revision identity (`rev`)
-and update time. Ordinary prompts, lists, reads and the dashboard expose only
+The submitting route assigns the source identity. A record contains ID, source
+(authority channel), opaque origin (actual caller sharing the transport, null
+means unknown and never guessed), created time, base snapshot, title, Markdown
+body, revision identity (`rev`) and update time. Origin is set once at submit by
+trusted host callers, preserved across revisions, never routed on, and never
+grants operator approval. Ordinary prompts, lists, reads and the dashboard expose only
 the current content, its current decision/evidence gap and `rev`; obsolete
 claims are replaced, never appended. The first submission creates `rev` 1.
 The original submitter may revise under the stable ID via compare-and-swap on

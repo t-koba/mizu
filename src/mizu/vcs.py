@@ -341,6 +341,7 @@ def require_go_approval(project, branch: str, code_digest: str) -> dict:
     Trust: local insight inbox plus ``decisions/`` records; the approval
     insight must carry source ``operator`` (``mizu insight submit``) and the
     ``accept`` decision must carry run ``operator`` (``mizu insight decide``).
+    The opaque ``origin`` label is ignored here: it never grants approval.
     Model-submitted insights (source is the role name) and model decisions
     (run is the run directory name) never satisfy this gate. Use a dedicated
     publisher role without ``submit_insight``/``decide`` (refused together
@@ -529,19 +530,23 @@ def ci_insight_id(branch: str, sha: str, check: str) -> str:
 
 
 def record_ci_result(project, *, branch: str, sha: str, check: str,
-                     state: str, url: str = "", run: str | None = None) -> dict:
+                     state: str, url: str = "", run: str | None = None,
+                     origin: str | None = None) -> dict:
     """Record a CI failure as an insight; deduplicate repeats, ignore passes.
 
     Schema: ``state`` is ``"failure"`` (record) or anything else
     (ignored). ``url`` is an optional bounded log link, validated but not
     stored: the persisted body covers only branch/sha/check so repeats with
     a varying per-run log URL resubmit identical content and return the
-    existing record. Bounds: title <= 200 chars, body within the insight
+    existing record. ``origin`` is an opaque trusted-caller label stored
+    alongside the ``vcs`` authority; it never affects approval, routing,
+    or dedup (the first-stored origin/run is preserved on repeats).
+    Bounds: title <= 200 chars, body within the insight
     byte limit. Trust: adapter-derived facts labeled external-untrusted in
     the body; the stable ID lets repeats return the existing record instead
     of spamming the inbox. The latest log URL stays available via
-    ``vcs_read`` ``status``. Failure: ``Denied`` on bad names or bad URLs;
-    adapter content never raises beyond validation.
+    ``vcs_read`` ``status``. Failure: ``Denied`` on bad names, bad URLs or
+    bad origins; adapter content never raises beyond validation.
     """
     if state != "failure":
         return {"recorded": False, "state": state}
@@ -554,6 +559,6 @@ def record_ci_result(project, *, branch: str, sha: str, check: str,
     body = (f"CI check '{check}' failed on branch '{branch}' at {sha}.\n"
             f"trust: external-untrusted\n")
     record = project.insights.submit(source="vcs", title=title, body=body,
-                                     base_snapshot=None, run=run,
+                                     base_snapshot=None, run=run, origin=origin,
                                      insight_id=insight_id)
     return {"recorded": True, "id": record["id"], "title": title}

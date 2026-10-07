@@ -19,6 +19,17 @@ owner revise transport; the source-match check already enforces that future.
 ``run`` is revision provenance recorded only on meaningful change and never
 wakes: an identical-content retry with a different ``run`` returns current
 unchanged (stored ``run`` preserved) without bumping rev.
+
+Attribution contract: ``source`` is the submitting authority channel
+(operator CLI, ``vcs`` CI helper, ``editor`` outbox, or a role name fixed by
+the runtime); ``origin`` is an opaque submitter-supplied label for the actual
+origin (for example which trusted caller shared the operator transport).
+``origin`` is ``None`` when unspecified; historical records without it read
+as unknown, never guessed from titles. ``origin`` is set once at submit by
+trusted host callers, preserved across revisions, never routed on, and never
+grants operator approval. Model ``submit_insight`` exposes no origin field
+and is stored with ``origin`` None; the Editor outbox accepts only
+``title``/``body``/``base_snapshot`` so capsule content cannot forge origin.
 """
 from __future__ import annotations
 
@@ -49,9 +60,21 @@ def _content_sha(record: dict) -> str:
     return digest(canonical(payload))
 
 
+def _check_origin(origin: str | None) -> str | None:
+    """Validate an opaque origin label (None means unknown, never guessed)."""
+    if origin is None:
+        return None
+    if (not isinstance(origin, str) or not 1 <= len(origin) <= 256
+            or "\x00" in origin or "\n" in origin or not origin.strip()):
+        raise Denied("Insight origin must be 1-256 chars without NUL/newlines")
+    return origin
+
+
 def _normalize(record: dict) -> dict:
     out = dict(record)
     out["rev"] = _rev_of(record)
+    if "origin" not in out:
+        out["origin"] = None
     if not out.get("updated_at"):
         out["updated_at"] = out.get("created_at")
     return out
@@ -86,15 +109,28 @@ class Insights:
         self.snapshots = None
 
     def submit(self, *, source: str, title: str, body: str, base_snapshot: str | None,
-               run: str | None = None, insight_id: str | None = None) -> dict:
+               run: str | None = None, insight_id: str | None = None,
+               origin: str | None = None) -> dict:
+        """Submit a proposal with authority ``source`` and opaque ``origin``.
+
+        ``origin`` labels the actual caller sharing the transport and never
+        confers authority: approval, revise, withdraw and event routing read
+        ``source``/``run`` only. ``None`` reads as unknown. ``run``/``origin``
+        are provenance preserved from the first store: a live ID repeat with
+        the same content (``id``/``source``/``title``/``body``/``base_snapshot``)
+        but a different ``run``/``origin`` returns the stored record instead
+        of raising, so stable IDs (for example CI dedup) never break on
+        provenance alone.
+        """
         identifier(source)
+        origin = _check_origin(origin)
         insight_id = identifier(insight_id or uuid.uuid4().hex)
         if not isinstance(title, str) or not 1 <= len(title) <= 200 or not isinstance(body, str) or not body.strip():
             raise Denied("Insight requires a title (1–200 characters) and nonempty body")
         if base_snapshot is not None and (not isinstance(base_snapshot, str) or not DIGEST.fullmatch(base_snapshot)):
             raise Denied("base_snapshot must be a SHA-256 ID or null")
         payload = {"id": insight_id, "source": source, "title": title, "body": body,
-                   "base_snapshot": base_snapshot, "run": run}
+                   "base_snapshot": base_snapshot, "run": run, "origin": origin}
         if len(canonical(payload)) > self.maximum:
             raise Denied("Insight exceeds byte limit")
         with lock(self.root / "locks" / "insights.lock"):
@@ -106,10 +142,14 @@ class Insights:
             if identity and identity.get("sha256") != sha:
                 # A revised identity exists; direct submit with different
                 # content is refused (use revise with expected_rev).
-                # Idempotent retry with current content returns current below.
+                # Idempotent retry with current content returns current below;
+                # provenance alone (run/origin) never breaks the dedup.
                 if old is not None:
-                    current_payload = {k: old[k] for k in payload}
+                    current_payload = {k: old.get(k) if k != "origin" else old.get("origin") for k in payload}
                     if current_payload == payload:
+                        return _normalize(old)
+                    core = ("id", "source", "title", "body", "base_snapshot")
+                    if all(old.get(k) == payload.get(k) for k in core):
                         return _normalize(old)
                 raise Denied("Insight ID was reused with different content")
             if old is None and identity:
@@ -118,8 +158,14 @@ class Insights:
             if old is None and (self.root / "decisions" / f"{insight_id}.json").exists():
                 raise Denied("Decided ID has no retained identity; reuse refused")
             if old:
-                if {k: old[k] for k in payload} != payload:
+                core = ("id", "source", "title", "body", "base_snapshot")
+                if any(old.get(k) != payload.get(k) for k in core):
                     raise Denied("Insight ID was reused with different content")
+                if {k: old.get(k) if k != "origin" else old.get("origin") for k in payload} != payload:
+                    # Same content, different provenance: preserve the first
+                    # store instead of raising, keeping the identity bound to
+                    # the stored record.
+                    return _normalize(old)
                 write_json(identity_path, {"id": insight_id, "sha256": sha, "created_at": old["created_at"]}, exclusive=True)
                 return _normalize(old)
             record = {**payload, "created_at": now(), "rev": 1}
@@ -169,13 +215,14 @@ replacement insight without implying rejected substance.
             raise Denied("base_snapshot must be a SHA-256 ID or null")
         if expected_rev is not None and (type(expected_rev) is not int or expected_rev < 1):
             raise Denied("expected_rev must be a positive integer")
-        payload = {"id": insight_id, "source": source, "title": title, "body": body,
-                   "base_snapshot": base_snapshot, "run": run}
-        if len(canonical(payload)) > self.maximum:
-            raise Denied("Insight exceeds byte limit")
         with lock(self.root / "locks" / "insights.lock"):
             path = self.root / "inbox" / f"{insight_id}.json"
             old = read_json(path)
+            _origin = _normalize(old).get("origin") if old else None
+            payload = {"id": insight_id, "source": source, "title": title, "body": body,
+                       "base_snapshot": base_snapshot, "run": run, "origin": _origin}
+            if len(canonical(payload)) > self.maximum:
+                raise Denied("Insight exceeds byte limit")
             if not old:
                 raise Denied("Insight not found")
             if old.get("source") != source:
@@ -185,7 +232,7 @@ replacement insight without implying rejected substance.
                 raise Denied("Insight revision conflict; reread the current revision")
             if (old.get("title") == title and old.get("body") == body
                     and old.get("base_snapshot") == base_snapshot):
-                stored_payload = {k: old.get(k) for k in ("id", "source", "title", "body", "base_snapshot", "run")}
+                stored_payload = {k: old.get(k) for k in ("id", "source", "title", "body", "base_snapshot", "run", "origin")}
                 try:
                     write_json(self.root / "insight-ids" / f"{insight_id}.json",
                                {"id": insight_id, "sha256": digest(canonical(stored_payload)),
@@ -210,7 +257,7 @@ replacement insight without implying rejected substance.
                 if (not isinstance(existing, dict) or existing.get("id") != insight_id
                         or _rev_of(existing) != current_rev
                         or any(existing.get(k) != old.get(k)
-                               for k in ("source", "title", "body", "base_snapshot"))):
+                               for k in ("source", "title", "body", "base_snapshot", "origin"))):
                     raise Denied("Insight revision archive conflict; reread the current revision")
                 write_json(archive_path, archive)
             else:
@@ -221,6 +268,7 @@ replacement insight without implying rejected substance.
                     raise Denied("Insight revision conflict; reread the current revision")
             record = {"id": insight_id, "source": source, "title": title, "body": body,
                       "base_snapshot": base_snapshot, "run": run,
+                      "origin": _origin,
                       "created_at": old.get("created_at"), "rev": current_rev + 1,
                       "updated_at": stamped}
             write_json(path, record)
@@ -269,7 +317,9 @@ replacement insight without implying rejected substance.
                 decision = _effective_decision(item_rev, raw_decision)
                 if pending and decision and decision["action"] != "defer":
                     continue
-                record = {k: item[k] for k in ("id", "source", "title", "created_at", "base_snapshot") if k in item}
+                record = {k: item[k] for k in ("id", "source", "origin", "title", "created_at", "base_snapshot") if k in item}
+                if "origin" not in record:
+                    record["origin"] = None
                 record["rev"] = item_rev
                 if item.get("updated_at"):
                     record["updated_at"] = item["updated_at"]
@@ -745,7 +795,9 @@ replacement insight without implying rejected substance.
                     decided_at = dt.datetime.fromisoformat(decision["created_at"]).timestamp()
                     if decided_at > cutoff:
                         continue
-                    payload = {k: item[k] for k in ("id", "source", "title", "body", "base_snapshot", "run")}
+                    payload = {k: item[k] for k in ("id", "source", "title", "body", "base_snapshot", "run", "origin") if k in item}
+                    if "origin" not in payload:
+                        payload["origin"] = None
                     write_json(self.root / "insight-ids" / path.name,
                                {"id": item["id"], "sha256": digest(canonical(payload)), "created_at": item["created_at"]},
                                exclusive=True)

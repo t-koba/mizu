@@ -23,7 +23,7 @@ Payload structure ( `src/mizu/dashboard.py`):
 | `control` | `armed`, `paused`, short `reason`, `updated_at` |
 | `snapshot` | `id`, `code_digest`, `created_at`, `outcome`, `summary`, `state`, recorded `verification`, `goal_digest`, `wake_at` |
 | `needs_operator_input` | `true` exactly when the snapshot outcome is `blocked` |
-| `pending_insights` | Newest pending proposals up to `[limits] pending_insights` (`id`, `source`, `title`, `created_at`, `base_snapshot`, slim decision) |
+| `pending_insights` | Newest pending proposals up to `[limits] pending_insights` (`id`, `source`, `origin` (null means unknown), `title`, `created_at`, `base_snapshot`, slim decision) |
 | `pending_count`, `pending_total`, `pending_truncated`, `answered_count` | `pending_count` is bounded by `[limits] pending_insights` (counting newest undecided and deferred proposals); `answered_count` is the total count of decision records on disk. These are not mutually exclusive: deferred proposals remain pending and are counted in both |
 | `recent_decisions` | Latest 10 decisions selected by `created_at` (`id`, `action`, `created_at`, truncated reason) |
 | `health`, `active` | Per-role failure counters and in-flight markers |

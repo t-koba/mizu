@@ -112,6 +112,23 @@ class CiStatusTests(Fixture):
         self.assertEqual(event["failures"], 1)
         self.assertEqual(event["recorded"][0]["id"], first["id"])
 
+    def test_varying_origin_and_run_dedupe_preserving_first(self):
+        first = vcs.record_ci_result(self.project, branch="main", sha=SHA_A,
+                                     check="unit", state="failure",
+                                     url="https://ci/run/1", origin="adapter:A",
+                                     run="run-1")
+        self.assertTrue(first["recorded"])
+        stored = self.project.insights.read(first["id"])
+        self.assertEqual(stored["origin"], "adapter:A")
+        second = vcs.record_ci_result(self.project, branch="main", sha=SHA_A,
+                                      check="unit", state="failure",
+                                      url="https://ci/run/2", origin="adapter:B",
+                                      run="run-2")
+        self.assertEqual(second["id"], first["id"])
+        kept = self.project.insights.read(first["id"])
+        self.assertEqual(kept["origin"], "adapter:A")
+        self.assertEqual(kept["run"], "run-1")
+
     def test_poll_disabled_adapter_never_polls(self):
         state = {}
         out = poll_ci(self.config, self.project, state, now=100.0, interval=15.0,

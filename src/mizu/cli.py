@@ -82,6 +82,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--revisit", default="", help="Revisit condition for defer")
     p.add_argument("--wait", default=None, help="Structured defer wait as kind[:arg]: deadline:<ISO-at> | code_change | insight_decided:<id>")
     p.add_argument("--expected-rev", type=int, default=None, help="Compare-and-swap revision for revise")
+    p.add_argument("--origin", default=None, help="Opaque origin label recorded alongside the operator authority (submit only)")
     p = sub.add_parser("editor", help="Export a capsule or serve the Editor MCP")
     esub = p.add_subparsers(dest="editor_command", required=True)
     p = esub.add_parser("export", help="Export an immutable Editor capsule")
@@ -284,7 +285,8 @@ def _cmd_insight(config, project, args):
             raise Denied("Insight body file exceeds byte limit")
         body = args.body.read_text(encoding="utf-8")
     return project.insights.submit(source="operator", title=args.title, body=body,
-                                   base_snapshot=project.snapshots.get()["id"], insight_id=args.id)
+                                   base_snapshot=project.snapshots.get()["id"], insight_id=args.id,
+                                   origin=args.origin)
 
 
 def _cmd_editor_export(config, project, args):

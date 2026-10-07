@@ -400,8 +400,12 @@ class Context:
                                             wait=args.get("wait"))
 
     def _op_submit_insight(self, args: dict) -> dict:
+        # Model submissions carry runtime-bound provenance only (source/run);
+        # no origin field is exposed, so stored origin stays unknown and can
+        # never elevate to operator authority.
         return self.project.insights.submit(source=self.role.name, title=args["title"], body=args["body"],
-                                             base_snapshot=self.snapshot["id"], run=self.run_dir.name)
+                                             base_snapshot=self.snapshot["id"], run=self.run_dir.name,
+                                             origin=None)
 
     def _op_sync(self, args: dict) -> dict:
         # Host-side refresh only: fetch upstream refs via the trusted adapter

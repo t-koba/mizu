@@ -69,6 +69,7 @@ def collect(project) -> dict:
     max_decisions = _configured(project, "dashboard_decisions", MAX_DECISIONS)
     for item in pending:
         entry = {k: item[k] for k in ("id", "source", "title", "created_at", "base_snapshot")}
+        entry["origin"] = item.get("origin")
         entry["rev"] = item.get("rev", 1)
         if item.get("updated_at"):
             entry["updated_at"] = item["updated_at"]

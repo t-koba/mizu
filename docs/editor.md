@@ -68,7 +68,7 @@ mizu insight ingest demo
 mizu insight list demo
 ```
 
-Source identity is stamped by ingestion, not trusted from proposal prose.
+Source identity is stamped by ingestion, not trusted from proposal prose. The outbox accepts only `title`/`body`/`base_snapshot`; any `origin`/`source` fields are quarantined. Trusted host callers may record their actual origin alongside the authority channel (`mizu insight submit --origin ...`); model submissions keep runtime-bound provenance with unknown origin. Origin never grants operator approval.
 Worker accepts, changes, defers or rejects with a reason. A human goal change
 belongs in the operator-owned `PROJECT.md` while paused, not disguised as an
 Editor technical suggestion.
