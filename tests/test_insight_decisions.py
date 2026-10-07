@@ -40,11 +40,16 @@ class DecisionRevisionTests(DecisionRevisionFixture):
                                               "", "run-1", expected_rev=2)
         self.assertEqual(record["rev"], 2)
 
-    def test_absent_rev_decides_current(self):
+    def test_absent_rev_denied(self):
         proposal = self.submit()
-        self.revise(proposal)
-        record = self.project.insights.decide(proposal["id"], "accept", "current", "", "run-1")
-        self.assertEqual(record["rev"], 2)
+        with self.assertRaises(Denied):
+            self.project.insights.decide(proposal["id"], "accept", "current", "", "run-1")
+        self.assertFalse(self.decided(proposal["id"]))
+        ctx = self.context("worker")
+        with self.assertRaises(Denied):
+            ctx.handle("decide", {"id": proposal["id"], "action": "accept",
+                                  "reason": "no rev echoed"})
+        self.assertFalse(self.decided(proposal["id"]))
 
     def test_malformed_rev_denied(self):
         proposal = self.submit()

@@ -10,7 +10,7 @@ class DashboardPolicyTests(Fixture):
         snap = self.project.snapshots.get()["id"]
         item = self.project.insights.submit(source="operator", title="T", body="B",
                                             base_snapshot=snap)
-        self.project.insights.decide(item["id"], "accept", reason, "", "test")
+        self.project.insights.decide(item["id"], "accept", reason, "", "test", expected_rev=1)
         return item
 
     def test_defaults_match_previous_fixed_bounds(self):

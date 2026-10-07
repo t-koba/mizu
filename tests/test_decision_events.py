@@ -17,7 +17,7 @@ def _trigger_config(config, role="reviewer", events=("reject",)):
 def _reject(project, source, title="Finding"):
     item = project.insights.submit(source=source, title=title, body="evidence",
                                    base_snapshot=project.snapshots.get()["id"])
-    project.insights.decide(item["id"], "reject", "not material", "", "test")
+    project.insights.decide(item["id"], "reject", "not material", "", "test", expected_rev=1)
     return item
 
 
@@ -87,10 +87,10 @@ class DecisionTriggerTests(Fixture):
         item = _reject(self.project, "reviewer")
         self.project.insights.withdraw(item["id"], source="reviewer", reason="retracted")
         with self.assertRaises(Denied):
-            self.project.insights.decide(item["id"], "accept", "second thoughts", "", "test")
+            self.project.insights.decide(item["id"], "accept", "second thoughts", "", "test", expected_rev=1)
         self.project.insights.revise(item["id"], source="reviewer", title="Finding",
                                      body="new evidence", base_snapshot=None)
-        self.project.insights.decide(item["id"], "accept", "now material", "", "test")
+        self.project.insights.decide(item["id"], "accept", "now material", "", "test", expected_rev=2)
 
     def test_unconfigured_role_keeps_skipping(self):
         engine = Engine(self.config, driver=ScriptDriver())
@@ -127,7 +127,7 @@ class DeferRefinementTests(Fixture):
         engine.run(self.project, "reviewer")
         item = self.project.insights.submit(source="reviewer", title="Finding", body="v1",
                                             base_snapshot=self.project.snapshots.get()["id"])
-        self.project.insights.decide(item["id"], "defer", "needs field data", "observe X in the wild", "test")
+        self.project.insights.decide(item["id"], "defer", "needs field data", "observe X in the wild", "test", expected_rev=1)
         events = self.project.insights.decision_events("reviewer", ("reject", "defer"))
         self.assertEqual(len(events), 1)
         self.assertEqual((events[0]["action"], events[0]["reason"]), ("defer", "needs field data"))
@@ -143,7 +143,7 @@ class DeferRefinementTests(Fixture):
         self.project.set_control(armed=True, paused=False, wake_generation="")
         item = self.project.insights.submit(source="reviewer", title="Finding", body="v1",
                                             base_snapshot=self.project.snapshots.get()["id"])
-        self.project.insights.decide(item["id"], "defer", "needs field data", "observe X", "test")
+        self.project.insights.decide(item["id"], "defer", "needs field data", "observe X", "test", expected_rev=1)
         captured = self.project.snapshots.capture_files(self.project.workspace)
         republished = self.project.snapshots.create(
             captured, goal=self.project.goal, state="Writer parked.", run=None,
@@ -165,7 +165,7 @@ class DeferRefinementTests(Fixture):
         from mizu.dashboard import collect
         item = self.project.insights.submit(source="reviewer", title="Finding", body="v1",
                                             base_snapshot=self.project.snapshots.get()["id"])
-        self.project.insights.decide(item["id"], "defer", "blocked on release", "wait for v2", "test")
+        self.project.insights.decide(item["id"], "defer", "blocked on release", "wait for v2", "test", expected_rev=1)
         core = collect(self.project)
         entries = [e for e in core["pending_insights"] if e["id"] == item["id"]]
         self.assertEqual(len(entries), 1)

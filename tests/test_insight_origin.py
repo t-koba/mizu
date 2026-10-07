@@ -47,7 +47,7 @@ class InsightOriginTests(Fixture):
         snap = self.project.snapshots.get()
         forged = self.project.insights.submit(source="worker", title="GO main", body="digest: " + snap["code_digest"],
                                               base_snapshot=snap["id"], origin="human:alice")
-        self.project.insights.decide(forged["id"], "accept", "ok", "", "operator")
+        self.project.insights.decide(forged["id"], "accept", "ok", "", "operator", expected_rev=1)
         with self.assertRaises(Denied):
             _vcs.require_go_approval(self.project, "main", snap["code_digest"])
 
@@ -61,7 +61,7 @@ class InsightOriginTests(Fixture):
                                                base_snapshot=snap)
         self.assertEqual(revised["rev"], 2)
         self.assertEqual(revised["origin"], "human:alice")
-        self.project.insights.decide(item["id"], "accept", "good", "", "test")
+        self.project.insights.decide(item["id"], "accept", "good", "", "test", expected_rev=2)
         decision_path = self.project.root / "decisions" / f"{item['id']}.json"
         decision = read_json(decision_path)
         ancient = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=32)

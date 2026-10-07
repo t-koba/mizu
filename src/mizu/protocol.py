@@ -83,7 +83,7 @@ DEFINITIONS = {
                     "reason": text(4000), "revisit": text(2000),
                     "rev": {"type": "integer", "minimum": 1},
                     "wait": obj({"kind": {"type": "string", "enum": ["deadline", "code_change", "insight_decided"]},
-                                 "at": text(64), "insight": text(64)}, ("kind",))}, ("id", "action", "reason"))),
+                                 "at": text(64), "insight": text(64)}, ("kind",))}, ("id", "action", "reason", "rev"))),
     "submit_insight": ("Submit an immutable proposal. Sender identity is assigned by the runtime, not the model.",
                        obj({"title": text(200), "body": text(60000)}, ("title", "body"))),
     "consult": ("Ask configured models independently about the SAME immutable code snapshot. Nested consultation is disabled by the runtime.",

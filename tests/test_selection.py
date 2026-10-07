@@ -384,7 +384,8 @@ class ClassificationTests(SelectionFixture):
         self.assertEqual(inferred[1]['proposals'][0]['id'], proposal['id'])
         self.assertEqual(inferred[1]['proposals'][0]['rev'], proposal['rev'])
         # Fresh review evidence routed to the role is material as well.
-        self.project.insights.decide(proposal['id'], 'reject', 'not yet', '', role.name)
+        self.project.insights.decide(proposal['id'], 'reject', 'not yet', '', role.name,
+                                       expected_rev=proposal['rev'])
         evidence = engine.run(self.project, role.name)['selection']['classification']
         self.assertEqual(evidence['status'], 'completed')
         self.assertEqual(len(inferred), 3)

@@ -54,7 +54,8 @@ def approve(fixture, branch, digest, action="accept", source="operator", run="op
         source=source, title=f"GO {branch}",
         body=f"Ship it.\ndigest: {digest}\n",
         base_snapshot=None, run=None)
-    fixture.project.insights.decide(record["id"], action, "reviewed", "", run)
+    fixture.project.insights.decide(record["id"], action, "reviewed", "", run,
+                                      expected_rev=record["rev"])
     return record
 
 

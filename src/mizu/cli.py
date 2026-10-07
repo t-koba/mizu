@@ -81,7 +81,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--reason", default="", help="Decision reason for decide, withdrawal reason for withdraw")
     p.add_argument("--revisit", default="", help="Revisit condition for defer")
     p.add_argument("--wait", default=None, help="Structured defer wait as kind[:arg]: deadline:<ISO-at> | code_change | insight_decided:<id>")
-    p.add_argument("--expected-rev", type=int, default=None, help="Compare-and-swap revision for revise")
+    p.add_argument("--expected-rev", type=int, default=None, help="Compare-and-swap revision for revise/decide/withdraw")
     p.add_argument("--origin", default=None, help="Opaque origin label recorded alongside the operator authority (submit only)")
     p = sub.add_parser("editor", help="Export a capsule or serve the Editor MCP")
     esub = p.add_subparsers(dest="editor_command", required=True)
@@ -268,7 +268,8 @@ def _cmd_insight(config, project, args):
         if not args.id or not args.decision:
             raise ConfigError("Insight decide requires --id and --decision")
         return project.insights.decide(args.id, args.decision, args.reason or "", args.revisit or "", "operator",
-                                                 wait=_parse_wait(args.wait))
+                                                 wait=_parse_wait(args.wait),
+                                                 expected_rev=args.expected_rev)
     if args.action == "withdraw":
         if not args.id or not args.reason.strip():
             raise ConfigError("Insight withdraw requires --id and --reason")

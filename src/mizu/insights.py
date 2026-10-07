@@ -387,8 +387,9 @@ replacement insight without implying rejected substance.
             raise Denied("Decision requires a supported action and a reason")
         if action == "defer" and not revisit.strip():
             raise Denied("Deferred proposals require a revisit condition")
-        if expected_rev is not None and (isinstance(expected_rev, bool) or not isinstance(expected_rev, int)
-                                         or expected_rev < 1):
+        if expected_rev is None:
+            raise Denied("Decision requires the revision read (expected_rev)")
+        if isinstance(expected_rev, bool) or not isinstance(expected_rev, int) or expected_rev < 1:
             raise Denied("Decision revision must be a positive revision number")
         registered = self._normalize_wait(wait, action)
         with lock(self.root / "locks" / "insights.lock"):

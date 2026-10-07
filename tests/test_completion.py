@@ -123,7 +123,7 @@ class CompletionTests(Fixture):
     def test_insight_identity_survives_gc(self):
         args = dict(source="searcher", title="a", body="b", base_snapshot=None, insight_id="retained")
         self.project.insights.submit(**args)
-        decision = self.project.insights.decide("retained", "reject", "no", "", "test")
+        decision = self.project.insights.decide("retained", "reject", "no", "", "test", expected_rev=1)
         decision["created_at"] = (dt.datetime.now(dt.timezone.utc)-dt.timedelta(days=40)).isoformat()
         write_json(self.project.root / "decisions/retained.json", decision)
         self.assertEqual(self.project.insights.gc_decided(), 1)
@@ -140,7 +140,7 @@ class CompletionTests(Fixture):
         proposal = self.project.insights.submit(source="searcher", title="a", body="b", base_snapshot=None)
         ancient = time.time()-40*86400
         os.utime(self.project.root / "inbox" / (proposal["id"]+".json"), (ancient, ancient))
-        self.project.insights.decide(proposal["id"], "reject", "no", "", "test")
+        self.project.insights.decide(proposal["id"], "reject", "no", "", "test", expected_rev=1)
         self.assertEqual(self.project.insights.gc_decided(), 0)
 
     def test_consultation_records_count_once(self):

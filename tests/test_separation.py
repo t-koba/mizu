@@ -91,7 +91,7 @@ class ProtocolWordingTests(unittest.TestCase):
         # Protocol schema keeps length bounds; the non-empty/revisit rules live
         # in the decision mechanism (insights.decide), not in wording.
         from mizu.protocol import DEFINITIONS, validate
-        validate({"id": "x", "action": "accept", "reason": "ok"}, DEFINITIONS["decide"][1])
+        validate({"id": "x", "action": "accept", "reason": "ok", "rev": 2}, DEFINITIONS["decide"][1])
         import tempfile
         from pathlib import Path as _P
         from mizu.insights import Insights
@@ -102,9 +102,9 @@ class ProtocolWordingTests(unittest.TestCase):
         store = Insights(tmp)
         rec = store.submit(source="s", title="T", body="b", base_snapshot=None)
         with self.assertRaises(Denied):
-            store.decide(rec["id"], "accept", "   ", "", "test")
+            store.decide(rec["id"], "accept", "   ", "", "test", expected_rev=1)
         with self.assertRaises(Denied):
-            store.decide(rec["id"], "defer", "later", "   ", "test")
+            store.decide(rec["id"], "defer", "later", "   ", "test", expected_rev=1)
 
 
 class ConsultGateTests(Fixture):
@@ -201,7 +201,7 @@ class InsightRetentionTests(Fixture):
         import os
         import time
         old = self.project.insights.submit(source="s", title="Old", body="b", base_snapshot=None)
-        self.project.insights.decide(old["id"], "reject", "no", "", "test")
+        self.project.insights.decide(old["id"], "reject", "no", "", "test", expected_rev=1)
         ancient = time.time() - 32 * 86400
         from mizu.fs import read_json, write_json, mkdir
         import datetime
@@ -213,7 +213,7 @@ class InsightRetentionTests(Fixture):
         self.assertEqual(self.project.insights.gc_decided(keep_days=31), 1)
         # Zero disables: file must survive even when old.
         again = self.project.insights.submit(source="s", title="Old2", body="b", base_snapshot=None)
-        self.project.insights.decide(again["id"], "reject", "no", "", "test")
+        self.project.insights.decide(again["id"], "reject", "no", "", "test", expected_rev=1)
         os.utime(self.project.root / "inbox" / f"{again['id']}.json", (ancient, ancient))
         self.assertEqual(self.project.insights.gc_decided(keep_days=0), 0)
         self.assertTrue((self.project.root / "inbox" / f"{again['id']}.json").exists())

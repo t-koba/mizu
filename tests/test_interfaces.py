@@ -37,7 +37,7 @@ class InsightTests(Fixture):
 
     def test_decision_does_not_rewrite_original(self):
         item = self.project.insights.submit(source="searcher", title="Claim", body="Original", base_snapshot=None)
-        self.project.insights.decide(item["id"], "reject", "Does not fit constraints", "", "test")
+        self.project.insights.decide(item["id"], "reject", "Does not fit constraints", "", "test", expected_rev=1)
         self.assertEqual(self.project.insights.read(item["id"])["body"], "Original")
         self.assertEqual(self.project.insights.list(), [])
         self.assertEqual(len(list((self.project.root / "decision-history").glob("*.json"))), 1)
@@ -45,7 +45,7 @@ class InsightTests(Fixture):
     def test_deferral_requires_revisit(self):
         item = self.project.insights.submit(source="editor", title="Idea", body="Original", base_snapshot=None)
         with self.assertRaises(Denied):
-            self.project.insights.decide(item["id"], "defer", "Not now", "", "test")
+            self.project.insights.decide(item["id"], "defer", "Not now", "", "test", expected_rev=1)
 
     def test_spool_sender_cannot_be_forged(self):
         spool = self.project.root / "spool/editor"
@@ -68,11 +68,11 @@ class InsightTests(Fixture):
         import os
         import time
         old = self.project.insights.submit(source="searcher", title="Old", body="b", base_snapshot=None)
-        self.project.insights.decide(old["id"], "reject", "no", "", "test")
+        self.project.insights.decide(old["id"], "reject", "no", "", "test", expected_rev=1)
         new = self.project.insights.submit(source="searcher", title="New", body="b", base_snapshot=None)
-        self.project.insights.decide(new["id"], "reject", "no", "", "test")
+        self.project.insights.decide(new["id"], "reject", "no", "", "test", expected_rev=1)
         waiting = self.project.insights.submit(source="searcher", title="Wait", body="b", base_snapshot=None)
-        self.project.insights.decide(waiting["id"], "defer", "later", "condition", "test")
+        self.project.insights.decide(waiting["id"], "defer", "later", "condition", "test", expected_rev=1)
         ancient = time.time() - 32 * 86400
         from mizu.fs import read_json, write_json
         import datetime
@@ -590,7 +590,7 @@ class InsightRevisionTests(Fixture):
         import datetime
         from mizu.fs import read_json, write_json
         item = self.project.insights.submit(source="operator", title="T", body="v1", base_snapshot=None)
-        self.project.insights.decide(item["id"], "accept", "good", "", "test")
+        self.project.insights.decide(item["id"], "accept", "good", "", "test", expected_rev=1)
         self.assertEqual(self.project.insights.list(), [])
         self.project.insights.revise(item["id"], source="operator", title="T", body="v2", base_snapshot=None)
         self.assertIn(item["id"], [i["id"] for i in self.project.insights.list()])
@@ -663,7 +663,7 @@ class InsightWithdrawalTests(Fixture):
         with self.assertRaises(Denied):
             self.project.insights.withdraw(other["id"], source="editor", reason="seizing control")
         with self.assertRaises(Denied):
-            self.project.insights.decide(other["id"], "withdraw", "via decide", "", "test")
+            self.project.insights.decide(other["id"], "withdraw", "via decide", "", "test", expected_rev=1)
 
     def test_repeated_withdraw_is_idempotent(self):
         item = self.project.insights.submit(source="operator", title="T", body="v1", base_snapshot=None)
@@ -676,16 +676,16 @@ class InsightWithdrawalTests(Fixture):
     def test_withdraw_overlays_decided_and_blocks_reanimation_until_revise(self):
         from mizu.fs import read_json
         item = self.project.insights.submit(source="operator", title="T", body="v1", base_snapshot=None)
-        self.project.insights.decide(item["id"], "accept", "good", "", "test")
+        self.project.insights.decide(item["id"], "accept", "good", "", "test", expected_rev=1)
         record = self.project.insights.withdraw(item["id"], source="operator", reason="retract approval")
         self.assertEqual(record["action"], "withdraw")
         actions = sorted(r["action"] for r in
                          (read_json(p) for p in (self.project.root / "decision-history").glob("*.json")))
         self.assertEqual(actions, ["accept", "withdraw"])
         with self.assertRaises(Denied):
-            self.project.insights.decide(item["id"], "reject", "second thoughts", "", "test")
+            self.project.insights.decide(item["id"], "reject", "second thoughts", "", "test", expected_rev=1)
         other = self.project.insights.submit(source="operator", title="U", body="v1", base_snapshot=None)
-        self.project.insights.decide(other["id"], "defer", "later", "condition", "test")
+        self.project.insights.decide(other["id"], "defer", "later", "condition", "test", expected_rev=1)
         self.project.insights.withdraw(other["id"], source="operator", reason="moot")
         self.assertEqual(self.project.insights.list(), [])
         with self.assertRaises(Denied):

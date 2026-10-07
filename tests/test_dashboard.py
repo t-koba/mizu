@@ -33,7 +33,7 @@ class DashboardTests(Fixture):
         self.assertEqual(core["answered_count"], 0)
         self.assertEqual(core["pending_insights"][0]["id"], item["id"])
         self.assertIsNone(core["pending_insights"][0]["decision"])
-        self.project.insights.decide(item["id"], "accept", "A fits the goal", "", "test")
+        self.project.insights.decide(item["id"], "accept", "A fits the goal", "", "test", expected_rev=1)
         core = collect(self.project)
         self.assertEqual(core["pending_count"], 0)
         self.assertEqual(core["answered_count"], 1)

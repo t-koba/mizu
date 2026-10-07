@@ -234,7 +234,7 @@ class EngineTests(Fixture):
         proposal = self.project.insights.submit(source="worker", title="Risk", body="evidence",
                                                 base_snapshot=snap["id"])
         self.project.insights.decide(proposal["id"], "defer", "recheck after edits", "when code changes",
-                                     "worker", wait={"kind": "code_change"})
+                                     "worker", wait={"kind": "code_change"}, expected_rev=1)
         (self.project.workspace / "app.py").write_bytes(b"VALUE = 3\n")
         Engine(self.config, driver=ScriptDriver()).run(self.project, "worker")
         # The wait came due after the run published: no inbox, goal, or wake
@@ -255,7 +255,7 @@ class EngineTests(Fixture):
         self.assertFalse(should_run(project, project.snapshots.get(), role_name="worker"))
         # A rejection leaves no inbox-generation footprint, so only the
         # event check admits the next dispatch.
-        project.insights.decide(proposal["id"], "reject", "not now", "", "worker")
+        project.insights.decide(proposal["id"], "reject", "not now", "", "worker", expected_rev=1)
         self.assertTrue(should_run(project, project.snapshots.get(), role_name="worker"))
         self.assertTrue(should_run(project, project.snapshots.get()))
 
