@@ -351,3 +351,108 @@ class RoleStateRaceTests(Fixture):
         with self.assertRaisesRegex(Denied, "generation"):
             store.replace("searcher", STATE, expected_generation=True)
         self.assertEqual(store.read("searcher")["status"], "absent")
+
+
+class RoleStateSessionTests(Fixture):
+    def capped(self, extra):
+        import dataclasses as _dc
+        role = self.config.roles["searcher"]
+        return _dc.replace(role, capabilities=tuple(list(role.capabilities) + extra))
+
+    def fresh_session(self, role):
+        # A successive session: rebuilt project and context over the
+        # same on-disk root with a new run dir, sharing nothing
+        # in-memory with the earlier session.
+        import uuid
+        from mizu.fs import mkdir
+        from mizu.project import Project
+        from mizu.runtime import Context
+        project = Project(self.config, "sample")
+        run = project.root / "runs" / uuid.uuid4().hex
+        mkdir(run)
+        snap = project.snapshots.get()
+        return Context(self.config, project, role, run, snap,
+                       project.workspace)
+
+    def test_successor_reads_without_rediscovery(self):
+        # Session one records conclusions through the tool; session two
+        # reads the same generation back through a rebuilt stack, so
+        # concluded work is continued, not researched again.
+        import dataclasses as _dc
+        first = super().context("searcher")
+        first.role = self.capped(["research"])
+        first.handle("research", {"state": '{"questions": [], "conclusions": ["x"]}',
+                                  "expected_generation": 0})
+        role = _dc.replace(self.config.roles["searcher"],
+                           capabilities=tuple(list(self.config.roles["searcher"].capabilities)
+                                              + ["research_read"]))
+        second = self.fresh_session(role)
+        out = second.handle("research_read", {})
+        self.assertEqual(out["status"], "current")
+        self.assertEqual(out["generation"], 1)
+        self.assertEqual(out["record"]["state"],
+                         {"questions": [], "conclusions": ["x"]})
+
+    def test_successor_prompt_carries_state_unsolicited(self):
+        # Autonomous selection needs no operator pointer: the fresh
+        # session's prompt already holds the current record, and the
+        # resumed-session delta carries it constant-size too.
+        import json as _json
+        self.project.role_state.replace("searcher", STATE,
+                                        expected_generation=0)
+        second = self.fresh_session(self.capped(["research_read"]))
+        from mizu.runtime import prompt_for, prompt_delta_for
+        full = _json.loads(prompt_for(second))
+        self.assertEqual(full["research_state"]["status"], "current")
+        self.assertEqual(full["research_state"]["generation"], 1)
+        self.assertEqual(full["research_state"]["state"], STATE)
+        delta = _json.loads(prompt_delta_for(second, []))
+        self.assertEqual(delta["research_state"]["status"], "current")
+        self.assertEqual(delta["research_state"]["generation"], 1)
+
+    def test_successor_reopens_and_stale_first_session_loses(self):
+        # Reopening: the successor merges new evidence onto the read
+        # generation; the earlier session's generation is stale now and
+        # its overwrite is refused instead of clobbering the reopen.
+        self.project.role_state.replace("searcher", STATE,
+                                        expected_generation=0)
+        second = self.fresh_session(self.capped(["research", "research_read"]))
+        seen = second.handle("research_read", {})
+        merged = dict(STATE)
+        merged["conclusions"] = ["reopened with fresh evidence"]
+        import json as _json2
+        second.handle("research", {"state": _json2.dumps(merged),
+                                   "expected_generation": seen["generation"]})
+        with self.assertRaises(Denied):
+            self.project.role_state.replace("searcher", STATE,
+                                            expected_generation=1)
+        third = self.fresh_session(self.capped(["research_read"]))
+        out = third.handle("research_read", {})
+        self.assertEqual(out["generation"], 2)
+        self.assertEqual(out["record"]["state"], merged)
+
+    def test_successor_prompt_stays_bounded(self):
+        # A record over the prompt bound injects truncated metadata in
+        # both full and delta prompts: generation and sizes travel,
+        # content never does.
+        import json as _json
+        big = {"pad": "x" * 5000}
+        self.project.role_state.replace("searcher", big, expected_generation=0)
+        import dataclasses as _dc2
+        config = _dc2.replace(
+            self.config,
+            limits=_dc2.replace(self.config.limits,
+                                role_state_prompt_bytes=64))
+        # A fresh session under tightened bounds: same disk, new stack.
+        real_config, self.config = self.config, config
+        try:
+            second = self.fresh_session(self.capped(["research_read"]))
+        finally:
+            self.config = real_config
+        from mizu.runtime import prompt_for, prompt_delta_for
+        for prompt in (prompt_for(second), prompt_delta_for(second, [])):
+            parsed = _json.loads(prompt)["research_state"]
+            self.assertEqual(parsed["status"], "truncated")
+            self.assertEqual(parsed["generation"], 1)
+            self.assertNotIn("state", parsed)
+            self.assertLessEqual(len(prompt.encode()), 10000)
