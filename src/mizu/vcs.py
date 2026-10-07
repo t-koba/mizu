@@ -306,6 +306,35 @@ PUBLISH_OPS = frozenset({"push", "pr"})
 #: Example body line: ``digest: <64 lowercase hex>``.
 GO_DIGEST_RE = re.compile(r"^digest:\s*([0-9a-f]{64})\s*$", re.M)
 
+#: Approval body lines binding a merge approval to the assessed destination
+#: and proposal endpoints. Example lines: ``target: main``,
+#: ``proposal: forge:owner/repo#1``, ``sha: <40/64 hex>``, ``base: <40/64 hex>``.
+GO_TARGET_RE = re.compile(r"^target:\s*(\S+)\s*$", re.M)
+GO_PROPOSAL_RE = re.compile(r"^proposal:\s*(\S+)\s*$", re.M)
+GO_HEAD_RE = re.compile(r"^sha:\s*([0-9a-f]{40}([0-9a-f]{24})?)\s*$", re.M)
+GO_BASE_RE = re.compile(r"^base:\s*([0-9a-f]{40}([0-9a-f]{24})?)\s*$", re.M)
+
+
+def parse_go_endpoints(body: str) -> dict | None:
+    """Return the merge endpoint lines from an approval body, else ``None``.
+
+    Schema: ``target`` is the destination branch the merge may aim at;
+    ``proposal`` names the assessed proposal; ``sha``/``base`` are its
+    assessed head and base. Trust: operator-written ``GO`` bodies only;
+    the caller compares the result against the live merge arguments.
+    Failure: ``None`` when any line is missing (never a partial binding).
+    """
+    if not isinstance(body, str):
+        return None
+    target = GO_TARGET_RE.search(body)
+    proposal = GO_PROPOSAL_RE.search(body)
+    head = GO_HEAD_RE.search(body)
+    base = GO_BASE_RE.search(body)
+    if target is None or proposal is None or head is None or base is None:
+        return None
+    return {"target": target.group(1), "proposal": proposal.group(1),
+            "sha": head.group(1), "base": base.group(1)}
+
 
 def go_title(branch: str) -> str:
     """Return the required human-approval insight title for a branch."""
@@ -335,11 +364,16 @@ OPERATOR_SOURCE = "operator"
 OPERATOR_RUN = "operator"
 
 
-def require_go_approval(project, branch: str, code_digest: str) -> dict:
+def require_go_approval(project, branch: str, code_digest: str,
+                        endpoints: dict | None = None) -> dict:
     """Require a recorded human ``GO <branch>`` approval for this digest.
 
     Schema: ``branch`` per ``check_branch``; ``code_digest`` 64 hex of the
     exact tree being published (workspace capture, not model supplied).
+    ``endpoints`` is None for publication (destination and content are the
+    branch and digest themselves) or ``{"target", "id", "sha", "base"}``
+    for a proposal merge: the destination and assessed proposal endpoints
+    the merge will act on.
     Trust: local insight inbox plus ``decisions/`` records; the approval
     insight must carry source ``operator`` (``mizu insight submit``) and the
     ``accept`` decision must carry run ``operator`` (``mizu insight decide``).
@@ -355,13 +389,28 @@ def require_go_approval(project, branch: str, code_digest: str) -> dict:
     approval bound to this publication. Failure: ``Denied`` when no matching
     title exists, when the digest line is missing/stale, when the source or
     decision run is not the operator channel, or when the matching
-    record is undecided or not ``accept``. Stale digests are refused even
-    when an older approval exists.
+    record is undecided or not ``accept``, or -- for merges -- when the
+    approval carries no endpoint binding or binds a different destination
+    or proposal content. Stale digests are refused even when an older
+    approval exists; a digest-only approval never authorizes a merge.
     """
     from .fs import DIGEST as _DIGEST
     check_branch(branch)
     if not isinstance(code_digest, str) or not _DIGEST.fullmatch(code_digest):
         raise Denied("Invalid code digest for publication approval")
+    if endpoints is not None:
+        if not isinstance(endpoints, dict):
+            raise Denied("Invalid merge endpoints for publication approval")
+        check_branch(endpoints.get("target"))
+        proposal_id = endpoints.get("id")
+        if (not isinstance(proposal_id, str) or not proposal_id
+                or len(proposal_id) > 128 or "\n" in proposal_id
+                or "\x00" in proposal_id):
+            raise Denied("Invalid merge proposal id for publication approval")
+        for _key in ("sha", "base"):
+            if (not isinstance(endpoints.get(_key), str)
+                    or not _SHA.fullmatch(endpoints[_key])):
+                raise Denied(f"Invalid merge proposal {_key} for publication approval")
     want = go_title(branch)
     inbox = project.root / "inbox"
     saw_title = False
@@ -369,6 +418,7 @@ def require_go_approval(project, branch: str, code_digest: str) -> dict:
     saw_undecided = False
     saw_refused = False
     saw_forged = False
+    saw_unbound = False
     try:
         paths = sorted(inbox.glob("*.json"))
     except OSError as exc:
@@ -389,6 +439,14 @@ def require_go_approval(project, branch: str, code_digest: str) -> dict:
         if parse_go_digest(item.get("body", "")) != code_digest:
             saw_stale = True
             continue
+        if endpoints is not None:
+            bound = parse_go_endpoints(item.get("body", ""))
+            if (bound is None or bound["target"] != endpoints["target"]
+                    or bound["proposal"] != endpoints["id"]
+                    or bound["sha"] != endpoints["sha"]
+                    or bound["base"] != endpoints["base"]):
+                saw_unbound = True
+                continue
         insight_id = item.get("id")
         if not isinstance(insight_id, str) or not insight_id:
             continue
@@ -417,6 +475,9 @@ def require_go_approval(project, branch: str, code_digest: str) -> dict:
         raise Denied("Publication approval is not accepted for this code digest")
     if saw_stale:
         raise Denied("Recorded human approval is stale for this code digest")
+    if saw_unbound:
+        raise Denied("Recorded human approval does not cover this merge "
+                     "destination and proposal endpoints")
     if saw_title:
         raise Denied("Publication approval is not accepted for this code digest")
     raise Denied("External publication requires recorded human approval")
@@ -1082,7 +1143,8 @@ def dispose_via(settings: dict, op: str, proposal_id: str, expected_sha,
     superseded proposal refuses) and echo ``id``/``sha``/``base``/
     ``target`` with the terminal ``state`` (``close`` ends ``closed``,
     ``merge`` ends ``merged``). Tree-content approval is enforced by the
-    caller before dispatch (a ``GO <branch>`` approval for merges), never
+    caller before dispatch (a ``GO <branch>`` approval for merges, bound
+    to the assessed target and proposal endpoints), never
     by the adapter: the forge cannot interpret workspace code digests, so
     the adapter contract binds endpoint identity only, and this
     limitation is explicit rather than a pretended atomic content check.

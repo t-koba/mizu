@@ -576,7 +576,10 @@ class Context:
         # grant (and approval for merges), never source-write access:
         # read-workspace integrators dispose from their materialized
         # input, whose digest binds a merge approval exactly like a
-        # writable workspace capture.
+        # writable workspace capture. The approval additionally binds the
+        # assessed destination and proposal endpoints, checked here before
+        # the adapter spawns: a GO for another target or other proposal
+        # content never authorizes this merge.
         if self.role.workspace == "none":
             raise Denied("Proposal disposition requires a visible workspace")
         approval = None
@@ -586,7 +589,10 @@ class Context:
             if captured.get("skipped"):
                 raise Denied("Proposal disposition requires a representable snapshot")
             code_digest = captured["code_digest"]
-            approval = _vcs.require_go_approval(self.project, args["branch"], code_digest)
+            approval = _vcs.require_go_approval(
+                self.project, args["branch"], code_digest,
+                endpoints={"target": args.get("target"), "id": args.get("id"),
+                           "sha": args.get("sha"), "base": args.get("base")})
         try:
             data = _vcs.dispose_via(self.config.vcs, args["op"], args.get("id"),
                                     args.get("sha"), args.get("base"),

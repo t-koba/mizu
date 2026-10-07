@@ -76,10 +76,19 @@ def current_digest(fixture):
     return captured["code_digest"]
 
 
-def approve(fixture, branch, digest):
+def approve(fixture, branch, digest, target=None, proposal_id=None,
+              sha=None, base=None):
+    body = f"Ship it.\ndigest: {digest}\n"
+    if target is not None:
+        body += f"target: {target}\n"
+    if proposal_id is not None:
+        body += f"proposal: {proposal_id}\n"
+    if sha is not None:
+        body += f"sha: {sha}\n"
+    if base is not None:
+        body += f"base: {base}\n"
     record = fixture.project.insights.submit(
-        source="operator", title=f"GO {branch}",
-        body=f"Ship it.\ndigest: {digest}\n",
+        source="operator", title=f"GO {branch}", body=body,
         base_snapshot=None, run=None)
     fixture.project.insights.decide(record["id"], "accept", "reviewed", "", "operator",
                                       expected_rev=record["rev"])
@@ -220,7 +229,8 @@ class VcsDisposeTests(Fixture):
         config = dataclasses.replace(
             config, vcs=granted(dispose_code(echo(state="merged"))))
         digest = current_digest(self)
-        rec = approve(self, "main", digest)
+        rec = approve(self, "main", digest, target="main",
+                      proposal_id=PROPOSAL_ID, sha=SHA_A, base=BASE_A)
         ctx = make_context(self, config, role)
         out = ctx.handle("vcs_dispose", close_args(op="merge", branch="main",
                                                    target="main"))

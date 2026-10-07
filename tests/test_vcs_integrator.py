@@ -88,13 +88,22 @@ def integrator_context(fixture, role):
     return config, Context(config, fixture.project, role, run, snap, workspace)
 
 
-def approve(fixture, branch, digest):
+def approve(fixture, branch, digest, target=None, proposal_id=None,
+              sha=None, base=None):
+    body = f"Ship it.\ndigest: {digest}\n"
+    if target is not None:
+        body += f"target: {target}\n"
+    if proposal_id is not None:
+        body += f"proposal: {proposal_id}\n"
+    if sha is not None:
+        body += f"sha: {sha}\n"
+    if base is not None:
+        body += f"base: {base}\n"
     record = fixture.project.insights.submit(
-        source="operator", title=f"GO {branch}",
-        body=f"Ship it.\ndigest: {digest}\n",
+        source="operator", title=f"GO {branch}", body=body,
         base_snapshot=None, run=None)
     fixture.project.insights.decide(record["id"], "accept", "reviewed", "", "operator",
-                                    expected_rev=record["rev"])
+                                      expected_rev=record["rev"])
     return record
 
 
@@ -125,7 +134,8 @@ class ReadIntegratorTests(Fixture):
         config = dataclasses.replace(config, vcs=dispose_settings("merged"))
         ctx = Context(config, self.project, role, ctx.run_dir,
                       ctx.snapshot, ctx.workspace)
-        rec = approve(self, "mizu/x-1", captured["code_digest"])
+        rec = approve(self, "mizu/x-1", captured["code_digest"], target=TARGET,
+                      proposal_id=PROPOSAL_ID, sha=SHA_A, base=BASE_A)
         out = ctx.handle("vcs_dispose", close_args(op="merge"))
         self.assertTrue(out["disposed"])
         self.assertEqual(out["state"], "merged")
@@ -163,6 +173,71 @@ class ReadIntegratorTests(Fixture):
                                          "", run, expected_rev=record["rev"])
         with self.assertRaisesRegex(Denied, "operator channel"):
             ctx.handle("vcs_dispose", close_args(op="merge"))
+        self.assertFalse((ctx.run_dir / "vcs-dispose.json").exists())
+
+    def test_merge_refused_without_endpoint_binding(self):
+        # Reported defect repro: GO dev-only names the local digest, and the
+        # merge names branch dev-only with target main. Branch/digest match,
+        # but the approval binds no destination or proposal content, so the
+        # merge is refused before the adapter spawns: the bad adapter
+        # command would fail with "unavailable" if dispatch were reached.
+        role = integrator_role(self)
+        config, ctx = integrator_context(self, role)
+        captured = self.project.snapshots.capture_files(ctx.workspace)
+        approve(self, "dev-only", captured["code_digest"])
+        bad = {"command": ["/nonexistent-adapter"], "timeout_seconds": 5,
+               "max_bytes": 524288, "close_grant": True, "merge_grant": True}
+        config = dataclasses.replace(config, vcs=bad)
+        ctx = Context(config, self.project, role, ctx.run_dir,
+                      ctx.snapshot, ctx.workspace)
+        with self.assertRaisesRegex(Denied, "does not cover this merge"):
+            ctx.handle("vcs_dispose", close_args(op="merge", branch="dev-only",
+                                                target="main"))
+        self.assertFalse((ctx.run_dir / "vcs-dispose.json").exists())
+
+    def test_merge_refused_for_wrong_destination(self):
+        # A GO bound to target main never authorizes a merge at release/2.
+        role = integrator_role(self)
+        config, ctx = integrator_context(self, role)
+        captured = self.project.snapshots.capture_files(ctx.workspace)
+        approve(self, "mizu/x-1", captured["code_digest"], target=TARGET,
+                proposal_id=PROPOSAL_ID, sha=SHA_A, base=BASE_A)
+        config = dataclasses.replace(config, vcs=dispose_settings("merged"))
+        ctx = Context(config, self.project, role, ctx.run_dir,
+                      ctx.snapshot, ctx.workspace)
+        with self.assertRaisesRegex(Denied, "does not cover this merge"):
+            ctx.handle("vcs_dispose", close_args(op="merge", target="release/2"))
+        self.assertFalse((ctx.run_dir / "vcs-dispose.json").exists())
+
+    def test_merge_refused_for_unrelated_proposal(self):
+        # A GO bound to another proposal's endpoints never authorizes this one.
+        role = integrator_role(self)
+        config, ctx = integrator_context(self, role)
+        captured = self.project.snapshots.capture_files(ctx.workspace)
+        approve(self, "mizu/x-1", captured["code_digest"], target=TARGET,
+                proposal_id="forge:owner/repo#9", sha="b" * 40, base="d" * 40)
+        config = dataclasses.replace(config, vcs=dispose_settings("merged"))
+        ctx = Context(config, self.project, role, ctx.run_dir,
+                      ctx.snapshot, ctx.workspace)
+        with self.assertRaisesRegex(Denied, "does not cover this merge"):
+            ctx.handle("vcs_dispose", close_args(op="merge"))
+        self.assertFalse((ctx.run_dir / "vcs-dispose.json").exists())
+
+    def test_merge_refused_for_moved_head_or_base(self):
+        # The approval pins the assessed head and base: either moving
+        # refuses, so approval is re-observed, never assumed.
+        role = integrator_role(self)
+        config, ctx = integrator_context(self, role)
+        captured = self.project.snapshots.capture_files(ctx.workspace)
+        approve(self, "mizu/x-1", captured["code_digest"], target=TARGET,
+                proposal_id=PROPOSAL_ID, sha=SHA_A, base=BASE_A)
+        config = dataclasses.replace(config, vcs=dispose_settings("merged"))
+        ctx = Context(config, self.project, role, ctx.run_dir,
+                      ctx.snapshot, ctx.workspace)
+        with self.assertRaisesRegex(Denied, "does not cover this merge"):
+            ctx.handle("vcs_dispose", close_args(op="merge", sha="b" * 40))
+        with self.assertRaisesRegex(Denied, "does not cover this merge"):
+            ctx.handle("vcs_dispose", close_args(op="merge", base="d" * 40))
         self.assertFalse((ctx.run_dir / "vcs-dispose.json").exists())
 
     def test_retire_owned_branch_without_workspace_write(self):
