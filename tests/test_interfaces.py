@@ -252,7 +252,7 @@ class IsolationAndWebTests(Fixture):
 
     def test_failed_cleanup_is_fail_closed(self):
         ctx = self.context()
-        with patch("mizu.sandbox.run", side_effect=[Result(0, "ok", "", "exited", .1), Result(1, "", "cleanup failed", "exited", .1)]):
+        with patch("mizu.sandbox.run", side_effect=[Result(0, "[]", "", "exited", 0.0), Result(0, "ok", "", "exited", .1), Result(1, "", "cleanup failed", "exited", .1)]):
             with self.assertRaises(Denied):
                 ctx.sandbox.execute(ctx.workspace, "true", writable=True)
         self.assertEqual(len(list((ctx.run_dir / "commands").glob("*.json"))), 2)

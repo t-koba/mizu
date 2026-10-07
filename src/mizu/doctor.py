@@ -17,7 +17,7 @@ from .errors import ConfigError, Denied, MizuError
 from .fs import digest, mkdir, read_json
 from .pi import credentials
 from .process import run
-from .sandbox import Sandbox, ensure_single, runtime_base, runtime_env
+from .sandbox import CHECKPOINT_ANNOTATION, Sandbox, ensure_single, inspect_text_is_checkpoint, runtime_base, runtime_env
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -132,6 +132,11 @@ def check(config: Config, *, sandbox: bool = False) -> dict:
                      timeout=15, maximum=8192, env=env)
         if result.exit_code:
             raise ConfigError("Configured image is not present locally; automatic pulls are disabled")
+        if inspect_text_is_checkpoint(result.stdout):
+            raise ConfigError(
+                "Configured image is a Podman checkpoint image (annotation %s); " % CHECKPOINT_ANNOTATION
+                + "it silently ignores sandbox flags on unpatched Podman (CVE-2026-94603). "
+                + "Rebuild from a clean base and repin sandbox.image")
         return config.sandbox.image
     checked("sandbox image", image)
     checks.append({"name": "provider-request admission", "status": "pass" if config.limits.daily_requests > 0 else "disabled",

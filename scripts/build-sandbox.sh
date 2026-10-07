@@ -16,8 +16,22 @@ done
 [[ $(id -u) != 0 && -n $BASE ]] || { echo 'Use a normal user and explicitly select a Python >=3.11 Debian-based base image.' >&2; exit 77; }
 command -v "$EXE" >/dev/null || { echo "Container runtime not found: $EXE (set MIZU_RUNTIME)." >&2; exit 78; }
 "$EXE" pull -- "$BASE" >&2
+# A Podman checkpoint image restores its own config under `run` and silently
+# ignores sandbox flags on unpatched Podman (CVE-2026-94603). Refuse it here
+# so neither the base nor the built tag can carry the marker forward.
+CHECKPOINT_ANNOTATION='io.podman.annotations.checkpoint.runtime.name'
+refuse_checkpoint() {
+  local ref="$1"
+  if "$EXE" image inspect -- "$ref" 2>/dev/null | grep -qF "$CHECKPOINT_ANNOTATION"; then
+    echo "Refusing checkpoint image: $ref carries $CHECKPOINT_ANNOTATION (CVE-2026-94603)." >&2
+    echo 'Rebuild from a clean base image.' >&2
+    exit 76
+  fi
+}
+refuse_checkpoint "$BASE"
 BASE_ID=$("$EXE" image inspect --format '{{.Id}}' "$BASE")
 "$EXE" build --pull=never --build-arg "BASE_IMAGE=$BASE_ID" --build-arg "APT_SANDBOX_USER=$APT_SANDBOX_USER" --tag "$TAG" --file "$ROOT/containers/Containerfile" "$ROOT/containers" >&2
+refuse_checkpoint "$TAG"
 IMAGE=$("$EXE" image inspect --format '{{.Id}}' "$TAG")
 [[ $IMAGE =~ ^sha256:[0-9a-f]{64}$ ]] || { echo 'Unexpected image ID' >&2; exit 76; }
 printf 'Base resolved to %s\nSet sandbox.image to the image ID printed on stdout. Archive build logs for provenance.\n' "$BASE_ID" >&2

@@ -299,7 +299,7 @@ class ContainerArgvTests(unittest.TestCase):
                                       mounts=({"source": str(data), "target": "/data"},),
                                       env={"HF_HOME": "/data/hf"})
         box = Sandbox(dataclasses.replace(base, sandbox=sandbox), self.root, "worker", run_dir)
-        calls = [Result(1, "", "", "exited", 0.1), Result(0, "", "", "exited", 0.0)]
+        calls = [Result(0, "[]", "", "exited", 0.0), Result(1, "", "", "exited", 0.1), Result(0, "", "", "exited", 0.0)]
         with patch("mizu.sandbox.run", side_effect=calls):
             record = box.execute(work, "echo hi", writable=True)
         self.assertEqual(record["exit_code"], 1)
@@ -334,6 +334,7 @@ class ContainerArgvTests(unittest.TestCase):
         engine = Sandbox(self.config("mizu-missing-runtime-xyz"), self.root, "worker", self.root / "run")
         with patch("mizu.sandbox.run",
                    side_effect=[Result(None, "", "missing", "startup_error", 0),
+                                Result(None, "", "missing", "startup_error", 0),
                                 Result(0, "", "", "exited", 0)]):
             record = engine.execute(work, "echo hi", writable=False)
         self.assertEqual(record["reason"], "startup_error")

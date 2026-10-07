@@ -14,6 +14,7 @@ host. The host side speaks generic OCI CLI (`podman` or `docker` via
 from __future__ import annotations
 
 import dataclasses
+import json
 import os
 import uuid
 from collections.abc import Callable
@@ -27,6 +28,72 @@ from .process import Result, environment, run
 
 #: Single-mode cgroup parents already prepared in this process.
 _PREPARED_SINGLE: set[str] = set()
+
+#: Podman checkpoint image marker (CVE-2026-94603 / GHSA-2cvf-wqm6-wr9g).
+#: On unpatched Podman (>= v4.4.0, < v5.8.8 / < v6.1.3) `podman run` restores
+#: the checkpoint config and silently ignores user flags such as
+#: `--cap-drop=ALL`. Checkpoint images are never valid sandbox images, so
+#: the annotation is refused unconditionally (no version parsing, no knob).
+CHECKPOINT_ANNOTATION = "io.podman.annotations.checkpoint.runtime.name"
+
+
+def _has_checkpoint_key(node) -> bool:
+    """Recursively search decoded `image inspect` JSON for the marker key."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == CHECKPOINT_ANNOTATION:
+                return True
+            if _has_checkpoint_key(value):
+                return True
+        return False
+    if isinstance(node, (list, tuple)):
+        return any(_has_checkpoint_key(item) for item in node)
+    return False
+
+
+def inspect_text_is_checkpoint(stdout: str) -> bool:
+    """True when `image inspect` output carries the checkpoint marker.
+
+    Schema/bounds: decoded JSON searched recursively; unparseable output
+    falls back to a literal substring search so a format change cannot hide
+    the marker. Trust: local runtime output. Failure: False (not proven).
+    """
+    try:
+        return _has_checkpoint_key(json.loads(stdout))
+    except (json.JSONDecodeError, UnicodeError, ValueError):
+        return CHECKPOINT_ANNOTATION in stdout
+
+
+def checkpoint_inspect_argv(config: Config) -> list[str]:
+    """Portable presence+annotation probe: `image inspect <image>`."""
+    return [*runtime_base(config), "image", "inspect", config.sandbox.image]
+
+
+def assert_no_checkpoint(config: Config, env: dict[str, str]) -> None:
+    """Fail closed when the configured image is a Podman checkpoint image.
+
+    Schema/bounds: one bounded `image inspect` (15 s, 8 KiB). Trust: local
+    runtime output only. Retry: none. Evidence: Denied message names the
+    annotation. Failure: Denied on positive evidence; infrastructure
+    failures (missing runtime, timeout, cancel) return silently so the
+    normal run path records its own startup/timeout evidence instead of
+    masking it as a checkpoint refusal.
+    """
+    if not config.sandbox.image:
+        raise ConfigError("Build and pin sandbox.image before running commands")
+    try:
+        result = run(checkpoint_inspect_argv(config), timeout=15, maximum=8192, env=env)
+    except OSError:
+        return
+    if result.reason != "exited" or result.exit_code is None:
+        return
+    if result.exit_code != 0:
+        return
+    if inspect_text_is_checkpoint(result.stdout):
+        raise Denied(
+            "sandbox.image is a Podman checkpoint image (annotation %s); " % CHECKPOINT_ANNOTATION
+            + "checkpoint config silently ignores sandbox flags on unpatched Podman "
+            + "(CVE-2026-94603). Rebuild from a clean base and repin sandbox.image")
 
 
 def runtime_base(config: Config) -> list[str]:
@@ -256,6 +323,7 @@ class Sandbox:
                   "env_keys": sorted(self.config.sandbox.env)}
         write_json(self.run_dir / "commands" / f"{operation}.started.json", record)
         try:
+            assert_no_checkpoint(self.config, env)
             result = run(self.argv(name, workspace, script, writable=writable, experiment=experiment),
                          timeout=timeout, maximum=self.config.limits.output_bytes, cancel=self.cancel, env=env)
             record.update(dataclasses.asdict(result))

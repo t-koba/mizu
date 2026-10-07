@@ -116,7 +116,7 @@ Per-threat mitigations:
 |---|---|
 | Secret exfiltration | Egress allowlist, no secrets in containers, a receipt for every retrieval, request budgets. Duty: keep secrets out of imports, set provider billing caps |
 | Malicious content executed | Fetched text is never executed by the harness; code runs only from snapshots and reviewed images; `verify` plus independent review precede `done` |
-| Supply chain | Digest-pinned images, no runtime pulls, hash verification where the ecosystem provides it (e.g. registry checksums), review of image contents |
+| Supply chain | Digest-pinned images, no runtime pulls, hash verification where the ecosystem provides it (e.g. registry checksums), review of image contents, refusal of Podman checkpoint images (annotation `io.podman.annotations.checkpoint.runtime.name`, CVE-2026-94603): `build-sandbox.sh`, `doctor` and every sandbox launch inspect the image and refuse when the marker is present |
 | Irreproducibility | Receipts (id, sha256, time), lockfiles, run records; search scope is reported honestly |
 | Cost | Request admission counts plus provider-side caps and bill inspection |
 | Prompt injection | External prose is data, never authority: no capability, goal, tool, model or budget change |
@@ -128,10 +128,10 @@ The fixed floor is mechanism; the rest is operator policy plus TCB.
 
 | Benchmark category | Mizu posture |
 |---|---|
-| Privileged container, added capabilities, host PID namespace | Excluded by the fixed mechanism floor (`--read-only`, `--cap-drop=ALL`, `--security-opt=no-new-privileges`, user mapping, resource bounds in `src/mizu/sandbox.py`); argv construction has no privileged fallback and no `--privileged`, `--pid=host`, or `cap-add` |
+| Privileged container, added capabilities, host PID namespace | Excluded by the fixed mechanism floor (`--read-only`, `--cap-drop=ALL`, `--security-opt=no-new-privileges`, user mapping, resource bounds in `src/mizu/sandbox.py`); argv construction has no privileged fallback and no `--privileged`, `--pid=host`, or `cap-add`. Podman checkpoint images are refused before launch (annotation `io.podman.annotations.checkpoint.runtime.name`, CVE-2026-94603): on unpatched Podman the checkpoint config would otherwise silently ignore those flags |
 | Mounted control socket | No Docker/Podman socket is ever mounted; extra mounts stay explicit operator choice, read-only, and refused for container-interior system targets |
 | Network namespace escape | Container network is `none` by default; any other `[sandbox] network` is an explicit operator grant that accepts egress and loopback reachability |
-| Runtime TCB floor | `doctor --sandbox` proves enforcement with a live smoke probe and records the runtime version string but enforces no minimum: keep the runtime at or above runc 1.3.6/1.4.3/1.5.0 or crun 1.28 (CVE-2026-41579, CVE-2026-47766). A rootless container shares a kernel and is not sufficient isolation for arbitrary high-risk malware; use a disposable VM or stronger separately reviewed boundary for that threat model |
+| Runtime TCB floor | `doctor --sandbox` proves enforcement with a live smoke probe and records the runtime version string but enforces no minimum: keep the runtime at or above runc 1.3.6/1.4.3/1.5.0 or crun 1.28 (CVE-2026-41579, CVE-2026-47766), and Podman at or above v5.8.8 / v6.1.3 where Podman is used (CVE-2026-94603 checkpoint bypass). Checkpoint-image refusal holds on any version; the version floor removes the upstream bypass itself. A rootless container shares a kernel and is not sufficient isolation for arbitrary high-risk malware; use a disposable VM or stronger separately reviewed boundary for that threat model |
 
 Egress facts: only HTTPS, port 443 and exact allowed hosts are accepted. Userinfo,
 control characters and unsupported URLs are rejected; fragments are stripped
