@@ -213,3 +213,29 @@ class VcsDisposeRoleTests(Fixture):
 
 if __name__ == "__main__":
     raise SystemExit(unittest.main())
+
+
+class VcsDisposeRecoveryTests(Fixture):
+    def test_changed_head_retry_recovers(self):
+        # The assessed head moved between observation and disposition:
+        # the first attempt fails closed with no evidence, and a retry
+        # at the re-observed head succeeds. The adapter answers a stale
+        # sha with the moved head and confirms the fresh one.
+        code = ("import sys,json; req=json.load(sys.stdin); "
+                "echo = %r if req['sha'] == %r else req['sha']; "
+                "print(json.dumps({'id': req['id'], 'sha': echo, "
+                "'state': 'closed'}))" % (SHA_B, SHA_A))
+        config, role = with_caps(self, "worker", ["vcs_dispose"])
+        config = dataclasses.replace(config, vcs=granted(code))
+        digest = current_digest(self)
+        approve(self, "main", digest)
+        ctx = make_context(self, config, role)
+        args = {"op": "close", "id": PROPOSAL_ID,
+                "sha": SHA_A, "branch": "main"}
+        with self.assertRaisesRegex(Denied, "expected sha"):
+            ctx.handle("vcs_dispose", dict(args))
+        self.assertFalse((ctx.run_dir / "vcs-dispose.json").exists())
+        out = ctx.handle("vcs_dispose", {**args, "sha": SHA_B})
+        self.assertTrue(out["disposed"])
+        self.assertEqual(out["sha"], SHA_B)
+        self.assertEqual(out["state"], "closed")
