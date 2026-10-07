@@ -348,6 +348,26 @@ replacement insight without implying rejected substance.
             raise Denied("Insight not found")
         return _normalize(record)
 
+    def scan_source(self, source: str) -> list[dict]:
+        """Return every inbox record carrying the given source.
+
+        Normalized records, malformed files skipped: the same tolerant
+        enumeration as ``generation``. Callers filter further by id
+        shape; a source alone never implies a record kind.
+        """
+        out = []
+        for path in (self.root / "inbox").glob("*.json"):
+            if path.is_symlink():
+                continue
+            try:
+                item = read_json(path)
+                identifier(item["id"])
+                if item.get("source") == source:
+                    out.append(_normalize(item))
+            except (OSError, ValueError, KeyError, TypeError, AttributeError, Denied):
+                continue
+        return out
+
     def generation(self) -> str:
         parts = []
         for path in (self.root / "inbox").glob("*.json"):

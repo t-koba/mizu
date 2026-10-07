@@ -197,3 +197,67 @@ class RetireConfigTests(Fixture):
         self.file.write_text(text + "\n[roles.retirer]" + body)
         with self.assertRaisesRegex(ConfigError, "vcs_retire"):
             load(self.file)
+
+
+def observed_proposal(ref="mizu/x-1", state="open", base_ref="main"):
+    return {"id": "forge:owner/repo#1", "state": state,
+            "head": {"repo": "owner/repo", "ref": ref, "sha": SHA_A},
+            "base": {"repo": "owner/repo", "ref": base_ref, "sha": SHA_B},
+            "draft": False, "mergeable": True,
+            "checks": [{"check": "unit", "state": "success", "sha": SHA_A}],
+            "url": "https://forge/x/pull/1"}
+
+
+class RetireLiveRefTests(Fixture):
+    def retire(self, code=RETIRE_OK):
+        config, role = with_caps(self, "worker", ["vcs_retire"])
+        config = dataclasses.replace(config, vcs=grant_settings(code))
+        return make_context(self, config, role)
+
+    def test_open_head_reference_blocks_without_spawn(self):
+        vcs.record_proposal_state(self.project, observed_proposal())
+        ctx = self.retire("import sys; sys.exit(3)")
+        with self.assertRaisesRegex(Denied, "forge:owner/repo#1"):
+            ctx.handle("vcs_retire", {"branch": "mizu/x-1",
+                                      "expected_sha": SHA_A})
+        self.assertFalse((ctx.run_dir / "vcs-retire.json").exists())
+
+    def test_open_base_reference_blocks(self):
+        vcs.record_proposal_state(self.project,
+                                  observed_proposal(ref="feature",
+                                                    base_ref="mizu/x-1"))
+        ctx = self.retire()
+        with self.assertRaisesRegex(Denied, "open proposal"):
+            ctx.handle("vcs_retire", {"branch": "mizu/x-1",
+                                      "expected_sha": SHA_A})
+
+    def test_terminal_disposition_unblocks(self):
+        vcs.record_proposal_state(self.project, observed_proposal())
+        vcs.record_proposal_state(self.project,
+                                  observed_proposal(state="merged"))
+        ctx = self.retire()
+        out = ctx.handle("vcs_retire", {"branch": "mizu/x-1",
+                                        "expected_sha": SHA_A})
+        self.assertTrue(out["retired"])
+
+    def test_tombstoned_head_does_not_block(self):
+        row = observed_proposal()
+        row["head"] = {"deleted": True, "repo": "owner/repo", "ref": "mizu/x-1"}
+        vcs.record_proposal_state(self.project, row)
+        ctx = self.retire()
+        out = ctx.handle("vcs_retire", {"branch": "mizu/x-1",
+                                        "expected_sha": SHA_A})
+        self.assertTrue(out["retired"])
+
+    def test_unrelated_reference_does_not_block(self):
+        vcs.record_proposal_state(self.project,
+                                  observed_proposal(ref="mizu/other"))
+        ctx = self.retire()
+        out = ctx.handle("vcs_retire", {"branch": "mizu/x-1",
+                                        "expected_sha": SHA_A})
+        self.assertTrue(out["retired"])
+
+    def test_ci_records_never_block(self):
+        vcs.record_ci_result(self.project, branch="mizu/x-1", sha=SHA_A,
+                             check="unit", state="failure")
+        self.assertEqual(vcs.live_proposal_refs(self.project, "mizu/x-1"), [])

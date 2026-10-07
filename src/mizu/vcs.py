@@ -797,6 +797,47 @@ def record_proposal_state(project, proposal: dict, *,
     return {"id": record["id"], "changed": True}
 
 
+def live_proposal_refs(project, branch: str) -> list:
+    """Return sorted proposal ids still openly referencing a branch.
+
+    Schema: scans recorded ``vcs`` proposal observations (``proposal-``
+    records; CI ``ci-`` records never match) and parses their ``state:``
+    and ``head:``/``base:`` fact lines. A proposal blocks while its
+    latest recorded state is outside ``TERMINAL_STATES`` and a
+    non-deleted head or base endpoint names ``branch``. Refs are the
+    second-to-last line token (repos may hold spaces; ref names never
+    do); ``deleted`` endpoints reference nothing live. Bounds: unknown
+    states block (fail closed toward preservation); unparseable bodies
+    are skipped, never treated as references. Trust: recorded local
+    observations only, no adapter call. Failure: never raises for
+    missing records (empty references); ``Denied`` only on a bad
+    branch name.
+    """
+    check_branch(branch)
+    blocking = set()
+    for record in project.insights.scan_source("vcs"):
+        if not record.get("id", "").startswith("proposal-"):
+            continue
+        body = record.get("body") or ""
+        if not isinstance(body, str):
+            continue
+        state = None
+        refs = set()
+        for line in body.splitlines():
+            if line.startswith("state: "):
+                state = line[len("state: "):]
+            elif line.startswith("head: ") or line.startswith("base: "):
+                parts = line.split(" ")[1:]
+                if len(parts) >= 2 and parts[-1] != "deleted":
+                    refs.add(parts[-2])
+        if state is not None and state not in TERMINAL_STATES and branch in refs:
+            for line in body.splitlines():
+                if line.startswith("id: "):
+                    blocking.add(line[len("id: "):])
+                    break
+    return sorted(blocking)
+
+
 def publish_via(settings: dict, op: str, params: dict) -> dict:
     """Invoke a mutating adapter operation (``push``/``pr``) after approval.
 

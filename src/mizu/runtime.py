@@ -493,9 +493,18 @@ class Context:
         # Classification is enforced inside retire_via (owned only);
         # protected, external, tracking, and other refs are preserved.
         # A failed call implies nothing about the remote ref: reconcile by
-        # re-observing, never by assuming deletion.
+        # re-observing, never by assuming deletion. Retirement is tied to
+        # terminal disposition: while a recorded proposal still openly
+        # references the branch, retire refuses and names the blocking
+        # proposal ids instead of deleting under a live review.
         if self.role.workspace != "write":
             raise Denied("Branch retirement requires a writable workspace")
+        blocking = _vcs.live_proposal_refs(self.project, args.get("branch"))
+        if blocking:
+            raise Denied("Branch retirement is blocked by open proposal "
+                         f"reference(s) {', '.join(blocking)}; dispose the "
+                         "proposal to a terminal state and re-observe before "
+                         "retiring")
         try:
             data = _vcs.retire_via(self.config.vcs, args.get("branch"),
                                    args.get("expected_sha"))
