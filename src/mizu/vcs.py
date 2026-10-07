@@ -295,7 +295,9 @@ def read_ref(workspace: Path, name: str) -> str:
 
 #: Read-only adapter operations served by ``vcs_read``. Publishing
 #: operations (``push``/``pr``) are never served through this path.
-READ_OPS = frozenset({"status", "log", "comments", "proposals"})
+#: ``acquire`` materializes exact-revision external content for assessment;
+#: it mutates nothing, so it reads like any other observation.
+READ_OPS = frozenset({"status", "log", "comments", "proposals", "acquire"})
 #: Mutating adapter operations served by ``vcs_publish`` behind a recorded
 #: human ``GO <branch>`` approval bound to branch and code digest.
 PUBLISH_OPS = frozenset({"push", "pr"})
@@ -418,19 +420,91 @@ def require_go_approval(project, branch: str, code_digest: str) -> dict:
     raise Denied("External publication requires recorded human approval")
 
 
-def read_via(settings: dict, op: str, params: dict) -> dict:
-    """Invoke a read-only adapter operation (``status``/``log``/``comments``).
+#: Maximum acquired content chars per ``acquire`` response (mirrors the
+#: default adapter byte bound; larger materializations are refused so the
+#: caller narrows scope instead of blowing the frame).
+MAX_ACQUIRE_CONTENT = 524288
 
-    Schema: ``params`` must include ``branch``; optional ``sha`` passes
-    through when given. Bounds: same ``max_bytes``/timeout contract as
-    ``invoke``. Trust: operator-owned adapter; results are
-    external-untrusted. Failure: ``Denied`` on publish ops, bad branch, or
-    any adapter contract violation. Never publishes.
+
+def acquire_digest(content: str) -> str:
+    """Bind acquired content to its digest (recomputed locally, never trusted).
+
+    Schema: ``content`` is text; the digest is sha256 over
+    ``fs.canonical(content)``. Adapters must echo this digest; the caller
+    recomputes and compares instead of trusting the echo.
+    """
+    from .fs import digest as _digest, canonical as _canonical
+    if not isinstance(content, str):
+        raise Denied("Invalid VCS acquired content")
+    return _digest(_canonical(content))
+
+
+def parse_acquired(data: dict) -> dict:
+    """Validate an ``acquire`` adapter response into a normalized receipt.
+
+    Schema: ``{"id", "sha", "digest", "content"}``; ``id`` 1-128 chars
+    without newline/NUL, ``sha`` 40/64 lowercase hex of the materialized
+    revision, ``digest`` 64 lowercase hex, ``content`` text at most
+    524288 chars. Trust: shape only; echo and digest binding are checked
+    by the caller against the request. Failure: ``Denied``.
+    """
+    if not isinstance(data, dict) or set(data) != {"id", "sha", "digest", "content"}:
+        raise Denied("Invalid VCS acquired content entry")
+    identity = data.get("id")
+    if (not isinstance(identity, str) or not identity or len(identity) > 128
+            or "\n" in identity or "\x00" in identity):
+        raise Denied("Invalid VCS proposal id for acquisition")
+    sha = data.get("sha")
+    if not isinstance(sha, str) or not _SHA.fullmatch(sha):
+        raise Denied("Invalid VCS sha for acquisition")
+    content_digest = data.get("digest")
+    if not isinstance(content_digest, str) or len(content_digest) != 64 or not _SHA.fullmatch(content_digest):
+        raise Denied("Invalid VCS acquired content digest")
+    content = data.get("content")
+    if not isinstance(content, str) or len(content) > MAX_ACQUIRE_CONTENT:
+        raise Denied("Invalid VCS acquired content")
+    return {"id": identity, "sha": sha, "digest": content_digest, "content": content}
+
+
+def read_via(settings: dict, op: str, params: dict) -> dict:
+    """Invoke a read-only adapter operation (``status``/``log``/``comments``/``acquire``).
+
+    Schema: ``params`` must include ``branch`` for addressed reads
+    (``status``/``log``/``comments``); optional ``sha`` passes through
+    when given. ``proposals`` enumerates with an optional ``branch``
+    filter. ``acquire`` takes ``id`` (proposal id) plus the exact head
+    ``sha`` to materialize and needs no branch: the endpoint travels in
+    the proposal record, so fork heads acquire by id and sha alone.
+    Bounds: same ``max_bytes``/timeout contract as ``invoke``. Trust:
+    operator-owned adapter; results are external-untrusted. Failure:
+    ``Denied`` on publish ops, bad params, a moved head (echo mismatch),
+    a digest mismatch, or any adapter contract violation. Never publishes.
     """
     if op not in READ_OPS:
         raise Denied("vcs_read cannot publish; unknown or mutating operation")
     if not isinstance(params, dict):
         raise Denied("Invalid VCS read parameters")
+    if op == "acquire":
+        # Exact-revision acquisition: the adapter materializes the head
+        # revision named by (id, sha) and echoes both plus the content
+        # digest. A moved head fails closed here (echo mismatch), so the
+        # caller re-observes proposals and retries with the fresh sha;
+        # identical repeats re-acquire identical content.
+        proposal_id = params.get("id")
+        if (not isinstance(proposal_id, str) or not proposal_id or len(proposal_id) > 128
+                or "\n" in proposal_id or "\x00" in proposal_id):
+            raise Denied("Invalid VCS proposal id for acquisition")
+        acquire_sha = params.get("sha")
+        if not isinstance(acquire_sha, str) or not _SHA.fullmatch(acquire_sha):
+            raise Denied("Invalid VCS sha for acquisition")
+        acquired = parse_acquired(invoke(settings, {"op": op, "id": proposal_id, "sha": acquire_sha}))
+        if acquired["id"] != proposal_id or acquired["sha"] != acquire_sha:
+            raise Denied("Acquired content must match the requested proposal revision")
+        if acquired["digest"] != acquire_digest(acquired["content"]):
+            raise Denied("Acquired content digest mismatch")
+        return {"op": op, "id": proposal_id, "sha": acquire_sha,
+                "digest": acquired["digest"], "content": acquired["content"],
+                "trust": "external-untrusted"}
     branch = params.get("branch")
     request = {"op": op}
     if op == "proposals":

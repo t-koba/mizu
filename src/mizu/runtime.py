@@ -439,7 +439,8 @@ class Context:
         # are refused here even if the adapter would serve them. Requires
         # a visible workspace. Branch stays required for addressed reads
         # (status/log/comments) inside read_via; proposals enumerate with
-        # an optional branch filter.
+        # an optional branch filter; acquire takes a proposal id plus the
+        # exact head sha and needs no branch.
         if self.role.workspace == "none":
             raise Denied("This role has no workspace")
         params = {}
@@ -447,6 +448,8 @@ class Context:
             params["branch"] = args["branch"]
         if "sha" in args:
             params["sha"] = args["sha"]
+        if "id" in args:
+            params["id"] = args["id"]
         try:
             data = _vcs.read_via(self.config.vcs, args["op"], params)
         except OSError as exc:
