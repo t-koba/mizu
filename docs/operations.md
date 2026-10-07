@@ -19,6 +19,7 @@ mizu cleanup demo  # 終了後に残存したラベル付きコンテナを停�
 - **状態の永続化**: arm/pause/disarm の状態はディスク上の `control.json` に記録され、OS やプロセスの再起動で勝手に解除されることはありません。
 - **実行権限の制約**: 自律モデル自身には停止状態を解除したり、自分自身を arm する権限はありません。
 - **二重起動防止**: 単一 Writer ロックにより、同一プロジェクトへの重複書き込みは排他制御されます。
+- **drain の意味**: 新規受付だけを止める cordon/quiet 相当であり、実行中の移管 (eviction) や再配置はしません。完了待ちの期限 (timeout) もないため、`mizu status` の active が空になるまで待ってから promote/保守へ進みます。協調的キャンセルが必要なら `pause`、arm 解除が必要なら `disarm` を使います。
 - **自動停止**: 連続失敗回数が `max_failures`（既定値 3）に達すると自動的に pause されます（`0` で自動 pause 無効化）。`mizu resume` は counters を 0 に戻します（ADR-016、ADR-017）。日次予算・ディスク予約・ロック待ち（`Busy`/`InfraExceeded`）は数えず延期し、`error.json` と `run_deferred` に残ります。エンジン期限・証跡上限などの `LimitExceeded` は数えます。Pi 経路の実行中予算拒否も `admission_wait` により延期します。
 
 ### タスクの実行
