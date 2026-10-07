@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run network-free quality gates. Missing required tools fail; absent
-operator-provisioned adapter dependencies are recorded not_run with the
-reason, never silently skipped."""
+operator-provisioned adapter dependencies fail unless explicitly waived with
+--allow-not-run, so the receipt never passes silently without coverage."""
 from __future__ import annotations
 import argparse
 import ast
@@ -36,6 +36,28 @@ def bash_available() -> bool:
     except (OSError, subprocess.SubprocessError):
         return False
     return probe.returncode == 0
+
+
+def durable_gate_entry(state, details, allowed) -> dict | None:
+    """Map a durable preflight state to its gate check entry (pure, no I/O).
+
+    `ready` returns None: the caller runs the suite. `absent` fails closed
+    unless the suite was explicitly waived, in which case it is recorded
+    not_run with the waiver noted. `mismatch` always fails: wrong versions
+    are a contract violation, not missing provisioning.
+    """
+    name = 'node-durable-contract-tests'
+    if state == 'ready':
+        return None
+    if state == 'absent' and name in allowed:
+        return {'name': name, 'status': 'not_run',
+                'details': details + ' (explicitly waived via --allow-not-run)'}
+    return {'name': name, 'status': 'fail', 'details': details}
+
+
+def _allow_list(value: str) -> frozenset:
+    """Parse an --allow-not-run value into waived check names."""
+    return frozenset(part.strip() for part in value.split(',') if part.strip())
 
 
 def durable_deps_status(adapter: Path) -> tuple:
@@ -74,7 +96,13 @@ def durable_deps_status(adapter: Path) -> tuple:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--report', type=Path, help='Write a portable JSON validation receipt')
+    parser.add_argument('--allow-not-run', default='',
+                        help='Comma-separated check names explicitly permitted to stay not_run '
+                             '(e.g. node-durable-contract-tests where the operator has not '
+                             'provisioned the pinned SDK); absent durable dependencies fail '
+                             'without an explicit waiver')
     args = parser.parse_args()
+    allowed_not_run = _allow_list(args.allow_not_run)
     checks = []
     counts = {}
     env = {**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'}
@@ -158,12 +186,8 @@ def main():
         if durable_state == 'ready':
             execute('node-durable-contract-tests', ['node', '--test', 'tests/durable.test.mjs'],
                     count=node_counts)
-        elif durable_state == 'absent':
-            checks.append({'name': 'node-durable-contract-tests', 'status': 'not_run',
-                           'details': durable_details})
         else:
-            checks.append({'name': 'node-durable-contract-tests', 'status': 'fail',
-                           'details': durable_details})
+            checks.append(durable_gate_entry(durable_state, durable_details, allowed_not_run))
         for path in sorted([*(ROOT / 'adapters/pi').glob('*.mjs'), *(ROOT / 'adapters/pi-durable').glob('*.mjs'), *(ROOT / 'scripts').glob('*.mjs')]):
             execute('javascript-syntax:' + path.name, ['node', '--check', str(path)])
     if has_bash:

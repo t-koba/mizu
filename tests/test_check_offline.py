@@ -58,10 +58,44 @@ class DurableDepsProbeTests(unittest.TestCase):
             state, _ = CHECK.durable_deps_status(base)
             self.assertEqual(state, "mismatch")
 
-    def test_real_adapter_reports_ready_here(self):
-        # This deployment provisions the pinned SDK; the probe must agree.
+    def test_real_adapter_reports_ready_where_provisioned(self):
+        # Environment-coupled by nature: where the operator provisioned the
+        # pinned SDK the probe must agree; elsewhere it skips instead of
+        # failing the gate for provisioning. A version mismatch still fails:
+        # wrong versions are a contract violation, not missing provisioning.
         state, details = CHECK.durable_deps_status(ROOT / 'adapters/pi-durable')
+        if state == "absent":
+            self.skipTest(f"pinned SDK not provisioned here: {details}")
         self.assertEqual((state, details), ("ready", ""))
+
+
+class DurableGateEntryTests(unittest.TestCase):
+    NAME = 'node-durable-contract-tests'
+
+    def test_ready_runs_the_suite(self):
+        self.assertIsNone(CHECK.durable_gate_entry("ready", "", frozenset()))
+
+    def test_absent_fails_closed_by_default(self):
+        entry = CHECK.durable_gate_entry("absent", "left-pad@1.3.0 is not installed", frozenset())
+        self.assertEqual(entry["status"], "fail")
+        self.assertIn("not installed", entry["details"])
+
+    def test_absent_waived_records_not_run(self):
+        entry = CHECK.durable_gate_entry("absent", "left-pad@1.3.0 is not installed", frozenset({self.NAME}))
+        self.assertEqual(entry["status"], "not_run")
+        self.assertIn("waived", entry["details"])
+
+    def test_mismatch_fails_even_when_waived(self):
+        entry = CHECK.durable_gate_entry("mismatch", "left-pad installed at 9.9.9", frozenset({self.NAME}))
+        self.assertEqual(entry["status"], "fail")
+
+    def test_unknown_waiver_name_does_not_waive(self):
+        entry = CHECK.durable_gate_entry("absent", "not installed", frozenset({"other-suite"}))
+        self.assertEqual(entry["status"], "fail")
+
+    def test_allow_list_parsing(self):
+        self.assertEqual(CHECK._allow_list(""), frozenset())
+        self.assertEqual(CHECK._allow_list("a, b ,,a"), frozenset({"a", "b"}))
 
 
 if __name__ == "__main__":

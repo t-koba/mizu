@@ -27,7 +27,10 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Offline core and transport contracts
-        run: python scripts/check.py --report private-validation/offline.json
+        # Offline runners do not provision the operator-owned Pi SDK, so the
+        # durable contract suite is explicitly waived here instead of silently
+        # passing without coverage; the receipt records the waiver.
+        run: python scripts/check.py --report private-validation/offline.json --allow-not-run node-durable-contract-tests
       - name: Core installer and CLI lifecycle
         if: runner.os == 'Linux' && matrix.python == '3.13'
         run: ./scripts/test-install.sh
