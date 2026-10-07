@@ -68,9 +68,9 @@ def durable_deps_status(adapter: Path) -> tuple:
     Returns ("ready", "") when every pinned dependency resolves at its pinned
     version, ("absent", reason) when nothing usable is installed, and
     ("mismatch", reason) when the manifest is unreadable or an installed
-    version differs from the pin. Absent inputs are environment provisioning,
-    reported as not_run; a version mismatch fails closed like any contract
-    violation.
+    version differs from the pin. Absent inputs are environment provisioning
+    and fail closed unless explicitly waived via --allow-not-run; a version
+    mismatch always fails like any contract violation.
     """
     try:
         manifest = json.loads((adapter / "package.json").read_text(encoding="utf-8"))
