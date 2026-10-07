@@ -136,8 +136,15 @@ class PiDurableDriver:
                 complete_run(conn, run_key, {"cancelled": True}, status="cancelled")
                 raise Cancelled("Run cancelled before durable dispatch")
             record_turn(conn, run_key, existing + 1, "prompt", {"bytes": len(prompt_bytes)})
+            # The shared budget covers persisted turns plus Harness steps: the
+            # just-recorded prompt turn leaves `remaining` admissions for this
+            # submission. Refuse without dispatch when nothing remains, so the
+            # grant is never exceeded by one.
+            remaining = policy["max_turns"] - (existing + 1)
+            if remaining < 1:
+                raise LimitExceeded("Durable turn bound exhausted for this run")
             outcome = self._run_once(context, settings, model, prompt, profile, run_key, store_path,
-                                     remaining=policy["max_turns"] - existing)
+                                     remaining=remaining)
             complete_turn(conn, run_key, existing + 1, {"engine": ENGINE}, state="completed")
             if settings["session"] == "persistent" and not context.ephemeral:
                 save_session(path, f"pi-durable:{session_key}",
@@ -181,13 +188,16 @@ class PiDurableDriver:
         mkdir(cwd)
         options = dict(settings.get("options", {}))
         # The turn budget is shared: persisted turns already spent on this
-        # run leave `remaining` admissions for the Harness submission, so
-        # retries and Harness-internal steps draw from one bound.
+        # run (including the just-recorded prompt turn) leave `remaining`
+        # admissions for the Harness submission, so retries and
+        # Harness-internal steps draw from one bound.
+        if not isinstance(remaining, int) or remaining < 1:
+            raise LimitExceeded("Durable turn bound exhausted for this run")
         effective_config = {
             "provider": model["provider"], "model": model["model"],
             "instructions": policy, "tools": tool_definitions(context.role.capabilities),
             "cwd": str(cwd), "store": str(store_path), "requestId": run_key, "prompt": prompt,
-            "max_turns": max(1, remaining),
+            "max_turns": remaining,
         }
         if options.get("thinkingLevel") is not None:
             effective_config["thinkingLevel"] = options["thinkingLevel"]
@@ -225,6 +235,21 @@ class PiDurableDriver:
             return {**context.model_evidence, "seconds": round(time.monotonic() - started, 3)}
 
 
+def _record_launcher_evidence(reported, context, model, thinking_level) -> None:
+    """Record launcher requests/usage into run evidence (shared mapping)."""
+    usage = reported.get("usage") if isinstance(reported, dict) else None
+    if isinstance(usage, dict):
+        mapped = {"input_tokens": usage.get("input", 0), "output_tokens": usage.get("output", 0),
+                  "cache_read_tokens": usage.get("cacheRead", 0),
+                  "cache_write_tokens": usage.get("cacheWrite", 0)}
+        context.model_evidence.update(requests=int(reported.get("requests", 0) or 0),
+                                      usage=[mapped], usage_known=True,
+                                      observed_models=[{**model, "thinkingLevel": thinking_level}],
+                                      usage_observations=[{"usage": mapped, **model}])
+    else:
+        context.model_evidence.update(requests=int((reported.get("requests", 0) if isinstance(reported, dict) else 0) or 0))
+
+
 def interpret_result(reported, context, model, thinking_level) -> None:
     """Validate the launcher result document and record usage evidence.
 
@@ -233,13 +258,16 @@ def interpret_result(reported, context, model, thinking_level) -> None:
     ``LimitExceeded`` so the spent budget surfaces as a bound, never a
     silent stop; other non-done statuses map to ``ModelFailure``. A done
     result still requires the ``mizu_finish`` seal and at least one
-    admitted request, like the pi engine. Bounds: usage counters pass
+    admitted request, like the pi engine. Launcher requests/usage counters
+    are recorded before raising on ``turn_bound`` so the bound-exhausted
+    path keeps its accounting. Bounds: usage counters pass
     through as-is; evidence stays local. Failure: ``ProtocolError``,
     ``ModelFailure`` or ``LimitExceeded``.
     """
     if not isinstance(reported, dict) or reported.get("durable_result") is not True:
         raise ProtocolError("Durable launcher returned an invalid result")
     if reported.get("status") == "turn_bound":
+        _record_launcher_evidence(reported, context, model, thinking_level)
         raise LimitExceeded("Durable turn bound exhausted")
     if reported.get("status") != "done":
         raise ModelFailure("pi-durable", kind="unanswered",

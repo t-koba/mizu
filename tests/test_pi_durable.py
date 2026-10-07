@@ -64,7 +64,7 @@ class PolicyTests(Fixture):
             effective(self.config, self.config.roles["worker"], profile)
 
     def test_turn_bound_enforced(self):
-        profile = self._durable_profile(durable_max_turns=1)
+        profile = self._durable_profile(durable_max_turns=2)
         driver = pi_durable.PiDurableDriver(self.config)
         context = self.context()
         seen = {}
@@ -74,12 +74,33 @@ class PolicyTests(Fixture):
         driver._run_once = boom
         with self.assertRaises(ModelFailure):
             driver.execute(context, "hello", profile=profile)
-        # The launcher gets the remaining budget (one turn, nothing spent).
+        # The shared budget subtracts the just-recorded prompt turn: with two
+        # allowed and nothing spent, one admission remains for the launcher.
         self.assertEqual(seen.get("remaining"), 1)
-        # The interrupted attempt left one persisted unknown turn; the bound
-        # of one is now exhausted, so resume is refused instead of retried.
+        # The interrupted attempt left persisted turns; the next submission
+        # records its prompt and finds nothing remains, so it is refused
+        # without dispatch instead of retried past the grant.
+        dispatched = {}
+        def never(*args, **kwargs):
+            dispatched["called"] = True
+            raise ModelFailure("pi-durable", kind="error", message="must not dispatch")
+        driver._run_once = never
         with self.assertRaises(LimitExceeded):
             driver.execute(context, "hello", profile=profile)
+        self.assertNotIn("called", dispatched)
+
+    def test_exhausted_budget_refuses_without_dispatch(self):
+        profile = self._durable_profile(durable_max_turns=1)
+        driver = pi_durable.PiDurableDriver(self.config)
+        context = self.context()
+        called = {}
+        def never(*args, **kwargs):
+            called["ran"] = True
+            raise AssertionError("must not dispatch past the grant")
+        driver._run_once = never
+        with self.assertRaises(LimitExceeded):
+            driver.execute(context, "hello", profile=profile)
+        self.assertNotIn("ran", called)
 
     def test_turn_bound_result_maps_to_limit(self):
         from mizu.errors import ProtocolError
@@ -91,7 +112,13 @@ class PolicyTests(Fixture):
         model = {"provider": "p", "model": "m"}
         with self.assertRaises(LimitExceeded):
             pi_durable.interpret_result({"durable_result": True, "status": "turn_bound",
-                                         "reason": "spent"}, context, model, None)
+                                         "reason": "spent", "requests": 5,
+                                         "usage": {"input": 10, "output": 5}}, context, model, None)
+        # The bound-exhausted path keeps launcher accounting, like the done path.
+        self.assertEqual(context.model_evidence["requests"], 5)
+        self.assertTrue(context.model_evidence["usage_known"])
+        self.assertEqual(context.model_evidence["usage"][0]["input_tokens"], 10)
+        self.assertEqual(context.model_evidence["usage"][0]["output_tokens"], 5)
         with self.assertRaises(ProtocolError):
             pi_durable.interpret_result({"durable_result": True, "status": "done",
                                          "finish_called": False}, context, model, None)
