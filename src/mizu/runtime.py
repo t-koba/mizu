@@ -1186,7 +1186,8 @@ class Engine:
             stack.enter_context(attempt)
             return
 
-    def run(self, project: Project, role_name: str, *, attributes=None, retry_busy: bool = False) -> dict:
+    def run(self, project: Project, role_name: str, *, attributes=None, retry_busy: bool = False,
+                event_trigger: bool = False) -> dict:
         if role_name not in project.roles:
             raise Denied("Role is not enabled for this project")
         role = self.config.roles[role_name]
@@ -1217,6 +1218,14 @@ class Engine:
             # it runs for other reasons; they never admit a run on their
             # own, so no new wake source is implied.
             obligations = project.insights.pending_obligations(role_name)
+            # Event-triggered dispatch (platform file triggers) admits only on a
+            # subscribed decision event or a due structured wait for this role;
+            # otherwise it exits before allocating a run directory or model use,
+            # like unchanged-code admission. Periodic timers invoke without the
+            # flag, so scheduled discovery still runs at its interval.
+            if event_trigger and not decision_events and not wait_events:
+                return {"skipped": "no-event", "snapshot": snapshot["id"],
+                        "code_digest": snapshot["code_digest"]}
             if code_unchanged and not decision_events and not wait_events:
                 return {"skipped": "unchanged", "snapshot": snapshot["id"],
                         "code_digest": snapshot["code_digest"]}

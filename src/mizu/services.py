@@ -8,10 +8,12 @@ Scheduler XML on Windows. Each emitter is pure text over the same inputs;
 started or enabled here on any platform.
 
 Decision events and due structured waits wake scheduled roles before their
-next interval: systemd path units on Linux and WatchPaths on macOS invoke the
-same `mizu run`, which admits on events and otherwise reports unchanged; the
-periodic timers stay unchanged. Task Scheduler XML has no file trigger in
-this minimal schema, so Windows still dispatches events when its timer fires.
+next interval: systemd path units on Linux and WatchPaths on macOS invoke
+`mizu run --event`, which admits only on a subscribed decision event or a due
+wait for that role and otherwise exits before any model use; the periodic
+timers invoke plain `mizu run` on their own schedules unchanged. Task
+Scheduler XML has no file trigger in this minimal schema, so Windows still
+dispatches events when its timer fires.
 """
 from __future__ import annotations
 
@@ -122,11 +124,20 @@ def _render_systemd(config: Config, project: Project, executable: Path) -> dict[
         timer.extend(["", "[Install]", "WantedBy=timers.target"])
         result[base + ".timer"] = "\n".join(timer) + "\n"
         if name in watches:
+            event_base = base + "-event"
+            event_args = [str(executable.resolve()), "--config", str(config.file),
+                          "run", project.name, "--role", name, "--event"]
+            event_service = ["[Unit]", f"Description=Mizu event dispatch for {project.name} / {name}", "After=network-online.target",
+                       "", "[Service]", "Type=exec", "UMask=0077", "KillMode=control-group", "Delegate=yes",
+                       f"TimeoutStopSec={STOP_SEC}", "ExecStart=" + " ".join(map(quote, event_args)),
+                       "ExecStopPost=-" + " ".join(map(quote, cleanup)),
+                       "SuccessExitStatus=69 75 76 77 78 130"]
+            result[event_base + ".service"] = "\n".join(event_service) + "\n"
             trigger = ["[Unit]", f"Description=Mizu event trigger for {project.name} / {name}", "",
                        "[Path]",
                        *(f"PathChanged={watch}" for watch in watches[name]),
-                       f"Unit={base}.service", "", "[Install]", "WantedBy=default.target"]
-            result[base + ".path"] = "\n".join(trigger) + "\n"
+                       f"Unit={event_base}.service", "", "[Install]", "WantedBy=default.target"]
+            result[event_base + ".path"] = "\n".join(trigger) + "\n"
     return result
 
 
@@ -155,14 +166,25 @@ def _render_launchd(config: Config, project: Project, executable: Path) -> dict[
                 f"<key>Minute</key><integer>{int(t[3:])}</integer></dict>\n" for t in role.calendar)
             body.extend(["  <key>StartCalendarInterval</key>", "  <array>",
                          entries.rstrip("\n"), "  </array>"])
-        if not role.daemon and name in watches:
-            paths = "".join(f"    <string>{_xml(watch)}</string>\n" for watch in watches[name])
-            body.extend(["  <key>WatchPaths</key>", "  <array>",
-                         paths.rstrip("\n"), "  </array>"])
         result[base + ".plist"] = ('<?xml version="1.0" encoding="UTF-8"?>\n'
                                    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
                                    '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
                                    '<plist version="1.0">\n<dict>\n' + "\n".join(body) +
+                                   '\n</dict>\n</plist>\n')
+        if not role.daemon and name in watches:
+            event_base = base + "-event"
+            event_args = [resolved, "--config", str(config.file),
+                          "run", project.name, "--role", name, "--event"]
+            event_body = [f"  <key>Label</key><string>{event_base}</string>",
+                          "  <key>ProgramArguments</key>", "  <array>",
+                          _plist_args(event_args).rstrip("\n"), "  </array>",
+                          "  <key>WatchPaths</key>", "  <array>",
+                          "".join(f"    <string>{_xml(watch)}</string>\n" for watch in watches[name]).rstrip("\n"),
+                          "  </array>"]
+            result[event_base + ".plist"] = ('<?xml version="1.0" encoding="UTF-8"?>\n'
+                                   '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+                                   '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+                                   '<plist version="1.0">\n<dict>\n' + "\n".join(event_body) +
                                    '\n</dict>\n</plist>\n')
     return result
 
@@ -312,7 +334,8 @@ def install(config: Config, project: Project, executable: Path, destination: Pat
                                "timezone": config.timezone if name == "linux" or (name == "windows" and config.timezone == "UTC") else "OS local"})
             sync_dir(directory)
     if name == "linux":
-        triggered = {unit[:-6] for unit in units if unit.endswith((".timer", ".path"))}
+        triggered = ({unit[:-len(".timer")] for unit in units if unit.endswith(".timer")} |
+                     {unit[:-len(".path")] for unit in units if unit.endswith(".path")})
         start = [unit for unit in units if unit.endswith((".timer", ".path")) or
                  (unit.endswith(".service") and unit[:-8] not in triggered)]
     else:

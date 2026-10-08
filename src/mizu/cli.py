@@ -55,6 +55,8 @@ def parser() -> argparse.ArgumentParser:
         p.add_argument("--role", default=None, help="Configured role (default: single configured role, else required)")
         if name == "run":
             p.add_argument("--attributes", type=Path, help="Operator JSON attributes for this execution")
+            p.add_argument("--event", action="store_true",
+                           help="Event-triggered dispatch: exit without model use unless a subscribed decision or due wait is pending")
     p = sub.add_parser("selection", help="Preview selection or manage operator observations; no inference")
     selection = p.add_subparsers(dest="selection_command", required=True)
     p = selection.add_parser("preview")
@@ -216,7 +218,7 @@ def _cmd_run(config, project, args):
         # unit when every execution slot is busy; the daemon keeps its
         # own defer-and-repoll loop and never waits here.
         return Engine(config, stop=stop).run(project, role, attributes=_attribute_input(getattr(args, "attributes", None)),
-                                             retry_busy=True)
+                                             retry_busy=True, event_trigger=getattr(args, "event", False))
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)

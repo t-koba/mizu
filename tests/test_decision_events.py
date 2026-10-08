@@ -92,6 +92,37 @@ class DecisionTriggerTests(Fixture):
                                      body="new evidence", base_snapshot=None)
         self.project.insights.decide(item["id"], "accept", "now material", "", "test", expected_rev=2)
 
+    def test_event_trigger_skips_without_subscribed_event(self):
+        # Schedule-only roles (no on_change) previously ran a full model unit
+        # on every file-trigger wake, even with no subscribed event pending:
+        # decision-history changes from unrelated roles re-triggered the
+        # searcher, whose new insight re-triggered the writer, forming a loop.
+        # Event-triggered dispatch must exit before any model use unless a
+        # subscribed decision event or due wait is pending for that role,
+        # while plain (timer) dispatch still runs its periodic unit.
+        config = _trigger_config(self.config, role="searcher")
+        driver = ScriptDriver()
+        engine = Engine(config, driver=driver)
+        before = {d.name for d in (self.project.root / "runs").iterdir()} if (self.project.root / "runs").exists() else set()
+        skipped = engine.run(self.project, "searcher", event_trigger=True)
+        self.assertEqual(skipped.get("skipped"), "no-event")
+        self.assertEqual(driver.calls, [])
+        after = {d.name for d in (self.project.root / "runs").iterdir()} if (self.project.root / "runs").exists() else set()
+        self.assertEqual(before, after)
+        # An unrelated role's decision must not admit this role's event dispatch.
+        _reject(self.project, "reviewer")
+        self.assertEqual(engine.run(self.project, "searcher", event_trigger=True).get("skipped"), "no-event")
+        self.assertEqual(driver.calls, [])
+        # The periodic timer (plain dispatch) still runs without events.
+        self.assertEqual(engine.run(self.project, "searcher")["status"], "completed")
+        self.assertEqual(len(driver.calls), 1)
+        # A subscribed event for this role admits exactly one focused unit.
+        _reject(self.project, "searcher")
+        admitted = engine.run(self.project, "searcher", event_trigger=True)
+        self.assertEqual(admitted["status"], "completed")
+        self.assertEqual(len(driver.calls), 2)
+        self.assertEqual(engine.run(self.project, "searcher", event_trigger=True).get("skipped"), "no-event")
+
     def test_unconfigured_role_keeps_skipping(self):
         engine = Engine(self.config, driver=ScriptDriver())
         engine.run(self.project, "reviewer")

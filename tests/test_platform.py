@@ -421,20 +421,32 @@ class ServiceRendererTests(unittest.TestCase):
         self.assertEqual(sorted(watches), ["reporter"])
         base = "mizu-3-svc-reporter"
         units = render(config, self.project, ROOT / "bin/mizu", system="linux")
-        trigger = units[base + ".path"]
-        self.assertIn(f"Unit={base}.service", trigger)
+        # Event-triggered dispatch is a separate service invoked with --event so
+        # a trigger with nothing due exits before any model use; the periodic
+        # timer keeps invoking the plain service on its own schedule.
+        self.assertIn("--event", units[base + "-event.service"])
+        self.assertNotIn("--event", units[base + ".service"])
+        trigger = units[base + "-event.path"]
+        self.assertIn(f"Unit={base}-event.service", trigger)
         self.assertIn("decision-history", trigger)
         self.assertIn("waits", trigger)
         self.assertIn("OnCalendar=", units[base + ".timer"])
-        job = plistlib.loads(render(config, self.project, ROOT / "bin/mizu", system="macos")[base + ".plist"].encode())
+        macos = render(config, self.project, ROOT / "bin/mizu", system="macos")
+        schedule = plistlib.loads(macos[base + ".plist"].encode())
+        self.assertNotIn("WatchPaths", schedule)
+        job = plistlib.loads(macos[base + "-event.plist"].encode())
         self.assertTrue(any("decision-history" in path for path in job["WatchPaths"]))
-        worker = plistlib.loads(render(config, self.project, ROOT / "bin/mizu", system="macos")["mizu-3-svc-worker.plist"].encode())
+        self.assertIn("--event", job["ProgramArguments"])
+        worker = plistlib.loads(macos["mizu-3-svc-worker.plist"].encode())
         self.assertNotIn("WatchPaths", worker)
         directory = self.root / "units-event-linux"
         result = install(config, self.project, ROOT / "bin/mizu", directory, system="linux")
-        self.assertIn(base + ".path", result["written"])
-        self.assertIn(base + ".path", result["enable_units"])
+        self.assertIn(base + "-event.path", result["written"])
+        self.assertIn(base + "-event.service", result["written"])
+        self.assertIn(base + "-event.path", result["enable_units"])
+        self.assertIn(base + ".timer", result["enable_units"])
         self.assertNotIn(base + ".service", result["enable_units"])
+        self.assertNotIn(base + "-event.service", result["enable_units"])
         checked = service_units(directory, system="linux")
         self.assertEqual(sorted(checked["units"]), sorted(result["written"]))
 
