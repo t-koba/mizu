@@ -111,7 +111,7 @@ def backup(project: Project, destination: Path, *, verify: bool = False) -> dict
                     raise Denied("Backup must be a new file outside the project tree") from None
             sync_dir(destination.parent)
             if verify:
-                with tarfile.open(destination, "r|gz") as archive:
+                with tarfile.open(destination, "r:gz") as archive:
                     members = [m.name for m in archive]
         finally:
             temporary.unlink(missing_ok=True)
@@ -906,7 +906,7 @@ def restore(config, name: str, archive_path: Path, *, max_bytes: int = 107374182
         try:
             total = count = 0
             seen = set()
-            with tarfile.open(archive_path, "r|gz") as archive:
+            with tarfile.open(archive_path, "r:gz") as archive:
                 for member in archive:
                     relative = Path(member.name)
                     parts = relative_parts(member.name.rstrip("/") if member.isdir() else member.name)
