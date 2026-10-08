@@ -188,7 +188,13 @@ Codex local skill resources, Pi extension/skill/prompt/theme resources.
 Each run verifies content before launch. `mcp_servers` uses engine-native
 connection configuration. The runtime owns the `mizu` server. Stdio commands
 run inside the existing readonly OCI floor and require executables already
-present in the selected image; environment belongs in `sandbox.env`. No
+present in the selected image; environment belongs in `sandbox.env`. Prefer
+stdio `command` servers: `url` HTTP servers stay explicit operator endpoints
+outside the OCI floor, and a loopback bind alone is not a browser boundary.
+An HTTP `url` must carry its upstream DNS-rebinding guard
+(`enableDnsRebindingProtection` / `allowedHosts` plus `allowedOrigins` /
+`hostHeaderValidation`, mcp-go >=0.56.0 or equivalent) plus auth; never serve
+one as unauthenticated loopback alone. No
 installation, login, package acquisition or deployment runs during work.
 
 A role has exactly one of `profile` or `selector`, plus `policy`, `workspace` (`write`, `read`, `none`),
