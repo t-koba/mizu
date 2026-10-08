@@ -29,6 +29,7 @@ from .protocol import DEFINITIONS, validate
 from .report import previous as _previous_report, publish
 from .sandbox import Sandbox, cleanup
 from . import vcs as _vcs
+from . import materialize as _materialize
 from .web import Web
 from .web_worker import bounded
 
@@ -107,7 +108,7 @@ def is_deferred(exc: BaseException, context=None) -> bool:
 CONSULT_FORBIDDEN = frozenset({"exec", "experiment", "verify", "decide",
                                "submit_insight", "consult", "report", "sync",
                                "vcs_publish", "vcs_retire", "vcs_dispose",
-                               "research"})
+                               "research", "materialize"})
 
 
 def check_consult_role(role_name: str, role) -> None:
@@ -611,6 +612,25 @@ class Context:
         write_json(self.run_dir / "vcs-dispose.json", record)
         return record
 
+    def _op_materialize(self, args: dict) -> dict:
+        # Generic offline-input materialization: trusted host adapter warms
+        # pre-mounted read-only caches and/or returns digest-bound content
+        # (e.g. an updated lockfile). The worker applies content as ordinary
+        # workspace edits followed by verification; the mechanism never mounts
+        # adapter paths and never grants network to the sandbox. Requires a
+        # visible workspace; fail closed without configuration or grant.
+        if self.role.workspace == "none":
+            raise Denied("This role has no workspace")
+        try:
+            data = _materialize.invoke(self.config.materialize, args["spec"])
+        except OSError as exc:
+            raise Denied(f"Materialization is unavailable: {exc}") from exc
+        record = {"spec": args["spec"], "digest": data["digest"],
+                  "cache": data["cache"], "trust": "external-untrusted",
+                  "evidence": "materialize.json", "result": data}
+        write_json(self.run_dir / "materialize.json", data)
+        return record
+
     def _op_consult(self, args: dict) -> dict:
         if self.consult is None:
             raise Denied("Nested consultation is disabled")
@@ -655,6 +675,7 @@ class Context:
         "decide": _op_decide, "submit_insight": _op_submit_insight,
         "sync": _op_sync, "vcs_read": _op_vcs_read, "vcs_publish": _op_vcs_publish,
         "vcs_retire": _op_vcs_retire, "vcs_dispose": _op_vcs_dispose,
+        "materialize": _op_materialize,
         "consult": _op_consult, "report": _op_report,
         "research_read": _op_research_read, "research": _op_research,
         "finish": _op_finish,

@@ -37,6 +37,7 @@ inputs. The trusted host adapter never executes model-provided host commands.
 | `snapshot.py` | Content objects, immutable manifests, published pointer | Semantic correctness |
 | `insights.py` | Submission identity, revisable proposals with separate audit, decision history | Acceptance or rejection |
 | `web.py` | Allowed retrieval and external source receipts | Scientific truth |
+| `materialize.py` | Generic offline-input adapter (spec in, digest-bound content out) | Ecosystem resolution, cache policy |
 | `editor.py` | Snapshot export and read/propose MCP | Code editing |
 | `report.py` | Escaped static artifact (Markdown + evidence) with atomic latest pointer | Presentation, retention policy |
 | `services.py` | Render OS service definitions (systemd / launchd / Task Scheduler) | Implicitly start or arm |

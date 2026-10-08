@@ -118,6 +118,8 @@ DEFINITIONS = {
                    ("op", "id", "sha", "base", "target", "branch"))),
     "research_read": ("Read this role's own current research state record with its generation. Never touches other roles.",
                obj()),
+    "materialize": ("Materialize offline inputs via the trusted host adapter from a declarative spec. Warms pre-mounted read-only caches and returns digest-bound content; never mounts adapter paths or uses the network from the sandbox.",
+               obj({"spec": text(8192)}, ("spec",))),
     "research": ("Replace this role's own current research state record with a full new JSON object state at the read generation; stale generations are refused. Audit evidence lands in research-state.json.",
                obj({"state": text(65536), "expected_generation": {"type": "integer", "minimum": 0}}, ("state", "expected_generation"))),
     "finish": ("End this work unit. Call after all other tools. 'done' on writable roles requires successful verification. "

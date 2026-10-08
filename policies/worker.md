@@ -42,8 +42,10 @@ Distinguish source claims, your observations, interpretation and uncertainty.
 Record failed experiments and rejected approaches when useful. Do not invent
 measurements, completed work, citations or tests. Preserve source receipt IDs,
 URLs, versions and command IDs when available. The sandbox has no network; put
-required dependencies in an operator-approved image rather than attempting a
-host or network fallback.
+required dependencies in an operator-approved image, or request them through the
+`materialize` capability when granted (a trusted host adapter warming
+pre-mounted read-only caches and/or returning digest-bound content to apply as
+ordinary edits), rather than attempting a host or network fallback.
 
 ## Work-unit boundary
 

@@ -399,6 +399,43 @@ Receipts are scoped per mutation: `vcs-publish.json`, `vcs-dispose.json`, and `v
 
 Revalidation is re-observation: after any failed mutation, `proposals` re-reads current state before retrying at a fresh revision. Recovery follows the failure kind: a moved head means re-assess and retry at the new sha; an externally superseded proposal (terminal state the action did not produce) means stop and reconcile instead of re-issuing; a malformed adapter echo means the adapter is at fault and the remote state is unknown. A failed call never implies the remote changed; only a fresh observation or a matching receipt does.
 
+## Materialize (offline-input adapter: generic host-side warming, no ecosystem logic)
+
+Configures the operator-owned offline-input adapter. `src/mizu/materialize.py`
+(`invoke`) implements the single-invocation contract; `src/mizu/runtime.py`
+(`Context._op_materialize`) implements the grant-gated `materialize` tool.
+
+| Key | Default | Description |
+|---|---|---|
+| `command` | `[]` | Trusted argv executable; JSON stdin/stdout, never a shell string. Empty disables |
+| `timeout_seconds` | `20` | Per-invocation deadline (1-16,777,216) |
+| `max_bytes` | `524288` | Maximum adapter request/response payload, 512 KiB (1-16,777,216) |
+
+Adapter contract: stdin is `{"spec": "..."}` (nonempty declarative description,
+at most 8192 chars, opaque to the product); stdout must be
+`{"content": str, "digest": 64 hex, "cache"?: str}` with `digest` equal to
+sha256 over `fs.canonical(content)` recomputed locally (a mismatch is `Denied`).
+`cache` (at most 256 chars, no NUL/newlines) names the warmed location for audit
+only. Invocation uses `process.run` with timeout, no shell, `maximum=max_bytes`.
+Trust: operator-owned host program only; never model-provided, never run in the
+sandbox. Results stay `external-untrusted` until applied as ordinary workspace
+edits and verified. Retry/cancellation: single invocation per call under the
+configured timeout; no shell retry. Evidence: `materialize.json` receipt plus
+the returned digest. Failure: `Denied` on unconfigured adapter, bad spec,
+timeout, oversize response, nonzero exit, malformed JSON, or digest mismatch.
+Defaults apply when `[materialize]` is absent so existing configs keep loading.
+
+First use: the adapter warms host caches already mounted read-only via static
+`[sandbox] mounts` (e.g. a cargo/npm cache directory) and/or returns
+digest-bound text content (e.g. an updated lockfile). The product never mounts
+arbitrary adapter paths and never grants network to the sandbox; dynamic
+per-request mounts and image switching are explicitly out of scope. Ecosystem
+logic (cargo/npm/rustup, registry allowlists, layer builds) and decisions
+(grants per role, which caches, size/time limits, auto-apply vs approval,
+retention) belong in operator configuration and the concrete adapter, not the
+product. The `materialize` capability grants the tool; consultation roles
+cannot hold it; `none`-workspace roles are refused at call time.
+
 ## Role research state (bounded current coverage, replacement only)
 
 Each role may hold one current research record under `role-state/<role>.json`: investigated questions with conclusions, consequential unknowns, coverage/evidence references, and explicit revisit conditions. The store is a bounded generic JSON object (nesting at most 4, keys at most 64 chars, total within `role_state_bytes`); section choice is role policy, never a hardcoded topic list. Updates replace the whole record under a generation compare-and-swap: first write expects generation 0, each replacement expects the generation its writer read, and stale expectations are refused so newer evidence is never overwritten. Read-compare-write runs under a per-role non-blocking lock, so overlapping writers never share a generation: the loser is refused and re-reads. The bound covers the full stored record (state plus envelope and authoring run token); non-finite numbers, non-JSON values, bad run tokens, and boolean generations are refused before the store is touched. Reads distinguish `absent` (never written, generation 0) from `unavailable` (unreadable or malformed, no generation): absence never reads as "nothing researched", and unavailable records refuse replacement until an operator clears the file, while atomic writes keep interrupted updates from disturbing the previous record. History lives only in run records; insight submission is never a research-memory store. Retention follows run records: current state persists until replaced, audit evidence under the existing log-retention windows. Retrieval is capability-gated: `research_read` serves the caller's own record with its generation (consultations may read), while `research` replaces the own record from a JSON `state` at the read `expected_generation` and writes `research-state.json` with the new generation and stored state as run-record audit (consultations cannot hold it, and malformed JSON is refused before the store is touched). Prompts inject the own record for capable roles in both full and resumed deltas: whole while within `role_state_prompt_bytes`, else `truncated` with generation and sizes and no partial content. Retention is configuration without a new knob: the current record is never a prune candidate and persists until replaced; run-record audit (`research-state.json` receipts) persists with the run like other receipts, and only bulky engine logs age out under the event-log windows.

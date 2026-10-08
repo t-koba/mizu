@@ -15,7 +15,8 @@ from .fs import ID
 CAPABILITIES = frozenset({"diff", "files", "read", "exec", "experiment", "verify", "fetch",
                           "search", "insights", "decide", "submit_insight", "consult",
                           "report", "finish", "sync", "vcs_read", "vcs_publish",
-                          "vcs_retire", "vcs_dispose", "research_read", "research"})
+                          "vcs_retire", "vcs_dispose", "research_read", "research",
+                          "materialize"})
 ENGINES = ("pi", "pi-durable", "codex", "claude")
 #: Role names that collide with insight sources owned by the host/operator
 #: channel (operator CLI, vcs CI helper, editor outbox). Model
@@ -245,7 +246,7 @@ def _load_merged(top: Path) -> dict:
         # Unknown root keys still fail here per fragment so the error names
         # the fragment, then the final merged load re-checks the whole.
         allowed = {"data_dir", "engines", "timezone", "limits", "sandbox", "profiles",
-                   "roles", "consult_profiles", "web", "vcs", "exclude", "selectors", "include"}
+                   "roles", "consult_profiles", "web", "vcs", "materialize", "exclude", "selectors", "include"}
         unknown = set(data) - allowed
         if unknown:
             raise ConfigError(f"Unknown keys in {resolved}: {', '.join(sorted(unknown))}")
@@ -426,6 +427,7 @@ class Config:
     timezone: str
     web: dict
     vcs: dict
+    materialize: dict
     exclude: tuple[str, ...]
     selectors: dict = dataclasses.field(default_factory=dict)
     tzinfo: dt.tzinfo | None = None
@@ -469,7 +471,7 @@ def load(file: Path) -> Config:
     file = file.expanduser().resolve()
     data = _load_merged(file)
     keys(data, {"data_dir", "engines", "timezone", "limits", "sandbox", "profiles",
-                "roles", "consult_profiles", "web", "vcs", "exclude", "selectors", "include"}, "root")
+                "roles", "consult_profiles", "web", "vcs", "materialize", "exclude", "selectors", "include"}, "root")
     data.pop("include", None)
     engines = data.get("engines", {})
     keys(engines, set(ENGINES), "engines")
@@ -819,7 +821,15 @@ def load(file: Path) -> Config:
     number(vcs["poll_max_branches"], "vcs.poll_max_branches", 1, 64)
     number(vcs["poll_fetch_timeout_seconds"], "vcs.poll_fetch_timeout_seconds", 1, 300)
     number(vcs["poll_status_timeout_seconds"], "vcs.poll_status_timeout_seconds", 1, 300)
+    mat = data.get("materialize", {})
+    keys(mat, {"command", "timeout_seconds", "max_bytes"}, "materialize")
+    mat = {"command": [], "timeout_seconds": 20, "max_bytes": 524288, **mat}
+    strings(mat["command"], "materialize.command")
+    if mat["command"] and any(not s or "\n" in s for s in mat["command"]):
+        raise ConfigError("materialize.command must be a nonempty argv array without newlines")
+    for k in ("timeout_seconds", "max_bytes"):
+        number(mat[k], f"materialize.{k}", 1, 16777216)
     return Config(file, path_value(string(data.get("data_dir", "~/.local/state/mizu"), "data_dir"), file.parent),
-                  environments, limits, sandbox, profiles, roles, consult, timezone, web, vcs,
+                  environments, limits, sandbox, profiles, roles, consult, timezone, web, vcs, mat,
                   strings(data.get("exclude", [".git", ".pi", ".env", ".env.*", ".venv",
                                                 "node_modules", "__pycache__", ".pytest_cache"]), "exclude"), selectors)

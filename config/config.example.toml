@@ -166,6 +166,11 @@ cache_seconds = 1800
 timeout_seconds = 20
 max_bytes = 524288
 
+[materialize]
+command = []                 # Trusted argv executable for offline-input materialization; JSON stdin/stdout, never a shell string. Empty disables.
+timeout_seconds = 20         # Per-invocation deadline for the adapter.
+max_bytes = 524288           # Maximum adapter request/response payload (512 KiB).
+
 [roles.worker]
 profile = "primary"
 # Composed policy: string or list in order, e.g. ["policies/shared.md", "policies/worker.md"].
