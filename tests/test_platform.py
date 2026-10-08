@@ -59,8 +59,10 @@ class PlatformContractTests(unittest.TestCase):
     def test_popen_kwargs_are_portable(self):
         import subprocess
         kwargs = _platform.popen_kwargs()
-        subprocess.Popen([sys.executable, "-c", "pass"], stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL, **kwargs).wait(timeout=10)
+        proc = subprocess.Popen([sys.executable, "-c", "pass"], stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, **kwargs)
+        self.assertEqual(proc.wait(timeout=10), 0)
+        self.assertEqual(proc.poll(), 0)
 
     def test_terminate_is_portable(self):
         import subprocess
