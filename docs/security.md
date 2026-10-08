@@ -45,7 +45,8 @@ require the upstream DNS-rebinding guard plus auth, never unauthenticated
 loopback alone, since a loopback bind is not a browser boundary.
 MCP tool definitions are runtime data, not pinned code (unlike `resources` hashes):
 granting an `engine_tools` name trusts its current definitions, so re-review them
-on server or image update and keep grants minimal.
+on server or image update (including a mid-session `notifications/tools/list_changed`
+or any tool-manifest change) and keep grants minimal.
 An attacker with the same host UID or root access can alter the policy, read
 secrets or replace code. A private bridge token is a process-boundary aid,
 not protection from a compromised operator account. Use a dedicated service
