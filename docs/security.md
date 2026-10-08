@@ -81,7 +81,7 @@ remain necessary. `verify` proves configured command results on a code digest,
 not that editable tests were a complete or independent oracle (a writer-edited
 test passes by construction once captured: test edits, hard-coded outputs, or
 defense deletion to satisfy a corrupted test are the same failure class, so keep
-acceptance tests operator-owned or review the test diff before `done`).
+acceptance tests operator-owned or review the test diff before `done`). When acceptance checks persisted effects, assert exact row/object counts and deny unknown persisted fields — prefer an independent readback over checker-echoed values, since value-only checks still pass on extra-record/extra-field effects.
 
 ### Inference-engine confinement
 
