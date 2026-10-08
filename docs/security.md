@@ -39,7 +39,10 @@ The operator account, OS kernel, filesystem, release source, installed Pi/npm
 dependencies, trusted search executable and container images are trusted.
 Operator-selected Pi extensions are trusted code too: membership in this set
 is an operator selection with source review and hash pins, not something the
-mechanism can verify from the inside.
+mechanism can verify from the inside. Prefer stdio MCP servers (containerized);
+HTTP `url` MCP servers are explicit operator endpoints outside the OCI floor:
+require the upstream DNS-rebinding guard plus auth, never unauthenticated
+loopback alone, since a loopback bind is not a browser boundary.
 An attacker with the same host UID or root access can alter the policy, read
 secrets or replace code. A private bridge token is a process-boundary aid,
 not protection from a compromised operator account. Use a dedicated service
@@ -131,7 +134,7 @@ The fixed floor is mechanism; the rest is operator policy plus TCB.
 | Privileged container, added capabilities, host PID namespace | Excluded by the fixed mechanism floor (`--read-only`, `--cap-drop=ALL`, `--security-opt=no-new-privileges`, user mapping, resource bounds in `src/mizu/sandbox.py`); argv construction has no privileged fallback and no `--privileged`, `--pid=host`, or `cap-add`. Podman checkpoint images are refused before launch (annotation `io.podman.annotations.checkpoint.runtime.name`, CVE-2026-94603): on unpatched Podman the checkpoint config would otherwise silently ignore those flags |
 | Mounted control socket | No Docker/Podman socket is ever mounted; extra mounts stay explicit operator choice, read-only, and refused for container-interior system targets |
 | Network namespace escape | Container network is `none` by default; any other `[sandbox] network` is an explicit operator grant that accepts egress and loopback reachability |
-| Runtime TCB floor | `doctor --sandbox` proves enforcement with a live smoke probe and records the runtime version string but enforces no minimum: keep the runtime at or above runc 1.3.6/1.4.3/1.5.0 or crun 1.28 (CVE-2026-41579, CVE-2026-47766), and Podman at or above v5.8.8 / v6.1.3 where Podman is used (CVE-2026-94603 checkpoint bypass). Checkpoint-image refusal holds on any version; the version floor removes the upstream bypass itself. A rootless container shares a kernel and is not sufficient isolation for arbitrary high-risk malware; use a disposable VM or stronger separately reviewed boundary for that threat model |
+| Runtime TCB floor | `doctor --sandbox` proves enforcement with a live smoke probe and records the runtime version string but enforces no minimum: keep the runtime at or above runc 1.3.6/1.4.3/1.5.1 (prefer >=1.5.2; 1.5.0 has Focal tmpfs regression #5348) or crun 1.30.1 (CVE-2026-41579, CVE-2026-47766, CVE-2026-84042, CVE-2026-88264, CVE-2026-88265; 1.30 alone omits the complete 84042 fix). Mizu never requests the krun handler or passt, so 84042 is out of posture; the floor moves for the /dev flaws, and Podman at or above v5.8.8 / v6.1.3 where Podman is used (CVE-2026-94603 checkpoint bypass). Checkpoint-image refusal holds on any version; the version floor removes the upstream bypass itself. A rootless container shares a kernel and is not sufficient isolation for arbitrary high-risk malware; use a disposable VM or stronger separately reviewed boundary for that threat model |
 
 Egress facts: only HTTPS, port 443 and exact allowed hosts are accepted. Userinfo,
 control characters and unsupported URLs are rejected; fragments are stripped
