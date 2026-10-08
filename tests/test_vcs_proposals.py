@@ -305,6 +305,24 @@ class ProposalSchemaV2Tests(Fixture):
             with self.assertRaises(Denied, msg=json.dumps(payload)[:60]):
                 vcs.read_via(config.vcs, "proposals", {})
 
+    def test_terminal_and_bidi_controls_refused(self):
+        base = proposal()
+        for identity in ("1\r\x1b[8m", "forge:owner/repo#\u202e", "x\x7f"):
+            row = dict(base, id=identity)
+            with self.assertRaises(Denied, msg=repr(identity)):
+                vcs.parse_proposals({"proposals": [row]})
+        row = reviewed_proposal()
+        row["reviews"] = [{"reviewer": "mallory\u202e", "verdict": "approved",
+                           "sha": SHA_A}]
+        with self.assertRaises(Denied):
+            vcs.parse_proposals({"proposals": [row]})
+        with self.assertRaises(Denied):
+            vcs.parse_proposals({"proposals": [dict(base, url="https://x/\r")]})
+        with self.assertRaises(Denied):
+            vcs.read_via(self.config.vcs, "proposals", {"cursor": "c\x1b"})
+        with self.assertRaises(Denied):
+            vcs.proposal_insight_id("forge:owner/repo#1\u202e")
+
     def test_current_shape_still_validates(self):
         # The working adapter shape gains unknown reviews/completeness,
         # never a validation failure.

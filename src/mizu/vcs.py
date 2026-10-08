@@ -42,6 +42,22 @@ REF_CONTENT_MAX = 4096
 
 _SHA = re.compile(r"[0-9a-f]{40}([0-9a-f]{24})?\Z")
 
+#: Forge-controlled strings are rendered into terminals and insight bodies,
+#: so terminal-escape and bidi controls must fail closed at ingestion (see
+#: gh GHSA-crc3-h8v6-qh57). Forge names have no legitimate need for them.
+_BIDI_CONTROLS = frozenset(
+    "\u200b\u200c\u200d\u200e\u200f\u202a\u202b\u202c\u202d\u202e"
+    "\u2066\u2067\u2068\u2069\ufeff"
+)
+
+
+def _reject_terminal_controls(value: str, message: str) -> None:
+    """Reject C0/DEL/C1/bidi controls in forge-controlled text."""
+    for char in value:
+        code = ord(char)
+        if code < 0x20 or code == 0x7F or 0x80 <= code <= 0x9F or char in _BIDI_CONTROLS:
+            raise Denied(message)
+
 
 def invoke(settings: dict, request: dict) -> dict:
     """Invoke the configured adapter once and return its JSON object.
@@ -104,8 +120,9 @@ def validate_refs(refs) -> dict:
 def _check_ref_name(name) -> None:
     if not isinstance(name, str) or not name or len(name) > 512:
         raise Denied("Invalid VCS ref name")
-    if "\n" in name or "\x00" in name or "\\" in name or ":" in name:
+    if "\\" in name or ":" in name:
         raise Denied("Invalid VCS ref name")
+    _reject_terminal_controls(name, "Invalid VCS ref name")
     if name.startswith("/"):
         raise Denied("Invalid VCS ref name")
     if any(part in ("", ".", "..") for part in name.split("/")):
@@ -404,9 +421,10 @@ def require_go_approval(project, branch: str, code_digest: str,
         check_branch(endpoints.get("target"))
         proposal_id = endpoints.get("id")
         if (not isinstance(proposal_id, str) or not proposal_id
-                or len(proposal_id) > 128 or "\n" in proposal_id
-                or "\x00" in proposal_id):
+                or len(proposal_id) > 128):
             raise Denied("Invalid merge proposal id for publication approval")
+        _reject_terminal_controls(
+            proposal_id, "Invalid merge proposal id for publication approval")
         for _key in ("sha", "base"):
             if (not isinstance(endpoints.get(_key), str)
                     or not _SHA.fullmatch(endpoints[_key])):
@@ -529,9 +547,9 @@ def parse_acquired(data: dict, *, scope: str, base_sha=None) -> dict:
     if not isinstance(data, dict) or set(data) != keys:
         raise Denied("Invalid VCS acquired content entry")
     identity = data.get("id")
-    if (not isinstance(identity, str) or not identity or len(identity) > 128
-            or "\n" in identity or "\x00" in identity):
+    if (not isinstance(identity, str) or not identity or len(identity) > 128):
         raise Denied("Invalid VCS proposal id for acquisition")
+    _reject_terminal_controls(identity, "Invalid VCS proposal id for acquisition")
     sha = data.get("sha")
     if not isinstance(sha, str) or not _SHA.fullmatch(sha):
         raise Denied("Invalid VCS sha for acquisition")
@@ -588,9 +606,9 @@ def read_via(settings: dict, op: str, params: dict) -> dict:
         # so the caller re-acquires at the fresh base revision.
         # Identical repeats re-acquire identical content.
         proposal_id = params.get("id")
-        if (not isinstance(proposal_id, str) or not proposal_id or len(proposal_id) > 128
-                or "\n" in proposal_id or "\x00" in proposal_id):
+        if (not isinstance(proposal_id, str) or not proposal_id or len(proposal_id) > 128):
             raise Denied("Invalid VCS proposal id for acquisition")
+        _reject_terminal_controls(proposal_id, "Invalid VCS proposal id for acquisition")
         acquire_sha = params.get("sha")
         if not isinstance(acquire_sha, str) or not _SHA.fullmatch(acquire_sha):
             raise Denied("Invalid VCS sha for acquisition")
@@ -627,9 +645,9 @@ def read_via(settings: dict, op: str, params: dict) -> dict:
             request["branch"] = branch
         cursor = params.get("cursor")
         if cursor is not None:
-            if (not isinstance(cursor, str) or not cursor or len(cursor) > 256
-                    or "\n" in cursor or "\x00" in cursor):
+            if (not isinstance(cursor, str) or not cursor or len(cursor) > 256):
                 raise Denied("Invalid VCS proposals cursor")
+            _reject_terminal_controls(cursor, "Invalid VCS proposals cursor")
             request["cursor"] = cursor
     else:
         check_branch(branch)
@@ -650,8 +668,10 @@ def read_via(settings: dict, op: str, params: dict) -> dict:
         cursor_out = data.get("cursor", None)
         if cursor_out is not None and (
                 not isinstance(cursor_out, str) or not cursor_out
-                or len(cursor_out) > 256 or "\n" in cursor_out or "\x00" in cursor_out):
+                or len(cursor_out) > 256):
             raise Denied("Invalid VCS proposals cursor")
+        if isinstance(cursor_out, str) and cursor_out:
+            _reject_terminal_controls(cursor_out, "Invalid VCS proposals cursor")
         return {"op": op, "branch": branch, "proposals": parse_proposals(data),
                 "complete": complete, "cursor": cursor_out,
                 "trust": "external-untrusted"}
@@ -685,16 +705,17 @@ def parse_status_checks(data: dict) -> list:
         state = entry.get("state")
         sha = entry.get("sha")
         url = entry.get("url", "")
-        if (not isinstance(check, str) or not check or len(check) > 256
-                or "\n" in check or "\x00" in check):
+        if (not isinstance(check, str) or not check or len(check) > 256):
             raise Denied("Invalid CI check name")
-        if (not isinstance(state, str) or not state or len(state) > 64
-                or "\n" in state or "\x00" in state):
+        _reject_terminal_controls(check, "Invalid CI check name")
+        if (not isinstance(state, str) or not state or len(state) > 64):
             raise Denied("Invalid CI check state")
+        _reject_terminal_controls(state, "Invalid CI check state")
         if not isinstance(sha, str) or not _SHA.fullmatch(sha):
             raise Denied("Invalid VCS sha for CI insight")
-        if not isinstance(url, str) or len(url) > 4096 or "\x00" in url or "\n" in url:
+        if not isinstance(url, str) or len(url) > 4096:
             raise Denied("Invalid CI log URL")
+        _reject_terminal_controls(url, "Invalid CI log URL")
         out.append({"check": check, "state": state, "sha": sha, "url": url})
     return out
 
@@ -707,8 +728,9 @@ PROPOSAL_STATES = frozenset({"open", "closed", "merged"})
 
 def _check_repo(repo) -> str:
     if (not isinstance(repo, str) or not repo or len(repo) > 256
-            or "\n" in repo or "\x00" in repo or not repo.strip()):
+            or not repo.strip()):
         raise Denied("Invalid VCS proposal repo")
+    _reject_terminal_controls(repo, "Invalid VCS proposal repo")
     return repo
 
 
@@ -747,9 +769,9 @@ def _check_review(value) -> dict:
     if not isinstance(value, dict) or set(value) != {"reviewer", "verdict", "sha"}:
         raise Denied("Invalid VCS proposal review")
     reviewer = value.get("reviewer")
-    if (not isinstance(reviewer, str) or not reviewer or len(reviewer) > 128
-            or "\n" in reviewer or "\x00" in reviewer):
+    if (not isinstance(reviewer, str) or not reviewer or len(reviewer) > 128):
         raise Denied("Invalid VCS proposal reviewer")
+    _reject_terminal_controls(reviewer, "Invalid VCS proposal reviewer")
     verdict = value.get("verdict")
     if verdict not in REVIEW_VERDICTS:
         raise Denied("Invalid VCS proposal review verdict")
@@ -788,9 +810,9 @@ def parse_proposals(data: dict) -> list:
                 "checks", "reviews", "url"}:
             raise Denied("Invalid VCS proposal entry")
         identity = entry.get("id")
-        if (not isinstance(identity, str) or not identity or len(identity) > 128
-                or "\n" in identity or "\x00" in identity):
+        if (not isinstance(identity, str) or not identity or len(identity) > 128):
             raise Denied("Invalid VCS proposal id")
+        _reject_terminal_controls(identity, "Invalid VCS proposal id")
         state = entry.get("state")
         if state not in PROPOSAL_STATES:
             raise Denied("Invalid VCS proposal state")
@@ -814,8 +836,9 @@ def parse_proposals(data: dict) -> list:
                 raise Denied("Invalid VCS proposal reviews")
             reviews = [_check_review(item) for item in raw_reviews]
         url = entry.get("url", "")
-        if not isinstance(url, str) or len(url) > 4096 or "\x00" in url or "\n" in url:
+        if not isinstance(url, str) or len(url) > 4096:
             raise Denied("Invalid VCS proposal URL")
+        _reject_terminal_controls(url, "Invalid VCS proposal URL")
         out.append({"id": identity, "state": state, "head": head,
                     "base": base, "draft": draft, "mergeable": mergeable,
                     "checks": checks, "reviews": reviews, "url": url})
@@ -826,9 +849,9 @@ def proposal_insight_id(proposal_id: str) -> str:
     """Derive a stable, deduplicating insight ID for an external proposal."""
     from .fs import digest as _digest, canonical as _canonical
     if (not isinstance(proposal_id, str) or not proposal_id
-            or len(proposal_id) > 128 or "\n" in proposal_id
-            or "\x00" in proposal_id):
+            or len(proposal_id) > 128):
         raise Denied("Invalid VCS proposal id")
+    _reject_terminal_controls(proposal_id, "Invalid VCS proposal id")
     return "proposal-" + _digest(_canonical({"proposal": proposal_id}))[:32]
 
 

@@ -59,7 +59,9 @@ class VcsRefInjectionTests(Fixture):
 
     def test_invalid_ref_names_refused(self):
         bad_names = ["", "../escape", "/absolute", "a//b", ".", "..", "a/./b",
-                     "with\nnewline", "with:colon", "back\\slash", "x" * 513]
+                     "with\nnewline", "with:colon", "back\\slash", "x" * 513,
+                     "main\x1b[2K\r", "main\u202e", "main\x7f", "main\x85",
+                     "main\u200b", "main\r", "main\u2066"]
         for name in bad_names:
             with self.assertRaises(Denied, msg=repr(name)):
                 vcs.inject_refs(self.project.workspace, {name: SHA_A})

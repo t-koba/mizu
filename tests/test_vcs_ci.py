@@ -47,6 +47,20 @@ class CiStatusTests(Fixture):
         with self.assertRaises(Denied):
             vcs.read_via(config.vcs, "status", {"branch": "main"})
 
+    def test_terminal_and_bidi_controls_refused(self):
+        for check in ("ci\x1b[2K", "ci\r", "ci\u202e", "ci\x7f", "ci\u200b"):
+            with self.assertRaises(Denied, msg=repr(check)):
+                vcs.parse_status_checks(
+                    {"checks": [{"check": check, "state": "success", "sha": SHA_A}]})
+        for state in ("suc\x1bcess", "ok\u202e"):
+            with self.assertRaises(Denied, msg=repr(state)):
+                vcs.parse_status_checks(
+                    {"checks": [{"check": "unit", "state": state, "sha": SHA_A}]})
+        with self.assertRaises(Denied):
+            vcs.parse_status_checks(
+                {"checks": [{"check": "unit", "state": "success", "sha": SHA_A,
+                             "url": "https://ci/run/1\r\x1b[8m"}]})
+
     def test_poll_records_failure_dedupes_and_ignores_pass(self):
         payload = {"checks": [{"check": "unit", "state": "failure", "sha": SHA_A,
                                "url": "https://x/log"}]}
