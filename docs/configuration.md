@@ -335,17 +335,21 @@ Defaults apply when `[vcs]` is absent so existing configs keep loading. `retire_
 `ci_branch` (default `""`) names the operator-selected CI/reporting branch. It is exposed as `ci_branch` in full and delta prompts, but only to roles holding the `vcs_read` engine tool; every other role sees `null`, and an empty value reads as `null` everywhere. Reporters must select that branch for CI evidence and never guess one. Unknown keys still fail load; a non-string, overlong (>256), or whitespace-containing value fails load.
 
 Host-side `inject_refs` writes validated refs as read-only (`0o444`) files
-under the reserved workspace subtree `refs/remotes/upstream/*` (at most
-4096 refs; stale entries pruned on refresh; symlink escapes refused).
-`Snapshots.excluded` always excludes that subtree, so injected refs never
-affect `code_digest` — even if the model rewrites them, and even under an
-emptied operator `exclude` list. Operators must not keep project source
-there. The `files`/`read` tools serve injected refs read-only from the
-project workspace (read roles included; `none` sees none). Content stays
+under the project-local harness store `upstream-refs/*` (a sibling of
+`workspace/`, at most 4096 refs; stale entries pruned on refresh; symlink
+escapes refused), so harness state never appears in the product working
+tree and product tooling (e.g. Git) never sees it. The `files`/`read`
+tools serve the store read-only under the virtual prefix
+`refs/remotes/upstream/*` (read roles included; `none` sees none);
+snapshots capture the workspace only, so refs never affect `code_digest`
+by construction. `Snapshots.excluded` still excludes the legacy workspace
+subtree of the same virtual path, so not-yet-refreshed workspaces keep
+their digest across the migration. Each refresh also removes the legacy
+`workspace/refs/remotes/upstream` subtree when present. Content stays
 `external-untrusted` until merged and verified.
 
 The `sync` tool refreshes that view on demand: it calls `fetch` on the
-adapter, then `inject_refs` into the project workspace, and returns the
+adapter, then `inject_refs` into the project harness store, and returns the
 bounded summary above. It requires the `sync` capability (writable workspace
 only; `sync` on a read/`none` role is refused at load for configured roles
 and at call time for replaced roles, and consultation roles cannot hold it).

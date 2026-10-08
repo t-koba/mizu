@@ -56,7 +56,7 @@ class DaemonPeriodicFetchTests(Fixture):
 
         def fake_refresh(c, p):
             calls.append(1)
-            receipt = vcs.inject_refs(p.workspace, {"main": SHA_A})
+            receipt = vcs.inject_refs(p.root, {"main": SHA_A})
             return {**receipt, "refs": {"main": SHA_A}}
 
         first = poll_upstream(config, self.project, state, now=0.0,
@@ -64,7 +64,7 @@ class DaemonPeriodicFetchTests(Fixture):
         self.assertTrue(first["ok"])
         self.assertEqual(first["event"], "upstream_fetch")
         self.assertEqual(first["injected"], 1)
-        self.assertEqual(vcs.read_ref(self.project.workspace, "main"), SHA_A)
+        self.assertEqual(vcs.read_ref(self.project.root, "main"), SHA_A)
         self.assertEqual(calls, [1])
         # Not due yet: no second refresh call, no new event.
         skipped = poll_upstream(config, self.project, state, now=14.0,
@@ -95,7 +95,7 @@ class DaemonPeriodicFetchTests(Fixture):
         self.assertIsNone(again)
         # Nothing published and nothing injected on failure.
         self.assertEqual(self.project.snapshots.get()["id"], before)
-        self.assertEqual(vcs.list_refs(self.project.workspace), [])
+        self.assertEqual(vcs.list_refs(self.project.root), [])
 
 
     def test_future_timestamp_is_due_after_clock_reset(self):

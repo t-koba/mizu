@@ -167,7 +167,7 @@ class CiStatusTests(Fixture):
         self.assertEqual(self.project.snapshots.get()["id"], before)
 
     def test_poll_derives_branches_from_injected_refs(self):
-        vcs.inject_refs(self.project.workspace, {"other": SHA_B, "main": SHA_A})
+        vcs.inject_refs(self.project.root, {"other": SHA_B, "main": SHA_A})
         seen = []
         def reader(settings, op, params):
             seen.append(params["branch"])
@@ -181,7 +181,7 @@ class CiStatusTests(Fixture):
 
     def test_poll_rotates_over_more_refs_than_budget(self):
         refs = {"a": "a" * 40, "b": "b" * 40, "c": "c" * 40, "d": "d" * 40, "main": SHA_A}
-        vcs.inject_refs(self.project.workspace, refs)
+        vcs.inject_refs(self.project.root, refs)
         seen = []
         def reader(settings, op, params):
             seen.append(params["branch"])

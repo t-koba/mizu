@@ -12,11 +12,14 @@ Failure: ``Denied`` on unconfigured adapter, oversize request, timeout,
 oversize output, nonzero exit, malformed JSON, invalid refs, or unsafe paths.
 
 Ref injection (host side only): ``inject_refs`` writes validated refs as
-read-only files under the reserved workspace subtree
-``refs/remotes/upstream/*``. ``Snapshots.excluded`` always excludes that
-subtree, so injected refs never affect ``code_digest`` even if the model
-rewrites them; only a host-side fetch refreshes them. ``files``/``read``
-serve them read-only from the project workspace.
+read-only files under the project-local harness store
+``upstream-refs/*`` (a sibling of ``workspace/``, never inside the product
+working tree, so product tooling never sees harness state). The
+``files``/``read`` tools serve them read-only under the virtual prefix
+``refs/remotes/upstream/*``. ``Snapshots.excluded`` still excludes the
+legacy workspace subtree of the same virtual path, so workspaces that
+have not yet refreshed never affect ``code_digest``; only a host-side
+fetch refreshes the store.
 """
 from __future__ import annotations
 
@@ -30,11 +33,16 @@ from .errors import Denied
 from .fs import atomic_write, canonical, safe_read
 from .process import run
 
-#: Reserved workspace subtree for injected upstream refs. Operators must not
-#: keep project source here; snapshots always exclude it (see
-#: ``Snapshots.excluded``) so refs never affect ``code_digest``.
+#: Virtual tool prefix for injected upstream refs. Model ``files``/``read``
+#: paths use this prefix; on disk the store lives outside the product
+#: working tree (see ``REF_STORE_NAME``) so harness state never appears
+#: in the product tree. ``REF_PREFIX`` is kept for the virtual path and
+#: the legacy workspace guard in ``Snapshots.excluded``.
 REF_PREFIX = ("refs", "remotes", "upstream")
 REF_PREFIX_PATH = "/".join(REF_PREFIX)
+#: On-disk harness store for injected refs: ``<project-root>/upstream-refs``,
+#: a sibling of ``workspace/``. Never inside the product working tree.
+REF_STORE_NAME = "upstream-refs"
 #: Maximum refs per fetch/injection (matches the adapter shape bound).
 MAX_REFS = 4096
 #: Ref file content bound for reads (a hex sha plus newline is far smaller).
@@ -140,8 +148,76 @@ def fetch_refs(settings: dict) -> dict:
     return {"refs": validate_refs(data.get("refs")), "trust": "external-untrusted"}
 
 
+def _store_base(project_root: Path) -> Path:
+    """Return the on-disk harness ref store under a project root."""
+    return project_root.joinpath(REF_STORE_NAME)
+
+
+def _legacy_base(project_root: Path) -> Path:
+    """Return the legacy in-workspace ref subtree (pre-move, for cleanup)."""
+    base = project_root / "workspace"
+    for part in REF_PREFIX:
+        base = base / part
+    return base
+
+
+def _remove_legacy_tree(project_root: Path) -> None:
+    """Remove the legacy in-workspace ref subtree so Git never sees it.
+
+    Schema: deletes files under ``workspace/refs/remotes/upstream/*``
+    then prunes newly-empty parent dirs (``upstream``, ``remotes``,
+    ``refs``). Refuses to follow symlinks: a symlinked legacy path is
+    left in place (fail closed, never delete through a link). Missing
+    or already-clean trees are a no-op. Failure: never raises; leftover
+    files are retried on the next refresh.
+    """
+    legacy = _legacy_base(project_root)
+    try:
+        if legacy.is_symlink():
+            return
+    except OSError:
+        return
+    if not legacy.is_dir():
+        # Prune newly-empty parents left by an earlier file removal.
+        current = legacy
+        for _ in range(len(REF_PREFIX)):
+            try:
+                if current.is_symlink():
+                    return
+                current.rmdir()
+            except OSError:
+                return
+            current = current.parent
+        return
+    for directory, dirs, files in os.walk(legacy, topdown=False, followlinks=False):
+        here = Path(directory)
+        for entry in files:
+            target = here / entry
+            try:
+                if target.is_symlink():
+                    continue
+                _clear_readonly_for_windows(target)
+                target.unlink()
+            except OSError:
+                continue
+        for entry in dirs:
+            try:
+                (here / entry).rmdir()
+            except OSError:
+                continue
+    current = legacy
+    for _ in range(len(REF_PREFIX)):
+        try:
+            if current.is_symlink():
+                return
+            current.rmdir()
+        except OSError:
+            return
+        current = current.parent
+
+
 def split_ref_path(path: str) -> str | None:
-    """Return the ref name for a workspace path under the reserved prefix.
+    """Return the ref name for a virtual tool path under the ref prefix.
 
     Schema: ``refs/remotes/upstream/<name>`` with a valid ref name, else
     ``None``. Bounds: name rules from ``_check_ref_name``. Trust: pure path
@@ -190,27 +266,28 @@ def _ensure_host_dir(path: Path) -> None:
         raise Denied("Upstream ref path is blocked by a non-directory")
 
 
-def inject_refs(workspace: Path, refs: dict) -> dict:
-    """Write validated refs as read-only files under the reserved subtree.
+def inject_refs(project_root: Path, refs: dict) -> dict:
+    """Write validated refs as read-only files outside the working tree.
 
     Schema: ``refs`` is a ``{name: sha}`` mapping per ``validate_refs``;
-    each ref lands at ``refs/remotes/upstream/<name>`` holding ``sha``
-    plus a newline with mode 0o444. Stale files under the subtree are
-    removed so a fetch refreshes the view; stale empty directories are
-    left in place. Bounds: at most 4096 refs. Trust: host side only (the
-    daemon/operator fetch path), never model-invoked; content stays
-    external-untrusted. Retry/cancellation: single pass, no retry.
-    Evidence: returned receipt names the prefix and count. Failure:
-    ``Denied`` on invalid refs, symlink escape, or blocked paths.
+    each ref lands at ``<project-root>/upstream-refs/<name>`` holding
+    ``sha`` plus a newline with mode 0o444. The model-visible virtual
+    path stays ``refs/remotes/upstream/<name>``. Stale files under the
+    store are removed so a fetch refreshes the view; stale empty
+    directories are left in place. The legacy
+    ``workspace/refs/remotes/upstream`` subtree is removed when present
+    so product tooling never sees harness state. Bounds: at most 4096
+    refs. Trust: host side only (the daemon/operator fetch path), never
+    model-invoked; content stays external-untrusted. Retry/cancellation:
+    single pass, no retry. Evidence: returned receipt names the prefix
+    and count. Failure: ``Denied`` on invalid refs, symlink escape, or
+    blocked paths.
     """
     validated = validate_refs(refs)
-    if not workspace.is_dir() or workspace.is_symlink():
-        raise Denied("Upstream refs require a real workspace directory")
-    base = workspace.joinpath(*REF_PREFIX)
-    current = workspace
-    for part in REF_PREFIX:
-        current = current / part
-        _ensure_host_dir(current)
+    if not project_root.is_dir() or project_root.is_symlink():
+        raise Denied("Upstream refs require a real project directory")
+    base = _store_base(project_root)
+    _ensure_host_dir(base)
     wanted = set(validated)
     for name in sorted(wanted):
         parent = base
@@ -230,8 +307,9 @@ def inject_refs(workspace: Path, refs: dict) -> dict:
             _clear_readonly_for_windows(target)
         atomic_write(target, (validated[name] + "\n").encode(), mode=0o444)
     _prune_stale(base, wanted)
+    _remove_legacy_tree(project_root)
     try:
-        have = set(list_refs(workspace))
+        have = set(list_refs(project_root))
     except OSError as exc:
         raise Denied(f"Cannot verify injected upstream refs: {exc}") from exc
     if have != wanted:
@@ -261,15 +339,15 @@ def _prune_stale(base: Path, wanted: set[str]) -> None:
                     raise Denied(f"Cannot prune upstream refs: {exc}") from exc
 
 
-def list_refs(workspace: Path) -> list[str]:
-    """List injected ref names (relative to the reserved prefix).
+def list_refs(project_root: Path) -> list[str]:
+    """List injected ref names (relative to the virtual ref prefix).
 
-    Schema: sorted names; missing subtree reads as empty. Bounds: at most
+    Schema: sorted names; missing store reads as empty. Bounds: at most
     4096 entries or ``Denied``. Trust: host files; entries failing name
     validation (model-planted garbage) are skipped, never served. Failure:
-    ``Denied`` when the subtree overflows; ``OSError`` only for host I/O.
+    ``Denied`` when the store overflows; ``OSError`` only for host I/O.
     """
-    base = workspace.joinpath(*REF_PREFIX)
+    base = _store_base(project_root)
     if not base.is_dir() or base.is_symlink():
         return []
     out: list[str] = []
@@ -291,7 +369,7 @@ def list_refs(workspace: Path) -> list[str]:
     return sorted(out)
 
 
-def read_ref(workspace: Path, name: str) -> str:
+def read_ref(project_root: Path, name: str) -> str:
     """Read one injected ref sha as text (read-only model view helper).
 
     Schema: ``name`` validated per ``_check_ref_name``; content must be a
@@ -300,7 +378,7 @@ def read_ref(workspace: Path, name: str) -> str:
     Failure: ``Denied`` on bad names, unsafe paths, or malformed content.
     """
     _check_ref_name(name)
-    data = safe_read(workspace, REF_PREFIX_PATH + "/" + name, REF_CONTENT_MAX)
+    data = safe_read(project_root, REF_STORE_NAME + "/" + name, REF_CONTENT_MAX)
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError as exc:

@@ -64,7 +64,7 @@ class VcsSyncTests(Fixture):
         ctx = Context(config, self.project, bad, run, snap, run / "input")
         with self.assertRaisesRegex(Denied, "writable"):
             ctx.handle("sync", {})
-        self.assertEqual(vcs.list_refs(self.project.workspace), [])
+        self.assertEqual(vcs.list_refs(self.project.root), [])
 
     def test_sync_on_read_role_refused_at_load(self):
         text = self.file.read_text()
@@ -112,9 +112,12 @@ class VcsSyncTests(Fixture):
         self.assertEqual(out["trust"], "external-untrusted")
         self.assertEqual(out["upstream"], SHA_A)
         self.assertEqual(out["refs"], ["main"])
-        self.assertEqual(vcs.read_ref(self.project.workspace, "main"), SHA_A)
+        self.assertEqual(vcs.read_ref(self.project.root, "main"), SHA_A)
         receipt = json.loads((ctx.run_dir / "sync.json").read_text())
         self.assertEqual(receipt["refs"], {"main": SHA_A})
+        # Harness state stays outside the product working tree.
+        self.assertFalse((self.project.workspace / "refs").exists())
+        self.assertFalse((self.project.workspace / "upstream-refs").exists())
         # Digest still excludes the injected view.
         captured = self.project.snapshots.capture_files(self.project.workspace)
         self.assertNotIn("refs/remotes/upstream/main", captured["files"])
@@ -125,7 +128,7 @@ class VcsSyncTests(Fixture):
         out = refresh_upstream(config, self.project)
         self.assertEqual(out["injected"], 1)
         self.assertEqual(out["refs"], {"main": SHA_B})
-        self.assertEqual(vcs.read_ref(self.project.workspace, "main"), SHA_B)
+        self.assertEqual(vcs.read_ref(self.project.root, "main"), SHA_B)
 
     def test_consult_role_cannot_hold_sync(self):
         import dataclasses
@@ -166,7 +169,7 @@ class VcsSyncTests(Fixture):
         data = project.snapshots.read(after, "app.py")
         self.assertEqual(data, b"VALUE = 3\n")
         # The injected ref view survived publication but stays out of digest.
-        self.assertEqual(vcs.read_ref(project.workspace, "main"), SHA_A)
+        self.assertEqual(vcs.read_ref(project.root, "main"), SHA_A)
         recaptured = project.snapshots.capture_files(project.workspace)
         self.assertEqual(recaptured["code_digest"], after["code_digest"])
 

@@ -33,10 +33,11 @@ class Snapshots:
         mkdir(root / "snapshots")
 
     def excluded(self, name: str) -> bool:
-        # Reserved upstream-ref subtree: injected refs are read-only
-        # workspace views served from the live tree, never snapshot content,
-        # so they cannot affect code_digest even under an emptied operator
-        # exclude list. Operators must not keep project source here.
+        # Legacy in-workspace upstream-ref subtree (pre-move): the store now
+        # lives outside the working tree, so this only guards workspaces
+        # that have not yet refreshed. It stays excluded so the migration
+        # never moves code_digest. Operators must not keep project source
+        # here.
         parts = name.split("/")
         if len(parts) >= len(REF_PREFIX) and tuple(parts[:len(REF_PREFIX)]) == REF_PREFIX:
             return True

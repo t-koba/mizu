@@ -290,10 +290,12 @@ class Context:
         return result
 
     def _injected_ref_paths(self) -> list[str]:
-        # Injected refs live in the project workspace even for read roles
-        # (snapshots exclude them, so materialized inputs lack them).
+        # Injected refs live in the project harness store outside the
+        # working tree, served under the virtual refs/remotes/upstream/*
+        # prefix even for read roles (snapshots capture the workspace
+        # only, so materialized inputs lack them by construction).
         try:
-            refs = _vcs.list_refs(self.project.workspace)
+            refs = _vcs.list_refs(self.project.root)
         except OSError as exc:
             raise Denied(f"Upstream refs are unavailable: {exc}") from exc
         return [_vcs.REF_PREFIX_PATH + "/" + name for name in refs]
@@ -304,7 +306,7 @@ class Context:
             if self.role.workspace == "none":
                 raise Denied("Path is not exposed to this role")
             try:
-                text = _vcs.read_ref(self.project.workspace, ref)
+                text = _vcs.read_ref(self.project.root, ref)
             except OSError as exc:
                 raise Denied(f"Upstream ref is unavailable: {exc}") from exc
             return {"path": args["path"], "text": text}
@@ -413,7 +415,8 @@ class Context:
 
     def _op_sync(self, args: dict) -> dict:
         # Host-side refresh only: fetch upstream refs via the trusted adapter
-        # and inject them read-only under refs/remotes/upstream/*. Merging is
+        # and inject them read-only into the harness store (virtual
+        # refs/remotes/upstream/*, never inside the working tree). Merging is
         # worker policy (workspace edits + verify + publish); the mechanism
         # only records the receipt. Requires a writable workspace so read
         # roles cannot mutate the shared ref view.
@@ -424,7 +427,7 @@ class Context:
         except OSError as exc:
             raise Denied(f"Upstream sync is unavailable: {exc}") from exc
         try:
-            receipt = _vcs.inject_refs(self.project.workspace, fetched["refs"])
+            receipt = _vcs.inject_refs(self.project.root, fetched["refs"])
         except OSError as exc:
             raise Denied(f"Upstream refs are unavailable: {exc}") from exc
         names = sorted(fetched["refs"])
@@ -692,7 +695,7 @@ def refresh_upstream(config, project) -> dict:
     No capability check here; the ``sync`` tool adds the grant gate.
     """
     fetched = _vcs.fetch_refs(capped_vcs_settings(config.vcs, vcs_poll_fetch_timeout(config)))
-    receipt = _vcs.inject_refs(project.workspace, fetched["refs"])
+    receipt = _vcs.inject_refs(project.root, fetched["refs"])
     return {"injected": receipt["injected"], "prefix": receipt["prefix"],
             "trust": "external-untrusted", "refs": dict(fetched["refs"])}
 
@@ -869,7 +872,7 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
             raise Denied("Too many CI branches per poll")
         if branches is None:
             try:
-                names = sorted(_vcs.list_refs(project.workspace))
+                names = sorted(_vcs.list_refs(project.root))
             except OSError as exc:
                 raise Denied(f"CI polling is unavailable: {exc}") from exc
             branches_total = len(names)
