@@ -191,8 +191,15 @@ binding still matches the current goal and snapshot. A goal edit or a new
 publication makes it stale; a missing file reads as absent; a corrupt file
 reads as invalid. Stale, absent, and invalid records fall back to ordinary
 selection and are reported in the decision's `recommendation` status, never
-fatal. Recommendations stay valid while the task is unchanged, so a unit
-countermands by recommending again, including back to the default profile.
+fatal. How long a fresh recommendation lasts is operator policy per
+selector: `recommendation_validity = "once"` (default) covers only the
+following dispatched unit — the dispatched unit consumes the file so the
+unit after falls back unless a newer recommendation was recorded — while
+`recommendation_validity = "sticky"` keeps the legacy behavior of staying
+valid while the task is unchanged. A unit countermands by recommending
+again, including back to the default profile. Preview and waiting
+selections never consume; only a dispatched unit consumes an `once`
+recommendation, best-effort and never fatal.
 
 The recommendation-to-profile mapping is operator policy: ordinary
 selector rules match on it, so blocks, availability, and candidate order

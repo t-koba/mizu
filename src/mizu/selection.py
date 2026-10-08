@@ -164,8 +164,13 @@ def validate_selectors(value, profiles, base):
     bounded(value)
     for key, spec in value.items():
         name(key)
-        table(spec, {'rules', 'classify_rules', 'classifier', 'on_error', 'retry_seconds'}, 'selector')
+        table(spec, {'rules', 'classify_rules', 'classifier', 'on_error', 'retry_seconds',
+                     'recommendation_validity'}, 'selector')
         seconds(spec.get('retry_seconds'))
+        validity = spec.get('recommendation_validity', 'once')
+        if validity not in ('once', 'sticky'):
+            raise ConfigError('recommendation_validity must be once or sticky')
+        spec['recommendation_validity'] = validity
         for rule in items(spec.get('rules'), 'rules', nonempty=True):
             table(rule, {'when', 'candidates'}, 'selection rule')
             validate_condition(rule.get('when', {}))

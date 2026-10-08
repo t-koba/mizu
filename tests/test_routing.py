@@ -10,6 +10,7 @@ from mizu.classification import prepare
 from mizu.errors import Denied
 from mizu.fs import digest
 from mizu.routing import current
+from mizu.errors import ConfigError
 from mizu.selection import validate_selectors
 
 
@@ -36,6 +37,19 @@ class RoutingFixture(Fixture):
 
     def engine(self):
         return types.SimpleNamespace(config=self.config)
+
+    def finish_next(self, profile, reason=None):
+        from mizu.runtime import Engine
+        from support import ScriptDriver
+        args = {"outcome": "continue", "summary": "unit done", "state": "next",
+                "next_profile": profile}
+        if reason is not None:
+            args["next_reason"] = reason
+        def callback(context, prompt, _profile):
+            context.handle("finish", args)
+        result = Engine(self.config, driver=ScriptDriver(callback)).run(self.project, "worker")
+        self.assertEqual(result["status"], "completed")
+        return result
 
     def prepare(self, role):
         return prepare(self.engine(), self.project, role, self.project.snapshots.get())
@@ -158,6 +172,60 @@ class RoutingLifecycleTests(RoutingFixture):
         self.assertIsNone(decision["classification"])
         self.assertEqual(set((self.project.root / "runs").iterdir()), before)
         self.assertEqual(decision["profile"], "alternate")
+
+
+class RoutingValidityTests(RoutingFixture):
+    def run_plain(self):
+        from mizu.runtime import Engine
+        from support import ScriptDriver
+        def callback(context, prompt, _profile):
+            context.handle("finish", {"outcome": "continue", "summary": "unit done",
+                                      "state": "next"})
+        result = Engine(self.config, driver=ScriptDriver(callback)).run(self.project, "worker")
+        self.assertEqual(result["status"], "completed")
+        return result
+
+    def test_validity_defaults_to_once(self):
+        spec = specification()
+        validate_selectors({"dynamic": spec}, self.config.profiles, self.file.parent)
+        self.assertEqual(spec["recommendation_validity"], "once")
+
+    def test_validity_rejects_unknown(self):
+        spec = specification()
+        spec["recommendation_validity"] = "forever"
+        with self.assertRaises(ConfigError):
+            validate_selectors({"dynamic": spec}, self.config.profiles, self.file.parent)
+
+    def test_once_consumes_on_dispatch(self):
+        role = self.setup_selection()
+        self.finish_next("deep")
+        self.assertEqual(self.prepare(role)["recommendation"]["status"], "fresh")
+        self.run_plain()
+        decision = self.prepare(role)
+        self.assertEqual(decision["recommendation"], {"status": "absent"})
+        self.assertEqual(decision["profile"], "primary")
+
+    def test_sticky_survives_dispatch(self):
+        # A writable run publishes a new snapshot, so a sticky file bound to
+        # the previous snapshot reads as stale (not consumed): the file is
+        # preserved while a once file is removed (absent above).
+        spec = specification()
+        spec["recommendation_validity"] = "sticky"
+        role = self.setup_selection(spec)
+        self.finish_next("deep")
+        self.run_plain()
+        decision = self.prepare(role)
+        self.assertEqual(decision["recommendation"]["status"], "stale")
+        self.assertEqual(decision["profile"], "primary")
+        self.assertTrue((self.project.root / "routing" / "worker.json").exists())
+
+    def test_preview_never_consumes(self):
+        from mizu.classification import prepare as prepare_fn
+        role = self.setup_selection()
+        self.finish_next("deep")
+        prepare_fn(self.engine(), self.project, role, self.project.snapshots.get(), preview=True)
+        decision = self.prepare(role)
+        self.assertEqual(decision["recommendation"]["status"], "fresh")
 
 
 class RoutingSessionTests(RoutingFixture):

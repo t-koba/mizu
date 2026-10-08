@@ -1308,6 +1308,19 @@ class Engine:
                         # falsely coalesces the next wait onto a pre-dispatch
                         # audit run; poison the record so it re-audits.
                         _invalidate_wait(project, role_name)
+                    # Single-use routing: a dispatched unit consumes the fresh
+                    # recommendation so the next unit falls back unless a newer
+                    # one is recorded. Waiting selections above return early and
+                    # never consume; preview never reaches this path. Sticky
+                    # selectors keep the file. Best-effort, never fatal.
+                    try:
+                        validity = self.config.selectors.get(role.selector, {}).get(
+                            'recommendation_validity', 'once')
+                        if validity != 'sticky' and decision.get('recommendation', {}).get('status') == 'fresh':
+                            from .routing import consume as _consume_routing
+                            _consume_routing(project, role_name)
+                    except Exception:
+                        pass
                     role = dataclasses.replace(role, profile=decision["profile"], selector="")
                 if self.stop.is_set() or not project.control().get("armed") or project.control().get("paused"):
                     raise Cancelled("Run stopped before model dispatch")

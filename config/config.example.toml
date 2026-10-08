@@ -267,6 +267,7 @@ interval_seconds = 21600
 # See docs/model-selection.md for external facts, task classification and errors.
 # [selectors.adaptive]
 # retry_seconds = 60
+# recommendation_validity = "once" # or "sticky": once covers only the following dispatched unit (default); sticky stays valid while the task is unchanged.
 # [[selectors.adaptive.rules]]
 # candidates = [{profile = "primary"}, {profile = "alternate"}]
 # [[selectors.adaptive.on_error]]

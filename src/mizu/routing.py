@@ -7,9 +7,13 @@ exposes it as predicate facts only while the binding still matches.
 Operator selector rules own the recommendation-to-profile mapping, so the
 product never names profiles or difficulty criteria. Stale, absent, and
 corrupt records fall back to ordinary selection and are reported in the
-decision record, never fatal. Recommendations stay valid while the task
-is unchanged; a unit countermands by recommending again, including back
-to the default profile.
+decision record, never fatal. How long a fresh recommendation lasts is
+operator policy per selector (``recommendation_validity``): ``once``
+covers only the following dispatched unit (default), ``sticky`` keeps it
+valid while the task is unchanged. A unit countermands by recommending
+again, including back to the default profile. Preview and waiting
+selections never consume; only a dispatched unit consumes a ``once``
+recommendation, best-effort and never fatal.
 """
 from __future__ import annotations
 
@@ -96,3 +100,26 @@ def current(project, role_name, goal_digest, snapshot_id):
     if entry.get("reason"):
         recommendation["reason"] = entry["reason"]
     return {"status": "fresh", "recommendation": recommendation}
+
+
+def consume(project, role_name):
+    """Consume a single-use recommendation after dispatch; never fatal.
+
+    Removes ``routing/<role>.json`` so the next unit falls back to
+    ordinary selection unless a newer recommendation was recorded. A
+    missing file is a no-op; unreadable files are removed best-effort
+    and any failure is swallowed so dispatch never fails on routing.
+    Sticky selectors never call this.
+    """
+    path = project.root / "routing" / f"{role_name}.json"
+    try:
+        if not path.exists() or path.is_symlink():
+            try:
+                path.unlink(missing_ok=True)
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
+            return False
+        path.unlink(missing_ok=True)
+        return True
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
