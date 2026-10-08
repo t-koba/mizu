@@ -56,6 +56,27 @@ test('unresponsive peers hit a deadline', async t => {
   const cfg = await server(t, () => {}, 30);
   await assert.rejects(request(cfg, 'read', {}), /deadline/);
 });
+test('trickling peers cannot defer the deadline', async t => {
+  const peers = new Set();
+  const timers = new Set();
+  const listener = net.createServer(peer => {
+    peers.add(peer); peer.on('error', () => {}); peer.on('close', () => peers.delete(peer));
+    const timer = setInterval(() => { try { peer.write('x'); } catch {} }, 20);
+    timers.add(timer); peer.on('close', () => { clearInterval(timer); timers.delete(timer); });
+  });
+  await new Promise((resolve, reject) => { listener.once('error', reject); listener.listen(0, '127.0.0.1', resolve); });
+  t.after(async () => {
+    for (const timer of timers) clearInterval(timer);
+    for (const peer of peers) peer.destroy();
+    await new Promise(resolve => listener.close(resolve));
+  });
+  const { port } = listener.address();
+  const start = Date.now();
+  await assert.rejects(
+    request({ transport: 'tcp', host: '127.0.0.1', port, token: 'unit-test-token', timeout_ms: 200 }, 'read', {}),
+    /deadline/);
+  assert.ok(Date.now() - start < 2000, 'deadline is absolute, not idle');
+});
 test('cancellation aborts a request', async t => {
   const cfg = await server(t, () => {});
   const controller = new AbortController();

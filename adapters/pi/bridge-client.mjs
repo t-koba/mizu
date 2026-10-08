@@ -13,17 +13,21 @@ export function request(config, operation, args, signal) {
     let bytes = 0;
     let chunks = [];
     let settled = false;
+    let deadline;
     const socket = net.createConnection(endpoint);
     const finish = (error, value) => {
       if (settled) return;
       settled = true;
+      clearTimeout(deadline);
       signal?.removeEventListener("abort", abort);
       socket.destroy();
       error ? reject(error) : resolve(value);
     };
     const abort = () => finish(new Error("Cancelled"));
     signal?.addEventListener("abort", abort, { once: true });
-    socket.setTimeout(config.timeout_ms, () => finish(new Error("Bridge deadline exceeded")));
+    // Absolute deadline: socket.setTimeout is idle-only and a trickling peer
+    // would defer it indefinitely, so arm a wall-clock timer instead.
+    deadline = setTimeout(() => finish(new Error("Bridge deadline exceeded")), config.timeout_ms);
     socket.on("error", error => finish(error));
     socket.on("end", () => finish(new Error("Bridge closed before responding")));
     socket.on("connect", () => {
