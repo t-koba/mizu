@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import json
 import os
+import socket
+import time
 from pathlib import Path
 
 from .bridge import LOOPBACK_HOSTS, connect as _bridge_connect
@@ -51,6 +53,15 @@ def forward(config: dict, operation: str, arguments: dict) -> dict:
     """Forward one operation to the parent runtime over the private channel."""
     if not isinstance(arguments, dict):
         raise Denied("Tool arguments must be an object")
+    try:
+        timeout_ms = int(config.get("timeout_ms", 60000))
+    except (TypeError, ValueError) as exc:
+        raise Denied("Invalid bridge configuration") from exc
+    if timeout_ms <= 0:
+        raise Denied("Invalid bridge configuration")
+    # Absolute deadline: per-recv timeouts are idle-only and a trickling peer
+    # would defer them indefinitely, so bound the whole call by wall-clock time.
+    deadline = time.monotonic() + timeout_ms / 1000.0
     wire = canonical({"token": config["token"], "operation": operation, "arguments": arguments})
     if len(wire) > MAX_FRAME:
         raise Denied("Request exceeds byte limit")
@@ -60,7 +71,14 @@ def forward(config: dict, operation: str, arguments: dict) -> dict:
         client.sendall(wire)
         data = bytearray()
         while True:
-            chunk = client.recv(65536)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise Denied("Bridge deadline exceeded")
+            client.settimeout(remaining)
+            try:
+                chunk = client.recv(65536)
+            except (socket.timeout, TimeoutError) as exc:
+                raise Denied("Bridge deadline exceeded") from exc
             if not chunk:
                 break
             data.extend(chunk)

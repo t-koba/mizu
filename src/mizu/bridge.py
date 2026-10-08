@@ -78,7 +78,10 @@ def connect(config: dict) -> socket.socket:
         timeout_ms = int(config.get("timeout_ms", 60000))
     except (TypeError, ValueError) as exc:
         raise Denied("Invalid bridge configuration") from exc
-    timeout = max(1, timeout_ms // 1000)
+    if timeout_ms <= 0:
+        raise Denied("Invalid bridge configuration")
+    # Float seconds: integer-second truncation would overrun sub-second deadlines.
+    timeout = timeout_ms / 1000.0
     transport = config.get("transport")
     if transport == "tcp":
         host, port = config.get("host"), config.get("port")

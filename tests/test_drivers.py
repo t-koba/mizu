@@ -316,6 +316,51 @@ class McpProxyTests(unittest.TestCase):
             forward({"transport":"unix", "socket": "/nonexistent.sock", "token": "x",
                      "timeout_ms": 1000, "tools": []}, "finish", {"outcome": "wait"})
 
+    def test_trickling_peer_cannot_defer_deadline(self):
+        import socket as _socket
+        import threading as _threading
+        import time as _time
+        listener = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        listener.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        listener.settimeout(5)
+        stop = _threading.Event()
+        def serve_once():
+            try:
+                peer, _ = listener.accept()
+            except OSError:
+                return
+            with peer:
+                peer.settimeout(5)
+                data = bytearray()
+                try:
+                    while b"\n" not in data:
+                        chunk = peer.recv(65536)
+                        if not chunk:
+                            return
+                        data.extend(chunk)
+                    while not stop.is_set():
+                        try:
+                            peer.sendall(b"x")
+                        except OSError:
+                            return
+                        _time.sleep(0.02)
+                except OSError:
+                    pass
+        worker = _threading.Thread(target=serve_once, daemon=True)
+        worker.start()
+        self.addCleanup(stop.set)
+        self.addCleanup(listener.close)
+        port = listener.getsockname()[1]
+        config = {"transport": "tcp", "host": "127.0.0.1", "port": port,
+                  "token": "x", "timeout_ms": 200, "tools": []}
+        start = _time.monotonic()
+        with self.assertRaisesRegex(Denied, "deadline"):
+            forward(config, "read", {})
+        self.assertLess(_time.monotonic() - start, 2.0, "deadline is absolute, not idle")
+        stop.set()
+
 
 class UsageEngineTests(Fixture):
     def write_run(self, name, model):
