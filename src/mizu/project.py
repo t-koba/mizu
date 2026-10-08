@@ -132,8 +132,14 @@ def read_goal(path: Path, complaint: str) -> str:
 
 
 def git_env() -> dict[str, str]:
+    # Refuse nested bare-repo discovery (GHSA-9ccr-r5hg-74gf): only
+    # explicitly allowlisted bare repos are used. Highest precedence
+    # over all config-file sources via GIT_CONFIG_* env.
     return environment(extra={"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
-                              "GIT_TERMINAL_PROMPT": "0"})
+                              "GIT_TERMINAL_PROMPT": "0",
+                              "GIT_CONFIG_COUNT": "1",
+                              "GIT_CONFIG_KEY_0": "safe.bareRepository",
+                              "GIT_CONFIG_VALUE_0": "explicit"})
 
 
 def config_managed_repo(workspace: Path, env: dict[str, str]) -> None:
@@ -155,13 +161,15 @@ def init_managed_repo(workspace: Path) -> None:
 
 def _import_git_tree(source: Path, workspace: Path, env: dict[str, str]) -> None:
     """Clone a clean git tree without history leakage. Loud failure only."""
-    status = run(["git", "-c", "core.fsmonitor=false", "-c", f"core.hooksPath={os.devnull}",
+    status = run(["git", "-c", "safe.bareRepository=explicit", "-c", "core.fsmonitor=false",
+                  "-c", f"core.hooksPath={os.devnull}",
                   "-C", str(source), "status", "--porcelain", "--untracked-files=all"],
                  # Only emptiness matters; truncation preserves truthiness.
                  timeout=30, maximum=65536, env=env)
     if status.exit_code != 0 or status.stdout.strip():
         raise Denied("Git import requires a clean source tree; commit or make a separate plain-directory export first")
-    result = run(["git", "-c", f"core.hooksPath={os.devnull}", "clone", "--no-local",
+    result = run(["git", "-c", "safe.bareRepository=explicit", "-c", f"core.hooksPath={os.devnull}",
+                  "clone", "--no-local",
                   "--no-hardlinks", "--", str(source), str(workspace)],
                  timeout=300, maximum=1048576, env=env)
     if result.exit_code != 0:
