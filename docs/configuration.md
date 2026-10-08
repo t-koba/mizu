@@ -137,7 +137,7 @@ The container interior is always Linux. The runtime must support standard flags 
 | `temporary_mb`, `file_mb` | `256`, `128` | Temporary storage size and per-file write limit (`RLIMIT_FSIZE`) |
 | `selinux_label` | `true` | Linux-only `:z` volume relabeling |
 | `mounts` | `[]` | Extra read-only host mounts (`{source, target}`); system/harness paths rejected |
-| `env` | `{}` | Extra environment variables; runtime vars (`HOME`, `TMPDIR`, `PATH`) and tokens matching `(^|_)(KEY|SECRET|TOKEN)(_|$)` rejected (`HF_TOKEN`, `PUBLIC_KEY_PATH` rejected; `MONKEY_PATH`, `TOKENIZERS_*` allowed) |
+| `env` | `{}` | Extra environment variables; runtime vars (`HOME`, `TMPDIR`, `PATH`), process-startup hijack vars (`NODE_OPTIONS`, `LD_PRELOAD`, `LD_LIBRARY_PATH`, `PYTHONPATH`, `BASH_ENV`) and tokens matching `(^|_)(KEY|SECRET|TOKEN)(_|$)` rejected (`HF_TOKEN`, `PUBLIC_KEY_PATH` rejected; `MONKEY_PATH`, `TOKENIZERS_*` allowed) |
 | `mode` | `"rootless"` | `"rootless"` (default) or `"single"` (Linux hosts lacking subordinate ID delegation) |
 
 Read-only root, dropped capabilities, `no-new-privileges`, user mapping, and the seccomp floor stay strictly enforced regardless of settings. For total disk storage capping, use a dedicated volume quota.

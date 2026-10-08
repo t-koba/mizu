@@ -562,7 +562,15 @@ def load(file: Path) -> Config:
         # Token-boundary match: KEY/SECRET/TOKEN as a full _-separated token.
         # MONKEY_PATH, TOKENIZERS_* and KEYCLOAK_* stay allowed; HF_TOKEN and
         # PUBLIC_KEY_PATH stay refused. Values are never inspected.
-        if key in ("HOME", "TMPDIR", "PATH") or re.search(r"(^|_)(KEY|SECRET|TOKEN)(_|$)", key):
+        # Process-startup hijack vars (NODE_OPTIONS/LD_PRELOAD/LD_LIBRARY_PATH/
+        # PYTHONPATH/BASH_ENV) would make every node/python/sh child in the
+        # container load workspace-controlled code, including the containerized
+        # stdio MCP servers that share sandbox.env. The interior is always
+        # Linux, so exact-name deny is sufficient; legitimate tuning belongs
+        # in the image build, not per-run env. Aligned with the pi/codex
+        # credential denylists and the OpenClaw MCP-env fix (GHSA-mj59-h3q9-ghfh).
+        if key in ("HOME", "TMPDIR", "PATH", "NODE_OPTIONS", "LD_PRELOAD",
+                   "LD_LIBRARY_PATH", "PYTHONPATH", "BASH_ENV") or re.search(r"(^|_)(KEY|SECRET|TOKEN)(_|$)", key):
             raise ConfigError(f"sandbox.env must not shadow runtime vars or carry secrets: {key}. "
                               "Keep credentials out of container environments.")
         if not isinstance(value, str) or "\x00" in value or "\n" in value:

@@ -58,9 +58,10 @@ entrypoint = "/bin/sh"            # Policy-selected container entrypoint; the im
 # source = "/data/corpus"
 # target = "/data"
 # Extra container environment, selected by policy. Runtime vars (HOME, TMPDIR,
-# PATH) and secret-looking names (KEY/SECRET/TOKEN as a full _-separated token,
-# e.g. HF_TOKEN; MONKEY_PATH and TOKENIZERS_* stay allowed) are refused; values are
-# recorded by key only.
+# PATH), process-startup hijack vars (NODE_OPTIONS, LD_PRELOAD, LD_LIBRARY_PATH,
+# PYTHONPATH, BASH_ENV) and secret-looking names (KEY/SECRET/TOKEN as a full
+# _-separated token, e.g. HF_TOKEN; MONKEY_PATH and TOKENIZERS_* stay allowed)
+# are refused; values are recorded by key only.
 # [sandbox.env]
 # HF_HOME = "/data/hf"
 mode = "rootless"                 # rootless on every OS, or single on Linux hosts without subordinate-ID delegation.

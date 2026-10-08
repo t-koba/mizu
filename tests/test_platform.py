@@ -265,6 +265,11 @@ class ContainerArgvTests(unittest.TestCase):
             ('[[sandbox.mounts]]\nsource = "/data"\n', "missing target", True),
             ('[sandbox.env]\nHOME = "/x"\n', "shadowed runtime var", True),
             ('[sandbox.env]\nHF_TOKEN = "s"\n', "secret name", True),
+            ('[sandbox.env]\nNODE_OPTIONS = "x"\n', "hijack var", True),
+            ('[sandbox.env]\nLD_PRELOAD = "x"\n', "hijack var", True),
+            ('[sandbox.env]\nLD_LIBRARY_PATH = "x"\n', "hijack var", True),
+            ('[sandbox.env]\nPYTHONPATH = "x"\n', "hijack var", True),
+            ('[sandbox.env]\nBASH_ENV = "x"\n', "hijack var", True),
             ('[sandbox.env]\nBAD-KEY = "s"\n', "bad key", True),
             ('entrypoint = "relative/sh"\n', "relative entrypoint", False),
         ]
