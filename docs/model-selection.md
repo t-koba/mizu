@@ -215,8 +215,10 @@ candidates = [
 ]
 ```
 
-A profile switch starts a fresh bounded session (sessions are namespaced
-by effective profile settings, so conversations are never transplanted);
+A profile switch that changes model, engine, grants, policy, or content
+starts a fresh bounded session; an effort-only switch (native reasoning-effort
+keys) continues the role's conversation with the current effort, so
+conversations are never transplanted across incompatible settings;
 returning to the earlier profile resumes its conversation. Routing applies
 to selector roles; fixed-profile roles ignore recorded recommendations.
 Deployment and routing policy activation remain operator work: without
@@ -296,9 +298,9 @@ matching rule, exclusions, selected profile and classification-run reference.
 Main result/error records also reference the decision and failure action.
 Classification results are separate canonical run records, never counted twice
 through their parent. Private task text stays in normal inputs, not selection
-facts. Model sessions retain existing identity checks: profiles with different
-effective settings use different session namespaces; conversations are not
-transplanted. Explicit consultation profiles bypass selection. A selector role
+facts. Model sessions retain existing identity checks minus live effort keys:
+profiles differing beyond reasoning effort use different session namespaces;
+conversations are not transplanted. Explicit consultation profiles bypass selection. A selector role
 requires `smoke --profile` so the paid probe has an exact target.
 
 New adapters provide `usage_observations` pairing each reported usage fragment

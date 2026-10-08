@@ -69,13 +69,24 @@ class EngineConfigTests(Fixture):
         ctx=self.context('consult')
         settings=effective(self.config,ctx.role,'primary')
         original,_=session_record(ctx,'primary',settings)
-        for key,value in (('model','changed'),('options',{'thinkingLevel':'new'}),('engine_tools',['tool']),('resources',[{'sha256':'a'*64}])):
+        for key,value in (('model','changed'),('options',{'thinkingLevel':'new','codemode':True}),('engine_tools',['tool']),('resources',[{'sha256':'a'*64}])):
             changed,_=session_record(ctx,'primary',{**settings,key:value})
             self.assertNotEqual(original,changed)
         save_session(original,'session',{})
         self.assertEqual(session_record(ctx,'primary',settings)[1]['id'],'session')
         write_json(original,{'id':None})
         with self.assertRaises(ConfigError): session_record(ctx,'primary',settings)
+
+    def test_live_effort_shares_session_while_other_options_fork(self):
+        from mizu.engine_config import conversation_settings
+        ctx=self.context('consult')
+        settings=effective(self.config,ctx.role,'primary')
+        original,_=session_record(ctx,'primary',settings)
+        live,_=session_record(ctx,'primary',{**settings,'options':{**settings['options'],'thinkingLevel':'new'}})
+        self.assertEqual(original,live)
+        self.assertNotIn('thinkingLevel',conversation_settings(settings)['options'])
+        forked,_=session_record(ctx,'primary',{**settings,'options':{**settings['options'],'codemode':True}})
+        self.assertNotEqual(original,forked)
 
     def test_seal_gates_extra_and_nested_operations(self):
         ctx=self.context('consult')

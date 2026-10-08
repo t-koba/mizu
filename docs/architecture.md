@@ -198,7 +198,10 @@ arriving during that unit do not vanish behind an advanced cursor.
 ## Multiple models and recovery
 
 Profiles explicitly select engine/provider/model/session and native options. Persistent sessions are
-keyed by role, model, goal and policy/grants. A changed key opens fresh context;
+keyed by role, model, goal and policy/grants; native reasoning-effort keys
+(`thinkingLevel` on pi/pi-durable, `model_reasoning_effort` on Codex, `effort`
+on Claude) apply live to the resumed conversation instead of forking it.
+A changed key opens fresh context;
 old sessions are kept for audit. No silent provider fallback or automatic replay
 is implemented. Operators can change profiles at a boundary, and Worker can
 request independent consultations against the same snapshot. Consultations

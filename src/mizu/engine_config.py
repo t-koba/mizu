@@ -162,8 +162,39 @@ def local_settings_digest(config, engine):
     return result
 
 
+#: Native per-engine reasoning-effort keys applied live to a resumed
+#: conversation instead of forking it. A profile switch that changes only
+#: these keys continues the role's conversation with the current effort;
+#: any other effective, grant, policy, model, engine, or content change
+#: still starts a fresh bounded session. Names stay native per engine;
+#: Mizu imposes no common effort enum.
+CONVERSATION_LIVE_OPTIONS = {
+    'pi': frozenset({'thinkingLevel'}),
+    'pi-durable': frozenset({'thinkingLevel'}),
+    'codex': frozenset({'model_reasoning_effort'}),
+    'claude': frozenset({'effort'}),
+}
+
+
+def conversation_settings(settings):
+    """Effective settings minus live effort keys for session identity.
+
+    Schema: settings dict from ``effective()``. Bounds: drops at most the
+    named live keys. Trust: configuration. Failure: never raises.
+    Drivers still receive the full settings, so the current effort
+    applies per dispatch to the shared conversation.
+    """
+    try:
+        options = dict(settings.get('options', {}))
+    except AttributeError:
+        return settings
+    for key in CONVERSATION_LIVE_OPTIONS.get(settings.get('engine'), frozenset()):
+        options.pop(key, None)
+    return {**settings, 'options': options}
+
+
 def session_record(context, profile, settings):
-    identity = {'settings': settings, 'policy': role_policy_text(context.role),
+    identity = {'settings': conversation_settings(settings), 'policy': role_policy_text(context.role),
                 'goal': context.goal_digest, 'capabilities': context.role.capabilities,
                 'workspace': context.role.workspace, 'command': context.config.command(settings['engine']),
                 'adapter_digest': adapter_digest(settings['engine']),
