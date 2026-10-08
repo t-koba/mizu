@@ -17,7 +17,7 @@ config.write_text(config.read_text().replace('data_dir = "~/.local/state/mizu"',
 PY
 "$ROOT/scripts/setup.sh" --core-only --prefix "$PREFIX" --bin-dir "$BIN" --config "$CONFIG" > "$TEMP/reinstall.json"
 cmp -- "$CONFIG" "$TEMP/configuration-before"
-"$BIN/mizu" --config "$CONFIG" init demo --source "$ROOT/examples/demo" --goal "$ROOT/examples/PROJECT.md" --verify 'python3 -m unittest discover -v' > "$TEMP/init.json"
+"$BIN/mizu" --config "$CONFIG" init demo --source "$ROOT/examples/demo" --goal "$ROOT/examples/PROJECT.md" --roles worker --verify 'python3 -m unittest discover -v' > "$TEMP/init.json"
 "$BIN/mizu" --config "$CONFIG" report demo > "$TEMP/report.json"
 "$BIN/mizu" --config "$CONFIG" editor export demo "$TEMP/editor bundle" > "$TEMP/editor.json"
 "$BIN/mizu" --config "$CONFIG" backup demo "$TEMP/private-backup.tar.gz" > "$TEMP/backup.json"
