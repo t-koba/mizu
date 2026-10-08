@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # An exact, caller-verified Node archive; no executable network bootstrap.
-# Linux production helper. On macOS/Windows install Node >=22.19.0 manually
+# Linux production helper. On macOS/Windows install Node >=22.23.2 manually
 # from nodejs.org and verify the published checksum/signature (see docs/upstream.md).
 set -Eeuo pipefail
 [[ $(uname -s) == Linux ]] || { echo 'install-node.sh is Linux-only; on macOS/Windows install Node manually.' >&2; exit 78; }
@@ -26,6 +26,6 @@ curl --fail --show-error --silent --location --proto '=https' --tlsv1.2 \
   "https://nodejs.org/dist/v${VERSION}/${NAME}.tar.xz" -o "$TMP/node.tar.xz"
 printf '%s  %s\n' "$SHA" "$TMP/node.tar.xz" | sha256sum --check --status
 tar --extract --xz --file "$TMP/node.tar.xz" --directory "$TMP" --no-same-owner --no-same-permissions
-"$TMP/$NAME/bin/node" -e 'const v=process.versions.node.split(".").map(Number); if(v[0]<22 || (v[0]===22 && v[1]<19))process.exit(78)'
+"$TMP/$NAME/bin/node" -e 'const v=process.versions.node.split(".").map(Number); if(v[0]<22 || (v[0]===22 && (v[1]<23 || (v[1]===23 && v[2]<2))))process.exit(78)'
 mv -- "$TMP/$NAME" "$DEST"
 printf 'Installed: %s\nAdd this directory to PATH before setup: %s/bin\n' "$DEST" "$DEST"
