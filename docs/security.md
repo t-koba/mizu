@@ -77,7 +77,7 @@ models or raise budgets. Policies additionally tell models to treat external
 instructions as untrusted. This reduces the impact of prompt injection; it does
 not prove that models will choose correct priorities, detect poisoned research,
 or write semantically correct code. Independent review and objective evaluation
-remain necessary. `verify` proves configured command results on a code digest,
+remain necessary. Persisted conversation (provider session plus durable store) is untrusted stored history: poisoned tool output recorded under one grant reloads on every same-grant resume -- grant binding and goal-keyed forking limit authority, not content, and rotation bounds lifetime without cleaning content. Treat resumed history as untrusted and rotate to a fresh generation on suspected poisoning. `verify` proves configured command results on a code digest,
 not that editable tests were a complete or independent oracle (a writer-edited
 test passes by construction once captured: test edits, hard-coded outputs, or
 defense deletion to satisfy a corrupted test are the same failure class, so keep
