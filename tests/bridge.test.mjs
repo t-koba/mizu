@@ -12,7 +12,9 @@ import { meterRuntime } from '../adapters/pi/model-runtime.mjs';
 // runners refuse them), so the shared helper binds TCP. Framing, auth,
 // bounds and deadlines are transport-independent; one POSIX-only test below
 // still covers the Unix-socket branch of request().
-async function server(t, respond, timeout = 200) {
+// Success-path tests synchronize on the bridge response, not on a short wall
+// clock: the tight deadline is asserted only by the unresponsive-peer test.
+async function server(t, respond, timeout = 5000) {
   const peers = new Set();
   const listener = net.createServer(peer => {
     peers.add(peer); peer.on('error', () => {}); peer.on('close', () => peers.delete(peer));
@@ -93,7 +95,7 @@ test('unix-socket endpoint still connects where the platform serves one', async 
     await new Promise(resolve => listener.close(resolve));
     await fs.rm(dir, { recursive: true, force: true });
   });
-  assert.deepEqual(await request({ transport: "unix", socket, token: 'unit-test-token', timeout_ms: 200 }, 'read', {}), {text:'unix-ok'});
+  assert.deepEqual(await request({ transport: "unix", socket, token: 'unit-test-token', timeout_ms: 5000 }, 'read', {}), {text:'unix-ok'});
 });
 test('schema conversion preserves required fields and denies extra properties', () => {
   const schema = typeSchema(Type, { type: 'object', properties: { x: { type: 'string', maxLength: 4 }, y: { type: 'boolean' } }, required: ['x'] });
