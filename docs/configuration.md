@@ -194,7 +194,12 @@ outside the OCI floor, and a loopback bind alone is not a browser boundary.
 An HTTP `url` must carry its upstream DNS-rebinding guard
 (`enableDnsRebindingProtection` / `allowedHosts` plus `allowedOrigins` /
 `hostHeaderValidation`, mcp-go >=0.56.0 or equivalent) plus auth; never serve
-one as unauthenticated loopback alone. No
+one as unauthenticated loopback alone. When the `url` server uses OAuth,
+pin the expected issuer in the client instead of trusting server-advertised
+authorization metadata: a hostile or compromised server can otherwise redirect
+client credentials to its own token endpoint. Clear stored OAuth state
+registered without an issuer and rotate secrets/tokens after any
+untrusted-server contact. No
 installation, login, package acquisition or deployment runs during work.
 
 A role has exactly one of `profile` or `selector`, plus `policy`, `workspace` (`write`, `read`, `none`),

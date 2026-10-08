@@ -44,7 +44,11 @@ is an operator selection with source review and hash pins, not something the
 mechanism can verify from the inside. Prefer stdio MCP servers (containerized);
 HTTP `url` MCP servers are explicit operator endpoints outside the OCI floor:
 require the upstream DNS-rebinding guard plus auth, never unauthenticated
-loopback alone, since a loopback bind is not a browser boundary.
+loopback alone, since a loopback bind is not a browser boundary. When the
+endpoint uses OAuth, pin the expected issuer in the client and never trust
+server-supplied authorization metadata: guard-plus-auth alone does not stop
+a hostile server from receiving redirected credentials. Clear issuer-less
+stored registrations and rotate secrets/tokens after untrusted contact.
 MCP tool definitions are runtime data, not pinned code (unlike `resources` hashes):
 granting an `engine_tools` name trusts its current definitions, so re-review them
 on server or image update (including a mid-session `notifications/tools/list_changed`
