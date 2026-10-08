@@ -14,6 +14,7 @@ from mizu.process import Result
 from mizu.sandbox import (
     CHECKPOINT_ANNOTATION,
     assert_no_checkpoint,
+    inspect_text_has_valueless_env,
     inspect_text_is_checkpoint,
 )
 
@@ -51,6 +52,24 @@ class CheckpointHelperTests(unittest.TestCase):
     def test_unparseable_output_falls_back_to_substring(self):
         self.assertTrue(inspect_text_is_checkpoint("not-json " + MARKER))
         self.assertFalse(inspect_text_is_checkpoint("not-json without the marker"))
+
+    def test_clean_env_is_allowed(self):
+        self.assertFalse(inspect_text_has_valueless_env("[]"))
+        clean = json.dumps([{"Id": "sha256:x", "Config": {"Env": ["A=1", "PATH=/usr/bin"]}}])
+        self.assertFalse(inspect_text_has_valueless_env(clean))
+
+    def test_bare_key_env_is_refused(self):
+        bare = json.dumps([{"Id": "sha256:x", "Config": {"Env": ["A=1", "HOST_KEY"]}}])
+        self.assertTrue(inspect_text_has_valueless_env(bare))
+
+    def test_star_env_is_refused(self):
+        star = json.dumps([{"Id": "sha256:x", "Config": {"Env": ["*"]}}])
+        self.assertTrue(inspect_text_has_valueless_env(star))
+        star_eq = json.dumps([{"Id": "sha256:x", "Config": {"Env": ["*=x"]}}])
+        self.assertTrue(inspect_text_has_valueless_env(star_eq))
+
+    def test_unparseable_env_is_not_positive(self):
+        self.assertFalse(inspect_text_has_valueless_env("not-json"))
 
 
 class CheckpointExecuteTests(unittest.TestCase):
@@ -137,6 +156,20 @@ class CheckpointExecuteTests(unittest.TestCase):
             with self.assertRaises(Denied) as caught:
                 box.execute(work, "echo hi", writable=False)
         self.assertIn("cannot verify", str(caught.exception).lower())
+
+    def test_execute_refuses_valueless_env_image(self):
+        from mizu.sandbox import Sandbox
+        config = _config(self.temp.name)
+        work = self.root / "work"
+        work.mkdir()
+        box = Sandbox(config, self.root, "worker", self.root / "run")
+        evil = json.dumps([{"Id": "sha256:x", "Config": {"Env": ["A=1", "*"]}}])
+        with patch("mizu.sandbox.run",
+                   side_effect=[Result(0, evil, "", "exited", 0.0),
+                                Result(0, "", "", "exited", 0.0)]):
+            with self.assertRaises(Denied) as caught:
+                box.execute(work, "echo hi", writable=False)
+        self.assertIn("valueless", str(caught.exception).lower())
 
     def test_missing_runtime_refuses_launch(self):
         config = _config(self.temp.name)

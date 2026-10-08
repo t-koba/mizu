@@ -72,6 +72,36 @@ def inspect_text_is_checkpoint(stdout: str) -> bool:
         return CHECKPOINT_ANNOTATION in stdout
 
 
+def inspect_text_has_valueless_env(stdout: str) -> bool:
+    """True when `image inspect` output carries a valueless image Env entry.
+
+    On unpatched Podman (GHSA-4hq8-gpf5-8p68) an image Config.Env entry
+    with a bare key (no `=value`) or `*` copies host env into the
+    container. Trust: decoded local runtime output only. Failure: False
+    when output is clean or unparseable; the caller must deny
+    truncated/failed inspects before trusting False.
+    """
+    try:
+        data = json.loads(stdout)
+    except (json.JSONDecodeError, UnicodeError, ValueError):
+        return False
+    stack = [data]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == "Env" and isinstance(value, list):
+                    for entry in value:
+                        if not isinstance(entry, str):
+                            continue
+                        if "=" not in entry or entry == "*" or entry.startswith("*="):
+                            return True
+                stack.append(value)
+        elif isinstance(node, (list, tuple)):
+            stack.extend(node)
+    return False
+
+
 def checkpoint_inspect_argv(config: Config) -> list[str]:
     """Portable presence+annotation probe: `image inspect <image>`."""
     return [*runtime_base(config), "image", "inspect", config.sandbox.image]
@@ -109,6 +139,11 @@ def assert_no_checkpoint(config: Config, env: dict[str, str]) -> None:
             "sandbox.image is a Podman checkpoint image (annotation %s); " % CHECKPOINT_ANNOTATION
             + "checkpoint config silently ignores sandbox flags on unpatched Podman "
             + "(CVE-2026-94603). Rebuild from a clean base and repin sandbox.image")
+    if inspect_text_has_valueless_env(result.stdout):
+        raise Denied(
+            "sandbox.image has valueless Env (bare-key or `*` entry); "
+            + "unpatched Podman copies host env into the container "
+            + "(GHSA-4hq8-gpf5-8p68). Rebuild without bare-key Env or upgrade Podman >=5.8.4/>=6.0.0")
 
 
 def runtime_base(config: Config) -> list[str]:

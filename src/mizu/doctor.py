@@ -17,7 +17,7 @@ from .errors import ConfigError, Denied, MizuError
 from .fs import digest, mkdir, read_json
 from .pi import credentials
 from .process import run
-from .sandbox import CHECKPOINT_ANNOTATION, CHECKPOINT_INSPECT_MAXIMUM, Sandbox, ensure_single, inspect_text_is_checkpoint, runtime_base, runtime_env
+from .sandbox import CHECKPOINT_ANNOTATION, CHECKPOINT_INSPECT_MAXIMUM, Sandbox, ensure_single, inspect_text_has_valueless_env, inspect_text_is_checkpoint, runtime_base, runtime_env
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -143,6 +143,11 @@ def check(config: Config, *, sandbox: bool = False) -> dict:
                 "Configured image is a Podman checkpoint image (annotation %s); " % CHECKPOINT_ANNOTATION
                 + "it silently ignores sandbox flags on unpatched Podman (CVE-2026-94603). "
                 + "Rebuild from a clean base and repin sandbox.image")
+        if inspect_text_has_valueless_env(result.stdout):
+            raise ConfigError(
+                "Configured image has valueless Env (bare-key or `*` entry); "
+                + "unpatched Podman copies host env into the container (GHSA-4hq8-gpf5-8p68). "
+                + "Rebuild without bare-key Env or upgrade Podman >=5.8.4/>=6.0.0")
         return config.sandbox.image
     checked("sandbox image", image)
     checks.append({"name": "provider-request admission", "status": "pass" if config.limits.daily_requests > 0 else "disabled",
