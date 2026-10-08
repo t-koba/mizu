@@ -245,12 +245,14 @@ class ConfigTests(Fixture):
         from mizu.errors import ConfigError
         args = parser().parse_args(["smoke", "--live"])
         self.assertIsNone(args.role)
-        # No role name is hardcoded: multi-role configs require explicit
-        # --role; single-role configs resolve to that configured role.
+        # No role name is hardcoded: the probe honors the configured
+        # consult_role, else the single configured role, else requires --role.
+        self.assertEqual(_resolve_role(self.config, None, probe=True), "consult")
+        bare = dataclasses.replace(self.config, consult_role="")
         with self.assertRaises(ConfigError):
-            _resolve_role(self.config, None, probe=True)
+            _resolve_role(bare, None, probe=True)
         single = {k: v for k, v in self.config.roles.items() if k == "consult"}
-        solo = dataclasses.replace(self.config, roles=single)
+        solo = dataclasses.replace(bare, roles=single)
         self.assertEqual(_resolve_role(solo, None, probe=True), "consult")
         # The consultation default itself is configuration: the fixture
         # example config documents consult_role = "consult".

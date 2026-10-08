@@ -488,7 +488,7 @@ class PresentationSeparationTests(Fixture):
         from mizu.cli import _resolve_role
         from mizu.errors import ConfigError
         single = {"only": self.config.roles["consult"]}
-        solo = dataclasses.replace(self.config, roles=single)
+        solo = dataclasses.replace(self.config, roles=single, consult_role="")
         self.assertEqual(_resolve_role(solo, None), "only")
         self.assertEqual(_resolve_role(solo, None, probe=True), "only")
         with self.assertRaises(ConfigError):

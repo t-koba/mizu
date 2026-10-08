@@ -149,10 +149,16 @@ def _resolve_role(config, preferred: str | None, *, probe: bool = False) -> str:
     """Resolve an omitted --role without naming any role.
 
     Single-role configurations default to that configured role; otherwise
-    --role is required. Role names stay configuration, not a class hierarchy.
+    --role is required. The read-only smoke probe also honors the configured
+    consult_role before the single-role fallback. Role names stay
+    configuration, not a class hierarchy.
     """
     if preferred:
         return preferred
+    if probe:
+        consult = getattr(config, "consult_role", "")
+        if consult:
+            return consult
     if len(config.roles) == 1:
         return next(iter(config.roles))
     raise ConfigError("Specify --role explicitly: no single configured role to default to")
