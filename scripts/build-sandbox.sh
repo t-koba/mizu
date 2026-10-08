@@ -17,8 +17,10 @@ done
 command -v "$EXE" >/dev/null || { echo "Container runtime not found: $EXE (set MIZU_RUNTIME)." >&2; exit 78; }
 "$EXE" pull -- "$BASE" >&2
 # A Podman checkpoint image restores its own config under `run` and silently
-# ignores sandbox flags on unpatched Podman (CVE-2026-94603). Refuse it here
-# so neither the base nor the built tag can carry the marker forward.
+# ignores sandbox flags on unpatched Podman (CVE-2026-94603). A crafted image
+# Env with a bare key or `*` pulls host env into the container on unpatched
+# Podman (GHSA-4hq8-gpf5-8p68). Refuse both here so neither the base nor the
+# built tag can carry them forward.
 CHECKPOINT_ANNOTATION='io.podman.annotations.checkpoint.runtime.name'
 refuse_checkpoint() {
   local ref="$1"
@@ -28,10 +30,37 @@ refuse_checkpoint() {
     exit 76
   fi
 }
+refuse_valueless_env() {
+  local ref="$1"
+  if "$EXE" image inspect -- "$ref" 2>/dev/null | python3 -c 'import json,sys
+try:
+  data = json.load(sys.stdin)
+except Exception:
+  sys.exit(1)
+stack = [data]
+while stack:
+  node = stack.pop()
+  if isinstance(node, dict):
+    for key, value in node.items():
+      if key == "Env" and isinstance(value, list):
+        for entry in value:
+          if isinstance(entry, str) and ("=" not in entry or entry == "*" or entry.startswith("*=")):
+            sys.exit(0)
+      stack.append(value)
+  elif isinstance(node, (list, tuple)):
+    stack.extend(node)
+sys.exit(1)'; then
+    echo "Refusing image with valueless Env: $ref carries a bare-key or '*' entry (GHSA-4hq8-gpf5-8p68)." >&2
+    echo 'Rebuild without bare-key Env or upgrade Podman >=5.8.4/>=6.0.0.' >&2
+    exit 76
+  fi
+}
 refuse_checkpoint "$BASE"
+refuse_valueless_env "$BASE"
 BASE_ID=$("$EXE" image inspect --format '{{.Id}}' "$BASE")
 "$EXE" build --pull=never --build-arg "BASE_IMAGE=$BASE_ID" --build-arg "APT_SANDBOX_USER=$APT_SANDBOX_USER" --tag "$TAG" --file "$ROOT/containers/Containerfile" "$ROOT/containers" >&2
 refuse_checkpoint "$TAG"
+refuse_valueless_env "$TAG"
 IMAGE=$("$EXE" image inspect --format '{{.Id}}' "$TAG")
 [[ $IMAGE =~ ^sha256:[0-9a-f]{64}$ ]] || { echo 'Unexpected image ID' >&2; exit 76; }
 printf 'Base resolved to %s\nSet sandbox.image to the image ID printed on stdout. Archive build logs for provenance.\n' "$BASE_ID" >&2
