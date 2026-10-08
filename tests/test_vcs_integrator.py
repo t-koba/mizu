@@ -309,6 +309,10 @@ class IntegratorConfigTests(Fixture):
     def _integrator_file(self, workspace):
         text = self.file.read_text()
         head, _, _ = text.partition("[roles.consult]")
+        # No consultation-suitable role remains in this fixture config,
+        # so the documented consult_role default is unset here (fail-closed:
+        # consultation then requires an explicit role).
+        head = head.replace('consult_role = "consult"\n', '')
         block = ('[roles.integrator]\nprofile = "alternate"\n'
                  'policy = "policies/consult.md"\n'
                  f'workspace = "{workspace}"\n'

@@ -18,6 +18,7 @@ silently change grants or paths. Prefer literal model aliases for systemd servic
 | `engines` | Named Pi/Codex/Claude environments: trusted `command` argv and private `directory` |
 | `timezone` | IANA zone for Linux calendar timers and the request-budget day; default UTC. macOS uses explicit local; Windows supports local and UTC (see completion-contracts.md) |
 | `consult_profiles` | Permitted independent consultation profiles |
+| `consult_role` | Default answering role for consultation when the caller names none; unset fails closed (explicit role required) |
 | `exclude` | Snapshot/import exclusion patterns; not a secret detection system |
 | `include` | Shared TOML fragments merged before validation; duplicate keys are errors (see below) |
 
@@ -248,7 +249,7 @@ models are recorded. Model usage excludes unreported auxiliary billing.
 | `insights` | Read proposals |
 | `decide` | Record accept/modify/defer/reject and rationale |
 | `submit_insight` | Submit proposal with route-derived identity |
-| `consult` | Consult operator-allowlisted profiles through a named read-only role (default `consult`), no nested consultation |
+| `consult` | Consult operator-allowlisted profiles through a named read-only role (default from `consult_role`, fail-closed when unset), no nested consultation |
 | `report` | Stage a Markdown document for static artifact publication |
 | `sync` | Refresh upstream refs via the trusted VCS adapter (writable workspace only); merges stay as workspace edits followed by verification |
 | `vcs_read` | Read CI status, logs, PR comments, external proposals, and exact-revision proposal content via the trusted VCS adapter; never publishes (read roles may hold it) |
@@ -259,7 +260,7 @@ models are recorded. Model usage excludes unreported auxiliary billing.
 | `research` | Replace this role's own current research state record under the read generation; stale generations refused, audit in `research-state.json` (consultation roles cannot hold it) |
 | `finish` | Seal result; cannot acquire new permissions |
 
-A consultation names its answering role explicitly (`role`, default `consult`).
+A consultation names its answering role explicitly (`role`, default from the configured `consult_role`, fail-closed when unset).
 Any configured role qualifies as long as it stays read-only (`workspace = "read"`)
 without write/execute grants (`exec`, `experiment`, `verify`, `decide`,
 `submit_insight`, `consult`, `report`, `sync`); read-only grants (`files`, `read`,

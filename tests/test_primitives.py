@@ -224,24 +224,37 @@ class ConfigTests(Fixture):
         self.assertEqual(configure(self.file, None)["status"], "unchanged")
         self.assertEqual(self.file.read_bytes(), before)
 
-    def test_init_defaults_to_one_unarmed_worker(self):
+    def test_init_requires_explicit_roles_without_single_role(self):
         from mizu.cli import _resolve_role, parser
+        from mizu.errors import ConfigError
         args = parser().parse_args(["init", "demo", "--source", "s", "--goal", "g"])
         self.assertIsNone(args.roles)
         self.assertFalse(args.armed)
-        # Stock config resolves omitted --roles to worker; single-role to itself.
-        self.assertEqual(_resolve_role(self.config, None), "worker")
+        # No role name is hardcoded: multi-role configs require explicit
+        # --roles; single-role configs resolve to that configured role.
+        import dataclasses
+        with self.assertRaises(ConfigError):
+            _resolve_role(self.config, None)
+        single = {"only": self.config.roles["consult"]}
+        solo = dataclasses.replace(self.config, roles=single)
+        self.assertEqual(_resolve_role(solo, None), "only")
 
-    def test_smoke_role_defaults_to_consult(self):
+    def test_probe_role_comes_from_configuration_or_single_role(self):
+        import dataclasses
         from mizu.cli import _resolve_role, parser
+        from mizu.errors import ConfigError
         args = parser().parse_args(["smoke", "--live"])
         self.assertIsNone(args.role)
-        # Stock config resolves to consult; single-role configs to that role.
-        self.assertEqual(_resolve_role(self.config, None, probe=True), "consult")
+        # No role name is hardcoded: multi-role configs require explicit
+        # --role; single-role configs resolve to that configured role.
+        with self.assertRaises(ConfigError):
+            _resolve_role(self.config, None, probe=True)
         single = {k: v for k, v in self.config.roles.items() if k == "consult"}
-        import dataclasses
         solo = dataclasses.replace(self.config, roles=single)
         self.assertEqual(_resolve_role(solo, None, probe=True), "consult")
+        # The consultation default itself is configuration: the fixture
+        # example config documents consult_role = "consult".
+        self.assertEqual(self.config.consult_role, "consult")
 
     def test_history_and_prompt_bounds_are_validated(self):
         self.file.write_text(self.file.read_text().replace("history_index = 128", "history_index = 2"))

@@ -1,7 +1,9 @@
 """An opt-in, paid end-to-end engine test. It cannot change a real project.
 
-Schema: ``live(config, profile, role_name)`` runs the named consult role's
+Schema: ``live(config, profile, role_name)`` runs the named read-only role's
 engine against a temporary project containing only ``probe.txt``.
+The role defaults to the configured ``consult_role`` (else the single
+configured role) and is required otherwise.
 Bounds: paid spend is capped at fixed ``SMOKE_REQUESTS/TOOLS/SECONDS``
 (clamped below operator limits, never raised). Trust: the probe system
 prompt is the fixed ``SMOKE_PROBE_POLICY`` written per run under
@@ -49,9 +51,16 @@ SMOKE_PROBE_POLICY = (
 )
 
 
-def live(config: Config, profile: str | None = None, role_name: str = "consult") -> dict:
+def live(config: Config, profile: str | None = None, role_name: str | None = None) -> dict:
     if _platform.is_root():
         raise Denied("Live tests must run as an unprivileged user")
+    resolved = role_name or getattr(config, "consult_role", "") or None
+    if resolved is None:
+        if len(config.roles) == 1:
+            resolved = next(iter(config.roles))
+        else:
+            raise ConfigError("Live probe role requires --role or a configured consult_role")
+    role_name = resolved
     if role_name not in config.roles:
         raise ConfigError(f"Live probe role is not configured: {role_name}")
     role = config.roles[role_name]

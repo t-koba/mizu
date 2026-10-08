@@ -8,6 +8,9 @@
 data_dir = "~/.local/state/mizu"
 timezone = "UTC"
 consult_profiles = ["primary", "alternate"]
+# Default answering role for consultation when the caller names none.
+# Unset (empty) fails closed: consultation then requires an explicit role.
+consult_role = "consult"
 exclude = [".git", ".pi", ".env", ".env.*", ".venv", "node_modules", "__pycache__", ".pytest_cache"]
 
 [limits]

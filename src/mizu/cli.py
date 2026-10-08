@@ -30,9 +30,9 @@ def parser() -> argparse.ArgumentParser:
     initialize.add_argument("project", help="New project name")
     initialize.add_argument("--source", type=Path, required=True, help="Clean source directory or git tree")
     initialize.add_argument("--goal", type=Path, required=True, help="Goal Markdown file")
-    # No hardcoded role assumption: omitted --roles resolves to the single
-    # configured role, else to worker when present, else requires explicit.
-    initialize.add_argument("--roles", default=None, help="Comma-separated configured roles (default: single role, else worker when present)")
+    # No role-name assumption: omitted --roles resolves to the single
+    # configured role, else requires explicit.
+    initialize.add_argument("--roles", default=None, help="Comma-separated configured roles (default: single configured role, else required)")
     initialize.add_argument("--armed", action="store_true",
                             help="Start armed (operator has reviewed the source at init time)")
     initialize.add_argument("--verify", action="append", default=[], help="Operator-owned acceptance command; repeatable")
@@ -50,9 +50,9 @@ def parser() -> argparse.ArgumentParser:
                                        "daemon": "Poll and run; streams JSON Lines per unit (result objects and run_deferred events)",
                                        "cleanup": "Remove leftover labelled containers"}[name])
         p.add_argument("project", help="Managed project name")
-        # No hardcoded role assumption: omitted --role resolves to the single
-        # configured role, else to worker when present, else requires explicit.
-        p.add_argument("--role", default=None, help="Configured role (default: single role, else worker when present)")
+        # No role-name assumption: omitted --role resolves to the single
+        # configured role, else requires explicit.
+        p.add_argument("--role", default=None, help="Configured role (default: single configured role, else required)")
         if name == "run":
             p.add_argument("--attributes", type=Path, help="Operator JSON attributes for this execution")
     p = sub.add_parser("selection", help="Preview selection or manage operator observations; no inference")
@@ -72,7 +72,7 @@ def parser() -> argparse.ArgumentParser:
     p = sub.add_parser("smoke", help="Paid read-only live probe; never touches a real project")
     p.add_argument("--live", action="store_true", required=True, help="Explicit consent to a paid, read-only Pi/provider probe")
     p.add_argument("--profile", help="Model profile for the probe")
-    p.add_argument("--role", default=None, help="Read-only probe role (default: consult when present, else single role)")
+    p.add_argument("--role", default=None, help="Read-only probe role (default: configured consult_role, else single configured role, else required)")
     p = sub.add_parser("insight", help="Submit, list, read, decide or ingest proposals")
     p.add_argument("action", choices=("submit", "list", "read", "decide", "ingest", "revise", "history", "withdraw"), help="Proposal operation")
     p.add_argument("project", help="Managed project name")
@@ -146,20 +146,16 @@ def configure(file: Path, pi_command: str | None) -> dict:
 
 
 def _resolve_role(config, preferred: str | None, *, probe: bool = False) -> str:
-    """Resolve an omitted --role without hardcoding role names.
+    """Resolve an omitted --role without naming any role.
 
-    Single-role configurations default to that role; otherwise prefer
-    `consult` (probe) or `worker` (run/daemon) when present; else require
-    explicit --role. Role names stay configuration, not a class hierarchy.
+    Single-role configurations default to that configured role; otherwise
+    --role is required. Role names stay configuration, not a class hierarchy.
     """
     if preferred:
         return preferred
     if len(config.roles) == 1:
         return next(iter(config.roles))
-    fallback = "consult" if probe else "worker"
-    if fallback in config.roles:
-        return fallback
-    raise ConfigError("Specify --role explicitly: no single or fallback role is configured")
+    raise ConfigError("Specify --role explicitly: no single configured role to default to")
 
 
 def _cmd_status(config, project, args):
@@ -429,7 +425,7 @@ def execute(args):
     if args.command == "init":
         roles = args.roles.split(",") if args.roles else _resolve_role(config, None).split(",")
         # _resolve_role returns one role name; init accepts a comma list.
-        # Single-role configs resolve to that role, otherwise worker fallback.
+        # Single-role configs resolve to that role, otherwise explicit --roles is required.
         project = initialize(config, args.project, args.source, args.goal, roles,
                              args.verify, armed=args.armed)
         return project.status()

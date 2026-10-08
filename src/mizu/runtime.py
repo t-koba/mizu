@@ -1467,7 +1467,9 @@ class Engine:
         names = args.get("profiles", list(self.config.consult_profiles))
         if not names or any(n not in self.config.consult_profiles for n in names) or len(set(names)) != len(names):
             raise Denied("Consultation requires unique, operator-allowlisted model profiles")
-        role_name = args.get("role") or "consult"
+        role_name = args.get("role") or getattr(self.config, "consult_role", "")
+        if not role_name:
+            raise Denied("Consultation role requires an explicit role or a configured consult_role")
         if role_name not in self.config.roles:
             raise ConfigError(f"Consultation role is not configured: {role_name}")
         role = self.config.roles[role_name]

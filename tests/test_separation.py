@@ -151,6 +151,40 @@ class ConsultGateTests(Fixture):
             Engine(self.config, driver=ScriptDriver()).consult(
                 self.context(), {"question": "q?", "role": "worker"})
 
+    def test_consult_default_is_configuration_fail_closed(self):
+        import dataclasses
+        from mizu.errors import ConfigError, Denied
+        from mizu.runtime import Engine
+        from support import ScriptDriver
+        # Configured default answers when the caller names no role.
+        result = Engine(self.config, driver=ScriptDriver()).consult(
+            self.context(), {"question": "q?"})
+        self.assertEqual(result["role"], self.config.consult_role)
+        # Unset default fails closed instead of naming a role.
+        bare = dataclasses.replace(self.config, consult_role="")
+        with self.assertRaises(Denied):
+            Engine(bare, driver=ScriptDriver()).consult(
+                self.context(), {"question": "q?"})
+        # Unknown configured default fails at load, not at call time.
+        text = self.file.read_text()
+        path = self.root / "config/unknown-consult-role.toml"
+        path.write_text(text.replace('consult_role = "consult"', 'consult_role = "ghost"'))
+        from mizu.config import load
+        with self.assertRaises(ConfigError):
+            load(path)
+
+    def test_smoke_default_is_configuration_fail_closed(self):
+        import dataclasses
+        import mizu.smoke as smoke
+        from mizu.errors import ConfigError
+        from unittest.mock import patch
+        # Explicit roles still work; unset default on multi-role configs
+        # requires --role instead of naming one.
+        bare = dataclasses.replace(self.config, consult_role="")
+        with patch("mizu.smoke._platform.is_root", return_value=False):
+            with self.assertRaises(ConfigError):
+                smoke.live(bare)
+
     def test_writable_role_requires_verify_capability(self):
         from mizu.config import load
         text = self.file.read_text()
@@ -463,9 +497,11 @@ class PresentationSeparationTests(Fixture):
 
     def test_init_roles_default_resolves_without_hardcoded_worker(self):
         from mizu.cli import _resolve_role, parser
+        from mizu.errors import ConfigError
         args = parser().parse_args(["init", "demo", "--source", "s", "--goal", "g"])
         self.assertIsNone(args.roles)
-        self.assertEqual(_resolve_role(self.config, None), "worker")
+        with self.assertRaises(ConfigError):
+            _resolve_role(self.config, None)
         import dataclasses
         single = {"only": self.config.roles["consult"]}
         solo = dataclasses.replace(self.config, roles=single)

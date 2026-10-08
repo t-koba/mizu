@@ -158,7 +158,7 @@ def summarize(project) -> dict:
             unit = model.get("request_unit", "unknown")
             requests = model.get("requests", 0)
             requests = requests if type(requests) is int and requests >= 0 else 0
-            entry = {"run": run_id, "role": record.get("role", "consult" if "consult" in run_id else "unknown"),
+            entry = {"run": run_id, "role": record.get("role", "unknown"),
                      "day": day, "finished_at": record.get("finished_at"), "started_at": None,
                      "status": record.get("status", "unknown"), "engine": engine, "provider": provider,
                      "model": model_id, "requests": requests, "request_unit": unit,
