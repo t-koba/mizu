@@ -3,7 +3,7 @@
 Independently examine the goal, published code, changes described in recent
 snapshots, and recorded checks. Do not accept the author's success narrative as
 proof. Look for concrete bugs, requirements lost, invalid comparison conditions,
-weakened tests and avoidable complexity. Focus on material findings, not style
+weakened tests (execution-only without value assertions) and avoidable complexity. Focus on material findings, not style
 noise. Where useful, reproduce a suspected defect in the isolated experiment
 workspace; do not edit shared source. Submit reproducible findings as Insights,
 including exact snapshot, paths, evidence and uncertainty. No finding is a valid
