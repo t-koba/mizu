@@ -31,6 +31,8 @@ later read or run. Each consumer, what it trusts, and the gate:
 | Publish pointers (`snapshot`, `report`) | Snapshot content and report body | Pointer moves atomically only after the entry is complete; report renders Markdown, never HTML; bounded JSON |
 | Service renderer | Staged unit definitions | Text rendering only; staged units must pass `systemd-analyze verify` (where available) and operator review before arming |
 | Backup, VCS publish, editor ingest | Published tree and outbox spool | Operator-owned destinations and commands; review the published tree before opening or executing anything from it |
+| Engine configuration | Writer-influenced `.codex/config.toml`/`.env` and Claude settings or hooks | Pinned controller `cwd`, isolated `CODEX_HOME` and `CLAUDE_CONFIG_DIR`, `setting_sources=[]`, read-only sandbox mode with command and file-change approvals declined (GHSA-xrxf-jgv3-qmrm, GHSA-w5fx-fh39-j5rw) |
+| VCS tooling | Writer-shaped `.git/config`, attributes or diff drivers honored by host `git` | `.git` excluded from snapshots, operator-owned VCS commands and destinations; review the published tree before opening or executing anything from it |
 | Control plane (host bridge) | Nothing model-supplied | Per-run 256-bit token plus loopback-only bind and strict shape checks (`hmac.compare_digest`, `src/mizu/bridge.py`); never trust a client-supplied `Host` header. This token-and-peer design avoids the CVE-2026-82533 class (Host-header trust with loopback left open) |
 
 ## What is trusted
