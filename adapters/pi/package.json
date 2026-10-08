@@ -4,7 +4,7 @@
   "private": true,
   "description": "Managed current Pi SDK adapter",
   "engines": {
-    "node": ">=22.23.2"
+    "node": ">=22.23.3"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "1.0.4",

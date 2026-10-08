@@ -5,7 +5,7 @@
 Mizu は Linux / macOS / Windows で動作します。共通の前提要件は以下のとおりです:
 - **Python**: 3.11 以上（標準ライブラリのみ使用）
 - **Git**
-- **Node.js**: 22.23.2 以上および npm
+- **Node.js**: 22.23.3 以上および npm
 - **OCI コンテナランタイム**: Podman または Docker（コンテナ内部は常に Linux 環境で実行）
 
 | OS | 推奨コンテナランタイム | サービス管理機構 | 設定/タスク配置先 |
@@ -56,7 +56,7 @@ Mizu は rootless Podman 実行時に `--user <host uid> --userns=keep-id` を�
 
 ### (3) Node.js と npm の準備
 
-Node.js 22.23.2 以上が必要です。
+Node.js 22.23.3 以上が必要です。
 
 ```sh
 node --version
@@ -130,7 +130,7 @@ mizu status demo
 
 ## 3. macOS / Windows での注意事項
 
-- **Node.js**: 公式インストーラーまたは nvm 等から Node.js 22.23.2 以上を導入してください（`install-node.sh` は Linux 専用）。
+- **Node.js**: 公式インストーラーまたは nvm 等から Node.js 22.23.3 以上を導入してください（`install-node.sh` は Linux 専用）。
 - **コンテナランタイム**: Podman Desktop (`podman machine`) または Docker Desktop を事前に起動しておきます。
 - **設定ファイルとタスク**:
   - macOS: `~/.config/mizu/config.toml`、サービスは `~/Library/LaunchAgents/`
