@@ -12,7 +12,7 @@ from mizu.runtime import Context, prompt_delta_for, prompt_for
 def _configured(fixture, branch):
     cfg = dataclasses.replace(fixture.config, vcs={**fixture.config.vcs, "ci_branch": branch})
     roles = dict(cfg.roles)
-    roles["reporter"] = dataclasses.replace(roles["reporter"], engine_tools=("vcs_read",))
+    roles["reporter"] = dataclasses.replace(roles["reporter"], capabilities=tuple(list(roles["reporter"].capabilities) + ["vcs_read"]))
     return dataclasses.replace(cfg, roles=roles)
 
 

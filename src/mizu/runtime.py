@@ -984,7 +984,7 @@ def prompt_for(context: Context) -> str:
         if ("insights" in caps or "decide" in caps) else []
     acceptance = list(context.project.verify) if "verify" in caps else []
     ci_branch = context.config.vcs.get("ci_branch") or None
-    if "vcs_read" not in context.role.engine_tools:
+    if "vcs_read" not in caps:
         ci_branch = None
     return json.dumps({"goal": context.goal,
                        "published_snapshot": {k: context.snapshot[k] for k in (
@@ -1042,7 +1042,7 @@ def prompt_delta_for(context: Context, pending: list) -> str:
                        "workspace": "/workspace", "workspace_mode": context.role.workspace,
                        "acceptance_commands": acceptance,
                        "ci_branch": ((context.config.vcs.get("ci_branch") or None)
-                                     if "vcs_read" in context.role.engine_tools else None),
+                                     if "vcs_read" in caps else None),
                        "previous_report": (_previous_report(context.project)
                                           if "report" in caps else None),
                        **_prompt_clock(context)},
