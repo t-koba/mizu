@@ -1137,7 +1137,56 @@ class Engine:
         from .classification import prepare
         return prepare(self, project, role, project.snapshots.get(), attributes, preview=True)
 
-    def run(self, project: Project, role_name: str, *, attributes=None) -> dict:
+    def _admit(self, project: Project, role_name: str, role: Role, stack: contextlib.ExitStack,
+               *, wait: bool) -> None:
+        """Hold the role, workspace and execution-slot locks for one work unit.
+
+        Schema: role/workspace locks plus one of ``parallel_runs`` slots,
+        all non-blocking. Bounds: with ``wait`` the caller holds nothing
+        while waiting and retries at ``idle_seconds`` cadence until
+        ``busy_retry_seconds`` expires (0 disables: a single attempt).
+        Trust: local locks only, never model input. Retry/cancellation:
+        only slot/lock contention (``Busy``) waits; draining, paused and
+        unarmed projects raise at once, and ``InfraExceeded`` budget/disk
+        guards above never enter this wait. Evidence: none on success; the
+        final ``Busy`` surfaces exactly as a fail-fast admission would.
+        Failure: ``Busy`` when capacity never frees in the window or the
+        run is stopped; locks release with the caller's stack.
+        """
+        if not wait:
+            stack.enter_context(lock(project.root / "locks" / f"run-{role_name}.lock", blocking=False))
+            if role.workspace == "write":
+                stack.enter_context(lock(project.root / "locks" / "workspace.lock", blocking=False))
+            stack.enter_context(slot(self.config))
+            return
+        try:
+            window = int(self.config.limits.busy_retry_seconds)
+        except (AttributeError, TypeError, ValueError):
+            window = 0
+        deadline = time.monotonic() + max(0, window)
+        while True:
+            attempt = contextlib.ExitStack()
+            try:
+                attempt.enter_context(lock(project.root / "locks" / f"run-{role_name}.lock", blocking=False))
+                if role.workspace == "write":
+                    attempt.enter_context(lock(project.root / "locks" / "workspace.lock", blocking=False))
+                attempt.enter_context(slot(self.config))
+            except Busy:
+                attempt.close()
+                control = project.control()
+                if not control.get("armed") or control.get("paused") or control.get("draining"):
+                    raise
+                if deadline - time.monotonic() <= 0:
+                    raise
+                self.stop.wait(min(self.config.limits.idle_seconds, deadline - time.monotonic()))
+                if self.stop.is_set():
+                    raise
+                continue
+            # Hand the held locks to the run scope; they release when it closes.
+            stack.enter_context(attempt)
+            return
+
+    def run(self, project: Project, role_name: str, *, attributes=None, retry_busy: bool = False) -> dict:
         if role_name not in project.roles:
             raise Denied("Role is not enabled for this project")
         role = self.config.roles[role_name]
@@ -1156,10 +1205,7 @@ class Engine:
         if shutil.disk_usage(project.root).free < self.config.limits.free_disk_mb * 1048576:
             raise InfraExceeded("Free disk space is below the configured reserve")
         with contextlib.ExitStack() as stack:
-            stack.enter_context(lock(project.root / "locks" / f"run-{role_name}.lock", blocking=False))
-            if role.workspace == "write":
-                stack.enter_context(lock(project.root / "locks" / "workspace.lock", blocking=False))
-            stack.enter_context(slot(self.config))
+            self._admit(project, role_name, role, stack, wait=retry_busy)
             project.insights.ingest_editor(keep_days=project.config.limits.retention_days)
             snapshot = project.snapshots.get()
             cursor = read_json(project.root / "observed" / f"{role_name}.json", {})

@@ -24,6 +24,7 @@ maximum_wait_seconds = 86400
 max_failures = 3
 parallel_runs = 4
 parallel_consults = 2
+busy_retry_seconds = 300      # One-shot `mizu run` waits this long for a free execution slot/lock before dropping the unit (0 disables).
 output_bytes = 262144
 file_bytes = 8388608
 snapshot_bytes = 268435456

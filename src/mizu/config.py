@@ -282,6 +282,12 @@ class Limits:
     max_failures: int = 3
     parallel_runs: int = 4
     parallel_consults: int = 2
+    #: Bounded wait for capacity: a one-shot `mizu run` (the unit the
+    #: platform schedulers dispatch) that finds every execution slot or
+    #: role lock busy waits up to this many seconds for release instead
+    #: of dropping the scheduled unit. 0 disables the wait (fail fast as
+    #: before); draining, paused and unarmed projects never wait.
+    busy_retry_seconds: int = 300
     output_bytes: int = 262144
     file_bytes: int = 8388608
     snapshot_bytes: int = 268435456
@@ -496,6 +502,7 @@ def load(file: Path) -> Config:
                      "default_wait_seconds": (1, MAX_WAIT_SECONDS),
                      "maximum_wait_seconds": (1, MAX_WAIT_SECONDS),
                      "daily_requests": (0, 100000), "shared_daily_requests": (0, 100000), "max_failures": (0, 1073741824),
+                     "busy_retry_seconds": (0, 86400),
                      "free_disk_mb": (0, 1073741824)}
     for k, v in lim.items():
         if k == "session_max_cost_usd":

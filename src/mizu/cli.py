@@ -208,7 +208,13 @@ def _cmd_run(config, project, args):
     watched = [sig for sig in (getattr(signal, "SIGTERM", None), getattr(signal, "SIGINT", None)) if sig is not None]
     previous = {sig: signal.signal(sig, lambda s, f: stop.set()) for sig in watched}
     try:
-        return Engine(config, stop=stop).run(project, role, attributes=_attribute_input(getattr(args, "attributes", None)))
+        # One-shot dispatch (the unit platform schedulers invoke for
+        # interval/calendar roles) waits for capacity within
+        # limits.busy_retry_seconds instead of dropping the scheduled
+        # unit when every execution slot is busy; the daemon keeps its
+        # own defer-and-repoll loop and never waits here.
+        return Engine(config, stop=stop).run(project, role, attributes=_attribute_input(getattr(args, "attributes", None)),
+                                             retry_busy=True)
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)
