@@ -130,7 +130,7 @@ Per-threat mitigations:
 | Malicious content executed | Fetched text is never executed by the harness; code runs only from snapshots and reviewed images; `verify` plus independent review precede `done` |
 | Supply chain | Digest-pinned images, no runtime pulls, hash verification where the ecosystem provides it (e.g. registry checksums), review of image contents, refusal of Podman checkpoint images (annotation `io.podman.annotations.checkpoint.runtime.name`, CVE-2026-94603) and of images with valueless Env (bare-key or `*` entry, GHSA-4hq8-gpf5-8p68): `build-sandbox.sh`, `doctor` and every sandbox launch inspect the image and refuse on positive evidence |
 | Irreproducibility | Receipts (id, sha256, time), lockfiles, run records; search scope is reported honestly |
-| Cost | Request admission counts plus provider-side caps and bill inspection |
+| Cost | Request admission counts plus hard provider-side spend caps/pauses and bill inspection |
 | Prompt injection | External prose is data, never authority: no capability, goal, tool, model or budget change |
 
 Container-escape checklist (external benchmark mapping): nested-sandbox CTF
@@ -160,7 +160,8 @@ are not supported. Private-network destinations need the operator's explicit
 
 Request admission counts are global per day in the configured timezone (UTC default) and retained across restarts.
 They are not a monetary cap, a token cap, or a guarantee about hidden upstream
-retries. Set account-level spending limits and inspect provider bills.
+retries. Set a hard account-level spend cap/pause by default and inspect provider bills;
+alert-only alarms are not sufficient for unattended runs.
 
 Container memory, CPUs, PID count, command deadline, temporary memory, individual
 file size and captured output are bounded. Entire workspace bytes and total
@@ -193,9 +194,12 @@ invoking user; per-container identity separation does not exist. The default
 
 ## Supply chain and exposure
 
-Direct Pi dependencies are exact-version pinned. A complete npm lock must be
-reviewed before a public release. Dependency lifecycle scripts are disabled by
-default; enabling them is explicit. Installation receipts contain source and
+Direct Pi dependencies are exact-version pinned. Review the complete npm lock
+before staging/installing it, not only before a public release: staging
+(`npm ci` then `node ... --version/--check-contract`) and every run execute
+the pinned tree on the host. Dependency lifecycle scripts are disabled by
+default (`--ignore-scripts` covers only lifecycle scripts, not import-time code);
+enabling them is explicit. Installation receipts contain source and
 lock hashes but are not publisher signatures. GitHub workflows pin action SHAs,
 use read-only repository permissions and do not run paid model calls on pull
 requests. Maintainer changes stay in a candidate tree; production pointers and
