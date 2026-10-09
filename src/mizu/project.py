@@ -168,7 +168,8 @@ def _import_git_tree(source: Path, workspace: Path, env: dict[str, str]) -> None
                  timeout=30, maximum=65536, env=env)
     if status.exit_code != 0 or status.stdout.strip():
         raise Denied("Git import requires a clean source tree; commit or make a separate plain-directory export first")
-    result = run(["git", "-c", "safe.bareRepository=explicit", "-c", f"core.hooksPath={os.devnull}",
+    result = run(["git", "-c", "safe.bareRepository=explicit", "-c", "core.fsmonitor=false",
+                  "-c", f"core.hooksPath={os.devnull}",
                   "clone", "--no-local",
                   "--no-hardlinks", "--", str(source), str(workspace)],
                  timeout=300, maximum=1048576, env=env)
