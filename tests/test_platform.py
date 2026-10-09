@@ -434,9 +434,9 @@ class ServiceRendererTests(unittest.TestCase):
         self.assertIn(f"Unit={base}-event.service", trigger)
         self.assertIn("decision-history", trigger)
         self.assertIn("waits", trigger)
-        # Burst coalescing floor: one dispatch per window, never start-limit-hit.
-        self.assertIn("TriggerLimitIntervalSec=10s", trigger)
-        self.assertIn("TriggerLimitBurst=1", trigger)
+        # No trigger limit: TriggerLimitBurst=1 fails the path unit on a burst
+        # and stops dispatching; extra dispatches exit cheaply via --event.
+        self.assertNotIn("TriggerLimit", trigger)
         event_service = units[base + "-event.service"]
         self.assertIn("Type=oneshot", event_service)
         self.assertIn("StartLimitIntervalSec=0", event_service)
