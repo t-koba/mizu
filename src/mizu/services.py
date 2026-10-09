@@ -14,6 +14,10 @@ wait for that role and otherwise exits before any model use; the periodic
 timers invoke plain `mizu run` on their own schedules unchanged. Task
 Scheduler XML has no file trigger in this minimal schema, so Windows still
 dispatches events when its timer fires.
+
+Event triggers are level state, not edge counts: a burst of writes coalesces
+into one dispatch per trigger window instead of disabling the trigger, and a
+trigger with nothing due exits before any model use.
 """
 from __future__ import annotations
 
@@ -44,6 +48,16 @@ RESTART_SEC = 15
 ACCURACY_SEC = "10s"
 RANDOMIZED_DELAY_SEC = "15s"
 STOP_SEC = 45
+#: Event-trigger coalescing floor (mechanism, not operator policy): a burst of
+#: decision-history/waits writes dispatches once per window instead of hitting
+#: the manager start limit and disabling the trigger. Admission is state-based
+#: (`mizu run --event` exits before any model use when nothing is due), so a
+#: suppressed edge loses nothing: the state remains for the next dispatch or
+#: the periodic timer. The event service additionally disables its own start
+#: limiter so an unsupported/edited trigger can only cause sequential fast
+#: exits, never a start-limit-hit that stops dispatching until reset by hand.
+EVENT_TRIGGER_LIMIT_INTERVAL = "10s"
+EVENT_TRIGGER_LIMIT_BURST = 1
 WINDOWS_RESTART_INTERVAL = "PT1M"
 WINDOWS_RESTART_COUNT = 999
 
@@ -128,7 +142,8 @@ def _render_systemd(config: Config, project: Project, executable: Path) -> dict[
             event_args = [str(executable.resolve()), "--config", str(config.file),
                           "run", project.name, "--role", name, "--event"]
             event_service = ["[Unit]", f"Description=Mizu event dispatch for {project.name} / {name}", "After=network-online.target",
-                       "", "[Service]", "Type=exec", "UMask=0077", "KillMode=control-group", "Delegate=yes",
+                       "StartLimitIntervalSec=0",
+                       "", "[Service]", "Type=oneshot", "UMask=0077", "KillMode=control-group", "Delegate=yes",
                        f"TimeoutStopSec={STOP_SEC}", "ExecStart=" + " ".join(map(quote, event_args)),
                        "ExecStopPost=-" + " ".join(map(quote, cleanup)),
                        "SuccessExitStatus=69 75 76 77 78 130"]
@@ -136,6 +151,8 @@ def _render_systemd(config: Config, project: Project, executable: Path) -> dict[
             trigger = ["[Unit]", f"Description=Mizu event trigger for {project.name} / {name}", "",
                        "[Path]",
                        *(f"PathChanged={watch}" for watch in watches[name]),
+                       f"TriggerLimitIntervalSec={EVENT_TRIGGER_LIMIT_INTERVAL}",
+                       f"TriggerLimitBurst={EVENT_TRIGGER_LIMIT_BURST}",
                        f"Unit={event_base}.service", "", "[Install]", "WantedBy=default.target"]
             result[event_base + ".path"] = "\n".join(trigger) + "\n"
     return result
