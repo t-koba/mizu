@@ -309,7 +309,8 @@ class Sandbox:
                     "--ulimit", f"fsize={cfg.file_mb * 1024 * 1024}:{cfg.file_mb * 1024 * 1024}",
                     "--ulimit", "core=0:0", "--log-driver=none", "--init",
                     "--tmpfs", f"/tmp:rw,nosuid,nodev,size={cfg.temporary_mb}m,mode=1777",
-                    "--env", "HOME=/tmp/home", "--env", "TMPDIR=/tmp"]
+                    "--env", "HOME=/tmp/home", "--env", "TMPDIR=/tmp",
+                    "--env", "PYTHONDONTWRITEBYTECODE=1", "--env", "PYTHONPYCACHEPREFIX=/tmp/pycache"]
         return command
 
     def argv(self, name: str, workspace: Path, script: str, *, writable: bool,

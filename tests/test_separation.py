@@ -309,6 +309,7 @@ class SandboxPolicyTests(unittest.TestCase):
             load(path)  # must not raise
         # Refused: exact tokens, runtime vars, and process-startup hijack vars.
         for key in ("HF_TOKEN", "MY_SECRET", "API_KEY", "PUBLIC_KEY_PATH", "HOME", "PATH",
+                    "PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX",
                     "NODE_OPTIONS", "LD_PRELOAD", "LD_LIBRARY_PATH", "PYTHONPATH", "BASH_ENV"):
             path = self.root / f"env-bad-{key}.toml"
             path.write_text(self.file.read_text() + f'\n[sandbox.env]\n{key} = "x"\n')

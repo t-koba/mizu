@@ -579,7 +579,8 @@ def load(file: Path) -> Config:
         # Linux, so exact-name deny is sufficient; legitimate tuning belongs
         # in the image build, not per-run env. Aligned with the pi/codex
         # credential denylists and the OpenClaw MCP-env fix (GHSA-mj59-h3q9-ghfh).
-        if key in ("HOME", "TMPDIR", "PATH", "NODE_OPTIONS", "LD_PRELOAD",
+        if key in ("HOME", "TMPDIR", "PATH", "PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX",
+                   "NODE_OPTIONS", "LD_PRELOAD",
                    "LD_LIBRARY_PATH", "PYTHONPATH", "BASH_ENV") or re.search(r"(^|_)(KEY|SECRET|TOKEN)(_|$)", key):
             raise ConfigError(f"sandbox.env must not shadow runtime vars or carry secrets: {key}. "
                               "Keep credentials out of container environments.")
@@ -858,4 +859,4 @@ def load(file: Path) -> Config:
     return Config(file, path_value(string(data.get("data_dir", "~/.local/state/mizu"), "data_dir"), file.parent),
                   environments, limits, sandbox, profiles, roles, consult, consult_role, timezone, web, vcs, mat,
                   strings(data.get("exclude", [".git", ".pi", ".env", ".env.*", ".venv",
-                                                "node_modules", "__pycache__", ".pytest_cache"]), "exclude"), selectors)
+                                                "node_modules", "__pycache__", "*.pyc", "*.pyo", ".pytest_cache"]), "exclude"), selectors)

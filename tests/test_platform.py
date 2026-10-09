@@ -226,6 +226,8 @@ class ContainerArgvTests(unittest.TestCase):
         self.assertTrue(any(a.endswith(":ro") or a.endswith(":ro,z") or "readonly" in a for a in selected))
         self.assertTrue(any(str(data) in a for a in selected))
         self.assertIn("HOME=/tmp/home", args)
+        self.assertIn("PYTHONDONTWRITEBYTECODE=1", args)
+        self.assertIn("PYTHONPYCACHEPREFIX=/tmp/pycache", args)
         home_idx = args.index("HF_HOME=/data/hf")
         self.assertEqual(args[home_idx - 1], "--env")
 
@@ -271,6 +273,8 @@ class ContainerArgvTests(unittest.TestCase):
             ('[sandbox.env]\nLD_PRELOAD = "x"\n', "hijack var", True),
             ('[sandbox.env]\nLD_LIBRARY_PATH = "x"\n', "hijack var", True),
             ('[sandbox.env]\nPYTHONPATH = "x"\n', "hijack var", True),
+            ('[sandbox.env]\nPYTHONDONTWRITEBYTECODE = "0"\n', "shadowed runtime var", True),
+            ('[sandbox.env]\nPYTHONPYCACHEPREFIX = "/x"\n', "shadowed runtime var", True),
             ('[sandbox.env]\nBASH_ENV = "x"\n', "hijack var", True),
             ('[sandbox.env]\nBAD-KEY = "s"\n', "bad key", True),
             ('entrypoint = "relative/sh"\n', "relative entrypoint", False),

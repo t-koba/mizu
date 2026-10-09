@@ -11,7 +11,7 @@ consult_profiles = ["primary", "alternate"]
 # Default answering role for consultation when the caller names none.
 # Unset (empty) fails closed: consultation then requires an explicit role.
 consult_role = "consult"
-exclude = [".git", ".pi", ".env", ".env.*", ".venv", "node_modules", "__pycache__", ".pytest_cache"]
+exclude = [".git", ".pi", ".env", ".env.*", ".venv", "node_modules", "__pycache__", "*.pyc", "*.pyo", ".pytest_cache"]
 
 [limits]
 daily_requests = 0                 # Fail closed. Set a deliberate positive limit.
@@ -62,6 +62,7 @@ entrypoint = "/bin/sh"            # Policy-selected container entrypoint; the im
 # source = "/data/corpus"
 # target = "/data"
 # Extra container environment, selected by policy. Runtime vars (HOME, TMPDIR,
+# PYTHONDONTWRITEBYTECODE, PYTHONPYCACHEPREFIX,
 # PATH), process-startup hijack vars (NODE_OPTIONS, LD_PRELOAD, LD_LIBRARY_PATH,
 # PYTHONPATH, BASH_ENV) and secret-looking names (KEY/SECRET/TOKEN as a full
 # _-separated token, e.g. HF_TOKEN; MONKEY_PATH and TOKENIZERS_* stay allowed)
