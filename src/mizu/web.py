@@ -241,9 +241,14 @@ class Web:
 
     def fetch(self, url: str) -> dict:
         original = url
+        # A decider owns the per-hop destination decision, but receipts store
+        # no hop count, so a cache hit cannot replay the redirect-hop question.
+        # Bypass the cache while a decider is configured: every fetch then
+        # replays each hop live. Static lists stay hop-insensitive and cached.
+        decider = bool(self.settings.get("destination_command"))
         cache_file = self.cache / f"{digest(url.encode())}.json"
         try:
-            cached = read_json(cache_file)
+            cached = None if decider else read_json(cache_file)
         except (OSError, ValueError):
             cached = None
         epoch = cached.get("retrieved_epoch") if isinstance(cached, dict) else None
@@ -291,7 +296,8 @@ class Web:
                            "url": original, "final_url": url, "retrieved_at": now(),
                            "retrieved_epoch": time.time(), "sha256": digest(raw),
                            "content_type": media, "text": text, "trust": "external-untrusted"}
-                write_json(cache_file, receipt)
+                if not decider:
+                    write_json(cache_file, receipt)
                 write_json(self.receipts / f"{receipt['id']}.json", receipt, exclusive=True)
                 return receipt
             finally:
