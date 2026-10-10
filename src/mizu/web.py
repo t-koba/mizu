@@ -68,6 +68,46 @@ class Text(HTMLParser):
             self.parts.append(data)
 
 
+def match_host(host: str, entries: list[str]) -> str | None:
+    """Match one normalized host against exact and domain-suffix entries.
+
+    Entries are operator configuration: a plain entry (``example.com``)
+    matches exactly; a leading-dot entry (``.example.com``) matches the
+    base domain and its subdomains on a label boundary (``example.com``,
+    ``www.example.com``) but never ``notexample.com`` or
+    ``example.com.evil.test``. Returns ``"exact"``/``"suffix"`` or
+    ``None``. Malformed entries never match (fail closed). This is the one
+    shared destination check used by both ``fetch`` (``hosts``) and
+    ``probe`` (``probe_hosts``); which list applies stays per-capability
+    policy, and ``probe`` keeps its own method/header/body rules.
+    """
+    if not isinstance(host, str) or not host:
+        return None
+    host = host.lower().rstrip(".")
+    if not host:
+        return None
+    exact: set[str] = set()
+    suffixes: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, str) or not entry:
+            continue
+        normalized = entry.lower().rstrip(".")
+        if normalized.startswith("."):
+            base = normalized[1:]
+            if (not base or base.startswith(".") or ".." in base
+                    or any(c in base for c in (" ", "/", ":", "@", "?", "#"))):
+                continue
+            suffixes.append(base)
+        else:
+            exact.add(normalized)
+    if host in exact:
+        return "exact"
+    for base in suffixes:
+        if host == base or host.endswith("." + base):
+            return "suffix"
+    return None
+
+
 def validate_url(url: str, hosts: list[str]) -> tuple[str, str]:
     if not isinstance(url, str) or len(url) > 4096 or any(ord(c) < 33 for c in url):
         raise Denied("Invalid URL")
@@ -79,7 +119,7 @@ def validate_url(url: str, hosts: list[str]) -> tuple[str, str]:
     host = (parsed.hostname or "").lower().rstrip(".")
     if parsed.scheme != "https" or port not in (None, 443) or parsed.username or parsed.password:
         raise Denied("Only HTTPS without credentials, on port 443, is allowed")
-    if not host or host not in {h.lower() for h in hosts}:
+    if not host or match_host(host, hosts) is None:
         raise Denied(f"Host is not allowlisted: {host}")
     # Fragments are client-side only: strip them instead of refusing, so feed
     # links like /doc#section-3 stay fetchable. They never reach the wire.
@@ -194,7 +234,8 @@ class Web:
     def probe(self, request: dict) -> dict:
         """Observe one HTTPS endpoint under operator policy (no redirects).
 
-        Schema: ``request`` carries ``url`` (allowlisted ``probe_hosts``),
+        Schema: ``request`` carries ``url`` (``probe_hosts`` exact or
+        leading-dot entries, checked by the shared destination check),
         ``method`` (allowlisted ``probe_methods``), ``headers`` (list of
         ``{name, value}``, at most 16), ``body`` (bounded string).
         Bounds: request body and response each at most ``max_bytes``;

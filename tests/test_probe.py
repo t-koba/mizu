@@ -76,6 +76,18 @@ class ProbeTests(Fixture):
         with self.assertRaises(Denied):
             web.probe({"url": "https://other.example/x", "method": "GET"})
 
+    def test_host_domain_suffix_uses_shared_check(self):
+        from mizu.web import validate_url
+        web = make_web(Path(self.temporary.name))
+        web.settings = {**SETTINGS, "probe_hosts": [".probe.example"], "probe_methods": ["GET"]}
+        # Subdomain passes the shared destination check (method still gated).
+        self.assertEqual(validate_url("https://api.probe.example/x", [".probe.example"]),
+                         ("api.probe.example", "/x"))
+        with self.assertRaises(Denied):
+            web.probe({"url": "https://other.example/x", "method": "GET"})
+        with self.assertRaises(Denied):
+            web.probe({"url": "https://api.probe.example/x", "method": "DELETE"})
+
     def test_credential_headers_refused(self):
         web = make_web(Path(self.temporary.name))
         for name in ("Authorization", "Cookie", "Proxy-Auth", "Host", "Content-Length", "Sec-Fetch-Site"):

@@ -300,8 +300,8 @@ Configures outbound retrieval for `fetch` and `search`:
 
 | Key | Default | Description |
 |---|---|---|
-| `hosts` | `[]` | Exact HTTPS hostname allowlist; re-checked on every redirect (no wildcards) |
-| `probe_hosts` | `[]` | Exact HTTPS hostname allowlist for `probe` observation; empty disables `probe` |
+| `hosts` | `[]` | HTTPS hostname allowlist; re-checked on every redirect. Plain entries match exactly; a leading-dot entry (e.g. `.python.org`) also covers the base domain and its subdomains on a label boundary. Prefer the narrowest entry: a suffix trusts every subdomain beneath it |
+| `probe_hosts` | `[]` | HTTPS hostname allowlist for `probe` observation with the same exact/leading-dot entries; empty disables `probe` |
 | `probe_methods` | `[]` | Allowlisted `probe` methods (uppercase tokens, e.g. `GET`, `POST`); empty disables `probe` |
 | `feeds` | `[]` | Allowed RSS/Atom feed URLs for discovery |
 | `search_command` | `[]` | Trusted argv command receiving/returning bounded JSON |

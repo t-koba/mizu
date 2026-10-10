@@ -265,6 +265,21 @@ class IsolationAndWebTests(Fixture):
             with self.assertRaises(Denied):
                 validate_url(url, ["example.com"])
 
+    def test_url_allowlist_domain_suffix(self):
+        from mizu.web import match_host
+        # Leading-dot entries cover the base domain and subdomains only.
+        self.assertEqual(validate_url("https://python.org/", [".python.org"]), ("python.org", "/"))
+        self.assertEqual(validate_url("https://docs.python.org/x", [".python.org"]), ("docs.python.org", "/x"))
+        self.assertEqual(match_host("www.python.org", ["example.com", ".python.org"]), "suffix")
+        self.assertEqual(match_host("example.com", ["example.com", ".python.org"]), "exact")
+        for host in ("notpython.org", "python.org.evil.test", "other.example"):
+            self.assertIsNone(match_host(host, [".python.org"]))
+            with self.assertRaises(Denied):
+                validate_url(f"https://{host}/", ["example.com", ".python.org"])
+        # Malformed entries never match (fail closed).
+        for entries in (["."], ["..evil"], [""], [".exa mple"]):
+            self.assertIsNone(match_host("example.com", entries))
+
     def test_private_dns_refused(self):
         for address in ("127.0.0.1", "169.254.169.254", "10.1.2.3", "192.168.1.1"):
             with patch("socket.getaddrinfo", return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, 443))]):

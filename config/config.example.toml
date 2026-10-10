@@ -164,8 +164,10 @@ poll_fetch_timeout_seconds = 30  # Daemon fetch adapter cap in seconds (1-300).
 poll_status_timeout_seconds = 15 # Daemon per-branch status adapter cap in seconds (1-300).
 
 [web]
-hosts = []                       # Exact HTTPS host allowlist, rechecked on every redirect.
-probe_hosts = []                 # Exact HTTPS host allowlist for policy-bounded protocol observation (empty disables probe).
+hosts = []                       # HTTPS host allowlist, rechecked on every redirect: exact hosts ("example.com");
+# a leading-dot entry (".python.org") also covers the base domain and its subdomains. Prefer the narrowest entry.
+probe_hosts = []                 # HTTPS host allowlist for policy-bounded protocol observation (empty disables probe),
+# with the same exact/leading-dot entries.
 probe_methods = []               # Allowlisted probe methods, e.g. ["GET", "POST"] (empty disables probe).
 feeds = []                       # RSS/Atom; optional discovery adapter below.
 search_command = []              # Trusted argv executable; JSON stdin/stdout, never a shell string.
