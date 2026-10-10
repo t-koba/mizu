@@ -279,6 +279,12 @@ class IsolationAndWebTests(Fixture):
         # Malformed entries never match (fail closed).
         for entries in (["."], ["..evil"], [""], [".exa mple"]):
             self.assertIsNone(match_host("example.com", entries))
+        # A single "*" entry opens any public HTTPS host; empty stays closed.
+        self.assertEqual(match_host("anything.example", ["*"]), "open")
+        self.assertEqual(validate_url("https://anything.example/x", ["*"]), ("anything.example", "/x"))
+        self.assertIsNone(match_host("example.com", []))
+        with self.assertRaises(Denied):
+            validate_url("https://example.com/", [])
 
     def test_private_dns_refused(self):
         for address in ("127.0.0.1", "169.254.169.254", "10.1.2.3", "192.168.1.1"):

@@ -165,9 +165,11 @@ poll_status_timeout_seconds = 15 # Daemon per-branch status adapter cap in secon
 
 [web]
 hosts = []                       # HTTPS host allowlist, rechecked on every redirect: exact hosts ("example.com");
-# a leading-dot entry (".python.org") also covers the base domain and its subdomains. Prefer the narrowest entry.
+# a leading-dot entry (".python.org") also covers the base domain and its subdomains. A single "*" entry
+# allows any public HTTPS host (HTTPS-only, port 443, public-DNS refusal unless intranet, and bounds still
+# apply). Empty stays closed. Prefer the narrowest entry.
 probe_hosts = []                 # HTTPS host allowlist for policy-bounded protocol observation (empty disables probe),
-# with the same exact/leading-dot entries.
+# with the same exact/leading-dot/"*" entries (probe keeps its own method/header/body rules).
 probe_methods = []               # Allowlisted probe methods, e.g. ["GET", "POST"] (empty disables probe).
 feeds = []                       # RSS/Atom; optional discovery adapter below.
 search_command = []              # Trusted argv executable; JSON stdin/stdout, never a shell string.

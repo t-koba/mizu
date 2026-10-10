@@ -69,17 +69,22 @@ class Text(HTMLParser):
 
 
 def match_host(host: str, entries: list[str]) -> str | None:
-    """Match one normalized host against exact and domain-suffix entries.
+    """Match one normalized host against exact, domain-suffix, and open entries.
 
     Entries are operator configuration: a plain entry (``example.com``)
     matches exactly; a leading-dot entry (``.example.com``) matches the
     base domain and its subdomains on a label boundary (``example.com``,
     ``www.example.com``) but never ``notexample.com`` or
-    ``example.com.evil.test``. Returns ``"exact"``/``"suffix"`` or
-    ``None``. Malformed entries never match (fail closed). This is the one
-    shared destination check used by both ``fetch`` (``hosts``) and
-    ``probe`` (``probe_hosts``); which list applies stays per-capability
-    policy, and ``probe`` keeps its own method/header/body rules.
+    ``example.com.evil.test``; a single ``"*"`` entry allows any public
+    HTTPS host (other protections — HTTPS-only, port 443, public-DNS
+    refusal unless ``intranet``, redirect re-check, bounds, receipts —
+    still apply, so open reach stays inside the same safe transport).
+    Returns ``"exact"``/``"suffix"``/``"open"`` or ``None``. Malformed
+    entries never match (fail closed); empty lists stay closed. This is
+    the one shared destination check used by both ``fetch`` (``hosts``)
+    and ``probe`` (``probe_hosts``); which list applies stays
+    per-capability policy, and ``probe`` keeps its own method/header/body
+    rules.
     """
     if not isinstance(host, str) or not host:
         return None
@@ -88,8 +93,12 @@ def match_host(host: str, entries: list[str]) -> str | None:
         return None
     exact: set[str] = set()
     suffixes: list[str] = []
+    open_entry = False
     for entry in entries:
         if not isinstance(entry, str) or not entry:
+            continue
+        if entry == "*":
+            open_entry = True
             continue
         normalized = entry.lower().rstrip(".")
         if normalized.startswith("."):
@@ -105,6 +114,8 @@ def match_host(host: str, entries: list[str]) -> str | None:
     for base in suffixes:
         if host == base or host.endswith("." + base):
             return "suffix"
+    if open_entry:
+        return "open"
     return None
 
 
@@ -234,8 +245,9 @@ class Web:
     def probe(self, request: dict) -> dict:
         """Observe one HTTPS endpoint under operator policy (no redirects).
 
-        Schema: ``request`` carries ``url`` (``probe_hosts`` exact or
-        leading-dot entries, checked by the shared destination check),
+        Schema: ``request`` carries ``url`` (``probe_hosts`` exact,
+        leading-dot, or ``"*"`` open entries, checked by the shared
+        destination check),
         ``method`` (allowlisted ``probe_methods``), ``headers`` (list of
         ``{name, value}``, at most 16), ``body`` (bounded string).
         Bounds: request body and response each at most ``max_bytes``;

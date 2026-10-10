@@ -88,6 +88,18 @@ class ProbeTests(Fixture):
         with self.assertRaises(Denied):
             web.probe({"url": "https://api.probe.example/x", "method": "DELETE"})
 
+    def test_host_open_entry_uses_shared_check(self):
+        from mizu.web import validate_url
+        # "*" opens any host through the same check; methods still gated.
+        self.assertEqual(validate_url("https://anything.example/x", ["*"]),
+                         ("anything.example", "/x"))
+        web = make_web(Path(self.temporary.name))
+        web.settings = {**SETTINGS, "probe_hosts": ["*"], "probe_methods": ["GET"]}
+        self.assertEqual(validate_url("https://anything.example/x", web.settings["probe_hosts"]),
+                         ("anything.example", "/x"))
+        with self.assertRaises(Denied):
+            web.probe({"url": "https://anything.example/x", "method": "DELETE"})
+
     def test_credential_headers_refused(self):
         web = make_web(Path(self.temporary.name))
         for name in ("Authorization", "Cookie", "Proxy-Auth", "Host", "Content-Length", "Sec-Fetch-Site"):
