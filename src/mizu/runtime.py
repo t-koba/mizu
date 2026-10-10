@@ -103,7 +103,7 @@ def is_deferred(exc: BaseException, context=None) -> bool:
 
 #: Capabilities that let a consultation role change shared state or execute
 #: code. Consultation must stay read-only and advisory: workspace "read" plus
-#: none of these. Read-only grants (files/read/diff/insights/fetch/search)
+#: none of these. Read-only grants (files/read/diff/insights/fetch/probe/search)
 #: stay operator choice, plus the required finish.
 CONSULT_FORBIDDEN = frozenset({"exec", "experiment", "verify", "decide",
                                "submit_insight", "consult", "report", "sync",
@@ -358,6 +358,16 @@ class Context:
 
     def _op_fetch(self, args: dict) -> dict:
         record = bounded(self.config, self.run_dir, "fetch", args["url"], self.tools_cancelled)
+        text = record.get('text','')
+        offset,limit = args.get('offset',0),args.get('limit',8192)
+        end = min(len(text),offset+limit)
+        return {**record,'text':text[offset:end],'offset':offset,
+                'next_offset':end if end<len(text) else None,'truncated':end<len(text)}
+
+    def _op_probe(self, args: dict) -> dict:
+        payload = {"url": args["url"], "method": args["method"],
+                   "headers": args.get("headers", []), "body": args.get("body", "")}
+        record = bounded(self.config, self.run_dir, "probe", payload, self.tools_cancelled)
         text = record.get('text','')
         offset,limit = args.get('offset',0),args.get('limit',8192)
         end = min(len(text),offset+limit)
@@ -674,7 +684,7 @@ class Context:
     _DISPATCH = {
         "diff": _op_diff, "files": _op_files, "read": _op_read,
         "exec": _op_exec, "experiment": _op_experiment, "verify": _op_verify,
-        "fetch": _op_fetch, "search": _op_search, "insights": _op_insights,
+        "fetch": _op_fetch, "probe": _op_probe, "search": _op_search, "insights": _op_insights,
         "decide": _op_decide, "submit_insight": _op_submit_insight,
         "sync": _op_sync, "vcs_read": _op_vcs_read, "vcs_publish": _op_vcs_publish,
         "vcs_retire": _op_vcs_retire, "vcs_dispose": _op_vcs_dispose,

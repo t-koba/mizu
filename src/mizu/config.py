@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .errors import ConfigError
 from .fs import ID
-CAPABILITIES = frozenset({"diff", "files", "read", "exec", "experiment", "verify", "fetch",
+CAPABILITIES = frozenset({"diff", "files", "read", "exec", "experiment", "verify", "fetch", "probe",
                           "search", "insights", "decide", "submit_insight", "consult",
                           "report", "finish", "sync", "vcs_read", "vcs_publish",
                           "vcs_retire", "vcs_dispose", "research_read", "research",
@@ -804,11 +804,18 @@ def load(file: Path) -> Config:
     timezone = string(data.get("timezone", "UTC"), "timezone")
     web = data.get("web", {})
     keys(web, {"hosts", "feeds", "cache_seconds", "timeout_seconds", "max_bytes", "search_command",
-               "intranet"}, "web")
+               "intranet", "probe_hosts", "probe_methods"}, "web")
     web = {"hosts": [], "feeds": [], "cache_seconds": 1800, "timeout_seconds": 20,
-           "max_bytes": 524288, "search_command": [], "intranet": False, **web}
-    for k in ("hosts", "feeds", "search_command"):
+           "max_bytes": 524288, "search_command": [], "intranet": False,
+           "probe_hosts": [], "probe_methods": [], **web}
+    for k in ("hosts", "feeds", "search_command", "probe_hosts", "probe_methods"):
         strings(web[k], f"web.{k}")
+    import re as _re_probe
+    for _m in web["probe_methods"]:
+        if not _re_probe.fullmatch(r"[A-Z]{1,16}", _m):
+            raise ConfigError("web.probe_methods entries must be uppercase HTTP tokens (1-16 chars)")
+    if len(set(web["probe_methods"])) != len(web["probe_methods"]):
+        raise ConfigError("web.probe_methods must not contain duplicates")
     for k in ("cache_seconds", "timeout_seconds", "max_bytes"):
         number(web[k], f"web.{k}", 1, 16777216)
     web["intranet"] = boolean(web["intranet"], "web.intranet")

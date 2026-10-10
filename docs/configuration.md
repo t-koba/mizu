@@ -251,6 +251,7 @@ models are recorded. Model usage excludes unreported auxiliary billing.
 | `experiment` | Container command with readonly source and ephemeral work area |
 | `verify` | Execute operator-owned command strings and bind proof to code digest |
 | `fetch`, `search` | Allowlisted retrieval / trusted discovery adapter |
+| `probe` | One policy-bounded HTTPS request to `probe_hosts` with an allowlisted method and bounded headers/body; observes status, headers and bounded body with a receipt (no redirects, no credentials) |
 | `insights` | Read proposals |
 | `decide` | Record accept/modify/defer/reject and rationale |
 | `submit_insight` | Submit proposal with route-derived identity |
@@ -300,6 +301,8 @@ Configures outbound retrieval for `fetch` and `search`:
 | Key | Default | Description |
 |---|---|---|
 | `hosts` | `[]` | Exact HTTPS hostname allowlist; re-checked on every redirect (no wildcards) |
+| `probe_hosts` | `[]` | Exact HTTPS hostname allowlist for `probe` observation; empty disables `probe` |
+| `probe_methods` | `[]` | Allowlisted `probe` methods (uppercase tokens, e.g. `GET`, `POST`); empty disables `probe` |
 | `feeds` | `[]` | Allowed RSS/Atom feed URLs for discovery |
 | `search_command` | `[]` | Trusted argv command receiving/returning bounded JSON |
 | `intranet` | `false` | When true, permits any private unicast IP (`ip.is_private`); multicast, link-local, loopback, unspecified, and transition addresses stay refused |
@@ -308,6 +311,8 @@ Configures outbound retrieval for `fetch` and `search`:
 | `max_bytes` | `524288` | Maximum response payload (512 KiB) |
 
 URL fragments are stripped client-side and never sent. Redirects re-validate hostname, port, and IP. Text/HTML/XML/JSON formats are supported; binary/PDF/image formats are rejected.
+
+`probe` reuses `[web] timeout_seconds`/`max_bytes`/`intranet` with its own `probe_hosts`/`probe_methods` allowlists. It sends one request (caller headers at most 16, names 128, values 4096; credential/framing headers refused) with a bounded body (at most `max_bytes`, 32 KiB tool-input cap), follows no redirects (3xx returns as observation), never caches, and records a `sources/<id>.json` receipt (`status`, bounded headers, `sha256`, `trust: external-untrusted`). Non-2xx statuses return as observation, never as failure.
 
 ## VCS (upstream sync, M1 step 5: grant-gated `sync` refresh plus daemon periodic fetch)
 

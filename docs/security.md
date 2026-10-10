@@ -118,10 +118,12 @@ Outbound traffic is separated by purpose instead of banned uniformly:
   dropped capabilities, `no-new-privileges` and user mapping stay fixed.
   Dependencies arrive via operator-reviewed images, never via in-sandbox
   downloads unless the operator enables the network and accepts the risk.
-- Retrieval (`fetch`/`search`): explicit HTTPS egress to operator-allowlisted
+- Retrieval (`fetch`/`search`/`probe`): explicit HTTPS egress to operator-allowlisted
   hosts, every response kept as a content receipt. Where to allow is policy
-  (`[web]`); the receipts, bounds and untrusted labels are
-  mechanism.
+  (`[web]`, with `probe` destinations/methods in `probe_hosts`/`probe_methods`);
+  the receipts, bounds and untrusted labels are
+  mechanism. `probe` follows no redirects, never caches, and refuses
+  credential/framing headers with no credentials injected.
 - Provider inference: the controller holds credentials and must contact those
   endpoints. Editor inference also has network access and its own credentials.
   Experiment code has none.

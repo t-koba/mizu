@@ -29,7 +29,12 @@ def main():
     try:
         data = json.loads(sys.stdin.buffer.readline(PREVIEW_BYTES + 1))
         web = Web(data["settings"], Path(data["cache"]), Path(data["receipts"]))
-        result = web.fetch(data["value"]) if data["operation"] == "fetch" else web.search(data["value"])
+        if data["operation"] == "fetch":
+            result = web.fetch(data["value"])
+        elif data["operation"] == "probe":
+            result = web.probe(data["value"])
+        else:
+            result = web.search(data["value"])
         sys.stdout.buffer.write(canonical(result))
         return 0
     except Exception as exc:

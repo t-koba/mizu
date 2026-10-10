@@ -30,6 +30,21 @@ SEARCH_RESULT_LIMIT = 1000
 #: Per-feed shaping bound: one huge feed must not crowd out other sources
 #: before the global cut. Feed order decides which items are kept.
 SEARCH_FEED_ITEM_LIMIT = 200
+#: Policy-bounded protocol observation: at most 16 caller headers per probe.
+PROBE_MAX_HEADERS = 16
+#: Fixed header bounds (mechanism, not knobs): names 128, values 4096.
+PROBE_HEADER_NAME_MAX = 128
+PROBE_HEADER_VALUE_MAX = 4096
+#: Response header bounds: at most 64 headers, names 256, values 8192.
+PROBE_RESPONSE_HEADERS_MAX = 64
+PROBE_RESPONSE_NAME_MAX = 256
+PROBE_RESPONSE_VALUE_MAX = 8192
+#: Credential/framing headers never sent from role input (fixed mechanism).
+PROBE_REFUSED_HEADERS = frozenset({
+    "authorization", "proxy-authorization", "cookie", "cookie2",
+    "host", "content-length", "transfer-encoding", "connection",
+    "proxy-connection", "upgrade",
+})
 
 
 class Text(HTMLParser):
@@ -175,6 +190,108 @@ class Web:
             finally:
                 connection.close()
         raise Denied("Too many redirects")
+
+    def probe(self, request: dict) -> dict:
+        """Observe one HTTPS endpoint under operator policy (no redirects).
+
+        Schema: ``request`` carries ``url`` (allowlisted ``probe_hosts``),
+        ``method`` (allowlisted ``probe_methods``), ``headers`` (list of
+        ``{name, value}``, at most 16), ``body`` (bounded string).
+        Bounds: request body and response each at most ``max_bytes``;
+        timeout ``timeout_seconds``; DNS pinned like ``fetch``; no
+        redirects (3xx returns as observation); never cached.
+        Trust: external-untrusted with a content receipt. No credentials
+        are injected and credential/framing headers are refused.
+        Failure: ``Denied`` on unconfigured probe, bad method/host/header,
+        oversize body, timeout, or oversize response. Non-2xx statuses
+        return as observation, never as failure.
+        """
+        import re as _re
+        if not isinstance(request, dict):
+            raise Denied("Probe request must be an object")
+        url = request.get("url", "")
+        method = request.get("method", "")
+        headers = request.get("headers", [])
+        body = request.get("body", "")
+        if not isinstance(method, str) or not _re.fullmatch(r"[A-Z]{1,16}", method):
+            raise Denied("Probe method must be an uppercase HTTP token")
+        allowed = self.settings.get("probe_methods", [])
+        if method not in {str(m).upper() for m in allowed}:
+            raise Denied(f"Probe method is not allowlisted: {method}")
+        if not self.settings.get("probe_hosts"):
+            raise Denied("Protocol observation is not configured")
+        if not isinstance(headers, list) or len(headers) > PROBE_MAX_HEADERS:
+            raise Denied("Probe headers must list at most 16 entries")
+        seen: list[tuple[str, str]] = []
+        names: set[str] = set()
+        for entry in headers:
+            if not isinstance(entry, dict) or set(entry) != {"name", "value"}:
+                raise Denied("Probe header entries must hold name and value only")
+            name, value = entry.get("name"), entry.get("value")
+            if not isinstance(name, str) or not isinstance(value, str):
+                raise Denied("Probe header name and value must be strings")
+            if "\x00" in name or "\x00" in value or "\n" in name or "\n" in value:
+                raise Denied("Probe headers must be single-line strings")
+            if not 1 <= len(name) <= PROBE_HEADER_NAME_MAX or len(value) > PROBE_HEADER_VALUE_MAX:
+                raise Denied("Probe header name or value exceeds bound")
+            if not _re.fullmatch(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+", name):
+                raise Denied("Invalid probe header name")
+            lowered = name.lower()
+            if lowered in PROBE_REFUSED_HEADERS or lowered.startswith("proxy-") or lowered.startswith("sec-"):
+                raise Denied(f"Probe header is not permitted: {name}")
+            if lowered in names:
+                raise Denied("Duplicate probe header")
+            names.add(lowered)
+            seen.append((name, value))
+        if not isinstance(body, str) or "\x00" in body:
+            raise Denied("Probe body must be a string without NUL")
+        body_bytes = body.encode("utf-8")
+        if len(body_bytes) > self.settings["max_bytes"]:
+            raise Denied("Probe body exceeds byte limit")
+        host, path = validate_url(url, self.settings.get("probe_hosts", []))
+        intranet = bool(self.settings.get("intranet", False))
+        connection = PinnedHTTPS(host, public_addresses(host, intranet), self.settings["timeout_seconds"])
+        try:
+            outgoing = {"User-Agent": "Mizu/" + __version__,
+                        "Accept-Encoding": "identity",
+                        "Accept": "*/*",
+                        "Connection": "close"}
+            for name, value in seen:
+                outgoing[name] = value
+            payload: bytes | None = None
+            if body_bytes:
+                outgoing.setdefault("Content-Type", "application/json")
+                outgoing["Content-Length"] = str(len(body_bytes))
+                payload = body_bytes
+            connection.request(method, path, body=payload, headers=outgoing)
+            response = connection.getresponse()
+            status = response.status
+            raw_headers: list[tuple[str, str]] = []
+            for name, value in response.getheaders():
+                if len(raw_headers) >= PROBE_RESPONSE_HEADERS_MAX:
+                    break
+                if not isinstance(name, str) or not isinstance(value, str):
+                    continue
+                name = name.strip()
+                value = value.strip().replace("\n", " ").replace("\r", " ")
+                if not name or len(name) > PROBE_RESPONSE_NAME_MAX:
+                    continue
+                raw_headers.append((name, value[:PROBE_RESPONSE_VALUE_MAX]))
+            raw = response.read(self.settings["max_bytes"] + 1)
+            if len(raw) > self.settings["max_bytes"]:
+                raise Denied("Probe response exceeds byte limit")
+            text = raw.decode("utf-8", "replace")
+            media = response.getheader("Content-Type", "").split(";")[0].strip()[:256]
+            receipt = {"id": digest((url + "\n" + method + "\n" + digest(raw) + "\n" + str(time.time_ns())).encode()),
+                       "url": url, "method": method, "status": status,
+                       "headers": [{"name": n, "value": v} for n, v in raw_headers],
+                       "media": media, "retrieved_at": now(),
+                       "retrieved_epoch": time.time(), "sha256": digest(raw),
+                       "text": text, "trust": "external-untrusted"}
+            write_json(self.receipts / f"{receipt['id']}.json", receipt, exclusive=True)
+            return receipt
+        finally:
+            connection.close()
 
     def _search_feeds(self, query: str) -> tuple[list, list, int, int]:
         """Keyword overlap over every configured feed; best-effort per feed.

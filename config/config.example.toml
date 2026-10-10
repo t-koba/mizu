@@ -165,6 +165,8 @@ poll_status_timeout_seconds = 15 # Daemon per-branch status adapter cap in secon
 
 [web]
 hosts = []                       # Exact HTTPS host allowlist, rechecked on every redirect.
+probe_hosts = []                 # Exact HTTPS host allowlist for policy-bounded protocol observation (empty disables probe).
+probe_methods = []               # Allowlisted probe methods, e.g. ["GET", "POST"] (empty disables probe).
 feeds = []                       # RSS/Atom; optional discovery adapter below.
 search_command = []              # Trusted argv executable; JSON stdin/stdout, never a shell string.
 intranet = false                 # Policy-selected private-network retrieval. true allows RFC 1918/ULA destinations (loopback stays refused); the operator accepts the exfiltration risk.
