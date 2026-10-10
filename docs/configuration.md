@@ -305,6 +305,7 @@ Configures outbound retrieval for `fetch` and `search`:
 | `probe_methods` | `[]` | Allowlisted `probe` methods (uppercase tokens, e.g. `GET`, `POST`); empty disables `probe` |
 | `feeds` | `[]` | Allowed RSS/Atom feed URLs for discovery |
 | `search_command` | `[]` | Trusted argv command receiving/returning bounded JSON |
+| `destination_command` | `[]` | Trusted argv owning the destination decision per request (`url`, `host`, `role`, `capability` fetch/probe, redirect `hop`, `method`); stdin bounded JSON, stdout must be `{"allow": bool}`. Unset keeps the `hosts`/`probe_hosts` lists; when set the decider decides authoritatively per hop and anything but explicit `true` denies (fail closed). HTTPS-only, port 443, DNS pinning, bounds and receipts stay in mechanism |
 | `intranet` | `false` | When true, permits any private unicast IP (`ip.is_private`); multicast, link-local, loopback, unspecified, and transition addresses stay refused |
 | `cache_seconds` | `1800` | Response cache TTL: reuse window and expired-entry reclamation age (`retrieved_epoch` vs now; epoch-less entries use mtime) |
 | `timeout_seconds`| `20` | Request timeout |

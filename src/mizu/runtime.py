@@ -158,7 +158,7 @@ class Context:
         self.consult = consult
         self.ephemeral = False
         self.sandbox = Sandbox(config, project.root, role.name, run_dir, cancel=self.tools_cancelled)
-        self.web = Web(config.web, config.data / "web-cache", run_dir / "sources")
+        self.web = Web(config.web, config.data / "web-cache", run_dir / "sources", role.name)
 
     def cancel_operations(self):
         self.operations_stopped.set()
@@ -357,7 +357,8 @@ class Context:
             for command in self.verification['commands']], 'evidence':'verification.json'}
 
     def _op_fetch(self, args: dict) -> dict:
-        record = bounded(self.config, self.run_dir, "fetch", args["url"], self.tools_cancelled)
+        record = bounded(self.config, self.run_dir, "fetch", args["url"], self.tools_cancelled,
+                         self.role.name)
         text = record.get('text','')
         offset,limit = args.get('offset',0),args.get('limit',8192)
         end = min(len(text),offset+limit)
@@ -367,7 +368,8 @@ class Context:
     def _op_probe(self, args: dict) -> dict:
         payload = {"url": args["url"], "method": args["method"],
                    "headers": args.get("headers", []), "body": args.get("body", "")}
-        record = bounded(self.config, self.run_dir, "probe", payload, self.tools_cancelled)
+        record = bounded(self.config, self.run_dir, "probe", payload, self.tools_cancelled,
+                         self.role.name)
         text = record.get('text','')
         offset,limit = args.get('offset',0),args.get('limit',8192)
         end = min(len(text),offset+limit)
@@ -375,7 +377,8 @@ class Context:
                 'next_offset':end if end<len(text) else None,'truncated':end<len(text)}
 
     def _op_search(self, args: dict) -> dict:
-        record = bounded(self.config, self.run_dir, "search", args["query"], self.tools_cancelled)
+        record = bounded(self.config, self.run_dir, "search", args["query"], self.tools_cancelled,
+                         self.role.name)
         evidence_id=digest(canonical(record))
         write_json(self.run_dir/'sources'/('search-'+evidence_id+'.json'),record,exclusive=True)
         rows=[]

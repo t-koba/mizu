@@ -11,10 +11,11 @@ from .process import environment, run
 from .web import Web
 
 
-def bounded(config, run_dir, operation, value, cancel):
+def bounded(config, run_dir, operation, value, cancel, role: str = ""):
     root = Path(__file__).resolve().parents[1]
     request = {"settings": config.web, "cache": str(config.data / "web-cache"),
-               "receipts": str(run_dir / "sources"), "operation": operation, "value": value}
+               "receipts": str(run_dir / "sources"), "operation": operation, "value": value,
+               "role": role}
     # Search may fetch multiple feeds, but remains bounded by the parent run deadline.
     timeout = config.web["timeout_seconds"] * (len(config.web["feeds"]) + 1) if operation == "search" else config.web["timeout_seconds"] + 2
     result = run([sys.executable, "-m", "mizu.web_worker"], timeout=min(timeout, config.limits.run_seconds),
@@ -28,7 +29,8 @@ def bounded(config, run_dir, operation, value, cancel):
 def main():
     try:
         data = json.loads(sys.stdin.buffer.readline(PREVIEW_BYTES + 1))
-        web = Web(data["settings"], Path(data["cache"]), Path(data["receipts"]))
+        web = Web(data["settings"], Path(data["cache"]), Path(data["receipts"]),
+                  role=data.get("role", ""))
         if data["operation"] == "fetch":
             result = web.fetch(data["value"])
         elif data["operation"] == "probe":

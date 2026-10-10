@@ -804,12 +804,15 @@ def load(file: Path) -> Config:
     timezone = string(data.get("timezone", "UTC"), "timezone")
     web = data.get("web", {})
     keys(web, {"hosts", "feeds", "cache_seconds", "timeout_seconds", "max_bytes", "search_command",
+               "destination_command",
                "intranet", "probe_hosts", "probe_methods"}, "web")
     web = {"hosts": [], "feeds": [], "cache_seconds": 1800, "timeout_seconds": 20,
-           "max_bytes": 524288, "search_command": [], "intranet": False,
+           "max_bytes": 524288, "search_command": [], "destination_command": [], "intranet": False,
            "probe_hosts": [], "probe_methods": [], **web}
-    for k in ("hosts", "feeds", "search_command", "probe_hosts", "probe_methods"):
+    for k in ("hosts", "feeds", "search_command", "destination_command", "probe_hosts", "probe_methods"):
         strings(web[k], f"web.{k}")
+    if web["destination_command"] and any(not s or "\n" in s for s in web["destination_command"]):
+        raise ConfigError("web.destination_command must be a nonempty argv array without newlines")
     import re as _re_probe
     for _m in web["probe_methods"]:
         if not _re_probe.fullmatch(r"[A-Z]{1,16}", _m):

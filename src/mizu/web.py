@@ -18,7 +18,7 @@ from pathlib import Path
 
 from . import __version__
 from .errors import Denied
-from .fs import digest, now, read_json, write_json
+from .fs import canonical, digest, now, read_json, write_json
 from .process import run
 
 #: Retained search candidates across adapter and feeds. Matches the tool
@@ -119,7 +119,7 @@ def match_host(host: str, entries: list[str]) -> str | None:
     return None
 
 
-def validate_url(url: str, hosts: list[str]) -> tuple[str, str]:
+def _parse_url(url: str) -> tuple[str, str]:
     if not isinstance(url, str) or len(url) > 4096 or any(ord(c) < 33 for c in url):
         raise Denied("Invalid URL")
     parsed = urllib.parse.urlsplit(url)
@@ -130,12 +130,44 @@ def validate_url(url: str, hosts: list[str]) -> tuple[str, str]:
     host = (parsed.hostname or "").lower().rstrip(".")
     if parsed.scheme != "https" or port not in (None, 443) or parsed.username or parsed.password:
         raise Denied("Only HTTPS without credentials, on port 443, is allowed")
-    if not host or match_host(host, hosts) is None:
-        raise Denied(f"Host is not allowlisted: {host}")
+    if not host:
+        raise Denied("URL has no host")
     # Fragments are client-side only: strip them instead of refusing, so feed
     # links like /doc#section-3 stay fetchable. They never reach the wire.
     path = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
     return host, path
+
+
+def validate_url(url: str, hosts: list[str]) -> tuple[str, str]:
+    host, path = _parse_url(url)
+    if match_host(host, hosts) is None:
+        raise Denied(f"Host is not allowlisted: {host}")
+    return host, path
+
+
+def decider_allows(settings: dict, *, url: str, host: str, role: str,
+                   capability: str, hop: int, method: str = "") -> bool:
+    """Ask the configured destination decider; fail closed on any fault.
+
+    Schema: stdin ``{"url", "host", "role", "capability", "hop", "method"}``;
+    stdout must be a JSON object with ``"allow"`` boolean. Bounds: deadline
+    ``timeout_seconds``, payload ``max_bytes``. Trust: operator-owned argv,
+    never model input. Failure: anything but an explicit ``true`` denies.
+    """
+    command = settings.get("destination_command", [])
+    if not command:
+        return False
+    try:
+        payload = canonical({"url": url, "host": host, "role": role,
+                             "capability": capability, "hop": hop, "method": method})
+        result = run(list(command), timeout=settings["timeout_seconds"],
+                     maximum=settings["max_bytes"], input_data=payload)
+        if result.exit_code != 0 or result.reason != "exited":
+            return False
+        data = json.loads(result.stdout)
+        return isinstance(data, dict) and data.get("allow") is True
+    except (OSError, ValueError):
+        return False
 
 
 def public_addresses(host: str, allow_private: bool = False) -> list[tuple]:
@@ -180,8 +212,32 @@ class PinnedHTTPS(http.client.HTTPSConnection):
 
 
 class Web:
-    def __init__(self, settings: dict, cache: Path, receipts: Path):
-        self.settings, self.cache, self.receipts = settings, cache, receipts
+    def __init__(self, settings: dict, cache: Path, receipts: Path, role: str = ""):
+        self.settings, self.cache, self.receipts, self.role = settings, cache, receipts, role
+
+    def check_url(self, url: str, capability: str, hop: int = 0, method: str = "") -> tuple[str, str]:
+        """Gate one destination: static lists or the configured decider.
+
+        Unset ``destination_command`` keeps today's behavior (exact,
+        leading-dot, ``"*"`` entries from ``hosts``/``probe_hosts``).
+        When set, the decider owns the destination decision authoritatively
+        per request (URL, role, capability, redirect hop); static lists are
+        then unused for the verdict. Transport protections (HTTPS-only,
+        port 443, DNS pinning, bounds, receipts) always stay in mechanism.
+        Unset, failing, timing-out or malformed decider output denies.
+        """
+        host, path = _parse_url(url)
+        command = self.settings.get("destination_command", [])
+        if command:
+            if decider_allows(self.settings, url=url, host=host, role=self.role,
+                               capability=capability, hop=hop, method=method):
+                return host, path
+            raise Denied(f"Destination decider refused: {host}")
+        entries = self.settings.get("probe_hosts", []) if capability == "probe" \
+            else self.settings["hosts"]
+        if match_host(host, entries) is None:
+            raise Denied(f"Host is not allowlisted: {host}")
+        return host, path
 
     def fetch(self, url: str) -> dict:
         original = url
@@ -197,12 +253,12 @@ class Web:
                 and isinstance(cached.get("id"), str)
                 and time.time() - float(epoch) < self.settings["cache_seconds"]):
             # A policy change must also revoke previously cached hosts.
-            validate_url(cached["url"], self.settings["hosts"])
-            validate_url(cached["final_url"], self.settings["hosts"])
+            self.check_url(cached["url"], "fetch")
+            self.check_url(cached["final_url"], "fetch")
             write_json(self.receipts / f"{cached['id']}.json", cached, exclusive=True)
             return {**cached, "cached": True}
-        for _ in range(4):
-            host, path = validate_url(url, self.settings["hosts"])
+        for hop in range(4):
+            host, path = self.check_url(url, "fetch", hop)
             intranet = bool(self.settings.get("intranet", False))
             connection = PinnedHTTPS(host, public_addresses(host, intranet), self.settings["timeout_seconds"])
             try:
@@ -271,7 +327,7 @@ class Web:
         allowed = self.settings.get("probe_methods", [])
         if method not in {str(m).upper() for m in allowed}:
             raise Denied(f"Probe method is not allowlisted: {method}")
-        if not self.settings.get("probe_hosts"):
+        if not self.settings.get("probe_hosts") and not self.settings.get("destination_command"):
             raise Denied("Protocol observation is not configured")
         if not isinstance(headers, list) or len(headers) > PROBE_MAX_HEADERS:
             raise Denied("Probe headers must list at most 16 entries")
@@ -301,7 +357,7 @@ class Web:
         body_bytes = body.encode("utf-8")
         if len(body_bytes) > self.settings["max_bytes"]:
             raise Denied("Probe body exceeds byte limit")
-        host, path = validate_url(url, self.settings.get("probe_hosts", []))
+        host, path = self.check_url(url, "probe", 0, method)
         intranet = bool(self.settings.get("intranet", False))
         connection = PinnedHTTPS(host, public_addresses(host, intranet), self.settings["timeout_seconds"])
         try:
