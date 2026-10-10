@@ -83,6 +83,14 @@ class ProbeTests(Fixture):
                 web.probe({"url": "https://probe.example/x", "method": "GET",
                            "headers": [{"name": name, "value": "secret"}]})
 
+    def test_cr_headers_refused_before_transport(self):
+        web = make_web(Path(self.temporary.name))
+        for headers in ([{"name": "X-A", "value": "a\rb"}],
+                        [{"name": "X-A\rb", "value": "1"}]):
+            with self.assertRaises(Denied):
+                web.probe({"url": "https://probe.example/x", "method": "GET",
+                           "headers": headers})
+
     def test_non_2xx_returns_as_observation(self):
         web = make_web(Path(self.temporary.name))
         answer = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]

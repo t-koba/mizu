@@ -230,7 +230,7 @@ class Web:
             name, value = entry.get("name"), entry.get("value")
             if not isinstance(name, str) or not isinstance(value, str):
                 raise Denied("Probe header name and value must be strings")
-            if "\x00" in name or "\x00" in value or "\n" in name or "\n" in value:
+            if "\x00" in name or "\x00" in value or "\n" in name or "\n" in value or "\r" in name or "\r" in value:
                 raise Denied("Probe headers must be single-line strings")
             if not 1 <= len(name) <= PROBE_HEADER_NAME_MAX or len(value) > PROBE_HEADER_VALUE_MAX:
                 raise Denied("Probe header name or value exceeds bound")
