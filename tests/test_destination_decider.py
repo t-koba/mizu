@@ -91,3 +91,88 @@ class DeciderTests(Fixture):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DeciderCacheBypassTests(Fixture):
+    """Fetch replays redirect hops live under a decider; receipts keep no hop count."""
+
+    def test_fetch_bypasses_fresh_cache_under_decider(self):
+        import time
+        from unittest.mock import patch
+        from mizu.fs import digest as fs_digest, read_json, write_json
+
+        url = "https://example.com/live"
+        tmp = Path(self.temporary.name)
+        web = make_web(self.temporary.name,
+                       {"hosts": [], "cache_seconds": 1800, "destination_command": ALLOW})
+        cache_file = tmp / "cache" / f"{fs_digest(url.encode())}.json"
+        write_json(cache_file, {"id": "a" * 64, "url": url, "final_url": url,
+                                "retrieved_at": "2026-01-01T00:00:00Z",
+                                "retrieved_epoch": time.time(), "sha256": "b" * 64,
+                                "content_type": "text/plain", "text": "CACHED-POISON",
+                                "trust": "external-untrusted"})
+
+        class LiveResponse:
+            status = 200
+
+            def getheader(self, name, default=None):
+                if name.lower() == "content-type":
+                    return "text/plain"
+                if name.lower() == "content-encoding":
+                    return "identity"
+                return default
+
+            def getheaders(self):
+                return [("Content-Type", "text/plain")]
+
+            def read(self, limit=None):
+                return b"LIVE-CONTENT" if limit is None else b"LIVE-CONTENT"[:limit]
+
+        calls = []
+
+        class LiveConnection:
+            def __init__(self, host, addresses, timeout):
+                calls.append(host)
+
+            def request(self, method, path, body=None, headers=None):
+                pass
+
+            def getresponse(self):
+                return LiveResponse()
+
+            def close(self):
+                pass
+
+        import socket
+        answer = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
+        with patch("mizu.web.public_addresses", return_value=answer), \
+             patch("mizu.web.PinnedHTTPS", LiveConnection):
+            record = web.fetch(url)
+        self.assertIn("LIVE-CONTENT", record["text"])
+        self.assertNotIn("cached", record)
+        self.assertTrue(calls, "decider fetch must reach transport live")
+        # Bypass must not overwrite the seeded entry.
+        self.assertIn("CACHED-POISON", read_json(cache_file)["text"])
+
+    def test_fetch_uses_fresh_cache_without_decider(self):
+        import time
+        from unittest.mock import patch
+        from mizu.fs import digest as fs_digest, write_json
+
+        url = "https://example.com/live"
+        tmp = Path(self.temporary.name)
+        web = make_web(self.temporary.name,
+                       {"hosts": ["example.com"], "cache_seconds": 1800,
+                        "destination_command": []})
+        write_json(tmp / "cache" / f"{fs_digest(url.encode())}.json",
+                   {"id": "c" * 64, "url": url, "final_url": url,
+                    "retrieved_at": "2026-01-01T00:00:00Z",
+                    "retrieved_epoch": time.time(), "sha256": "d" * 64,
+                    "content_type": "text/plain", "text": "CACHED-POISON",
+                    "trust": "external-untrusted"})
+
+        with patch("mizu.web.PinnedHTTPS") as conn:
+            record = web.fetch(url)
+        conn.assert_not_called()
+        self.assertTrue(record.get("cached"))
+        self.assertIn("CACHED-POISON", record["text"])
