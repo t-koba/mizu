@@ -305,9 +305,9 @@ Configures outbound retrieval for `fetch` and `search`:
 | `probe_methods` | `[]` | Allowlisted `probe` methods (uppercase tokens, e.g. `GET`, `POST`); empty disables `probe` |
 | `feeds` | `[]` | Allowed RSS/Atom feed URLs for discovery |
 | `search_command` | `[]` | Trusted argv command receiving/returning bounded JSON |
-| `destination_command` | `[]` | Trusted argv owning the destination decision per request (`url`, `host`, `role`, `capability` fetch/probe, redirect `hop`, `method`); stdin bounded JSON, stdout must be `{"allow": bool}`. Unset keeps the `hosts`/`probe_hosts` lists; when set the decider decides authoritatively per hop and anything but explicit `true` denies (fail closed). HTTPS-only, port 443, DNS pinning, bounds and receipts stay in mechanism |
+| `destination_command` | `[]` | Trusted argv owning the destination decision per request (`url`, `host`, `role`, `capability` fetch/probe, redirect `hop`, `method`); stdin bounded JSON, stdout must be `{"allow": bool}`. Unset keeps the `hosts`/`probe_hosts` lists; when set the decider decides authoritatively per hop and anything but explicit `true` denies (fail closed). While set, `fetch` bypasses the response cache so every hop is decided live; `probe` never caches. HTTPS-only, port 443, DNS pinning, bounds and receipts stay in mechanism |
 | `intranet` | `false` | When true, permits any private unicast IP (`ip.is_private`); multicast, link-local, loopback, unspecified, and transition addresses stay refused |
-| `cache_seconds` | `1800` | Response cache TTL: reuse window and expired-entry reclamation age (`retrieved_epoch` vs now; epoch-less entries use mtime) |
+| `cache_seconds` | `1800` | Response cache TTL: reuse window and expired-entry reclamation age (`retrieved_epoch` vs now; epoch-less entries use mtime). Unused for `fetch` while `destination_command` is set (cache bypassed); still ages already-stored entries for reclamation |
 | `timeout_seconds`| `20` | Request timeout |
 | `max_bytes` | `524288` | Maximum response payload (512 KiB) |
 
