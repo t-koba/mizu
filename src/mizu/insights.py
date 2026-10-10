@@ -81,10 +81,16 @@ def _normalize(record: dict) -> dict:
 
 
 def _effective_decision(item_rev: int, decision) -> dict | None:
+    """Current disposition for one inbox revision (None when undecided here).
+
+    Every action binds to its reviewed rev, including defer: a meaningful
+    revision reopens the topic as pending with no current decision, so a
+    stale defer is never shown as the current disposition. The superseded
+    record stays in decisions/history audit; readers needing the old gap
+    use the explicit history path.
+    """
     if not decision:
         return None
-    if decision.get("action") == "defer":
-        return decision
     try:
         decision_rev = int(decision.get("rev", 1))
     except (TypeError, ValueError):

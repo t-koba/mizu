@@ -185,12 +185,32 @@ class DeferRefinementTests(Fixture):
         self.assertFalse(should_run(self.project, {**snap, "outcome": "wait"}))
         self.project.insights.revise(item["id"], source="reviewer", title="Finding",
                                      body="v2 with field data", base_snapshot=None)
-        # The generation change wakes the writer; the old gap stays attached
-        # with its rev so the writer reassesses a visibly stale decision.
+        # The generation change wakes the writer; the revision reopens the
+        # topic with no current decision so the new body must be re-decided.
+        # The superseded defer stays in decisions/history audit, never as
+        # the current disposition.
         self.assertTrue(should_run(self.project, {**snap, "outcome": "wait"}))
         pending = [i for i in self.project.insights.list() if i["id"] == item["id"]][0]
         self.assertEqual(pending["rev"], 2)
-        self.assertEqual((pending["decision"]["action"], pending["decision"]["rev"]), ("defer", 1))
+        self.assertIsNone(pending["decision"])
+        from mizu.fs import read_json
+        raw = read_json(self.project.root / "decisions" / f"{item['id']}.json")
+        self.assertEqual((raw["action"], raw["rev"]), ("defer", 1))
+
+    def test_revised_defer_must_be_decided_again_at_new_rev(self):
+        item = self.project.insights.submit(source="reviewer", title="Finding", body="v1",
+                                            base_snapshot=self.project.snapshots.get()["id"])
+        self.project.insights.decide(item["id"], "defer", "needs field data", "observe X", "test", expected_rev=1)
+        self.project.insights.revise(item["id"], source="reviewer", title="Finding",
+                                     body="v2 with field data", base_snapshot=None)
+        pending = [i for i in self.project.insights.list() if i["id"] == item["id"]][0]
+        self.assertIsNone(pending["decision"])
+        # A decision at the old rev is refused; the new rev is actionable.
+        from mizu.errors import Denied
+        with self.assertRaises(Denied):
+            self.project.insights.decide(item["id"], "accept", "stale read", "", "test", expected_rev=1)
+        record = self.project.insights.decide(item["id"], "accept", "read v2", "", "test", expected_rev=2)
+        self.assertEqual(record["rev"], 2)
 
     def test_deferred_gap_stays_visible_with_revisit(self):
         item = self.project.insights.submit(source="reviewer", title="Finding", body="v1",
