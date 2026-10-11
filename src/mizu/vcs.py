@@ -453,8 +453,8 @@ def check_branch(branch: str) -> str:
 
 
 #: Insight source and decision run marking an operator-recorded approval.
-#: Model ``submit_insight`` fixes source to the role name and model ``decide``
-#: fixes run to the run directory name, so neither can mint these values.
+#: Model ``submit_insight``/``revise_insight``/``withdraw_insight`` fix source to the role name and model ``decide``
+#: fixes run to the run directory name, so none can mint these values.
 OPERATOR_SOURCE = "operator"
 OPERATOR_RUN = "operator"
 
@@ -477,7 +477,8 @@ def require_go_approval(project, branch: str, code_digest: str,
     (run is the run directory name) never satisfy this gate. Use a dedicated
     publisher role without ``decide`` (refused together with lifecycle
     capabilities at config load) for defense in depth; ``submit_insight``
-    is allowed because ordinary insights can never mint an operator-channel
+    (and likewise owner-only ``revise_insight``/``withdraw_insight``)
+    are allowed because ordinary insights can never mint an operator-channel
     approval.
     Retry/cancellation: pure local reads, no retry. Evidence: returned
     ``{"insight": id, "branch": ..., "code_digest": ...}`` names the

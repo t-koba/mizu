@@ -106,7 +106,7 @@ def is_deferred(exc: BaseException, context=None) -> bool:
 #: none of these. Read-only grants (files/read/diff/insights/fetch/probe/search)
 #: stay operator choice, plus the required finish.
 CONSULT_FORBIDDEN = frozenset({"exec", "experiment", "verify", "decide",
-                               "submit_insight", "consult", "report", "sync",
+                               "submit_insight", "revise_insight", "withdraw_insight", "consult", "report", "sync",
                                "vcs_publish", "vcs_retire", "vcs_dispose",
                                "research", "materialize"})
 
@@ -426,6 +426,22 @@ class Context:
                                              base_snapshot=self.snapshot["id"], run=self.run_dir.name,
                                              origin=None)
 
+    def _op_revise_insight(self, args: dict) -> dict:
+        # Owner-only revision: source is fixed to the caller's role and the
+        # mechanism (insights.revise) enforces the source match plus
+        # compare-and-swap on the read rev. The revision is rebased onto the
+        # current snapshot, like a fresh submission about the current tree.
+        return self.project.insights.revise(args["id"], source=self.role.name, title=args["title"],
+                                             body=args["body"], base_snapshot=self.snapshot["id"],
+                                             run=self.run_dir.name, expected_rev=args["rev"])
+
+    def _op_withdraw_insight(self, args: dict) -> dict:
+        # Owner-only withdrawal: source is fixed to the caller's role and the
+        # mechanism (insights.withdraw) enforces submitter-or-operator plus
+        # compare-and-swap on the read rev. Operator withdrawal stays on the CLI.
+        return self.project.insights.withdraw(args["id"], source=self.role.name, reason=args["reason"],
+                                               expected_rev=args["rev"], run=self.run_dir.name)
+
     def _op_sync(self, args: dict) -> dict:
         # Host-side refresh only: fetch upstream refs via the trusted adapter
         # and inject them read-only into the harness store (virtual
@@ -689,6 +705,7 @@ class Context:
         "exec": _op_exec, "experiment": _op_experiment, "verify": _op_verify,
         "fetch": _op_fetch, "probe": _op_probe, "search": _op_search, "insights": _op_insights,
         "decide": _op_decide, "submit_insight": _op_submit_insight,
+        "revise_insight": _op_revise_insight, "withdraw_insight": _op_withdraw_insight,
         "sync": _op_sync, "vcs_read": _op_vcs_read, "vcs_publish": _op_vcs_publish,
         "vcs_retire": _op_vcs_retire, "vcs_dispose": _op_vcs_dispose,
         "materialize": _op_materialize,

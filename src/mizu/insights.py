@@ -12,10 +12,12 @@ changed content, while a meaningful revision becomes pending again and
 advances the inbox generation. Identical retries are no-ops that do not wake.
 Revisions are durable audit like decisions (backed up, never pruned).
 
-Current transport: only the operator path exposes revise/history
-(``mizu insight revise/history`` with source ``operator``). Other sources
-supersede obsolete claims via a new insight until a reviewed release adds an
-owner revise transport; the source-match check already enforces that future.
+Current transport: the operator path exposes revise/history/withdraw
+(``mizu insight revise/history/withdraw`` with source ``operator``); each
+runtime role with the ``revise_insight``/``withdraw_insight`` capability may
+revise/withdraw its own insights via the runtime, which fixes source to the
+role name and binds to the read rev. The source-match check enforces the
+owner boundary on every path. History stays operator/reader-side.
 ``run`` is revision provenance recorded only on meaningful change and never
 wakes: an identical-content retry with a different ``run`` returns current
 unchanged (stored ``run`` preserved) without bumping rev.

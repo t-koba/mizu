@@ -255,6 +255,8 @@ models are recorded. Model usage excludes unreported auxiliary billing.
 | `insights` | Read proposals |
 | `decide` | Record accept/modify/defer/reject and rationale |
 | `submit_insight` | Submit proposal with route-derived identity |
+| `revise_insight` | Revise one of the role's own proposals under its stable ID (source fixed to the role, bound to the read rev; prior content archived, meaningful change reopens the topic) |
+| `withdraw_insight` | Withdraw one of the role's own pending proposals as author retraction, not rejection (source fixed to the role, bound to the read rev) |
 | `consult` | Consult operator-allowlisted profiles through a named read-only role (default from `consult_role`, fail-closed when unset), no nested consultation |
 | `report` | Stage a Markdown document for static artifact publication |
 | `sync` | Refresh upstream refs via the trusted VCS adapter (writable workspace only); merges stay as workspace edits followed by verification |
@@ -269,7 +271,7 @@ models are recorded. Model usage excludes unreported auxiliary billing.
 A consultation names its answering role explicitly (`role`, default from the configured `consult_role`, fail-closed when unset).
 Any configured role qualifies as long as it stays read-only (`workspace = "read"`)
 without write/execute grants (`exec`, `experiment`, `verify`, `decide`,
-`submit_insight`, `consult`, `report`, `sync`); read-only grants (`files`, `read`,
+`submit_insight`, `revise_insight`, `withdraw_insight`, `consult`, `report`, `sync`); read-only grants (`files`, `read`,
 `diff`, `insights`, `fetch`, `search`) stay operator choice plus the required
 `finish`. Anything broader is refused before any model call by the single
 shared gate (`runtime.check_consult_role`, also used by `smoke --live`).

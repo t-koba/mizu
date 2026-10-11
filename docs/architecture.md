@@ -132,10 +132,9 @@ generation, while a meaningful revision archives the prior record to
 `insight-revisions/<id>.r<rev>.json` and becomes pending again. A crashed
 revise converges on retry: an orphan archive for the still-current rev is
 overwritten, and a same-content retry preserves the stored `run` (revision
-provenance recorded only on meaningful change). The current transport
-exposes revise/history/withdraw only to the operator (`mizu insight revise/history/withdraw`);
-other sources supersede obsolete claims via a new insight until a reviewed
-release adds an owner revise transport. Decisions carry the same binding:
+provenance recorded only on meaningful change). The transport exposes revise/history/withdraw to the operator (`mizu insight revise/history/withdraw`);
+each runtime role holding `revise_insight`/`withdraw_insight` may revise/withdraw its own insights
+via the runtime, which fixes source to the role name and binds to the read rev. History stays a read path. Decisions carry the same binding:
 the decide interface accepts the `rev` from the read, and a decision naming
 a superseded revision is rejected without writing anything, so a prior
 rationale never authorizes changed content while the current revision stays

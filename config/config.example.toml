@@ -197,14 +197,14 @@ daemon = true
 profile = "alternate"
 policy = "policies/searcher.md"
 workspace = "read"
-capabilities = ["files", "read", "search", "fetch", "experiment", "submit_insight", "finish"]
+capabilities = ["files", "read", "search", "fetch", "experiment", "submit_insight", "revise_insight", "withdraw_insight", "finish"]
 interval_seconds = 1800
 
 [roles.reviewer]
 profile = "alternate"
 policy = "policies/reviewer.md"
 workspace = "read"
-capabilities = ["files", "read", "diff", "exec", "experiment", "submit_insight", "finish"]
+capabilities = ["files", "read", "diff", "exec", "experiment", "submit_insight", "revise_insight", "withdraw_insight", "finish"]
 # on_change only skips unchanged snapshots; it combines with interval_seconds.
 on_change = true
 interval_seconds = 900
@@ -236,7 +236,7 @@ interval_seconds = 21600
 profile = "alternate"
 policy = "policies/maintainer-searcher.md"
 workspace = "read"
-capabilities = ["files", "read", "search", "fetch", "experiment", "submit_insight", "finish"]
+capabilities = ["files", "read", "search", "fetch", "experiment", "submit_insight", "revise_insight", "withdraw_insight", "finish"]
 interval_seconds = 21600
 
 # Dedicated publisher for external publication only. Uncomment to enable on a
