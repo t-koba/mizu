@@ -501,13 +501,16 @@ class Context:
 
     def _op_vcs_read(self, args: dict) -> dict:
         # Read-only VCS view: CI status, logs, PR comments, external
-        # proposals via the trusted adapter. Never publishes; mutating ops
-        # are refused here even if the adapter would serve them. Requires
-        # a visible workspace. Branch stays required for addressed reads
-        # (status/log/comments) inside read_via; proposals enumerate with
-        # an optional branch filter; acquire takes a proposal id, the
-        # exact head sha, and the explicit content scope (plus an
-        # optional base sha pin for full scope) and needs no branch.
+        # proposals, and CI-recorded artifact files via the trusted
+        # adapter. Never publishes; mutating ops are refused here even if
+        # the adapter would serve them. Requires a visible workspace.
+        # Branch stays required for addressed reads
+        # (status/log/comments/artifacts/artifact) inside read_via;
+        # proposals enumerate with an optional branch filter; acquire
+        # takes a proposal id, the exact head sha, and the explicit
+        # content scope (plus an optional base sha pin for full scope)
+        # and needs no branch; artifact takes a branch, an artifact file
+        # name, and an optional sha filter.
         if self.role.workspace == "none":
             raise Denied("This role has no workspace")
         params = {}
@@ -523,6 +526,8 @@ class Context:
             params["scope"] = args["scope"]
         if "base_sha" in args:
             params["base_sha"] = args["base_sha"]
+        if "artifact" in args:
+            params["artifact"] = args["artifact"]
         try:
             data = _vcs.read_via(self.config.vcs, args["op"], params)
         except OSError as exc:

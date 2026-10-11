@@ -392,7 +392,10 @@ def read_ref(project_root: Path, name: str) -> str:
 #: operations (``push``/``pr``) are never served through this path.
 #: ``acquire`` materializes exact-revision external content for assessment;
 #: it mutates nothing, so it reads like any other observation.
-READ_OPS = frozenset({"status", "log", "comments", "proposals", "acquire"})
+#: ``artifacts`` lists CI-recorded artifact files for a branch revision;
+#: ``artifact`` reads one listed text file with a digest binding.
+READ_OPS = frozenset({"status", "log", "comments", "proposals", "acquire",
+                      "artifacts", "artifact"})
 #: Mutating adapter operations served by ``vcs_publish`` behind a recorded
 #: human ``GO <branch>`` approval bound to branch and code digest.
 PUBLISH_OPS = frozenset({"push", "pr"})
@@ -593,6 +596,83 @@ MAX_ACQUIRE_CONTENT = 524288
 #: the base revision it was computed against.
 ACQUIRE_SCOPES = frozenset({"head", "full"})
 
+#: Maximum CI artifact entries per ``artifacts`` response.
+MAX_ARTIFACTS = 256
+#: Maximum CI artifact file-name chars (relative Unix path, no traversal).
+MAX_ARTIFACT_NAME = 512
+#: Maximum artifact file content chars per ``artifact`` response (mirrors
+#: the default adapter byte bound; larger files are refused so the caller
+#: narrows scope instead of blowing the frame).
+MAX_ARTIFACT_CONTENT = 524288
+
+
+def check_artifact_name(name: str) -> str:
+    """Validate one CI artifact file name as a relative Unix path.
+
+    Schema: 1-512 chars, ``/``-separated components, no empty/``.``/``..``
+    components, no leading slash, no backslashes. Bounds: length only.
+    Trust: pure path syntax, no filesystem access. Failure: ``Denied``.
+    """
+    if not isinstance(name, str) or not name or len(name) > MAX_ARTIFACT_NAME:
+        raise Denied("Invalid VCS artifact name")
+    if "\\" in name or name.startswith("/"):
+        raise Denied("Invalid VCS artifact name")
+    _reject_terminal_controls(name, "Invalid VCS artifact name")
+    if any(part in ("", ".", "..") for part in name.split("/")):
+        raise Denied("Invalid VCS artifact name")
+    return name
+
+
+def parse_artifacts(data: dict) -> list:
+    """Validate an ``artifacts`` adapter response into normalized rows.
+
+    Schema: ``{"artifacts": [{artifact, size?, digest?}]}``; ``artifact``
+    per ``check_artifact_name``, ``size`` an int >= 0 when present,
+    ``digest`` 64 lowercase hex when present. Bounds: at most 256 rows.
+    Trust: adapter facts stay external-untrusted; this only validates
+    shape. Failure: ``Denied``.
+    """
+    if not isinstance(data, dict):
+        raise Denied("VCS artifacts must be a JSON object")
+    rows = data.get("artifacts")
+    if not isinstance(rows, list) or len(rows) > MAX_ARTIFACTS:
+        raise Denied("VCS artifacts must carry an array with at most 256 entries")
+    out = []
+    for entry in rows:
+        if not isinstance(entry, dict) or set(entry) - {"artifact", "size", "digest"}:
+            raise Denied("Invalid VCS artifact entry")
+        name = check_artifact_name(entry.get("artifact"))
+        size = entry.get("size", None)
+        if size is not None and (type(size) is not int or size < 0):
+            raise Denied("Invalid VCS artifact size")
+        content_digest = entry.get("digest", None)
+        if content_digest is not None and (
+                not isinstance(content_digest, str) or not _SHA.fullmatch(content_digest)):
+            raise Denied("Invalid VCS artifact digest")
+        out.append({"artifact": name, "size": size, "digest": content_digest})
+    return out
+
+
+def parse_artifact(data: dict, *, name: str) -> dict:
+    """Validate an ``artifact`` adapter response into a digest-bound receipt.
+
+    Schema: ``{"artifact", "digest", "content"}``; ``artifact`` must echo
+    the requested name, ``digest`` 64 lowercase hex, ``content`` text at
+    most 524288 chars. Trust: shape only; the digest binding is checked
+    by the caller against the content. Failure: ``Denied``.
+    """
+    if not isinstance(data, dict) or set(data) != {"artifact", "digest", "content"}:
+        raise Denied("Invalid VCS artifact content entry")
+    if data.get("artifact") != name:
+        raise Denied("Artifact content must match the requested file")
+    content_digest = data.get("digest")
+    if not isinstance(content_digest, str) or not _SHA.fullmatch(content_digest):
+        raise Denied("Invalid VCS artifact content digest")
+    content = data.get("content")
+    if not isinstance(content, str) or len(content) > MAX_ARTIFACT_CONTENT:
+        raise Denied("Invalid VCS artifact content")
+    return {"artifact": name, "digest": content_digest, "content": content}
+
 
 def acquire_digest(content: str) -> str:
     """Bind acquired content to its digest (recomputed locally, never trusted).
@@ -653,24 +733,28 @@ def parse_acquired(data: dict, *, scope: str, base_sha=None) -> dict:
 
 
 def read_via(settings: dict, op: str, params: dict) -> dict:
-    """Invoke a read-only adapter operation (``status``/``log``/``comments``/``acquire``).
+    """Invoke a read-only adapter operation (``status``/``log``/``comments``/``acquire``/``artifacts``/``artifact``).
 
     Schema: ``params`` must include ``branch`` for addressed reads
-    (``status``/``log``/``comments``); optional ``sha`` passes through
-    when given. ``proposals`` enumerates with an optional ``branch``
-    filter. ``acquire`` takes ``id`` (proposal id), the exact head
-    ``sha``, and the explicit content ``scope`` (``"head"`` for the head
-    commit only, ``"full"`` for the base revision through the head),
-    plus an optional ``base_sha`` pin with ``"full"``; it needs no
-    branch: the endpoint travels in the proposal record, so fork heads
-    acquire by id and sha alone. A pinned base must echo back
-    unchanged; an unpinned ``"full"`` acquisition binds whatever base
-    the adapter served, so review evidence always names both revisions.
-    Bounds: same ``max_bytes``/timeout contract as ``invoke``. Trust:
-    operator-owned adapter; results are external-untrusted. Failure:
-    ``Denied`` on publish ops, bad params, a moved head or base (echo
-    mismatch), a scope mismatch, a digest mismatch, or any adapter
-    contract violation. Never publishes.
+    (``status``/``log``/``comments``/``artifacts``/``artifact``);
+    optional ``sha`` passes through when given. ``proposals`` enumerates
+    with an optional ``branch`` filter. ``acquire`` takes ``id``
+    (proposal id), the exact head ``sha``, and the explicit content
+    ``scope`` (``"head"`` for the head commit only, ``"full"`` for the
+    base revision through the head), plus an optional ``base_sha`` pin
+    with ``"full"``; it needs no branch: the endpoint travels in the
+    proposal record, so fork heads acquire by id and sha alone. A pinned
+    base must echo back unchanged; an unpinned ``"full"`` acquisition
+    binds whatever base the adapter served, so review evidence always
+    names both revisions. ``artifacts`` lists CI-recorded files for a
+    branch revision (``{"branch", optional "sha"}``); ``artifact`` reads
+    one listed text file (``{"branch", "artifact", optional "sha"}``)
+    with a digest recomputed locally like ``acquire``. Bounds: same
+    ``max_bytes``/timeout contract as ``invoke``. Trust: operator-owned
+    adapter; results are external-untrusted. Failure: ``Denied`` on
+    publish ops, bad params, a moved head or base (echo mismatch), a
+    scope or name mismatch, a digest mismatch, or any adapter contract
+    violation. Never publishes.
     """
     if op not in READ_OPS:
         raise Denied("vcs_read cannot publish; unknown or mutating operation")
@@ -712,6 +796,50 @@ def read_via(settings: dict, op: str, params: dict) -> dict:
                 "scope": scope, "base_sha": acquired["base_sha"],
                 "digest": acquired["digest"], "content": acquired["content"],
                 "trust": "external-untrusted"}
+    if op == "artifacts":
+        # CI artifact listing: which measured files the product recorded
+        # for a branch revision (benchmark JSONL, profiles, allocation
+        # reports). The optional sha narrows to one run revision; the
+        # receipt echoes the requested pair so diagnosis cites it.
+        branch = params.get("branch")
+        check_branch(branch)
+        sha = params.get("sha")
+        if sha is not None and (not isinstance(sha, str) or not _SHA.fullmatch(sha)):
+            raise Denied("Invalid VCS sha filter")
+        request = {"op": op, "branch": branch}
+        if sha is not None:
+            request["sha"] = sha
+        rows = parse_artifacts(invoke(settings, request))
+        out = {"op": op, "branch": branch, "artifacts": rows,
+               "trust": "external-untrusted"}
+        if sha is not None:
+            out["sha"] = sha
+        return out
+    if op == "artifact":
+        # One CI-recorded text file: the adapter echoes the requested
+        # name plus the content digest, and the caller recomputes the
+        # digest instead of trusting the echo (same binding as acquire).
+        # An optional sha narrows to one run revision and is echoed in
+        # the receipt for citation.
+        branch = params.get("branch")
+        check_branch(branch)
+        name = params.get("artifact")
+        check_artifact_name(name)
+        sha = params.get("sha")
+        if sha is not None and (not isinstance(sha, str) or not _SHA.fullmatch(sha)):
+            raise Denied("Invalid VCS sha filter")
+        request = {"op": op, "branch": branch, "artifact": name}
+        if sha is not None:
+            request["sha"] = sha
+        got = parse_artifact(invoke(settings, request), name=name)
+        if got["digest"] != acquire_digest(got["content"]):
+            raise Denied("Artifact content digest mismatch")
+        out = {"op": op, "branch": branch, "artifact": name,
+               "digest": got["digest"], "content": got["content"],
+               "trust": "external-untrusted"}
+        if sha is not None:
+            out["sha"] = sha
+        return out
     branch = params.get("branch")
     request = {"op": op}
     if op == "proposals":
