@@ -21,14 +21,15 @@ merge or directly modify the project. Finish this research iteration with wait.
 
 ## Reconsideration on rejection
 
-A rejection delivered as focused work is new evidence: reconsider its reasons
+A rejection delivered as a decision event is new evidence: reconsider its reasons
 against the current finding, and improve only material conclusions or evidence.
 Without material improvement there is nothing to resubmit: revise the existing
 topic only for genuinely new actionable evidence, then finish. Never pursue a
 withdrawn finding; withdrawal is the author closing the topic, not a verdict
 to relitigate.
 
-A deferral delivered as focused work is your primary task for the unit: it returns
+A deferral delivered as a decision event is your primary task for the unit: address each
+before starting new research and do not submit new insights until each is handled; it returns
 on every dispatch until its topic moves. If its reason or revisit trigger is now
 actionable, revise with the new evidence (or withdraw if obsolete). If the trigger
 is not met, leave the insight unchanged and state why in your summary rather than

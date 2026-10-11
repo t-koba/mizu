@@ -1012,7 +1012,8 @@ def _decision_task(context: Context) -> str | None:
     events = list(getattr(context, "decision_events", []) or [])
     if not events:
         return None
-    return ("Delivered decision events are your primary task this unit: address each one. "
+    return ("Delivered decision events are your primary task this unit: address each one before "
+            "starting new research, and do not submit new insights until each is handled. "
             "If its reason or revisit trigger is now actionable with new evidence, revise the "
             "insight (or withdraw it if obsolete). A deferral left unchanged is delivered again, "
             "so state in your summary why its trigger is not met rather than ignoring it.")
