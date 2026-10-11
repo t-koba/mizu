@@ -158,15 +158,20 @@ delivered events under the run directory, and advances a per-role acknowledged
 cursor over substantive outcomes only after successful processing, so pause, budget,
 concurrency, and restart keep their authority and nothing is lost or repeated.
 Withdrawn or superseded decisions never emit, and a substantive decision never lands on a
-withdrawn revision. Substantive delivery is one-shot per decision; a deferral is
-redelivered on every dispatch while still current, whatever its age against the cursor,
-and counts as handled only when its topic moves (revision, withdrawal, or a superseding
-decision). Truncation keeps substantive delivery lossless: unacknowledged substantive events
-come before redelivered deferrals, oldest-first within each class. A deferral with a
-registered structured wait still redelivers while defer is a subscribed trigger; to gate
+withdrawn revision. Substantive delivery is one-shot per decision; a deferral rides
+along when the role runs for other reasons and rotates across dispatches while still
+current, whatever its age against the cursor, and counts as handled only when its
+topic moves (revision, withdrawal, or a superseding decision). A deferral alone never
+admits a run: event-triggered and unchanged-code dispatch exit unless a substantive
+event or due wait is pending, so standing deferrals cost a cheap skip rather than a
+model run. Truncation keeps substantive delivery lossless: unacknowledged substantive events
+come before the rotating defer window, oldest-first within each class, so every deferral
+stays reachable instead of pinning the oldest window. A deferral with a
+registered structured wait still rides along while defer is a subscribed trigger; to gate
 reconsideration until the condition holds, subscribe to substantive actions only and rely
-on the wait. The prompt marks delivered events as the unit's primary task with that rule,
-so an ignored deferral returns instead of vanishing. The revisit
+on the wait. The prompt marks delivered substantive events as the unit's primary task and
+delivered deferrals as ride-along work with that rule, so an ignored deferral returns in a
+later window instead of vanishing. The revisit
 prose is never parsed as an executable condition. A deferral may instead
 register one structured wait (``deadline``, ``code_change``,
 ``insight_decided``, or ``dependency``) through the decision interface; the wait binds to the

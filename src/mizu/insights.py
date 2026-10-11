@@ -812,11 +812,12 @@ replacement insight without implying rejected substance.
         """Collect decision events routed to one role.
 
         Schema: ``actions`` is the role's configured trigger list;
-        returns focused payloads, substantive oldest-first then redelivered
-        deferrals oldest-first,
+        returns focused payloads, substantive oldest-first then a rotating
+        window of deferrals,
         ``{event, insight, rev, title, body, action, reason, revisit, decided_at}``
         (at most ``limit``). Bounds: ``limit`` is a positive int capped at
-        100; cursors keep at most 100 tie-window ids. Trust: only
+        100; cursors keep at most 100 tie-window ids plus a defer-rotation
+        offset. Trust: only
         recorded decisions and inbox state, never model input; routing is
         ``insight.source == role_name`` so one role's rejection never
         schedules another. Retry: read-only and idempotent; corrupt
@@ -824,17 +825,19 @@ replacement insight without implying rejected substance.
         cursor lives in ``decision-cursors/<role>.json``; dispatch logs
         delivered events under the run directory. Delivery: substantive
         decisions (accept/modify/reject) emit once per decision and are
-        acknowledged on successful processing; deferrals emit on every
-        dispatch while still current, so an ignored deferral is redelivered
-        instead of lost, whatever its age against the cursor. A deferral
+        acknowledged on successful processing; deferrals ride along when
+        the role runs for other reasons and rotate across dispatches, so
+        an ignored deferral returns in a later window instead of occupying
+        every delivery. A deferral
         counts as handled only when its topic moves: a meaningful revision
         (which reopens the topic with no current decision), a withdrawal,
         or a superseding substantive decision. Truncation keeps substantive
         delivery lossless: unacknowledged substantive events come before
-        redelivered deferrals, oldest-first within each class, so persistent
+        the defer window, oldest-first within each class, so persistent
         defers fill only the remainder of ``limit`` and never starve a newer
-        substantive event. A deferral with a registered structured wait still
-        redelivers while defer is a subscribed trigger; the wait is an
+        substantive event, while rotation keeps every defer reachable
+        instead of pinning the oldest window. A deferral with a registered structured wait still
+        rides along while defer is a subscribed trigger; the wait is an
         additional one-shot reconsideration signal, not a gate. To gate
         reconsideration until the condition holds, subscribe to substantive
         actions only and rely on the wait. Failure: Denied on bad
@@ -881,12 +884,26 @@ replacement insight without implying rejected substance.
                         created < ack_at or (created == ack_at and path.stem in acked)):
                     continue
                 candidates.append((created, path.stem, record))
-        # Substantive delivery stays lossless under truncation: persistent
-        # defer redelivery must fill only the remainder of ``limit``, never
-        # starve a newer substantive event behind older defers.
-        candidates.sort(key=lambda item: (item[2].get("action") == "defer", item[0], item[1]))
+        # Substantive delivery stays lossless under truncation: the defer
+        # window must fill only the remainder of ``limit``, never starve a
+        # newer substantive event behind older defers, and must rotate so
+        # newer defers are reachable instead of pinned behind the oldest.
+        candidates.sort(key=lambda item: (item[0], item[1]))
+        substantive_raw = [c for c in candidates if c[2].get("action") != "defer"]
+        defer_raw = [c for c in candidates if c[2].get("action") == "defer"]
+        try:
+            offset = 0
+            if isinstance(cursor, dict):
+                raw_offset = cursor.get("defer_offset", 0)
+                if type(raw_offset) is int and raw_offset >= 0:
+                    offset = raw_offset
+        except (TypeError, ValueError, AttributeError):
+            offset = 0
+        ordered_raw = list(substantive_raw) + list(defer_raw)
         pending = []
-        for created, stem, record in candidates:
+        substantive: list = []
+        defers: list = []
+        for created, stem, record in ordered_raw:
             try:
                 current = self.read(record.get("id", ""))
             except (Denied, OSError, ValueError, TypeError, AttributeError):
@@ -903,13 +920,24 @@ replacement insight without implying rejected substance.
                 continue
             if effective != record:
                 continue
-            pending.append({"event": stem, "insight": current["id"], "rev": rev,
-                            "title": current.get("title", ""), "body": current.get("body", ""),
-                            "action": record.get("action"), "reason": record.get("reason", ""),
-                            "revisit": record.get("revisit", ""),
-                            "decided_at": created})
-            if len(pending) >= limit:
-                break
+            payload = {"event": stem, "insight": current["id"], "rev": rev,
+                       "title": current.get("title", ""), "body": current.get("body", ""),
+                       "action": record.get("action"), "reason": record.get("reason", ""),
+                       "revisit": record.get("revisit", ""),
+                       "decided_at": created}
+            if record.get("action") == "defer":
+                defers.append(payload)
+            else:
+                substantive.append(payload)
+        pending.extend(substantive[:limit])
+        room = limit - len(pending)
+        if room > 0 and defers:
+            if len(defers) <= room:
+                pending.extend(defers)
+            else:
+                start = offset % len(defers)
+                for i in range(room):
+                    pending.append(defers[(start + i) % len(defers)])
         return pending
 
     def acknowledge_decisions(self, role_name: str, events) -> dict:
@@ -917,28 +945,43 @@ replacement insight without implying rejected substance.
 
         Schema: ``events`` are payloads from ``decision_events``. Trust:
         called only after successful processing, so busy/budget/restart
-        redelivers instead of losing work. Deferral payloads need no
-        cursor (their delivery is state-derived until the topic moves) and
-        are ignored here. Retry: idempotent and forward
+        redelivers instead of losing work (the defer window does not
+        advance). Substantive payloads advance the acknowledged cursor;
+        defer payloads advance the rotation offset so the next dispatch
+        shows the next window. Retry: idempotent and forward
         only; an empty delivery leaves the cursor untouched. Evidence:
         the cursor file records ``acknowledged_at`` plus the tie-window
-        ids at that timestamp. Failure: Denied on bad role name.
+        ids at that timestamp and ``defer_offset``. Failure: Denied on bad role name.
         """
         identifier(role_name)
         delivered = [e for e in (events or []) if isinstance(e, dict)
                      and isinstance(e.get("decided_at"), str) and isinstance(e.get("event"), str)
                      and e.get("action") != "defer"]
-        if not delivered:
+        deferred = [e for e in (events or []) if isinstance(e, dict)
+                    and isinstance(e.get("decided_at"), str) and isinstance(e.get("event"), str)
+                    and e.get("action") == "defer"]
+        if not delivered and not deferred:
             return self.decision_cursor(role_name)
         cursor = self.decision_cursor(role_name)
-        ack_at = max([cursor.get("acknowledged_at") or ""] + [e["decided_at"] for e in delivered])
-        acked = {e["event"] for e in delivered if e["decided_at"] == ack_at}
-        if cursor.get("acknowledged_at") == ack_at and isinstance(cursor.get("acknowledged"), list):
-            acked |= set(cursor["acknowledged"])
-        if len(acked) > 100:
-            acked = set(sorted(acked)[-100:])
+        if delivered:
+            ack_at = max([cursor.get("acknowledged_at") or ""] + [e["decided_at"] for e in delivered])
+            acked = {e["event"] for e in delivered if e["decided_at"] == ack_at}
+            if cursor.get("acknowledged_at") == ack_at and isinstance(cursor.get("acknowledged"), list):
+                acked |= set(cursor["acknowledged"])
+            if len(acked) > 100:
+                acked = set(sorted(acked)[-100:])
+        else:
+            ack_at = cursor.get("acknowledged_at") or ""
+            acked = set(cursor.get("acknowledged") or [])
+        try:
+            offset = cursor.get("defer_offset", 0)
+            if type(offset) is not int or offset < 0:
+                offset = 0
+        except (TypeError, ValueError, AttributeError):
+            offset = 0
+        offset += len(deferred)
         record = {"role": role_name, "acknowledged_at": ack_at,
-                  "acknowledged": sorted(acked), "updated_at": now()}
+                  "acknowledged": sorted(acked), "defer_offset": offset, "updated_at": now()}
         mkdir(self.root / "decision-cursors")
         write_json(self.root / "decision-cursors" / f"{role_name}.json", record)
         return record
@@ -954,9 +997,16 @@ replacement insight without implying rejected substance.
             return {"role": role_name, "acknowledged_at": "", "acknowledged": []}
         ack_at = cursor.get("acknowledged_at", "")
         acked = cursor.get("acknowledged", [])
+        try:
+            offset = cursor.get("defer_offset", 0)
+            if type(offset) is not int or offset < 0:
+                offset = 0
+        except (TypeError, ValueError, AttributeError):
+            offset = 0
         return {"role": role_name,
                 "acknowledged_at": ack_at if isinstance(ack_at, str) else "",
-                "acknowledged": [i for i in acked if isinstance(i, str)][:100]}
+                "acknowledged": [i for i in acked if isinstance(i, str)][:100],
+                "defer_offset": offset}
 
     def gc_decided(self, *, keep_days: int | None = None) -> int:
         """Remove long-decided proposals. Decisions persist separately in

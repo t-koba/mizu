@@ -152,7 +152,7 @@ if __name__ == "__main__":
 
 
 class DeferRefinementTests(Fixture):
-    def test_defer_redelivers_until_topic_moves(self):
+    def test_defer_rides_along_without_admitting_until_topic_moves(self):
         config = _trigger_config(self.config, events=("reject", "defer"))
         engine = Engine(config, driver=ScriptDriver())
         engine.run(self.project, "reviewer")
@@ -163,16 +163,33 @@ class DeferRefinementTests(Fixture):
         self.assertEqual(len(events), 1)
         self.assertEqual((events[0]["action"], events[0]["reason"], events[0]["revisit"]),
                          ("defer", "needs field data", "observe X in the wild"))
-        admitted = engine.run(self.project, "reviewer")
-        started = read_json(self.project.root / "runs" / admitted["run"] / "started.json")
-        self.assertEqual(started["admission"], "decision")
-        # An ignored deferral is redelivered, not lost: still current, still routed.
-        still = self.project.insights.decision_events("reviewer", ("reject", "defer"))
-        self.assertEqual(len(still), 1)
-        # The topic moving (meaningful revision reopening it) ends the redelivery.
+        # A deferral alone never admits a run: unchanged and event-trigger
+        # dispatch skip cheaply instead of starting model runs.
+        self.assertEqual(engine.run(self.project, "reviewer").get("skipped"), "unchanged")
+        self.assertEqual(engine.run(self.project, "reviewer", event_trigger=True).get("skipped"), "no-event")
+        # A failure leaves the same window in place (no rotation advance).
+        self.assertEqual(self.project.insights.decision_events("reviewer", ("reject", "defer"))[0]["insight"], item["id"])
+        # The topic moving (meaningful revision reopening it) ends the ride-along.
         self.project.insights.revise(item["id"], source="reviewer", title="Finding",
                                      body="v2 with field data", base_snapshot=None)
         self.assertEqual(self.project.insights.decision_events("reviewer", ("reject", "defer")), [])
+
+    def test_defer_window_rotates_across_successful_runs(self):
+        snap = self.project.snapshots.get()["id"]
+        for i in range(4):
+            item = self.project.insights.submit(source="reviewer", title="D%02d" % i, body="v1",
+                                                base_snapshot=snap)
+            self.project.insights.decide(item["id"], "defer", "parked", "wait", "test", expected_rev=1)
+        first = self.project.insights.decision_events("reviewer", ("reject", "defer"), limit=2)
+        self.assertEqual(len(first), 2)
+        self.project.insights.acknowledge_decisions("reviewer", first)
+        second = self.project.insights.decision_events("reviewer", ("reject", "defer"), limit=2)
+        self.assertEqual(len(second), 2)
+        # Rotation advances past the first window: no overlap, full coverage.
+        self.assertEqual(set(e["insight"] for e in first) & set(e["insight"] for e in second), set())
+        self.project.insights.acknowledge_decisions("reviewer", second)
+        third = self.project.insights.decision_events("reviewer", ("reject", "defer"), limit=2)
+        self.assertEqual(set(e["insight"] for e in third), set(e["insight"] for e in first))
 
     def test_meaningful_revision_wakes_writer_with_stale_gap_visible(self):
         from mizu.runtime import should_run

@@ -1012,11 +1012,17 @@ def _decision_task(context: Context) -> str | None:
     events = list(getattr(context, "decision_events", []) or [])
     if not events:
         return None
-    return ("Delivered decision events are your primary task this unit: address each one before "
-            "starting new research, and do not submit new insights until each is handled. "
+    substantive = [e for e in events if isinstance(e, dict) and e.get("action") != "defer"]
+    if substantive:
+        head = ("Delivered decision events are your primary task this unit: address each one before "
+                "starting new research, and do not submit new insights until each is handled. ")
+    else:
+        head = ("Delivered deferrals ride along with this unit: address each one before "
+                "starting new research where its trigger is met. ")
+    return (head +
             "If its reason or revisit trigger is now actionable with new evidence, revise the "
-            "insight (or withdraw it if obsolete). A deferral left unchanged is delivered again, "
-            "so state in your summary why its trigger is not met rather than ignoring it.")
+            "insight (or withdraw it if obsolete). A deferral left unchanged returns in a later "
+            "window, so state in your summary why its trigger is not met rather than ignoring it.")
 
 
 def prompt_for(context: Context) -> str:
@@ -1268,14 +1274,18 @@ class Engine:
             # own, so no new wake source is implied.
             obligations = project.insights.pending_obligations(role_name)
             # Event-triggered dispatch (platform file triggers) admits only on a
-            # subscribed decision event or a due structured wait for this role;
-            # otherwise it exits before allocating a run directory or model use,
+            # subscribed substantive decision event or a due structured wait
+            # for this role; deferrals ride along when the role runs for
+            # other reasons and never admit a run on their own. Otherwise
+            # it exits before allocating a run directory or model use,
             # like unchanged-code admission. Periodic timers invoke without the
             # flag, so scheduled discovery still runs at its interval.
-            if event_trigger and not decision_events and not wait_events:
+            substantive_events = [e for e in decision_events
+                                  if isinstance(e, dict) and e.get("action") != "defer"]
+            if event_trigger and not substantive_events and not wait_events:
                 return {"skipped": "no-event", "snapshot": snapshot["id"],
                         "code_digest": snapshot["code_digest"]}
-            if code_unchanged and not decision_events and not wait_events:
+            if code_unchanged and not substantive_events and not wait_events:
                 return {"skipped": "unchanged", "snapshot": snapshot["id"],
                         "code_digest": snapshot["code_digest"]}
             # Pre-execution selection probe: evaluate before allocating a run
@@ -1315,8 +1325,8 @@ class Engine:
             workspace = project.workspace if role.workspace == "write" else run_dir / "input"
             try:
                 write_json(active, {"run": run_id, "role": role_name, "started_at": now()})
-                if code_unchanged and (decision_events or wait_events):
-                    admission = "decision" if decision_events else "wait"
+                if code_unchanged and (substantive_events or wait_events):
+                    admission = "decision" if substantive_events else "wait"
                 elif role.on_change:
                     admission = "change"
                 else:
@@ -1638,8 +1648,10 @@ def _role_events_due(project: Project, snapshot: dict, role_name=None) -> bool:
         for name in names:
             try:
                 triggers = project.config.roles[name].decision_events
-                if triggers and project.insights.decision_events(name, triggers):
-                    return True
+                if triggers:
+                    pending = project.insights.decision_events(name, triggers)
+                    if any(isinstance(e, dict) and e.get("action") != "defer" for e in pending):
+                        return True
             except (Denied, OSError, ValueError, TypeError, KeyError, AttributeError):
                 pass
             try:

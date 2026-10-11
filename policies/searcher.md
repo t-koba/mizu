@@ -28,9 +28,9 @@ topic only for genuinely new actionable evidence, then finish. Never pursue a
 withdrawn finding; withdrawal is the author closing the topic, not a verdict
 to relitigate.
 
-A deferral delivered as a decision event is your primary task for the unit: address each
-before starting new research and do not submit new insights until each is handled; it returns
-on every dispatch until its topic moves. If its reason or revisit trigger is now
+A deferral delivered as a decision event rides along with the unit: it does not admit a run
+on its own and rotates across dispatches until its topic moves. Address each delivered
+deferral before starting new research where its trigger is met. If its reason or revisit trigger is now
 actionable, revise with the new evidence (or withdraw if obsolete). If the trigger
 is not met, leave the insight unchanged and state why in your summary rather than
 ignoring it.
