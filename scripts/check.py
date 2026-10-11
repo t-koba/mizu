@@ -108,7 +108,7 @@ def main():
     env = {**os.environ, 'PYTHONDONTWRITEBYTECODE': '1', 'PYTHONFAULTHANDLER': '1'}
     # The offline suite is process-spawn heavy (~75 s on Linux); Windows
     # runners need substantially more headroom than 300 s, well within the
-    # 15-minute CI job budget. Step output streams live (merged in order) so
+    # 20-minute CI job budget. Step output streams live (merged in order) so
     # a hung step leaves the last-running test visible, and a step timeout
     # is recorded as a structured failure with the partial output counted
     # instead of crashing the gate before the receipt is written.
@@ -181,12 +181,15 @@ def main():
                 'skipped': int(re.search(r'^# skipped (\d+)', output, re.M).group(1)) if re.search(r'^# skipped (\d+)', output, re.M) else 0}
     # Timestamped verbose progress: on a timeout the killed step leaves the
     # unfinished test as the last timestamped line (see output-tail
-    # details). Step budget 780 s: the suite measured 403-510 s on Windows
-    # legs (775 tests) at b80b2379, so 780 s keeps ~50% headroom while
-    # staying inside the 900 s job timeout; a true hang still dies here
-    # with per-line arrival times as evidence, not a silent raise.
+    # details). Step budget 840 s: the suite measured 403-510 s on Windows
+    # legs (775 tests) at b80b2379, but on 2026-10-11 the slowest
+    # windows-latest leg hit the 780 s budget with every executed test
+    # passing (steady ~1 s/test progress to the kill), so 840 s restores
+    # headroom while staying inside the 1200 s job timeout; a true hang
+    # still dies here with per-line arrival times as evidence, not a
+    # silent raise.
     execute('python-unit-and-contract-tests', [sys.executable, '-u', '-m', 'unittest', 'discover', '-s', 'tests', '-v'],
-            count=unittest_counts, timeout=780)
+            count=unittest_counts, timeout=840)
     if not shutil.which('node'):
         checks.append({'name': 'node-available', 'status': 'fail'})
     # bash is a POSIX convenience for shell-syntax checks, not a runtime
