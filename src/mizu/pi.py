@@ -82,6 +82,8 @@ class PiDriver:
                                 raise ProtocolError("Pi request aborted")
                             observed.append({key: message.get(key) for key in ("provider", "api", "model", "thinkingLevel")})
                     elif kind == "agent_settled":
+                        if event.get("aborted") or (isinstance(event.get("data"), dict) and event["data"].get("aborted")):
+                            raise ProtocolError("Pi run aborted before settlement")
                         if context.request_count == 0:
                             raise ProtocolError("No runtime request admission observed")
                         if context.finished is None:

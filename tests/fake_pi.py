@@ -64,4 +64,9 @@ for raw in sys.stdin.buffer:
         if scenario != "missing-finish":
             bridge("read", {"path": "app.py"})
             bridge("finish", {"outcome": "wait", "summary": "After agent_end: \u2028 verified transport"})
-        emit({"type": "agent_settled"})
+        if scenario == "aborted-settled":
+            emit({"type": "agent_settled", "aborted": True})
+        elif scenario == "aborted-nested":
+            emit({"type": "agent_settled", "data": {"aborted": True}})
+        else:
+            emit({"type": "agent_settled"})

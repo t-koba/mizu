@@ -192,6 +192,13 @@ class PiProtocolTests(Fixture):
         with self.assertRaises(ProtocolError):
             self.driver("missing-finish").execute(ctx, "x")
 
+    def test_aborted_settlement_is_not_success(self):
+        for scenario in ("aborted-settled", "aborted-nested"):
+            with self.subTest(scenario=scenario):
+                ctx = self.context("consult")
+                with self.assertRaisesRegex(ProtocolError, "aborted"):
+                    self.driver(scenario).execute(ctx, prompt_for(ctx))
+
     def test_handled_prompt_not_confused_with_completed_run(self):
         ctx = self.context("consult")
         with self.assertRaises(ProtocolError):
