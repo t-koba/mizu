@@ -1003,26 +1003,31 @@ def _prompt_research_state(context: Context):
 
 
 def _decision_task(context: Context) -> str | None:
-    """Primary-task directive for a run carrying delivered decision events.
+    """Delivery description for a run carrying delivered decision events.
 
     Schema: None when no decision events were delivered, else a short
-    instruction naming how each event counts as handled. Bounds: one small
-    string. Trust: local dispatch state only. Failure: never raises.
+    factual description naming which kinds were delivered and what counts
+    as handled. Bounds: one small string. Trust: local dispatch state
+    only. Failure: never raises.
     """
     events = list(getattr(context, "decision_events", []) or [])
     if not events:
         return None
     substantive = [e for e in events if isinstance(e, dict) and e.get("action") != "defer"]
+    handled = ("A deferral counts as handled only when its topic moves "
+               "(meaningful revision, withdrawal, or a superseding decision); "
+               "an unchanged deferral returns in a later window.")
     if substantive:
-        head = ("Delivered decision events are your primary task this unit: address each one before "
-                "starting new research, and do not submit new insights until each is handled. ")
-    else:
-        head = ("Delivered deferrals ride along with this unit: address each one before "
-                "starting new research where its trigger is met. ")
-    return (head +
-            "If its reason or revisit trigger is now actionable with new evidence, revise the "
-            "insight (or withdraw it if obsolete). A deferral left unchanged returns in a later "
-            "window, so state in your summary why its trigger is not met rather than ignoring it.")
+        return (f"Delivered decision events: {len(substantive)} substantive, "
+                f"{len(events) - len(substantive)} deferral(s). "
+                "Substantive events deliver once and are acknowledged after successful "
+                "processing; deferrals ride along when this role runs for other reasons "
+                "and rotate across dispatches. " + handled +
+                " Handling is defined by the role policy.")
+    return (f"Delivered deferrals: {len(events)} ride-along. "
+            "Deferrals ride along when this role runs for other reasons "
+            "and rotate across dispatches. " + handled +
+            " Handling is defined by the role policy.")
 
 
 def prompt_for(context: Context) -> str:

@@ -169,9 +169,8 @@ come before the rotating defer window, oldest-first within each class, so every 
 stays reachable instead of pinning the oldest window. A deferral with a
 registered structured wait still rides along while defer is a subscribed trigger; to gate
 reconsideration until the condition holds, subscribe to substantive actions only and rely
-on the wait. The prompt marks delivered substantive events as the unit's primary task and
-delivered deferrals as ride-along work with that rule, so an ignored deferral returns in a
-later window instead of vanishing. The revisit
+on the wait. The prompt describes delivered kinds factually (substantive counts, ride-along deferral counts, and what counts as handled), so an unchanged deferral returning in a
+later window instead of vanishing is visible without directing behaviour; handling is defined by the role policy. The revisit
 prose is never parsed as an executable condition. A deferral may instead
 register one structured wait (``deadline``, ``code_change``,
 ``insight_decided``, or ``dependency``) through the decision interface; the wait binds to the
