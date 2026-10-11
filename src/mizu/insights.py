@@ -812,7 +812,8 @@ replacement insight without implying rejected substance.
         """Collect decision events routed to one role.
 
         Schema: ``actions`` is the role's configured trigger list;
-        returns oldest-first focused payloads
+        returns focused payloads, substantive oldest-first then redelivered
+        deferrals oldest-first,
         ``{event, insight, rev, title, body, action, reason, revisit, decided_at}``
         (at most ``limit``). Bounds: ``limit`` is a positive int capped at
         100; cursors keep at most 100 tie-window ids. Trust: only
@@ -828,7 +829,15 @@ replacement insight without implying rejected substance.
         instead of lost, whatever its age against the cursor. A deferral
         counts as handled only when its topic moves: a meaningful revision
         (which reopens the topic with no current decision), a withdrawal,
-        or a superseding substantive decision. Failure: Denied on bad
+        or a superseding substantive decision. Truncation keeps substantive
+        delivery lossless: unacknowledged substantive events come before
+        redelivered deferrals, oldest-first within each class, so persistent
+        defers fill only the remainder of ``limit`` and never starve a newer
+        substantive event. A deferral with a registered structured wait still
+        redelivers while defer is a subscribed trigger; the wait is an
+        additional one-shot reconsideration signal, not a gate. To gate
+        reconsideration until the condition holds, subscribe to substantive
+        actions only and rely on the wait. Failure: Denied on bad
         role name or limit; missing inbox, superseded decisions,
         revision-stale records, and withdrawals never emit (a
         revision-current withdraw over a rejection means do not
@@ -872,7 +881,10 @@ replacement insight without implying rejected substance.
                         created < ack_at or (created == ack_at and path.stem in acked)):
                     continue
                 candidates.append((created, path.stem, record))
-        candidates.sort()
+        # Substantive delivery stays lossless under truncation: persistent
+        # defer redelivery must fill only the remainder of ``limit``, never
+        # starve a newer substantive event behind older defers.
+        candidates.sort(key=lambda item: (item[2].get("action") == "defer", item[0], item[1]))
         pending = []
         for created, stem, record in candidates:
             try:

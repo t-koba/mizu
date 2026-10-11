@@ -159,7 +159,11 @@ Withdrawn or superseded decisions never emit, and a substantive decision never l
 withdrawn revision. Substantive delivery is one-shot per decision; a deferral is
 redelivered on every dispatch while still current, whatever its age against the cursor,
 and counts as handled only when its topic moves (revision, withdrawal, or a superseding
-decision). The prompt marks delivered events as the unit's primary task with that rule,
+decision). Truncation keeps substantive delivery lossless: unacknowledged substantive events
+come before redelivered deferrals, oldest-first within each class. A deferral with a
+registered structured wait still redelivers while defer is a subscribed trigger; to gate
+reconsideration until the condition holds, subscribe to substantive actions only and rely
+on the wait. The prompt marks delivered events as the unit's primary task with that rule,
 so an ignored deferral returns instead of vanishing. The revisit
 prose is never parsed as an executable condition. A deferral may instead
 register one structured wait (``deadline``, ``code_change``,

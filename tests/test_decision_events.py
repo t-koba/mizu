@@ -217,6 +217,28 @@ class DeferRefinementTests(Fixture):
         record = self.project.insights.decide(item["id"], "accept", "read v2", "", "test", expected_rev=2)
         self.assertEqual(record["rev"], 2)
 
+    def test_substantive_not_starved_by_defers_under_limit(self):
+        # Persistent defer redelivery must fill only the remainder of the
+        # limit: a newer substantive event is delivered first and acking it
+        # vacates the window while defers keep redelivering.
+        snap = self.project.snapshots.get()["id"]
+        for i in range(20):
+            item = self.project.insights.submit(source="reviewer", title="D%02d" % i, body="v1",
+                                                base_snapshot=snap)
+            self.project.insights.decide(item["id"], "defer", "parked", "wait", "test", expected_rev=1)
+        rejected = self.project.insights.submit(source="reviewer", title="R", body="v1",
+                                                base_snapshot=snap)
+        self.project.insights.decide(rejected["id"], "reject", "not material", "", "test", expected_rev=1)
+        events = self.project.insights.decision_events("reviewer", ("reject", "defer"), limit=10)
+        self.assertEqual(len(events), 10)
+        self.assertEqual(events[0]["action"], "reject")
+        self.assertEqual(events[0]["title"], "R")
+        self.assertEqual(sum(1 for e in events if e["action"] == "defer"), 9)
+        self.project.insights.acknowledge_decisions("reviewer", events)
+        again = self.project.insights.decision_events("reviewer", ("reject", "defer"), limit=10)
+        self.assertEqual(len(again), 10)
+        self.assertTrue(all(e["action"] == "defer" for e in again))
+
     def test_deferred_gap_stays_visible_with_revisit(self):
         item = self.project.insights.submit(source="reviewer", title="Finding", body="v1",
                                             base_snapshot=self.project.snapshots.get()["id"])
