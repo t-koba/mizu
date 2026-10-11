@@ -4,7 +4,7 @@
  * submission to settlement and prints a single JSON result document to
  * stdout (stderr carries progress only). No RPC, no JSONL event stream.
  *
- * Durable contracts (from @earendil-works/pi-durable 1.0.4):
+ * Durable contracts (from @earendil-works/pi-durable 1.1.0):
  * - openNodeSqliteStorage(file): WAL SQLite; commits survive process crashes.
  * - Harness.open(storage, {models, registry}): one Session line of commits.
  * - root.submit({type:'input', content, requestId}): retried requestId
