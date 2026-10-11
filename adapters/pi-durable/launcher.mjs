@@ -23,7 +23,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Type } from '@earendil-works/pi-ai';
+import { InMemoryCredentialStore, Type } from '@earendil-works/pi-ai';
 import { builtinModels } from '@earendil-works/pi-ai/providers/all';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { AssistantEntry, createRegistry, defineExtension, defineTool, Harness } from '@earendil-works/pi-durable';
@@ -31,6 +31,62 @@ import { openNodeSqliteStorage } from '@earendil-works/pi-durable/storage/sqlite
 import { request, typeSchema } from './bridge-client.mjs';
 
 const CONTRACT_EXPORTS = ['Harness', 'createRegistry', 'defineExtension', 'defineTool', 'openNodeSqliteStorage', 'builtinModels'];
+
+/**
+ * Seed provider credentials from Pi's login store (auth.json), read-only.
+ *
+ * The pi engine resolves the same file (its agentDir auth.json) plus
+ * environment; the durable Harness previously saw environment only, so a
+ * Pi subscription login (e.g. provider `openai` via OAuth) was unusable
+ * from durable profiles. The parsed file seeds an in-memory store handed
+ * to builtinModels: request-time OAuth refresh still runs in memory for
+ * the submission, but nothing is written back, so the file stays the
+ * system of record (a pi run persists its own refresh there). Entry
+ * shapes mirror Pi's auth.json validation (api_key key/env, oauth
+ * access/refresh/expires); anything else fails closed. A missing file
+ * keeps the previous env-only behavior; any other read or shape failure
+ * refuses loudly instead of running unauthenticated.
+ */
+export async function credentialsFromFile(authPath) {
+  const store = new InMemoryCredentialStore();
+  let raw;
+  try {
+    raw = readFileSync(authPath, 'utf8');
+  } catch (error) {
+    if (error?.code === 'ENOENT') return store;
+    throw new Error(`Cannot read Pi auth store: ${error.message}`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`Invalid Pi auth store: ${error.message}`);
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error('Invalid Pi auth store: expected an object');
+  }
+  for (const [providerId, credential] of Object.entries(parsed)) {
+    if (typeof credential !== 'object' || credential === null || Array.isArray(credential)) {
+      throw new Error(`Invalid Pi auth credential for provider "${providerId}"`);
+    }
+    if (credential.type === 'api_key') {
+      const validKey = credential.key === undefined || typeof credential.key === 'string';
+      const validEnv = credential.env === undefined
+        || (typeof credential.env === 'object' && credential.env !== null && !Array.isArray(credential.env)
+          && Object.values(credential.env).every(entry => typeof entry === 'string'));
+      if (!validKey || !validEnv) throw new Error(`Invalid Pi auth credential for provider "${providerId}"`);
+    } else if (credential.type === 'oauth') {
+      if (typeof credential.access !== 'string' || typeof credential.refresh !== 'string'
+        || typeof credential.expires !== 'number' || !Number.isFinite(credential.expires)) {
+        throw new Error(`Invalid Pi auth credential for provider "${providerId}"`);
+      }
+    } else {
+      throw new Error(`Invalid Pi auth credential for provider "${providerId}"`);
+    }
+    await store.modify(providerId, async () => credential);
+  }
+  return store;
+}
 
 export function meterModels(models, hooks) {
   // Guarded provider metering shared by the one-shot submission path.
@@ -130,7 +186,10 @@ async function runOnce(cfg) {
 
   // Exact-model pin over built-in providers only. Custom models.json
   // providers stay on pi; here they refuse loudly instead of guessing.
-  const models = builtinModels();
+  // Credentials resolve like pi: the engine-directory login store
+  // (authPath, read-only seed) plus environment API keys.
+  if (typeof cfg.authPath !== 'string' || !cfg.authPath) throw new Error('Effective configuration lacks authPath');
+  const models = builtinModels({ credentials: await credentialsFromFile(cfg.authPath) });
   const model = models.getModel(cfg.provider, cfg.model);
   if (!model) throw new Error(`Configured exact model is unavailable on pi-durable: ${cfg.provider}/${cfg.model}`);
   const auth = await models.checkAuth(cfg.provider).catch(() => undefined);

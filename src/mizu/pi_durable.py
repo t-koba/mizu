@@ -57,6 +57,22 @@ def durable_options(settings: dict) -> dict:
     return {"backend": backend, "resume": resume, "retention_days": retention, "max_turns": max_turns}
 
 
+def durable_auth_path(config) -> Path:
+    """Pi login store read by the durable launcher (same source as pi).
+
+    Schema: ``config.agent_dir("pi-durable")/auth.json`` (operator-owned
+    engine directory, like the pi engine's own ``auth.json``). Bounds:
+    path only, never content: credentials stay out of evidence and content
+    hashes. Trust: operator-owned login state, read host-side by the
+    controller, never mounted into command containers. Failure: the
+    launcher treats a missing file as env-only auth and refuses a
+    malformed store loudly.
+    """
+    agent_dir = config.agent_dir(ENGINE)
+    mkdir(agent_dir)
+    return agent_dir / "auth.json"
+
+
 def grant_for(settings: dict, role, model: dict) -> str:
     policy = role_policy_text(role)
     options_digest = digest(canonical({k: v for k, v in settings.get("options", {}).items()
@@ -220,7 +236,7 @@ class PiDurableDriver:
             "provider": model["provider"], "model": model["model"],
             "instructions": policy, "tools": tool_definitions(context.role.capabilities),
             "cwd": str(cwd), "store": str(store_path), "requestId": run_key, "prompt": prompt,
-            "max_turns": remaining,
+            "max_turns": remaining, "authPath": str(durable_auth_path(self.config)),
         }
         if options.get("thinkingLevel") is not None:
             effective_config["thinkingLevel"] = options["thinkingLevel"]

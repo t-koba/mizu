@@ -5,6 +5,7 @@
  * close/reopen with resume, committed usage, and replay-unsafe default.
  */
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,7 +15,7 @@ import { spawnSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join as joinPath } from 'node:path';
-import { meterModels } from '../adapters/pi-durable/launcher.mjs';
+import { credentialsFromFile, meterModels } from '../adapters/pi-durable/launcher.mjs';
 import { AssistantEntry, BACKGROUND_CONTEXT, Harness, Type, createModels, createRegistry,
   defineExtension, defineTool, fauxAssistantMessage, fauxProvider, fauxToolCall,
   openNodeSqliteStorage } from '../adapters/pi-durable/test-support.mjs';
@@ -101,6 +102,33 @@ test('close/reopen resumes pending work exactly once', async () => {
     const answer = await root2.commit(tx => tx.entry(AssistantEntry, settled.answer), context);
     assert.ok(answer);
     await two.close(context);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('pi login store seeds provider credentials read-only', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'mizu-durable-auth-'));
+  try {
+    const missing = join(directory, 'auth.json');
+    const empty = await credentialsFromFile(missing);
+    assert.equal(await empty.read('openai'), undefined);
+    assert.deepEqual(await empty.list(), []);
+    // A missing store keeps env-only behavior and never creates the file.
+    assert.equal(existsSync(missing), false);
+    const credential = { type: 'api_key', key: 'synthetic-test-only' };
+    writeFileSync(missing, JSON.stringify({ 'test-only': credential }));
+    const seeded = await credentialsFromFile(missing);
+    assert.deepEqual(await seeded.read('test-only'), credential);
+    assert.deepEqual(await seeded.list(), [{ providerId: 'test-only', type: 'api_key' }]);
+    const oauth = { type: 'oauth', access: 'a', refresh: 'r', expires: Date.now() + 3600000 };
+    writeFileSync(missing, JSON.stringify({ openai: oauth }));
+    const subscription = await credentialsFromFile(missing);
+    assert.deepEqual(await subscription.read('openai'), oauth);
+    writeFileSync(missing, '{corrupt');
+    await assert.rejects(credentialsFromFile(missing), /Invalid Pi auth store/);
+    writeFileSync(missing, JSON.stringify({ 'test-only': { type: 'oauth', access: 'a' } }));
+    await assert.rejects(credentialsFromFile(missing), /Invalid Pi auth credential/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

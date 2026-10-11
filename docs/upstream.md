@@ -22,6 +22,15 @@ adapters/pi-durable の3依存を 1.1.0 に固定した。
 両 lock は materialize 経由で再生し、Pi 系以外の差分がないことと実際の npm 配布物の
 公開型定義との整合を確認した。
 
+pi-durable の launcher は Pi のログイン保存 (`auth.json`) を read-only で種にし、
+環境 API キーと併せて `builtinModels({ credentials })` に渡す。2026-10-11 に
+`engine = "pi"` では通る ChatGPT subscription ログイン (provider `openai`) が
+`engine = "pi-durable"` では `Provider auth is not configured` で失敗することを確認し、
+環境変数のみを見ていたことが原因だった。durable 側の refresh は当該 run の
+メモリ内に留まり、ファイルへの書戻しは pi 側の run が担う。subscription ログインを
+durable で使う運用者は `[engines.pi-durable] directory` を `[engines.pi]` と同じ
+path にするか、`auth.json` を複写する。
+
 管理下の launcher が `ModelRuntime`、`createAgentSession`、`runRpcMode` を使用する。
 `stream` / `streamSimple` / deferred fetch、分類、画像生成の公開要求入口に
 予約を置く。`complete` と `completeSimple` は stream へ委譲するので二重予約しない。

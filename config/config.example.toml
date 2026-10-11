@@ -116,6 +116,9 @@ session = "ephemeral"
 thinkingLevel = "off"
 
 # Durable execution: selectable via engine = "pi-durable" (no live switch here).
+# pi-durable reads Pi's login store (auth.json) from its own engine directory plus
+# environment. To reuse a Pi subscription login, point [engines.pi-durable] directory
+# at the same path as [engines.pi] or copy auth.json over.
 # [profiles.durable]
 # engine = "pi-durable"
 # provider = ""

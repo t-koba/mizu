@@ -195,6 +195,51 @@ class PolicyTests(Fixture):
         self.assertEqual(record2["usage"], {"tokens": 30})
 
 
+class AuthPathTests(Fixture):
+    def _durable_profile(self, **options):
+        settings = dict(self.config.profiles["primary"])
+        settings["engine"] = "pi-durable"
+        merged = dict(settings.get("options", {}))
+        merged.update(options)
+        settings["options"] = merged
+        self.config.profiles["durable"] = settings
+        return "durable"
+
+    def test_auth_path_defaults_to_durable_engine_directory(self):
+        from pathlib import Path
+        expected = self.config.agent_dir("pi-durable") / "auth.json"
+        self.assertEqual(pi_durable.durable_auth_path(self.config), expected)
+        self.assertTrue(Path(expected).parent.is_dir())
+
+    def test_run_once_writes_auth_path_into_effective_config(self):
+        import json
+        import types
+        from pathlib import Path
+        from unittest import mock
+        from mizu.engine_config import effective
+        profile = self._durable_profile()
+        driver = pi_durable.PiDurableDriver(self.config)
+        context = self.context()
+        context.handle("_hello", {})
+        context.handle("_budget", {"sequence": 1})
+        context.handle("finish", {"outcome": "wait", "summary": "s", "state": "n"})
+        reported = {"durable_result": True, "status": "done", "finish_called": True,
+                    "requests": 1, "usage": {"input": 1, "output": 1}}
+        fake = types.SimpleNamespace(reason="exited", exit_code=0,
+                                     stdout=json.dumps(reported), stderr="")
+        settings = effective(self.config, context.role, profile)
+        model = self.config.model(profile)
+        with mock.patch.object(pi_durable, "Bridge") as bridge_cls, \
+                mock.patch.object(pi_durable, "run", return_value=fake):
+            bridge_cls.return_value.__enter__.return_value.config_file = str(
+                context.run_dir / "bridge.json")
+            driver._run_once(context, settings, model, "hello", profile,
+                             "run-key", Path("/tmp/store.sqlite"), remaining=5)
+        written = json.loads((context.run_dir / "pi-durable-effective.json").read_text())
+        self.assertEqual(written["authPath"],
+                         str(self.config.agent_dir("pi-durable") / "auth.json"))
+
+
 class SessionIsolationTests(Fixture):
     def _durable_profile(self, **options):
         settings = dict(self.config.profiles["primary"])
