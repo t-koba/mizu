@@ -152,7 +152,7 @@ decision and over an unseen revision, a repeated request is a no-op, and
 `decision_events` is additionally admitted by unacknowledged decisions routed
 to it (insight source equals role name): the dispatch delivers the current
 finding plus the reason as a `decision_events` field inside the role's ordinary prompt
-(all other granted inputs stay present), marked by a `decision_task` primary-task directive,
+(all other granted inputs stay present), described factually by a `decision_task` field,
 records the admission and the
 delivered events under the run directory, and advances a per-role acknowledged
 cursor over substantive outcomes only after successful processing, so pause, budget,
