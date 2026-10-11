@@ -35,17 +35,19 @@ const CONTRACT_EXPORTS = ['Harness', 'createRegistry', 'defineExtension', 'defin
 /**
  * Seed provider credentials from Pi's login store (auth.json), read-only.
  *
- * The pi engine resolves the same file (its agentDir auth.json) plus
- * environment; the durable Harness previously saw environment only, so a
- * Pi subscription login (e.g. provider `openai` via OAuth) was unusable
- * from durable profiles. The parsed file seeds an in-memory store handed
- * to builtinModels: request-time OAuth refresh still runs in memory for
- * the submission, but nothing is written back, so the file stays the
- * system of record (a pi run persists its own refresh there). Entry
- * shapes mirror Pi's auth.json validation (api_key key/env, oauth
- * access/refresh/expires); anything else fails closed. A missing file
- * keeps the previous env-only behavior; any other read or shape failure
- * refuses loudly instead of running unauthenticated.
+ * Only `api_key` entries are seeded. `oauth` entries are validated and
+ * then skipped: an OAuth refresh rotates the server-side refresh token,
+ * and the durable launcher owns no write-back to auth.json (nor the
+ * pi engine's cross-process lock), so spending the refresh in memory
+ * would leave a stale token in the file and break the shared login for
+ * every later run on either engine (observed 2026-10-11: one durable
+ * refresh, then invalid_grant everywhere until re-login). A requested
+ * provider whose login is OAuth-only therefore refuses loudly at dispatch
+ * (see runOnce) instead of spending the shared token; use engine `pi`
+ * or an API key for durable profiles. Entry shapes mirror Pi's auth.json
+ * validation (api_key key/env, oauth access/refresh/expires); anything
+ * else fails closed. A missing file keeps env-only behavior; any other
+ * read or shape failure refuses loudly instead of running unauthenticated.
  */
 export async function credentialsFromFile(authPath) {
   const store = new InMemoryCredentialStore();
@@ -83,9 +85,20 @@ export async function credentialsFromFile(authPath) {
     } else {
       throw new Error(`Invalid Pi auth credential for provider "${providerId}"`);
     }
+    if (credential.type === 'oauth') continue; // never spend a rotating refresh token (see above)
     await store.modify(providerId, async () => credential);
   }
   return store;
+}
+
+export function authPathHasOAuth(authPath, providerId) {
+  try {
+    const parsed = JSON.parse(readFileSync(authPath, 'utf8'));
+    const credential = parsed?.[providerId];
+    return typeof credential === 'object' && credential !== null && credential.type === 'oauth';
+  } catch {
+    return false;
+  }
 }
 
 export function meterModels(models, hooks) {
@@ -193,7 +206,14 @@ async function runOnce(cfg) {
   const model = models.getModel(cfg.provider, cfg.model);
   if (!model) throw new Error(`Configured exact model is unavailable on pi-durable: ${cfg.provider}/${cfg.model}`);
   const auth = await models.checkAuth(cfg.provider).catch(() => undefined);
-  if (!auth) throw new Error(`Provider auth is not configured for ${cfg.provider}`);
+  if (!auth) {
+    if (authPathHasOAuth(cfg.authPath, cfg.provider)) {
+      throw new Error(`Pi OAuth login for "${cfg.provider}" is not usable on pi-durable:`
+        + ' refreshing here would spend the rotating refresh token and break the shared login;'
+        + ' use engine "pi" or an API key');
+    }
+    throw new Error(`Provider auth is not configured for ${cfg.provider}`);
+  }
 
   // Admission + usage metering around every provider call, mirroring the
   // pi engine: one _budget reservation before dispatch, one _model_usage

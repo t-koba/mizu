@@ -15,7 +15,7 @@ import { spawnSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join as joinPath } from 'node:path';
-import { credentialsFromFile, meterModels } from '../adapters/pi-durable/launcher.mjs';
+import { authPathHasOAuth, credentialsFromFile, meterModels } from '../adapters/pi-durable/launcher.mjs';
 import { AssistantEntry, BACKGROUND_CONTEXT, Harness, Type, createModels, createRegistry,
   defineExtension, defineTool, fauxAssistantMessage, fauxProvider, fauxToolCall,
   openNodeSqliteStorage } from '../adapters/pi-durable/test-support.mjs';
@@ -124,7 +124,17 @@ test('pi login store seeds provider credentials read-only', async () => {
     const oauth = { type: 'oauth', access: 'a', refresh: 'r', expires: Date.now() + 3600000 };
     writeFileSync(missing, JSON.stringify({ openai: oauth }));
     const subscription = await credentialsFromFile(missing);
-    assert.deepEqual(await subscription.read('openai'), oauth);
+    // OAuth entries validate but are never seeded: spending the rotating
+    // refresh in memory would stale the shared file (invalid_grant).
+    assert.equal(await subscription.read('openai'), undefined);
+    assert.deepEqual(await subscription.list(), []);
+    assert.equal(authPathHasOAuth(missing, 'openai'), true);
+    assert.equal(authPathHasOAuth(missing, 'other'), false);
+    // api_key entries still seed alongside a skipped oauth entry.
+    writeFileSync(missing, JSON.stringify({ openai: oauth, 'test-only': credential }));
+    const mixed = await credentialsFromFile(missing);
+    assert.deepEqual(await mixed.read('test-only'), credential);
+    assert.equal(await mixed.read('openai'), undefined);
     writeFileSync(missing, '{corrupt');
     await assert.rejects(credentialsFromFile(missing), /Invalid Pi auth store/);
     writeFileSync(missing, JSON.stringify({ 'test-only': { type: 'oauth', access: 'a' } }));

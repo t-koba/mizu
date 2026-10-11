@@ -61,7 +61,11 @@ def durable_auth_path(config) -> Path:
     """Pi login store read by the durable launcher (same source as pi).
 
     Schema: ``config.agent_dir("pi-durable")/auth.json`` (operator-owned
-    engine directory, like the pi engine's own ``auth.json``). Bounds:
+    engine directory, like the pi engine's own ``auth.json``). Only
+    ``api_key`` entries are used: the launcher validates but never seeds
+    ``oauth`` (spending a rotating refresh without the pi write-back lock
+    would stale the shared file, observed 2026-10-11), and an OAuth-only
+    provider refuses loudly at dispatch. Bounds:
     path only, never content: credentials stay out of evidence and content
     hashes. Trust: operator-owned login state, read host-side by the
     controller, never mounted into command containers. Failure: the
