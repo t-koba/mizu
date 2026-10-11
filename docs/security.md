@@ -30,7 +30,7 @@ later read or run. Each consumer, what it trusts, and the gate:
 | `verify` command | Agent-influenced worktree at a captured digest | Operator-owned argv only; proves command results on the digest, not oracle completeness |
 | Publish pointers (`snapshot`, `report`) | Snapshot content and report body | Pointer moves atomically only after the entry is complete; report renders Markdown, never HTML; bounded JSON |
 | Service renderer | Staged unit definitions | Text rendering only; staged units must pass `systemd-analyze verify` (where available) and operator review before arming |
-| Backup, VCS publish, editor ingest | Published tree and outbox spool | Operator-owned destinations and commands; review the published tree before opening or executing anything from it |
+| Backup, VCS publish, editor ingest | Published tree and outbox spool | Operator-owned destinations and commands; review the published tree before opening or executing anything from it, including repository autostart settings such as `.vscode/tasks.json` and `.claude/settings.json` hooks (a separate execution path from npm lifecycle scripts) |
 | Engine configuration | Writer-influenced `.codex/config.toml`/`.env`, Claude settings or hooks, and Pi project-local inputs | Pinned controller `cwd` (Pi controller `cwd` is the private run dir, not the workspace), isolated `CODEX_HOME` and `CLAUDE_CONFIG_DIR`, `setting_sources=[]`, Pi `noExtensions/noSkills/noPromptTemplates/noThemes/noContextFiles` with only digest-checked operator `resources` as `additional*Paths` (pin 1.1.0; CVE-2026-54325 trust gating landed in 0.79.0), read-only sandbox mode with command and file-change approvals declined (GHSA-xrxf-jgv3-qmrm, GHSA-w5fx-fh39-j5rw) |
 | VCS tooling | Writer-shaped `.git/config`, attributes, diff drivers, or nested `*.git` bare repos honored by host `git` | `.git` excluded from snapshots, operator-owned VCS commands and destinations, host git refuses bare-repo discovery unless explicitly allowlisted (`safe.bareRepository=explicit`); review the published tree before opening or executing anything from it |
 | Control plane (host bridge) | Nothing model-supplied | Per-run 256-bit token plus loopback-only bind and strict shape checks (`hmac.compare_digest`, `src/mizu/bridge.py`); never trust a client-supplied `Host` header. This token-and-peer design avoids the CVE-2026-82533 class (Host-header trust with loopback left open) |
@@ -206,7 +206,7 @@ before staging/installing it, not only before a public release: staging
 the pinned tree on the host. Dependency lifecycle scripts are disabled by
 default (`--ignore-scripts` covers only lifecycle scripts, not import-time code);
 enabling them is explicit. Installation receipts contain source and
-lock hashes but are not publisher signatures. GitHub workflows pin action SHAs,
+lock hashes but are not publisher signatures. Genuine build provenance can still authenticate malicious source from a compromised workflow, so review the referenced source, workflow, and delivered artifact rather than pins or attestation status alone. GitHub workflows pin action SHAs,
 use read-only repository permissions and do not run paid model calls on pull
 requests. Maintainer changes stay in a candidate tree; production pointers and
 secrets are never mounted there.
