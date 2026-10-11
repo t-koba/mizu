@@ -20,10 +20,12 @@
  * only (native host tools refused Python-side), per-request budget admission
  * and usage reporting around every provider call, mizu_finish seal required.
  */
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { InMemoryCredentialStore, Type } from '@earendil-works/pi-ai';
+import { setTimeout as sleep } from 'node:timers/promises';
+import lockfile from 'proper-lockfile';
+import { Type } from '@earendil-works/pi-ai';
 import { builtinModels } from '@earendil-works/pi-ai/providers/all';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { AssistantEntry, createRegistry, defineExtension, defineTool, Harness } from '@earendil-works/pi-durable';
@@ -33,72 +35,206 @@ import { request, typeSchema } from './bridge-client.mjs';
 const CONTRACT_EXPORTS = ['Harness', 'createRegistry', 'defineExtension', 'defineTool', 'openNodeSqliteStorage', 'builtinModels'];
 
 /**
- * Seed provider credentials from Pi's login store (auth.json), read-only.
+ * File-backed provider credentials over Pi's login store (auth.json).
  *
- * Only `api_key` entries are seeded. `oauth` entries are validated and
- * then skipped: an OAuth refresh rotates the server-side refresh token,
- * and the durable launcher owns no write-back to auth.json (nor the
- * pi engine's cross-process lock), so spending the refresh in memory
- * would leave a stale token in the file and break the shared login for
- * every later run on either engine (observed 2026-10-11: one durable
- * refresh, then invalid_grant everywhere until re-login). A requested
- * provider whose login is OAuth-only therefore refuses loudly at dispatch
- * (see runOnce) instead of spending the shared token; use engine `pi`
- * or an API key for durable profiles. Entry shapes mirror Pi's auth.json
+ * The store is the pi engine's `AuthStorage`/`FileAuthStorageBackend`
+ * protocol in miniature: `auth.json` read-modify-write serialized by
+ * `proper-lockfile` with the same options Pi uses (`realpath: false`,
+ * `stale: 30000`), file mode 0600 and directory mode 0700. `pi-ai`
+ * runs OAuth refresh inside `modify`, so the rotated refresh token is
+ * persisted before the lock is released and concurrent pi / pi-durable
+ * processes refresh exactly once instead of spending the same rotating
+ * token twice (observed 2026-10-11: in-memory seed discarded the
+ * replacement, then `invalid_grant` everywhere until re-login).
+ *
+ * Reads on a missing file stay env-only without creating it; `modify`
+ * ensures the directory/file. Entry shapes mirror Pi's auth.json
  * validation (api_key key/env, oauth access/refresh/expires); anything
- * else fails closed. A missing file keeps env-only behavior; any other
- * read or shape failure refuses loudly instead of running unauthenticated.
+ * else fails closed. Any other read or shape failure refuses loudly
+ * instead of running unauthenticated.
  */
-export async function credentialsFromFile(authPath) {
-  const store = new InMemoryCredentialStore();
-  let raw;
-  try {
-    raw = readFileSync(authPath, 'utf8');
-  } catch (error) {
-    if (error?.code === 'ENOENT') return store;
-    throw new Error(`Cannot read Pi auth store: ${error.message}`);
+const AUTH_FILE_WRITE_OPTIONS = { encoding: 'utf-8', mode: 0o600 };
+
+function validateCredential(providerId, credential) {
+  if (typeof credential !== 'object' || credential === null || Array.isArray(credential)) {
+    throw new Error(`Invalid Pi auth credential for provider "${providerId}"`);
   }
+  if (credential.type === 'api_key') {
+    const validKey = credential.key === undefined || typeof credential.key === 'string';
+    const validEnv = credential.env === undefined
+      || (typeof credential.env === 'object' && credential.env !== null && !Array.isArray(credential.env)
+        && Object.values(credential.env).every(entry => typeof entry === 'string'));
+    if (!validKey || !validEnv) throw new Error(`Invalid Pi auth credential for provider "${providerId}"`);
+  } else if (credential.type === 'oauth') {
+    if (typeof credential.access !== 'string' || typeof credential.refresh !== 'string'
+      || typeof credential.expires !== 'number' || !Number.isFinite(credential.expires)) {
+      throw new Error(`Invalid Pi auth credential for provider "${providerId}"`);
+    }
+  } else {
+    throw new Error(`Invalid Pi auth credential for provider "${providerId}"`);
+  }
+}
+
+function parseAuthData(content) {
+  if (!content) return {};
   let parsed;
   try {
-    parsed = JSON.parse(raw);
+    parsed = JSON.parse(content);
   } catch (error) {
     throw new Error(`Invalid Pi auth store: ${error.message}`);
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     throw new Error('Invalid Pi auth store: expected an object');
   }
-  for (const [providerId, credential] of Object.entries(parsed)) {
-    if (typeof credential !== 'object' || credential === null || Array.isArray(credential)) {
-      throw new Error(`Invalid Pi auth credential for provider "${providerId}"`);
-    }
-    if (credential.type === 'api_key') {
-      const validKey = credential.key === undefined || typeof credential.key === 'string';
-      const validEnv = credential.env === undefined
-        || (typeof credential.env === 'object' && credential.env !== null && !Array.isArray(credential.env)
-          && Object.values(credential.env).every(entry => typeof entry === 'string'));
-      if (!validKey || !validEnv) throw new Error(`Invalid Pi auth credential for provider "${providerId}"`);
-    } else if (credential.type === 'oauth') {
-      if (typeof credential.access !== 'string' || typeof credential.refresh !== 'string'
-        || typeof credential.expires !== 'number' || !Number.isFinite(credential.expires)) {
-        throw new Error(`Invalid Pi auth credential for provider "${providerId}"`);
-      }
-    } else {
-      throw new Error(`Invalid Pi auth credential for provider "${providerId}"`);
-    }
-    if (credential.type === 'oauth') continue; // never spend a rotating refresh token (see above)
-    await store.modify(providerId, async () => credential);
-  }
-  return store;
+  for (const [providerId, credential] of Object.entries(parsed)) validateCredential(providerId, credential);
+  return parsed;
 }
 
-export function authPathHasOAuth(authPath, providerId) {
-  try {
-    const parsed = JSON.parse(readFileSync(authPath, 'utf8'));
-    const credential = parsed?.[providerId];
-    return typeof credential === 'object' && credential !== null && credential.type === 'oauth';
-  } catch {
-    return false;
+function ensureParentDir(authPath) {
+  const dir = dirname(authPath);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
+}
+
+function ensureFileExists(authPath) {
+  if (!existsSync(authPath)) writeFileSync(authPath, '{}', AUTH_FILE_WRITE_OPTIONS);
+}
+
+async function acquireLockAsync(authPath, signal, onCompromised) {
+  const staleMs = 30000;
+  const maxDelayMs = 2000;
+  const deadline = Date.now() + staleMs;
+  let retry = 0;
+  for (;;) {
+    signal?.throwIfAborted();
+    let release;
+    try {
+      release = await lockfile.lock(authPath, { realpath: false, retries: 0, stale: staleMs, onCompromised });
+    } catch (error) {
+      signal?.throwIfAborted();
+      const code = typeof error === 'object' && error !== null && 'code' in error ? String(error.code) : undefined;
+      const remainingMs = deadline - Date.now();
+      if (code !== 'ELOCKED' || remainingMs <= 0) throw error;
+      const baseDelayMs = Math.min(10 * 2 ** retry, maxDelayMs / 2);
+      retry++;
+      const delayMs = Math.min(Math.round(baseDelayMs * (1 + Math.random())), remainingMs);
+      if (signal) await sleep(delayMs, undefined, { signal });
+      else await sleep(delayMs);
+      continue;
+    }
+    if (signal?.aborted) {
+      await release();
+      signal.throwIfAborted();
+    }
+    return release;
   }
+}
+
+async function withAuthLockAsync(authPath, fn, options) {
+  options?.signal?.throwIfAborted();
+  ensureParentDir(authPath);
+  ensureFileExists(authPath);
+  let release;
+  let compromised = false;
+  let compromisedError;
+  try {
+    release = await acquireLockAsync(authPath, options?.signal, (error) => {
+      compromised = true;
+      compromisedError = error;
+    });
+    if (compromised) throw compromisedError ?? new Error('Auth storage lock was compromised');
+    options?.signal?.throwIfAborted();
+    const current = existsSync(authPath) ? readFileSync(authPath, 'utf-8') : undefined;
+    const { result, next } = await fn(current);
+    if (compromised) throw compromisedError ?? new Error('Auth storage lock was compromised');
+    options?.signal?.throwIfAborted();
+    if (next !== undefined) writeFileSync(authPath, next, AUTH_FILE_WRITE_OPTIONS);
+    if (compromised) throw compromisedError ?? new Error('Auth storage lock was compromised');
+    return result;
+  } finally {
+    if (release) {
+      try {
+        await release();
+      } catch {
+        // Ignore unlock errors when the lock was compromised.
+      }
+    }
+  }
+}
+
+export class FileCredentialStore {
+  constructor(authPath) {
+    if (typeof authPath !== 'string' || !authPath) throw new Error('Credential store requires authPath');
+    this.authPath = authPath;
+  }
+
+  async read(providerId, options) {
+    options?.signal?.throwIfAborted();
+    let raw;
+    try {
+      raw = readFileSync(this.authPath, 'utf8');
+    } catch (error) {
+      if (error?.code === 'ENOENT') return undefined;
+      throw new Error(`Cannot read Pi auth store: ${error.message}`);
+    }
+    options?.signal?.throwIfAborted();
+    // Serialized read: concurrent refresh persistence cannot tear the file.
+    return withAuthLockAsync(this.authPath, async (current) => {
+      const data = parseAuthData(current ?? raw);
+      return { result: data[providerId] === undefined ? undefined : structuredClone(data[providerId]) };
+    }, options);
+  }
+
+  async list(options) {
+    options?.signal?.throwIfAborted();
+    let raw;
+    try {
+      raw = readFileSync(this.authPath, 'utf8');
+    } catch (error) {
+      if (error?.code === 'ENOENT') return [];
+      throw new Error(`Cannot read Pi auth store: ${error.message}`);
+    }
+    return withAuthLockAsync(this.authPath, async (current) => {
+      const data = parseAuthData(current ?? raw);
+      return { result: Object.entries(data).map(([providerId, credential]) => ({ providerId, type: credential.type })) };
+    }, options);
+  }
+
+  async modify(providerId, fn, options) {
+    const result = await withAuthLockAsync(this.authPath, async (current) => {
+      const data = parseAuthData(current);
+      const next = await fn(data[providerId] === undefined ? undefined : structuredClone(data[providerId]));
+      if (next === undefined) return { result: data[providerId] };
+      validateCredential(providerId, next);
+      const merged = { ...data, [providerId]: next };
+      return { result: next, next: JSON.stringify(merged, null, 2) };
+    }, options);
+    return result === undefined ? undefined : structuredClone(result);
+  }
+
+  async delete(providerId, options) {
+    await withAuthLockAsync(this.authPath, async (current) => {
+      const data = parseAuthData(current);
+      delete data[providerId];
+      return { result: undefined, next: JSON.stringify(data, null, 2) };
+    }, options);
+  }
+}
+
+/**
+ * Open the shared Pi login store for `builtinModels({ credentials })`.
+ * A missing file keeps env-only behavior: reads resolve absent without
+ * creating the file, and refresh persistence (`modify`) is the only
+ * write path. Malformed content refuses loudly.
+ */
+export async function credentialsFromFile(authPath) {
+  const store = new FileCredentialStore(authPath);
+  try {
+    await store.list();
+  } catch (error) {
+    if (error?.code === 'ENOENT') return store;
+    throw error;
+  }
+  return store;
 }
 
 export function meterModels(models, hooks) {
@@ -199,19 +335,16 @@ async function runOnce(cfg) {
 
   // Exact-model pin over built-in providers only. Custom models.json
   // providers stay on pi; here they refuse loudly instead of guessing.
-  // Credentials resolve like pi: the engine-directory login store
-  // (authPath, read-only seed) plus environment API keys.
+  // Credentials resolve like pi: the shared engine-directory login store
+  // (authPath) plus environment API keys. The file-backed store persists
+  // OAuth refreshes under Pi's cross-process lock, so a rotating refresh
+  // token is never spent without write-back.
   if (typeof cfg.authPath !== 'string' || !cfg.authPath) throw new Error('Effective configuration lacks authPath');
   const models = builtinModels({ credentials: await credentialsFromFile(cfg.authPath) });
   const model = models.getModel(cfg.provider, cfg.model);
   if (!model) throw new Error(`Configured exact model is unavailable on pi-durable: ${cfg.provider}/${cfg.model}`);
   const auth = await models.checkAuth(cfg.provider).catch(() => undefined);
   if (!auth) {
-    if (authPathHasOAuth(cfg.authPath, cfg.provider)) {
-      throw new Error(`Pi OAuth login for "${cfg.provider}" is not usable on pi-durable:`
-        + ' refreshing here would spend the rotating refresh token and break the shared login;'
-        + ' use engine "pi" or an API key');
-    }
     throw new Error(`Provider auth is not configured for ${cfg.provider}`);
   }
 

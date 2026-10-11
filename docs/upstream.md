@@ -22,14 +22,16 @@ adapters/pi-durable の3依存を 1.1.0 に固定した。
 両 lock は materialize 経由で再生し、Pi 系以外の差分がないことと実際の npm 配布物の
 公開型定義との整合を確認した。
 
-pi-durable の launcher は Pi のログイン保存 (`auth.json`) のうち `api_key`
-のみを read-only で種にし、環境 API キーと併せて `builtinModels({ credentials })`
-に渡す。`oauth` は検証のうえ種にしない。2026-10-11 に read-only seed が回転する
-refresh token をメモリ内で消費して置換を破棄し、共有ログインを `invalid_grant`
-で壊すことを確認したためである (durable に write-back と pi 側のプロセス間
-lock がない以上、安全な共有はできない)。OAuth のみの運用者は `engine = "pi"`
-を使うか durable 用に API キーを用意する。`auth.json` の複写や directory の
-共有では durable 化できない。
+pi-durable の launcher は Pi のログイン保存 (`auth.json`) を共有の
+file-backed `CredentialStore` として開き、環境 API キーと併せて
+`builtinModels({ credentials })` に渡す。`api_key` と `oauth` のいずれも
+検証のうえ共有し、`pi-ai` が `modify` 内で回転する refresh token を
+永続化する。read-only seed が置換を破棄して共有ログインを `invalid_grant`
+で壊すことを 2026-10-11 に確認したため、durable 側も pi と同じ
+`proper-lockfile` (`realpath: false`、`stale: 30000`) によるプロセス間
+lock で write-back し、並行する pi / pi-durable の refresh を直列化する。
+欠落ファイルは env-only として扱い、読み取りでは作成しない。不正な
+store は fail-closed で拒否する。
 
 管理下の launcher が `ModelRuntime`、`createAgentSession`、`runRpcMode` を使用する。
 `stream` / `streamSimple` / deferred fetch、分類、画像生成の公開要求入口に

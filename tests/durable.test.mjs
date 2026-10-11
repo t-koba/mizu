@@ -12,10 +12,10 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import { spawnSync } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join as joinPath } from 'node:path';
-import { authPathHasOAuth, credentialsFromFile, meterModels } from '../adapters/pi-durable/launcher.mjs';
+import { credentialsFromFile, meterModels } from '../adapters/pi-durable/launcher.mjs';
 import { AssistantEntry, BACKGROUND_CONTEXT, Harness, Type, createModels, createRegistry,
   defineExtension, defineTool, fauxAssistantMessage, fauxProvider, fauxToolCall,
   openNodeSqliteStorage } from '../adapters/pi-durable/test-support.mjs';
@@ -107,7 +107,7 @@ test('close/reopen resumes pending work exactly once', async () => {
   }
 });
 
-test('pi login store seeds provider credentials read-only', async () => {
+test('pi login store is shared file-backed with locked OAuth persistence', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'mizu-durable-auth-'));
   try {
     const missing = join(directory, 'auth.json');
@@ -124,17 +124,21 @@ test('pi login store seeds provider credentials read-only', async () => {
     const oauth = { type: 'oauth', access: 'a', refresh: 'r', expires: Date.now() + 3600000 };
     writeFileSync(missing, JSON.stringify({ openai: oauth }));
     const subscription = await credentialsFromFile(missing);
-    // OAuth entries validate but are never seeded: spending the rotating
-    // refresh in memory would stale the shared file (invalid_grant).
-    assert.equal(await subscription.read('openai'), undefined);
-    assert.deepEqual(await subscription.list(), []);
-    assert.equal(authPathHasOAuth(missing, 'openai'), true);
-    assert.equal(authPathHasOAuth(missing, 'other'), false);
-    // api_key entries still seed alongside a skipped oauth entry.
-    writeFileSync(missing, JSON.stringify({ openai: oauth, 'test-only': credential }));
+    // OAuth entries are shared, not skipped: reads serve the stored
+    // credential and modify persists the rotated replacement under Pi's
+    // cross-process lock instead of discarding it (invalid_grant).
+    assert.deepEqual(await subscription.read('openai'), oauth);
+    assert.deepEqual(await subscription.list(), [{ providerId: 'openai', type: 'oauth' }]);
+    const rotated = { type: 'oauth', access: 'a2', refresh: 'r2', expires: Date.now() + 7200000 };
+    await subscription.modify('openai', async () => rotated);
+    assert.deepEqual(await subscription.read('openai'), rotated);
+    const persisted = JSON.parse(readFileSync(missing, 'utf8'));
+    assert.deepEqual(persisted.openai, rotated);
+    // api_key entries still read alongside an oauth entry.
+    writeFileSync(missing, JSON.stringify({ openai: rotated, 'test-only': credential }));
     const mixed = await credentialsFromFile(missing);
     assert.deepEqual(await mixed.read('test-only'), credential);
-    assert.equal(await mixed.read('openai'), undefined);
+    assert.deepEqual(await mixed.read('openai'), rotated);
     writeFileSync(missing, '{corrupt');
     await assert.rejects(credentialsFromFile(missing), /Invalid Pi auth store/);
     writeFileSync(missing, JSON.stringify({ 'test-only': { type: 'oauth', access: 'a' } }));
