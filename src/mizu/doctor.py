@@ -153,7 +153,7 @@ def check(config: Config, *, sandbox: bool = False) -> dict:
     checks.append({"name": "provider-request admission", "status": "pass" if config.limits.daily_requests > 0 else "disabled",
                    "details": {"daily_requests": config.limits.daily_requests,
                              "shared_daily_requests": config.limits.shared_daily_requests,
-                             "scope": "per-project UTC-day request count plus optional shared total, not currency"}})
+                             "scope": f"per-project day request count in {config.timezone} plus optional shared total, not currency"}})
     checks.append({"name": "search sources", "status": "pass" if config.web["feeds"] or config.web["search_command"] else "disabled",
                    "details": "Configure feeds or a trusted search executable; no implicit search service."})
     if sandbox:
