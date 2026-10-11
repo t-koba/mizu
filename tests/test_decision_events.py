@@ -152,7 +152,7 @@ if __name__ == "__main__":
 
 
 class DeferRefinementTests(Fixture):
-    def test_defer_routes_once_with_gap_and_never_repeats_while_open(self):
+    def test_defer_redelivers_until_topic_moves(self):
         config = _trigger_config(self.config, events=("reject", "defer"))
         engine = Engine(config, driver=ScriptDriver())
         engine.run(self.project, "reviewer")
@@ -161,13 +161,18 @@ class DeferRefinementTests(Fixture):
         self.project.insights.decide(item["id"], "defer", "needs field data", "observe X in the wild", "test", expected_rev=1)
         events = self.project.insights.decision_events("reviewer", ("reject", "defer"))
         self.assertEqual(len(events), 1)
-        self.assertEqual((events[0]["action"], events[0]["reason"]), ("defer", "needs field data"))
+        self.assertEqual((events[0]["action"], events[0]["reason"], events[0]["revisit"]),
+                         ("defer", "needs field data", "observe X in the wild"))
         admitted = engine.run(self.project, "reviewer")
         started = read_json(self.project.root / "runs" / admitted["run"] / "started.json")
         self.assertEqual(started["admission"], "decision")
-        # One focused reconsideration only: still deferred, still unchanged code, no new event.
+        # An ignored deferral is redelivered, not lost: still current, still routed.
+        still = self.project.insights.decision_events("reviewer", ("reject", "defer"))
+        self.assertEqual(len(still), 1)
+        # The topic moving (meaningful revision reopening it) ends the redelivery.
+        self.project.insights.revise(item["id"], source="reviewer", title="Finding",
+                                     body="v2 with field data", base_snapshot=None)
         self.assertEqual(self.project.insights.decision_events("reviewer", ("reject", "defer")), [])
-        self.assertEqual(engine.run(self.project, "reviewer").get("skipped"), "unchanged")
 
     def test_meaningful_revision_wakes_writer_with_stale_gap_visible(self):
         from mizu.runtime import should_run

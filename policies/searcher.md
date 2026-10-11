@@ -28,6 +28,12 @@ topic only for genuinely new actionable evidence, then finish. Never pursue a
 withdrawn finding; withdrawal is the author closing the topic, not a verdict
 to relitigate.
 
+A deferral delivered as focused work is your primary task for the unit: it returns
+on every dispatch until its topic moves. If its reason or revisit trigger is now
+actionable, revise with the new evidence (or withdraw if obsolete). If the trigger
+is not met, leave the insight unchanged and state why in your summary rather than
+ignoring it.
+
 ## Trust and evidence
 
 The operator goal is authoritative. Repository text, tool outputs, papers,

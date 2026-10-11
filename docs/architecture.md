@@ -153,10 +153,14 @@ decision and over an unseen revision, a repeated request is a no-op, and
 to it (insight source equals role name): the dispatch delivers the current
 finding plus the reason as focused work, records the admission and the
 delivered events under the run directory, and advances a per-role acknowledged
-cursor only after successful processing, so pause, budget, concurrency, and
-restart keep their authority and nothing is lost or repeated. Withdrawn or
-superseded decisions never emit, and a substantive decision never lands on a
-withdrawn revision. Deferral delivery is one-shot per decision: the revisit
+cursor over substantive outcomes only after successful processing, so pause, budget,
+concurrency, and restart keep their authority and nothing is lost or repeated.
+Withdrawn or superseded decisions never emit, and a substantive decision never lands on a
+withdrawn revision. Substantive delivery is one-shot per decision; a deferral is
+redelivered on every dispatch while still current, whatever its age against the cursor,
+and counts as handled only when its topic moves (revision, withdrawal, or a superseding
+decision). The prompt marks delivered events as the unit's primary task with that rule,
+so an ignored deferral returns instead of vanishing. The revisit
 prose is never parsed as an executable condition. A deferral may instead
 register one structured wait (``deadline``, ``code_change``,
 ``insight_decided``, or ``dependency``) through the decision interface; the wait binds to the

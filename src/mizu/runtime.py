@@ -1002,6 +1002,22 @@ def _prompt_research_state(context: Context):
             "updated_at": record.get("updated_at"), "state": record["state"]}
 
 
+def _decision_task(context: Context) -> str | None:
+    """Primary-task directive for a run carrying delivered decision events.
+
+    Schema: None when no decision events were delivered, else a short
+    instruction naming how each event counts as handled. Bounds: one small
+    string. Trust: local dispatch state only. Failure: never raises.
+    """
+    events = list(getattr(context, "decision_events", []) or [])
+    if not events:
+        return None
+    return ("Delivered decision events are your primary task this unit: address each one. "
+            "If its reason or revisit trigger is now actionable with new evidence, revise the "
+            "insight (or withdraw it if obsolete). A deferral left unchanged is delivered again, "
+            "so state in your summary why its trigger is not met rather than ignoring it.")
+
+
 def prompt_for(context: Context) -> str:
     caps = set(context.role.capabilities)
     # Mechanism enforces grants, not policy choice: only capability-gated,
@@ -1025,6 +1041,7 @@ def prompt_for(context: Context) -> str:
                        "workspace": "/workspace", "workspace_mode": context.role.workspace,
                        "pending_insights": pending,
                        "decision_events": list(getattr(context, "decision_events", []) or []),
+                       "decision_task": _decision_task(context),
                        "wait_events": list(getattr(context, "wait_events", []) or []),
                        "obligations": list(getattr(context, "obligations", []) or []),
                        "acceptance_commands": acceptance,
@@ -1066,6 +1083,7 @@ def prompt_delta_for(context: Context, pending: list) -> str:
                                           "code_digest": context.snapshot["code_digest"]},
                        "pending_insights": pending,
                        "decision_events": list(getattr(context, "decision_events", []) or []),
+                       "decision_task": _decision_task(context),
                        "wait_events": list(getattr(context, "wait_events", []) or []),
                        "obligations": list(getattr(context, "obligations", []) or []),
                        "research_state": _prompt_research_state(context),

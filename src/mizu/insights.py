@@ -809,11 +809,11 @@ replacement insight without implying rejected substance.
         return record
 
     def decision_events(self, role_name: str, actions, *, limit: int = 10) -> list:
-        """Collect unacknowledged decision events routed to one role.
+        """Collect decision events routed to one role.
 
         Schema: ``actions`` is the role's configured trigger list;
         returns oldest-first focused payloads
-        ``{event, insight, rev, title, body, action, reason, decided_at}``
+        ``{event, insight, rev, title, body, action, reason, revisit, decided_at}``
         (at most ``limit``). Bounds: ``limit`` is a positive int capped at
         100; cursors keep at most 100 tie-window ids. Trust: only
         recorded decisions and inbox state, never model input; routing is
@@ -821,7 +821,14 @@ replacement insight without implying rejected substance.
         schedules another. Retry: read-only and idempotent; corrupt
         records are skipped, never invented. Evidence: the acknowledged
         cursor lives in ``decision-cursors/<role>.json``; dispatch logs
-        delivered events under the run directory. Failure: Denied on bad
+        delivered events under the run directory. Delivery: substantive
+        decisions (accept/modify/reject) emit once per decision and are
+        acknowledged on successful processing; deferrals emit on every
+        dispatch while still current, so an ignored deferral is redelivered
+        instead of lost, whatever its age against the cursor. A deferral
+        counts as handled only when its topic moves: a meaningful revision
+        (which reopens the topic with no current decision), a withdrawal,
+        or a superseding substantive decision. Failure: Denied on bad
         role name or limit; missing inbox, superseded decisions,
         revision-stale records, and withdrawals never emit (a
         revision-current withdraw over a rejection means do not
@@ -861,7 +868,8 @@ replacement insight without implying rejected substance.
                 created = record.get("created_at")
                 if not isinstance(created, str) or not created:
                     continue
-                if created < ack_at or (created == ack_at and path.stem in acked):
+                if record.get("action") != "defer" and (
+                        created < ack_at or (created == ack_at and path.stem in acked)):
                     continue
                 candidates.append((created, path.stem, record))
         candidates.sort()
@@ -886,6 +894,7 @@ replacement insight without implying rejected substance.
             pending.append({"event": stem, "insight": current["id"], "rev": rev,
                             "title": current.get("title", ""), "body": current.get("body", ""),
                             "action": record.get("action"), "reason": record.get("reason", ""),
+                            "revisit": record.get("revisit", ""),
                             "decided_at": created})
             if len(pending) >= limit:
                 break
@@ -896,14 +905,17 @@ replacement insight without implying rejected substance.
 
         Schema: ``events`` are payloads from ``decision_events``. Trust:
         called only after successful processing, so busy/budget/restart
-        redelivers instead of losing work. Retry: idempotent and forward
+        redelivers instead of losing work. Deferral payloads need no
+        cursor (their delivery is state-derived until the topic moves) and
+        are ignored here. Retry: idempotent and forward
         only; an empty delivery leaves the cursor untouched. Evidence:
         the cursor file records ``acknowledged_at`` plus the tie-window
         ids at that timestamp. Failure: Denied on bad role name.
         """
         identifier(role_name)
         delivered = [e for e in (events or []) if isinstance(e, dict)
-                     and isinstance(e.get("decided_at"), str) and isinstance(e.get("event"), str)]
+                     and isinstance(e.get("decided_at"), str) and isinstance(e.get("event"), str)
+                     and e.get("action") != "defer"]
         if not delivered:
             return self.decision_cursor(role_name)
         cursor = self.decision_cursor(role_name)
