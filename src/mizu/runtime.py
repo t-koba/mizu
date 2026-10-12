@@ -956,6 +956,31 @@ def wake_ci_failures(project, config=None, *, limit: int = MAX_CI_FAILURES) -> l
         return []
 
 
+def _ci_due_for(project, project_config, role) -> list:
+    """Cached CI failures that may admit one role (never raises).
+
+    A red ``ci_branch`` wakes only roles with ``ci_wake`` (writable roles by
+    default): event-triggered or unchanged-code dispatch for any other role
+    exits cheaply instead of spending a run on CI it never subscribed to.
+    """
+    try:
+        if not getattr(role, "ci_wake", False):
+            return []
+        return wake_ci_failures(project, project_config)
+    except Exception:
+        return []
+
+
+def _ci_wake_enabled(project_config, role_name) -> bool:
+    """True when the named role opts into the CI-red wake (never raises)."""
+    try:
+        roles = getattr(project_config, "roles", None) or {}
+        role = roles.get(role_name) if isinstance(roles, dict) else None
+        return bool(getattr(role, "ci_wake", False))
+    except Exception:
+        return False
+
+
 def vcs_poll_enabled(config) -> bool:
     """True only when daemon VCS polling is explicitly opted in.
 
@@ -1464,7 +1489,7 @@ class Engine:
                 substantive_events = [e for e in decision_events
                                       if isinstance(e, dict) and e.get("action") != "defer"]
             try:
-                ci_failures = wake_ci_failures(project, self.config)
+                ci_failures = _ci_due_for(project, self.config, role)
             except Exception:
                 ci_failures = []
             if event_trigger and not substantive_events and not wait_events and not ci_failures:
@@ -1511,6 +1536,13 @@ class Engine:
             try:
                 write_json(active, {"run": run_id, "role": role_name, "started_at": now()})
                 if code_unchanged and (substantive_events or wait_events or ci_failures):
+                    if substantive_events:
+                        admission = "decision"
+                    elif wait_events:
+                        admission = "wait"
+                    else:
+                        admission = "ci"
+                elif event_trigger and (substantive_events or wait_events or ci_failures):
                     if substantive_events:
                         admission = "decision"
                     elif wait_events:
@@ -1907,7 +1939,8 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
     `wait`/`blocked` resume on wake, new proposals, elapsed wait, or a cached
     current CI failure on the operator-selected ``[vcs] ci_branch`` (polled
     red, independent of insight decisions, until a later poll sees green or
-    a new revision; empty disables the wake). Goal and
+    a new revision; empty disables the wake) for roles with ``ci_wake``
+    (writable roles by default). Goal and
     wake-generation changes always resume. See docs/architecture.md.
     """
     current_time = time.time() if current_time is None else current_time
@@ -1929,7 +1962,9 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
         return True
     try:
         effective = config if config is not None else getattr(project, "config", None)
-        if wake_ci_failures(project, effective):
+        if role_name is not None and not _ci_wake_enabled(effective, role_name):
+            pass
+        elif wake_ci_failures(project, effective):
             return True
     except Exception:
         pass

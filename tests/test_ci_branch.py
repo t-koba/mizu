@@ -56,5 +56,140 @@ class CiBranchTests(Fixture):
                 load(self.file)
 
 
+RED_SHA = "a" * 40
+
+
+def _red_config(fixture, **role_caps):
+    import dataclasses
+    from mizu.fs import write_json
+    cfg = dataclasses.replace(fixture.config, vcs={**fixture.config.vcs, "ci_branch": "mizu"})
+    write_json(fixture.project.root / "vcs-poll.json",
+               {"failures": {"mizu": [{"sha": RED_SHA, "check": "Offline checks"}]}})
+    return cfg
+
+
+class CiWakeTests(Fixture):
+    def test_ci_wake_defaults_to_writable_roles(self):
+        self.assertTrue(self.config.roles["worker"].ci_wake)
+        self.assertFalse(self.config.roles["searcher"].ci_wake)
+        self.assertFalse(self.config.roles["reporter"].ci_wake)
+        self.assertFalse(self.config.roles["consult"].ci_wake)
+
+    def test_ci_wake_load_explicit_and_refused(self):
+        import dataclasses
+        from mizu.config import load
+        from mizu.errors import ConfigError
+        text = self.file.read_text()
+        lines = text.splitlines(keepends=True)
+        start = next(i for i, line in enumerate(lines) if line.strip() == "[roles.searcher]")
+        end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("[")), len(lines))
+        lines.insert(end, "ci_wake = true\n")
+        self.file.write_text("".join(lines))
+        self.assertTrue(load(self.file).roles["searcher"].ci_wake)
+        self.file.write_text(text)
+        lines = self.file.read_text().splitlines(keepends=True)
+        start = next(i for i, line in enumerate(lines) if line.strip() == "[roles.worker]")
+        end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("[")), len(lines))
+        lines.insert(end, "ci_wake = false\n")
+        self.file.write_text("".join(lines))
+        self.assertFalse(load(self.file).roles["worker"].ci_wake)
+        lines.insert(end, 'ci_wake = "yes"\n')
+        self.file.write_text("".join(lines))
+        with self.assertRaises(ConfigError):
+            load(self.file)
+
+    def test_red_skips_event_trigger_without_ci_wake(self):
+        import dataclasses
+        from mizu.runtime import Engine
+        from support import ScriptDriver
+        config = _red_config(self)
+        driver = ScriptDriver()
+        engine = Engine(config, driver=driver)
+        # A read role with no CI subscription spends nothing on foreign red:
+        # no events of its own, so the trigger exits before any model use.
+        skipped = engine.run(self.project, "searcher", event_trigger=True)
+        self.assertEqual(skipped.get("skipped"), "no-event")
+        self.assertEqual(driver.calls, [])
+
+    def test_red_admits_writer_and_labels_ci(self):
+        from mizu.fs import read_json
+        from mizu.runtime import Engine
+        from support import ScriptDriver
+        config = _red_config(self)
+        admitted = Engine(config, driver=ScriptDriver()).run(
+            self.project, "worker", event_trigger=True)
+        self.assertEqual(admitted["status"], "completed")
+        started = read_json(self.project.root / "runs" / admitted["run"] / "started.json")
+        self.assertEqual(started["admission"], "ci")
+
+    def test_writer_opt_out_skips_red(self):
+        import dataclasses
+        from mizu.runtime import Engine
+        from support import ScriptDriver
+        config = _red_config(self)
+        roles = dict(config.roles)
+        roles["worker"] = dataclasses.replace(roles["worker"], ci_wake=False)
+        config = dataclasses.replace(config, roles=roles)
+        skipped = Engine(config, driver=ScriptDriver()).run(
+            self.project, "worker", event_trigger=True)
+        self.assertEqual(skipped.get("skipped"), "no-event")
+
+    def test_read_role_opt_in_admits_red(self):
+        import dataclasses
+        from mizu.fs import read_json
+        from mizu.runtime import Engine
+        from support import ScriptDriver
+        config = _red_config(self)
+        roles = dict(config.roles)
+        roles["searcher"] = dataclasses.replace(roles["searcher"], ci_wake=True)
+        config = dataclasses.replace(config, roles=roles)
+        admitted = Engine(config, driver=ScriptDriver()).run(
+            self.project, "searcher", event_trigger=True)
+        self.assertEqual(admitted["status"], "completed")
+        started = read_json(self.project.root / "runs" / admitted["run"] / "started.json")
+        self.assertEqual(started["admission"], "ci")
+
+    def test_event_trigger_labels_substantive_reason(self):
+        import dataclasses
+        from mizu.fs import read_json
+        from mizu.runtime import Engine
+        from support import ScriptDriver
+        config = _red_config(self)
+        roles = dict(config.roles)
+        roles["worker"] = dataclasses.replace(roles["worker"], decision_events=("reject",))
+        config = dataclasses.replace(config, roles=roles)
+        item = self.project.insights.submit(
+            source="worker", title="Finding", body="v1",
+            base_snapshot=self.project.snapshots.get()["id"])
+        self.project.insights.decide(item["id"], "reject", "not material", "", "test", expected_rev=1)
+        admitted = Engine(config, driver=ScriptDriver()).run(
+            self.project, "worker", event_trigger=True)
+        self.assertEqual(admitted["status"], "completed")
+        started = read_json(self.project.root / "runs" / admitted["run"] / "started.json")
+        self.assertEqual(started["admission"], "decision")
+
+    def test_should_run_parks_writer_without_ci_wake(self):
+        import dataclasses
+        import time
+        from mizu.runtime import should_run
+        config = _red_config(self)
+        gen = self.project.insights.generation()
+        cap = self.project.snapshots.capture_files(self.project.workspace)
+        wait = self.project.snapshots.create(
+            cap, goal=self.project.goal, state="Parked.", run=None,
+            outcome="wait", summary="Parked on red.", verification=None,
+            inbox_seen=gen,
+            wake_generation=self.project.control().get("wake_generation", ""))
+        self.project.snapshots.publish(wait)
+        snap = self.project.snapshots.get()
+        self.assertTrue(should_run(self.project, snap, current_time=time.time(),
+                                  role_name="worker", config=config))
+        roles = dict(config.roles)
+        roles["worker"] = dataclasses.replace(roles["worker"], ci_wake=False)
+        config = dataclasses.replace(config, roles=roles)
+        self.assertFalse(should_run(self.project, snap, current_time=time.time(),
+                                   role_name="worker", config=config))
+
+
 if __name__ == "__main__":
     unittest.main()

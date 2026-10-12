@@ -393,6 +393,11 @@ class Role:
     #: (default, fail-closed); "any" routes matching actions from any source
     #: so a resolver runs on each new deferral. Unset keeps own-source.
     decision_sources: str = "own"
+    #: Whether a red operator-selected ``ci_branch`` wakes this role.
+    #: Default true for writable roles (the writer keeps its sticky-red wake),
+    #: false otherwise, so event-only/read roles never spend runs on CI they
+    #: never subscribed to unless the operator opts them in.
+    ci_wake: bool = False
     #: Per-role per-run spend overrides. None keeps the project `[limits]`
     #: value as default; a set value must lie in the same range as the
     #: project bound. Only spend bounds live here (requests/tools); storage,
@@ -733,7 +738,7 @@ def load(file: Path) -> Config:
             raise ConfigError(f"Role name '{name}' is reserved for the operator channel")
         keys(role, {"profile", "policy", "workspace", "capabilities", "engine_tools", "on_change",
                     "interval_seconds", "calendar", "daemon", "selector", "attributes",
-                    "decision_events", "decision_sources", "requests_per_run", "tools_per_run"}, f"roles.{name}")
+                    "decision_events", "decision_sources", "ci_wake", "requests_per_run", "tools_per_run"}, f"roles.{name}")
         profile = string(role.get("profile", ""), f"roles.{name}.profile")
         selector = string(role.get("selector", ""), f"roles.{name}.selector")
         if ("profile" in role) == ("selector" in role):
@@ -832,6 +837,7 @@ def load(file: Path) -> Config:
         if raw_sources == "any" and not events:
             raise ConfigError(f"roles.{name}.decision_sources is any without decision_events; "
                               "subscribe to at least one action")
+        ci_wake = boolean(role.get("ci_wake", workspace == "write"), f"roles.{name}.ci_wake")
         role_requests = role.get("requests_per_run")
         if role_requests is not None:
             number(role_requests, f"roles.{name}.requests_per_run", 1, 1073741824)
@@ -841,7 +847,7 @@ def load(file: Path) -> Config:
         roles[name] = Role(name, profile, policy, workspace, caps,
                            strings(role.get("engine_tools", []), "engine_tools"),
                            boolean(role.get("on_change", False), "on_change"), interval, calendar, daemon, selector, attrs,
-                           decision_events=events, decision_sources=raw_sources,
+                           decision_events=events, decision_sources=raw_sources, ci_wake=ci_wake,
                            requests_per_run=role_requests, tools_per_run=role_tools)
     if not roles:
         raise ConfigError("At least one role is required")

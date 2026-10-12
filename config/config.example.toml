@@ -221,6 +221,9 @@ interval_seconds = 900
 # decision_events = ["reject"]
 # A resolver running on each new deferral from any source (unset keeps own-source).
 # decision_sources = "any"  # own (default) or any; any requires decision_events.
+# A red ci_branch wakes only roles with ci_wake (default true for write roles,
+# false otherwise), so event-only roles skip CI they never subscribed to.
+# ci_wake = false
 
 [roles.reporter]
 profile = "primary"
