@@ -331,7 +331,7 @@ class Limits:
     decision_events_limit: int = 10
     #: Operator-selected persistent-session rotation bounds. A resumed
     #: persistent session restarts with a fresh session key once cumulative
-    #: usage or wall-clock session age reaches a bound, carrying the
+    #: usage or wall-clock conversation lifetime reaches a bound, carrying the
     #: published snapshot and composed policy forward. 0 disables that bound;
     #: unset preserves the previous never-rotate behaviour.
     session_max_tokens: int = 0

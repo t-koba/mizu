@@ -239,7 +239,8 @@ A resumed persistent session receives only an append-only delta (goal pin,
 current snapshot pin, proposals not yet offered), never the full goal and
 history again; a new, compacted-away, or rotated session receives the full
 prompt. Rotation is operator policy via `[limits] session_max_tokens`,
-`session_max_cost_usd`, and `session_max_age_seconds` (0 disables each):
+`session_max_cost_usd`, and `session_max_age_seconds` (0 disables each, age bounds
+conversation lifetime from its stable creation surviving same-id saves):
 a due rotation removes `session.json` so the next dispatch mints a fresh
 provider session while the published snapshot and composed policy reload
 unchanged, recording the reason in `rotation.json` and the mode/key in

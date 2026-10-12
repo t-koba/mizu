@@ -42,7 +42,7 @@ pending_insights = 30            # Newest pending proposals offered per prompt. 
 decision_events_limit = 10      # Decision events delivered per dispatch (1-100; default 10). Bound stays 100; value is policy.
 session_max_tokens = 0          # Restart a resumed persistent session once cumulative tokens reach N (0 disables).
 session_max_cost_usd = 0         # Restart a resumed persistent session once estimated cost (USD) reaches N (0 disables).
-session_max_age_seconds = 0      # Restart a resumed persistent session once wall-clock session age reaches N seconds (0 disables).
+session_max_age_seconds = 0      # Restart a resumed persistent session once wall-clock conversation lifetime reaches N seconds (stable creation surviving same-id saves; 0 disables).
 free_disk_mb = 1024
 
 [sandbox]

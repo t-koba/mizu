@@ -67,6 +67,10 @@ class SessionDeltaTests(Fixture):
         project = Project(config, "sample")
         path = save_worker_session(self, {"tokens": 0})
         old = time.time() - 10
+        record = read_json(path)
+        record["created_at"] = old
+        from mizu.fs import write_json as _write_json
+        _write_json(path, record)
         os.utime(path, (old, old))
         capture = Capture()
         result = Engine(config, driver=capture).run(project, "worker")
@@ -79,6 +83,43 @@ class SessionDeltaTests(Fixture):
         self.assertTrue(rotation["rotated"])
         self.assertIn("age", rotation["reason"])
         self.assertFalse(path.exists())
+
+    def test_frequent_same_id_saves_still_hit_lifetime_bound(self):
+        # Lifetime, not inactivity: repeated saves inside the window must not
+        # postpone rotation once total elapsed lifetime crosses the bound.
+        from mizu.engine_config import rotation_due, save_session
+        config = dataclasses.replace(
+            self.config, limits=dataclasses.replace(self.config.limits, session_max_age_seconds=60))
+        project = Project(config, "sample")
+        path = save_worker_session(self, {"tokens": 0})
+        old = time.time() - 120
+        record = read_json(path)
+        record["created_at"] = old
+        from mizu.fs import write_json as _write_json
+        _write_json(path, record)
+        # Simulate a frequent resume: same-id save refreshes mtime to now.
+        save_session(path, "test-session", {"tokens": 0})
+        kept = read_json(path)
+        self.assertAlmostEqual(kept["created_at"], old, delta=1.0)
+        due, reason = rotation_due(config.limits, path, kept)
+        self.assertTrue(due)
+        self.assertIn("age", reason)
+        capture = Capture()
+        result = Engine(config, driver=capture).run(project, "worker")
+        record_proj = projection(self, result["run"])
+        self.assertEqual(record_proj["prompt_mode"], "full")
+        self.assertIn("age", record_proj["rotation"])
+        self.assertFalse(path.exists())
+
+    def test_new_id_resets_lifetime_clock(self):
+        from mizu.engine_config import save_session, session_age_seconds
+        path = save_worker_session(self, {"tokens": 0})
+        old = read_json(path)["created_at"]
+        # A different conversation id mints a fresh creation time.
+        save_session(path, "other-session", {"tokens": 0})
+        fresh = read_json(path)["created_at"]
+        self.assertGreaterEqual(fresh, old)
+        self.assertIsNotNone(session_age_seconds(path, read_json(path)))
 
     def test_token_bound_rotates_to_a_fresh_full_prompt(self):
         config = dataclasses.replace(
@@ -122,6 +163,10 @@ class RotationFailureTests(Fixture):
         project = Project(config, "sample")
         path = save_worker_session(self, {"tokens": 0})
         old = time.time() - backdate
+        from mizu.fs import read_json as _read_json, write_json as _write_json
+        record = _read_json(path)
+        record["created_at"] = old
+        _write_json(path, record)
         os.utime(path, (old, old))
         return config, project, path
 

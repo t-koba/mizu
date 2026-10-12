@@ -215,9 +215,10 @@ def session_record(context, profile, settings):
     path = directory / 'session.json'
     record = read_json(path, None)
     if path.exists():
-        if (not isinstance(record, dict) or set(record) != {'id', 'usage'} or
+        if (not isinstance(record, dict) or set(record) not in ({'id', 'usage'}, {'id', 'usage', 'created_at'}) or
                 not isinstance(record.get('id'), str) or not 0 < len(record['id']) <= 4096 or
-                not isinstance(record.get('usage'), dict) or len(canonical(record)) > 262144):
+                not isinstance(record.get('usage'), dict) or len(canonical(record)) > 262144 or
+                ('created_at' in record and _session_created_at(record) is None)):
             raise ConfigError('Invalid session record; resume cannot be replaced with a new conversation')
     return path, record
 
@@ -296,7 +297,7 @@ def _entry_cost(entry):
 def session_token_total(saved, engine="unknown"):
     """Cumulative model tokens recorded for a saved persistent session.
 
-    Schema: ``saved`` is a ``session_record()`` record (``{'id', 'usage'}``).
+    Schema: ``saved`` is a ``session_record()`` record (``{'id', 'usage', 'created_at?'}``).
     Bounds: usage payloads stay under the 256 KiB session-record bound; at
     most 4097 entries are scanned. Trust: local operator state only.
     Failure: unknown shapes count 0 (rotation stays age-driven) rather than
@@ -342,10 +343,44 @@ def session_cost_total(saved):
         return 0.0
 
 
-def session_age_seconds(path):
-    """Wall-clock age of a saved session file, or None when unknown."""
+def _session_created_at(saved):
+    """Stable conversation creation time, or None when absent/invalid.
+
+    Schema: ``session.json`` ``created_at`` epoch seconds set at first save
+    and preserved across same-id saves; legacy records lack it. Bounds:
+    finite non-negative number only. Trust: local operator state. Failure:
+    never raises (invalid reads as None so callers fall back to mtime or
+    treat the record as invalid at validation).
+    """
+    import math
+    try:
+        if not isinstance(saved, dict):
+            return None
+        value = saved.get("created_at")
+        if type(value) not in (int, float) or isinstance(value, bool):
+            return None
+        number = float(value)
+        if not math.isfinite(number) or number < 0:
+            return None
+        return number
+    except Exception:
+        return None
+
+
+def session_age_seconds(path, saved=None):
+    """Wall-clock age of a saved session conversation, or None when unknown.
+
+    Schema: prefers the stable ``created_at`` surviving same-id saves so a
+    frequently resumed conversation still reaches its lifetime bound;
+    legacy records without it fall back to file mtime. Bounds: one stat
+    plus pure arithmetic. Trust: local operator state only. Failure:
+    ``None`` when the file is missing.
+    """
     import time
     try:
+        created = _session_created_at(saved)
+        if created is not None:
+            return max(0.0, time.time() - created)
         return max(0.0, time.time() - path.stat().st_mtime)
     except OSError:
         return None
@@ -356,7 +391,8 @@ def rotation_due(limits, path, saved, engine="unknown"):
 
     Schema: reads ``[limits] session_max_tokens``, ``session_max_cost_usd``
     and ``session_max_age_seconds`` (0 disables each). Bounds: token/cost
-    totals come from the bounded saved record; age from file mtime. Trust:
+    totals come from the bounded saved record; age from the stable
+    conversation creation time (legacy fallback to file mtime). Trust:
     local operator state only. Failure: never raises; unknown usage counts
     as zero so age still rotates Pi sessions that report no cumulative
     tokens. Returns ``(due, reason)`` with an empty reason when fresh.
@@ -376,7 +412,7 @@ def rotation_due(limits, path, saved, engine="unknown"):
                 return True, f"cost {cost}>={cost_max}"
         age_max = getattr(limits, "session_max_age_seconds", 0) or 0
         if age_max:
-            age = session_age_seconds(path)
+            age = session_age_seconds(path, saved)
             if age is not None and age >= age_max:
                 return True, f"age {age:.0f}s>={age_max}s"
     except Exception:
@@ -439,9 +475,43 @@ def write_prompt_state(directory, *, snapshot, inbox_generation):
 
 
 def save_session(path, identifier, usage):
+    """Persist a provider session identifier with a stable creation time.
+
+    Schema: writes ``{'id', 'usage', 'created_at'}`` where ``created_at`` is
+    epoch seconds. Same-id saves preserve the existing creation time so
+    ``session_max_age_seconds`` bounds conversation lifetime, not file
+    inactivity; legacy same-id records without it keep their mtime as
+    creation. A new id (or missing file) mints now. Rotation deletes the
+    file so the next conversation starts fresh. Bounds: one read plus one
+    atomic write. Trust: local operator state. Failure: invalid
+    identifiers raise; unreadable prior state starts fresh without raising.
+    """
     if not isinstance(identifier, str) or not identifier or len(identifier) > 4096:
         raise ConfigError('Engine did not return a valid session identifier')
-    write_json(path, {'id': identifier, 'usage': usage})
+    import time
+    now_ts = time.time()
+    created = now_ts
+    try:
+        existing = read_json(path, None)
+        if isinstance(existing, dict) and existing.get('id') == identifier:
+            kept = _session_created_at(existing)
+            if kept is not None:
+                created = kept
+            else:
+                try:
+                    created = path.stat().st_mtime
+                except OSError:
+                    created = now_ts
+    except Exception:
+        pass
+    try:
+        import math
+        created = float(created)
+        if not math.isfinite(created) or created < 0:
+            created = now_ts
+    except Exception:
+        created = now_ts
+    write_json(path, {'id': identifier, 'usage': usage, 'created_at': created})
 
 
 def mizu_server(bridge):

@@ -93,7 +93,7 @@ required). Operator tooling that concatenates configs
 | `decision_events_limit` | Decision events delivered per dispatch (1–100; default 10; 100-event cap stays fixed mechanism). With rotation, a role with many deferrals sees each one every N/value runs |
 | `session_max_tokens` | Cumulative session tokens at which a resumed persistent session restarts with a fresh session key (0 disables; 0–1,073,741,824; default 0). The published snapshot and composed policy reload on the next unit; Pi accumulates per-run usage into the session record, Codex/Claude reuse their saved cumulative totals, unknown shapes count 0 (age still rotates) |
 | `session_max_cost_usd` | Estimated session cost (USD) at which a resumed persistent session restarts (0 disables; 0–1,000,000; default 0). Cost is the native provider estimate where reported (ADR-005); sessions without cost evidence never rotate on this bound |
-| `session_max_age_seconds` | Wall-clock session age (file mtime versus now) at which a resumed persistent session restarts (0 disables; 0–31,536,000s; default 0) |
+| `session_max_age_seconds` | Wall-clock conversation lifetime (stable creation time surviving same-id saves; legacy files fall back to mtime) at which a resumed persistent session restarts (0 disables; 0–31,536,000s; default 0) |
 | `free_disk_mb` | Minimum free disk space required to start a work unit |
 
 All limits are positive integers except `daily_requests`, `shared_daily_requests`, `max_failures`, `busy_retry_seconds`, `free_disk_mb`, `retention_days`, `event_log_compress_days`, `event_log_retention_days`, `session_max_tokens`, and `session_max_age_seconds`, which may be zero. `session_max_cost_usd` is a number (integer or float) which may be zero.
