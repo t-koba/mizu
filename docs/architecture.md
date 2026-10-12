@@ -203,6 +203,18 @@ offer keeps the newest `limits.pending_insights` proposals so recent evidence
 is never hidden behind the bound. Worker discretion applies to proposals,
 not to the operator's goal or prohibitions.
 
+Deferral evidence may be gathered by a scheduled resolver role with existing
+capabilities only: a role holding `insights` lists pending deferrals across
+sources, uses `experiment`/`fetch`/`search` to obtain the missing evidence,
+and adds it with `submit_insight` as a new insight referencing the deferred
+ID and rev; the worker links it and revises or decides the original, whose
+ownership (submitter-only revise/withdraw) never moves. No cross-source
+`decision_events` subscription, no admission on a new deferral, and no
+non-submitter revise grant exist: those stay sequenced until a
+scheduled-resolver experiment shows schedule latency or correlation failure
+(Less-is-more). The operator configures the resolver's schedule, model and
+policy; the submitter owns its topic.
+
 Editor uploads are first atomically claimed into a private ingest directory;
 they are not parsed while still mutable in the Editor outbox. Malformed records
 and non-regular objects are quarantined. A crash after claim can be recovered.
