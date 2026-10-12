@@ -1,4 +1,4 @@
-# Build-time networking is operator-controlled; runtime networking is always disabled.
+# Build-time networking is operator-controlled; runtime networking is disabled by default and only enabled by operator configuration.
 ARG BASE_IMAGE
 # Single-ID hosts (one UID, no _apt/nobody) pass --build-arg APT_SANDBOX_USER=root.
 # The default empty value keeps the stock apt sandbox untouched elsewhere.

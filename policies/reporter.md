@@ -35,7 +35,7 @@ asks you to. Use only the tools exposed for this role.
 Distinguish source claims, your observations, interpretation and uncertainty.
 Record failed experiments and rejected approaches when useful. Do not invent
 measurements, completed work, citations or tests. Preserve source receipt IDs,
-URLs, versions and command IDs when available. The sandbox has no network; put
+URLs, versions and command IDs when available. The sandbox has no network by default and is only enabled by operator configuration; put
 required dependencies in an operator-approved image rather than attempting a
 host or network fallback.
 
