@@ -7,7 +7,7 @@ from unittest.mock import patch
 from support import Fixture, ScriptDriver
 from mizu.budget import Budget
 from mizu.config import load
-from mizu.errors import Busy, Cancelled, Denied, LimitExceeded, ProtocolError
+from mizu.errors import Busy, Cancelled, ConfigError, Denied, LimitExceeded, ProtocolError
 from mizu.fs import digest, lock, mkdir, read_json, write_json
 from mizu.project import Project, initialize
 from mizu.runtime import Engine, should_run
@@ -267,21 +267,35 @@ class EngineTests(Fixture):
         self.assertTrue(should_run(self.project, snap))
 
     def test_consult_same_snapshot_and_isolated_failure(self):
+        import dataclasses
         def answer(ctx, prompt, profile):
             if profile == "alternate":
                 raise ProtocolError("one provider unavailable")
             ctx.handle("finish", {"outcome": "wait", "summary": "Independent analysis"})
-        engine = Engine(self.config, driver=ScriptDriver(answer))
+        roles = dict(self.config.roles)
+        roles["advisor-a"] = dataclasses.replace(self.config.roles["consult"], name="advisor-a", profile="primary")
+        roles["advisor-b"] = dataclasses.replace(self.config.roles["consult"], name="advisor-b", profile="alternate")
+        config = dataclasses.replace(self.config, roles=roles)
+        engine = Engine(config, driver=ScriptDriver(answer))
         parent = self.context()
-        result = engine.consult(parent, {"question": "What could fail?"})
+        result = engine.consult(parent, {"question": "What could fail?", "roles": ["advisor-a", "advisor-b"]})
         self.assertEqual({x["snapshot"] for x in result["answers"]}, {result["snapshot"]})
         self.assertEqual(len(result["answers"]), 2)
+        self.assertEqual(result["roles"], ["advisor-a", "advisor-b"])
         self.assertEqual(result["answers"][0]["answer"], "Independent analysis")
+        self.assertEqual(result["answers"][0]["role"], "advisor-a")
         self.assertIn("error", result["answers"][1])
+        self.assertEqual(result["answers"][1]["role"], "advisor-b")
 
     def test_agent_cannot_select_unapproved_consult_model(self):
+        with self.assertRaises(ConfigError):
+            Engine(self.config, driver=ScriptDriver()).consult(self.context(), {"question": "x", "roles": ["unapproved"]})
         with self.assertRaises(Denied):
-            Engine(self.config, driver=ScriptDriver()).consult(self.context(), {"question": "x", "profiles": ["unapproved"]})
+            Engine(self.config, driver=ScriptDriver()).consult(self.context(), {"question": "x", "roles": []})
+        with self.assertRaises(Denied):
+            Engine(self.config, driver=ScriptDriver()).consult(self.context(), {"question": "x", "roles": ["consult", "consult"]})
+        with self.assertRaises(Denied):
+            Engine(self.config, driver=ScriptDriver()).consult(self.context(), {"question": "x", "roles": ["consult"], "role": "consult"})
 
     def test_consult_role_is_operator_chosen_not_hardcoded(self):
         import dataclasses
@@ -291,8 +305,43 @@ class EngineTests(Fixture):
         config = dataclasses.replace(self.config, roles={**self.config.roles, "advisor": role})
         engine = Engine(config, driver=ScriptDriver())
         result = engine.consult(self.context(), {"question": "q?", "role": "advisor"})
-        self.assertEqual(result["role"], "advisor")
+        self.assertEqual(result["roles"], ["advisor"])
         self.assertNotIn("aggregation", result)
+
+    def test_consult_uses_answering_role_own_profile(self):
+        seen = []
+        def answer(ctx, prompt, profile):
+            seen.append(profile)
+            ctx.handle("finish", {"outcome": "wait", "summary": "Own model"})
+        engine = Engine(self.config, driver=ScriptDriver(answer))
+        result = engine.consult(self.context(), {"question": "Which model answers?"})
+        self.assertEqual(result["roles"], [self.config.consult_role])
+        self.assertEqual(len(result["answers"]), 1)
+        own = self.config.roles[self.config.consult_role].profile
+        self.assertEqual(result["answers"][0]["profile"], own)
+        self.assertEqual(seen, [own])
+
+    def test_consult_selector_role_resolves_via_own_selector(self):
+        import dataclasses
+        roles = dict(self.config.roles)
+        roles["consult"] = dataclasses.replace(
+            self.config.roles["consult"], profile="", selector="pick")
+        selectors = {"pick": {"retry_seconds": 60, "recommendation_validity": "once",
+                              "rules": [{"when": {}, "candidates": [{"profile": "primary"}]}]}}
+        config = dataclasses.replace(self.config, roles=roles, selectors=selectors)
+        engine = Engine(config, driver=ScriptDriver())
+        result = engine.consult(self.context(), {"question": "q?"})
+        self.assertEqual(result["roles"], [config.consult_role])
+        self.assertEqual(result["answers"][0]["profile"], "primary")
+        self.assertEqual(result["answers"][0]["role"], config.consult_role)
+
+    def test_consult_profiles_key_is_refused_at_load(self):
+        from mizu.config import load
+        from mizu.errors import ConfigError
+        text = self.file.read_text()
+        self.file.write_text(text + 'consult_profiles = ["primary"]\n')
+        with self.assertRaises(ConfigError):
+            load(self.file)
 
     def test_consult_refuses_non_readonly_role(self):
         from mizu.errors import ConfigError

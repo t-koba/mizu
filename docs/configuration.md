@@ -17,8 +17,7 @@ silently change grants or paths. Prefer literal model aliases for systemd servic
 | `data_dir` | Private local filesystem state; restart before moving it |
 | `engines` | Named Pi/Codex/Claude environments: trusted `command` argv and private `directory` |
 | `timezone` | IANA zone for Linux calendar timers and the request-budget day; default UTC. macOS uses explicit local; Windows supports local and UTC (see completion-contracts.md) |
-| `consult_profiles` | Permitted independent consultation profiles |
-| `consult_role` | Default answering role for consultation when the caller names none; unset fails closed (explicit role required) |
+| `consult_role` | Default answering role for consultation when the caller names none; unset fails closed (explicit roles required) |
 | `exclude` | Snapshot/import exclusion patterns; not a secret detection system |
 | `include` | Shared TOML fragments merged before validation; duplicate keys are errors (see below) |
 
@@ -76,7 +75,7 @@ required). Operator tooling that concatenates configs
 | `idle_seconds`, `cooldown_seconds` | Daemon sleep between poll iterations and pause between work units |
 | `default_wait_seconds`, `maximum_wait_seconds` | Default and maximum model-selected wait times (1–86,400s) |
 | `max_failures` | Consecutive role failures before auto-pause (0 disables auto-pause; `Busy`/`InfraExceeded` infra waits (daily budget, disk reserve) defer without counting, plain `LimitExceeded` bound faults still count, `mizu resume` resets to 0 — ADR-016, ADR-017) |
-| `parallel_runs`, `parallel_consults` | Global execution slots and per-consultation fan-out (`parallel_consults <= parallel_runs`) |
+| `parallel_runs`, `parallel_consults` | Global execution slots and per-consultation role fan-out (`parallel_consults <= parallel_runs`) |
 | `busy_retry_seconds` | How long a one-shot `mizu run` (the unit platform schedulers dispatch for interval/calendar roles) waits for a free execution slot or role lock before dropping the unit instead (0–86,400s; default 300; 0 disables the wait and fails fast as before). Retries poll at `idle_seconds` cadence and hold nothing while waiting; draining, paused and unarmed projects never wait, and the daemon keeps its own defer-and-repoll loop |
 | `output_bytes` | Maximum captured stdout/stderr per command |
 | `file_bytes` | Maximum readable file size |
@@ -286,7 +285,7 @@ models are recorded. Model usage excludes unreported auxiliary billing.
 | `submit_insight` | Submit proposal with route-derived identity |
 | `revise_insight` | Revise one of the role's own proposals under its stable ID (source fixed to the role, bound to the read rev; prior content archived, meaningful change reopens the topic) |
 | `withdraw_insight` | Withdraw one of the role's own pending proposals as author retraction, not rejection (source fixed to the role, bound to the read rev) |
-| `consult` | Consult operator-allowlisted profiles through a named read-only role (default from `consult_role`, fail-closed when unset), no nested consultation |
+| `consult` | Ask named read-only roles through their own profile or selector (default from `consult_role`, fail-closed when unset), no nested consultation |
 | `report` | Stage a Markdown document for static artifact publication |
 | `sync` | Refresh upstream refs via the trusted VCS adapter (writable workspace only); merges stay as workspace edits followed by verification |
 | `vcs_read` | Read CI status, logs, PR comments, external proposals, exact-revision proposal content, and CI-recorded artifact files via the trusted VCS adapter; never publishes (read roles may hold it) |
@@ -297,7 +296,7 @@ models are recorded. Model usage excludes unreported auxiliary billing.
 | `research` | Replace this role's own current research state record under the read generation; stale generations refused, audit in `research-state.json` (consultation roles cannot hold it) |
 | `finish` | Seal result; cannot acquire new permissions |
 
-A consultation names its answering role explicitly (`role`, default from the configured `consult_role`, fail-closed when unset). The `consult` capability names the operation (bounded child unit of a read-only role on the same snapshot, answers returned unranked); role and profile names are operator configuration — avoid naming a role or profile `consult` when that overload confuses review, since the capability, role, profile, and `consult_role`/`consult_profiles` keys are distinct.
+A consultation names its answering roles explicitly (`roles` array of at most 8, or single `role`, default from the configured `consult_role`, fail-closed when unset). Each child unit runs the named role as configured — its own fixed `profile` or a bounded selector preview with no routing consumption and no classifier inference — so retry, `on_error`, and fallback apply with no new mechanism and the model is stated once on the role. The `consult` capability names the operation (bounded child units on the same snapshot, answers returned unranked); role and profile names are operator configuration — avoid naming a role or profile `consult` when that overload confuses review, since the capability, role, profile, and `consult_role` key are distinct.
 Any configured role qualifies as long as it stays read-only (`workspace = "read"`)
 without write/execute grants (`exec`, `experiment`, `verify`, `decide`,
 `submit_insight`, `revise_insight`, `withdraw_insight`, `consult`, `report`, `sync`); read-only grants (`files`, `read`,

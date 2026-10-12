@@ -246,7 +246,7 @@ def _load_merged(top: Path) -> dict:
         # Unknown root keys still fail here per fragment so the error names
         # the fragment, then the final merged load re-checks the whole.
         allowed = {"data_dir", "engines", "timezone", "limits", "sandbox", "profiles",
-                   "roles", "consult_profiles", "consult_role", "web", "vcs", "materialize", "exclude", "selectors", "include"}
+                   "roles", "consult_role", "web", "vcs", "materialize", "exclude", "selectors", "include"}
         unknown = set(data) - allowed
         if unknown:
             raise ConfigError(f"Unknown keys in {resolved}: {', '.join(sorted(unknown))}")
@@ -471,7 +471,6 @@ class Config:
     sandbox: Sandbox
     profiles: dict[str, dict]
     roles: dict[str, Role]
-    consult_profiles: tuple[str, ...]
     #: Default answering role for consultation when the caller names none.
     #: Empty (unset) fails closed: consultation then requires an explicit role.
     consult_role: str
@@ -522,7 +521,7 @@ def load(file: Path) -> Config:
     file = file.expanduser().resolve()
     data = _load_merged(file)
     keys(data, {"data_dir", "engines", "timezone", "limits", "sandbox", "profiles",
-                "roles", "consult_profiles", "consult_role", "web", "vcs", "materialize", "exclude", "selectors", "include"}, "root")
+                "roles", "consult_role", "web", "vcs", "materialize", "exclude", "selectors", "include"}, "root")
     data.pop("include", None)
     engines = data.get("engines", {})
     keys(engines, set(ENGINES), "engines")
@@ -846,17 +845,12 @@ def load(file: Path) -> Config:
                            requests_per_run=role_requests, tools_per_run=role_tools)
     if not roles:
         raise ConfigError("At least one role is required")
-    consult = strings(data.get("consult_profiles", []), "consult_profiles")
-    if any(p not in profiles for p in consult) or len(set(consult)) != len(consult):
-        raise ConfigError("consult_profiles must contain unique, configured profiles")
     consult_role = string(data.get("consult_role", ""), "consult_role")
     if consult_role:
         if not ID.fullmatch(consult_role):
             raise ConfigError("Invalid consult_role name")
         if consult_role not in roles:
             raise ConfigError(f"consult_role is not a configured role: {consult_role}")
-    if any(p not in profiles for p in consult) or len(set(consult)) != len(consult):
-        raise ConfigError("consult_profiles must contain unique, configured profiles")
     timezone = string(data.get("timezone", "UTC"), "timezone")
     web = data.get("web", {})
     keys(web, {"hosts", "feeds", "cache_seconds", "timeout_seconds", "max_bytes", "search_command",
@@ -923,6 +917,6 @@ def load(file: Path) -> Config:
     for k in ("timeout_seconds", "max_bytes"):
         number(mat[k], f"materialize.{k}", 1, 16777216)
     return Config(file, path_value(string(data.get("data_dir", "~/.local/state/mizu"), "data_dir"), file.parent),
-                  environments, limits, sandbox, profiles, roles, consult, consult_role, timezone, web, vcs, mat,
+                  environments, limits, sandbox, profiles, roles, consult_role, timezone, web, vcs, mat,
                   strings(data.get("exclude", [".git", ".pi", ".env", ".env.*", ".venv",
                                                 "node_modules", "__pycache__", "*.pyc", "*.pyo", ".pytest_cache"]), "exclude"), selectors)

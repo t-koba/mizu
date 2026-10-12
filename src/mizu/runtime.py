@@ -1710,67 +1710,94 @@ class Engine:
                     shutil.rmtree(workspace, ignore_errors=True)
 
     def consult(self, parent: Context, args: dict) -> dict:
-        names = args.get("profiles", list(self.config.consult_profiles))
-        if not names or any(n not in self.config.consult_profiles for n in names) or len(set(names)) != len(names):
-            raise Denied("Consultation requires unique, operator-allowlisted model profiles")
-        role_name = args.get("role") or getattr(self.config, "consult_role", "")
-        if not role_name:
-            raise Denied("Consultation role requires an explicit role or a configured consult_role")
-        if role_name not in self.config.roles:
-            raise ConfigError(f"Consultation role is not configured: {role_name}")
-        role = self.config.roles[role_name]
-        check_consult_role(role_name, role)
+        # The child unit takes its model from each answering role's own
+        # profile or selector, exactly as a scheduled run of that role would:
+        # fixed profiles run directly, selector roles resolve through a
+        # bounded preview (no routing consumption, no classifier inference),
+        # so retry/on_error/fallback apply with no new mechanism and the model
+        # is stated once on the role instead of twice (role plus allowlist).
+        if args.get("roles") is not None and args.get("role"):
+            raise Denied("Consultation takes roles or role, not both")
+        if args.get("roles") is not None:
+            role_names = list(args.get("roles") or [])
+            if (not role_names or len(set(role_names)) != len(role_names)
+                    or any(not isinstance(n, str) for n in role_names)):
+                raise Denied("Consultation requires unique answering roles")
+        else:
+            single = args.get("role") or getattr(self.config, "consult_role", "")
+            if not single:
+                raise Denied("Consultation role requires explicit roles or a configured consult_role")
+            role_names = [single]
+        for role_name in role_names:
+            if role_name not in self.config.roles:
+                raise ConfigError(f"Consultation role is not configured: {role_name}")
+            check_consult_role(role_name, self.config.roles[role_name])
         if self.config.limits.parallel_runs <= 1:
             raise Busy("Consultation needs an execution slot in addition to its parent")
         capture = parent.project.snapshots.capture_files(parent.workspace)
         snap = parent.project.snapshots.create(capture, goal=parent.goal, state=parent.snapshot["state"],
                                               run=parent.run_dir.name, outcome="wait", summary="Consultation input")
 
-        def ask(name: str) -> dict:
+        def ask(role_name: str) -> dict:
             run_dir = parent.project.root / "runs" / uuid.uuid4().hex
             workspace = run_dir / "input"
             ctx = None
+            role = self.config.roles[role_name]
+            profile = ""
             try:
                 with slot(self.config):
                     mkdir(run_dir)
+                    if role.selector:
+                        decision = self.preview(parent.project, role_name)
+                        profile = decision.get("profile") or ""
+                        if not profile:
+                            raise Denied("Consultation selector has no selectable profile: "
+                                         + str(decision.get("reason") or "waiting"))
+                        role = dataclasses.replace(role, profile=profile, selector="")
+                    else:
+                        profile = role.profile
                     write_json(run_dir / "started.json", {"run": run_dir.name,
                                "parent_run": parent.run_dir.name, "role": role.name,
-                               "snapshot": snap["id"], "started_at": now()})
+                               "profile": profile, "snapshot": snap["id"], "started_at": now()})
                     parent.project.snapshots.materialize(snap, workspace)
-                    ctx = Context(self.config, parent.project, dataclasses.replace(role, profile=name),
+                    ctx = Context(self.config, parent.project, role,
                                   run_dir, snap, workspace, stop=parent.stop, goal=parent.goal)
                     ctx.ephemeral = True
                     ctx.deadline = min(ctx.deadline, parent.deadline)
-                    model = self.resolve(name).execute(ctx, prompt_for(ctx) + "\n\nQuestion:\n" + args["question"], profile=name)
+                    model = self.resolve(profile).execute(ctx, prompt_for(ctx) + "\n\nQuestion:\n" + args["question"], profile=profile)
                     if ctx.cancelled():
                         raise Cancelled("Consultation cancelled before completion")
                     if ctx.finished is None:
                         raise Denied("Consultation did not finish")
                     result = {"run": run_dir.name, "parent_run": parent.run_dir.name,
                               "role": role.name, "status": "completed", "finished_at": now(),
-                              "profile": name, "snapshot": snap["id"],
+                              "profile": profile, "snapshot": snap["id"],
                               "answer": ctx.finished["summary"], "model": model}
                     write_json(run_dir / "consultation.json", result)
                     return result
             except Exception as exc:
                 result = {"run": run_dir.name, "parent_run": parent.run_dir.name,
-                          "role": role.name, "status": "interrupted", "finished_at": now(),
-                          "profile": name, "snapshot": snap["id"], "error": str(exc)}
+                          "role": role_name, "status": "interrupted", "finished_at": now(),
+                          "profile": profile, "snapshot": snap["id"], "error": str(exc)}
                 if ctx is not None and hasattr(ctx, "model_evidence"):
                     result["model"] = ctx.model_evidence
-                write_json(run_dir / "error.json", result)
+                try:
+                    mkdir(run_dir)
+                    write_json(run_dir / "error.json", result)
+                except (OSError, ValueError, TypeError, AttributeError):
+                    pass
                 return result
             finally:
                 if ctx is not None:
                     ctx.closed = True
                 shutil.rmtree(workspace, ignore_errors=True)
         with ThreadPoolExecutor(max_workers=self.config.limits.parallel_consults) as pool:
-            results = list(pool.map(ask, names))
-        record = {"snapshot": snap["id"], "question": args["question"], "role": role.name, "answers": [{"run": r["run"], "profile": r["profile"], **({"error": r["error"]} if "error" in r else {})} for r in results]}
+            results = list(pool.map(ask, role_names))
+        record = {"snapshot": snap["id"], "question": args["question"], "roles": list(role_names), "answers": [{"run": r["run"], "role": r["role"], "profile": r["profile"], **({"error": r["error"]} if "error" in r else {})} for r in results]}
         write_json(parent.run_dir / "consultations" / f"{uuid.uuid4().hex}.json", record)
         answers=[]
         for result in results:
-            answer={k:result[k] for k in ('run','profile','snapshot') if k in result}
+            answer={k:result[k] for k in ('run','role','profile','snapshot') if k in result}
             if 'answer' in result:
                 answer['answer']=result['answer']
             if 'error' in result:

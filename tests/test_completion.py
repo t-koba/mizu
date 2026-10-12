@@ -148,7 +148,7 @@ class CompletionTests(Fixture):
         def work(ctx, *_):
             ctx.handle("finish", {"outcome": "wait", "summary": "observed"})
         parent = self.context()
-        result = Engine(self.config, driver=ScriptDriver(work)).consult(parent, {"question": "review", "profiles": [self.config.consult_profiles[0]]})
+        result = Engine(self.config, driver=ScriptDriver(work)).consult(parent, {"question": "review"})
         self.assertEqual(len(result["answers"]), 1)
         facts = summarize(self.project)
         self.assertEqual(facts["totals"]["runs"], 1)
@@ -158,7 +158,7 @@ class CompletionTests(Fixture):
         config = dataclasses.replace(self.config, limits=dataclasses.replace(self.config.limits, parallel_runs=1))
         driver = ScriptDriver()
         with self.assertRaises(Busy):
-            Engine(config, driver=driver).consult(self.context(), {"question": "review", "profiles": [config.consult_profiles[0]]})
+            Engine(config, driver=driver).consult(self.context(), {"question": "review"})
         self.assertEqual(driver.calls, [])
 
     def test_backup_retains_incomplete_ingest(self):

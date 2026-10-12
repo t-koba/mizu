@@ -300,7 +300,7 @@ Classification results are separate canonical run records, never counted twice
 through their parent. Private task text stays in normal inputs, not selection
 facts. Model sessions retain existing identity checks minus live effort keys:
 profiles differing beyond reasoning effort use different session namespaces;
-conversations are not transplanted. Explicit consultation profiles bypass selection. A selector role
+conversations are not transplanted. Consultations resolve each answering role through a bounded selector preview (no routing consumption, no classifier inference) instead of overriding its profile. A selector role
 requires `smoke --profile` so the paid probe has an exact target.
 
 New adapters provide `usage_observations` pairing each reported usage fragment

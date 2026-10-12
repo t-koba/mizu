@@ -132,7 +132,7 @@ class ConsultGateTests(Fixture):
             config = dataclasses.replace(self.config, roles={**self.config.roles, "advisor": role})
             result = Engine(config, driver=ScriptDriver()).consult(
                 self.context(), {"question": "q?", "role": "advisor"})
-            self.assertEqual(result["role"], "advisor")
+            self.assertEqual(result["roles"], ["advisor"])
 
     def test_write_caps_still_refused_before_model(self):
         from mizu.runtime import Engine, check_consult_role
@@ -159,7 +159,7 @@ class ConsultGateTests(Fixture):
         # Configured default answers when the caller names no role.
         result = Engine(self.config, driver=ScriptDriver()).consult(
             self.context(), {"question": "q?"})
-        self.assertEqual(result["role"], self.config.consult_role)
+        self.assertEqual(result["roles"], [self.config.consult_role])
         # Unset default fails closed instead of naming a role.
         bare = dataclasses.replace(self.config, consult_role="")
         with self.assertRaises(Denied):
