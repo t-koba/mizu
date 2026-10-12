@@ -1228,10 +1228,13 @@ def session_prompt(context: Context, role, run_dir: Path) -> tuple:
     is ``"full"`` or ``"delta"`` and rotation is the ``rotation.json`` record
     (or None). Bounds: prompt-state and rotation evidence are small JSON
     files; pending lists follow ``[limits] pending_insights``. Trust: local
-    session state only. Retry/cancellation: never raises for session I/O;
-    any failure falls back to the full prompt and empty identity. Evidence:
-    rotations write ``rotation.json``; dispatches record the mode in
-    ``prompt_projection.json``. Failure: a due rotation removes
+    session state only. Retry/cancellation: peeking never raises (any failure
+    falls back to the full prompt and empty identity), except an enforcing
+    due rotation, which propagates so the unit fails before model dispatch
+    instead of admitting the old conversation. Evidence: rotations write
+    ``rotation.json``; dispatches record the mode in
+    ``prompt_projection.json``; a failed due rotation is recorded in the run
+    ``error.json`` by the Engine caller. Failure: a due rotation removes
     ``session.json`` so the next dispatch mints a fresh provider session
     while the published snapshot and composed policy reload unchanged; a
     missing or invalid record (new, compacted-away or rotated session) takes
@@ -1261,10 +1264,10 @@ def session_prompt(context: Context, role, run_dir: Path) -> tuple:
     except Exception:
         due, reason = False, ""
     if due:
-        try:
-            record = rotate_session(path, run_dir, reason)
-        except Exception:
-            return prompt_for(context), "full", key, None, session_dir
+        # A due rotation enforces a configured bound: its failure must fail
+        # the work unit before model dispatch (Engine records error.json),
+        # never substitute a full prompt and admit the old conversation.
+        record = rotate_session(path, run_dir, reason)
         return prompt_for(context), "full", key, record, session_dir
     caps = set(context.role.capabilities)
     try:

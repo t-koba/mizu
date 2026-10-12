@@ -114,6 +114,54 @@ class SessionDeltaTests(Fixture):
         self.assertEqual(record["session_key"], "")
 
 
+class RotationFailureTests(Fixture):
+    def _due_session(self, age_seconds=1, backdate=10):
+        import dataclasses, os, time
+        config = dataclasses.replace(
+            self.config, limits=dataclasses.replace(self.config.limits, session_max_age_seconds=age_seconds))
+        project = Project(config, "sample")
+        path = save_worker_session(self, {"tokens": 0})
+        old = time.time() - backdate
+        os.utime(path, (old, old))
+        return config, project, path
+
+    def test_due_rotation_generation_failure_fails_without_dispatch(self):
+        import unittest.mock
+        from mizu import fs as fs_mod
+        config, project, path = self._due_session()
+        real = fs_mod.write_json
+        def flaky(target, *args, **kwargs):
+            from pathlib import Path as _Path
+            if _Path(target).name == "generation.json":
+                raise OSError("injected generation failure")
+            return real(target, *args, **kwargs)
+        capture = Capture()
+        with unittest.mock.patch.object(fs_mod, "write_json", side_effect=flaky):
+            with self.assertRaises(OSError):
+                Engine(config, driver=capture).run(project, "worker")
+        # Zero driver admission and no successful completion.
+        self.assertEqual(capture.prompts, [])
+        # Failed bump changes nothing: the old conversation stays resumable
+        # for the next dispatch to retry the due rotation, never admitted now.
+        self.assertTrue(path.is_file())
+
+    def test_due_rotation_unlink_failure_fails_without_dispatch(self):
+        import unittest.mock
+        from pathlib import Path as _Path
+        config, project, path = self._due_session()
+        real_unlink = _Path.unlink
+        def flaky_unlink(self, *args, **kwargs):
+            if self.name == "session.json":
+                raise OSError("injected unlink failure")
+            return real_unlink(self, *args, **kwargs)
+        capture = Capture()
+        with unittest.mock.patch.object(_Path, "unlink", autospec=True,
+                                        side_effect=lambda s, *a, **k: flaky_unlink(s, *a, **k)):
+            with self.assertRaises(OSError):
+                Engine(config, driver=capture).run(project, "worker")
+        self.assertEqual(capture.prompts, [])
+
+
 class SessionTotalsTests(unittest.TestCase):
     """Native per-engine shapes total exactly once (review 7837a1c0)."""
 
