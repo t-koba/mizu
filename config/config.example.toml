@@ -198,6 +198,9 @@ policy = "policies/worker.md"
 workspace = "write"
 capabilities = ["files", "read", "diff", "exec", "experiment", "verify", "fetch", "search", "insights", "decide", "consult", "finish"]
 daemon = true
+# Per-role per-run spend override (optional, same range as [limits]; unset keeps the project value).
+# requests_per_run = 24
+# tools_per_run = 64
 
 [roles.searcher]
 profile = "alternate"

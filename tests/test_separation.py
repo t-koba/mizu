@@ -471,6 +471,57 @@ class WebSeparationTests(Fixture):
         self.assertEqual(out["feeds_consulted"], 1)
 
 
+class PerRoleSpendTests(Fixture):
+    def test_role_override_defaults_to_project(self):
+        from mizu.config import role_requests_per_run, role_tools_per_run
+        role = self.config.roles["worker"]
+        self.assertEqual(role_requests_per_run(self.config, role), self.config.limits.requests_per_run)
+        self.assertEqual(role_tools_per_run(self.config, role), self.config.limits.tools_per_run)
+
+    def test_role_override_applies_per_role(self):
+        from mizu.config import load, role_requests_per_run, role_tools_per_run
+        text = self.file.read_text()
+        text = text.replace('[roles.worker]\nprofile = "primary"',
+                            '[roles.worker]\nprofile = "primary"\nrequests_per_run = 200\ntools_per_run = 400')
+        self.file.write_text(text)
+        config = load(self.file)
+        self.assertEqual(role_requests_per_run(config, config.roles["worker"]), 200)
+        self.assertEqual(role_tools_per_run(config, config.roles["worker"]), 400)
+        # Other roles keep the project default.
+        self.assertEqual(role_requests_per_run(config, config.roles["searcher"]),
+                         config.limits.requests_per_run)
+
+    def test_role_override_refuses_bad_values(self):
+        from mizu.config import load
+        text = self.file.read_text()
+        text = text.replace('[roles.worker]\nprofile = "primary"',
+                            '[roles.worker]\nprofile = "primary"\nrequests_per_run = 0')
+        self.file.write_text(text)
+        with self.assertRaises(Exception):
+            load(self.file)
+
+    def test_budget_and_tool_gates_use_role_effective(self):
+        from mizu.config import load
+        text = self.file.read_text()
+        text = text.replace('[roles.worker]\nprofile = "primary"',
+                            '[roles.worker]\nprofile = "primary"\nrequests_per_run = 1\ntools_per_run = 1')
+        self.file.write_text(text)
+        config = load(self.file)
+        ctx = self.context("worker")
+        ctx.config = config
+        ctx.role = config.roles["worker"]
+        ctx.handle("_hello", {})
+        ctx.handle("_budget", {"sequence": 1})
+        from mizu.errors import LimitExceeded
+        with self.assertRaises(LimitExceeded):
+            ctx.handle("_budget", {"sequence": 2})
+        # Generic tool gate respects the same per-role bound: one files call
+        # fits, the second exceeds tools_per_run = 1.
+        ctx.handle("files", {"offset": 0, "limit": 1})
+        with self.assertRaises(LimitExceeded):
+            ctx.handle("files", {"offset": 0, "limit": 1})
+
+
 class DriverSeparationTests(Fixture):
     def test_pi_does_not_rewrite_operator_settings(self):
         from mizu.pi import PiDriver

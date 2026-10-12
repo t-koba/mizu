@@ -384,6 +384,39 @@ class Role:
     selector: str = ""
     attributes: dict = dataclasses.field(default_factory=dict)
     decision_events: tuple[str, ...] = ()
+    #: Per-role per-run spend overrides. None keeps the project `[limits]`
+    #: value as default; a set value must lie in the same range as the
+    #: project bound. Only spend bounds live here (requests/tools); storage,
+    #: transport, budgets, slots and rotation stay project/host policy.
+    requests_per_run: int | None = None
+    tools_per_run: int | None = None
+
+
+def role_requests_per_run(config: "Config", role: "Role") -> int:
+    """Effective per-run provider-request bound for one role.
+
+    Schema: role override when set, else project `[limits] requests_per_run`.
+    Trust: configuration. Failure: never raises; malformed overrides read as
+    the project value (load already refuses them fail-closed).
+    """
+    try:
+        value = getattr(role, "requests_per_run", None)
+    except Exception:
+        value = None
+    if type(value) is int and value >= 1:
+        return value
+    return config.limits.requests_per_run
+
+
+def role_tools_per_run(config: "Config", role: "Role") -> int:
+    """Effective per-run tool-call bound for one role (project default)."""
+    try:
+        value = getattr(role, "tools_per_run", None)
+    except Exception:
+        value = None
+    if type(value) is int and value >= 1:
+        return value
+    return config.limits.tools_per_run
 
 
 def role_policy_text(role: "Role") -> str:
@@ -691,7 +724,7 @@ def load(file: Path) -> Config:
             raise ConfigError(f"Role name '{name}' is reserved for the operator channel")
         keys(role, {"profile", "policy", "workspace", "capabilities", "engine_tools", "on_change",
                     "interval_seconds", "calendar", "daemon", "selector", "attributes",
-                    "decision_events"}, f"roles.{name}")
+                    "decision_events", "requests_per_run", "tools_per_run"}, f"roles.{name}")
         profile = string(role.get("profile", ""), f"roles.{name}.profile")
         selector = string(role.get("selector", ""), f"roles.{name}.selector")
         if ("profile" in role) == ("selector" in role):
@@ -784,10 +817,17 @@ def load(file: Path) -> Config:
             if event == "withdraw":
                 raise ConfigError(f"roles.{name}.decision_events must never include withdraw; "
                                   "withdrawn findings are never reanimated")
+        role_requests = role.get("requests_per_run")
+        if role_requests is not None:
+            number(role_requests, f"roles.{name}.requests_per_run", 1, 1073741824)
+        role_tools = role.get("tools_per_run")
+        if role_tools is not None:
+            number(role_tools, f"roles.{name}.tools_per_run", 1, 1073741824)
         roles[name] = Role(name, profile, policy, workspace, caps,
                            strings(role.get("engine_tools", []), "engine_tools"),
                            boolean(role.get("on_change", False), "on_change"), interval, calendar, daemon, selector, attrs,
-                           decision_events=events)
+                           decision_events=events,
+                           requests_per_run=role_requests, tools_per_run=role_tools)
     if not roles:
         raise ConfigError("At least one role is required")
     consult = strings(data.get("consult_profiles", []), "consult_profiles")

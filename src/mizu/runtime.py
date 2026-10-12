@@ -19,7 +19,7 @@ from pathlib import Path
 
 from . import platform as _platform
 from .budget import Budget
-from .config import Config, Role, load, role_policy_bytes
+from .config import Config, Role, load, role_policy_bytes, role_requests_per_run, role_tools_per_run
 from .doctor import container_runtime
 from .drivers import driver_for
 from .errors import Busy, Cancelled, ConfigError, Denied, InfraExceeded, LimitExceeded, MizuError, ModelFailure, ProtocolError
@@ -202,7 +202,7 @@ class Context:
                 if arguments.get("name") not in self.role.engine_tools:
                     raise Denied("Engine tool has no explicit grant")
                 self.tool_count += 1
-                if self.tool_count > self.config.limits.tools_per_run:
+                if self.tool_count > role_tools_per_run(self.config, self.role):
                     raise LimitExceeded("Per-run tool limit exceeded")
                 return {"allowed": True}
             if operation == "_budget":
@@ -213,7 +213,7 @@ class Context:
                     if self.finished is not None:
                         raise Denied("No model requests are permitted after finish")
                     if sequence not in self.request_sequences:
-                        if self.request_count >= self.config.limits.requests_per_run:
+                        if self.request_count >= role_requests_per_run(self.config, self.role):
                             raise LimitExceeded("Per-run provider request budget exhausted")
                         try:
                             Budget(self.config.data / "budget", self.config.limits.daily_requests,
@@ -247,7 +247,7 @@ class Context:
             if operation not in self.role.capabilities:
                 raise Denied(f"Role has no capability: {operation}")
             self.tool_count += 1
-            if self.tool_count > self.config.limits.tools_per_run:
+            if self.tool_count > role_tools_per_run(self.config, self.role):
                 raise LimitExceeded("Per-run tool limit exceeded")
             validate(arguments, DEFINITIONS[operation][1])
             result = self.dispatch(operation, arguments)

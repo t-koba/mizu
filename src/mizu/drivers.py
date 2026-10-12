@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 
 from .budget import Budget
+from .config import role_requests_per_run
 from .errors import Cancelled, ConfigError, InfraExceeded, LimitExceeded, ProtocolError
 from .fs import write_json, canonical, now
 
@@ -66,7 +67,8 @@ def admit_invocation(context, *, unit: str) -> dict:
     """Admit one non-Pi driver invocation against the shared daily budget.
 
     Idempotent per run directory: a retry records the same admission without
-    double-charging (see Budget.take). Enforces `requests_per_run` uniformly.
+    double-charging (see Budget.take). Enforces the role-effective
+    `requests_per_run` (per-role override or project default).
     """
     if context.finished is not None:
         raise ProtocolError("No inference after the work unit is sealed")
@@ -74,7 +76,7 @@ def admit_invocation(context, *, unit: str) -> dict:
         raise Cancelled("Run cancelled before admission")
     if getattr(context, "invocation_admitted", False):
         return {"admitted": True}
-    if context.request_count >= context.config.limits.requests_per_run:
+    if context.request_count >= role_requests_per_run(context.config, context.role):
         raise LimitExceeded("Per-run provider request budget exhausted")
     project_name = getattr(getattr(context, "project", None), "name", "")
     try:

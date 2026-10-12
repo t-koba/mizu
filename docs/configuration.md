@@ -71,7 +71,7 @@ required). Operator tooling that concatenates configs
 |---|---|
 | `daily_requests` | Per-project provider admissions per day in the configured `timezone` (UTC default; 0 disables, max 100,000). Day-files older than `retention_days` are reaped. Pi counts logical model requests, Codex counts turns, Claude counts queries |
 | `shared_daily_requests` | Optional shared total across all projects sharing `data_dir` per day in the configured `timezone` (UTC default; 0 disables the shared cap, max 100,000). Per-project admissions also count toward this total; the tighter bound refuses first |
-| `requests_per_run`, `tools_per_run` | Per-work-unit request and tool bounds; child consultations consume shared daily budget |
+| `requests_per_run`, `tools_per_run` | Per-work-unit request and tool bounds (project default; a role may override with `roles.<name>.requests_per_run` / `tools_per_run`, same range, unset keeps the project value); child consultations consume shared daily budget |
 | `run_seconds`, `command_seconds` | Deadlines for the overall work unit and individual container commands |
 | `idle_seconds`, `cooldown_seconds` | Daemon sleep between poll iterations and pause between work units |
 | `default_wait_seconds`, `maximum_wait_seconds` | Default and maximum model-selected wait times (1–86,400s) |
@@ -226,7 +226,10 @@ installation, login, package acquisition or deployment runs during work.
 A role has exactly one of `profile` or `selector`, plus `policy`, `workspace` (`write`, `read`, `none`),
 `capabilities`, `engine_tools` (maximum 128 explicit names), `on_change`,
 `decision_events` (at most 8 unique lowercase decision actions, never
-`withdraw`), and at most one of `daemon`, `interval_seconds`, `calendar`. `policy` is a path
+`withdraw`), optional per-role spend overrides `requests_per_run` / `tools_per_run`
+(1–1,073,741,824; unset keeps the project `[limits]` value, so an auditor may run
+200/400 while other roles stay at the project default; storage, transport, budgets,
+slots and rotation stay project/host policy), and at most one of `daemon`, `interval_seconds`, `calendar`. `policy` is a path
 string or an array of path strings (e.g. shared principles plus the role file);
 parts are read as UTF-8 in order and joined with one `\n` (trailing newline
 kept), so the composed text is the prompt and the policy digest. Missing,
