@@ -93,7 +93,9 @@ def event_watches(config: Config, project: Project) -> dict[str, list[str]]:
 
     Mechanism: roles with decision_events wake on decision-history and waits
     writes, but dispatch runs only on a substantive event or due wait;
-    deferrals ride along and never admit a run on their own. Write roles
+    in own-source mode deferrals ride along and never admit a run on their own,
+    while a role with decision_sources="any" admits once per new matching
+    deferral from any source. Write roles
     with a schedule additionally wake when their own structured waits come due. Daemon roles need no file trigger (their loop
     re-checks admission every idle tick via should_run) and unscheduled roles
     get nothing. Periodic discovery stays independent policy: timers and

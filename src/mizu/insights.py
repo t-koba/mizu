@@ -808,10 +808,12 @@ replacement insight without implying rejected substance.
                 write_json(self.root / "decisions" / f"{insight_id}.json", record)
         return record
 
-    def decision_events(self, role_name: str, actions, *, limit: int = 10) -> list:
+    def decision_events(self, role_name: str, actions, *, limit: int = 10, sources: str = "own") -> list:
         """Collect decision events routed to one role.
 
-        Schema: ``actions`` is the role's configured trigger list;
+        Schema: ``actions`` is the role's configured trigger list; ``sources``
+        is ``own`` (default, only this role's findings) or ``any`` (matching
+        actions from any source, so a resolver runs on each new deferral);
         returns focused payloads, substantive oldest-first then a rotating
         window of deferrals,
         ``{event, insight, rev, title, body, action, reason, revisit, decided_at}``
@@ -819,11 +821,14 @@ replacement insight without implying rejected substance.
         100; cursors keep at most 100 tie-window ids plus a defer-rotation
         offset. Trust: only
         recorded decisions and inbox state, never model input; routing is
-        ``insight.source == role_name`` so one role's rejection never
-        schedules another. Retry: read-only and idempotent; corrupt
+        ``insight.source == role_name`` in ``own`` mode so one role's rejection never
+        schedules another, or any source in ``any`` mode for an explicitly
+        opted-in resolver (``decision_sources = "any"``). Retry: read-only and idempotent; corrupt
         records are skipped, never invented. Evidence: the acknowledged
         cursor lives in ``decision-cursors/<role>.json``; dispatch logs
-        delivered events under the run directory. Delivery: substantive
+        delivered events under the run directory. In ``any`` mode deferrals
+        deliver once like substantive decisions and admit a run (one-shot);
+        in ``own`` mode delivery is substantive
         decisions (accept/modify/reject) emit once per decision and are
         acknowledged on successful processing; deferrals ride along when
         the role runs for other reasons and rotate across dispatches, so
@@ -850,6 +855,9 @@ replacement insight without implying rejected substance.
         identifier(role_name)
         if type(limit) is not int or limit < 1 or limit > 100:
             raise Denied("Decision event limit must be an integer in [1, 100]")
+        if sources not in ("own", "any"):
+            raise Denied("Decision event sources must be own or any")
+        any_source = (sources == "any")
         wanted = {a for a in (actions or ()) if isinstance(a, str)} - {"withdraw"}
         if not wanted:
             return []
@@ -880,7 +888,7 @@ replacement insight without implying rejected substance.
                 created = record.get("created_at")
                 if not isinstance(created, str) or not created:
                     continue
-                if record.get("action") != "defer" and (
+                if (record.get("action") != "defer" or any_source) and (
                         created < ack_at or (created == ack_at and path.stem in acked)):
                     continue
                 candidates.append((created, path.stem, record))
@@ -908,7 +916,7 @@ replacement insight without implying rejected substance.
                 current = self.read(record.get("id", ""))
             except (Denied, OSError, ValueError, TypeError, AttributeError):
                 continue
-            if current.get("source") != role_name:
+            if not any_source and current.get("source") != role_name:
                 continue
             rev = _rev_of(current)
             if not isinstance(record.get("rev"), int) or record["rev"] != rev:
@@ -924,11 +932,17 @@ replacement insight without implying rejected substance.
                        "title": current.get("title", ""), "body": current.get("body", ""),
                        "action": record.get("action"), "reason": record.get("reason", ""),
                        "revisit": record.get("revisit", ""),
-                       "decided_at": created}
+                       "decided_at": created, "source": current.get("source", "")}
             if record.get("action") == "defer":
                 defers.append(payload)
             else:
                 substantive.append(payload)
+        if any_source:
+            pending.extend(substantive[:limit])
+            room = limit - len(pending)
+            if room > 0 and defers:
+                pending.extend(defers[:room])
+            return pending
         pending.extend(substantive[:limit])
         room = limit - len(pending)
         if room > 0 and defers:
@@ -940,26 +954,38 @@ replacement insight without implying rejected substance.
                     pending.append(defers[(start + i) % len(defers)])
         return pending
 
-    def acknowledge_decisions(self, role_name: str, events) -> dict:
+    def acknowledge_decisions(self, role_name: str, events, *, sources: str = "own") -> dict:
         """Advance one role's decision-event cursor over delivered events.
 
-        Schema: ``events`` are payloads from ``decision_events``. Trust:
+        Schema: ``events`` are payloads from ``decision_events``; ``sources``
+        is ``own`` (default) or ``any`` matching the delivery call. Trust:
         called only after successful processing, so busy/budget/restart
         redelivers instead of losing work (the defer window does not
-        advance). Substantive payloads advance the acknowledged cursor;
-        defer payloads advance the rotation offset so the next dispatch
-        shows the next window. Retry: idempotent and forward
-        only; an empty delivery leaves the cursor untouched. Evidence:
-        the cursor file records ``acknowledged_at`` plus the tie-window
-        ids at that timestamp and ``defer_offset``. Failure: Denied on bad role name.
+        advance in ``own`` mode). In ``own`` mode substantive payloads advance
+        the acknowledged cursor while defer payloads advance the rotation
+        offset so the next dispatch shows the next window; in ``any`` mode
+        deferrals deliver once like substantive decisions and advance the
+        acknowledged cursor instead of the rotation offset. Retry: idempotent
+        and forward only; an empty delivery leaves the cursor untouched.
+        Evidence: the cursor file records ``acknowledged_at`` plus the tie-window
+        ids at that timestamp and ``defer_offset``. Failure: Denied on bad role
+        name or sources.
         """
         identifier(role_name)
+        if sources not in ("own", "any"):
+            raise Denied("Decision event sources must be own or any")
+        any_source = (sources == "any")
         delivered = [e for e in (events or []) if isinstance(e, dict)
                      and isinstance(e.get("decided_at"), str) and isinstance(e.get("event"), str)
                      and e.get("action") != "defer"]
         deferred = [e for e in (events or []) if isinstance(e, dict)
                     and isinstance(e.get("decided_at"), str) and isinstance(e.get("event"), str)
                     and e.get("action") == "defer"]
+        if any_source:
+            # One-shot deferral delivery: fold deferrals into the acknowledged
+            # cursor so a handled deferral never re-admits.
+            delivered = delivered + deferred
+            deferred = []
         if not delivered and not deferred:
             return self.decision_cursor(role_name)
         cursor = self.decision_cursor(role_name)

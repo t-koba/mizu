@@ -220,6 +220,8 @@ on_change = true
 interval_seconds = 900
 # A rejected finding returns for reconsideration even when the code is unchanged.
 # decision_events = ["reject"]
+# A resolver running on each new deferral from any source (unset keeps own-source).
+# decision_sources = "any"  # own (default) or any; any requires decision_events.
 
 [roles.reporter]
 profile = "primary"

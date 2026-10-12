@@ -1139,10 +1139,24 @@ def _decision_task(context: Context) -> str | None:
     events = list(getattr(context, "decision_events", []) or [])
     if not events:
         return None
+    try:
+        any_source = getattr(getattr(context, "role", None), "decision_sources", "own") == "any"
+    except Exception:
+        any_source = False
     substantive = [e for e in events if isinstance(e, dict) and e.get("action") != "defer"]
     handled = ("A deferral counts as handled only when its topic moves "
                "(meaningful revision, withdrawal, or a superseding decision); "
                "an unchanged deferral returns in a later window.")
+    if any_source:
+        if substantive:
+            return (f"Delivered decision events from any source: {len(substantive)} substantive, "
+                    f"{len(events) - len(substantive)} deferral(s). "
+                    "All deliver once and are acknowledged after successful processing. " + handled +
+                    " Handling is defined by the role policy.")
+        return (f"Delivered deferrals from any source: {len(events)} one-shot. "
+                "Each new deferral admits one focused run and is acknowledged after successful "
+                "processing. " + handled +
+                " Handling is defined by the role policy.")
     if substantive:
         return (f"Delivered decision events: {len(substantive)} substantive, "
                 f"{len(events) - len(substantive)} deferral(s). "
@@ -1411,8 +1425,10 @@ class Engine:
             cursor = read_json(project.root / "observed" / f"{role_name}.json", {})
             code_unchanged = role.on_change and _on_change_observed(cursor, snapshot)
             triggers = tuple(getattr(role, "decision_events", ()) or ())
+            sources = getattr(role, "decision_sources", "own") or "own"
             decision_events = project.insights.decision_events(
-                role_name, triggers, limit=project.config.limits.decision_events_limit) if triggers else []
+                role_name, triggers, limit=project.config.limits.decision_events_limit,
+                sources=sources) if triggers else []
             wait_events = project.insights.due_waits(role_name, snapshot)
             # Dependency obligations addressed to this role ride along when
             # it runs for other reasons; they never admit a run on their
@@ -1420,13 +1436,18 @@ class Engine:
             obligations = project.insights.pending_obligations(role_name)
             # Event-triggered dispatch (platform file triggers) admits only on a
             # subscribed substantive decision event or a due structured wait
-            # for this role; deferrals ride along when the role runs for
-            # other reasons and never admit a run on their own. Otherwise
+            # for this role; in own-source mode deferrals ride along when the role
+            # runs for other reasons and never admit a run on their own. A role
+            # explicitly opted into decision_sources="any" admits on any matching
+            # action including deferrals (one-shot per new deferral). Otherwise
             # it exits before allocating a run directory or model use,
             # like unchanged-code admission. Periodic timers invoke without the
             # flag, so scheduled discovery still runs at its interval.
-            substantive_events = [e for e in decision_events
-                                  if isinstance(e, dict) and e.get("action") != "defer"]
+            if sources == "any":
+                substantive_events = [e for e in decision_events if isinstance(e, dict)]
+            else:
+                substantive_events = [e for e in decision_events
+                                      if isinstance(e, dict) and e.get("action") != "defer"]
             try:
                 ci_failures = wake_ci_failures(project, self.config)
             except Exception:
@@ -1622,8 +1643,10 @@ class Engine:
                 write_json(project.root / "observed" / f"{role_name}.json",
                            {"snapshot": snapshot["id"], "code_digest": snapshot["code_digest"]})
                 if context.decision_events:
-                    with contextlib.suppress(OSError, ValueError, TypeError, AttributeError):
-                        project.insights.acknowledge_decisions(role_name, context.decision_events)
+                    with contextlib.suppress(OSError, ValueError, TypeError, AttributeError, Denied):
+                        project.insights.acknowledge_decisions(
+                            role_name, context.decision_events,
+                            sources=getattr(role, "decision_sources", "own") or "own")
                 if context.wait_events:
                     with contextlib.suppress(OSError, ValueError, TypeError, AttributeError, Denied):
                         project.insights.consume_waits(role_name, context.wait_events)
@@ -1803,10 +1826,15 @@ def _role_events_due(project: Project, snapshot: dict, role_name=None) -> bool:
         for name in names:
             try:
                 triggers = project.config.roles[name].decision_events
+                sources = getattr(project.config.roles[name], "decision_sources", "own") or "own"
                 if triggers:
                     pending = project.insights.decision_events(
-                        name, triggers, limit=project.config.limits.decision_events_limit)
-                    if any(isinstance(e, dict) and e.get("action") != "defer" for e in pending):
+                        name, triggers, limit=project.config.limits.decision_events_limit,
+                        sources=sources)
+                    if sources == "any":
+                        if any(isinstance(e, dict) for e in pending):
+                            return True
+                    elif any(isinstance(e, dict) and e.get("action") != "defer" for e in pending):
                         return True
             except (Denied, OSError, ValueError, TypeError, KeyError, AttributeError):
                 pass

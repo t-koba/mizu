@@ -151,7 +151,8 @@ the same decision store; it is refused over a revision-current substantive
 decision and over an unseen revision, a repeated request is a no-op, and
 `reject` keeps meaning substantive rejection. A role with configured
 `decision_events` is additionally admitted by unacknowledged decisions routed
-to it (insight source equals role name): the dispatch delivers the current
+to it (insight source equals role name in `own` mode, any source when
+`decision_sources = "any"`): the dispatch delivers the current
 finding plus the reason as a `decision_events` field inside the role's ordinary prompt
 (all other granted inputs stay present), described factually by a `decision_task` field,
 records the admission and the
@@ -162,7 +163,7 @@ Withdrawn or superseded decisions never emit, and a substantive decision never l
 withdrawn revision. Substantive delivery is one-shot per decision; a deferral rides
 along when the role runs for other reasons and rotates across dispatches while still
 current, whatever its age against the cursor, and counts as handled only when its
-topic moves (revision, withdrawal, or a superseding decision). A deferral alone never
+topic moves (revision, withdrawal, or a superseding decision). In `own` mode a deferral alone never
 admits a run: event-triggered and unchanged-code dispatch exit unless a substantive
 event or due wait is pending, so standing deferrals cost a cheap skip rather than a
 model run. Truncation keeps substantive delivery lossless: unacknowledged substantive events
@@ -210,12 +211,18 @@ and adds it with `submit_insight` as a new insight referencing the deferred
 ID and rev; the worker links the evidence when it decides the original, while
 only the original submitter (or the operator path) revises it, so ownership
 (submitter-only revise/withdraw) never moves and no non-submitter revise grant
-exists. No cross-source
-`decision_events` subscription, no admission on a new deferral, and no
-non-submitter revise grant exist: those stay sequenced until a
-scheduled-resolver experiment shows schedule latency or correlation failure
-(Less-is-more). The operator configures the resolver's schedule, model and
-policy; the submitter owns its topic.
+exists. No non-submitter revise grant exists: ownership never moves.
+A resolver role may opt into cross-source `decision_events` with
+`decision_sources = "any"` next to `decision_events = ["defer"]` (unset keeps
+own-source delivery): matching deferrals from any source then deliver once and
+admit one focused run each, acknowledged after successful processing, so the
+resolver runs on each new deferral instead of on a clock. Own-source deferrals
+keep ride-along rotation and never admit alone. The operator configures which
+role subscribes, to which actions, and its schedule/model/policy; the submitter
+owns its topic and takes it back at its next scheduled run when nothing resolved
+it. The scheduled-resolver experiment (qpx 15 deferrals waiting on an
+already-green fact, most deferrals without structured waits) justified this
+opt-in admission over shortening the clock (Less-is-more).
 
 Editor uploads are first atomically claimed into a private ingest directory;
 they are not parsed while still mutable in the Editor outbox. Malformed records

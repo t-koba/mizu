@@ -147,6 +147,78 @@ class DecisionTriggerConfigTests(Fixture):
             load(self.file)
 
 
+
+
+class AnySourceResolverTests(Fixture):
+    def _any_config(self, role="searcher", events=("defer",)):
+        import dataclasses
+        roles = dict(self.config.roles)
+        roles[role] = dataclasses.replace(roles[role], decision_events=events, decision_sources="any")
+        return dataclasses.replace(self.config, roles=roles)
+
+    def test_own_mode_keeps_cross_source_isolated(self):
+        snap = self.project.snapshots.get()["id"]
+        item = self.project.insights.submit(source="reviewer", title="Finding", body="v1",
+                                            base_snapshot=snap)
+        self.project.insights.decide(item["id"], "defer", "needs field data", "observe X", "test", expected_rev=1)
+        self.assertEqual(self.project.insights.decision_events("searcher", ("defer",)), [])
+        self.assertEqual(len(self.project.insights.decision_events("searcher", ("defer",), sources="any")), 1)
+
+    def test_any_source_defer_admits_once_then_skips(self):
+        import dataclasses
+        from mizu.runtime import Engine
+        from support import ScriptDriver
+        config = self._any_config()
+        engine = Engine(config, driver=ScriptDriver())
+        # No event yet: event trigger skips cheaply without model use.
+        driver_calls = engine._driver.calls if hasattr(engine, "_driver") else None
+        skipped = engine.run(self.project, "searcher", event_trigger=True)
+        self.assertEqual(skipped.get("skipped"), "no-event")
+        # A deferral from another source routes to the resolver.
+        snap = self.project.snapshots.get()["id"]
+        item = self.project.insights.submit(source="reviewer", title="Finding", body="v1",
+                                            base_snapshot=snap)
+        self.project.insights.decide(item["id"], "defer", "needs field data", "observe X", "test", expected_rev=1)
+        events = self.project.insights.decision_events("searcher", ("defer",), sources="any")
+        self.assertEqual(len(events), 1)
+        self.assertEqual((events[0]["action"], events[0]["source"]), ("defer", "reviewer"))
+        admitted = engine.run(self.project, "searcher", event_trigger=True)
+        self.assertEqual(admitted["status"], "completed")
+        # One-shot: acknowledged, so the next event trigger skips again.
+        self.assertEqual(self.project.insights.decision_events("searcher", ("defer",), sources="any"), [])
+        self.assertEqual(engine.run(self.project, "searcher", event_trigger=True).get("skipped"), "no-event")
+        # Own-source view never saw it.
+        self.assertEqual(self.project.insights.decision_events("searcher", ("defer",)), [])
+
+    def test_any_source_invalid_and_empty_refused_at_load(self):
+        from mizu.config import load
+        from mizu.errors import ConfigError
+        # Unknown value refused.
+        text = self.file.read_text()
+        lines = text.splitlines(keepends=True)
+        start = next(i for i, line in enumerate(lines) if line.strip() == "[roles.searcher]")
+        end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("[")), len(lines))
+        lines.insert(end, 'decision_events = ["defer"]\ndecision_sources = "everyone"\n')
+        self.file.write_text("".join(lines))
+        with self.assertRaises(ConfigError):
+            load(self.file)
+        # any without events refused.
+        self.file.write_text(text)
+        lines = self.file.read_text().splitlines(keepends=True)
+        start = next(i for i, line in enumerate(lines) if line.strip() == "[roles.searcher]")
+        end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("[")), len(lines))
+        lines.insert(end, 'decision_sources = "any"\n')
+        self.file.write_text("".join(lines))
+        with self.assertRaises(ConfigError):
+            load(self.file)
+
+    def test_any_source_bad_kwarg_refused(self):
+        from mizu.errors import Denied
+        with self.assertRaises(Denied):
+            self.project.insights.decision_events("searcher", ("defer",), sources="everyone")
+        with self.assertRaises(Denied):
+            self.project.insights.acknowledge_decisions("searcher", [], sources="everyone")
+
 if __name__ == "__main__":
     raise SystemExit(unittest.main())
 
