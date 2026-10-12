@@ -204,14 +204,20 @@ offer keeps the newest `limits.pending_insights` proposals so recent evidence
 is never hidden behind the bound. Worker discretion applies to proposals,
 not to the operator's goal or prohibitions.
 
-Deferral evidence may be gathered by a scheduled resolver role with existing
-capabilities only: a role holding `insights` lists pending deferrals across
-sources, uses `experiment`/`fetch`/`search` to obtain the missing evidence,
-and adds it with `submit_insight` as a new insight referencing the deferred
-ID and rev; the worker links the evidence when it decides the original, while
-only the original submitter (or the operator path) revises it, so ownership
-(submitter-only revise/withdraw) never moves and no non-submitter revise grant
-exists. No non-submitter revise grant exists: ownership never moves.
+Deferral evidence may be gathered by a resolver role holding `insights` (to
+list pending deferrals) plus the `attach_evidence` capability: it uses
+`experiment`/`fetch`/`search` to obtain the missing evidence, then appends an
+attributed, append-only entry to the deferred insight itself, bound to the read
+rev like `revise` but without changing title, body, or rev. Ownership and the
+revise/withdraw rights stay with the submitter only: this is not a revision
+and no non-submitter revise grant exists. The attach advances the inbox
+generation so the decider wakes once; pending lists carry evidence counts with
+full entries behind the read path, and a later decision on the topic reaches
+its submitter with the evidence included. Entries are bounded (at most 16 per
+insight, each at most 8192 chars; bulk belongs in referenced run evidence),
+a full insight refuses further attaches until decided, and a meaningful
+revision archives prior entries with the old rev and starts the new rev empty.
+No non-submitter revise grant exists: ownership never moves.
 A resolver role may opt into cross-source `decision_events` with
 `decision_sources = "any"` next to `decision_events = ["defer"]` (unset keeps
 own-source delivery): matching deferrals from any source then deliver once and

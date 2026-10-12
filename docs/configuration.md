@@ -286,6 +286,7 @@ models are recorded. Model usage excludes unreported auxiliary billing.
 | `revise_insight` | Revise one of the role's own proposals under its stable ID (source fixed to the role, bound to the read rev; prior content archived, meaningful change reopens the topic) |
 | `withdraw_insight` | Withdraw one of the role's own pending proposals as author retraction, not rejection (source fixed to the role, bound to the read rev) |
 | `consult` | Ask named read-only roles through their own profile or selector (default from `consult_role`, fail-closed when unset), no nested consultation |
+| `attach_evidence` | Append an attributed evidence entry to any open insight (bound to the read rev, title/body/rev unchanged; at most 16 entries of 8192 chars each; no role holds it by default) |
 | `report` | Stage a Markdown document for static artifact publication |
 | `sync` | Refresh upstream refs via the trusted VCS adapter (writable workspace only); merges stay as workspace edits followed by verification |
 | `vcs_read` | Read CI status, logs, PR comments, external proposals, exact-revision proposal content, and CI-recorded artifact files via the trusted VCS adapter; never publishes (read roles may hold it) |

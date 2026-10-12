@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from .errors import ConfigError
 from .fs import ID
 CAPABILITIES = frozenset({"diff", "files", "read", "exec", "experiment", "verify", "fetch", "probe",
-                          "search", "insights", "decide", "submit_insight", "revise_insight", "withdraw_insight", "consult",
+                          "search", "insights", "decide", "submit_insight", "revise_insight", "withdraw_insight", "attach_evidence", "consult",
                           "report", "finish", "sync", "vcs_read", "vcs_publish",
                           "vcs_retire", "vcs_dispose", "research_read", "research",
                           "materialize"})

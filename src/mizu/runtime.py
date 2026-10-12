@@ -106,7 +106,7 @@ def is_deferred(exc: BaseException, context=None) -> bool:
 #: none of these. Read-only grants (files/read/diff/insights/fetch/probe/search)
 #: stay operator choice, plus the required finish.
 CONSULT_FORBIDDEN = frozenset({"exec", "experiment", "verify", "decide",
-                               "submit_insight", "revise_insight", "withdraw_insight", "consult", "report", "sync",
+                               "submit_insight", "revise_insight", "withdraw_insight", "attach_evidence", "consult", "report", "sync",
                                "vcs_publish", "vcs_retire", "vcs_dispose",
                                "research", "materialize"})
 
@@ -442,6 +442,20 @@ class Context:
         return self.project.insights.withdraw(args["id"], source=self.role.name, reason=args["reason"],
                                                expected_rev=args["rev"], run=self.run_dir.name)
 
+    def _op_attach_evidence(self, args: dict) -> dict:
+        # Attributed annotation of another insight: source is fixed to the
+        # caller's role and the mechanism (insights.attach_evidence) binds to
+        # the read rev without changing title, body, or rev, so ownership and
+        # revise/withdraw rights stay with the submitter only.
+        record = self.project.insights.attach_evidence(
+            args["id"], source=self.role.name, text=args["text"],
+            run=self.run_dir.name, expected_rev=args["rev"])
+        write_json(self.run_dir / "evidence-attach.json",
+                   {"insight": record["id"], "rev": record["rev"],
+                    "author": self.role.name, "run": self.run_dir.name,
+                    "evidence_count": len(record.get("evidence") or [])})
+        return record
+
     def _op_sync(self, args: dict) -> dict:
         # Host-side refresh only: fetch upstream refs via the trusted adapter
         # and inject them read-only into the harness store (virtual
@@ -711,6 +725,7 @@ class Context:
         "fetch": _op_fetch, "probe": _op_probe, "search": _op_search, "insights": _op_insights,
         "decide": _op_decide, "submit_insight": _op_submit_insight,
         "revise_insight": _op_revise_insight, "withdraw_insight": _op_withdraw_insight,
+        "attach_evidence": _op_attach_evidence,
         "sync": _op_sync, "vcs_read": _op_vcs_read, "vcs_publish": _op_vcs_publish,
         "vcs_retire": _op_vcs_retire, "vcs_dispose": _op_vcs_dispose,
         "materialize": _op_materialize,

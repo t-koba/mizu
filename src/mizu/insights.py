@@ -62,6 +62,15 @@ def _content_sha(record: dict) -> str:
     return digest(canonical(payload))
 
 
+def _evidence_sha(evidence) -> str:
+    """Digest of one insight's evidence list (empty list reads as no evidence)."""
+    try:
+        items = list(evidence) if isinstance(evidence, list) else []
+    except TypeError:
+        items = []
+    return digest(canonical(items))
+
+
 def _check_origin(origin: str | None) -> str | None:
     """Validate an opaque origin label (None means unknown, never guessed)."""
     if origin is None:
@@ -77,6 +86,8 @@ def _normalize(record: dict) -> dict:
     out["rev"] = _rev_of(record)
     if "origin" not in out:
         out["origin"] = None
+    if not isinstance(out.get("evidence"), list):
+        out["evidence"] = []
     if not out.get("updated_at"):
         out["updated_at"] = out.get("created_at")
     return out
@@ -107,6 +118,13 @@ def _effective_decision(item_rev: int, decision) -> dict | None:
 #: polling or model calls. Anything else is refused at registration with
 #: this list, exposing the missing wake source instead of implying it.
 WAIT_KINDS = ("deadline", "code_change", "insight_decided", "dependency")
+
+#: Evidence-entry bounds (fixed mechanism, not knobs): at most this many
+#: append-only entries per insight, each at most this many chars of text.
+#: Entries carry small text plus receipt references; bulk belongs in the
+#: referenced run evidence, never pasted into the entry.
+MAX_EVIDENCE_ENTRIES = 16
+MAX_EVIDENCE_CHARS = 8192
 
 
 class Insights:
@@ -176,7 +194,7 @@ class Insights:
                     return _normalize(old)
                 write_json(identity_path, {"id": insight_id, "sha256": sha, "created_at": old["created_at"]}, exclusive=True)
                 return _normalize(old)
-            record = {**payload, "created_at": now(), "rev": 1}
+            record = {**payload, "created_at": now(), "rev": 1, "evidence": []}
             record["updated_at"] = record["created_at"]
             write_json(path, record, exclusive=True)
             write_json(identity_path, {"id": insight_id, "sha256": sha, "created_at": record["created_at"]}, exclusive=True)
@@ -276,7 +294,7 @@ replacement insight without implying rejected substance.
                     raise Denied("Insight revision conflict; reread the current revision")
             record = {"id": insight_id, "source": source, "title": title, "body": body,
                       "base_snapshot": base_snapshot, "run": run,
-                      "origin": _origin,
+                      "origin": _origin, "evidence": [],
                       "created_at": old.get("created_at"), "rev": current_rev + 1,
                       "updated_at": stamped}
             write_json(path, record)
@@ -310,6 +328,58 @@ replacement insight without implying rejected substance.
         out.sort(key=lambda r: _rev_of(r))
         return out
 
+    def attach_evidence(self, insight_id: str, *, source: str, text: str,
+                        run: str | None = None,
+                        expected_rev: int | None = None) -> dict:
+        """Append an attributed evidence entry to an open insight.
+
+        Schema: ``text`` is 1-8192 chars of evidence prose plus receipt or
+        run references (bulk belongs in the referenced run evidence, never
+        pasted here); ``expected_rev`` must equal the current rev
+        (compare-and-swap, like revise); at most ``MAX_EVIDENCE_ENTRIES``
+        entries per insight. Bounds: entries are append-only and bounded;
+        a full insight refuses further attaches until decided. Trust:
+        ``source`` is the attaching authority channel (fixed by the runtime
+        for model calls); the title/body/rev never change, so ownership and
+        the revise/withdraw rights stay with the submitter only — this is
+        not a revision. Retry: identical concurrent attaches each append
+        under the lock; a stale ``expected_rev`` is Denied, never merged.
+        Evidence: the entry ``{author, run, created_at, text}`` is stored on
+        the inbox record (archived with the rev on revise, reaped with a
+        decided record while the decision rationale cites it); the inbox
+        generation advances so the decider wakes once. Failure: Denied on
+        unknown ID, revision conflict, bounds, a full entry list, or a
+        revision-current substantive decision or withdrawal (revise the topic
+        to reopen it).
+        """
+        identifier(source)
+        identifier(insight_id)
+        if not isinstance(text, str) or not text.strip() or len(text) > MAX_EVIDENCE_CHARS:
+            raise Denied(f"Evidence text must be 1-{MAX_EVIDENCE_CHARS} chars")
+        if expected_rev is None:
+            raise Denied("Evidence attach requires the revision read (expected_rev)")
+        if isinstance(expected_rev, bool) or not isinstance(expected_rev, int) or expected_rev < 1:
+            raise Denied("Evidence revision must be a positive revision number")
+        with lock(self.root / "locks" / "insights.lock"):
+            current = self.read(insight_id)
+            rev = _rev_of(current)
+            if expected_rev != rev:
+                raise Denied(f"Insight revised since read (now rev {rev}); re-read before attaching")
+            raw = self.root / "decisions" / f"{insight_id}.json"
+            effective = _effective_decision(rev, None if raw.is_symlink() else read_json(raw, {}))
+            if effective is not None and effective.get("action") in ("accept", "modify", "reject"):
+                raise Denied("Insight already decided; revise the topic to reopen it")
+            if effective is not None and effective.get("action") == "withdraw":
+                raise Denied("Insight withdrawn; revise the topic to reopen it")
+            entries = list(current.get("evidence") or [])
+            if len(entries) >= MAX_EVIDENCE_ENTRIES:
+                raise Denied("Insight evidence is full; decide the topic to make room")
+            entry = {"author": source, "run": run, "created_at": now(), "text": text}
+            entries.append(entry)
+            record = {**current, "evidence": entries, "updated_at": entry["created_at"]}
+            write_json(self.root / "inbox" / f"{insight_id}.json", record)
+            return _normalize(record)
+
     def projection(self, *, pending: bool = True, limit: int = 30) -> dict:
         heap = []
         total = 0
@@ -332,6 +402,15 @@ replacement insight without implying rejected substance.
                 if item.get("updated_at"):
                     record["updated_at"] = item["updated_at"]
                 record["decision"] = decision
+                try:
+                    entries = item.get("evidence") if isinstance(item.get("evidence"), list) else []
+                    record["evidence_count"] = len(entries)
+                    stamps = [e.get("created_at") for e in entries
+                              if isinstance(e, dict) and isinstance(e.get("created_at"), str)]
+                    if stamps:
+                        record["evidence_updated_at"] = max(stamps)
+                except (AttributeError, TypeError, ValueError):
+                    record["evidence_count"] = 0
                 key = (record["created_at"], record["id"], path.name)
                 total += 1
                 if limit > 0:
@@ -384,7 +463,7 @@ replacement insight without implying rejected substance.
             try:
                 item = read_json(path)
                 identifier(item["id"])
-                parts.append(f"{item['id']}:{_rev_of(item)}:{_content_sha(item)}")
+                parts.append(f"{item['id']}:{_rev_of(item)}:{_content_sha(item)}:{_evidence_sha(item.get('evidence'))}")
             except (OSError, ValueError, KeyError, TypeError, AttributeError, Denied):
                 continue
         return digest(canonical(sorted(parts)))
@@ -816,8 +895,11 @@ replacement insight without implying rejected substance.
         actions from any source, so a resolver runs on each new deferral);
         returns focused payloads, substantive oldest-first then a rotating
         window of deferrals,
-        ``{event, insight, rev, title, body, action, reason, revisit, decided_at}``
-        (at most ``limit``). Bounds: ``limit`` is a positive int capped at
+        ``{event, insight, rev, title, body, action, reason, revisit, decided_at,
+        source, evidence}``
+        (at most ``limit``). ``evidence`` carries the insight's attached
+        entries, so a decision on an evidenced topic reaches its submitter
+        with the evidence included. Bounds: ``limit`` is a positive int capped at
         100; cursors keep at most 100 tie-window ids plus a defer-rotation
         offset. Trust: only
         recorded decisions and inbox state, never model input; routing is
@@ -928,11 +1010,13 @@ replacement insight without implying rejected substance.
                 continue
             if effective != record:
                 continue
+            evidence = current.get("evidence") if isinstance(current.get("evidence"), list) else []
             payload = {"event": stem, "insight": current["id"], "rev": rev,
                        "title": current.get("title", ""), "body": current.get("body", ""),
                        "action": record.get("action"), "reason": record.get("reason", ""),
                        "revisit": record.get("revisit", ""),
-                       "decided_at": created, "source": current.get("source", "")}
+                       "decided_at": created, "source": current.get("source", ""),
+                       "evidence": evidence}
             if record.get("action") == "defer":
                 defers.append(payload)
             else:
