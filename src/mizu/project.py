@@ -150,15 +150,6 @@ def config_managed_repo(workspace: Path, env: dict[str, str]) -> None:
             raise Denied("Cannot configure managed repository")
 
 
-def init_managed_repo(workspace: Path) -> None:
-    """Initialize the managed worktree repository. Loud failure, never partial trust."""
-    env = git_env()
-    if run(["git", "init", "--initial-branch=work", str(workspace)],
-           timeout=15, maximum=8192, env=env).exit_code:
-        raise Denied("Cannot initialize managed repository")
-    config_managed_repo(workspace, env)
-
-
 def _import_git_tree(source: Path, workspace: Path, env: dict[str, str]) -> None:
     """Clone a clean git tree without history leakage. Loud failure only."""
     status = run(["git", "-c", "safe.bareRepository=explicit", "-c", "core.fsmonitor=false",
@@ -187,7 +178,6 @@ def _import_plain_directory(source: Path, workspace: Path, stage: Path, config: 
     if captured["skipped"]:
         raise Denied("Plain-directory import contains unsupported links or special files: " + ", ".join(captured["skipped"][:10]))
     temporary_store.materialize(captured, workspace)
-    init_managed_repo(workspace)
 
 
 def initialize(config: Config, name: str, source: Path, goal_file: Path,

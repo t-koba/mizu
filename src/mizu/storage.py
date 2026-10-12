@@ -25,7 +25,7 @@ from pathlib import Path
 from .config import keys, strings
 from .errors import Denied
 from .fs import DIGEST, atomic_write, identifier, lock, mkdir, now, read_json, sync_dir, write_json, relative_parts
-from .project import Project, check_verify, init_managed_repo, read_goal
+from .project import Project, check_verify, read_goal
 from .snapshot import open_store
 
 #: Project members covered by backup/restore (plus backup.json on restore).
@@ -963,7 +963,6 @@ def restore(config, name: str, archive_path: Path, *, max_bytes: int = 107374182
                 historical = store.get(sid)
                 for path in historical["files"]:
                     store.read(historical, path)
-            init_managed_repo(stage / "workspace")
             write_json(stage / "control.json", {"armed": False, "paused": True,
                        "draining": False,
                        "wake_generation": uuid.uuid4().hex, "reason": "Restored checkpoint; operator review required"})
