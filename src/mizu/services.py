@@ -93,23 +93,6 @@ def _role_base(project: Project, name: str) -> str:
     return f"mizu-{len(project.name)}-{identifier(project.name)}-{identifier(name)}"
 
 
-def _event_only_roles(config: Config, project: Project):
-    """Yield (name, role, base) for non-daemon unscheduled roles with subscriptions.
-
-    These roles have no timer or plain service: they run only via the event
-    trigger (or explicit `mizu run`). Daemon roles need no trigger (their loop
-    re-checks every idle tick); roles with neither a schedule nor event
-    subscriptions stay explicit-run only.
-    """
-    for name in project.roles:
-        role = config.roles[name]
-        if role.daemon or role.interval_seconds or role.calendar:
-            continue
-        if not role.decision_events:
-            continue
-        yield name, role, _role_base(project, name)
-
-
 def event_watches(config: Config, project: Project) -> dict[str, list[str]]:
     """Event-trigger watch directories per subscribed role.
 
@@ -163,25 +146,11 @@ def _render_systemd(config: Config, project: Project, executable: Path) -> dict[
             timer.extend(f"OnCalendar=*-*-* {t}:00" + ("" if config.timezone == "local" else " " + config.timezone) for t in role.calendar)
         timer.extend(["", "[Install]", "WantedBy=timers.target"])
         result[base + ".timer"] = "\n".join(timer) + "\n"
-        if name in watches:
-            event_base = base + "-event"
-            event_args = [str(executable.resolve()), "--config", str(config.file),
-                          "run", project.name, "--role", name, "--event"]
-            event_service = ["[Unit]", f"Description=Mizu event dispatch for {project.name} / {name}", "After=network-online.target",
-                       "StartLimitIntervalSec=0",
-                       "", "[Service]", "Type=oneshot", "UMask=0077", "KillMode=control-group", "Delegate=yes",
-                       f"TimeoutStopSec={STOP_SEC}", "ExecStart=" + " ".join(map(quote, event_args)),
-                       "ExecStopPost=-" + " ".join(map(quote, cleanup)),
-                       "SuccessExitStatus=69 75 76 77 78 130"]
-            result[event_base + ".service"] = "\n".join(event_service) + "\n"
-            trigger = ["[Unit]", f"Description=Mizu event trigger for {project.name} / {name}", "",
-                       "[Path]",
-                       *(f"PathChanged={watch}" for watch in watches[name]),
-                       f"Unit={event_base}.service", "", "[Install]", "WantedBy=default.target"]
-            result[event_base + ".path"] = "\n".join(trigger) + "\n"
-    for name, role, base in _event_only_roles(config, project):
-        if name not in watches:
-            continue
+    # One event-trigger path for every watched role (scheduled or event-only):
+    # a trigger with nothing due exits cheaply via --event, so sharing the
+    # rendering cannot miss a later fix in one copy.
+    for name in sorted(watches):
+        base = _role_base(project, name)
         cleanup = [str(executable.resolve()), "--config", str(config.file),
                    "cleanup", project.name, "--role", name]
         event_base = base + "-event"
@@ -232,24 +201,9 @@ def _render_launchd(config: Config, project: Project, executable: Path) -> dict[
                                    '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
                                    '<plist version="1.0">\n<dict>\n' + "\n".join(body) +
                                    '\n</dict>\n</plist>\n')
-        if not role.daemon and name in watches:
-            event_base = base + "-event"
-            event_args = [resolved, "--config", str(config.file),
-                          "run", project.name, "--role", name, "--event"]
-            event_body = [f"  <key>Label</key><string>{event_base}</string>",
-                          "  <key>ProgramArguments</key>", "  <array>",
-                          _plist_args(event_args).rstrip("\n"), "  </array>",
-                          "  <key>WatchPaths</key>", "  <array>",
-                          "".join(f"    <string>{_xml(watch)}</string>\n" for watch in watches[name]).rstrip("\n"),
-                          "  </array>"]
-            result[event_base + ".plist"] = ('<?xml version="1.0" encoding="UTF-8"?>\n'
-                                   '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
-                                   '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
-                                   '<plist version="1.0">\n<dict>\n' + "\n".join(event_body) +
-                                   '\n</dict>\n</plist>\n')
-    for name, role, base in _event_only_roles(config, project):
-        if name not in watches:
-            continue
+    # One event-trigger path for every watched role (scheduled or event-only).
+    for name in sorted(watches):
+        base = _role_base(project, name)
         event_base = base + "-event"
         event_args = [resolved, "--config", str(config.file),
                       "run", project.name, "--role", name, "--event"]
