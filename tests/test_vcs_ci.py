@@ -205,3 +205,85 @@ class CiStatusTests(Fixture):
 
 if __name__ == "__main__":
     raise SystemExit(unittest.main())
+
+class CiStickyRedTests(Fixture):
+    def _wait_snapshot(self):
+        import time
+        gen = self.project.insights.generation()
+        cap = self.project.snapshots.capture_files(self.project.workspace)
+        wait = self.project.snapshots.create(
+            cap, goal=self.project.goal,
+            state="Now: parked\nNext: none\nTasks: none\nBlocking: none",
+            run=None, outcome="wait", summary="parked", verification=None,
+            wake_at=time.time() + 86400, inbox_seen=gen,
+            wake_generation=self.project.control().get("wake_generation", ""))
+        self.project.snapshots.publish(wait)
+        return self.project.snapshots.get()
+
+    def test_deferred_failure_stays_current_until_green(self):
+        import dataclasses
+        import time
+        from mizu.fs import write_json
+        from mizu.runtime import current_ci_failures, poll_ci, should_run
+        failing = {"checks": [{"check": "perf audit", "state": "failure",
+                               "sha": SHA_A, "url": "https://x/log"}]}
+        config = dataclasses.replace(
+            self.config, vcs=adapter_settings(status_code(failing)))
+        snap = self._wait_snapshot()
+        self.assertFalse(should_run(self.project, snap, current_time=time.time()))
+        state: dict = {}
+        event = poll_ci(config, self.project, state, now=0.0, interval=15.0,
+                        branches=["mizu"])
+        self.assertTrue(event["ok"])
+        write_json(self.project.root / "vcs-poll.json",
+                   {"last_poll": 0.0, "failures": state.get("failures")})
+        self.assertEqual(current_ci_failures(self.project),
+                         [{"branch": "mizu", "sha": SHA_A, "check": "perf audit"}])
+        # Parking the insight as noise must not park the red head.
+        record = self.project.insights.read(event["recorded"][0]["id"])
+        self.project.insights.decide(record["id"], "defer", "noise",
+                                     "awaiting CI re-run", run="test-run",
+                                     expected_rev=record["rev"])
+        parked = self.project.snapshots.get()
+        self.assertTrue(current_ci_failures(self.project))
+        self.assertTrue(should_run(self.project, parked, current_time=time.time()))
+        # Green on the same branch/check clears the fact without any decision.
+        passing = {"checks": [{"check": "perf audit", "state": "success", "sha": SHA_A}]}
+        config2 = dataclasses.replace(
+            self.config, vcs=adapter_settings(status_code(passing)))
+        state2: dict = {"failures": state.get("failures")}
+        event2 = poll_ci(config2, self.project, state2, now=15.0, interval=15.0,
+                         branches=["mizu"])
+        self.assertTrue(event2["ok"])
+        write_json(self.project.root / "vcs-poll.json",
+                   {"last_poll": 15.0, "failures": state2.get("failures")})
+        self.assertEqual(current_ci_failures(self.project), [])
+
+    def test_superseding_sha_replaces_cached_failure(self):
+        import dataclasses
+        from mizu.runtime import current_ci_failures, poll_ci
+        from mizu.fs import write_json
+        red_a = {"checks": [{"check": "unit", "state": "failure", "sha": SHA_A}]}
+        config = dataclasses.replace(
+            self.config, vcs=adapter_settings(status_code(red_a)))
+        state: dict = {}
+        poll_ci(config, self.project, state, now=0.0, interval=15.0,
+                branches=["main"])
+        red_b = {"checks": [{"check": "unit", "state": "failure", "sha": SHA_B}]}
+        config2 = dataclasses.replace(
+            self.config, vcs=adapter_settings(status_code(red_b)))
+        poll_ci(config2, self.project, state, now=15.0, interval=15.0,
+                branches=["main"])
+        write_json(self.project.root / "vcs-poll.json",
+                   {"last_poll": 15.0, "failures": state.get("failures")})
+        self.assertEqual(current_ci_failures(self.project),
+                         [{"branch": "main", "sha": SHA_B, "check": "unit"}])
+
+    def test_malformed_cache_reads_as_no_failures(self):
+        from mizu.fs import write_json
+        from mizu.runtime import current_ci_failures
+        write_json(self.project.root / "vcs-poll.json",
+                   {"failures": {"main": [{"sha": "zz", "check": "unit"}]}})
+        self.assertEqual(current_ci_failures(self.project), [])
+        write_json(self.project.root / "vcs-poll.json", {"failures": "nope"})
+        self.assertEqual(current_ci_failures(self.project), [])

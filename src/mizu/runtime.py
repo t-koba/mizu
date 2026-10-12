@@ -841,6 +841,80 @@ def vcs_poll_status_timeout(config) -> int:
 POLL_STATE_FILE = "vcs-poll.json"
 POLL_LOCK_NAME = "vcs-poll.lock"
 
+#: Bound for the shared current-CI-failure fact (branches x checks). The
+#: prompt carries at most this many flattened rows so resumed-session
+#: deltas stay flat; the poll store itself is pruned to valid shapes.
+MAX_CI_FAILURES = 32
+#: Bound for stored per-branch check rows (keeps one tick short and the
+#: shared file small).
+MAX_CI_CHECKS_PER_BRANCH = 16
+#: Bound for stored branches with failures (rotation prunes absent refs).
+MAX_CI_FAILURE_BRANCHES = 128
+
+
+def _clean_ci_failures(value) -> dict:
+    """Normalize a stored ``{branch: [{sha, check}]}`` mapping (never raises)."""
+    if not isinstance(value, dict):
+        return {}
+    out: dict = {}
+    try:
+        from .vcs import check_branch as _check_branch
+        from .vcs import _SHA as _sha_re
+    except Exception:
+        return {}
+    for branch, rows in list(value.items())[:MAX_CI_FAILURE_BRANCHES]:
+        try:
+            _check_branch(branch)
+        except Exception:
+            continue
+        if not isinstance(rows, list):
+            continue
+        kept = []
+        for entry in rows[:MAX_CI_CHECKS_PER_BRANCH]:
+            if not isinstance(entry, dict):
+                continue
+            sha = entry.get("sha")
+            check = entry.get("check")
+            try:
+                if not isinstance(sha, str) or not _sha_re.fullmatch(sha):
+                    continue
+                if (not isinstance(check, str) or not check
+                        or len(check) > 256 or "\n" in check or "\x00" in check):
+                    continue
+            except Exception:
+                continue
+            kept.append({"sha": sha, "check": check})
+        out[branch] = kept
+    return out
+
+
+def current_ci_failures(project, *, limit: int = MAX_CI_FAILURES) -> list:
+    """Return cached current CI failures as ``[{branch, sha, check}]`` (never raises).
+
+    Schema: best-effort read of the shared ``vcs-poll.json`` ``failures``
+    mapping written by :func:`poll_ci`; flattened branch-major, sorted,
+    capped at ``limit``. Empty means no observed red (poll disabled,
+    never polled, unreadable, or last ticks green). Trust: host-side
+    poll cache, adapter facts stay external-untrusted; insight decisions
+    are deliberately ignored so a deferred failure stays current until
+    green or superseded. Failure: never raises (unreadable reads as none).
+    """
+    try:
+        raw = read_json(project.root / POLL_STATE_FILE, {})
+    except Exception:
+        return []
+    try:
+        if not isinstance(raw, dict):
+            return []
+        cleaned = _clean_ci_failures(raw.get("failures"))
+        flat = [{"branch": branch, "sha": entry["sha"], "check": entry["check"]}
+                for branch in sorted(cleaned)
+                for entry in cleaned[branch]]
+        return flat[:max(0, int(limit))]
+    except Exception:
+        return []
+
+
 
 def vcs_poll_enabled(config) -> bool:
     """True only when daemon VCS polling is explicitly opted in.
@@ -926,11 +1000,13 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
             branches_total = len(targets)
         recorded: list[dict] = []
         failures = 0
+        tick: dict = {}
         for branch in targets:
             data = do_read(config.vcs, "status", {"branch": branch})
             checks = data.get("checks")
             if not isinstance(checks, list):
                 raise Denied("VCS status must carry a checks array")
+            rows = []
             for entry in checks:
                 if entry.get("state") != "failure":
                     continue
@@ -939,9 +1015,29 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
                     check=entry["check"], state="failure",
                     url=entry.get("url", ""))
                 failures += 1
+                rows.append({"sha": entry["sha"], "check": entry["check"]})
                 if receipt.get("recorded"):
                     recorded.append({"id": receipt["id"], "branch": branch,
                                      "check": entry["check"]})
+            tick[branch] = rows[:MAX_CI_CHECKS_PER_BRANCH]
+        failures_map = _clean_ci_failures(state.get("failures"))
+        for branch, rows in tick.items():
+            failures_map[branch] = rows
+        if branches is None:
+            try:
+                live = set(sorted(_vcs.list_refs(project.root)))
+            except OSError:
+                live = None
+            if live is not None:
+                if len(live) <= max_branches:
+                    live.add("main")
+                for stale in [b for b in failures_map if b not in live]:
+                    failures_map.pop(stale, None)
+        for empty in [b for b, rows in failures_map.items() if not rows]:
+            failures_map.pop(empty, None)
+        while len(failures_map) > MAX_CI_FAILURE_BRANCHES:
+            failures_map.pop(sorted(failures_map)[0], None)
+        state["failures"] = failures_map
         state["last_error"] = ""
         state["last_ok"] = now
         return {"event": "ci_poll", "ok": True, "branches": list(targets),
@@ -1049,6 +1145,10 @@ def prompt_for(context: Context) -> str:
     ci_branch = context.config.vcs.get("ci_branch") or None
     if "vcs_read" not in caps:
         ci_branch = None
+    try:
+        ci_failures = current_ci_failures(context.project) if "vcs_read" in caps else None
+    except Exception:
+        ci_failures = None
     return json.dumps({"goal": context.goal,
                        "published_snapshot": {k: context.snapshot[k] for k in (
                            "id", "code_digest", "created_at", "state", "summary", "verification")},
@@ -1064,6 +1164,7 @@ def prompt_for(context: Context) -> str:
                        "acceptance_commands": acceptance,
                        "research_state": _prompt_research_state(context),
                        "ci_branch": ci_branch,
+                       "ci_failures": ci_failures,
                        "previous_report": (_previous_report(context.project)
                                           if "report" in caps else None),
                        **_prompt_clock(context)},
@@ -1093,6 +1194,10 @@ def prompt_delta_for(context: Context, pending: list) -> str:
     """
     caps = set(context.role.capabilities)
     acceptance = list(context.project.verify) if "verify" in caps else []
+    try:
+        ci_failures = current_ci_failures(context.project) if "vcs_read" in caps else None
+    except Exception:
+        ci_failures = None
     return json.dumps({"goal_digest": context.goal_digest,
                        "published_snapshot": {k: context.snapshot[k] for k in (
                            "id", "code_digest", "created_at", "state", "summary", "verification")},
@@ -1108,6 +1213,7 @@ def prompt_delta_for(context: Context, pending: list) -> str:
                        "acceptance_commands": acceptance,
                        "ci_branch": ((context.config.vcs.get("ci_branch") or None)
                                      if "vcs_read" in caps else None),
+                       "ci_failures": ci_failures,
                        "previous_report": (_previous_report(context.project)
                                           if "report" in caps else None),
                        **_prompt_clock(context)},
@@ -1292,10 +1398,14 @@ class Engine:
             # flag, so scheduled discovery still runs at its interval.
             substantive_events = [e for e in decision_events
                                   if isinstance(e, dict) and e.get("action") != "defer"]
-            if event_trigger and not substantive_events and not wait_events:
+            try:
+                ci_failures = current_ci_failures(project)
+            except Exception:
+                ci_failures = []
+            if event_trigger and not substantive_events and not wait_events and not ci_failures:
                 return {"skipped": "no-event", "snapshot": snapshot["id"],
                         "code_digest": snapshot["code_digest"]}
-            if code_unchanged and not substantive_events and not wait_events:
+            if code_unchanged and not substantive_events and not wait_events and not ci_failures:
                 return {"skipped": "unchanged", "snapshot": snapshot["id"],
                         "code_digest": snapshot["code_digest"]}
             # Pre-execution selection probe: evaluate before allocating a run
@@ -1335,8 +1445,13 @@ class Engine:
             workspace = project.workspace if role.workspace == "write" else run_dir / "input"
             try:
                 write_json(active, {"run": run_id, "role": role_name, "started_at": now()})
-                if code_unchanged and (substantive_events or wait_events):
-                    admission = "decision" if substantive_events else "wait"
+                if code_unchanged and (substantive_events or wait_events or ci_failures):
+                    if substantive_events:
+                        admission = "decision"
+                    elif wait_events:
+                        admission = "wait"
+                    else:
+                        admission = "ci"
                 elif role.on_change:
                     admission = "change"
                 else:
@@ -1346,6 +1461,7 @@ class Engine:
                             "admission": admission, "decision_events": len(decision_events),
                             "wait_events": len(wait_events),
                             "obligation_events": len(obligations),
+                            "ci_failures": len(ci_failures),
                             "config_sha256": digest(self.config.file.read_bytes()),
                             "policy_sha256": digest(role_policy_bytes(role))})
                 if decision_events:
@@ -1679,7 +1795,9 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
     """Fixed single-writer publication contract (mechanism, not operator policy).
 
     `done` needs an explicit wake or changed goal; `continue` always runs;
-    `wait`/`blocked` resume on wake, new proposals, or elapsed wait. Goal and
+    `wait`/`blocked` resume on wake, new proposals, elapsed wait, or a cached
+    current CI failure (polled red, independent of insight decisions, until
+    a later poll sees green or a new revision). Goal and
     wake-generation changes always resume. See docs/architecture.md.
     """
     current_time = time.time() if current_time is None else current_time
@@ -1699,6 +1817,11 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
         return True
     if _role_events_due(project, snapshot, role_name):
         return True
+    try:
+        if current_ci_failures(project):
+            return True
+    except Exception:
+        pass
     return outcome == "wait" and snapshot.get("wake_at") is not None and current_time >= snapshot["wake_at"]
 
 
@@ -1731,6 +1854,11 @@ def refresh_poll_state(state: dict, shared: dict) -> dict:
         current = _wall(target.get(key))
         if current is None or seen > current:
             target[key] = seen
+    if isinstance(shared.get("failures"), dict):
+        merged = _clean_ci_failures(ci_state.get("failures"))
+        for branch, rows in _clean_ci_failures(shared.get("failures")).items():
+            merged[branch] = rows
+        ci_state["failures"] = merged
     return ci_state
 
 
@@ -1762,7 +1890,8 @@ def poll_project_vcs(config, project, state: dict, *, now: float, interval: floa
             with contextlib.suppress(OSError, ValueError, TypeError):
                 write_json(project.root / POLL_STATE_FILE,
                            {"last_fetch": state.get("last_fetch"),
-                            "last_poll": ci_state.get("last_poll")})
+                            "last_poll": ci_state.get("last_poll"),
+                            "failures": _clean_ci_failures(ci_state.get("failures"))})
             return events
     except Busy:
         return []
