@@ -176,14 +176,17 @@ def public_addresses(host: str, allow_private: bool = False) -> list[tuple]:
         raise Denied("DNS returned no addresses")
     for _, _, _, _, address in addresses:
         ip = ipaddress.ip_address(address[0])
-        # Loopback, link-local, multicast, unspecified and transition addresses
-        # are never dialable: they reach the host itself or nowhere meaningful.
+        # Loopback, link-local, multicast, unspecified and known transition
+        # prefixes (mapped, 64:ff9b::/96, 64:ff9b:1::/48, 2002::/16) are never
+        # dialable: they reach the host itself or nowhere meaningful.
         # Global unicast is always fine; RFC 1918/ULA private addresses need the
-        # operator's explicit `intranet` choice.
+        # operator's explicit `intranet` choice. Arbitrary network-specific
+        # translation prefixes cannot be recognized from syntax alone.
         if ip.is_multicast or ip.is_loopback or ip.is_link_local or ip.is_unspecified \
                 or getattr(ip, "ipv4_mapped", None):
             raise Denied("DNS target is not a dialable address")
         if ip.version == 6 and (ip in ipaddress.ip_network("64:ff9b::/96") or
+                               ip in ipaddress.ip_network("64:ff9b:1::/48") or
                                ip in ipaddress.ip_network("2002::/16")):
             raise Denied("Transition addresses are not supported")
         if not ip.is_global and not (allow_private and ip.is_private):

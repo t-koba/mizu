@@ -312,6 +312,27 @@ class IsolationAndWebTests(Fixture):
                 with self.assertRaises(Denied):
                     addresses("example.com", True)
 
+    def test_local_translation_prefix_refused_in_both_modes(self):
+        # RFC 8215 local-use 64:ff9b:1::/48 must match the documented
+        # unconditional transition refusal, like well-known NAT64/6to4.
+        for address in ("64:ff9b:1::7f00:1", "64:ff9b::7f00:1", "2002:7f00:1::1"):
+            family = socket.AF_INET6
+            answer = [(family, socket.SOCK_STREAM, 6, "", (address, 443, 0, 0))]
+            for allow_private in (False, True):
+                with patch("socket.getaddrinfo", return_value=answer):
+                    with self.assertRaises(Denied, msg=f"{address} allow={allow_private}"):
+                        public_addresses("example.com", allow_private)
+        # Controls: ordinary private needs intranet, public passes both.
+        private = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.1.2.3", 443))]
+        with patch("socket.getaddrinfo", return_value=private):
+            with self.assertRaises(Denied):
+                public_addresses("example.com", False)
+            self.assertEqual(public_addresses("example.com", True), private)
+        public = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443))]
+        with patch("socket.getaddrinfo", return_value=public):
+            self.assertEqual(public_addresses("example.com", False), public)
+            self.assertEqual(public_addresses("example.com", True), public)
+
     def test_public_dns_is_pinned(self):
         answer = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443))]
         with patch("socket.getaddrinfo", return_value=answer):
