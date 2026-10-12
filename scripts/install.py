@@ -245,6 +245,9 @@ def stage(args):
             if not args.core_only:
                 adapter = temporary / "adapters/pi"
                 common = ["--engine-strict", "--no-audit", "--no-fund"]
+                # Permit npm's own script policy when opted in; on npm v12 removing
+                # --ignore-scripts still defers to allowScripts default-deny, so the flag
+                # is requested permission, not proof scripts ran. Default stays deny-all.
                 scripts = [] if args.allow_install_scripts else ["--ignore-scripts"]
                 if not (adapter / "package-lock.json").exists():
                     command(["npm", "install", "--package-lock-only", *common, "--ignore-scripts"], cwd=adapter)
@@ -264,7 +267,7 @@ def stage(args):
             write_json(temporary / "installation.json", {"version": __version__, "source_sha256": sha,
                         "installed_at": now(), "mode": "core-only" if args.core_only else "pi",
                         "pi_version": None if args.core_only else result, "pi_lock_sha256": pi_lock,
-                        "node": node, "install_scripts_enabled": args.allow_install_scripts,
+                        "node": node, "install_scripts_enabled": args.allow_install_scripts,  # requested permission, not proof scripts ran (npm v12 may still deny via allowScripts),
                         "validation": "local-install-checks-passed", "checks": checks["checks"], "live_validation": "not_run"})
             os.rename(temporary, release)
         finally:
@@ -288,7 +291,7 @@ def main():
     p.add_argument("--bin-dir", type=Path, default=Path.home() / ".local/bin", help="Directory for the mizu launcher link")
     p.add_argument("--config", type=Path, default=_platform.default_config_file(), help="Private config file to create on activation")
     p.add_argument("--core-only", action="store_true", help="Offline core installation, without Pi or permission to run agents")
-    p.add_argument("--allow-install-scripts", action="store_true", help="Explicitly allow dependency lifecycle scripts after reviewing the lock")
+    p.add_argument("--allow-install-scripts", action="store_true", help="Permit dependency lifecycle scripts under npm's own policy after reviewing the lock")
     p.add_argument("--allow-mode-change", action="store_true", help="Permit promotion across core-only/pi modes after review")
     group = p.add_mutually_exclusive_group()
     group.add_argument("--stage-only", action="store_true", help="Stage a validated release without promoting it")
