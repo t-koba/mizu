@@ -39,6 +39,19 @@ ENGINE = "pi-durable"
 RESULT_BYTES = 1024 * 1024
 
 
+#: Compaction token bound (matches limits.session_max_tokens ceiling).
+#: An unset durable_compaction_* option keeps the engine/provider default
+#: (today the pinned pi-durable DEFAULT_COMPACTION_POLICY); Mizu never
+#: injects its own value. Enabled stays true; disabling is not exposed.
+COMPACTION_TOKEN_MAX = 1073741824
+#: Profile-option to Harness-policy field names for the live-context bound.
+COMPACTION_FIELDS = {
+    "durable_compaction_reserve_tokens": "reserveTokens",
+    "durable_compaction_keep_recent_tokens": "keepRecentTokens",
+    "durable_compaction_background_tokens": "backgroundTokens",
+}
+
+
 def durable_options(settings: dict) -> dict:
     """Explicit durable policy with documented defaults (no silent fallback)."""
     options = dict(settings.get("options", {}))
@@ -54,7 +67,16 @@ def durable_options(settings: dict) -> dict:
     max_turns = options.get("durable_max_turns", 128)
     if type(max_turns) is not int or not 1 <= max_turns <= 1024:
         raise ConfigError("durable_max_turns must be an integer in [1, 1024]")
-    return {"backend": backend, "resume": resume, "retention_days": retention, "max_turns": max_turns}
+    compaction: dict[str, int] = {}
+    for option_key, policy_key in COMPACTION_FIELDS.items():
+        if option_key not in options:
+            continue
+        value = options[option_key]
+        if type(value) is not int or not 0 <= value <= COMPACTION_TOKEN_MAX:
+            raise ConfigError(f"{option_key} must be an integer in [0, 1073741824]")
+        compaction[policy_key] = value
+    return {"backend": backend, "resume": resume, "retention_days": retention, "max_turns": max_turns,
+            "compaction": compaction or None}
 
 
 def durable_auth_path(config) -> Path:
@@ -81,7 +103,10 @@ def grant_for(settings: dict, role, model: dict) -> str:
     policy = role_policy_text(role)
     options_digest = digest(canonical({k: v for k, v in settings.get("options", {}).items()
                                        if k in ("thinkingLevel", "durable_backend", "durable_resume",
-                                                "durable_retention_days", "durable_max_turns")}))
+                                                "durable_retention_days", "durable_max_turns",
+                                                "durable_compaction_reserve_tokens",
+                                                "durable_compaction_keep_recent_tokens",
+                                                "durable_compaction_background_tokens")}))
     return grant_digest(policy_text=policy, capabilities=tuple(role.capabilities),
                         model=model, adapter_digest_value=adapter_digest(ENGINE),
                         options_digest=options_digest)
@@ -236,12 +261,19 @@ class PiDurableDriver:
         # Harness-internal steps draw from one bound.
         if not isinstance(remaining, int) or remaining < 1:
             raise LimitExceeded("Durable turn bound exhausted for this run")
+        policy_options = durable_options(settings)
         effective_config = {
             "provider": model["provider"], "model": model["model"],
             "instructions": policy, "tools": tool_definitions(context.role.capabilities),
             "cwd": str(cwd), "store": str(store_path), "requestId": run_key, "prompt": prompt,
             "max_turns": remaining, "authPath": str(durable_auth_path(self.config)),
         }
+        # Unset keeps the engine/provider default: omit the field so the
+        # Harness resolves its own built-in policy instead of a Mizu value.
+        # A partial triple passes through; the Harness merges it over its
+        # defaults. Retuning keeps the same store (live keys).
+        if policy_options["compaction"] is not None:
+            effective_config["compaction"] = dict(policy_options["compaction"])
         if options.get("thinkingLevel") is not None:
             effective_config["thinkingLevel"] = options["thinkingLevel"]
         deadline_ms = max(1, int(1000 * min(context.deadline - time.monotonic(),

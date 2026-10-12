@@ -172,13 +172,32 @@ A profile explicitly selects `engine`, `provider`, `model`, and `session`
 that engine: Pi `thinkingLevel`, `settings`, `codemode`, `toolSearch`,
 `excludeTools`, `scopedModels`; pi-durable `thinkingLevel` plus
 `durable_backend` (`sqlite`), `durable_resume` (`compatible`|`fresh`),
-`durable_retention_days` (0-3650), `durable_max_turns` (1-1024). The turn
+`durable_retention_days` (0-3650), `durable_max_turns` (1-1024), and the per-profile
+live-context bound `durable_compaction_reserve_tokens`,
+`durable_compaction_keep_recent_tokens`, `durable_compaction_background_tokens`
+(each 0-1073741824; omit to keep the engine/provider default, 0 disables
+background). The turn
 budget is shared per run: persisted turns already spent leave the remainder
 for the launcher, which aborts the Harness submission past it (`turn_bound`
-maps to a bound error, never a silent stop). Pi SDK knobs
+maps to a bound error, never a silent stop). A set threshold rides the
+Harness `settings.compaction` policy as a partial override (enabled stays true;
+disabling is not exposed): generation blocks to compact above `contextWindow -
+reserveTokens`, background starts `backgroundTokens` below that, and the summary keeps
+`keepRecentTokens` verbatim. Unset keeps the engine default with no Mizu value
+injected, so a `plan` profile that sets nothing keeps the provider default while a
+`main` profile may set a half-window bound (operator policy, never a fixed
+mechanism value). Larger `reserveTokens` (or `backgroundTokens`)
+bounds live context tighter without rotating the session away: retuning only these
+three keys (or `thinkingLevel`) continues the same durable store with the new
+thresholds on the next run, while any other effective change still starts a fresh
+bounded session; the per-run grant still binds the values, so retrying the same run
+under changed thresholds is refused. Pi SDK knobs
 are refused on pi-durable profiles and durable policy is refused on pi
 profiles instead of silently ignored. pi-durable resolves the exact model
-over built-in providers only; custom provider setups stay on pi. Codex native configuration keys plus `options.turn` for native turn fields
+over built-in providers only; custom provider setups stay on pi. Pi operators bound
+its live context through `options.settings.compaction` (`reserveTokens`,
+`keepRecentTokens`); pi-durable operators use the three `durable_compaction_*`
+keys above. Codex native configuration keys plus `options.turn` for native turn fields
 (such as `outputSchema`, `effort`, `serviceTier`); Claude
 `ClaudeAgentOptions` fields. Effort values are validated by the selected engine,
 not a Mizu enum. Models/providers have no fixed allowlist.

@@ -47,9 +47,59 @@ class PolicyTests(Fixture):
         model = {"provider": "p", "model": "m"}
         base = pi_durable.grant_for({"options": {}}, role, model)
         for key, value in (("durable_backend", "sqlite"), ("durable_resume", "fresh"),
-                           ("durable_retention_days", 30), ("durable_max_turns", 7)):
+                           ("durable_retention_days", 30), ("durable_max_turns", 7),
+                           ("durable_compaction_reserve_tokens", 5000),
+                           ("durable_compaction_keep_recent_tokens", 8000),
+                           ("durable_compaction_background_tokens", 1000)):
             changed = pi_durable.grant_for({"options": {key: value}}, role, model)
             self.assertNotEqual(base, changed, key)
+
+    def test_unset_compaction_keeps_engine_default(self):
+        # Unset must mean engine/provider default, not a Mizu value: the
+        # driver omits the field so the Harness resolves its own built-ins.
+        policy = pi_durable.durable_options({"options": {}})
+        self.assertIsNone(policy["compaction"])
+
+    def test_partial_compaction_passes_through(self):
+        policy = pi_durable.durable_options(
+            {"options": {"durable_compaction_reserve_tokens": 500000}})
+        self.assertEqual(policy["compaction"], {"reserveTokens": 500000})
+
+    def test_compaction_thresholds_refused_outside_bounds(self):
+        for key in ("durable_compaction_reserve_tokens",
+                    "durable_compaction_keep_recent_tokens",
+                    "durable_compaction_background_tokens"):
+            with self.assertRaises(ConfigError, msg=key):
+                pi_durable.durable_options({"options": {key: -1}})
+            with self.assertRaises(ConfigError, msg=key):
+                pi_durable.durable_options({"options": {key: 1073741825}})
+            with self.assertRaises(ConfigError, msg=key):
+                pi_durable.durable_options({"options": {key: "16384"}})
+
+    def test_compaction_only_change_keeps_session_identity(self):
+        from mizu.engine_config import conversation_settings, effective, session_record
+        profile = self._durable_profile()
+        role = self.config.roles["worker"]
+        before = effective(self.config, role, profile)
+        path_before, _ = session_record(self.context(), profile, before)
+        key_before = path_before.parent.name
+        # Retuning only compaction thresholds (and thinkingLevel) must not fork:
+        # the content-bound key stays identical, so the same store continues.
+        self.config.profiles[profile]["options"] = {
+            **before["options"],
+            "durable_compaction_reserve_tokens": 500000,
+            "durable_compaction_background_tokens": 100000}
+        after = effective(self.config, role, profile)
+        path_after, _ = session_record(self.context(), profile, after)
+        self.assertEqual(path_after.parent.name, key_before)
+        self.assertEqual(conversation_settings(before)["options"],
+                         conversation_settings(after)["options"])
+        # Any other durable change still forks to a fresh conversation.
+        self.config.profiles[profile]["options"] = {
+            **before["options"], "durable_max_turns": 7}
+        forked = effective(self.config, role, profile)
+        path_forked, _ = session_record(self.context(), profile, forked)
+        self.assertNotEqual(path_forked.parent.name, key_before)
 
     def test_pi_rejects_durable_options(self):
         settings = dict(self.config.profiles["primary"])
@@ -238,6 +288,9 @@ class AuthPathTests(Fixture):
         written = json.loads((context.run_dir / "pi-durable-effective.json").read_text())
         self.assertEqual(written["authPath"],
                          str(self.config.agent_dir("pi-durable") / "auth.json"))
+        # Unset keeps the engine default: the effective file omits the field
+        # so no Mizu value is injected.
+        self.assertNotIn("compaction", written)
 
 
 class SessionIsolationTests(Fixture):

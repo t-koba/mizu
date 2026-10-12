@@ -130,6 +130,9 @@ thinkingLevel = "off"
 # durable_resume = "compatible"    # compatible binds resume to current grants; fresh refuses resume.
 # durable_retention_days = 31      # Terminal-store retention applied per execute with accounting; omit to disable.
 # durable_max_turns = 128          # Shared per-run turn budget (1-1024): persisted turns plus Harness steps.
+# durable_compaction_reserve_tokens = 16384      # Live-context bound: Harness compacts above contextWindow minus this (0-1073741824; omit to keep the engine default).
+# durable_compaction_keep_recent_tokens = 20000  # Verbatim recent context a summary keeps (0-1073741824; omit to keep the engine default).
+# durable_compaction_background_tokens = 32768   # Early background compaction starts this far below the blocking threshold; 0 disables background (0-1073741824; omit to keep the engine default).
 
 # Native options belong to the selected engine; Mizu has no effort enum.
 # [profiles.codex]

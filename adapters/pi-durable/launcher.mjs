@@ -6,7 +6,10 @@
  *
  * Durable contracts (from @earendil-works/pi-durable 1.1.0):
  * - openNodeSqliteStorage(file): WAL SQLite; commits survive process crashes.
- * - Harness.open(storage, {models, registry}): one Session line of commits.
+ * - Harness.open(storage, {models, registry, settings}): one Session line of
+ *   commits. `settings.compaction` carries the operator live-context bound
+ *   (reserve/keepRecent/background tokens); enabled stays true, absent keeps
+ *   the engine/provider default with no Mizu value injected.
  * - root.submit({type:'input', content, requestId}): retried requestId
  *   returns the existing submission instead of submitting twice.
  * - submission.wait(): resolves done/unanswered. Interrupted tool calls are
@@ -328,6 +331,34 @@ async function runOnce(cfg) {
   if (!Array.isArray(cfg.tools) || !cfg.tools.length) throw new Error('Effective configuration carries no bridge tools');
   if (!Number.isInteger(cfg.max_turns) || cfg.max_turns < 1) throw new Error('Effective configuration lacks max_turns');
   const maxTurns = cfg.max_turns;
+  // Live-context bound: operator compaction thresholds ride the Harness
+  // policy (read at every resolution, so retuning keeps the conversation).
+  // Absent keeps the engine/provider default: no Mizu value is injected, so
+  // a future SDK default change applies without a Mizu release. A partial
+  // triple passes through; the Harness merges it over its built-ins.
+  // Malformed refuses loudly. Enabled stays true: disabling automatic
+  // compaction is not exposed, so live context stays bounded instead of
+  // failing at overflow.
+  const COMPACTION_MAX = 1073741824;
+  let compaction = undefined;
+  if (cfg.compaction !== undefined) {
+    if (typeof cfg.compaction !== 'object' || cfg.compaction === null || Array.isArray(cfg.compaction)) {
+      throw new Error('Effective configuration carries an invalid compaction policy');
+    }
+    const keys = Object.keys(cfg.compaction);
+    const allowed = ['reserveTokens', 'keepRecentTokens', 'backgroundTokens'];
+    if (!keys.length || keys.length > allowed.length || !keys.every(k => allowed.includes(k))) {
+      throw new Error('Effective configuration carries an invalid compaction policy');
+    }
+    compaction = {};
+    for (const key of keys) {
+      const value = cfg.compaction[key];
+      if (!Number.isSafeInteger(value) || value < 0 || value > COMPACTION_MAX) {
+        throw new Error(`Effective configuration carries an invalid compaction policy: ${key}`);
+      }
+      compaction[key] = value;
+    }
+  }
   if (cfg.engine_tools?.length) throw new Error('Native host tools bypass the OCI bridge');
   if (cfg.resources?.length) throw new Error('Resource kinds are unsupported on pi-durable');
   if (cfg.mcp_servers && Object.keys(cfg.mcp_servers).length) throw new Error('MCP servers are unsupported on pi-durable');
@@ -405,7 +436,9 @@ async function runOnce(cfg) {
 
   const storage = await openNodeSqliteStorage(cfg.store);
   const context = BACKGROUND_CONTEXT;
-  const harness = await Harness.open(storage, { models, registry }, context);
+  const harness = compaction === undefined
+    ? await Harness.open(storage, { models, registry }, context)
+    : await Harness.open(storage, { models, registry, settings: { compaction } }, context);
   try {
     harness.resume(); // continue work a dead process left unfinished
     // Agent tools take the installed tool registrations (not bare names);

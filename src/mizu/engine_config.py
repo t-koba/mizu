@@ -61,7 +61,10 @@ def effective(config, role, profile):
         # refused here instead of silently ignored, and pi profiles cannot
         # carry durable policy that the pi engine never enforces.
         allowed = {'thinkingLevel', 'durable_backend', 'durable_resume',
-                   'durable_retention_days', 'durable_max_turns'}
+                   'durable_retention_days', 'durable_max_turns',
+                   'durable_compaction_reserve_tokens',
+                   'durable_compaction_keep_recent_tokens',
+                   'durable_compaction_background_tokens'}
         if set(options) - allowed:
             raise ConfigError('Unknown pi-durable configuration field')
         settings = options.get('settings', {})
@@ -162,27 +165,33 @@ def local_settings_digest(config, engine):
     return result
 
 
-#: Native per-engine reasoning-effort keys applied live to a resumed
-#: conversation instead of forking it. A profile switch that changes only
-#: these keys continues the role's conversation with the current effort;
-#: any other effective, grant, policy, model, engine, or content change
-#: still starts a fresh bounded session. Names stay native per engine;
-#: Mizu imposes no common effort enum.
+#: Keys applied live to a resumed conversation instead of forking it. A
+#: profile switch that changes only these keys continues the role's
+#: conversation with the current settings; any other effective, grant,
+#: policy, model, engine, or content change still starts a fresh bounded
+#: session. Names stay native per engine; Mizu imposes no common effort
+#: enum. Durable compaction thresholds ride along because the Harness reads
+#: its policy at every resolution: bounding live context must not throw the
+#: conversation away, while the per-run grant still binds the values.
 CONVERSATION_LIVE_OPTIONS = {
     'pi': frozenset({'thinkingLevel'}),
-    'pi-durable': frozenset({'thinkingLevel'}),
+    'pi-durable': frozenset({'thinkingLevel',
+                             'durable_compaction_reserve_tokens',
+                             'durable_compaction_keep_recent_tokens',
+                             'durable_compaction_background_tokens'}),
     'codex': frozenset({'model_reasoning_effort'}),
     'claude': frozenset({'effort'}),
 }
 
 
 def conversation_settings(settings):
-    """Effective settings minus live effort keys for session identity.
+    """Effective settings minus live keys for session identity.
 
     Schema: settings dict from ``effective()``. Bounds: drops at most the
     named live keys. Trust: configuration. Failure: never raises.
-    Drivers still receive the full settings, so the current effort
-    applies per dispatch to the shared conversation.
+    Drivers still receive the full settings, so the current effort and
+    durable compaction thresholds apply per dispatch to the shared
+    conversation.
     """
     try:
         options = dict(settings.get('options', {}))

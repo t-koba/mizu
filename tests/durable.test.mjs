@@ -182,6 +182,32 @@ test('metering guards entry points and stops past the turn bound', async () => {
   assert.deepEqual(reported, [{ input: 1 }]);
 });
 
+test('launcher refuses malformed compaction policy fail-closed', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'mizu-durable-'));
+  try {
+    const base = { provider: 'p', model: 'm', instructions: 'i', store: join(directory, 's.sqlite'),
+      requestId: 'r', prompt: 'go', cwd: directory, tools: [{ name: 't' }], max_turns: 4,
+      authPath: join(directory, 'auth.json') };
+    const launcher = joinPath(dirname(fileURLToPath(import.meta.url)), '..', 'adapters', 'pi-durable', 'launcher.mjs');
+    // Partial triples pass through (the Harness merges over its built-ins);
+    // only empty, unknown, or out-of-range shapes refuse.
+    for (const compaction of [
+      { reserveTokens: -1, keepRecentTokens: 20000, backgroundTokens: 32768 },
+      {},
+      { reserveTokens: 16384, keepRecentTokens: 20000, backgroundTokens: 32768, extra: 1 },
+      { reserveTokens: '16384', keepRecentTokens: 20000, backgroundTokens: 32768 },
+    ]) {
+      const file = join(directory, `effective-${Math.random().toString(36).slice(2)}.json`);
+      writeFileSync(file, JSON.stringify({ ...base, compaction }));
+      const child = spawnSync(process.execPath, [launcher, file], { encoding: 'utf8' });
+      assert.notEqual(child.status, 0);
+      assert.match(child.stderr, /compaction/);
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('launcher refuses effective configuration without max_turns', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'mizu-durable-'));
   try {
