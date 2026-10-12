@@ -522,6 +522,21 @@ class PerRoleSpendTests(Fixture):
             ctx.handle("files", {"offset": 0, "limit": 1})
 
 
+class WebTransportFloorTests(unittest.TestCase):
+    def test_https_443_no_credentials_floor(self):
+        from mizu.web import _parse_url
+        from mizu.errors import Denied
+        # Mechanism floor: encrypted standard-port retrieval with no creds.
+        self.assertEqual(_parse_url("https://example.com/x")[0], "example.com")
+        self.assertEqual(_parse_url("https://example.com:443/x")[0], "example.com")
+        for bad in ("http://example.com/x",
+                    "https://example.com:8443/x",
+                    "https://user@example.com/x",
+                    "https://user:pass@example.com/x"):
+            with self.assertRaises(Denied, msg=bad):
+                _parse_url(bad)
+
+
 class DriverSeparationTests(Fixture):
     def test_pi_does_not_rewrite_operator_settings(self):
         from mizu.pi import PiDriver

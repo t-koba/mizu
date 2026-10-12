@@ -117,7 +117,7 @@ Safety-critical bounds are fixed in code rather than exposed as configuration kn
 | | `search` query / path | 1,000 / 4,096 chars | Retrieval query and file path limits |
 | **Sandbox** | Process termination | 1s TERM, 5s KILL | Clean process-group termination without orphan leaks |
 | | `MAX_VERIFY_COMMANDS` | 32 | Prevents unbounded verify fan-out |
-| **Web broker** | URL / redirects / media | 4,096 chars / max 3 / text, JSON, XML | Strict URL length, redirect limit, and safe media types |
+| **Web broker** | URL / redirects / media / transport | 4,096 chars / max 3 / text, JSON, XML / HTTPS-only, port 443, no URL credentials, DNS pinning | Strict URL length, redirect limit, safe media types, and fixed safe transport floor |
 | **Restore** | `--max-bytes` default | 1 GiB | Archive bomb defense; override explicitly if needed |
 | **Smoke probe** | `SMOKE_REQUESTS_PER_RUN` / `TOOLS` / `SECONDS` (`smoke.py`) | 4 / 5 / 120 s | Paid `smoke --live` spend cap with margin for one benign listing plus one auxiliary request; applied as `min(fixed, operator limits)` |
 | **Config include** | `MAX_INCLUDE_DEPTH` / `MAX_INCLUDE_FILES` / `MAX_INCLUDE_BYTES` (`config.py`) | 8 / 32 / 1 MiB | Shared-fragment recursion, file-count, and total-byte bounds; per-file entries max 32, entry length max 4096 |
@@ -336,6 +336,8 @@ Configures outbound retrieval for `fetch` and `search`:
 | `max_bytes` | `524288` | Maximum response payload (512 KiB) |
 
 URL fragments are stripped client-side and never sent. Redirects re-validate hostname, port, and IP. Text/HTML/XML/JSON formats are supported; binary/PDF/image formats are rejected.
+
+Transport floor (fixed mechanism, not policy): every `fetch`/`probe`/feed retrieval is HTTPS-only on port 443 with no URL credentials and DNS pinning, even when `destination_command` decides the destination or `hosts` widens to `*`. Which hosts, feeds, adapters, deciders, intranet reach, timeouts, cache windows and byte caps apply is operator policy above; how bytes move (encrypted TLS, standard port, no creds in URLs, pinned DNS, bounded receipts) stays in mechanism so cleartext or non-standard-port retrieval cannot be enabled by configuration. Credentials in URLs stay refused.
 
 `probe` reuses `[web] timeout_seconds`/`max_bytes`/`intranet` with its own `probe_hosts`/`probe_methods` allowlists. It sends one request (caller headers at most 16, names 128, values 4096; credential/framing headers refused) with a bounded body (at most `max_bytes`, 32 KiB tool-input cap), follows no redirects (3xx returns as observation), never caches, and records a `sources/<id>.json` receipt (`status`, bounded headers, `sha256`, `trust: external-untrusted`). Non-2xx statuses return as observation, never as failure.
 
