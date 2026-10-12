@@ -112,7 +112,7 @@ and the usage window edge use the configured `timezone` day boundary so
 
 `continue` starts another meaningful unit. `wait` sleeps until its deadline,
 new information, a changed goal, a human wake, or a cached current CI failure
-(polled red, independent of insight decisions, until green or superseded). `blocked` needs a wake or new
+on the operator-selected `ci_branch` (polled red, independent of insight decisions, until green or superseded; empty disables the wake). `blocked` needs a wake or new
 information. `done` is not reopened by news alone; an explicit wake or changed
 goal can reopen it. Other scheduled roles are independent until the project is
 paused/disarmed.

@@ -224,11 +224,12 @@ class CiStickyRedTests(Fixture):
         import dataclasses
         import time
         from mizu.fs import write_json
-        from mizu.runtime import current_ci_failures, poll_ci, should_run
+        from mizu.runtime import current_ci_failures, poll_ci, should_run, wake_ci_failures
         failing = {"checks": [{"check": "perf audit", "state": "failure",
                                "sha": SHA_A, "url": "https://x/log"}]}
         config = dataclasses.replace(
-            self.config, vcs=adapter_settings(status_code(failing)))
+            self.config, vcs={**adapter_settings(status_code(failing)), "ci_branch": "mizu"})
+        self.project.config = config
         snap = self._wait_snapshot()
         self.assertFalse(should_run(self.project, snap, current_time=time.time()))
         state: dict = {}
@@ -258,6 +259,43 @@ class CiStickyRedTests(Fixture):
         write_json(self.project.root / "vcs-poll.json",
                    {"last_poll": 15.0, "failures": state2.get("failures")})
         self.assertEqual(current_ci_failures(self.project), [])
+
+    def test_only_selected_branch_wakes_writer(self):
+        import dataclasses
+        import time
+        from mizu.fs import write_json
+        from mizu.runtime import current_ci_failures, should_run, wake_ci_failures
+        config = dataclasses.replace(
+            self.config, vcs={**self.config.vcs, "ci_branch": "mizu"})
+        self.project.config = config
+        snap = self._wait_snapshot()
+        # Red on an unrelated branch stays visible but never wakes.
+        write_json(self.project.root / "vcs-poll.json",
+                   {"last_poll": 0.0, "failures": {"alpha": [{"sha": SHA_A, "check": "unit"}],
+                                                      "codex/old": [{"sha": SHA_A, "check": "perf"}]}})
+        self.assertEqual(len(current_ci_failures(self.project)), 2)
+        self.assertEqual(wake_ci_failures(self.project, config), [])
+        self.assertFalse(should_run(self.project, snap, current_time=time.time()))
+        # Red on the selected branch wakes.
+        write_json(self.project.root / "vcs-poll.json",
+                   {"last_poll": 1.0, "failures": {"alpha": [{"sha": SHA_A, "check": "unit"}],
+                                                      "mizu": [{"sha": SHA_A, "check": "unit"}]}})
+        self.assertEqual(wake_ci_failures(self.project, config),
+                         [{"branch": "mizu", "sha": SHA_A, "check": "unit"}])
+        self.assertTrue(should_run(self.project, snap, current_time=time.time()))
+
+    def test_empty_branch_disables_wake_fail_closed(self):
+        import time
+        from mizu.fs import write_json
+        from mizu.runtime import current_ci_failures, should_run, wake_ci_failures
+        # Default fixture has empty ci_branch: any red stays visible, none wakes.
+        self.assertEqual(self.project.config.vcs.get("ci_branch"), "")
+        snap = self._wait_snapshot()
+        write_json(self.project.root / "vcs-poll.json",
+                   {"last_poll": 0.0, "failures": {"mizu": [{"sha": SHA_A, "check": "unit"}]}})
+        self.assertTrue(current_ci_failures(self.project))
+        self.assertEqual(wake_ci_failures(self.project, self.project.config), [])
+        self.assertFalse(should_run(self.project, snap, current_time=time.time()))
 
     def test_superseding_sha_replaces_cached_failure(self):
         import dataclasses

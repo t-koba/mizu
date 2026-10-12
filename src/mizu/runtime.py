@@ -915,6 +915,31 @@ def current_ci_failures(project, *, limit: int = MAX_CI_FAILURES) -> list:
         return []
 
 
+def wake_ci_failures(project, config=None, *, limit: int = MAX_CI_FAILURES) -> list:
+    """Cached CI failures that may wake a parked writer (never raises).
+
+    Schema: filters :func:`current_ci_failures` to the operator-selected
+    ``[vcs] ci_branch``; an empty branch disables the wake (fail closed).
+    Other branches stay visible in ``ci_failures`` prompts but never admit
+    a run, so red on unrelated refs cannot spend the writer budget.
+    Bounds: same cap as ``current_ci_failures``. Trust: host-side poll
+    cache plus operator configuration. Failure: never raises (unknown
+    configuration reads as no wake).
+    """
+    try:
+        settings = config.vcs if config is not None else getattr(project, "config", {}).vcs if hasattr(getattr(project, "config", {}), "vcs") else {}
+        # Config.vcs is a dict; project without config reads as no wake.
+        try:
+            branch = settings.get("ci_branch") if isinstance(settings, dict) else None
+        except Exception:
+            branch = None
+        if not branch or not isinstance(branch, str):
+            return []
+        return [entry for entry in current_ci_failures(project, limit=limit)
+                if entry.get("branch") == branch][:max(0, int(limit))]
+    except Exception:
+        return []
+
 
 def vcs_poll_enabled(config) -> bool:
     """True only when daemon VCS polling is explicitly opted in.
@@ -1403,7 +1428,7 @@ class Engine:
             substantive_events = [e for e in decision_events
                                   if isinstance(e, dict) and e.get("action") != "defer"]
             try:
-                ci_failures = current_ci_failures(project)
+                ci_failures = wake_ci_failures(project, self.config)
             except Exception:
                 ci_failures = []
             if event_trigger and not substantive_events and not wait_events and not ci_failures:
@@ -1796,13 +1821,14 @@ def _role_events_due(project: Project, snapshot: dict, role_name=None) -> bool:
 
 
 def should_run(project: Project, snapshot: dict, current_time: float | None = None,
-               role_name: str | None = None) -> bool:
+               role_name: str | None = None, config=None) -> bool:
     """Fixed single-writer publication contract (mechanism, not operator policy).
 
     `done` needs an explicit wake or changed goal; `continue` always runs;
     `wait`/`blocked` resume on wake, new proposals, elapsed wait, or a cached
-    current CI failure (polled red, independent of insight decisions, until
-    a later poll sees green or a new revision). Goal and
+    current CI failure on the operator-selected ``[vcs] ci_branch`` (polled
+    red, independent of insight decisions, until a later poll sees green or
+    a new revision; empty disables the wake). Goal and
     wake-generation changes always resume. See docs/architecture.md.
     """
     current_time = time.time() if current_time is None else current_time
@@ -1823,7 +1849,8 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
     if _role_events_due(project, snapshot, role_name):
         return True
     try:
-        if current_ci_failures(project):
+        effective = config if config is not None else getattr(project, "config", None)
+        if wake_ci_failures(project, effective):
             return True
     except Exception:
         pass
