@@ -1748,7 +1748,16 @@ class Engine:
                 with slot(self.config):
                     mkdir(run_dir)
                     if role.selector:
-                        decision = self.preview(parent.project, role_name)
+                        # Config-only gate: preview() also requires project
+                        # enablement, but a consultation child is ephemeral
+                        # (slot only, no role lock, no dispatch gate), so any
+                        # configured read-only role qualifies as the docs say.
+                        # Resolve through the same bounded preview without the
+                        # project-membership check and without consuming routing.
+                        from .classification import prepare as _prepare_selection
+                        decision = _prepare_selection(
+                            self, parent.project, role,
+                            parent.project.snapshots.get(), None, preview=True)
                         profile = decision.get("profile") or ""
                         if not profile:
                             raise Denied("Consultation selector has no selectable profile: "

@@ -113,7 +113,7 @@ Safety-critical bounds are fixed in code rather than exposed as configuration kn
 | | `submit_insight` body | 60 KiB | Proposal prose size |
 | | `report` body | 48 KiB | Markdown artifact size |
 | | `finish` summary / state | 12 KiB / 32 KiB | Work-unit completion summary and carried state |
-| | `consult` question / profiles | 8 KiB / max 8 | Consultation query and bounded fan-out |
+| | `consult` question / roles | 8 KiB / max 8 | Consultation query and bounded role fan-out |
 | | `search` query / path | 1,000 / 4,096 chars | Retrieval query and file path limits |
 | **Sandbox** | Process termination | 1s TERM, 5s KILL | Clean process-group termination without orphan leaks |
 | | `MAX_VERIFY_COMMANDS` | 32 | Prevents unbounded verify fan-out |

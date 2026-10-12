@@ -335,6 +335,26 @@ class EngineTests(Fixture):
         self.assertEqual(result["answers"][0]["profile"], "primary")
         self.assertEqual(result["answers"][0]["role"], config.consult_role)
 
+    def test_consult_config_only_gate_applies_to_selector_and_fixed(self):
+        # Parity: a configured-but-not-project-enabled read-only role consults
+        # the same whether fixed-profile or selector-resolved (config.roles
+        # gate only; no project-membership check for ephemeral children).
+        import dataclasses
+        roles = dict(self.config.roles)
+        roles["outsider"] = dataclasses.replace(self.config.roles["consult"], name="outsider")
+        roles["sel-outsider"] = dataclasses.replace(
+            self.config.roles["consult"], name="sel-outsider", profile="", selector="pick")
+        selectors = {"pick": {"retry_seconds": 60, "recommendation_validity": "once",
+                              "rules": [{"when": {}, "candidates": [{"profile": "primary"}]}]}}
+        config = dataclasses.replace(self.config, roles=roles, selectors=selectors)
+        engine = Engine(config, driver=ScriptDriver())
+        result = engine.consult(self.context(), {"question": "q?", "roles": ["outsider", "sel-outsider"]})
+        self.assertEqual(result["roles"], ["outsider", "sel-outsider"])
+        by_role = {a["role"]: a for a in result["answers"]}
+        self.assertIn("answer", by_role["outsider"])
+        self.assertIn("answer", by_role["sel-outsider"])
+        self.assertEqual(by_role["sel-outsider"]["profile"], "primary")
+
     def test_consult_profiles_key_is_refused_at_load(self):
         from mizu.config import load
         from mizu.errors import ConfigError
