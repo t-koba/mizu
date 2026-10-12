@@ -207,8 +207,10 @@ Deferral evidence may be gathered by a scheduled resolver role with existing
 capabilities only: a role holding `insights` lists pending deferrals across
 sources, uses `experiment`/`fetch`/`search` to obtain the missing evidence,
 and adds it with `submit_insight` as a new insight referencing the deferred
-ID and rev; the worker links it and revises or decides the original, whose
-ownership (submitter-only revise/withdraw) never moves. No cross-source
+ID and rev; the worker links the evidence when it decides the original, while
+only the original submitter (or the operator path) revises it, so ownership
+(submitter-only revise/withdraw) never moves and no non-submitter revise grant
+exists. No cross-source
 `decision_events` subscription, no admission on a new deferral, and no
 non-submitter revise grant exist: those stay sequenced until a
 scheduled-resolver experiment shows schedule latency or correlation failure
