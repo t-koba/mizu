@@ -464,7 +464,10 @@ class Web:
         ranking priority: its results come first, then feed matches fill the
         remaining slots. Trust: external-untrusted. Retry: per-feed
         best-effort, errors listed. Evidence: source_receipt per feed result.
-        Failure: Denied for bad query/adapter shape.
+        Failure: Denied for bad query/adapter shape. One non-HTTPS adapter
+        row never fails the whole call: like feed links, it is dropped so the
+        remaining results still return (fetching a kept URL still needs its
+        own allowlist grant).
         """
         if not isinstance(query, str) or not 1 <= len(query) <= 1000:
             raise Denied("Search query must be 1–1000 characters")
@@ -478,16 +481,19 @@ class Web:
             data = json.loads(result.stdout)
             if not isinstance(data, dict) or not isinstance(data.get("results"), list):
                 raise Denied("Search adapter must return a JSON object with a results array")
-            adapter_overflow = len(data["results"]) > SEARCH_RESULT_LIMIT
-            results = data["results"]
-            for item in results:
+            kept: list = []
+            for item in data["results"]:
                 if not isinstance(item, dict) or not all(isinstance(item.get(k), str) for k in ("title", "url", "summary")):
                     raise Denied("Invalid search adapter result")
                 # Search can discover new hosts. Fetching them still needs an explicit grant.
+                # A single non-HTTPS row is dropped like a non-HTTPS feed link,
+                # never a whole-call failure, so one bad row keeps the rest.
                 if not item["url"].startswith("https://"):
-                    raise Denied("Search result URL must use HTTPS")
+                    continue
                 item["source"] = "search-adapter"
-            results = results[:SEARCH_RESULT_LIMIT]
+                kept.append(item)
+            adapter_overflow = len(kept) > SEARCH_RESULT_LIMIT
+            results = kept[:SEARCH_RESULT_LIMIT]
             feeds, errors, feeds_total, feeds_consulted = self._search_feeds(query)
             room = SEARCH_RESULT_LIMIT - len(results)
             results = results + feeds[:room]

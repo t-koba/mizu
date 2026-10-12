@@ -427,6 +427,27 @@ class WebSeparationTests(Fixture):
         self.assertEqual(out["results"][1]["source"], feed)
         self.assertFalse(out["truncated"])
 
+    def test_adapter_non_https_row_drops_without_failing_call(self):
+        from mizu.web import Web
+        import json
+        import tempfile
+        from mizu.process import Result
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
+        web = Web({"hosts": [], "feeds": [], "cache_seconds": 0, "timeout_seconds": 5,
+                   "max_bytes": 1048576, "search_command": ["python3", "adapter"],
+                   "intranet": False}, tmp / "c", tmp / "r")
+        import mizu.web as webmod
+        mixed = [{"title": "good", "url": "https://example.com/keep", "summary": "s"},
+                 {"title": "bad", "url": "http://example.com/drop", "summary": "s"},
+                 {"title": "also-good", "url": "https://example.com/keep2", "summary": "s"}]
+        with patch.object(webmod, "run", return_value=Result(0, json.dumps({"results": mixed}), "", "exited", 0.1)):
+            out = web.search("q")
+        # One bad row keeps the rest, like non-HTTPS feed links.
+        self.assertEqual([r["url"] for r in out["results"]],
+                         ["https://example.com/keep", "https://example.com/keep2"])
+        self.assertFalse(out["truncated"])
+
     def test_adapter_priority_fills_result_bound_first(self):
         from mizu.web import Web, SEARCH_RESULT_LIMIT
         import json
