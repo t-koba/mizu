@@ -65,6 +65,43 @@ class SmokeProbeTests(Fixture):
         self.assertLessEqual(seen["requests_per_run"], 1)
         self.assertLessEqual(seen["tools_per_run"], 1)
 
+    def test_per_role_overrides_never_raise_probe_caps(self):
+        import dataclasses
+        from mizu.config import role_requests_per_run, role_tools_per_run
+        # Auditor-style high overrides still probe at the fixed 4/5 caps.
+        high = dataclasses.replace(self.config.roles["consult"],
+                                   requests_per_run=200, tools_per_run=400)
+        config = dataclasses.replace(self.config, roles={**self.config.roles, "consult": high})
+        seen = {}
+        def capture(driver_self, project, role_name):
+            cfg = driver_self.config
+            seen["effective_requests"] = role_requests_per_run(cfg, cfg.roles[role_name])
+            seen["effective_tools"] = role_tools_per_run(cfg, cfg.roles[role_name])
+            seen.update(cfg.limits.__dict__)
+            raise RuntimeError("stop after capture")
+        import unittest.mock
+        with unittest.mock.patch.object(Engine, "run", capture), \
+                unittest.mock.patch("mizu.smoke._platform.is_root", return_value=False):
+            try:
+                smoke.live(config, role_name="consult")
+            except RuntimeError:
+                pass
+        self.assertEqual(seen["effective_requests"], 4)
+        self.assertEqual(seen["effective_tools"], 5)
+        # A lower per-role override stays lower, never raised to the caps.
+        low_role = dataclasses.replace(self.config.roles["consult"],
+                                       requests_per_run=1, tools_per_run=1)
+        config_low = dataclasses.replace(self.config, roles={**self.config.roles, "consult": low_role})
+        seen.clear()
+        with unittest.mock.patch.object(Engine, "run", capture), \
+                unittest.mock.patch("mizu.smoke._platform.is_root", return_value=False):
+            try:
+                smoke.live(config_low, role_name="consult")
+            except RuntimeError:
+                pass
+        self.assertLessEqual(seen["effective_requests"], 1)
+        self.assertLessEqual(seen["effective_tools"], 1)
+
     def test_listing_plus_read_plus_finish_fits_new_cap(self):
         # The observed live shape: files, read, finish consume 3 provider
         # sequences. Under the old cap of 2 the third admission raised

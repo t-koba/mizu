@@ -74,6 +74,13 @@ def live(config: Config, profile: str | None = None, role_name: str | None = Non
     role = dataclasses.replace(role, profile=profile or role.profile, selector="", workspace="read",
                                capabilities=("files", "read", "finish"), on_change=False,
                                policy=(probe_policy,))
+    # Per-role spend overrides must not raise the probe above its fixed caps:
+    # clamp them the same way as the project limits (None keeps the clamped
+    # project value; a lower override stays lower, never raised).
+    if role.requests_per_run is not None:
+        role = dataclasses.replace(role, requests_per_run=min(SMOKE_REQUESTS_PER_RUN, role.requests_per_run))
+    if role.tools_per_run is not None:
+        role = dataclasses.replace(role, tools_per_run=min(SMOKE_TOOLS_PER_RUN, role.tools_per_run))
     # Probe budgets stay fixed mechanism constants per ADR-006/ADR-013, not
     # knobs: 4 requests tolerate one benign extra listing (files + read +
     # finish is 3 sequences) plus one auxiliary Pi inference without opening
