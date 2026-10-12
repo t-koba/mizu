@@ -462,6 +462,40 @@ class ServiceRendererTests(unittest.TestCase):
         checked = service_units(directory, system="linux")
         self.assertEqual(sorted(checked["units"]), sorted(result["written"]))
 
+    def test_event_only_role_gets_trigger_without_schedule(self):
+        import dataclasses
+        import plistlib
+        from mizu.services import event_watches, render
+        roles = dict(self.config.roles)
+        # Event-only resolver: subscriptions without any schedule. The project
+        # here enables only worker/reporter, so turn reporter event-only.
+        roles["reporter"] = dataclasses.replace(
+            roles["reporter"], interval_seconds=0, calendar=(), daemon=False,
+            decision_events=("defer",), decision_sources="any")
+        config = dataclasses.replace(self.config, roles=roles)
+        watches = event_watches(config, self.project)
+        self.assertEqual(sorted(watches), ["reporter"])
+        base = "mizu-3-svc-reporter"
+        units = render(config, self.project, ROOT / "bin/mizu", system="linux")
+        # Event units only: no timer or plain service for an event-only role.
+        self.assertIn(base + "-event.service", units)
+        self.assertIn(base + "-event.path", units)
+        self.assertNotIn(base + ".timer", units)
+        self.assertNotIn(base + ".service", units)
+        self.assertIn("--event", units[base + "-event.service"])
+        self.assertIn("decision-history", units[base + "-event.path"])
+        # macOS renders the WatchPaths event plist with no base schedule plist.
+        mac = render(config, self.project, ROOT / "bin/mizu", system="macos")
+        self.assertNotIn(base + ".plist", mac)
+        event = plistlib.loads(mac[base + "-event.plist"].encode())
+        self.assertIn("WatchPaths", str(event))
+        # A role with neither schedule nor subscriptions stays explicit-run only.
+        roles["reporter"] = dataclasses.replace(
+            roles["reporter"], interval_seconds=0, calendar=(), daemon=False,
+            decision_events=())
+        bare = dataclasses.replace(config, roles=roles)
+        self.assertEqual(event_watches(bare, self.project), {})
+
     def test_unknown_system_is_refused(self):
         from mizu.errors import Denied
         from mizu.services import render
