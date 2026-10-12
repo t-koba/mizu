@@ -324,6 +324,11 @@ class Limits:
     #: Raw inbox/decisions stay on disk; the operator
     #: review path (`mizu insight list`) uses a separate 1000-item bound.
     pending_insights: int = 30
+    #: Operator-selected decision-event ride-along window per dispatch
+    #: (1-100; default 10). The 100-event cap stays fixed mechanism;
+    #: the value is policy: with rotation, a role with many deferrals sees
+    #: each one every N/value runs.
+    decision_events_limit: int = 10
     #: Operator-selected persistent-session rotation bounds. A resumed
     #: persistent session restarts with a fresh session key once cumulative
     #: usage or wall-clock session age reaches a bound, carrying the
@@ -530,6 +535,7 @@ def load(file: Path) -> Config:
     # auto-pause brake only (budgets/deadlines still bound spend and time).
     _LIMIT_RANGES = {"history_index": (8, 1000000), "prompt_snapshots": (1, 64),
                      "retention_days": (0, 3650), "pending_insights": (1, 1000),
+                     "decision_events_limit": (1, 100),
                      "event_log_compress_days": (0, 3650), "event_log_retention_days": (0, 3650),
                      "event_stream_bytes": (1048576, 268435456),
                      "role_state_bytes": (1024, 65536),

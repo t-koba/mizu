@@ -174,6 +174,28 @@ class DeferRefinementTests(Fixture):
                                      body="v2 with field data", base_snapshot=None)
         self.assertEqual(self.project.insights.decision_events("reviewer", ("reject", "defer")), [])
 
+    def test_configured_ridealong_limit_controls_dispatch_window(self):
+        import dataclasses
+        snap = self.project.snapshots.get()["id"]
+        for i in range(4):
+            item = self.project.insights.submit(source="reviewer", title="L%02d" % i, body="v1",
+                                                base_snapshot=snap)
+            self.project.insights.decide(item["id"], "defer", "parked", "wait", "test", expected_rev=1)
+        # Project default stays 10; an explicit 2 keeps the 2-window.
+        self.assertEqual(self.config.limits.decision_events_limit, 10)
+        limited = dataclasses.replace(self.config.limits, decision_events_limit=2)
+        config = dataclasses.replace(self.config, limits=limited)
+        window = self.project.insights.decision_events(
+            "reviewer", ("reject", "defer"), limit=config.limits.decision_events_limit)
+        self.assertEqual(len(window), 2)
+        # Bad values refuse at load, fail closed.
+        from mizu.config import load
+        from mizu.errors import ConfigError
+        text = self.file.read_text()
+        self.file.write_text(text.replace("pending_insights = 30", "pending_insights = 30\ndecision_events_limit = 0"))
+        with self.assertRaises(ConfigError):
+            load(self.file)
+
     def test_defer_window_rotates_across_successful_runs(self):
         snap = self.project.snapshots.get()["id"]
         for i in range(4):

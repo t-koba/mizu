@@ -1383,7 +1383,8 @@ class Engine:
             cursor = read_json(project.root / "observed" / f"{role_name}.json", {})
             code_unchanged = role.on_change and _on_change_observed(cursor, snapshot)
             triggers = tuple(getattr(role, "decision_events", ()) or ())
-            decision_events = project.insights.decision_events(role_name, triggers) if triggers else []
+            decision_events = project.insights.decision_events(
+                role_name, triggers, limit=project.config.limits.decision_events_limit) if triggers else []
             wait_events = project.insights.due_waits(role_name, snapshot)
             # Dependency obligations addressed to this role ride along when
             # it runs for other reasons; they never admit a run on their
@@ -1775,7 +1776,8 @@ def _role_events_due(project: Project, snapshot: dict, role_name=None) -> bool:
             try:
                 triggers = project.config.roles[name].decision_events
                 if triggers:
-                    pending = project.insights.decision_events(name, triggers)
+                    pending = project.insights.decision_events(
+                        name, triggers, limit=project.config.limits.decision_events_limit)
                     if any(isinstance(e, dict) and e.get("action") != "defer" for e in pending):
                         return True
             except (Denied, OSError, ValueError, TypeError, KeyError, AttributeError):
