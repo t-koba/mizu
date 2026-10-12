@@ -114,11 +114,16 @@ class SessionDeltaTests(Fixture):
     def test_new_id_resets_lifetime_clock(self):
         from mizu.engine_config import save_session, session_age_seconds
         path = save_worker_session(self, {"tokens": 0})
-        old = read_json(path)["created_at"]
+        old = time.time() - 120
+        record = read_json(path)
+        record["created_at"] = old
+        from mizu.fs import write_json as _write_json
+        _write_json(path, record)
         # A different conversation id mints a fresh creation time.
         save_session(path, "other-session", {"tokens": 0})
         fresh = read_json(path)["created_at"]
-        self.assertGreaterEqual(fresh, old)
+        self.assertGreater(fresh, old)
+        self.assertAlmostEqual(fresh, time.time(), delta=10.0)
         self.assertIsNotNone(session_age_seconds(path, read_json(path)))
 
     def test_token_bound_rotates_to_a_fresh_full_prompt(self):
