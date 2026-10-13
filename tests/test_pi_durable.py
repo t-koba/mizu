@@ -98,9 +98,15 @@ class PolicyTests(Fixture):
         self.assertEqual(path_after.parent.name, key_before)
         self.assertEqual(conversation_settings(before)["options"],
                          conversation_settings(after)["options"])
-        # Any other durable change still forks to a fresh conversation.
+        # Any other durable setting still rides the same conversation:
+        # only the backend and the declared store format rotate it.
         self.config.profiles[profile]["options"] = {
             **before["options"], "durable_retention_days": 30}
+        same = effective(self.config, role, profile)
+        path_same, _ = session_record(self.context(), profile, same)
+        self.assertEqual(path_same.parent.name, key_before)
+        self.config.profiles[profile]["options"] = {
+            **before["options"], "durable_backend": "other"}
         forked = effective(self.config, role, profile)
         path_forked, _ = session_record(self.context(), profile, forked)
         self.assertNotEqual(path_forked.parent.name, key_before)
@@ -225,6 +231,97 @@ class PolicyTests(Fixture):
         driver.execute(context2, "again", profile=profile)
         record2 = json.loads(saved[0].read_text())
         self.assertEqual(record2["usage"], {"tokens": 30})
+
+
+
+
+class SessionContinuityTests(Fixture):
+    def _durable_settings(self, **options):
+        settings = dict(self.config.profiles["primary"])
+        settings["engine"] = "pi-durable"
+        merged = dict(settings.get("options", {}))
+        merged.update(options)
+        settings["options"] = merged
+        return settings
+
+    def _key(self, role_name, settings):
+        from mizu.engine_config import effective, session_record
+        ctx = self.context(role_name)
+        path, _ = session_record(ctx, "primary", settings)
+        return path.parent.name
+
+    def test_durable_identity_ignores_policy_caps_goal_and_settings(self):
+        import dataclasses
+        settings = self._durable_settings()
+        before = self._key("worker", settings)
+        role = dataclasses.replace(
+            self.config.roles["worker"],
+            capabilities=tuple([*self.config.roles["worker"].capabilities, "delegate"]))
+        self.config = dataclasses.replace(
+            self.config, roles={**self.config.roles, "worker": role})
+        changed = self._durable_settings(thinkingLevel="high", durable_retention_days=30)
+        self.assertEqual(self._key("worker", changed), before)
+
+    def test_durable_identity_rotates_on_backend(self):
+        settings = self._durable_settings()
+        before = self._key("worker", settings)
+        other = dict(settings)
+        other["options"] = {**settings["options"], "durable_backend": "other"}
+        self.assertNotEqual(self._key("worker", other), before)
+
+    def test_other_engines_keep_rotation(self):
+        import dataclasses
+        from mizu.engine_config import effective
+        role = self.config.roles["worker"]
+        before_settings = dict(self.config.profiles["primary"])
+        before = self._key("worker", before_settings)
+        roles = dict(self.config.roles)
+        roles["worker"] = dataclasses.replace(
+            role, capabilities=tuple([*role.capabilities, "delegate"]))
+        self.config = dataclasses.replace(self.config, roles=roles)
+        self.assertNotEqual(self._key("worker", before_settings), before)
+
+    def test_reset_clears_sessions_and_stores(self):
+        from mizu.engine_config import reset_role_sessions
+        from mizu.pi_durable_store import store_path_for
+        sessions = self.project.root / "sessions" / "worker"
+        (sessions / "abc123").mkdir(parents=True)
+        (sessions / "abc123" / "session.json").write_text("{}")
+        store = store_path_for(self.config.data, "sample", "worker", "abc123")
+        store.parent.mkdir(parents=True)
+        store.write_text("x")
+        receipt = reset_role_sessions(self.config, self.project, "worker")
+        self.assertEqual(receipt["removed_sessions"], ["abc123"])
+        self.assertEqual(receipt["removed_stores"], ["abc123"])
+        self.assertFalse(sessions.exists())
+        self.assertFalse(store.exists())
+
+    def test_reset_refuses_unknown_role_and_active_run(self):
+        from mizu.engine_config import reset_role_sessions
+        from mizu.errors import ConfigError, Denied
+        from mizu.fs import write_json
+        with self.assertRaises(ConfigError):
+            reset_role_sessions(self.config, self.project, "ghost")
+        active = self.project.root / "active" / "worker.json"
+        write_json(active, {"run": "live"})
+        try:
+            with self.assertRaises(Denied):
+                reset_role_sessions(self.config, self.project, "worker")
+        finally:
+            active.unlink()
+
+    def test_reset_cli_parses_and_executes(self):
+        from mizu.cli import execute, parser
+        sessions = self.project.root / "sessions" / "worker"
+        (sessions / "abc123").mkdir(parents=True)
+        args = parser().parse_args(["--config", str(self.file), "session", "reset",
+                                    "sample", "--role", "worker"])
+        self.assertEqual(args.session_command, "reset")
+        receipt = execute(args)
+        self.assertEqual(receipt["role"], "worker")
+        self.assertEqual(receipt["removed_sessions"], ["abc123"])
+        self.assertFalse(sessions.exists())
+
 
 
 class AuthPathTests(Fixture):

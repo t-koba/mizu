@@ -15,7 +15,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join as joinPath } from 'node:path';
-import { credentialsFromFile, meterModels } from '../adapters/pi-durable/launcher.mjs';
+import { agentChanges, credentialsFromFile, meterModels } from '../adapters/pi-durable/launcher.mjs';
 import { AssistantEntry, BACKGROUND_CONTEXT, Harness, Type, createModels, createRegistry,
   defineExtension, defineTool, fauxAssistantMessage, fauxProvider, fauxToolCall,
   openNodeSqliteStorage } from '../adapters/pi-durable/test-support.mjs';
@@ -146,6 +146,22 @@ test('pi login store is shared file-backed with locked OAuth persistence', async
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test('agentChanges converges only what differs', async () => {
+  const wanted = { model: { provider: 'p', modelId: 'm' }, instructions: 'new',
+    cwd: '/work', tools: [{ name: 'a' }, { name: 'b' }] };
+  const same = { model: { provider: 'p', modelId: 'm' }, instructions: 'new',
+    cwd: '/work', tools: [{ name: 'a' }, { name: 'b' }], thinkingLevel: 'high' };
+  assert.deepEqual(agentChanges(same, wanted), {});
+  assert.deepEqual(agentChanges({ ...same, model: { provider: 'p', modelId: 'old' } }, wanted),
+    { model: { provider: 'p', modelId: 'm' } });
+  assert.deepEqual(agentChanges({ ...same, instructions: 'old' }, wanted), { instructions: 'new' });
+  assert.deepEqual(agentChanges({ ...same, tools: [{ name: 'b' }, { name: 'a' }] }, wanted),
+    { tools: wanted.tools });
+  assert.deepEqual(agentChanges(null, wanted), { ...wanted });
+  assert.deepEqual(agentChanges({ ...same, thinkingLevel: 'low' }, { ...wanted, thinkingLevel: 'high' }),
+    { thinkingLevel: 'high' });
 });
 
 test('metering guards entry points and stops past the turn bound', async () => {

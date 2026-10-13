@@ -192,9 +192,16 @@ injected, so a `plan` profile that sets nothing keeps the provider default while
 mechanism value). Larger `reserveTokens` (or `backgroundTokens`)
 bounds live context tighter without rotating the session away: retuning only these
 three keys (or `thinkingLevel`) continues the same durable store with the new
-thresholds on the next run, while any other effective change still starts a fresh
-bounded session; the per-run grant still binds the values, so retrying the same run
-under changed thresholds is refused. Pi SDK knobs
+thresholds on the next run; the per-run grant still binds the values, so retrying the same run
+under changed thresholds is refused. More broadly, a pi-durable session covers only
+what makes a conversation incompatible (engine, backend, the adapter-declared store
+format): policy text, capabilities and tools, goal, model, and settings ride the live
+conversation (applied per submission, keeping prompt caches warm), and adapter upgrades
+keep it unless they declare a store-incompatible change. Other engines keep rotation on
+any effective change outside their live keys. The explicit fresh start is
+`mizu session reset PROJECT --role ROLE`, which deletes that role's persistent sessions
+and durable stores (refused while the role has an active run); usage and age rotation
+bounds still apply to every engine. Pi SDK knobs
 are refused on pi-durable profiles and durable policy is refused on pi
 profiles instead of silently ignored. pi-durable resolves the exact model
 over built-in providers only; custom provider setups stay on pi. Pi operators bound

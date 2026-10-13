@@ -324,6 +324,39 @@ if (process.argv.includes('--check-contract') && invokedAsMain) {
   }
 }
 
+// Pure agent diff for in-place session updates (unit-tested below).
+// Returns the AgentChange that converges the resolved agent to the wanted
+// one, or {} when they already agree. Anything uncomparable converges by
+// applying the wanted values: the operator's current configuration wins.
+export function agentChanges(resolved, wanted) {
+  const change = {};
+  try {
+    if (!resolved || typeof resolved !== 'object') return { ...wanted };
+    if (resolved?.model?.provider !== wanted?.model?.provider
+        || resolved?.model?.modelId !== wanted?.model?.modelId) {
+      change.model = { provider: wanted.model.provider, modelId: wanted.model.modelId };
+    }
+    if ((resolved?.instructions ?? null) !== (wanted?.instructions ?? null)) {
+      change.instructions = wanted.instructions ?? null;
+    }
+    if ((resolved?.cwd ?? null) !== (wanted?.cwd ?? null)) {
+      change.cwd = wanted.cwd ?? null;
+    }
+    const have = Array.isArray(resolved?.tools) ? resolved.tools.map((tool) => tool?.name) : null;
+    const want = Array.isArray(wanted?.tools) ? wanted.tools.map((tool) => tool?.name) : null;
+    if (have === null || want === null
+        || have.length !== want.length || !have.every((name, index) => name === want[index])) {
+      change.tools = wanted.tools ?? [];
+    }
+    if (wanted?.thinkingLevel !== undefined && resolved?.thinkingLevel !== wanted.thinkingLevel) {
+      change.thinkingLevel = wanted.thinkingLevel;
+    }
+  } catch {
+    return { ...wanted };
+  }
+  return change;
+}
+
 async function runOnce(cfg) {
   for (const field of ['provider', 'model', 'instructions', 'store', 'requestId', 'prompt', 'cwd']) {
     if (typeof cfg[field] !== 'string' || !cfg[field]) throw new Error(`Effective configuration lacks ${field}`);
@@ -450,9 +483,13 @@ async function runOnce(cfg) {
     if (cfg.thinkingLevel) agent.thinkingLevel = cfg.thinkingLevel;
     const root = await harness.root(context, { agent });
     const resolved = await root.agent(context);
-    if (resolved?.model?.provider !== cfg.provider || resolved?.model?.modelId !== cfg.model) {
-      throw new Error('Durable session resolved a different model/provider');
-    }
+    // Session continuity: model, tools, instructions, and cwd ride the live
+    // conversation. A resumed session keeps its stored agent until told
+    // otherwise, so apply the current submission's agent when it differs
+    // (positional system entries keep prompt caches warm) instead of
+    // refusing. New conversations already carry these values from root().
+    const change = agentChanges(resolved, agent);
+    if (Object.keys(change).length) await root.configure(change, context);
     submission = await root.submit({ type: 'input', content: cfg.prompt, requestId: cfg.requestId }, context);
     const settled = await submission.wait(context);
     if (boundTripped) {

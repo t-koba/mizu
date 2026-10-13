@@ -202,12 +202,47 @@ def conversation_settings(settings):
     return {**settings, 'options': options}
 
 
+def durable_session_identity(settings) -> dict:
+    """Session identity for pi-durable: only what makes a conversation incompatible.
+
+    Schema: ``{'engine', 'backend', 'store_compat'}``. Policy text,
+    capabilities and tools, goal, model, and settings ride the live
+    conversation (the launcher applies them per submission through
+    positional system entries and ``configure()``), so they stay out of
+    the key. ``store_compat`` is the integer store format the adapter
+    declares in ``adapters/pi-durable/contract.json``: launcher changes
+    that keep it continue the same store, and only a declared
+    store-incompatible change rotates. Bounds: small dict, never raises
+    for missing options (backend defaults to sqlite). Trust: operator
+    configuration plus the vendored adapter declaration. Failure:
+    ``ConfigError`` when the declaration is missing or malformed, so an
+    unreadable contract never silently forks or merges conversations.
+    """
+    try:
+        options = settings.get('options', {}) or {}
+    except AttributeError:
+        options = {}
+    backend = options.get('durable_backend', 'sqlite')
+    contract_path = Path(__file__).resolve().parents[2] / 'adapters' / 'pi-durable' / 'contract.json'
+    try:
+        contract = read_json(contract_path, None)
+        compat = contract['store_compat']
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise ConfigError('Unreadable pi-durable store_compat declaration') from exc
+    if type(compat) is not int or compat < 1:
+        raise ConfigError('Unreadable pi-durable store_compat declaration')
+    return {'engine': 'pi-durable', 'backend': backend, 'store_compat': compat}
+
+
 def session_record(context, profile, settings):
-    identity = {'settings': conversation_settings(settings), 'policy': role_policy_text(context.role),
-                'goal': context.goal_digest, 'capabilities': context.role.capabilities,
-                'workspace': context.role.workspace, 'command': context.config.command(settings['engine']),
-                'adapter_digest': adapter_digest(settings['engine']),
-                'local_settings': local_settings_digest(context.config, settings['engine'])}
+    if settings.get('engine') == 'pi-durable':
+        identity = durable_session_identity(settings)
+    else:
+        identity = {'settings': conversation_settings(settings), 'policy': role_policy_text(context.role),
+                    'goal': context.goal_digest, 'capabilities': context.role.capabilities,
+                    'workspace': context.role.workspace, 'command': context.config.command(settings['engine']),
+                    'adapter_digest': adapter_digest(settings['engine']),
+                    'local_settings': local_settings_digest(context.config, settings['engine'])}
     key = digest(canonical(identity))
     persistent = settings['session'] == 'persistent' and not context.ephemeral
     directory = context.run_dir.parents[1] / 'sessions' / context.role.name / key if persistent else context.run_dir / 'session'
@@ -221,6 +256,41 @@ def session_record(context, profile, settings):
                 ('created_at' in record and _session_created_at(record) is None)):
             raise ConfigError('Invalid session record; resume cannot be replaced with a new conversation')
     return path, record
+
+
+def reset_role_sessions(config, project, role_name: str) -> dict:
+    """Delete one role's persistent sessions and durable stores (explicit reset).
+
+    Schema: receipt ``{"project", "role", "removed_sessions", "removed_stores"}``
+    naming deleted session keys and store directories. Session identity
+    deliberately almost never rotates for pi-durable, so this is the
+    operator's explicit fresh start. Bounds: one role's directories only;
+    nothing outside ``sessions/<role>`` and ``durable/<project>/<role>`` is
+    touched. Trust: operator CLI invocation. Failure: ``ConfigError`` for an
+    unknown role, ``Denied`` while the role has an active run (reset after
+    it finishes); filesystem errors propagate loudly, never half-silently.
+    """
+    from .fs import ID
+    from .errors import Denied
+    import shutil
+    if not isinstance(role_name, str) or not ID.fullmatch(role_name):
+        raise ConfigError("Invalid role name for session reset")
+    if role_name not in config.roles:
+        raise ConfigError(f"Session reset role is not configured: {role_name}")
+    if (project.root / "active" / f"{role_name}.json").exists():
+        raise Denied(f"Session reset refused: role {role_name} has an active run")
+    sessions_dir = project.root / "sessions" / role_name
+    removed_sessions = sorted(d.name for d in sessions_dir.iterdir()) if sessions_dir.is_dir() else []
+    if sessions_dir.is_dir():
+        shutil.rmtree(sessions_dir)
+    from .pi_durable_store import _safe_name
+    stores_dir = (config.data / "durable" / _safe_name(project.name, "project")
+                  / _safe_name(role_name, "role"))
+    removed_stores = sorted(d.name for d in stores_dir.iterdir() if d.is_dir()) if stores_dir.is_dir() else []
+    if stores_dir.is_dir():
+        shutil.rmtree(stores_dir)
+    return {"project": project.name, "role": role_name,
+            "removed_sessions": removed_sessions, "removed_stores": removed_stores}
 
 
 def session_generation(session_dir) -> int:

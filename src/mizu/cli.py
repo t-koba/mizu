@@ -57,6 +57,11 @@ def parser() -> argparse.ArgumentParser:
             p.add_argument("--attributes", type=Path, help="Operator JSON attributes for this execution")
             p.add_argument("--event", action="store_true",
                            help="Event-triggered dispatch: exit without model use unless a subscribed decision or due wait is pending")
+    p = sub.add_parser("session", help="Manage persistent engine sessions; no inference")
+    session = p.add_subparsers(dest="session_command", required=True)
+    p = session.add_parser("reset", help="Delete one role's persistent sessions and durable stores for a fresh conversation")
+    p.add_argument("project", help="Managed project name")
+    p.add_argument("--role", required=True, help="Configured role whose sessions reset")
     p = sub.add_parser("selection", help="Preview selection or manage operator observations; no inference")
     selection = p.add_subparsers(dest="selection_command", required=True)
     p = selection.add_parser("preview")
@@ -411,6 +416,11 @@ def execute(args):
         serve(args.bundle, args.outbox)
         return None
     config = load(args.config)
+    if args.command == "session":
+        from .project import Project
+        from .engine_config import reset_role_sessions
+        if args.session_command == "reset":
+            return reset_role_sessions(config, Project(config, args.project), args.role)
     if args.command == "selection":
         from .selection import State
         state = State(config)
