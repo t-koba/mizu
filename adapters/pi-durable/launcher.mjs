@@ -348,8 +348,12 @@ export function agentChanges(resolved, wanted) {
         || have.length !== want.length || !have.every((name, index) => name === want[index])) {
       change.tools = wanted.tools ?? [];
     }
-    if (wanted?.thinkingLevel !== undefined && resolved?.thinkingLevel !== wanted.thinkingLevel) {
-      change.thinkingLevel = wanted.thinkingLevel;
+    if (wanted?.thinkingLevel !== undefined) {
+      if (resolved?.thinkingLevel !== wanted.thinkingLevel) change.thinkingLevel = wanted.thinkingLevel;
+    } else if (resolved?.thinkingLevel !== undefined && resolved?.thinkingLevel !== null
+        && resolved?.thinkingLevel !== 'off') {
+      // A removed override clears instead of retaining the old value.
+      change.thinkingLevel = null;
     }
   } catch {
     return { ...wanted };
@@ -489,7 +493,14 @@ async function runOnce(cfg) {
     // (positional system entries keep prompt caches warm) instead of
     // refusing. New conversations already carry these values from root().
     const change = agentChanges(resolved, agent);
-    if (Object.keys(change).length) await root.configure(change, context);
+    if (Object.keys(change).length) {
+      await root.configure(change, context);
+      // Fail closed: the retained conversation must actually converge.
+      const applied = await root.agent(context);
+      if (Object.keys(agentChanges(applied, agent)).length) {
+        throw new Error('Durable session kept a stale agent after configure');
+      }
+    }
     submission = await root.submit({ type: 'input', content: cfg.prompt, requestId: cfg.requestId }, context);
     const settled = await submission.wait(context);
     if (boundTripped) {

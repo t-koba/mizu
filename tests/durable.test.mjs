@@ -152,8 +152,9 @@ test('agentChanges converges only what differs', async () => {
   const wanted = { model: { provider: 'p', modelId: 'm' }, instructions: 'new',
     cwd: '/work', tools: [{ name: 'a' }, { name: 'b' }] };
   const same = { model: { provider: 'p', modelId: 'm' }, instructions: 'new',
-    cwd: '/work', tools: [{ name: 'a' }, { name: 'b' }], thinkingLevel: 'high' };
+    cwd: '/work', tools: [{ name: 'a' }, { name: 'b' }] };
   assert.deepEqual(agentChanges(same, wanted), {});
+  assert.deepEqual(agentChanges({ ...same, thinkingLevel: 'off' }, wanted), {});
   assert.deepEqual(agentChanges({ ...same, model: { provider: 'p', modelId: 'old' } }, wanted),
     { model: { provider: 'p', modelId: 'm' } });
   assert.deepEqual(agentChanges({ ...same, instructions: 'old' }, wanted), { instructions: 'new' });
@@ -162,6 +163,52 @@ test('agentChanges converges only what differs', async () => {
   assert.deepEqual(agentChanges(null, wanted), { ...wanted });
   assert.deepEqual(agentChanges({ ...same, thinkingLevel: 'low' }, { ...wanted, thinkingLevel: 'high' }),
     { thinkingLevel: 'high' });
+  assert.deepEqual(agentChanges({ ...same, thinkingLevel: 'high' }, wanted), { thinkingLevel: null });
+  assert.deepEqual(agentChanges({ ...same, thinkingLevel: 'off' }, wanted), {});
+});
+
+test('reopened store keeps the conversation while configure applies the current agent', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'mizu-durable-'));
+  try {
+    const env = backend();
+    const file = join(directory, 's.sqlite');
+    const first = await openNodeSqliteStorage(file);
+    const one = await Harness.open(first, { models: env.models, registry: env.registry }, context);
+    const agentA = { model: { provider: 'test-only', modelId: 'model' },
+      tools: env.tools, instructions: 'Call probe then finish.', cwd: directory };
+    const root = await one.root(context, { agent: agentA });
+    env.faux.setResponses([fauxAssistantMessage([fauxToolCall('probe', {})], { stopReason: 'toolUse' }),
+      fauxAssistantMessage([fauxToolCall('finish', {})], { stopReason: 'toolUse' })]);
+    const submitted = await root.submit({ type: 'input', content: 'go', requestId: 'cfg-1' }, context);
+    assert.equal((await submitted.wait(context)).status, 'done');
+    await one.close(context);
+    // Reopen the SAME store: root({agent}) alone must not rewrite the
+    // retained agent (negative control for the configure path).
+    const second = await openNodeSqliteStorage(file);
+    const two = await Harness.open(second, { models: env.models, registry: env.registry }, context);
+    two.resume();
+    const agentB = { model: { provider: 'test-only', modelId: 'model' },
+      tools: [env.tools[1]], instructions: 'Call finish only.', cwd: directory };
+    await two.root(context, { agent: agentB });
+    const retained = await (await two.root(context)).agent(context);
+    assert.equal(retained.instructions, 'Call probe then finish.');
+    assert.deepEqual(retained.tools.map((tool) => tool.name), ['probe', 'finish']);
+    // Explicit configure converges the live conversation: instructions
+    // update, the removed tool drops out, usage persists.
+    const live = await two.root(context);
+    await live.configure({ instructions: agentB.instructions, tools: agentB.tools }, context);
+    const applied = await live.agent(context);
+    assert.equal(applied.instructions, 'Call finish only.');
+    assert.deepEqual(applied.tools.map((tool) => tool.name), ['finish']);
+    env.faux.setResponses([fauxAssistantMessage([fauxToolCall('finish', {})], { stopReason: 'toolUse' })]);
+    const next = await live.submit({ type: 'input', content: 'again', requestId: 'cfg-2' }, context);
+    assert.equal((await next.wait(context)).status, 'done');
+    const usage = await two.usage(context);
+    assert.ok(usage.models['test-only/model']);
+    await two.close(context);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('metering guards entry points and stops past the turn bound', async () => {
