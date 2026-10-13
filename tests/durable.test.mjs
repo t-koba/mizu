@@ -160,6 +160,11 @@ test('agentChanges converges only what differs', async () => {
   assert.deepEqual(agentChanges({ ...same, instructions: 'old' }, wanted), { instructions: 'new' });
   assert.deepEqual(agentChanges({ ...same, tools: [{ name: 'b' }, { name: 'a' }] }, wanted),
     { tools: wanted.tools });
+  const drifted = { model: { provider: 'p', modelId: 'm' }, instructions: 'new',
+    cwd: '/work', tools: [{ name: 'a', description: 'old' }, { name: 'b' }] };
+  const current = { model: { provider: 'p', modelId: 'm' }, instructions: 'new',
+    cwd: '/work', tools: [{ name: 'a', description: 'new' }, { name: 'b' }] };
+  assert.deepEqual(agentChanges(drifted, current), { tools: current.tools });
   assert.deepEqual(agentChanges(null, wanted), { ...wanted });
   assert.deepEqual(agentChanges({ ...same, thinkingLevel: 'low' }, { ...wanted, thinkingLevel: 'high' }),
     { thinkingLevel: 'high' });

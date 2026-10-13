@@ -175,10 +175,6 @@ def local_settings_digest(config, engine):
 #: conversation away, while the per-run grant still binds the values.
 CONVERSATION_LIVE_OPTIONS = {
     'pi': frozenset({'thinkingLevel'}),
-    'pi-durable': frozenset({'thinkingLevel',
-                             'durable_compaction_reserve_tokens',
-                             'durable_compaction_keep_recent_tokens',
-                             'durable_compaction_background_tokens'}),
     'codex': frozenset({'model_reasoning_effort'}),
     'claude': frozenset({'effort'}),
 }

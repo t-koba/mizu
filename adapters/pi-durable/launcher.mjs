@@ -342,10 +342,25 @@ export function agentChanges(resolved, wanted) {
     if ((resolved?.cwd ?? null) !== (wanted?.cwd ?? null)) {
       change.cwd = wanted.cwd ?? null;
     }
-    const have = Array.isArray(resolved?.tools) ? resolved.tools.map((tool) => tool?.name) : null;
-    const want = Array.isArray(wanted?.tools) ? wanted.tools.map((tool) => tool?.name) : null;
+    // Tools converge by value (name, description, parameters), not by
+    // name alone, so bridge definition drift applies too. Uncomparable
+    // shapes converge by applying the current registrations.
+    const shape = (tool) => {
+      if (!tool || typeof tool !== 'object' || typeof tool.name !== 'string') return null;
+      let parameters = null;
+      if (tool.parameters !== undefined) {
+        try {
+          parameters = JSON.stringify(tool.parameters);
+        } catch {
+          return null;
+        }
+      }
+      return JSON.stringify({ name: tool.name, description: tool.description ?? null, parameters });
+    };
+    const have = Array.isArray(resolved?.tools) ? resolved.tools.map(shape) : null;
+    const want = Array.isArray(wanted?.tools) ? wanted.tools.map(shape) : null;
     if (have === null || want === null
-        || have.length !== want.length || !have.every((name, index) => name === want[index])) {
+        || have.length !== want.length || have.some((entry, index) => entry === null || entry !== want[index])) {
       change.tools = wanted.tools ?? [];
     }
     if (wanted?.thinkingLevel !== undefined) {

@@ -96,8 +96,9 @@ class PolicyTests(Fixture):
         after = effective(self.config, role, profile)
         path_after, _ = session_record(self.context(), profile, after)
         self.assertEqual(path_after.parent.name, key_before)
-        self.assertEqual(conversation_settings(before)["options"],
-                         conversation_settings(after)["options"])
+        # pi-durable keeps no live keys: every setting rides the live
+        # conversation, so identity never consults the options at all.
+        self.assertEqual(conversation_settings(after)["options"], after["options"])
         # Any other durable setting still rides the same conversation:
         # only the backend and the declared store format rotate it.
         self.config.profiles[profile]["options"] = {

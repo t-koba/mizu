@@ -263,13 +263,16 @@ the bridge and publication contract.
 
 Settings that collide with runtime-owned prompt/model/bridge/session fields
 fail before input; they are never silently overwritten. Native engine errors
-remain errors. Session identifiers include model, policy, goal, capabilities,
-native grants, effective configuration minus live reasoning-effort keys
-(`thinkingLevel` on pi/pi-durable, `model_reasoning_effort` on Codex,
+remain errors. On every engine but pi-durable, session identifiers include model,
+policy, goal, capabilities, native grants, effective configuration minus live
+reasoning-effort keys (`thinkingLevel` on pi, `model_reasoning_effort` on Codex,
 `effort` on Claude), command and resource content digests. An effort-only
 profile switch therefore continues the role's conversation with the current
 effort; any other change still starts a fresh bounded session whose first
 prompt carries the full goal, snapshots, pending insights, and research state.
+Pi-durable sessions instead cover only engine, backend, and the declared store
+format (see the profile section above), so compatible changes ride the live
+conversation there.
 Resume errors never start a new conversation. Persistent sessions belong to
 that fingerprint; ephemeral state belongs to the run. Authentication is an
 explicit operator operation. Mizu does not alter operator settings files.
