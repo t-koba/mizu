@@ -116,10 +116,21 @@ class CacheRetentionTests(Fixture):
         self.assertEqual(written2["cacheRetention"], "long")
 
     def test_durable_launcher_refuses_invalid_cache_retention(self):
+        import importlib.util
         import subprocess
         import tempfile
         from pathlib import Path
-        launcher = Path(__file__).resolve().parents[1] / "adapters" / "pi-durable" / "launcher.mjs"
+        root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location('check_gate', root / 'scripts/check.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        # Environment-coupled like the durable contract suite: without the
+        # pinned SDK the launcher fails on missing imports before reaching
+        # validation, so skip instead of failing the gate for provisioning.
+        state, details = module.durable_deps_status(root / 'adapters/pi-durable')
+        if state != "ready":
+            self.skipTest(f"pinned SDK not provisioned here: {details}")
+        launcher = root / "adapters" / "pi-durable" / "launcher.mjs"
         with tempfile.TemporaryDirectory() as td:
             cfg = {"provider": "p", "model": "m", "instructions": "i",
                    "store": str(Path(td) / "s.sqlite"), "requestId": "r",
