@@ -64,6 +64,36 @@ class DelegateTests(Fixture):
         parent_records = list((runs / result["run"] / "delegations").glob("*.json"))
         self.assertEqual(len(parent_records), 1)
 
+    def test_delegated_overspend_coerces_parent_seal(self):
+        import dataclasses
+        from mizu.runtime import Engine
+        from support import ScriptDriver
+        config = _configured(self)
+        roles = dict(config.roles)
+        roles["worker"] = dataclasses.replace(roles["worker"], requests_per_run=2)
+        config = dataclasses.replace(config, roles=roles)
+        seen = {}
+
+        def callback(ctx, prompt, profile):
+            if ctx.role.name == "worker":
+                response = ctx.handle("delegate", {"role": "helper", "task": "spend"})
+                seen["bound"] = ctx.bound_hit
+                ctx.handle("finish", {"outcome": "continue", "summary": "parent seals",
+                                      "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+            else:
+                # One admitted sequence is spent by the driver; the next
+                # request exceeds the caller's bound inside the child.
+                ctx.handle("_budget", {"sequence": 2})
+                seen["child_bound"] = ctx.bound_hit
+                ctx.handle("finish", {"outcome": "continue", "summary": "child seals",
+                                      "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+
+        result = Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(seen["child_bound"], "requests")
+        self.assertEqual(seen["bound"], "requests")
+        self.assertEqual(result["finish"]["outcome"], "bounded")
+
     def test_forbidden_grants_are_refused(self):
         from mizu.runtime import DELEGATE_FORBIDDEN
         base = self.config.roles["searcher"]

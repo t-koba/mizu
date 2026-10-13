@@ -2170,6 +2170,14 @@ class Engine:
                     parent.tool_count = ctx.tool_count
                     parent.wrap_up_requests = ctx.wrap_up_requests
                     parent.wrap_up_tools = ctx.wrap_up_tools
+                    # Spend state the child tripped belongs to the unit:
+                    # a bound the delegation exceeded must coerce the
+                    # parent's seal too, and daily-refusal flags must
+                    # survive for the parent's own error handling.
+                    parent.bound_hit = parent.bound_hit or ctx.bound_hit
+                    parent.admission_wait = parent.admission_wait or ctx.admission_wait
+                    if ctx.admission_error:
+                        parent.admission_error = ctx.admission_error
                 if ctx.cancelled():
                     raise Cancelled("Delegation cancelled before completion")
                 if ctx.finished is None:
