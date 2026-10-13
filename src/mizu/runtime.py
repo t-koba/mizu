@@ -1567,6 +1567,9 @@ class Engine:
             mkdir(run_dir)
             context = None
             decision = None
+            selection_role = None
+            selection_retries: list = []
+            max_selection_attempts = 1
             model_result = None
             result = None
             workspace = project.workspace if role.workspace == "write" else run_dir / "input"
@@ -1649,6 +1652,14 @@ class Engine:
                             _consume_routing(project, role_name)
                     except Exception:
                         pass
+                    selection_role = role
+                    try:
+                        _spec = self.config.selectors.get(role.selector, {})
+                        _profiles = {c.get("profile") for _rule in _spec.get("rules", [])
+                                     for c in _rule.get("candidates", [])}
+                        max_selection_attempts = len(_profiles) + 1
+                    except Exception:
+                        max_selection_attempts = 1
                     role = dataclasses.replace(role, profile=decision["profile"], selector="")
                 if self.stop.is_set() or not project.control().get("armed") or project.control().get("paused"):
                     raise Cancelled("Run stopped before model dispatch")
@@ -1682,7 +1693,68 @@ class Engine:
                             "prompt_bytes": len(prompt.encode("utf-8")), "created_at": now(),
                             "prompt_mode": prompt_mode, "session_key": session_key,
                             "rotation": (rotation or {}).get("reason", "")})
-                model_result = driver.execute(context, prompt)
+                fallback_attempt = 0
+                while True:
+                    try:
+                        model_result = driver.execute(context, prompt)
+                    except ModelFailure as exc:
+                        # A matched on_error rule falls back within this
+                        # dispatch: the block just recorded applies to the
+                        # re-selection, so a transient provider error costs a
+                        # retry, not the whole interval to the next run.
+                        # Anything else (no rule match, local admission
+                        # refusal, stop) fails exactly as before.
+                        if (context.cancelled() or self.stop.is_set()
+                                or getattr(context, "admission_error", None)):
+                            raise
+                        matched = None
+                        if decision and decision.get("profile") and selection_role is not None:
+                            from .selection import State as _FallbackState
+                            matched = _FallbackState(self.config).result(
+                                decision, run=run_id, error=exc)
+                        if not matched:
+                            raise
+                        fallback_attempt += 1
+                        if fallback_attempt >= max_selection_attempts:
+                            raise
+                        if (self.stop.is_set() or not project.control().get("armed")
+                                or project.control().get("paused")):
+                            raise Cancelled("Run stopped before fallback dispatch")
+                        selection_retries.append({"profile": decision["profile"],
+                                                  "error": str(exc)})
+                        try:
+                            reselected = prepare(self, project, selection_role, snapshot, attributes)
+                        except Cancelled:
+                            raise
+                        except Exception:
+                            raise exc
+                        if not reselected.get("profile"):
+                            # Nothing eligible under the recorded blocks: fail
+                            # on the last attempt as before (deferred below),
+                            # keeping its decision for the failure record.
+                            raise exc
+                        decision = reselected
+                        write_json(run_dir / "selection.json", decision)
+                        role = dataclasses.replace(selection_role, profile=decision["profile"],
+                                                   selector="")
+                        context.role = role
+                        # The failed attempt's bridge close cancelled this
+                        # context's operations; the fallback is a new engine
+                        # connection, so reopen them. Deadline, budget, and
+                        # tool counters stay accumulated on the reused context,
+                        # but the failed attempt's seal never carries: the
+                        # fallback must finish and verify its own work.
+                        context.operations_stopped.clear()
+                        context.finished = None
+                        context.verification = None
+                        context.commentary = None
+                        driver = self.resolve(role.profile)
+                        if getattr(driver, "requires_sandbox", True) and any(
+                                c in role.capabilities for c in ("exec", "experiment", "verify")):
+                            container_runtime(self.config)
+                            cleanup(self.config, project.root, role_name)
+                        continue
+                    break
                 if context.cancelled():
                     raise Cancelled("Run stopped before publication")
                 if context.finished is None:
@@ -1763,7 +1835,8 @@ class Engine:
                              "durability": "unconfirmed" if isinstance(exc, OSError) or publication == "unknown" or _platform.IS_WINDOWS else "confirmed",
                              **({"selection": decision} if decision else {}),
                              **({"model_failure": exc.evidence} if isinstance(exc, ModelFailure) else {}),
-                             **({"selection_action": handled} if handled else {})}
+                             **({"selection_action": handled} if handled else {}),
+                             **({"selection_retries": selection_retries} if selection_retries else {})}
                     if model_result is not None:
                         error["model"] = model_result
                     elif context is not None and hasattr(context, "model_evidence"):

@@ -63,6 +63,16 @@ chosen quota scopes, never guessed from provider names or credentials. Active
 blocks persist across configuration changes and restarts until expiry or an
 explicitly configured observation-based recovery.
 
+A run whose main-model error matches an `on_error` rule falls back within the
+same dispatch: the recorded block applies to an immediate re-selection, and
+the run continues on the next eligible candidate instead of losing the whole
+interval to the next scheduled start. Attempts are bounded by the candidate
+count, and the same run context is reused so the run's own deadline and
+budget keep accumulating across attempts. If no candidate remains eligible,
+or no rule matches, the run fails as before (deferred with the block, or
+raised). Whether to fall back stays configuration: the selector's candidates
+and rules decide, never a built-in retry.
+
 ## Facts and predicates
 
 The same bounded predicate evaluator is used everywhere:

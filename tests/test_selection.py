@@ -170,27 +170,57 @@ class SelectionTests(SelectionFixture):
         State(self.config).path.write_text('{broken')
         with self.assertRaises(ConfigError): self.decision(role)
 
-    def test_runtime_no_replay_and_no_failure_pause(self):
+    def test_runtime_falls_back_within_dispatch_and_no_failure_pause(self):
         role, _ = self.setup_selection()
         self.config = dataclasses.replace(self.config, limits=dataclasses.replace(self.config.limits, max_failures=1))
-        before = self.project.snapshots.get()['id']
+        attempted = []
         def callback(ctx, prompt, profile):
+            attempted.append(ctx.role.profile)
             if ctx.role.profile == 'primary':
                 raise ModelFailure('custom', code='synthetic-exhausted')
         driver = ScriptDriver(callback)
         with patch('mizu.selection.time.time', return_value=1000):
             first = Engine(self.config, driver=driver).run(self.project, role.name)
-        self.assertEqual(first['status'], 'deferred')
-        self.assertEqual(len(driver.calls), 1)
+        # The matched block applies to the same dispatch: primary fails once,
+        # alternate completes it, and no interval is lost to the transient.
+        self.assertEqual(first['status'], 'completed')
+        self.assertEqual(first['selection']['profile'], 'alternate')
+        self.assertEqual(len(driver.calls), 2)
+        self.assertEqual(attempted, ['primary', 'alternate'])
         self.assertFalse(self.project.control()['paused'])
-        self.assertEqual(self.project.snapshots.get()['id'], before)
-        failure = read_json(self.project.root/'runs'/first['run']/'error.json')
-        self.assertEqual(failure['model_failure']['code'], 'synthetic-exhausted')
+        self.assertEqual(State(self.config).read()['blocks']['group:shared']['run'], first['run'])
         with patch('mizu.selection.time.time', return_value=1001):
             second = Engine(self.config, driver=driver).run(self.project, role.name)
         self.assertEqual(second['selection']['profile'], 'alternate')
         self.assertEqual(driver.calls[-1][0].role.capabilities, role.capabilities)
         self.assertEqual(driver.calls[-1][0].role.engine_tools, role.engine_tools)
+
+    def test_runtime_fallback_bounded_by_candidates_then_defers(self):
+        role, _ = self.setup_selection()
+        def callback(ctx, prompt, profile):
+            raise ModelFailure('custom', code='synthetic-exhausted')
+        driver = ScriptDriver(callback)
+        with patch('mizu.selection.time.time', return_value=1000):
+            failed = Engine(self.config, driver=driver).run(self.project, role.name)
+        # Both candidates fail under a matching rule: exactly two attempts,
+        # then fail as before with the superseded attempt audited.
+        self.assertEqual(failed['status'], 'deferred')
+        self.assertEqual(len(driver.calls), 2)
+        failure = read_json(self.project.root/'runs'/failed['run']/'error.json')
+        self.assertEqual(failure['model_failure']['code'], 'synthetic-exhausted')
+        self.assertEqual(failure['selection']['profile'], 'alternate')
+        self.assertEqual([retry['profile'] for retry in failure['selection_retries']],
+                         ['primary', 'alternate'])
+
+    def test_runtime_unmatched_error_keeps_single_attempt(self):
+        role, _ = self.setup_selection()
+        def callback(ctx, prompt, profile):
+            raise ModelFailure('custom', code='unrelated-boom')
+        driver = ScriptDriver(callback)
+        with self.assertRaises(ModelFailure):
+            Engine(self.config, driver=driver).run(self.project, role.name)
+        self.assertEqual(len(driver.calls), 1)
+        self.assertEqual(State(self.config).read()['blocks'], {})
 
     def test_local_invariants_and_cancellation_do_not_switch(self):
         for error in (Denied('no grant'), ProtocolError('bad handshake'), Cancelled('operator stop')):

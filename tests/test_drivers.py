@@ -148,7 +148,11 @@ class SyntheticEngineTests(Fixture):
         with unittest.mock.patch.dict(os.environ, {'CODEX_AUTH_FILE': str(self.root/'absent')}):
             first = Engine(config).run(self.project, 'worker')
             second = Engine(config).run(self.project, 'worker')
-        self.assertEqual(first['status'], 'deferred')
+        # The matched profile block falls back within the first dispatch:
+        # codex fails, claude completes it, and no second run is needed.
+        self.assertEqual(first['status'], 'completed')
+        self.assertEqual(first['model']['engine'], 'claude')
+        self.assertEqual(first['selection']['profile'], 'alternate')
         self.assertEqual(second['status'], 'completed')
         self.assertEqual(second['model']['engine'], 'claude')
         self.assertEqual(second['selection']['profile'], 'alternate')
