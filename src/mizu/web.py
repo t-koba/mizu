@@ -411,17 +411,20 @@ class Web:
         finally:
             connection.close()
 
-    def _search_feeds(self, query: str) -> tuple[list, list, int, int]:
+    def _search_feeds(self, query: str) -> tuple[list, list, int, int, bool]:
         """Keyword overlap over every configured feed; best-effort per feed.
 
-        Schema: ``(results, errors, feeds_total, feeds_consulted)``. Each
-        result carries ``"source"`` naming the feed it came from. Bounds:
+        Schema: ``(results, errors, feeds_total, feeds_consulted, feed_overflow)``.
+        Each result carries ``"source"`` naming the feed it came from. Bounds:
         titles 300, summaries 1500, at most ``SEARCH_FEED_ITEM_LIMIT`` items
-        per feed. Trust: external-untrusted. Failure: per-feed faults are
-        listed, never raised.
+        kept per feed; ``feed_overflow`` is True when any feed held another
+        eligible ``item``/``entry`` with an ``https://`` link beyond that bound
+        (non-eligible rows never set it). Trust: external-untrusted. Failure:
+        per-feed faults are listed, never raised.
         """
         results, errors = [], []
         feeds = list(self.settings["feeds"])
+        feed_overflow = False
         for feed in feeds:
             kept = 0
             try:
@@ -431,8 +434,6 @@ class Web:
                     raise Denied("XML document type and entity declarations are refused")
                 root = ET.fromstring(source)
                 for item in root.iter():
-                    if kept >= SEARCH_FEED_ITEM_LIMIT:
-                        break
                     if item.tag.rsplit("}", 1)[-1] not in ("item", "entry"):
                         continue
                     fields = {child.tag.rsplit("}", 1)[-1]: child for child in item}
@@ -445,6 +446,9 @@ class Web:
                     summary = "" if summary_node is None else "".join(summary_node.itertext())
                     if not link.startswith("https://"):
                         continue
+                    if kept >= SEARCH_FEED_ITEM_LIMIT:
+                        feed_overflow = True
+                        break
                     # Fixed discovery shaping: keyword overlap only. Operator
                     # ranking lives in `search_command` when configured.
                     score = sum(word.lower() in (title + " " + summary).lower() for word in query.split())
@@ -454,7 +458,7 @@ class Web:
             except (Denied, OSError, ET.ParseError, http.client.HTTPException) as exc:
                 errors.append({"feed": feed, "error": str(exc)})
         ordered = sorted(results, key=lambda r: r["score"], reverse=True)
-        return ordered, errors, len(feeds), len(feeds) - len(errors)
+        return ordered, errors, len(feeds), len(feeds) - len(errors), feed_overflow
 
     def search(self, query: str) -> dict:
         """Search every configured source with explicit truncation flags.
@@ -463,9 +467,11 @@ class Web:
         "scope", "trust", "truncated": bool, "feeds_total": int,
         "feeds_consulted": int}``. Bounds: titles 300, summaries 1500,
         at most ``SEARCH_RESULT_LIMIT`` retained candidates (matches the tool
-        page limit, so callers page the full retained set). The adapter keeps
-        ranking priority: its results come first, then feed matches fill the
-        remaining slots. Trust: external-untrusted. Retry: per-feed
+        page limit, so callers page the full retained set). ``truncated`` is
+        True when the adapter overflows, any feed holds an eligible item beyond
+        its per-feed bound, or feed matches exceed the remaining slots. The
+        adapter keeps ranking priority: its results come first, then feed
+        matches fill the remaining slots. Trust: external-untrusted. Retry: per-feed
         best-effort, errors listed. Evidence: source_receipt per feed result.
         Failure: Denied for bad query/adapter shape. One non-HTTPS adapter
         row never fails the whole call: like feed links, it is dropped so the
@@ -497,15 +503,15 @@ class Web:
                 kept.append(item)
             adapter_overflow = len(kept) > SEARCH_RESULT_LIMIT
             results = kept[:SEARCH_RESULT_LIMIT]
-            feeds, errors, feeds_total, feeds_consulted = self._search_feeds(query)
+            feeds, errors, feeds_total, feeds_consulted, feed_overflow = self._search_feeds(query)
             room = SEARCH_RESULT_LIMIT - len(results)
             results = results + feeds[:room]
-            truncated = adapter_overflow or len(feeds) > room
+            truncated = adapter_overflow or feed_overflow or len(feeds) > room
             scope = "configured-search-adapter+feeds" if feeds_total else "configured-search-adapter"
             return {"results": results, "errors": errors, "scope": scope, "trust": "external-untrusted",
                     "truncated": truncated, "feeds_total": feeds_total, "feeds_consulted": feeds_consulted}
-        ordered, errors, feeds_total, feeds_consulted = self._search_feeds(query)
-        truncated = len(ordered) > SEARCH_RESULT_LIMIT
+        ordered, errors, feeds_total, feeds_consulted, feed_overflow = self._search_feeds(query)
+        truncated = feed_overflow or len(ordered) > SEARCH_RESULT_LIMIT
         return {"results": ordered[:SEARCH_RESULT_LIMIT],
                 "errors": errors, "scope": "configured-feeds-only", "trust": "external-untrusted",
                 "truncated": truncated, "feeds_total": feeds_total, "feeds_consulted": feeds_consulted}

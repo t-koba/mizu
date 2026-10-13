@@ -396,6 +396,70 @@ class RemainingTests(Fixture):
         self.assertIsNone(overflow["next_offset"])
         self.assertFalse(overflow["truncated"])
 
+    def test_feed_search_truncation_flag_at_per_feed_bound(self):
+        import tempfile
+        from mizu.web import SEARCH_FEED_ITEM_LIMIT, Web
+        def feed_xml(count, trailing=""):
+            items = "".join("<item><title>hi test</title><link>https://example.org/x%d</link>"
+                            "<description>d</description></item>" % n for n in range(count))
+            return "<rss><channel>%s%s</channel></rss>" % (items, trailing)
+        def make_web(xml):
+            tmp = Path(tempfile.mkdtemp())
+            self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
+            feed = "https://example.org/feed"
+            web = Web({**self.config.web, "hosts": ["example.org"], "feeds": [feed],
+                       "cache_seconds": 0, "timeout_seconds": 1, "max_bytes": 1048576,
+                       "search_command": [], "intranet": False}, tmp / "c", tmp / "r")
+            web.fetch = lambda url: {"id": "r", "text": xml}
+            return web
+        # Exactly at the bound: no overflow, so not truncated.
+        web = make_web(feed_xml(SEARCH_FEED_ITEM_LIMIT))
+        out = web.search("hi")
+        self.assertEqual(len(out["results"]), SEARCH_FEED_ITEM_LIMIT)
+        self.assertFalse(out["truncated"])
+        # Trailing non-eligible rows (wrong tag, non-HTTPS) never set overflow.
+        trailing = ("<notanitem><title>hi</title><link>https://example.org/no</link></notanitem>"
+                    "<item><title>hi</title><link>http://example.org/plain</link>"
+                    "<description>d</description></item>")
+        web = make_web(feed_xml(SEARCH_FEED_ITEM_LIMIT, trailing))
+        out = web.search("hi")
+        self.assertEqual(len(out["results"]), SEARCH_FEED_ITEM_LIMIT)
+        self.assertFalse(out["truncated"])
+        # One more eligible entry overflows the per-feed bound and flags truncation.
+        web = make_web(feed_xml(SEARCH_FEED_ITEM_LIMIT + 1))
+        out = web.search("hi")
+        self.assertEqual(len(out["results"]), SEARCH_FEED_ITEM_LIMIT)
+        self.assertTrue(out["truncated"])
+        ctx = self.context("searcher")
+        with patch("mizu.runtime.bounded", return_value=out):
+            response = ctx._op_search({"query": "hi", "limit": 1000})
+        self.assertTrue(response["source_truncated"])
+
+    def test_feed_overflow_forces_truncated_with_room_remaining(self):
+        import json
+        import tempfile
+        from mizu.process import Result
+        from mizu.web import SEARCH_FEED_ITEM_LIMIT, Web
+        import mizu.web as webmod
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
+        feed = "https://example.org/feed"
+        web = Web({**self.config.web, "hosts": ["example.org"], "feeds": [feed],
+                   "cache_seconds": 0, "timeout_seconds": 5, "max_bytes": 1048576,
+                   "search_command": ["python3", "adapter"], "intranet": False},
+                  tmp / "c", tmp / "r")
+        items = "".join("<item><title>hi</title><link>https://example.org/x%d</link>"
+                        "<description>d</description></item>" % n
+                        for n in range(SEARCH_FEED_ITEM_LIMIT + 1))
+        web.fetch = lambda url: {"id": "r", "text": "<rss><channel>%s</channel></rss>" % items}
+        adapted = [{"title": "t", "url": "https://x/", "summary": "s"}]
+        with patch.object(webmod, "run",
+                          return_value=Result(0, json.dumps({"results": adapted}), "", "exited", 0.1)):
+            out = web.search("hi")
+        # Only one adapter result, so room remains, yet the feed overflow still flags truncation.
+        self.assertEqual(len(out["results"]), 1 + SEARCH_FEED_ITEM_LIMIT)
+        self.assertTrue(out["truncated"])
+
     def test_invalid_engine_json_cannot_poison_saved_usage(self):
         from mizu.drivers import parse_event
         with self.assertRaises(ValueError): parse_event('{"usage":{"input_tokens":NaN}}')
