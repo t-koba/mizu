@@ -15,7 +15,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join as joinPath } from 'node:path';
-import { agentChanges, credentialsFromFile, meterModels } from '../adapters/pi-durable/launcher.mjs';
+import { agentChanges, credentialsFromFile, meterModels, settlementFields } from '../adapters/pi-durable/launcher.mjs';
 import { AssistantEntry, BACKGROUND_CONTEXT, Harness, Type, createModels, createRegistry,
   defineExtension, defineTool, fauxAssistantMessage, fauxProvider, fauxToolCall,
   openNodeSqliteStorage } from '../adapters/pi-durable/test-support.mjs';
@@ -146,6 +146,16 @@ test('pi login store is shared file-backed with locked OAuth persistence', async
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test('settlement fields preserve bounded provider detail', () => {
+  const detail = '402: upstream request failed: insufficient account funds';
+  assert.deepEqual(settlementFields({ status: 'unanswered', reason: 'model_error', detail }),
+    { status: 'unanswered', reason: 'model_error', detail });
+  const long = '😀'.repeat(4001);
+  const bounded = settlementFields({ status: 'unanswered', reason: 'model_error', detail: long });
+  assert.equal(Array.from(bounded.detail).length, 4000);
+  assert.equal(bounded.reason, 'model_error');
 });
 
 test('agentChanges converges only what differs', async () => {

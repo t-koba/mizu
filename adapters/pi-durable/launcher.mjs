@@ -324,6 +324,34 @@ if (process.argv.includes('--check-contract') && invokedAsMain) {
   }
 }
 
+/** Preserve only bounded textual settlement detail in the one-shot result.
+ * Provider error text is evidence, not a status code; Python pairs it with the
+ * unchanged settlement reason for configured error predicates.
+ */
+const MAX_SETTLEMENT_DETAIL_CHARS = 4000;
+
+function boundedSettlementDetail(value) {
+  if (typeof value !== 'string') return undefined;
+  let end = 0;
+  let characters = 0;
+  while (end < value.length && characters < MAX_SETTLEMENT_DETAIL_CHARS) {
+    const point = value.codePointAt(end);
+    end += point > 0xffff ? 2 : 1;
+    characters++;
+  }
+  return value.slice(0, end);
+}
+
+export function settlementFields(settled) {
+  const status = settled?.status;
+  const detail = boundedSettlementDetail(settled?.detail);
+  return {
+    status,
+    reason: status === 'done' ? null : (settled?.reason ?? 'unanswered'),
+    ...(detail === undefined ? {} : { detail }),
+  };
+}
+
 // Pure agent diff for in-place session updates (unit-tested below).
 // Returns the AgentChange that converges the resolved agent to the wanted
 // one, or {} when they already agree. Anything uncomparable converges by
@@ -555,8 +583,7 @@ async function runOnce(cfg) {
         answer = null; // transcript stays in storage; evidence stays bounded
       }
     }
-    return { durable_result: true, status: settled.status,
-      reason: settled.status === 'done' ? null : (settled.reason ?? 'unanswered'),
+    return { durable_result: true, ...settlementFields(settled),
       finish_called: finishCalled, sealed,
       requests, observed: observations,
       usage: usage?.models?.[key] ?? null,

@@ -280,7 +280,11 @@ protocol interop only, never research quality or large-codebase utility.
 ## Execution and evidence contract
 
 Reported model failures are distinct from local protocol invariants. Pi provides
-assistant `error` and its message; abort remains a protocol/stop path. Codex
+assistant `error` and its message; abort remains a protocol/stop path. Pi-durable
+preserves textual settlement `detail` (bounded to 4,000 Unicode characters)
+alongside the unchanged `reason`; `error.message` combines them as
+`<reason>: <detail>`, so an explicitly configured `contains` predicate can
+match provider text without inferring a status code. Codex
 provides failed-turn error details or a `turn/start` RPC error. Its structured
 `codexErrorInfo` is retained under `error.details.codex_error_info`. Claude
 provides terminal reason/subtype/errors, or query-stage exception class/message.

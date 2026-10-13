@@ -9,6 +9,7 @@
     "builtinModels"
   ],
   "completion": "settled submission + mizu seal",
+  "settlement_detail": "unanswered textual detail is preserved up to 4000 Unicode characters alongside the unchanged reason",
   "request_unit": "model_request",
   "dependency_evidence": "package-lock.json",
   "durable": "pi-durable 1.1.0 Harness over file-backed SQLite with requestId resume binding; replay unsafe by default",

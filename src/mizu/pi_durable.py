@@ -394,8 +394,10 @@ def interpret_result(reported, context, model, thinking_level) -> None:
         context.bound_hit = context.bound_hit or "requests"
         raise LimitExceeded("Per-run provider request budget exhausted")
     if reported.get("status") != "done":
-        raise ModelFailure("pi-durable", kind="unanswered",
-                           message=str(reported.get("reason") or "submission unanswered"))
+        reason = str(reported.get("reason") or "submission unanswered")
+        detail = reported.get("detail")
+        message = f"{reason}: {detail}" if isinstance(detail, str) and detail else reason
+        raise ModelFailure("pi-durable", kind="unanswered", message=message)
     if not reported.get("finish_called") or context.finished is None:
         raise ProtocolError("Pi-durable settled without mizu_finish")
     if context.request_count == 0:

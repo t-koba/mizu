@@ -144,6 +144,27 @@ class SelectionTests(SelectionFixture):
         State(self.config).result(result, run='done', at=1000)
         self.assertEqual(self.decision(role, 1001)['facts']['history']['alternate']['status'], 'completed')
 
+    def test_pi_durable_settlement_detail_matches_error_message_rule(self):
+        from mizu import pi_durable
+        detail = '402: Upstream request failed: Insufficient account funds'
+        spec = specification()
+        spec['on_error'] = [{
+            'when': cond('error.message', 'contains', 'Insufficient account funds'),
+            'scope': 'group', 'seconds': 100}]
+        role, _ = self.setup_selection(spec)
+        decision = self.decision(role)
+        with self.assertRaises(ModelFailure) as caught:
+            pi_durable.interpret_result(
+                {'durable_result': True, 'status': 'unanswered',
+                 'reason': 'model_error', 'detail': detail},
+                self.context(), {'provider': 'p', 'model': 'm'}, None)
+        self.assertEqual(caught.exception.evidence['kind'], 'unanswered')
+        self.assertEqual(caught.exception.evidence['message'], f'model_error: {detail}')
+        matched = State(self.config).result(decision, run='durable-detail',
+                                            at=1000, error=caught.exception)
+        self.assertEqual(matched['scope'], 'group')
+        self.assertEqual(State(self.config).read()['blocks']['group:shared']['until'], 1100)
+
     def test_error_rules_missing_time_and_unmatched(self):
         spec = specification()
         spec['on_error'] = [{'scope': 'profile', 'until': 'error.retry_at'},
