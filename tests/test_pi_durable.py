@@ -212,6 +212,79 @@ class PolicyTests(Fixture):
         self.assertEqual(facts["totals"]["output_tokens"], 8)
         self.assertEqual(facts["totals"]["requests"], 2)
 
+    def test_engine_records_terminal_unanswered_usage_and_preserves_unknown(self):
+        from unittest import mock
+        from mizu.fs import read_json
+        from mizu.runtime import Engine
+        from mizu.usage import summarize
+
+        settings = dict(self.config.profiles["primary"])
+        settings["engine"] = "pi-durable"
+        self.config.profiles["primary"] = settings
+        driver = pi_durable.PiDurableDriver(self.config)
+        engine = Engine(self.config, driver=driver)
+        cases = (
+            ({"input": 13, "output": 5},
+             {"input": 901, "output": 902}),
+            (None, None),
+        )
+        run_root = self.project.root / "runs"
+        run_root.mkdir(parents=True, exist_ok=True)
+
+        for runtime_usage, launcher_usage in cases:
+            def settle(context, settings, selected_model, prompt, profile, run_key, store_path):
+                context.model_evidence = {
+                    "profile": profile, **selected_model, "engine": "pi-durable",
+                    "requests": 0, "request_unit": "model_request",
+                    "usage": [], "usage_known": False,
+                }
+                context.handle("_hello", {})
+                context.handle("_budget", {"sequence": 1})
+                if runtime_usage is not None:
+                    context.handle("_model_usage", {
+                        "sequence": 2, "usage": runtime_usage,
+                        "model": selected_model,
+                    })
+                reported = {
+                    "durable_result": True, "status": "unanswered",
+                    "reason": "provider rejected", "detail": "terminal settlement",
+                    "requests": 1,
+                }
+                if launcher_usage is not None:
+                    reported["usage"] = launcher_usage
+                pi_durable.interpret_result(
+                    reported, context, selected_model,
+                    settings.get("options", {}).get("thinkingLevel"))
+
+            driver._run_once = settle
+            before = set(run_root.iterdir())
+            with mock.patch("mizu.runtime.container_runtime"), \
+                    mock.patch("mizu.runtime.cleanup"):
+                with self.assertRaisesRegex(ModelFailure, "provider rejected: terminal settlement"):
+                    engine.run(self.project, "worker")
+            created = set(run_root.iterdir()) - before
+            self.assertEqual(len(created), 1)
+            run_dir = created.pop()
+            error = read_json(run_dir / "error.json")
+            self.assertEqual(error["model_failure"]["kind"], "unanswered")
+            self.assertEqual(error["model_failure"]["message"],
+                             "provider rejected: terminal settlement")
+            self.assertEqual(error["model"]["requests"], 1)
+            if runtime_usage is not None:
+                # Runtime per-request observations win over launcher aggregates.
+                self.assertEqual(error["model"]["usage"], [runtime_usage])
+                self.assertTrue(error["model"]["usage_known"])
+            else:
+                # With neither source reporting usage, evidence stays unknown.
+                self.assertEqual(error["model"]["usage"], [])
+                self.assertFalse(error["model"]["usage_known"])
+
+        facts = summarize(self.project)
+        self.assertEqual(facts["totals"]["input_tokens"], 13)
+        self.assertEqual(facts["totals"]["output_tokens"], 5)
+        self.assertEqual(facts["totals"]["requests"], 2)
+        self.assertEqual(facts["totals"]["unknown_usage_runs"], 1)
+
     def test_persistent_session_saves_cumulative_tokens(self):
         profile = self._durable_profile()
         role = self.config.roles["worker"]

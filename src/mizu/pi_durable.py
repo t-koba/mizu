@@ -389,9 +389,10 @@ def interpret_result(reported, context, model, thinking_level) -> None:
     silent stop; only the known terminal ``unanswered`` status maps to
     ``ModelFailure``, while unknown statuses are ``ProtocolError``. A done
     result still requires the ``mizu_finish`` seal and at least one
-    admitted request, like the pi engine. Launcher requests/usage counters
-    are recorded before raising on ``request_bound`` so the bound-exhausted
-    path keeps its accounting. Bounds: usage counters pass
+    admitted request, like the pi engine. Launcher/runtime requests and
+    usage are recorded before raising on ``request_bound`` or terminal
+    ``unanswered`` so failed submissions keep their accounting. Bounds:
+    usage counters pass
     through as-is; evidence stays local. Failure: ``ProtocolError``,
     ``ModelFailure`` or ``LimitExceeded``.
     """
@@ -402,6 +403,7 @@ def interpret_result(reported, context, model, thinking_level) -> None:
         context.bound_hit = context.bound_hit or "requests"
         raise LimitExceeded("Per-run provider request budget exhausted")
     if reported.get("status") == "unanswered":
+        _record_launcher_evidence(reported, context, model, thinking_level)
         reason = str(reported.get("reason") or "submission unanswered")
         detail = reported.get("detail")
         message = f"{reason}: {detail}" if isinstance(detail, str) and detail else reason

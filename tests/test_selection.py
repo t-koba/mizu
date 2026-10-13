@@ -153,11 +153,13 @@ class SelectionTests(SelectionFixture):
             'scope': 'group', 'seconds': 100}]
         role, _ = self.setup_selection(spec)
         decision = self.decision(role)
+        context = self.context()
+        context.model_evidence = {"requests": 0, "usage": [], "usage_known": False}
         with self.assertRaises(ModelFailure) as caught:
             pi_durable.interpret_result(
                 {'durable_result': True, 'status': 'unanswered',
                  'reason': 'model_error', 'detail': detail},
-                self.context(), {'provider': 'p', 'model': 'm'}, None)
+                context, {'provider': 'p', 'model': 'm'}, None)
         self.assertEqual(caught.exception.evidence['kind'], 'unanswered')
         self.assertEqual(caught.exception.evidence['message'], f'model_error: {detail}')
         matched = State(self.config).result(decision, run='durable-detail',
