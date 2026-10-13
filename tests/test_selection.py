@@ -528,6 +528,69 @@ class ClassificationTests(SelectionFixture):
         self.assertLessEqual(len(canonical(work)), MAX_WORK_BYTES)
         self.assertEqual([item['id'] for item in work['proposals']], ['edge-1'])
 
+    def test_multibyte_text_bytes_bound(self):
+        from mizu.selection import _clip, work_inputs
+        role, spec = self.classifier()
+        spec['classifier']['inputs'] = {'max_proposals': 8, 'max_decisions': 8,
+                                         'max_text_bytes': 256}
+        validate_selectors({'dynamic': spec}, self.config.profiles, self.file.parent)
+        bounds = spec['classifier']['inputs']
+        cap = bounds['max_text_bytes']
+        title = '\U0001F600' * 256  # 256 chars, 1024 UTF-8 bytes
+        reason = '\U0001F389' * 256
+        goal_text = '\U0001F680' * 256
+        state_text = '\U0001F31F' * 256
+        self.assertEqual(len(title), 256)
+        self.assertEqual(len(title.encode('utf-8')), 1024)
+        snapshot = self.project.snapshots.get()
+        write_json(self.project.root/'inbox'/'multi-title.json',
+                   {'id': 'multi-title', 'source': 'worker', 'title': title,
+                    'body': 'bulk', 'base_snapshot': snapshot['id'],
+                    'created_at': '2026-10-06T00:00:00+00:00', 'rev': 1})
+        decided = self.project.insights.submit(source='worker', title='Decided topic',
+                                               body='evidence', base_snapshot=snapshot['id'])
+        self.project.insights.decide(decided['id'], 'reject', reason, '', role.name,
+                                     expected_rev=decided['rev'])
+        work = work_inputs(self.project, role, snapshot, bounds)
+        clipped_titles = [item['title'] for item in work['proposals'] if item['id'] == 'multi-title']
+        self.assertEqual(len(clipped_titles), 1)
+        for text in clipped_titles:
+            self.assertLessEqual(len(text.encode('utf-8')), cap)
+            self.assertEqual(text.encode('utf-8').decode('utf-8'), text)
+        self.assertLess(len(clipped_titles[0].encode('utf-8')), len(title.encode('utf-8')))
+        clipped_reasons = [event['reason'] for event in work['evidence']['decisions']
+                           if event['insight'] == decided['id']]
+        self.assertEqual(len(clipped_reasons), 1)
+        for text in clipped_reasons:
+            self.assertLessEqual(len(text.encode('utf-8')), cap)
+            self.assertEqual(text.encode('utf-8').decode('utf-8'), text)
+        self.assertLess(len(clipped_reasons[0].encode('utf-8')), len(reason.encode('utf-8')))
+        # Shared helper covers goal/state excerpts as well.
+        for text in (_clip(goal_text, cap), _clip(state_text, cap)):
+            self.assertLessEqual(len(text.encode('utf-8')), cap)
+            self.assertEqual(text.encode('utf-8').decode('utf-8'), text)
+        self.assertIsInstance(_clip(None, cap), str)
+        self.assertEqual(_clip(None, cap), '')
+        # Classify excerpt path uses the same byte-safe helper.
+        from mizu.classification import classify
+        prompts = []
+        def callback(ctx, prompt, profile):
+            if ctx.role.workspace == 'none':
+                prompts.append(json.loads(prompt))
+                ctx.handle('finish', {'outcome': 'done', 'summary': '{"difficulty":"hard"}'})
+        facts = {'task': {'goal': goal_text, 'state': state_text}, 'attributes': {}}
+        labels, _ = classify(Engine(self.config, driver=ScriptDriver(callback)),
+                             self.project, role, snapshot, facts)
+        self.assertEqual(labels, {'difficulty': 'hard'})
+        self.assertEqual(len(prompts), 1)
+        for text in prompts[0]['task'].values():
+            self.assertLessEqual(len(text.encode('utf-8')), cap)
+            self.assertEqual(text.encode('utf-8').decode('utf-8'), text)
+        for item in prompts[0]['proposals']:
+            self.assertLessEqual(len(item['title'].encode('utf-8')), cap)
+        for event in prompts[0]['evidence']['decisions']:
+            self.assertLessEqual(len(event['reason'].encode('utf-8')), cap)
+
     def test_inputs_bounds_validated_defaulted_and_missing_classifier(self):
         role, spec = self.classifier()
         from mizu.selection import DEFAULT_CLASSIFIER_INPUTS

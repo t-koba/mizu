@@ -5,7 +5,7 @@ import math
 import time
 
 from .errors import ConfigError, ModelFailure
-from .fs import DIGEST, ID, canonical, digest, lock, read_json, write_json
+from .fs import DIGEST, ID, canonical, digest, lock, read_json, text_preview, write_json
 
 MAX_BYTES = 1024 * 1024
 MAX_ITEMS = 64
@@ -395,7 +395,8 @@ def base_facts(project, role, snapshot, explicit=None):
 def _clip(text, maximum):
     if not isinstance(text, str):
         return ''
-    return text if len(text) <= maximum else text[:maximum]
+    preview, _ = text_preview(text, maximum)
+    return preview
 
 
 def work_inputs(project, role, snapshot, bounds):

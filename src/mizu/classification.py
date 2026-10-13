@@ -10,7 +10,7 @@ from .config import Role, role_policy_text
 from .engine_config import effective, adapter_digest, local_settings_digest
 from .errors import Cancelled, ConfigError, Denied, ProtocolError, ModelFailure
 from .fs import canonical, digest, mkdir, now, read_json, write_json
-from .selection import (DEFAULT_CLASSIFIER_INPUTS, bounded, validate_labels, work_inputs)
+from .selection import (DEFAULT_CLASSIFIER_INPUTS, _clip, bounded, validate_labels, work_inputs)
 
 
 class ClassificationOutputError(ValueError):
@@ -74,7 +74,7 @@ def classify(engine, project, role, snapshot, facts, *, preview=False):
     task = facts['task']
     excerpt = {'goal': task.get('goal') if isinstance(task.get('goal'), str) else '',
                'state': task.get('state') if isinstance(task.get('state'), str) else ''}
-    excerpt = {key: value[:cap] for key, value in excerpt.items()}
+    excerpt = {key: _clip(value, cap) for key, value in excerpt.items()}
     inputs = {'task': excerpt, 'proposals': work['proposals'], 'evidence': work['evidence'],
               'attributes': facts['attributes'], 'role': role.name,
               'project': project.name, 'output_attributes': definition['attributes']}
