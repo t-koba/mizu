@@ -107,6 +107,8 @@ DEFINITIONS = {
                             "rev": {"type": "integer", "minimum": 1}}, ("id", "reason", "rev"))),
     "attach_evidence": ("Add an attributed evidence note to another insight without changing its title or body.",
                        obj({"id": text(64), "rev": {"type": "integer", "minimum": 1}, "text": text(8192)}, ("id", "rev", "text"))),
+    "delegate": ("Hand a self-contained implementation task to a configured delegate role working in the caller's live workspace. The child never holds finish, decide, insight-write, vcs-mutating, or delegate grants; its spend counts against this unit. Returns the child's result summary.",
+                 obj({"role": text(64), "task": text(8000)}, ("task",))),
     "consult": ("Ask named read-only roles independently about the SAME immutable code snapshot. Each answers with its own profile or selector; nested consultation is disabled by the runtime.",
                 obj({"question": text(8000), "roles": array(text(64), 8), "role": text(64)}, ("question",))),
     "report": ("Stage a UTF-8 Markdown document for static publication as this work unit's artifact. Structure and length follow the role policy; recorded evidence is attached separately by the runtime.",

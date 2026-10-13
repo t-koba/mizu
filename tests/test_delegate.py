@@ -1,0 +1,184 @@
+"""Delegation: one-shot implementation children in the caller's live workspace."""
+import dataclasses
+import json
+import unittest
+from support import Fixture, ScriptDriver
+from mizu.errors import ConfigError, Denied
+from mizu.fs import read_json
+from mizu.runtime import Engine, check_delegate_role
+
+
+def _configured(fixture):
+    roles = dict(fixture.config.roles)
+    worker = roles["worker"]
+    roles["worker"] = dataclasses.replace(
+        worker, capabilities=tuple([*worker.capabilities, "delegate"]))
+    searcher = roles["searcher"]
+    roles["helper"] = dataclasses.replace(
+        searcher, name="helper", capabilities=("files", "read"))
+    return dataclasses.replace(fixture.config, roles=roles)
+
+
+class DelegateTests(Fixture):
+    def test_delegation_completes_in_live_workspace(self):
+        config = _configured(self)
+        marker = self.project.workspace / "delegate-marker.txt"
+        marker.write_text("live")
+        child_spend = {}
+
+        def callback(ctx, prompt, profile):
+            if ctx.role.name == "worker":
+                response = ctx.handle("delegate", {"role": "helper", "task": "List the workspace"})
+                child_spend["requests"] = ctx.request_count
+                child_spend["tools"] = ctx.tool_count
+                ctx.handle("finish", {"outcome": "continue",
+                                      "summary": "child said: " + response["answer"],
+                                      "state": "Now: delegated.\nNext: verify.\nTasks: none\nBlocking: none"})
+            else:
+                listing = ctx.handle("files", {"limit": 100, "offset": 0})
+                names = list(listing["files"])
+                assert "delegate-marker.txt" in names, names
+                child_spend["child_requests"] = ctx.request_count
+                child_spend["child_tools"] = ctx.tool_count
+                ctx.handle("finish", {"outcome": "continue", "summary": "child saw marker",
+                                      "state": "Now: done.\nNext: none.\nTasks: none\nBlocking: none"})
+
+        result = Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
+        self.assertEqual(result["status"], "completed")
+        self.assertIn("child saw marker", result["finish"]["summary"])
+        # The child's spend counted against the caller's unit. The tool
+        # adoption includes the child's finish seal, recorded after the
+        # child's own count was read.
+        self.assertEqual(child_spend["requests"], child_spend["child_requests"])
+        self.assertEqual(child_spend["tools"], child_spend["child_tools"] + 1)
+        self.assertGreater(child_spend["requests"], 1)
+        runs = self.project.root / "runs"
+        child_runs = [d for d in runs.iterdir()
+                      if d.is_dir() and (d / "delegation.json").is_file()]
+        self.assertEqual(len(child_runs), 1)
+        started = read_json(child_runs[0] / "started.json")
+        self.assertEqual(started["workspace"], str(self.project.workspace))
+        self.assertFalse((child_runs[0] / "input").exists())
+        delegation = read_json(child_runs[0] / "delegation.json")
+        self.assertEqual(delegation["answer"], "child saw marker")
+        parent_records = list((runs / result["run"] / "delegations").glob("*.json"))
+        self.assertEqual(len(parent_records), 1)
+
+    def test_forbidden_grants_are_refused(self):
+        from mizu.runtime import DELEGATE_FORBIDDEN
+        base = self.config.roles["searcher"]
+        for cap in sorted(DELEGATE_FORBIDDEN):
+            role = dataclasses.replace(base, capabilities=("files", cap))
+            with self.assertRaises(ConfigError, msg=cap):
+                check_delegate_role("helper", role)
+        check_delegate_role("helper", dataclasses.replace(base, capabilities=("files", "read")))
+
+    def test_self_unknown_and_missing_role(self):
+        config = _configured(self)
+
+        def callback(ctx, prompt, profile):
+            raise AssertionError("must not dispatch")
+
+        ctx = self.context("worker")
+        ctx.config = config
+        ctx.role = config.roles["worker"]
+        engine = Engine(config, driver=ScriptDriver(callback))
+        with self.assertRaises(Denied):
+            engine.delegate(ctx, {"role": "worker", "task": "t"})
+        with self.assertRaises(ConfigError):
+            engine.delegate(ctx, {"role": "ghost", "task": "t"})
+        with self.assertRaises(Denied):
+            engine.delegate(ctx, {"task": "t"})
+        with self.assertRaises(Denied):
+            engine.delegate(ctx, {"role": "helper", "task": "  "})
+        configured = dataclasses.replace(config, delegate_role="helper")
+        record = Engine(configured, driver=ScriptDriver(callback)).delegate(ctx, {"task": "t"})
+        # No model ran: the default role resolves, then the slot/model path
+        # fails only if misconfigured; here the child dispatches and the
+        # callback assertion proves dispatch happened with the default.
+        self.assertIn("run", record)
+
+    def test_nested_delegation_is_disabled(self):
+        config = _configured(self)
+
+        def callback(ctx, prompt, profile):
+            if ctx.role.name == "worker":
+                response = ctx.handle("delegate", {"role": "helper", "task": "t"})
+                ctx.handle("finish", {"outcome": "continue", "summary": "child said: " + response["answer"],
+                                      "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+            else:
+                with self.assertRaises(Denied):
+                    ctx.handle("delegate", {"role": "helper", "task": "nested"})
+                ctx.handle("finish", {"outcome": "continue", "summary": "nested refused",
+                                      "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+
+        result = Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
+        self.assertEqual(result["status"], "completed")
+        self.assertIn("nested refused", result["finish"]["summary"])
+
+    def test_delegation_error_returns_result(self):
+        config = _configured(self)
+
+        def callback(ctx, prompt, profile):
+            if ctx.role.name == "worker":
+                response = ctx.handle("delegate", {"role": "helper", "task": "t"})
+                ctx.handle("finish", {"outcome": "continue", "summary": "child error: " + response["error"],
+                                      "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+            else:
+                raise RuntimeError("synthetic child failure")
+
+        result = Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
+        self.assertEqual(result["status"], "completed")
+        self.assertIn("synthetic child failure", result["finish"]["summary"])
+
+    def test_selector_delegate_resolves_without_inference(self):
+        import copy
+        from mizu.selection import validate_selectors
+        config = _configured(self)
+        spec = {"retry_seconds": 30, "rules": [{"candidates": [
+            {"profile": "primary"}, {"profile": "alternate"}]}]}
+        validate_selectors({"dynamic": spec}, config.profiles, self.file.parent)
+        roles = dict(config.roles)
+        helper = roles["helper"]
+        roles["helper"] = dataclasses.replace(helper, profile="", selector="dynamic")
+        config = dataclasses.replace(config, roles=roles, selectors={"dynamic": spec})
+
+        def callback(ctx, prompt, profile):
+            if ctx.role.name == "worker":
+                response = ctx.handle("delegate", {"role": "helper", "task": "t"})
+                ctx.handle("finish", {"outcome": "continue", "summary": "via " + response["profile"],
+                                      "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+            else:
+                ctx.handle("finish", {"outcome": "continue", "summary": "selected child",
+                                      "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+
+        result = Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
+        self.assertEqual(result["status"], "completed")
+        self.assertIn("via primary", result["finish"]["summary"])
+
+    def test_config_loads_delegate_capability_and_role(self):
+        from mizu.config import load
+        from mizu.errors import ConfigError
+        import io
+        text = self.file.read_text()
+        # delegate_role is a root key: insert before the first section
+        # (TOML has no end-of-section marker).
+        out = io.StringIO()
+        inserted = False
+        for line in text.splitlines(keepends=True):
+            if not inserted and line.startswith("["):
+                out.write('delegate_role = "searcher"\n')
+                inserted = True
+            out.write(line)
+        assert inserted
+        probe = out.getvalue()
+        self.file.write_text(probe)
+        loaded = load(self.file)
+        self.assertEqual(loaded.delegate_role, "searcher")
+        self.file.write_text(probe.replace('delegate_role = "searcher"', 'delegate_role = "ghost"'))
+        with self.assertRaises(ConfigError):
+            load(self.file)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -120,6 +120,30 @@ CONSULT_FORBIDDEN = frozenset({"exec", "experiment", "verify", "decide",
                                "research", "materialize"})
 
 
+#: Capabilities a delegation child must never hold. The child works in the
+#: caller's live workspace, so finish/decide/insight-write/vcs-mutating
+#: grants and redelegation stay with the caller: verification and publication
+#: never leave it. Implementation grants (files/read/exec/search/fetch and
+#: the child's own profile/selector/policy) stay operator choice.
+DELEGATE_FORBIDDEN = frozenset({"finish", "decide", "submit_insight", "revise_insight",
+                                "withdraw_insight", "attach_evidence", "delegate",
+                                "vcs_publish", "vcs_retire", "vcs_dispose"})
+
+
+def check_delegate_role(role_name: str, role) -> None:
+    """Single property-based delegation gate (fail closed before any model call).
+
+    Schema: role has ``capabilities``. Bounds: none beyond the capability
+    set. Trust: configuration, not model output. Retry/cancellation: n/a
+    (pre-model validation). Evidence: ConfigError names the role. Failure:
+    raises ConfigError before any model call or budget use.
+    """
+    if set(role.capabilities) & DELEGATE_FORBIDDEN:
+        raise ConfigError(
+            f"Delegation role {role_name} must not hold "
+            f"{sorted(DELEGATE_FORBIDDEN)}")
+
+
 def check_consult_role(role_name: str, role) -> None:
     """Single property-based consultation gate (runtime + smoke share this).
 
@@ -137,7 +161,7 @@ def check_consult_role(role_name: str, role) -> None:
 class Context:
     def __init__(self, config: Config, project: Project, role: Role, run_dir: Path,
                  snapshot: dict, workspace: Path, *, stop: threading.Event | None = None,
-                 consult=None, goal: str | None = None):
+                 consult=None, delegate=None, goal: str | None = None):
         self.config, self.project, self.role = config, project, role
         self.run_dir, self.snapshot, self.workspace = run_dir, snapshot, workspace
         self.goal = (project.goal if role.workspace == "write" else snapshot["goal"]) if goal is None else goal
@@ -154,6 +178,10 @@ class Context:
         self.runtime_usage: dict[int, dict] = {}
         self.runtime_models: dict[int, dict] = {}
         self.tool_count = 0
+        # Delegation spend sharing: the role whose per-run caps bind spend.
+        # Delegation children count against the caller's unit, so theirs
+        # points at the caller; everyone else spends their own role.
+        self.spend_role = None
         # Per-run spend-bound wrap-up: which bound was reached plus the spent
         # wrap-up allowance. Set when a requests/tools refusal fires, so the
         # unit can seal `bounded` instead of failing.
@@ -172,6 +200,7 @@ class Context:
         self.verification: dict | None = None
         self.commentary: dict | None = None
         self.consult = consult
+        self.delegate = delegate
         self.ephemeral = False
         self.sandbox = Sandbox(config, project.root, role.name, run_dir, cancel=self.tools_cancelled)
         self.web = Web(config.web, config.data / "web-cache", run_dir / "sources", role.name)
@@ -227,7 +256,7 @@ class Context:
                 if arguments.get("name") not in self.role.engine_tools:
                     raise Denied("Engine tool has no explicit grant")
                 self.tool_count += 1
-                if self.tool_count > role_tools_per_run(self.config, self.role):
+                if self.tool_count > role_tools_per_run(self.config, self.spend_role or self.role):
                     # Native tools are never wrap-up operations: record the
                     # bound and refuse without drawing the allowance.
                     self.bound_hit = self.bound_hit or "tools"
@@ -241,7 +270,7 @@ class Context:
                     if self.finished is not None:
                         raise Denied("No model requests are permitted after finish")
                     if sequence not in self.request_sequences:
-                        if self.request_count >= role_requests_per_run(self.config, self.role):
+                        if self.request_count >= role_requests_per_run(self.config, self.spend_role or self.role):
                             self.bound_hit = self.bound_hit or "requests"
                             if self.wrap_up_requests >= WRAP_UP_REQUESTS:
                                 raise LimitExceeded("Per-run provider request budget exhausted")
@@ -280,7 +309,7 @@ class Context:
             if self.bound_hit is not None and operation not in WRAP_UP_OPS:
                 raise Denied(self._bound_message())
             self.tool_count += 1
-            if self.tool_count > role_tools_per_run(self.config, self.role):
+            if self.tool_count > role_tools_per_run(self.config, self.spend_role or self.role):
                 self.bound_hit = self.bound_hit or "tools"
                 if operation not in WRAP_UP_OPS or self.wrap_up_tools >= WRAP_UP_TOOLS:
                     raise LimitExceeded("Per-run tool limit exceeded")
@@ -730,6 +759,11 @@ class Context:
             raise Denied("Nested consultation is disabled")
         return self.consult(self, args)
 
+    def _op_delegate(self, args: dict) -> dict:
+        if self.delegate is None:
+            raise Denied("Nested delegation is disabled")
+        return self.delegate(self, args)
+
     def _op_report(self, args: dict) -> dict:
         self.commentary = args
         write_json(self.run_dir / "commentary.json", args)
@@ -777,7 +811,7 @@ class Context:
         "sync": _op_sync, "vcs_read": _op_vcs_read, "vcs_publish": _op_vcs_publish,
         "vcs_retire": _op_vcs_retire, "vcs_dispose": _op_vcs_dispose,
         "materialize": _op_materialize,
-        "consult": _op_consult, "report": _op_report,
+        "consult": _op_consult, "delegate": _op_delegate, "report": _op_report,
         "research_read": _op_research_read, "research": _op_research,
         "finish": _op_finish,
     }
@@ -1716,7 +1750,7 @@ class Engine:
                     else:
                         project.snapshots.materialize(snapshot, workspace)
                 context = Context(self.config, project, role, run_dir, snapshot, workspace,
-                                  stop=self.stop, consult=self.consult)
+                                  stop=self.stop, consult=self.consult, delegate=self.delegate)
                 context.ephemeral = self.ephemeral
                 context.decision_events = decision_events
                 context.wait_events = wait_events
@@ -2046,6 +2080,119 @@ class Engine:
                 answer['error'],answer['error_truncated']=text_preview(result['error'],2048)
             answers.append(answer)
         return {**record,'answers':answers}
+
+
+    def delegate(self, parent: Context, args: dict) -> dict:
+        # One-shot implementation child in the caller's live workspace. The
+        # caller waits holding its workspace lock, so exactly one writer
+        # touches the tree; verification and publication stay with the
+        # caller. The child takes grants, profile or selector, and policy
+        # from the delegate role's own configuration, minus the forbidden
+        # set, plus a mechanism-provided terminal finish seal that returns
+        # to the caller. Spend counts against the caller's unit through the
+        # shared counters; nested delegation and consultation stay disabled
+        # so no spend escapes the unit.
+        role_name = args.get("role") or getattr(self.config, "delegate_role", "")
+        if not role_name:
+            raise Denied("Delegation needs an explicit role or a configured delegate_role")
+        if role_name == parent.role.name:
+            raise Denied("A role cannot delegate to itself")
+        if role_name not in self.config.roles:
+            raise ConfigError(f"Delegation role is not configured: {role_name}")
+        check_delegate_role(role_name, self.config.roles[role_name])
+        task = args.get("task") or ""
+        if not task.strip():
+            raise Denied("Delegation needs a self-contained task")
+        if self.config.limits.parallel_runs <= 1:
+            raise Busy("Delegation needs an execution slot in addition to its parent")
+        role = self.config.roles[role_name]
+        # The child works the caller's tree, so it inherits the caller's
+        # workspace value: live listing and writable execution for a writer
+        # caller, a consistent read view otherwise. The role itself must
+        # not hold finish (checked above); the child unit still needs a
+        # terminal seal, provided here by the mechanism.
+        role = dataclasses.replace(role, workspace=parent.role.workspace,
+                                   capabilities=tuple(dict.fromkeys([*role.capabilities, "finish"])))
+        capture = parent.project.snapshots.capture_files(parent.workspace)
+        snap = parent.project.snapshots.create(capture, goal=parent.goal, state=parent.snapshot["state"],
+                                              run=parent.run_dir.name, outcome="wait", summary="Delegation input")
+        run_dir = parent.project.root / "runs" / uuid.uuid4().hex
+        ctx = None
+        profile = ""
+        try:
+            with slot(self.config):
+                mkdir(run_dir)
+                if role.selector:
+                    # Config-only gate like consultation: the child is
+                    # ephemeral (slot only), so any configured role
+                    # qualifies; resolve without consuming routing.
+                    from .classification import prepare as _prepare_selection
+                    decision = _prepare_selection(
+                        self, parent.project, role,
+                        parent.project.snapshots.get(), None, preview=True)
+                    profile = decision.get("profile") or ""
+                    if not profile:
+                        raise Denied("Delegation selector has no selectable profile: "
+                                     + str(decision.get("reason") or "waiting"))
+                    role = dataclasses.replace(role, profile=profile, selector="")
+                else:
+                    profile = role.profile
+                write_json(run_dir / "started.json", {"run": run_dir.name,
+                           "parent_run": parent.run_dir.name, "delegation": True,
+                           "role": role.name, "profile": profile, "snapshot": snap["id"],
+                           "workspace": str(parent.workspace), "started_at": now()})
+                driver = self.resolve(profile)
+                if getattr(driver, "requires_sandbox", True) and any(
+                        c in role.capabilities for c in ("exec", "experiment", "verify")):
+                    container_runtime(self.config)
+                    cleanup(self.config, parent.project.root, role_name)
+                ctx = Context(self.config, parent.project, role,
+                              run_dir, snap, parent.workspace, stop=parent.stop, goal=parent.goal)
+                ctx.ephemeral = True
+                ctx.consult = None
+                ctx.spend_role = parent.role
+                ctx.request_count = parent.request_count
+                ctx.tool_count = parent.tool_count
+                ctx.wrap_up_requests = parent.wrap_up_requests
+                ctx.wrap_up_tools = parent.wrap_up_tools
+                ctx.deadline = min(ctx.deadline, parent.deadline)
+                try:
+                    model = driver.execute(ctx, prompt_for(ctx) + "\n\nTask:\n" + task
+                                           + "\n\nCall finish once with a result summary (and short state) "
+                                           + "when done; that seal returns to the caller, it publishes nothing.")
+                finally:
+                    parent.request_count = ctx.request_count
+                    parent.tool_count = ctx.tool_count
+                    parent.wrap_up_requests = ctx.wrap_up_requests
+                    parent.wrap_up_tools = ctx.wrap_up_tools
+                if ctx.cancelled():
+                    raise Cancelled("Delegation cancelled before completion")
+                if ctx.finished is None:
+                    raise Denied("Delegation did not finish")
+                result = {"run": run_dir.name, "parent_run": parent.run_dir.name,
+                          "role": role.name, "status": "completed", "finished_at": now(),
+                          "profile": profile, "snapshot": snap["id"],
+                          "answer": ctx.finished["summary"], "model": model}
+                write_json(run_dir / "delegation.json", result)
+                record = {"task": task, "role": role.name, "run": run_dir.name,
+                          "snapshot": snap["id"], "profile": profile, "answer": ctx.finished["summary"]}
+                write_json(parent.run_dir / "delegations" / f"{uuid.uuid4().hex}.json", record)
+                return record
+        except Exception as exc:
+            result = {"run": run_dir.name, "parent_run": parent.run_dir.name,
+                      "role": role_name, "status": "interrupted", "finished_at": now(),
+                      "profile": profile, "snapshot": snap["id"], "error": str(exc)}
+            if ctx is not None and hasattr(ctx, "model_evidence"):
+                result["model"] = ctx.model_evidence
+            try:
+                mkdir(run_dir)
+                write_json(run_dir / "error.json", result)
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
+            return result
+        finally:
+            if ctx is not None:
+                ctx.closed = True
 
 
 def _on_change_observed(cursor: dict, snapshot: dict) -> bool:

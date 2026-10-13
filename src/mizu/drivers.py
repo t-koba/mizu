@@ -76,7 +76,7 @@ def admit_invocation(context, *, unit: str) -> dict:
         raise Cancelled("Run cancelled before admission")
     if getattr(context, "invocation_admitted", False):
         return {"admitted": True}
-    if context.request_count >= role_requests_per_run(context.config, context.role):
+    if context.request_count >= role_requests_per_run(context.config, context.spend_role or context.role):
         from .runtime import WRAP_UP_REQUESTS
         context.bound_hit = context.bound_hit or "requests"
         if getattr(context, "wrap_up_requests", 0) >= WRAP_UP_REQUESTS:
