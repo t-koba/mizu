@@ -76,12 +76,11 @@ def admit_invocation(context, *, unit: str) -> dict:
         raise Cancelled("Run cancelled before admission")
     if getattr(context, "invocation_admitted", False):
         return {"admitted": True}
-    if context.request_count >= role_requests_per_run(context.config, context.spend_role or context.role):
+    over = context.request_count >= role_requests_per_run(context.config, context.spend_role or context.role)
+    if over:
         from .runtime import WRAP_UP_REQUESTS
-        context.bound_hit = context.bound_hit or "requests"
         if getattr(context, "wrap_up_requests", 0) >= WRAP_UP_REQUESTS:
             raise LimitExceeded("Per-run provider request budget exhausted")
-        context.wrap_up_requests = getattr(context, "wrap_up_requests", 0) + 1
     project_name = getattr(getattr(context, "project", None), "name", "")
     try:
         Budget(context.config.data / "budget", context.config.limits.daily_requests,
@@ -104,6 +103,10 @@ def admit_invocation(context, *, unit: str) -> dict:
         if hasattr(context,'model_evidence'):
             context.model_evidence.update(requests_known=False,admission_status='unconfirmed')
         raise
+    if over:
+        # Wrap state records only after daily admission succeeds.
+        context.bound_hit = context.bound_hit or "requests"
+        context.wrap_up_requests = getattr(context, "wrap_up_requests", 0) + 1
     context.request_count += 1
     context.invocation_admitted = True
     if hasattr(context,"model_evidence"):

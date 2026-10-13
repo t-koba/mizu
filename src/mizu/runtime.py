@@ -270,11 +270,10 @@ class Context:
                     if self.finished is not None:
                         raise Denied("No model requests are permitted after finish")
                     if sequence not in self.request_sequences:
-                        if self.request_count >= role_requests_per_run(self.config, self.spend_role or self.role):
-                            self.bound_hit = self.bound_hit or "requests"
-                            if self.wrap_up_requests >= WRAP_UP_REQUESTS:
-                                raise LimitExceeded("Per-run provider request budget exhausted")
-                            self.wrap_up_requests += 1
+                        over = self.request_count >= role_requests_per_run(
+                            self.config, self.spend_role or self.role)
+                        if over and self.wrap_up_requests >= WRAP_UP_REQUESTS:
+                            raise LimitExceeded("Per-run provider request budget exhausted")
                         try:
                             Budget(self.config.data / "budget", self.config.limits.daily_requests,
                                    self.config.limits.retention_days,
@@ -293,6 +292,12 @@ class Context:
                             if hasattr(self, 'model_evidence'):
                                 self.model_evidence.update(requests_known=False, admission_status='unconfirmed')
                             raise
+                        if over:
+                            # Wrap state records only after daily admission
+                            # succeeds: an infrastructure refusal must not
+                            # burn the allowance or mislabel the context.
+                            self.bound_hit = self.bound_hit or "requests"
+                            self.wrap_up_requests += 1
                         self.request_sequences.add(sequence)
                         self.request_count += 1
                         if hasattr(self, "model_evidence"):

@@ -675,6 +675,30 @@ class WrapUpTests(Fixture):
         self.assertEqual(snap["outcome"], "bounded")
         self.assertTrue(should_run(self.project, snap, current_time=time.time()))
 
+    def test_daily_refusal_at_per_run_cap_burns_nothing(self):
+        import dataclasses
+        from mizu.drivers import admit_invocation
+        from mizu.errors import InfraExceeded
+        roles = dict(self.config.roles)
+        roles["worker"] = dataclasses.replace(roles["worker"], requests_per_run=1)
+        config = dataclasses.replace(
+            self.config, roles=roles,
+            limits=dataclasses.replace(self.config.limits, daily_requests=0))
+        self.project.config = config
+        ctx = self.context("worker")
+        ctx.config = config
+        ctx.role = config.roles["worker"]
+        ctx.request_count = 1
+        with self.assertRaises(InfraExceeded):
+            ctx.handle("_budget", {"sequence": 99})
+        self.assertIsNone(ctx.bound_hit)
+        self.assertEqual(ctx.wrap_up_requests, 0)
+        self.assertTrue(ctx.admission_wait)
+        with self.assertRaises(InfraExceeded):
+            admit_invocation(ctx, unit="request")
+        self.assertIsNone(ctx.bound_hit)
+        self.assertEqual(ctx.wrap_up_requests, 0)
+
     def test_daily_budget_refusal_is_not_wrap_up(self):
         import dataclasses
         from mizu.errors import InfraExceeded
