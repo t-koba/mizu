@@ -527,6 +527,7 @@ class PromptOrderTests(Fixture):
         self.assertEqual(list(json.loads(prompt_for(ctx)).keys()),
                          ["goal", "published_snapshot", "recent_snapshots",
                           "workspace", "workspace_mode", "pending_insights",
+                          "open_insights",
                           "decision_events", "decision_task", "wait_events", "obligations",
                           "acceptance_commands", "research_state",
                           "ci_branch", "ci_failures", "previous_report", "now",
@@ -534,7 +535,7 @@ class PromptOrderTests(Fixture):
         self.assertEqual(
             list(json.loads(prompt_delta_for(ctx, [])).keys()),
             ["goal_digest", "published_snapshot", "snapshot_delta",
-             "pending_insights", "decision_events", "decision_task", "wait_events", "obligations",
+             "pending_insights", "open_insights", "decision_events", "decision_task", "wait_events", "obligations",
              "research_state", "workspace", "workspace_mode",
              "acceptance_commands", "ci_branch", "ci_failures", "previous_report",
              "now", "timezone"])

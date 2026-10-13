@@ -262,3 +262,67 @@ class SnapshotRevivalTests(Fixture):
         revived = self.project.snapshots.get(ids[0])
         self.assertEqual(revived["id"], ids[0])
         self.assertEqual(revived["summary"], "snap 0")
+
+
+def _submit(fixture, source, title):
+    return fixture.project.insights.submit(
+        source=source, title=title, body="body",
+        base_snapshot=fixture.project.snapshots.get()["id"])
+
+
+class SessionBacklogTests(Fixture):
+    def test_full_prompt_states_open_backlog(self):
+        ids = {_submit(self, "worker", f"Finding {i}")["id"] for i in range(2)}
+        capture = Capture()
+        result = Engine(self.config, driver=capture).run(self.project, "worker")
+        decoded = json.loads(capture.prompts[0])
+        self.assertIn("goal", decoded)
+        stated = decoded["open_insights"]
+        self.assertEqual(set(stated["ids"]), ids)
+        self.assertEqual(stated["total"], 2)
+        self.assertFalse(stated["truncated"])
+        self.assertEqual(projection(self, result["run"])["open_insights"], 2)
+
+    def test_delta_with_no_new_offers_still_states_backlog(self):
+        from mizu.engine_config import write_prompt_state
+        from mizu.runtime import session_prompt
+        ids = {_submit(self, "worker", f"Finding {i}")["id"] for i in range(2)}
+        ctx = self.context("worker")
+        path = save_worker_session(self, {"tokens": 0})
+        # Mimic the post-run state: same snapshot, same inbox generation, so
+        # the delta offers nothing new -- the reported empty-backlog case.
+        write_prompt_state(path.parent, snapshot=ctx.snapshot["id"],
+                           inbox_generation=self.project.insights.generation())
+        prompt, mode, _, _, _ = session_prompt(ctx, ctx.role, ctx.run_dir)
+        decoded = json.loads(prompt)
+        self.assertEqual(mode, "delta")
+        self.assertEqual(decoded["pending_insights"], [])
+        stated = decoded["open_insights"]
+        self.assertEqual(set(stated["ids"]), ids)
+        self.assertEqual(stated["total"], 2)
+        self.assertFalse(stated["truncated"])
+
+    def test_open_backlog_truncation_is_explicit(self):
+        import dataclasses
+        from mizu.runtime import prompt_delta_for
+        self.config = dataclasses.replace(
+            self.config, limits=dataclasses.replace(self.config.limits, pending_insights=2))
+        for i in range(3):
+            _submit(self, "worker", f"Finding {i}")
+        stated = json.loads(prompt_delta_for(self.context("worker"), []))["open_insights"]
+        self.assertEqual(len(stated["ids"]), 2)
+        self.assertEqual(stated["total"], 3)
+        self.assertTrue(stated["truncated"])
+
+    def test_open_backlog_gated_by_capability(self):
+        from mizu.runtime import prompt_delta_for, prompt_for
+        _submit(self, "worker", "Finding")
+        stated = json.loads(prompt_delta_for(self.context("consult"), []))["open_insights"]
+        self.assertEqual(stated, {"ids": [], "total": 0, "truncated": False})
+        full = json.loads(prompt_for(self.context("consult")))
+        self.assertEqual(full["pending_insights"], [])
+        self.assertEqual(full["open_insights"], {"ids": [], "total": 0, "truncated": False})
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -249,9 +249,11 @@ is implemented. Operators can change profiles at a boundary, and Worker can
 request independent consultations against the same snapshot. Consultations
 share budget/slot limits and fail independently; they cannot edit code.
 A resumed persistent session receives only an append-only delta (goal pin,
-current snapshot pin, proposals not yet offered), never the full goal and
-history again; a new, compacted-away, or rotated session receives the full
-prompt. Rotation is operator policy via `[limits] session_max_tokens`,
+current snapshot pin, proposals not yet offered, plus an `open_insights`
+statement of the still-undecided backlog with ids, total, and explicit
+truncation so already-offered insights never read as done), never the full
+goal and history again; a new, compacted-away, or rotated session receives
+the full prompt, which states the same backlog alongside the full entries. Rotation is operator policy via `[limits] session_max_tokens`,
 `session_max_cost_usd`, and `session_max_age_seconds` (0 disables each, age bounds
 conversation lifetime from its stable creation surviving same-id saves):
 a due rotation removes `session.json` so the next dispatch mints a fresh

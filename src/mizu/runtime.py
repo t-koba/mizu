@@ -1210,11 +1210,34 @@ def _decision_task(context: Context) -> str | None:
             " Handling is defined by the role policy.")
 
 
+def _open_backlog(context: Context, caps: set) -> dict:
+    """Still-undecided backlog statement for prompts (never raises).
+
+    Schema: ``{"ids", "total", "truncated"}`` over the same bounded pending
+    set the full prompt carries as entries, so a delta that omits
+    already-offered entries still states the open backlog instead of reading
+    as empty. Bounds: ids follow ``[limits] pending_insights`` (newest kept)
+    with explicit ``truncated``. Trust: local recorded state only.
+    """
+    stated: dict = {"ids": [], "total": 0, "truncated": False}
+    if "insights" not in caps and "decide" not in caps:
+        return stated
+    try:
+        backlogged = context.project.insights.projection(
+            limit=context.config.limits.pending_insights)
+        return {"ids": [item["id"] for item in backlogged["items"]],
+                "total": backlogged["total"],
+                "truncated": backlogged["truncated"]}
+    except Exception:
+        return stated
+
+
 def prompt_for(context: Context) -> str:
     caps = set(context.role.capabilities)
     # Mechanism enforces grants, not policy choice: only capability-gated,
     # already-recorded context is offered. `pending_insights` count follows the
-    # operator-selected `[limits] pending_insights` bound (newest kept);
+    # operator-selected `[limits] pending_insights` bound (newest kept), and
+    # `open_insights` states the same bounded backlog with explicit total;
     # `recent_snapshots` follows `[limits] prompt_snapshots`. Exact snapshot
     # references are always pinned. Publication/commit and `should_run`
     # transitions below are the fixed single-writer contract, not policy.
@@ -1236,6 +1259,7 @@ def prompt_for(context: Context) -> str:
                                                 context.snapshot["id"], context.config.limits.prompt_snapshots)],
                        "workspace": "/workspace", "workspace_mode": context.role.workspace,
                        "pending_insights": pending,
+                       "open_insights": _open_backlog(context, caps),
                        "decision_events": list(getattr(context, "decision_events", []) or []),
                        "decision_task": _decision_task(context),
                        "wait_events": list(getattr(context, "wait_events", []) or []),
@@ -1255,21 +1279,25 @@ def prompt_delta_for(context: Context, pending: list) -> str:
 
     Schema: ``goal_digest`` pin plus the pinned ``published_snapshot`` and a
     small ``snapshot_delta`` (previous/current ids), then only the pending
-    proposals not yet offered, workspace markers, capability-gated acceptance
+    proposals not yet offered, an ``open_insights`` statement of the still
+    undecided backlog (ids plus total, so an already-offered insight never
+    reads as done), workspace markers, capability-gated acceptance
     commands, and a capability-gated ``previous_report`` preview for roles
     holding ``report``. The full goal text and ``recent_snapshots`` history
     are never repeated: the provider session already holds them. Key order is
     fixed (pins first) so the stable prefix keeps working caches warm.
-    Bounds: pending follows ``[limits] pending_insights``; the delta carries
-    no workspace file contents and no history array, so resumed-unit bytes
-    stay flat as history grows apart from the fixed previous-report preview
-    (at most ``report.PREVIOUS_REPORT_BYTES``). Trust: local recorded state
-    only, never model input. Retry/cancellation: bounded local reads only
-    (artifact pointer plus one file prefix); ``previous()`` never raises,
-    so an unreadable artifact reads as no previous edition. Evidence: the
-    dispatching run records ``prompt_mode=delta`` and ``prompt_bytes`` in
-    ``prompt_projection.json``. Failure: never raises for missing state
-    (callers fall back to the full prompt).
+    Bounds: pending and the open backlog both follow
+    ``[limits] pending_insights`` (newest kept; ``truncated`` says so
+    explicitly); the delta carries no workspace file contents and no history
+    array, so resumed-unit bytes stay flat as history grows apart from the
+    fixed previous-report preview (at most ``report.PREVIOUS_REPORT_BYTES``).
+    Trust: local recorded state only, never model input. Retry/cancellation:
+    bounded local reads only (artifact pointer plus one file prefix);
+    ``previous()`` never raises, so an unreadable artifact reads as no
+    previous edition. Evidence: the dispatching run records
+    ``prompt_mode=delta`` and ``prompt_bytes`` in ``prompt_projection.json``.
+    Failure: never raises for missing state (callers fall back to the full
+    prompt).
     """
     caps = set(context.role.capabilities)
     acceptance = list(context.project.verify) if "verify" in caps else []
@@ -1277,12 +1305,14 @@ def prompt_delta_for(context: Context, pending: list) -> str:
         ci_failures = current_ci_failures(context.project) if "vcs_read" in caps else None
     except Exception:
         ci_failures = None
+    open_backlog = _open_backlog(context, caps)
     return json.dumps({"goal_digest": context.goal_digest,
                        "published_snapshot": {k: context.snapshot[k] for k in (
                            "id", "code_digest", "created_at", "state", "summary", "verification")},
                        "snapshot_delta": {"id": context.snapshot["id"],
                                           "code_digest": context.snapshot["code_digest"]},
                        "pending_insights": pending,
+                       "open_insights": open_backlog,
                        "decision_events": list(getattr(context, "decision_events", []) or []),
                        "decision_task": _decision_task(context),
                        "wait_events": list(getattr(context, "wait_events", []) or []),
@@ -1638,6 +1668,7 @@ class Engine:
                            {"run": run_id, "role": role_name, "snapshot": snapshot["id"],
                             "recent_snapshots": len(decoded.get("recent_snapshots", [])),
                             "pending_insights": len(decoded.get("pending_insights", [])),
+                            "open_insights": (decoded.get("open_insights") or {}).get("total", 0),
                             "decision_events": len(decoded.get("decision_events", [])),
                             "wait_events": len(decoded.get("wait_events", [])),
                             "acceptance_commands": len(decoded.get("acceptance_commands", [])),
