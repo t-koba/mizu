@@ -289,9 +289,13 @@ are accepted; none of the current adapters derives them from prose or headers.
 Cancellation, native turn/cost/tool-abort limits, invalid handshakes, missing seals and local authorization failures
 do not trigger selector actions.
 
-A matched error action saves its evidence and returns `status = "deferred"`;
-it does not automatically replay the work or increment the ordinary consecutive
-failure brake. An unmatched failure follows the existing health/pause behavior.
+A matched error action saves its evidence and blocks the failed profile or
+group; the same dispatch then continues on the next eligible candidate, one
+attempt each bounded by the candidate count, and never replays the blocked
+profile within the run. Only when no candidate remains eligible does the unit
+return `status = "deferred"`. Neither the fallback attempts nor the deferral
+increment the ordinary consecutive failure brake, which counts dispatches; a
+completed fallback resets it. An unmatched failure follows the existing health/pause behavior.
 `status = "waiting"` means no main-model invocation was made. Both results
 provide `next_evaluation_at`. The daemon uses interruptible waits and rechecks
 at least at its configured idle cadence so external updates can be noticed.

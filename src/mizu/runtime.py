@@ -1722,12 +1722,11 @@ class Engine:
                             raise Cancelled("Run stopped before fallback dispatch")
                         selection_retries.append({"profile": decision["profile"],
                                                   "error": str(exc)})
-                        try:
-                            reselected = prepare(self, project, selection_role, snapshot, attributes)
-                        except Cancelled:
-                            raise
-                        except Exception:
-                            raise exc
+                        # A reselection fault (corrupt state, invalid selector)
+                        # is a local invariant failure: it propagates as itself,
+                        # chained to the model failure, never relabelled as a
+                        # transient provider error.
+                        reselected = prepare(self, project, selection_role, snapshot, attributes)
                         if not reselected.get("profile"):
                             # Nothing eligible under the recorded blocks: fail
                             # on the last attempt as before (deferred below),
@@ -1847,6 +1846,7 @@ class Engine:
                 if handled:
                     return {"run": run_id, "role": role_name, "status": "deferred",
                             "error": str(exc), "selection": decision, "selection_action": handled,
+                            **({"selection_retries": selection_retries} if selection_retries else {}),
                             "next_evaluation_at": time.time() + self.config.limits.cooldown_seconds}
                 if not is_deferred(exc, context):
                     with contextlib.suppress(OSError, ValueError, TypeError):

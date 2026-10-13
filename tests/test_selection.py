@@ -211,6 +211,30 @@ class SelectionTests(SelectionFixture):
         self.assertEqual(failure['selection']['profile'], 'alternate')
         self.assertEqual([retry['profile'] for retry in failure['selection_retries']],
                          ['primary', 'alternate'])
+        self.assertEqual([retry['profile'] for retry in failed['selection_retries']],
+                         ['primary', 'alternate'])
+
+    def test_runtime_reselection_fault_propagates_unmasked(self):
+        import mizu.classification
+        role, _ = self.setup_selection()
+        real_prepare = mizu.classification.prepare
+        calls = []
+        def flaky(engine, project, selection_role, snapshot, attributes):
+            calls.append(1)
+            if len(calls) == 1:
+                return real_prepare(engine, project, selection_role, snapshot, attributes)
+            raise ConfigError('synthetic corrupt selection state')
+        def callback(ctx, prompt, profile):
+            raise ModelFailure('custom', code='synthetic-exhausted')
+        with patch('mizu.classification.prepare', side_effect=flaky):
+            with self.assertRaises(ConfigError) as caught:
+                Engine(self.config, driver=ScriptDriver(callback)).run(self.project, role.name)
+        self.assertIsInstance(caught.exception.__context__, ModelFailure)
+        # The provider block was recorded for the failed attempt, but the run
+        # surfaces the local fault, not a provider deferral.
+        saved = State(self.config).read()
+        self.assertIn('group:shared', saved['blocks'])
+        self.assertEqual(saved['history']['primary']['status'], 'failed')
 
     def test_runtime_unmatched_error_keeps_single_attempt(self):
         role, _ = self.setup_selection()
