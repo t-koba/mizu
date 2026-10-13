@@ -515,6 +515,46 @@ class InsightRetrievalTests(Fixture):
         seen = [item["id"] for page in (first, overflow) for item in page["insights"]]
         self.assertEqual(len(set(seen)), 35)
 
+    def test_small_pages_enumerate_each_pending_item_once(self):
+        snap = self.project.snapshots.get()["id"]
+        submitted = [self.project.insights.submit(source="searcher", title=f"Idea {n}",
+                                                  body="Evidence", base_snapshot=snap)["id"]
+                     for n in range(5)]
+        ctx = self.context("worker")
+        seen, offset, pages = [], 0, 0
+        while True:
+            response = ctx.handle("insights", {"offset": offset, "limit": 2})
+            self.assertEqual(response["total"], 5)
+            seen.extend(item["id"] for item in response["insights"])
+            pages += 1
+            if response["next_offset"] is None:
+                break
+            offset = response["next_offset"]
+            self.assertLess(pages, 10)
+        self.assertEqual(sorted(seen), sorted(submitted))
+        self.assertEqual(len(set(seen)), 5)
+
+    def test_small_pages_enumerate_each_decided_item_once(self):
+        snap = self.project.snapshots.get()["id"]
+        ids = [self.project.insights.submit(source="searcher", title=f"Idea {n}",
+                                            body="Evidence", base_snapshot=snap)["id"]
+               for n in range(4)]
+        for insight_id in ids[:3]:
+            self.project.insights.decide(insight_id, "accept", "sequenced", "", "test", expected_rev=1)
+        ctx = self.context("worker")
+        seen, offset, pages = [], 0, 0
+        while True:
+            response = ctx.handle("insights", {"action": "accept", "offset": offset, "limit": 1})
+            self.assertEqual(response["total"], 3)
+            seen.extend(item["id"] for item in response["insights"])
+            pages += 1
+            if response["next_offset"] is None:
+                break
+            offset = response["next_offset"]
+            self.assertLess(pages, 10)
+        self.assertEqual(sorted(seen), sorted(ids[:3]))
+        self.assertEqual(len(set(seen)), 3)
+
     def test_accepted_work_lists_by_action_after_leaving_pending(self):
         snap = self.project.snapshots.get()["id"]
         ids = [self.project.insights.submit(source="searcher", title=f"Idea {n}",
