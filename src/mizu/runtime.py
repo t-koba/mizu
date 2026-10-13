@@ -1045,19 +1045,246 @@ def wake_ci_failures(project, config=None, *, limit: int = MAX_CI_FAILURES) -> l
         return []
 
 
-def _ci_due_for(project, project_config, role) -> list:
+#: Default re-wake interval for an unchanged red (seconds). An unchanged
+#: red must still re-wake eventually so it can never park a writer forever.
+DEFAULT_CI_REWAKE_SECONDS = 1800
+#: Version of the per-role CI wake record.
+CI_WAKE_VERSION = 1
+
+
+def _ci_rewake_seconds(project_config) -> float:
+    """Configured ``[vcs] ci_rewake_seconds`` (never raises).
+
+    Schema: operator config. Trust: configuration. Failure: never raises;
+    missing or garbage reads as the 1800 default since tests build vcs
+    dicts by hand.
+    """
+    try:
+        settings = getattr(project_config, "vcs", None)
+        if settings is None and isinstance(project_config, dict):
+            settings = project_config
+        raw = settings.get("ci_rewake_seconds", 1800) if isinstance(settings, dict) else 1800
+    except Exception:
+        return 1800.0
+    try:
+        if type(raw) is bool:
+            return 1800.0
+        value = float(raw) if isinstance(raw, (int, float)) else None
+        if value is None:
+            return 1800.0
+        import math as _math
+        if not _math.isfinite(value) or not 60 <= value <= 86400:
+            return 1800.0
+        return value
+    except Exception:
+        return 1800.0
+
+
+def _ci_wake_path(project, role_name):
+    """Per-role CI wake record path (None when unusable, never raises)."""
+    try:
+        name = str(role_name)
+        if not name or "/" in name or "\\" in name or "\x00" in name or ".." in name:
+            return None
+        return project.root / f"vcs-ci-wake-{name}.json"
+    except Exception:
+        return None
+
+
+def read_ci_wake(project, role_name):
+    """Last CI wake record for one role (never raises).
+
+    Schema: ``{'version': 1, 'branch': str, 'fact': [{'sha', 'check'}],
+    'snapshot': str, 'at': float}``. Missing or malformed reads as None;
+    wake suppression must never break dispatch.
+    """
+    try:
+        path = _ci_wake_path(project, role_name)
+        if path is None:
+            return None
+        raw = read_json(path, None)
+        if raw is None or not isinstance(raw, dict):
+            return None
+        return raw
+    except Exception:
+        return None
+
+
+def write_ci_wake(project, role_name, branch, present, snapshot_id, now=None) -> None:
+    """Record that one role observed the current red (never raises).
+
+    Schema: ``branch`` is the ``ci_branch`` string, ``present`` is the
+    presence list (``[{branch, sha, check}]``), ``snapshot_id`` is the
+    published head observed, ``now`` is epoch seconds. Malformed inputs
+    write nothing; wake suppression must never break dispatch.
+    """
+    try:
+        path = _ci_wake_path(project, role_name)
+        if path is None:
+            return
+        if not isinstance(branch, str) or not branch:
+            return
+        if not isinstance(snapshot_id, str) or not snapshot_id:
+            return
+        try:
+            at = time.time() if now is None else float(now)
+        except Exception:
+            return
+        import math as _math
+        if not _math.isfinite(at):
+            return
+        fact = []
+        try:
+            for entry in present or []:
+                if not isinstance(entry, dict):
+                    continue
+                sha = entry.get("sha")
+                check = entry.get("check")
+                if not isinstance(sha, str) or not isinstance(check, str):
+                    continue
+                fact.append({"sha": sha, "check": check})
+        except Exception:
+            return
+        fact.sort(key=lambda item: (item["sha"], item["check"]))
+        write_json(path, {"version": CI_WAKE_VERSION, "branch": branch,
+                          "fact": fact, "snapshot": snapshot_id, "at": at})
+    except Exception:
+        return
+
+
+def _ci_due(present, record, snapshot_id, now, rewake_seconds) -> bool:
+    """True when a present red is due to wake (fail open, never raises).
+
+    Schema: ``present`` is the ``wake_ci_failures`` list, ``record`` is the
+    last :func:`read_ci_wake` dict (or None), ``snapshot_id`` is the current
+    published head, ``now`` is epoch seconds. Due on first sighting (no
+    record), a changed branch/fact (new failing sha or check, including a
+    branch switch), a moved head, or an elapsed ``rewake_seconds`` interval.
+    An empty presence is never due; a malformed record/at reads as due so a
+    red is never silently deferred.
+    """
+    try:
+        if not present:
+            return False
+        if not isinstance(record, dict):
+            return True
+        try:
+            current_branch = present[0].get("branch") if isinstance(present[0], dict) else None
+        except Exception:
+            return True
+        record_branch = record.get("branch")
+        if not isinstance(current_branch, str) or not isinstance(record_branch, str):
+            return True
+        if record_branch != current_branch:
+            return True
+        if record.get("version") != CI_WAKE_VERSION:
+            return True
+        try:
+            current_fact = sorted(
+                [{"sha": entry["sha"], "check": entry["check"]}
+                 for entry in present if isinstance(entry, dict)
+                 and isinstance(entry.get("sha"), str) and isinstance(entry.get("check"), str)],
+                key=lambda item: (item["sha"], item["check"]))
+        except Exception:
+            return True
+        raw_fact = record.get("fact")
+        if not isinstance(raw_fact, list):
+            return True
+        try:
+            record_fact = []
+            for entry in raw_fact:
+                if not isinstance(entry, dict):
+                    return True
+                sha = entry.get("sha")
+                check = entry.get("check")
+                if not isinstance(sha, str) or not isinstance(check, str):
+                    return True
+                record_fact.append({"sha": sha, "check": check})
+            record_fact.sort(key=lambda item: (item["sha"], item["check"]))
+        except Exception:
+            return True
+        if record_fact != current_fact:
+            return True
+        record_snapshot = record.get("snapshot")
+        if not isinstance(record_snapshot, str) or not isinstance(snapshot_id, str):
+            return True
+        if record_snapshot != snapshot_id:
+            return True
+        try:
+            at = record.get("at")
+            if type(at) is bool:
+                return True
+            at_value = float(at)
+            now_value = float(now)
+            rewake_value = float(rewake_seconds)
+            import math as _math
+            if not _math.isfinite(at_value) or not _math.isfinite(now_value):
+                return True
+            if not _math.isfinite(rewake_value):
+                return True
+        except Exception:
+            return True
+        return (now_value - at_value) >= rewake_value
+    except Exception:
+        return True
+
+
+def _ci_due_for(project, project_config, role, snapshot_id=None, now=None) -> list:
     """Cached CI failures that may admit one role (never raises).
 
     A red ``ci_branch`` wakes only roles with ``ci_wake`` (writable roles by
     default): event-triggered or unchanged-code dispatch for any other role
     exits cheaply instead of spending a run on CI it never subscribed to.
+    The red stays visible via ``current_ci_failures`` prompts, but it wakes
+    only on change: a new failing sha/check, a moved published head, or an
+    elapsed ``ci_rewake_seconds`` interval. Without ``snapshot_id``/``now``
+    this falls back to presence (as before) so project-level checks stay
+    conservative.
     """
     try:
-        if not getattr(role, "ci_wake", False):
+        if isinstance(role, str):
+            role_name = role
+            if not _ci_wake_enabled(project_config, role):
+                return []
+        else:
+            try:
+                role_name = getattr(role, "name", None)
+            except Exception:
+                role_name = None
+            try:
+                if not bool(getattr(role, "ci_wake", False)):
+                    return []
+            except Exception:
+                return []
+        try:
+            present = wake_ci_failures(project, project_config)
+        except Exception:
             return []
-        return wake_ci_failures(project, project_config)
+        if not present:
+            return []
+        if snapshot_id is None or now is None:
+            return present
+        if not isinstance(role_name, str) or not role_name:
+            return present
+        try:
+            rewake = _ci_rewake_seconds(project_config)
+        except Exception:
+            rewake = 1800.0
+        try:
+            record = read_ci_wake(project, role_name)
+        except Exception:
+            return present
+        try:
+            if _ci_due(present, record, snapshot_id, now, rewake):
+                return present
+            return []
+        except Exception:
+            return present
     except Exception:
-        return []
+        try:
+            return wake_ci_failures(project, project_config)
+        except Exception:
+            return []
 
 
 def _ci_wake_enabled(project_config, role_name) -> bool:
@@ -1608,7 +1835,12 @@ class Engine:
                 substantive_events = [e for e in decision_events
                                       if isinstance(e, dict) and e.get("action") != "defer"]
             try:
-                ci_failures = _ci_due_for(project, self.config, role)
+                ci_present = _ci_due_for(project, self.config, role)
+            except Exception:
+                ci_present = []
+            try:
+                _ci_snapshot_id = snapshot.get("id") if isinstance(snapshot, dict) else None
+                ci_failures = _ci_due_for(project, self.config, role, _ci_snapshot_id, time.time())
             except Exception:
                 ci_failures = []
             if event_trigger and not substantive_events and not wait_events and not ci_failures:
@@ -1675,12 +1907,22 @@ class Engine:
                     admission = "change"
                 else:
                     admission = "schedule"
+                try:
+                    _ci_branch = self.config.vcs.get("ci_branch") if isinstance(getattr(self.config, "vcs", None), dict) else None
+                except Exception:
+                    _ci_branch = None
+                if ci_present:
+                    try:
+                        _ci_head = snapshot["id"] if isinstance(snapshot, dict) else None
+                        write_ci_wake(project, role_name, _ci_branch, ci_present, _ci_head, time.time())
+                    except Exception:
+                        pass
                 write_json(run_dir / "started.json", {"run": run_id, "role": role_name,
                             "snapshot": snapshot["id"], "started_at": now(),
                             "admission": admission, "decision_events": len(decision_events),
                             "wait_events": len(wait_events),
                             "obligation_events": len(obligations),
-                            "ci_failures": len(ci_failures),
+                            "ci_failures": len(ci_present),
                             "config_sha256": digest(self.config.file.read_bytes()),
                             "policy_sha256": digest(role_policy_bytes(role))})
                 if decision_events:
@@ -1895,6 +2137,22 @@ class Engine:
                 write_json(run_dir / "result.json", result)
                 if role.workspace == "write":
                     project.snapshots.publish(snapshot)
+                    # Own publication moves the head without new CI facts: refresh
+                    # the wake record to the published head so this run does not
+                    # re-wake itself; a new sha/check or a later head still wakes.
+                    try:
+                        _refresh_present = ci_present
+                        _refresh_branch = _ci_branch
+                    except Exception:
+                        _refresh_present = []
+                        _refresh_branch = None
+                    if _refresh_present:
+                        try:
+                            write_ci_wake(project, role_name, _refresh_branch, _refresh_present,
+                                          snapshot["id"] if isinstance(snapshot, dict) else None,
+                                          time.time())
+                        except Exception:
+                            pass
                 # Advisory hint: a failed routing write must not flip an
                 # already-published unit to interrupted, like the other
                 # best-effort post-publication records below.
@@ -2288,7 +2546,9 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
     current CI failure on the operator-selected ``[vcs] ci_branch`` (polled
     red, independent of insight decisions, until a later poll sees green or
     a new revision; empty disables the wake) for roles with ``ci_wake``
-    (writable roles by default). Goal and
+    (writable roles by default; a parked role wakes only on a changed red --
+    new failing sha/check, moved head, or elapsed ``ci_rewake_seconds``).
+    Goal and
     wake-generation changes always resume. See docs/architecture.md.
     """
     current_time = time.time() if current_time is None else current_time
@@ -2312,6 +2572,10 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
         effective = config if config is not None else getattr(project, "config", None)
         if role_name is not None and not _ci_wake_enabled(effective, role_name):
             pass
+        elif role_name is not None:
+            _snapshot_id = snapshot.get("id") if isinstance(snapshot, dict) else None
+            if _ci_due_for(project, effective, role_name, _snapshot_id, current_time):
+                return True
         elif wake_ci_failures(project, effective):
             return True
     except Exception:

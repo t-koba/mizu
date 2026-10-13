@@ -325,3 +325,193 @@ class CiStickyRedTests(Fixture):
         self.assertEqual(current_ci_failures(self.project), [])
         write_json(self.project.root / "vcs-poll.json", {"failures": "nope"})
         self.assertEqual(current_ci_failures(self.project), [])
+
+
+class CiRewakeTests(Fixture):
+    """Change-based CI wake: an unchanged red parks until sha/check/head/interval changes."""
+
+    def _wait_snapshot(self):
+        import time
+        gen = self.project.insights.generation()
+        cap = self.project.snapshots.capture_files(self.project.workspace)
+        wait = self.project.snapshots.create(
+            cap, goal=self.project.goal,
+            state="Now: parked\nNext: none\nTasks: none\nBlocking: none",
+            run=None, outcome="wait", summary="parked", verification=None,
+            wake_at=time.time() + 86400, inbox_seen=gen,
+            wake_generation=self.project.control().get("wake_generation", ""))
+        self.project.snapshots.publish(wait)
+        return self.project.snapshots.get()
+
+    def _red(self, branch="mizu", sha=None, check="unit"):
+        import dataclasses
+        from mizu.fs import write_json
+        sha = SHA_A if sha is None else sha
+        config = dataclasses.replace(
+            self.config, vcs={**self.config.vcs, "ci_branch": branch})
+        self.project.config = config
+        snap = self._wait_snapshot()
+        write_json(self.project.root / "vcs-poll.json",
+                   {"last_poll": 1000.0,
+                    "failures": {branch: [{"sha": sha, "check": check}]}})
+        return config, snap
+
+    def test_identical_red_parks_after_record(self):
+        from mizu.runtime import _ci_due_for, should_run, wake_ci_failures, write_ci_wake
+        config, snap = self._red()
+        base = 2000.0
+        self.assertTrue(should_run(self.project, snap, current_time=base,
+                                   role_name="worker", config=config))
+        present = wake_ci_failures(self.project, config)
+        self.assertEqual(len(present), 1)
+        write_ci_wake(self.project, "worker", "mizu", present, snap["id"], base)
+        self.assertFalse(should_run(self.project, snap, current_time=base + 10,
+                                    role_name="worker", config=config))
+        self.assertEqual(
+            _ci_due_for(self.project, config, "worker", snap["id"], base + 10), [])
+        # Project-level check (no role) stays conservative: presence still wakes.
+        self.assertTrue(should_run(self.project, snap, current_time=base + 10))
+
+    def test_new_sha_wakes(self):
+        from mizu.fs import write_json
+        from mizu.runtime import should_run, wake_ci_failures, write_ci_wake
+        config, snap = self._red(sha=SHA_A)
+        base = 2000.0
+        write_ci_wake(self.project, "worker", "mizu",
+                      wake_ci_failures(self.project, config), snap["id"], base)
+        self.assertFalse(should_run(self.project, snap, current_time=base + 10,
+                                    role_name="worker", config=config))
+        write_json(self.project.root / "vcs-poll.json",
+                   {"last_poll": 2001.0,
+                    "failures": {"mizu": [{"sha": SHA_B, "check": "unit"}]}})
+        self.assertTrue(should_run(self.project, snap, current_time=base + 11,
+                                   role_name="worker", config=config))
+
+    def test_new_check_wakes(self):
+        from mizu.fs import write_json
+        from mizu.runtime import should_run, wake_ci_failures, write_ci_wake
+        config, snap = self._red(check="unit")
+        base = 2000.0
+        write_ci_wake(self.project, "worker", "mizu",
+                      wake_ci_failures(self.project, config), snap["id"], base)
+        write_json(self.project.root / "vcs-poll.json",
+                   {"last_poll": 2001.0,
+                    "failures": {"mizu": [{"sha": SHA_A, "check": "lint"}]}})
+        self.assertTrue(should_run(self.project, snap, current_time=base + 11,
+                                   role_name="worker", config=config))
+
+    def test_interval_elapsed_wakes(self):
+        from mizu.runtime import should_run, wake_ci_failures, write_ci_wake
+        config, snap = self._red()
+        base = 2000.0
+        write_ci_wake(self.project, "worker", "mizu",
+                      wake_ci_failures(self.project, config), snap["id"], base)
+        self.assertFalse(should_run(self.project, snap, current_time=base + 1799,
+                                    role_name="worker", config=config))
+        self.assertTrue(should_run(self.project, snap, current_time=base + 1800,
+                                   role_name="worker", config=config))
+
+    def test_moved_snapshot_wakes(self):
+        from mizu.runtime import should_run, wake_ci_failures, write_ci_wake
+        config, snap = self._red()
+        base = 2000.0
+        write_ci_wake(self.project, "worker", "mizu",
+                      wake_ci_failures(self.project, config), snap["id"], base)
+        self.assertFalse(should_run(self.project, snap, current_time=base + 10,
+                                    role_name="worker", config=config))
+        moved = self._wait_snapshot()
+        self.assertNotEqual(moved["id"], snap["id"])
+        self.assertTrue(should_run(self.project, moved, current_time=base + 11,
+                                   role_name="worker", config=config))
+
+    def test_malformed_record_wakes(self):
+        from mizu.fs import write_json
+        from mizu.runtime import should_run, wake_ci_failures, write_ci_wake
+        config, snap = self._red()
+        base = 2000.0
+        write_ci_wake(self.project, "worker", "mizu",
+                      wake_ci_failures(self.project, config), snap["id"], base)
+        self.assertFalse(should_run(self.project, snap, current_time=base + 10,
+                                    role_name="worker", config=config))
+        wake_path = self.project.root / "vcs-ci-wake-worker.json"
+        for bad in ({"version": 1, "branch": "mizu", "fact": "nope",
+                     "snapshot": snap["id"], "at": base},
+                    {"version": 999, "branch": "mizu",
+                     "fact": [{"sha": SHA_A, "check": "unit"}],
+                     "snapshot": snap["id"], "at": base},
+                    {"version": 1, "branch": "mizu",
+                     "fact": [{"sha": SHA_A, "check": "unit"}],
+                     "snapshot": snap["id"], "at": "bad"},
+                    "garbage-string"):
+            write_json(wake_path, bad)
+            self.assertTrue(should_run(self.project, snap, current_time=base + 10,
+                                       role_name="worker", config=config),
+                            msg=repr(bad))
+
+    def test_ci_rewake_seconds_load(self):
+        from mizu.config import load
+        from mizu.errors import ConfigError
+        self.assertEqual(self.config.vcs.get("ci_rewake_seconds"), 1800)
+
+        def _with_line(line):
+            text = self.file.read_text()
+            lines = [ln for ln in text.splitlines(keepends=True)
+                     if "ci_rewake_seconds" not in ln]
+            if "[vcs]\n" in lines:
+                at = lines.index("[vcs]\n") + 1
+                lines.insert(at, line + "\n")
+            else:
+                lines += ["[vcs]\n", line + "\n"]
+            self.file.write_text("".join(lines))
+
+        for good in (60, 1800, 86400):
+            _with_line(f"ci_rewake_seconds = {good}")
+            self.assertEqual(load(self.file).vcs["ci_rewake_seconds"], good)
+        for bad in ("ci_rewake_seconds = 0", "ci_rewake_seconds = 59",
+                    "ci_rewake_seconds = 86401",
+                    'ci_rewake_seconds = "3600"',
+                    "ci_rewake_seconds = true",
+                    "ci_rewake_seconds = 3.5"):
+            _with_line(bad)
+            with self.assertRaises(ConfigError, msg=bad):
+                load(self.file)
+
+    def test_rewake_seconds_defensive(self):
+        import dataclasses
+        from mizu.runtime import _ci_rewake_seconds
+        self.assertEqual(_ci_rewake_seconds(self.config), 1800)
+        garbage = dataclasses.replace(
+            self.config, vcs={**self.config.vcs, "ci_rewake_seconds": "bad"})
+        self.assertEqual(_ci_rewake_seconds(garbage), 1800)
+        missing = dataclasses.replace(
+            self.config,
+            vcs={key: value for key, value in self.config.vcs.items()
+                 if key != "ci_rewake_seconds"})
+        self.assertEqual(_ci_rewake_seconds(missing), 1800)
+
+    def test_dispatch_rewake_suppresses_identical_red(self):
+        import dataclasses
+        from mizu.fs import read_json, write_json
+        from mizu.runtime import Engine
+        from support import ScriptDriver
+        config = dataclasses.replace(
+            self.config, vcs={**self.config.vcs, "ci_branch": "mizu"})
+        self.project.config = config
+        self._wait_snapshot()
+        write_json(self.project.root / "vcs-poll.json",
+                   {"last_poll": 1000.0,
+                    "failures": {"mizu": [{"sha": SHA_A, "check": "unit"}]}})
+        driver = ScriptDriver()
+        first = Engine(config, driver=driver).run(
+            self.project, "worker", event_trigger=True)
+        self.assertEqual(first.get("status"), "completed")
+        started = read_json(
+            self.project.root / "runs" / first["run"] / "started.json")
+        self.assertEqual(started["admission"], "ci")
+        self.assertEqual(started["ci_failures"], 1)
+        calls_after_first = len(driver.calls)
+        self.assertGreater(calls_after_first, 0)
+        second = Engine(config, driver=driver).run(
+            self.project, "worker", event_trigger=True)
+        self.assertEqual(second.get("skipped"), "no-event")
+        self.assertEqual(len(driver.calls), calls_after_first)

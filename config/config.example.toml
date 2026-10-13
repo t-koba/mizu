@@ -160,6 +160,7 @@ command = []                 # Trusted argv executable for upstream sync; JSON s
 timeout_seconds = 20         # Per-invocation deadline for the adapter.
 max_bytes = 524288           # Maximum adapter response payload (512 KiB).
 ci_branch = ""               # Authoritative CI/reporting branch exposed as ci_branch to vcs_read roles (e.g. "mizu"); only this branch wakes a parked writer, empty disables wake and exposure.
+ci_rewake_seconds = 1800     # Unchanged-red re-wake interval in seconds (60-86400); an unchanged red still re-wakes eventually.
 retire_grant = false         # Explicit operator grant for vcs_retire; false disables retirement.
 close_grant = false          # Explicit operator grant for routine vcs_dispose close; false disables close.
 merge_grant = false          # Explicit operator grant for vcs_dispose merge; false disables merge (merges also need a GO approval).
