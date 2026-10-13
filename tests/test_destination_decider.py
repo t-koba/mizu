@@ -99,7 +99,7 @@ class DeciderCacheBypassTests(Fixture):
     def test_fetch_bypasses_fresh_cache_under_decider(self):
         import time
         from unittest.mock import patch
-        from mizu.fs import digest as fs_digest, read_json, write_json
+        from mizu.fs import canonical, digest as fs_digest, read_json, write_json
 
         url = "https://example.com/live"
         tmp = Path(self.temporary.name)
@@ -110,7 +110,9 @@ class DeciderCacheBypassTests(Fixture):
                                 "retrieved_at": "2026-01-01T00:00:00Z",
                                 "retrieved_epoch": time.time(), "sha256": "b" * 64,
                                 "content_type": "text/plain", "text": "CACHED-POISON",
-                                "trust": "external-untrusted"})
+                                "trust": "external-untrusted",
+                                "fetch_policy_digest": fs_digest(canonical({
+                                    "hosts": [], "intranet": False, "max_bytes": 65536}))})
 
         class LiveResponse:
             status = 200
@@ -150,6 +152,7 @@ class DeciderCacheBypassTests(Fixture):
             record = web.fetch(url)
         self.assertIn("LIVE-CONTENT", record["text"])
         self.assertNotIn("cached", record)
+        self.assertNotIn("fetch_policy_digest", record)
         self.assertTrue(calls, "decider fetch must reach transport live")
         # Bypass must not overwrite the seeded entry.
         self.assertIn("CACHED-POISON", read_json(cache_file)["text"])
@@ -157,22 +160,103 @@ class DeciderCacheBypassTests(Fixture):
     def test_fetch_uses_fresh_cache_without_decider(self):
         import time
         from unittest.mock import patch
-        from mizu.fs import digest as fs_digest, write_json
+        from mizu.fs import canonical, digest as fs_digest, write_json
 
         url = "https://example.com/live"
         tmp = Path(self.temporary.name)
         web = make_web(self.temporary.name,
-                       {"hosts": ["example.com"], "cache_seconds": 1800,
+                       {"hosts": ["example.com", "other.example"], "cache_seconds": 1800,
                         "destination_command": []})
         write_json(tmp / "cache" / f"{fs_digest(url.encode())}.json",
                    {"id": "c" * 64, "url": url, "final_url": url,
                     "retrieved_at": "2026-01-01T00:00:00Z",
                     "retrieved_epoch": time.time(), "sha256": "d" * 64,
                     "content_type": "text/plain", "text": "CACHED-POISON",
-                    "trust": "external-untrusted"})
+                    "trust": "external-untrusted",
+                    "fetch_policy_digest": fs_digest(canonical({
+                        "hosts": sorted(web.settings["hosts"]),
+                        "intranet": False, "max_bytes": 65536}))})
 
-        with patch("mizu.web.PinnedHTTPS") as conn:
+        # Host order is not a policy change. Original/final gates still run.
+        web.settings["hosts"].reverse()
+        with patch("mizu.web.PinnedHTTPS") as conn, \
+             patch.object(web, "check_url", wraps=web.check_url) as check_url:
             record = web.fetch(url)
         conn.assert_not_called()
+        self.assertEqual(check_url.call_count, 2)
+        check_url.assert_any_call(url, "fetch")
         self.assertTrue(record.get("cached"))
         self.assertIn("CACHED-POISON", record["text"])
+
+
+    def test_static_cache_misses_after_intermediate_host_revocation(self):
+        from unittest.mock import Mock, patch
+        from mizu.fs import canonical, digest as fs_digest, read_json
+
+        url = "https://start.example/doc"
+        middle = "https://middle.example/doc"
+        end = "https://end.example/doc"
+        web = make_web(self.temporary.name,
+                       {"hosts": ["start.example", "middle.example", "end.example"],
+                        "cache_seconds": 1800})
+        start_response = Mock(status=302)
+        start_response.getheader.return_value = middle
+        middle_response = Mock(status=302)
+        middle_response.getheader.return_value = end
+        end_response = Mock(status=200)
+        end_response.getheader.side_effect = lambda name, default=None: {
+            "Content-Type": "text/plain"}.get(name, default)
+        end_response.read.return_value = b"LIVE-CONTENT"
+        connections = {
+            host: Mock(getresponse=Mock(return_value=response))
+            for host, response in (("start.example", start_response),
+                                   ("middle.example", middle_response),
+                                   ("end.example", end_response))}
+
+        with patch("mizu.web.public_addresses", return_value=[]) as addresses, \
+             patch("mizu.web.PinnedHTTPS", side_effect=lambda host, *_: connections[host]) as conn:
+            first = web.fetch(url)
+            self.assertNotIn("cached", first)
+            self.assertEqual(first["final_url"], end)
+            self.assertEqual([call.args[0] for call in conn.call_args_list],
+                             ["start.example", "middle.example", "end.example"])
+            cached = read_json(web.cache / f"{fs_digest(url.encode())}.json")
+            self.assertEqual(cached["fetch_policy_digest"], fs_digest(canonical({
+                "hosts": sorted(web.settings["hosts"]), "intranet": False, "max_bytes": 65536})))
+            conn.reset_mock()
+            addresses.reset_mock()
+            web.settings["hosts"].remove("middle.example")
+
+            with self.assertRaisesRegex(Denied, "Host is not allowlisted: middle.example"):
+                web.fetch(url)
+            # The live start redirect is re-read; the revoked middle is not resolved or dialed.
+            self.assertEqual([call.args[0] for call in conn.call_args_list], ["start.example"])
+            addresses.assert_called_once_with("start.example", False)
+
+    def test_static_cache_without_policy_digest_is_a_miss(self):
+        import time
+        from unittest.mock import Mock, patch
+        from mizu.fs import digest as fs_digest, read_json, write_json
+
+        url = "https://example.com/live"
+        web = make_web(self.temporary.name,
+                       {"hosts": ["example.com"], "cache_seconds": 1800})
+        cache_file = web.cache / f"{fs_digest(url.encode())}.json"
+        write_json(cache_file, {"id": "e" * 64, "url": url, "final_url": url,
+                                "retrieved_at": "2026-01-01T00:00:00Z",
+                                "retrieved_epoch": time.time(), "sha256": "f" * 64,
+                                "content_type": "text/plain", "text": "LEGACY-CONTENT",
+                                "trust": "external-untrusted"})
+        response = Mock(status=200)
+        response.getheader.side_effect = lambda name, default=None: {
+            "Content-Type": "text/plain"}.get(name, default)
+        response.read.return_value = b"LIVE-CONTENT"
+        with patch("mizu.web.public_addresses", return_value=[]), \
+             patch("mizu.web.PinnedHTTPS") as conn:
+            conn.return_value.getresponse.return_value = response
+            record = web.fetch(url)
+        conn.assert_called_once()
+        self.assertNotIn("cached", record)
+        self.assertEqual(record["text"], "LIVE-CONTENT")
+        self.assertIn("fetch_policy_digest", record)
+        self.assertEqual(read_json(cache_file), record)

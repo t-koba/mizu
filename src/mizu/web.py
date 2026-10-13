@@ -247,8 +247,13 @@ class Web:
         # A decider owns the per-hop destination decision, but receipts store
         # no hop count, so a cache hit cannot replay the redirect-hop question.
         # Bypass the cache while a decider is configured: every fetch then
-        # replays each hop live. Static lists stay hop-insensitive and cached.
+        # replays each hop live. Static receipts bind to the fetch policy
+        # so a change (including intermediate-host revocation) is a miss.
         decider = bool(self.settings.get("destination_command"))
+        policy_digest = None if decider else digest(canonical({
+            "hosts": sorted(self.settings["hosts"]),
+            "intranet": bool(self.settings.get("intranet", False)),
+            "max_bytes": self.settings["max_bytes"]}))
         cache_file = self.cache / f"{digest(url.encode())}.json"
         try:
             cached = None if decider else read_json(cache_file)
@@ -259,8 +264,9 @@ class Web:
                 and epoch not in (float("inf"), float("-inf")) and epoch >= 0
                 and isinstance(cached.get("url"), str) and isinstance(cached.get("final_url"), str)
                 and isinstance(cached.get("id"), str)
+                and cached.get("fetch_policy_digest") == policy_digest
                 and time.time() - float(epoch) < self.settings["cache_seconds"]):
-            # A policy change must also revoke previously cached hosts.
+            # Legacy receipts without the digest miss; hits still re-check URLs.
             self.check_url(cached["url"], "fetch")
             self.check_url(cached["final_url"], "fetch")
             write_json(self.receipts / f"{cached['id']}.json", cached, exclusive=True)
@@ -300,6 +306,7 @@ class Web:
                            "retrieved_epoch": time.time(), "sha256": digest(raw),
                            "content_type": media, "text": text, "trust": "external-untrusted"}
                 if not decider:
+                    receipt["fetch_policy_digest"] = policy_digest
                     write_json(cache_file, receipt)
                 write_json(self.receipts / f"{receipt['id']}.json", receipt, exclusive=True)
                 return receipt
