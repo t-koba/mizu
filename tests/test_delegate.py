@@ -15,7 +15,7 @@ def _configured(fixture):
         worker, capabilities=tuple([*worker.capabilities, "delegate"]))
     searcher = roles["searcher"]
     roles["helper"] = dataclasses.replace(
-        searcher, name="helper", capabilities=("files", "read"))
+        searcher, name="helper", capabilities=("files", "read", "finish"))
     return dataclasses.replace(fixture.config, roles=roles)
 
 
@@ -102,6 +102,7 @@ class DelegateTests(Fixture):
             with self.assertRaises(ConfigError, msg=cap):
                 check_delegate_role("helper", role)
         check_delegate_role("helper", dataclasses.replace(base, capabilities=("files", "read")))
+        check_delegate_role("helper", dataclasses.replace(base, capabilities=("files", "read", "finish")))
 
     def test_self_unknown_and_missing_role(self):
         config = _configured(self)
@@ -206,6 +207,38 @@ class DelegateTests(Fixture):
         loaded = load(self.file)
         self.assertEqual(loaded.delegate_role, "searcher")
         self.file.write_text(probe.replace('delegate_role = "searcher"', 'delegate_role = "ghost"'))
+        with self.assertRaises(ConfigError):
+            load(self.file)
+        # A delegate implementation role loads with finish and passes the
+        # delegation gate: the mechanism ensures the seal (idempotent when
+        # already configured), so no role is unusable as a delegate.
+        self.file.write_text(text)
+        text = self.file.read_text()
+        out = io.StringIO()
+        inserted = False
+        for line in text.splitlines(keepends=True):
+            if not inserted and line.startswith("["):
+                out.write('delegate_role = "implementer"\n')
+                inserted = True
+            out.write(line)
+        assert inserted
+        out.write(
+            "\n[roles.implementer]\n"
+            'profile = "alternate"\n'
+            'policy = "policies/consult.md"\n'
+            'workspace = "write"\n'
+            'capabilities = ["files", "read", "diff", "exec", "experiment", '
+            '"verify", "vcs_read", "materialize", "finish"]\n'
+        )
+        self.file.write_text(out.getvalue())
+        loaded = load(self.file)
+        self.assertEqual(loaded.delegate_role, "implementer")
+        check_delegate_role("implementer", loaded.roles["implementer"])
+        # Without finish the same role still fails load: every configured
+        # role carries finish for its own top-level runs.
+        self.file.write_text(out.getvalue().replace(
+            '"verify", "vcs_read", "materialize", "finish"',
+            '"verify", "vcs_read", "materialize"'))
         with self.assertRaises(ConfigError):
             load(self.file)
 

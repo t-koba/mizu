@@ -121,11 +121,13 @@ CONSULT_FORBIDDEN = frozenset({"exec", "experiment", "verify", "decide",
 
 
 #: Capabilities a delegation child must never hold. The child works in the
-#: caller's live workspace, so finish/decide/insight-write/vcs-mutating
-#: grants and redelegation stay with the caller: verification and publication
+#: caller's live workspace, so decide/insight-write/vcs-mutating grants
+#: and redelegation stay with the caller: verification and publication
 #: never leave it. Implementation grants (files/read/exec/search/fetch and
-#: the child's own profile/selector/policy) stay operator choice.
-DELEGATE_FORBIDDEN = frozenset({"finish", "decide", "submit_insight", "revise_insight",
+#: the child's own profile/selector/policy) stay operator choice. finish
+#: stays allowed: every configured role carries it so the child can seal,
+#: and delegation ensures it (idempotent when already present).
+DELEGATE_FORBIDDEN = frozenset({"decide", "submit_insight", "revise_insight",
                                 "withdraw_insight", "attach_evidence", "delegate",
                                 "vcs_publish", "vcs_retire", "vcs_dispose"})
 
@@ -2113,9 +2115,9 @@ class Engine:
         role = self.config.roles[role_name]
         # The child works the caller's tree, so it inherits the caller's
         # workspace value: live listing and writable execution for a writer
-        # caller, a consistent read view otherwise. The role itself must
-        # not hold finish (checked above); the child unit still needs a
-        # terminal seal, provided here by the mechanism.
+        # caller, a consistent read view otherwise. The child unit needs a
+        # terminal seal, ensured here by the mechanism (idempotent when the
+        # configured role already carries finish for its own top-level runs).
         role = dataclasses.replace(role, workspace=parent.role.workspace,
                                    capabilities=tuple(dict.fromkeys([*role.capabilities, "finish"])))
         capture = parent.project.snapshots.capture_files(parent.workspace)
