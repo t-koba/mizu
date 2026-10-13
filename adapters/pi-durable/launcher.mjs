@@ -404,6 +404,32 @@ export function agentChanges(resolved, wanted) {
   return change;
 }
 
+/** Validate the current agent before unpausing recovery in the same session. */
+export async function submitWithCurrentAgent(harness, agent, input, context) {
+  const root = await harness.root(context, { agent });
+  const resolved = await root.agent(context);
+  // Session continuity: model, tools, instructions, and cwd ride the live
+  // conversation. A reopened session keeps its stored agent until told
+  // otherwise, so apply the current submission's agent when it differs
+  // (positional system entries keep prompt caches warm) instead of
+  // refusing. New conversations already carry these values from root().
+  const change = agentChanges(resolved, agent);
+  if (Object.keys(change).length) {
+    await root.configure(change, context);
+    // Fail closed: read back the retained conversation before recovery can
+    // dispatch any unfinished work.
+    const applied = await root.agent(context);
+    if (Object.keys(agentChanges(applied, agent)).length) {
+      throw new Error('Durable session kept a stale agent after configure');
+    }
+  }
+  // An unchanged first read is already the convergence check. In either case,
+  // do not enable recovered work until current authority is confirmed.
+  harness.resume(); // continue work a dead process left unfinished
+  const submission = await root.submit(input, context);
+  return { root, submission };
+}
+
 async function runOnce(cfg) {
   for (const field of ['provider', 'model', 'instructions', 'store', 'requestId', 'prompt', 'cwd']) {
     if (typeof cfg[field] !== 'string' || !cfg[field]) throw new Error(`Effective configuration lacks ${field}`);
@@ -540,29 +566,14 @@ async function runOnce(cfg) {
     ? await Harness.open(storage, { models, registry }, context)
     : await Harness.open(storage, { models, registry, settings }, context);
   try {
-    harness.resume(); // continue work a dead process left unfinished
     // Agent tools take the installed tool registrations (not bare names);
     // the registry holds the same objects installed above.
     const agent = { model: { provider: cfg.provider, modelId: cfg.model },
       tools, instructions: cfg.instructions, cwd: cfg.cwd };
     if (cfg.thinkingLevel) agent.thinkingLevel = cfg.thinkingLevel;
-    const root = await harness.root(context, { agent });
-    const resolved = await root.agent(context);
-    // Session continuity: model, tools, instructions, and cwd ride the live
-    // conversation. A resumed session keeps its stored agent until told
-    // otherwise, so apply the current submission's agent when it differs
-    // (positional system entries keep prompt caches warm) instead of
-    // refusing. New conversations already carry these values from root().
-    const change = agentChanges(resolved, agent);
-    if (Object.keys(change).length) {
-      await root.configure(change, context);
-      // Fail closed: the retained conversation must actually converge.
-      const applied = await root.agent(context);
-      if (Object.keys(agentChanges(applied, agent)).length) {
-        throw new Error('Durable session kept a stale agent after configure');
-      }
-    }
-    submission = await root.submit({ type: 'input', content: cfg.prompt, requestId: cfg.requestId }, context);
+    const { root, submission: currentSubmission } = await submitWithCurrentAgent(harness, agent,
+      { type: 'input', content: cfg.prompt, requestId: cfg.requestId }, context);
+    submission = currentSubmission;
     const settled = await submission.wait(context);
     if (boundTripped) {
       const usage = await harness.usage(context).catch(() => null);

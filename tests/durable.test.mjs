@@ -1,4 +1,4 @@
-/** Real pi-durable persistence/tool/recovery contracts. No inference, no network.
+/** pi-durable persistence/tool/recovery and launcher contracts. No inference, no network.
  *
  * Uses the pinned pi-durable 1.1.0 + pi-ai faux provider over file-backed
  * SQLite: idempotent requestId submit, exactly-once tool execution across
@@ -15,7 +15,8 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join as joinPath } from 'node:path';
-import { agentChanges, credentialsFromFile, meterModels, settlementFields } from '../adapters/pi-durable/launcher.mjs';
+import { agentChanges, credentialsFromFile, meterModels, settlementFields, submitWithCurrentAgent }
+  from '../adapters/pi-durable/launcher.mjs';
 import { AssistantEntry, BACKGROUND_CONTEXT, Harness, Type, createModels, createRegistry,
   defineExtension, defineTool, fauxAssistantMessage, fauxProvider, fauxToolCall,
   openNodeSqliteStorage } from '../adapters/pi-durable/test-support.mjs';
@@ -236,6 +237,94 @@ test('agentChanges converges only what differs', async () => {
     { thinkingLevel: 'high' });
   assert.deepEqual(agentChanges({ ...same, thinkingLevel: 'high' }, wanted), { thinkingLevel: null });
   assert.deepEqual(agentChanges({ ...same, thinkingLevel: 'off' }, wanted), {});
+});
+
+// Bounded fake harness for launcher ordering, not an SDK recovery simulation.
+function setupHarness(agent, { resolved = agent, applied = agent, failAt } = {}) {
+  const calls = [];
+  const changes = [];
+  const inputs = [];
+  const submission = { id: 'test-submission' };
+  let reads = 0;
+  async function step(name, ctx) {
+    assert.equal(ctx, context);
+    await Promise.resolve();
+    calls.push(name);
+    if (failAt === name) throw new Error(`synthetic ${name} failure`);
+  }
+  const root = {
+    async agent(ctx) {
+      assert.ok(++reads <= 2, 'agent reads stay bounded');
+      await step(reads === 1 ? 'read' : 'readback', ctx);
+      return reads === 1 ? resolved : applied;
+    },
+    async configure(change, ctx) {
+      await step('configure', ctx);
+      changes.push(change);
+    },
+    async submit(input, ctx) {
+      await step('submit', ctx);
+      inputs.push(input);
+      return submission;
+    },
+  };
+  const harness = {
+    async root(ctx, options) {
+      await step('root', ctx);
+      assert.equal(options.agent, agent);
+      return root;
+    },
+    resume() { calls.push('resume'); },
+  };
+  return { harness, root, submission, calls, changes, inputs };
+}
+
+const currentAgent = { model: { provider: 'test-only', modelId: 'current' },
+  instructions: 'Current instructions.', cwd: '/work',
+  tools: [{ name: 'finish', description: 'Current grant', parameters: { type: 'object' } }] };
+const retainedAgent = { model: { provider: 'test-only', modelId: 'old' },
+  instructions: 'Old instructions.', cwd: '/old-work', tools: [{ name: 'removed' }] };
+const currentInput = { type: 'input', content: 'go', requestId: 'same-store-request' };
+
+test('launcher validates agent readback before resume and submit', { timeout: 1000 }, async () => {
+  const fake = setupHarness(currentAgent, { resolved: retainedAgent });
+  const result = await submitWithCurrentAgent(fake.harness, currentAgent, currentInput, context);
+  assert.deepEqual(fake.calls, ['root', 'read', 'configure', 'readback', 'resume', 'submit']);
+  assert.deepEqual(fake.changes, [currentAgent]);
+  assert.equal(fake.inputs[0], currentInput); // content and replay requestId pass through unchanged
+  assert.equal(result.root, fake.root);
+  assert.equal(result.submission, fake.submission);
+});
+
+test('launcher resumes after a current agent read without redundant configure', { timeout: 1000 }, async () => {
+  const fake = setupHarness(currentAgent);
+  await submitWithCurrentAgent(fake.harness, currentAgent, currentInput, context);
+  assert.deepEqual(fake.calls, ['root', 'read', 'resume', 'submit']);
+  assert.deepEqual(fake.changes, []);
+  assert.equal(fake.inputs[0], currentInput);
+});
+
+for (const [failAt, expected] of [
+  ['root', ['root']],
+  ['read', ['root', 'read']],
+  ['configure', ['root', 'read', 'configure']],
+  ['readback', ['root', 'read', 'configure', 'readback']],
+]) {
+  test(`launcher never resumes when ${failAt} fails`, { timeout: 1000 }, async () => {
+    const fake = setupHarness(currentAgent, { resolved: retainedAgent, failAt });
+    await assert.rejects(submitWithCurrentAgent(fake.harness, currentAgent, currentInput, context),
+      new RegExp(`synthetic ${failAt} failure`));
+    assert.deepEqual(fake.calls, expected); // neither resume nor submit is reached
+    assert.deepEqual(fake.inputs, []);
+  });
+}
+
+test('launcher never resumes when agent readback does not converge', { timeout: 1000 }, async () => {
+  const fake = setupHarness(currentAgent, { resolved: retainedAgent, applied: retainedAgent });
+  await assert.rejects(submitWithCurrentAgent(fake.harness, currentAgent, currentInput, context),
+    /Durable session kept a stale agent/);
+  assert.deepEqual(fake.calls, ['root', 'read', 'configure', 'readback']);
+  assert.deepEqual(fake.inputs, []);
 });
 
 test('reopened store keeps the conversation while configure applies the current agent', async () => {
