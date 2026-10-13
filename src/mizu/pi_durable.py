@@ -101,7 +101,7 @@ def durable_auth_path(config) -> Path:
 def grant_for(settings: dict, role, model: dict) -> str:
     policy = role_policy_text(role)
     options_digest = digest(canonical({k: v for k, v in settings.get("options", {}).items()
-                                       if k in ("thinkingLevel", "durable_backend", "durable_resume",
+                                       if k in ("thinkingLevel", "cacheRetention", "durable_backend", "durable_resume",
                                                 "durable_retention_days",
                                                 "durable_compaction_reserve_tokens",
                                                 "durable_compaction_keep_recent_tokens",
@@ -262,6 +262,8 @@ class PiDurableDriver:
             effective_config["compaction"] = dict(policy_options["compaction"])
         if options.get("thinkingLevel") is not None:
             effective_config["thinkingLevel"] = options["thinkingLevel"]
+        if options.get("cacheRetention") is not None:
+            effective_config["cacheRetention"] = options["cacheRetention"]
         deadline_ms = max(1, int(1000 * min(context.deadline - time.monotonic(),
                                             self.config.limits.run_seconds)))
         effective_config["deadline_ms"] = deadline_ms

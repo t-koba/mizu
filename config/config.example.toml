@@ -106,6 +106,7 @@ model = ""
 session = "persistent"
 [profiles.primary.options]
 thinkingLevel = "off"
+# cacheRetention = "long"  # Provider prompt-cache retention: none|short|long; unset keeps the Pi default (short). long via the Pi env channel; none degrades to Pi default on pi.
 
 [profiles.alternate]
 engine = "pi"
@@ -114,6 +115,7 @@ model = ""
 session = "ephemeral"
 [profiles.alternate.options]
 thinkingLevel = "off"
+# cacheRetention = "long"  # Provider prompt-cache retention: none|short|long; unset keeps the Pi default (short). long via the Pi env channel; none degrades to Pi default on pi.
 
 # Durable execution: selectable via engine = "pi-durable" (no live switch here).
 # pi-durable reads Pi's login store (auth.json) from its own engine directory plus
@@ -126,6 +128,7 @@ thinkingLevel = "off"
 # session = "persistent"
 # [profiles.durable.options]
 # thinkingLevel = "off"
+# cacheRetention = "long"  # Provider prompt-cache retention: none|short|long; unset keeps the engine default; retuning keeps the store.
 # durable_backend = "sqlite"       # Only backend; unknown values are refused.
 # durable_resume = "compatible"    # compatible binds resume to current grants; fresh refuses resume.
 # durable_retention_days = 31      # Terminal-store retention applied per execute with accounting; omit to disable.

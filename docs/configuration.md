@@ -172,8 +172,8 @@ Only roles with `selector` enable it; fixed profiles keep their existing behavio
 
 A profile explicitly selects `engine`, `provider`, `model`, and `session`
 (`ephemeral` or `persistent`). IDs remain exact. Native `options` belong to
-that engine: Pi `thinkingLevel`, `settings`, `codemode`, `toolSearch`,
-`excludeTools`, `scopedModels`; pi-durable `thinkingLevel` plus
+that engine: Pi `thinkingLevel`, `cacheRetention` (`none`|`short`|`long`; unset keeps the Pi default `short`; `long` via the Pi env channel, `none` degrades to the Pi default on pi), `settings`, `codemode`, `toolSearch`,
+`excludeTools`, `scopedModels`; pi-durable `thinkingLevel` plus `cacheRetention` (`none`|`short`|`long`; unset keeps the engine/provider default; passed natively as `settings.stream.cacheRetention`, retuning keeps the store)
 `durable_backend` (`sqlite`), `durable_resume` (`compatible`|`fresh`),
 `durable_retention_days` (0-3650), and the per-profile
 live-context bound `durable_compaction_reserve_tokens`,
@@ -191,9 +191,9 @@ injected, so a `plan` profile that sets nothing keeps the provider default while
 `main` profile may set a half-window bound (operator policy, never a fixed
 mechanism value). Larger `reserveTokens` (or `backgroundTokens`)
 bounds live context tighter without rotating the session away: retuning only these
-three keys (or `thinkingLevel`) continues the same durable store with the new
+three keys (or `thinkingLevel` or `cacheRetention`) continues the same durable store with the new
 thresholds on the next run; the per-run grant still binds the values, so retrying the same run
-under changed thresholds is refused. More broadly, a pi-durable session covers only
+under changed thresholds is refused. Retuning `cacheRetention` likewise keeps the store on both pi (continuing the conversation like `thinkingLevel`) and pi-durable (the Harness reads `settings.stream` live). More broadly, a pi-durable session covers only
 what makes a conversation incompatible (engine, backend, the adapter-declared store
 format): policy text, capabilities and tools, goal, model, and settings ride the live
 conversation (applied per submission, keeping prompt caches warm), and adapter upgrades
@@ -265,8 +265,8 @@ Settings that collide with runtime-owned prompt/model/bridge/session fields
 fail before input; they are never silently overwritten. Native engine errors
 remain errors. On every engine but pi-durable, session identifiers include model,
 policy, goal, capabilities, native grants, effective configuration minus live
-reasoning-effort keys (`thinkingLevel` on pi, `model_reasoning_effort` on Codex,
-`effort` on Claude), command and resource content digests. An effort-only
+reasoning-effort keys (`thinkingLevel` and `cacheRetention` on pi, `model_reasoning_effort` on Codex,
+`effort` on Claude), command and resource content digests. An effort-only (or `cacheRetention`-only on pi)
 profile switch therefore continues the role's conversation with the current
 effort; any other change still starts a fresh bounded session whose first
 prompt carries the full goal, snapshots, pending insights, and research state.

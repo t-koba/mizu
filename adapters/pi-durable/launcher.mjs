@@ -409,6 +409,13 @@ async function runOnce(cfg) {
       compaction[key] = value;
     }
   }
+  // cacheRetention: fail closed before any bridge/auth work so a malformed
+  // profile refuses even offline.
+  if (cfg.cacheRetention !== undefined
+      && cfg.cacheRetention !== 'none' && cfg.cacheRetention !== 'short'
+      && cfg.cacheRetention !== 'long') {
+    throw new Error('Effective configuration carries an invalid cacheRetention');
+  }
   if (cfg.engine_tools?.length) throw new Error('Native host tools bypass the OCI bridge');
   if (cfg.resources?.length) throw new Error('Resource kinds are unsupported on pi-durable');
   if (cfg.mcp_servers && Object.keys(cfg.mcp_servers).length) throw new Error('MCP servers are unsupported on pi-durable');
@@ -490,9 +497,20 @@ async function runOnce(cfg) {
 
   const storage = await openNodeSqliteStorage(cfg.store);
   const context = BACKGROUND_CONTEXT;
-  const harness = compaction === undefined
+  // cacheRetention: profile stream preference passed natively as
+  // settings.stream.cacheRetention (HarnessSettings.stream is read live at
+  // every resolution, so retuning keeps the same store). Unset omits the
+  // field so the engine/provider default applies (validated above).
+  const cacheRetention = cfg.cacheRetention;
+  let settings = undefined;
+  if (compaction !== undefined || cacheRetention !== undefined) {
+    settings = {};
+    if (compaction !== undefined) settings.compaction = compaction;
+    if (cacheRetention !== undefined) settings.stream = { cacheRetention };
+  }
+  const harness = settings === undefined
     ? await Harness.open(storage, { models, registry }, context)
-    : await Harness.open(storage, { models, registry, settings: { compaction } }, context);
+    : await Harness.open(storage, { models, registry, settings }, context);
   try {
     harness.resume(); // continue work a dead process left unfinished
     // Agent tools take the installed tool registrations (not bare names);

@@ -53,20 +53,24 @@ def effective(config, role, profile):
     if set(options) & owned:
         raise ConfigError('Engine options conflict with runtime-owned configuration: ' + ', '.join(sorted(set(options) & owned)))
     if raw['engine'] == 'pi':
-        allowed = {'thinkingLevel', 'settings', 'codemode', 'toolSearch', 'excludeTools', 'scopedModels'}
+        allowed = {'thinkingLevel', 'settings', 'codemode', 'toolSearch', 'excludeTools', 'scopedModels', 'cacheRetention'}
         if set(options) - allowed:
             raise ConfigError('Unknown Pi SDK configuration field')
+        if 'cacheRetention' in options and options['cacheRetention'] not in ('none', 'short', 'long'):
+            raise ConfigError("cacheRetention must be one of 'none', 'short', or 'long'")
     if raw['engine'] == 'pi-durable':
         # The durable Harness owns its own generation loop: Pi SDK knobs are
         # refused here instead of silently ignored, and pi profiles cannot
         # carry durable policy that the pi engine never enforces.
-        allowed = {'thinkingLevel', 'durable_backend', 'durable_resume',
+        allowed = {'thinkingLevel', 'cacheRetention', 'durable_backend', 'durable_resume',
                    'durable_retention_days',
                    'durable_compaction_reserve_tokens',
                    'durable_compaction_keep_recent_tokens',
                    'durable_compaction_background_tokens'}
         if set(options) - allowed:
             raise ConfigError('Unknown pi-durable configuration field')
+        if 'cacheRetention' in options and options['cacheRetention'] not in ('none', 'short', 'long'):
+            raise ConfigError("cacheRetention must be one of 'none', 'short', or 'long'")
         settings = options.get('settings', {})
         if not isinstance(settings, dict) or settings.get('packages'):
             raise ConfigError('Use reviewed local resources; runtime package acquisition is unavailable')
@@ -174,7 +178,7 @@ def local_settings_digest(config, engine):
 #: its policy at every resolution: bounding live context must not throw the
 #: conversation away, while the per-run grant still binds the values.
 CONVERSATION_LIVE_OPTIONS = {
-    'pi': frozenset({'thinkingLevel'}),
+    'pi': frozenset({'thinkingLevel', 'cacheRetention'}),
     'codex': frozenset({'model_reasoning_effort'}),
     'claude': frozenset({'effort'}),
 }

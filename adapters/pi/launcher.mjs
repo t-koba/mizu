@@ -21,6 +21,13 @@ if (process.argv.includes('--check-contract')) {
   const cfg = JSON.parse(readFileSync(process.argv[2], 'utf8'));
   const bridge = JSON.parse(readFileSync(process.env.MIZU_BRIDGE_CONFIG, 'utf8'));
   bridge.engine_tools = cfg.engine_tools;
+  // cacheRetention: pi-coding-agent createAgentSession exposes no per-session knob, but
+  // pi-ai honors PI_CACHE_RETENTION=long via resolveCacheRetention. The profile is
+  // authoritative: 'long' sets the supported env channel, anything else clears it so
+  // the Pi default (short) applies. 'none' therefore degrades to the Pi default on
+  // pi (the SDK exposes no per-session none here); pi-durable passes all three natively.
+  if (cfg.options?.cacheRetention === 'long') process.env.PI_CACHE_RETENTION = 'long';
+  else delete process.env.PI_CACHE_RETENTION;
   const modelRuntime = await ModelRuntime.create({ authPath: join(cfg.agentDir, 'auth.json'),
     modelsPath: join(cfg.agentDir, 'models.json'), modelsStorePath: join(cfg.agentDir, 'models-cache.json'),
     allowModelNetwork: false });
