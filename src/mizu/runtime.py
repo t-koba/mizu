@@ -176,9 +176,12 @@ class Context:
         self.mutex = threading.RLock()
         self.hello = threading.Event()
         self.request_count = 0
-        self.request_sequences: set[int] = set()
-        self.runtime_usage: dict[int, dict] = {}
-        self.runtime_models: dict[int, dict] = {}
+        # Provider adapters restart their local sequence for each execute;
+        # scope it to the reused Context's engine invocation.
+        self.execution_attempt = 0
+        self.request_sequences: set[tuple[int, int]] = set()
+        self.runtime_usage: dict[tuple[int, int], dict] = {}
+        self.runtime_models: dict[tuple[int, int], dict] = {}
         self.tool_count = 0
         # Delegation spend sharing: the role whose per-run caps bind spend.
         # Delegation children count against the caller's unit, so theirs
@@ -194,6 +197,10 @@ class Context:
         self.finished: dict | None = None
         self.admission_error: str | None = None
         self.admission_wait = False
+        # Selector failover identity for durable submissions. Retries and
+        # recovery of this candidate keep the same ordinal; only a proven
+        # terminal pi-durable unanswered settlement can advance it.
+        self.attempt_ordinal = 0
         self.decision_events: list = []
         self.wait_events: list = []
         self.obligations: list = []
@@ -243,12 +250,14 @@ class Context:
                     raise Denied("Invalid runtime usage")
                 if len(canonical(arguments)) > 65536 or len(self.runtime_usage) >= 4096:
                     raise LimitExceeded("Runtime usage evidence bound exceeded")
-                self.runtime_usage.setdefault(sequence, usage)
+                key = (self.execution_attempt, sequence)
+                self.runtime_usage.setdefault(key, usage)
                 if isinstance(arguments.get("model"), dict):
-                    self.runtime_models.setdefault(sequence, arguments["model"])
+                    self.runtime_models.setdefault(key, arguments["model"])
                 write_json(self.run_dir / "runtime-usage.json", {"observations": [
-                    {"sequence": seq, "usage": value, "model": self.runtime_models.get(seq)}
-                    for seq, value in self.runtime_usage.items()]})
+                    {"execution_attempt": attempt, "sequence": seq, "usage": value,
+                     "model": self.runtime_models.get((attempt, seq))}
+                    for (attempt, seq), value in self.runtime_usage.items()]})
                 return {"recorded": True}
             if operation == "_engine_tool":
                 if self.bound_hit is not None:
@@ -271,7 +280,8 @@ class Context:
                         raise Denied("Invalid request sequence")
                     if self.finished is not None:
                         raise Denied("No model requests are permitted after finish")
-                    if sequence not in self.request_sequences:
+                    sequence_key = (self.execution_attempt, sequence)
+                    if sequence_key not in self.request_sequences:
                         over = self.request_count >= role_requests_per_run(
                             self.config, self.spend_role or self.role)
                         if over and self.wrap_up_requests >= WRAP_UP_REQUESTS:
@@ -280,7 +290,8 @@ class Context:
                             Budget(self.config.data / "budget", self.config.limits.daily_requests,
                                    self.config.limits.retention_days,
                                    self.config.limits.shared_daily_requests, self.config.timezone).take(
-                                       f"{self.run_dir.name}:{sequence}", project=self.project.name)
+                                       f"{self.run_dir.name}:{self.execution_attempt}:{sequence}",
+                                       project=self.project.name)
                         except InfraExceeded:
                             if hasattr(self, 'model_evidence'):
                                 self.model_evidence['admission_status'] = 'rejected'
@@ -300,7 +311,7 @@ class Context:
                             # burn the allowance or mislabel the context.
                             self.bound_hit = self.bound_hit or "requests"
                             self.wrap_up_requests += 1
-                        self.request_sequences.add(sequence)
+                        self.request_sequences.add(sequence_key)
                         self.request_count += 1
                         if hasattr(self, "model_evidence"):
                             self.model_evidence.update(requests=self.request_count, requests_known=True, admission_status="accepted")
@@ -2078,6 +2089,7 @@ class Engine:
                             "rotation": (rotation or {}).get("reason", "")})
                 fallback_attempt = 0
                 while True:
+                    context.execution_attempt += 1
                     try:
                         model_result = driver.execute(context, prompt)
                     except ModelFailure as exc:
@@ -2128,6 +2140,14 @@ class Engine:
                         # tool counters stay accumulated on the reused context,
                         # but the failed attempt's seal never carries: the
                         # retry must finish and verify its own work.
+                        # A terminal unanswered durable settlement is known
+                        # not to be an in-flight recovery. Give the selected
+                        # fallback its own idempotency key; every other error
+                        # keeps the identity and therefore still fails closed
+                        # if the candidate's grant changed.
+                        if (exc.evidence.get("source") == "pi-durable"
+                                and exc.evidence.get("kind") == "unanswered"):
+                            context.attempt_ordinal += 1
                         context.operations_stopped.clear()
                         context.finished = None
                         context.verification = None
@@ -2167,6 +2187,7 @@ class Engine:
                                   f"Keep the published state unless this run changed it. "
                                   f"{WRAP_UP_REQUESTS - context.wrap_up_requests} requests and "
                                   f"{WRAP_UP_TOOLS - context.wrap_up_tools} wrap-up tools remain.")
+                        context.execution_attempt += 1
                         model_result = driver.execute(context, notice + "\n\n" + prompt)
                     break
                 if context.cancelled():

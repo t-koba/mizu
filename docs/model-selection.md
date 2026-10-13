@@ -68,10 +68,19 @@ same dispatch: the recorded block applies to an immediate re-selection, and
 the run continues on the next eligible candidate instead of losing the whole
 interval to the next scheduled start. Attempts are bounded by the candidate
 count, and the same run context is reused so the run's own deadline and
-budget keep accumulating across attempts. If no candidate remains eligible,
-or no rule matches, the run fails as before (deferred with the block, or
-raised). Whether to fall back stays configuration: the selector's candidates
-and rules decide, never a built-in retry.
+budget keep accumulating across attempts. For pi-durable, the durable requestId
+normally stays bound to the same selector attempt so retry/recovery cannot
+submit it twice. Only a known terminal `ModelFailure` from `pi-durable` with
+`kind = "unanswered"`, followed by a successfully selected fallback, advances
+a bounded per-run attempt ordinal; that fallback gets a distinct deterministic
+requestId while retaining the same durable session/store and grant/resume
+checks. Launcher, protocol, cancellation, admission, and other uncertain errors
+do not advance it, so a changed authority still fails closed against the old
+run row. The ordinal is not derived from model or grant identity, and repeated
+calls for one candidate keep the same identity. If no candidate remains
+eligible, or no rule matches, the run fails as before (deferred with the block,
+or raised). Whether to fall back stays configuration: the selector's
+candidates and rules decide, never a built-in retry.
 
 ## Facts and predicates
 

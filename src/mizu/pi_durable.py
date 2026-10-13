@@ -37,6 +37,8 @@ ROOT = Path(__file__).resolve().parents[2]
 ENGINE = "pi-durable"
 #: Single bounded result document from the one-shot launcher.
 RESULT_BYTES = 1024 * 1024
+#: Selectors allow 64 rules of 64 candidates; ordinals count fallback advances.
+MAX_ATTEMPT_ORDINAL = 64 * 64
 
 
 #: Compaction token bound (matches limits.session_max_tokens ceiling).
@@ -143,6 +145,12 @@ class PiDurableDriver:
             raise ConfigError("Durable prompt must be nonempty")
         if len(prompt_bytes) > EVENT_RECORD_BYTES:
             raise ConfigError("Durable prompt exceeds the bounded record")
+        run_key = context.run_dir.name
+        attempt_ordinal = getattr(context, "attempt_ordinal", 0)
+        if type(attempt_ordinal) is not int or not 0 <= attempt_ordinal <= MAX_ATTEMPT_ORDINAL:
+            raise ConfigError("Durable selector attempt ordinal is outside its bound")
+        if attempt_ordinal:
+            run_key = f"{run_key}-a{attempt_ordinal}"
         # The durable SQLite store (keyed by session_key) owns conversation
         # resume and supersedes native session files; the session record
         # still carries cumulative usage for rotation, like the pi engine.
@@ -176,7 +184,6 @@ class PiDurableDriver:
         conn = open_store(store_path)
         existing = 0
         try:
-            run_key = context.run_dir.name
             if policy["resume"] == "fresh" and load_run(conn, run_key) is not None:
                 raise ConfigError("Durable resume mode is fresh; retry with a new run")
             started_record = begin_run(conn, run_key=run_key, session_key=session_key,
@@ -377,9 +384,10 @@ def interpret_result(reported, context, model, thinking_level) -> None:
     """Validate the launcher result document and record usage evidence.
 
     Schema: ``reported`` is the parsed one-shot result (``durable_result``
-    true, ``status`` done/request_bound/other). ``request_bound`` maps to
-    ``LimitExceeded`` so the spent budget surfaces as a bound, never a
-    silent stop; other non-done statuses map to ``ModelFailure``. A done
+    true, ``status`` done/unanswered/request_bound). ``request_bound`` maps
+    to ``LimitExceeded`` so the spent budget surfaces as a bound, never a
+    silent stop; only the known terminal ``unanswered`` status maps to
+    ``ModelFailure``, while unknown statuses are ``ProtocolError``. A done
     result still requires the ``mizu_finish`` seal and at least one
     admitted request, like the pi engine. Launcher requests/usage counters
     are recorded before raising on ``request_bound`` so the bound-exhausted
@@ -393,11 +401,13 @@ def interpret_result(reported, context, model, thinking_level) -> None:
         _record_launcher_evidence(reported, context, model, thinking_level)
         context.bound_hit = context.bound_hit or "requests"
         raise LimitExceeded("Per-run provider request budget exhausted")
-    if reported.get("status") != "done":
+    if reported.get("status") == "unanswered":
         reason = str(reported.get("reason") or "submission unanswered")
         detail = reported.get("detail")
         message = f"{reason}: {detail}" if isinstance(detail, str) and detail else reason
         raise ModelFailure("pi-durable", kind="unanswered", message=message)
+    if reported.get("status") != "done":
+        raise ProtocolError("Durable launcher returned an unknown settlement status")
     if not reported.get("finish_called") or context.finished is None:
         raise ProtocolError("Pi-durable settled without mizu_finish")
     if context.request_count == 0:

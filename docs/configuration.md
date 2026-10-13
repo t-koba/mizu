@@ -257,9 +257,17 @@ the bridge and publication contract.
 | Engine | Managed interface | Completion | Admission unit |
 |---|---|---|---|
 | Pi | `createAgentSession`, `ModelRuntime`, `runRpcMode` | `agent_settled` and seal | Logical model request (includes auxiliary inference) |
-| Pi-durable | Pinned pi-durable Harness over file-backed SQLite, one admitted submission per run with requestId resume binding | Settled submission and seal | Logical model request (includes auxiliary inference) |
+| Pi-durable | Pinned pi-durable Harness over file-backed SQLite, one admitted submission per engine attempt with stable requestId resume binding | Settled submission and seal | Logical model request (includes auxiliary inference) |
 | Codex | `app-server --listen stdio://` | `turn/completed` with completed status and seal | Turn |
 | Claude | Official Python Agent SDK in separate interpreter | `terminal_reason=completed`, successful subtype, no error and seal | Query |
+
+For pi-durable, `requestId` is the durable run key: retrying a candidate with
+the same id returns its stored submission/settlement and does not admit a new
+provider request. Selector failover gets a new id only after a known terminal
+`pi-durable` `unanswered` failure and an eligible fallback has actually been
+selected; the bounded attempt suffix leaves the session/store and all durable
+grant and replay checks intact. Other or uncertain failures retain the id and
+therefore refuse a changed grant rather than forking around unresolved work.
 
 Settings that collide with runtime-owned prompt/model/bridge/session fields
 fail before input; they are never silently overwritten. Native engine errors

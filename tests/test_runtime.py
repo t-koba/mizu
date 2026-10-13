@@ -611,7 +611,9 @@ class WrapUpTests(Fixture):
         from mizu.runtime import Engine, WRAP_UP_OPS
         from support import ScriptDriver
         seen = []
+        attempts = []
         def callback(ctx, prompt, profile):
+            attempts.append((ctx.execution_attempt, ctx.request_count))
             if not seen:
                 seen.append("first")
                 ctx.bound_hit = "requests"
@@ -629,6 +631,7 @@ class WrapUpTests(Fixture):
         self.assertTrue(set(grants) <= set(WRAP_UP_OPS))
         self.assertIn("finish", grants)
         self.assertEqual(seen[3], ())
+        self.assertEqual(attempts, [(1, 1), (2, 2)])
 
     def test_wrap_up_prompt_states_bound(self):
         from mizu.errors import LimitExceeded

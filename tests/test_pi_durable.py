@@ -166,6 +166,9 @@ class PolicyTests(Fixture):
         with self.assertRaises(ProtocolError):
             pi_durable.interpret_result({"durable_result": True, "status": "done",
                                          "finish_called": False}, context, model, None)
+        with self.assertRaisesRegex(ProtocolError, "unknown settlement status"):
+            pi_durable.interpret_result({"durable_result": True, "status": "future-status"},
+                                         context, model, None)
         pi_durable.interpret_result({"durable_result": True, "status": "done",
                                      "finish_called": True, "requests": 2,
                                      "usage": {"input": 3, "output": 4}},
@@ -368,6 +371,7 @@ class AuthPathTests(Fixture):
         written = json.loads((context.run_dir / "pi-durable-effective.json").read_text())
         self.assertEqual(written["authPath"],
                          str(self.config.agent_dir("pi-durable") / "auth.json"))
+        self.assertEqual(written["requestId"], "run-key")
         # Unset keeps the engine default: the effective file omits the field
         # so no Mizu value is injected.
         self.assertNotIn("compaction", written)
@@ -418,14 +422,20 @@ class SessionIsolationTests(Fixture):
         profile = self._durable_profile()
         driver = pi_durable.PiDurableDriver(self.config)
         context = self._ephemeral()
+        run_keys = []
         def boom(*args, **kwargs):
+            run_keys.append(args[5])
             raise ModelFailure("pi-durable", kind="error", message="boom")
         driver._run_once = boom
         with self.assertRaises(ModelFailure):
             driver.execute(context, "hello", profile=profile)
         from pathlib import Path
-        self._succeed(driver)
+        def succeed(*args, **kwargs):
+            run_keys.append(args[5])
+            return {"engine": "pi-durable", "requests": 1, "usage": []}
+        driver._run_once = succeed
         out = driver.execute(context, "hello", profile=profile)
+        self.assertEqual(run_keys[0], run_keys[1])
         self.assertTrue(out["durable"]["resumed"])
         conn = open_store(Path(out["durable"]["store"]))
         try:
@@ -436,6 +446,117 @@ class SessionIsolationTests(Fixture):
         # completed, holding a prompt turn from each attempt.
         self.assertEqual(record["status"], "completed")
         self.assertEqual(len(record["turns"]), 2)
+
+    def test_terminal_unanswered_fallback_uses_new_row_and_preserves_unknown(self):
+        from pathlib import Path
+        first_profile = self._durable_profile()
+        self.config.profiles[first_profile]["session"] = "persistent"
+        fallback_profile = "durable-fallback"
+        fallback_settings = dict(self.config.profiles[first_profile])
+        fallback_settings["provider"] = "fallback-provider"
+        fallback_settings["model"] = "fallback-model"
+        fallback_settings["options"] = {**fallback_settings.get("options", {}),
+                                         "thinkingLevel": "high"}
+        self.config.profiles[fallback_profile] = fallback_settings
+        driver = pi_durable.PiDurableDriver(self.config)
+        context = self.context()
+        captured = []
+
+        def unanswered(ctx, settings, model, prompt, selected_profile, run_key, store_path):
+            captured.append((run_key, store_path,
+                             pi_durable.grant_for(settings, ctx.role, model)))
+            raise ModelFailure("pi-durable", kind="unanswered", message="model_error")
+
+        driver._run_once = unanswered
+        with self.assertRaises(ModelFailure):
+            driver.execute(context, "first candidate", profile=first_profile)
+        context.attempt_ordinal = 1
+
+        def complete(ctx, settings, model, prompt, selected_profile, run_key, store_path):
+            captured.append((run_key, store_path,
+                             pi_durable.grant_for(settings, ctx.role, model)))
+            return {"engine": "pi-durable", "requests": 1, "usage": []}
+
+        driver._run_once = complete
+        out = driver.execute(context, "fallback candidate", profile=fallback_profile)
+        self.assertEqual(captured[0][1], captured[1][1])
+        self.assertNotEqual(captured[0][0], captured[1][0])
+        self.assertNotEqual(captured[0][2], captured[1][2])
+        # Different durable profiles with different grants still address one
+        # persistent SQLite session; the ordinal creates the distinct row.
+        self.assertEqual(out["durable"]["store"], str(captured[0][1]))
+        self.assertEqual(out["durable"]["grant"], captured[1][2])
+        conn = open_store(Path(out["durable"]["store"]))
+        try:
+            rows = conn.execute("SELECT run_key FROM durable_runs ORDER BY run_key").fetchall()
+            old = load_run(conn, captured[0][0])
+            new = load_run(conn, captured[1][0])
+        finally:
+            conn.close()
+        self.assertEqual({row[0] for row in rows}, {captured[0][0], captured[1][0]})
+        self.assertEqual(old["status"], "interrupted")
+        self.assertEqual(old["turns"][0]["state"], "unknown")
+        self.assertEqual(old["turns"][0]["result"], {"uncertain": True})
+        self.assertEqual(new["status"], "completed")
+
+    def test_attempt_ordinal_distinguishes_equal_grant_candidates(self):
+        first_profile = self._durable_profile()
+        self.config.profiles[first_profile]["session"] = "persistent"
+        fallback_profile = "durable-equal"
+        self.config.profiles[fallback_profile] = dict(self.config.profiles[first_profile])
+        driver = pi_durable.PiDurableDriver(self.config)
+        context = self.context()
+        captured = []
+
+        def unanswered(ctx, settings, model, prompt, selected_profile, run_key, store_path):
+            captured.append((run_key, store_path,
+                             pi_durable.grant_for(settings, ctx.role, model)))
+            raise ModelFailure("pi-durable", kind="unanswered", message="model_error")
+
+        driver._run_once = unanswered
+        with self.assertRaises(ModelFailure):
+            driver.execute(context, "first candidate", profile=first_profile)
+        context.attempt_ordinal = 1
+
+        def complete(ctx, settings, model, prompt, selected_profile, run_key, store_path):
+            captured.append((run_key, store_path,
+                             pi_durable.grant_for(settings, ctx.role, model)))
+            return {"engine": "pi-durable", "requests": 1, "usage": []}
+
+        driver._run_once = complete
+        driver.execute(context, "equal-authority fallback", profile=fallback_profile)
+        self.assertNotEqual(captured[0][0], captured[1][0])
+        self.assertEqual(captured[0][1], captured[1][1])
+        self.assertEqual(captured[0][2], captured[1][2])
+
+    def test_changed_grant_without_advanced_attempt_still_refuses_resume(self):
+        import dataclasses
+        profile = self._durable_profile()
+        self.config.profiles[profile]["session"] = "persistent"
+        driver = pi_durable.PiDurableDriver(self.config)
+        context = self.context()
+        seen = []
+
+        def interrupted(*args, **kwargs):
+            seen.append((args[5], args[6]))
+            raise ModelFailure("pi-durable", kind="error", message="uncertain")
+
+        driver._run_once = interrupted
+        with self.assertRaises(ModelFailure):
+            driver.execute(context, "retry same candidate", profile=profile)
+        context.role = dataclasses.replace(context.role,
+            capabilities=tuple([*context.role.capabilities, "delegate"]))
+        with self.assertRaisesRegex(ConfigError, "authority differs"):
+            driver.execute(context, "changed grant", profile=profile)
+        self.assertEqual([item[0] for item in seen], [context.run_dir.name])
+        # The persistent store's identity does not change with the grant; the
+        # original run row remains the only candidate for this request id.
+        conn = open_store(seen[0][1])
+        try:
+            self.assertIsNotNone(load_run(conn, context.run_dir.name))
+            self.assertIsNone(load_run(conn, context.run_dir.name + "-a1"))
+        finally:
+            conn.close()
 
     def test_token_rotation_starts_a_fresh_conversation(self):
         import json

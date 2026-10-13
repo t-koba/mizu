@@ -78,7 +78,8 @@ class Budget:
     def take(self, request_id: str, *, day: str | None = None, project: str = "") -> int:
         """Admit one request against the per-project limit and the shared total.
 
-        Schema: ``request_id`` is an opaque caller string (``run:sequence``);
+        Schema: ``request_id`` is an opaque caller string
+        (``run:execution_attempt:sequence``);
         ``project`` is the validated project name (``\"\"`` keeps the legacy
         shared-only accounting used by unit callers). Bounds: per-project
         count below ``daily``; shared aggregate below ``shared_daily`` when

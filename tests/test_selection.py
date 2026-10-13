@@ -216,6 +216,70 @@ class SelectionTests(SelectionFixture):
         self.assertEqual(driver.calls[-1][0].role.capabilities, role.capabilities)
         self.assertEqual(driver.calls[-1][0].role.engine_tools, role.engine_tools)
 
+    def test_pi_durable_unanswered_fallback_keeps_spend_and_usage_scoped(self):
+        role, _ = self.setup_selection()
+        seen = []
+
+        def callback(ctx, prompt, profile):
+            # Repeated bridge events in one execute remain idempotent, while
+            # the same adapter-local sequence in the next execute is new spend.
+            ctx.handle('_budget', {'sequence': 1})
+            ctx.handle('_model_usage', {'sequence': 2, 'usage': {'input': 1},
+                                        'model': {'provider': 'test', 'model': 'model'}})
+            seen.append((ctx.role.profile, ctx.attempt_ordinal,
+                         ctx.execution_attempt, ctx.request_count))
+            if ctx.role.profile == 'primary':
+                raise ModelFailure('pi-durable', kind='unanswered',
+                                   code='synthetic-exhausted', message='model_error')
+
+        driver = ScriptDriver(callback)
+        result = Engine(self.config, driver=driver).run(self.project, role.name)
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(seen, [('primary', 0, 1, 1), ('alternate', 1, 2, 2)])
+        context = driver.calls[1][0]
+        self.assertEqual(set(context.runtime_usage), {(1, 2), (2, 2)})
+        observations = json.loads((context.run_dir / 'runtime-usage.json').read_text())['observations']
+        self.assertEqual([(item['execution_attempt'], item['sequence']) for item in observations],
+                         [(1, 2), (2, 2)])
+        budget = Budget(self.config.data / 'budget', self.config.limits.daily_requests,
+                        self.config.limits.retention_days, self.config.limits.shared_daily_requests,
+                        self.config.timezone)
+        ledger = read_json(budget.root / f'{budget._today()}.json')
+        admitted = ledger['projects'][self.project.name]
+        self.assertEqual(len(admitted), 2)
+        self.assertEqual(len(set(admitted)), 2)
+        self.assertIs(driver.calls[0][0], context)
+
+    def test_nonterminal_or_uncertain_failures_keep_selector_attempt_identity(self):
+        for failure in (ModelFailure('pi-durable', kind='launcher', code='synthetic-exhausted'),
+                        ModelFailure('pi-durable', kind='error', code='synthetic-exhausted'),
+                        ModelFailure('other-engine', kind='unanswered', code='synthetic-exhausted')):
+            with self.subTest(source=failure.evidence['source'], kind=failure.evidence['kind']):
+                State(self.config).path.unlink(missing_ok=True)
+                role, _ = self.setup_selection()
+                seen = []
+
+                def callback(ctx, prompt, profile):
+                    seen.append(ctx.attempt_ordinal)
+                    if ctx.role.profile == 'primary':
+                        raise failure
+
+                result = Engine(self.config, driver=ScriptDriver(callback)).run(self.project, role.name)
+                self.assertEqual(result['status'], 'completed')
+                self.assertEqual(seen, [0, 0])
+
+    def test_unanswered_without_eligible_fallback_does_not_advance_identity(self):
+        spec = specification()
+        spec['rules'][0]['candidates'] = spec['rules'][0]['candidates'][:1]
+        role, _ = self.setup_selection(spec)
+        def unanswered(ctx, *_):
+            raise ModelFailure('pi-durable', kind='unanswered', code='synthetic-exhausted')
+        driver = ScriptDriver(unanswered)
+        result = Engine(self.config, driver=driver).run(self.project, role.name)
+        self.assertEqual(result['status'], 'deferred')
+        self.assertEqual(len(driver.calls), 1)
+        self.assertEqual(driver.calls[0][0].attempt_ordinal, 0)
+
     def test_runtime_fallback_bounded_by_candidates_then_defers(self):
         role, _ = self.setup_selection()
         def callback(ctx, prompt, profile):

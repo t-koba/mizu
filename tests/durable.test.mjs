@@ -107,6 +107,62 @@ test('close/reopen resumes pending work exactly once', async () => {
   }
 });
 
+test('terminal unanswered replay is bound to requestId; a distinct id starts a new submission', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'mizu-durable-'));
+  try {
+    const env = backend();
+    const file = join(directory, 's.sqlite');
+    const firstStorage = await openNodeSqliteStorage(file);
+    const firstHarness = await Harness.open(firstStorage,
+      { models: env.models, registry: env.registry }, context);
+    const agent = { model: { provider: 'test-only', modelId: 'model' },
+      tools: env.tools, instructions: 'Call probe; a later provider error is expected.', cwd: directory };
+    const root = await firstHarness.root(context, { agent });
+    env.faux.setResponses([
+      fauxAssistantMessage([fauxToolCall('probe', {})], { stopReason: 'toolUse' }),
+      fauxAssistantMessage('synthetic provider failure', {
+        stopReason: 'error', errorMessage: 'synthetic provider failure' }),
+    ]);
+    const failed = await root.submit({ type: 'input', content: 'probe then fail', requestId: 'candidate-0' }, context);
+    const settlement = await failed.wait(context);
+    assert.equal(settlement.status, 'unanswered');
+    assert.equal(settlement.reason, 'model_error');
+    assert.equal(env.seen.length, 1);
+    assert.equal(env.faux.state.callCount, 2);
+    await firstHarness.close(context);
+
+    // Reopen the same persistent store. resume must leave the completed
+    // unanswered submission and its already-completed tool side effect alone.
+    const secondStorage = await openNodeSqliteStorage(file);
+    const secondHarness = await Harness.open(secondStorage,
+      { models: env.models, registry: env.registry }, context);
+    secondHarness.resume();
+    const resumedRoot = await secondHarness.root(context);
+    const duplicate = await resumedRoot.submit({ type: 'input', content: 'probe then fail',
+      requestId: 'candidate-0' }, context);
+    assert.equal(duplicate.id, failed.id);
+    const replayed = await duplicate.wait(context);
+    assert.equal(replayed.status, 'unanswered');
+    assert.equal(replayed.reason, 'model_error');
+    assert.equal(env.faux.state.callCount, 2); // same requestId admits no new provider call
+    assert.equal(env.seen.length, 1); // neither submit nor resume replays the completed tool
+
+    // The selector's next candidate has a new deterministic requestId, so
+    // this is genuinely a fresh provider admission in the same store.
+    env.faux.setResponses([
+      fauxAssistantMessage([fauxToolCall('finish', {})], { stopReason: 'toolUse' }),
+    ]);
+    const next = await resumedRoot.submit({ type: 'input', content: 'fallback candidate',
+      requestId: 'candidate-0-a1' }, context);
+    assert.equal((await next.wait(context)).status, 'done');
+    assert.equal(env.faux.state.callCount, 3);
+    assert.equal(env.seen.length, 1);
+    await secondHarness.close(context);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('pi login store is shared file-backed with locked OAuth persistence', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'mizu-durable-auth-'));
   try {
