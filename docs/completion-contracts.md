@@ -56,7 +56,7 @@ Codex providerの設定契約は [公式設定リファレンス](https://develo
 
 exec/experimentはid/kind/exit_code/reason/seconds/writableと、script/stdout/stderrの各8KiB UTF-8プレビュー、各truncated、commands/<id>.jsonの証跡参照を返します。完全な結果は保存したcommand記録が正本です。verifyも完全な検証記録を保存し、応答の各scriptは512バイトプレビューとtruncatedにします。切り詰めは実行結果や検証結果を成功へ変更しません。相談は最大8件×12000文字の回答を保持し、例外文字列だけ2KiBに制限して完全な子runの証跡を残します。エスケープを含むMCP応答の1MiB境界をテストします。
 
-insights/searchの一覧はoffset/limit（filesと同じ型・上限）を受理し、既存呼出しは省略できます。insightsは設定した最新N件の選択内をページングし、総件数とselection_truncatedも返します。searchは応答行をtitle 300、URL 4096、summary 1500のUTF-8バイトプレビューと各truncatedにし、完全な結果をsources/search-<SHA256>.jsonへ記録します。ページは128KiB以下の項目集合、offset/next_offset/truncatedを持ちます。source_truncatedは検索元の切り詰めと区別します。fetchはoffset（0..2147483647文字）とlimit（1..8192文字、省略8192）で本文をページングし、全文は既存の取得receiptに残します。取得元や検索元が変わるページ間の不変性は保証しません。これらは既存のread/fetch/search/insights権限内であり、新しいホスト読取権限を与えません。通信失敗や部分書込みを再送しません。
+insights/searchの一覧はoffset/limit（filesと同じ型・上限）を受理し、既存呼出しは省略できます。insightsは未決定の保留一覧をページングし、総件数とselection_truncatedも返します。action指定では決定済みを行動別（accept/modify/defer/reject）に列挙し、id指定では全IDまたは一意な接頭辞で1件を読みます（曖昧・不存在は拒否）。プロンプトに載る選択は[limits]pending_insights件に収まりますが、明示的取得の選択はそれと分離し、INSIGHT_RETRIEVAL_LIMIT（1000）件上限のオフセット非依存の安定選択をページングします。searchは応答行をtitle 300、URL 4096、summary 1500のUTF-8バイトプレビューと各truncatedにし、完全な結果をsources/search-<SHA256>.jsonへ記録します。ページは128KiB以下の項目集合、offset/next_offset/truncatedを持ちます。source_truncatedは検索元の切り詰めと区別します。fetchはoffset（0..2147483647文字）とlimit（1..8192文字、省略8192）で本文をページングし、全文は既存の取得receiptに残します。取得元や検索元が変わるページ間の不変性は保証しません。これらは既存のread/fetch/search/insights権限内であり、新しいホスト読取権限を与えません。通信失敗や部分書込みを再送しません。
 
 ## 現行エンジンの接続契約
 
