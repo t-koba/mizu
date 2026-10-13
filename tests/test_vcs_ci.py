@@ -515,3 +515,190 @@ class CiRewakeTests(Fixture):
             self.project, "worker", event_trigger=True)
         self.assertEqual(second.get("skipped"), "no-event")
         self.assertEqual(len(driver.calls), calls_after_first)
+
+
+class CiRunIdentityTests(Fixture):
+    """Adapter run identity keys the CI wake fact; absent stays sha-keyed."""
+
+    def test_status_accepts_valid_run(self):
+        rows = vcs.parse_status_checks(
+            {"checks": [{"check": "unit", "state": "failure", "sha": SHA_A,
+                         "run": "run-123"}]})
+        self.assertEqual(rows[0]["run"], "run-123")
+        # Absent stays absent (exactly check/state/sha/url).
+        plain = vcs.parse_status_checks(
+            {"checks": [{"check": "unit", "state": "failure", "sha": SHA_A}]})
+        self.assertEqual(set(plain[0]), {"check", "state", "sha", "url"})
+        self.assertNotIn("run", plain[0])
+
+    def test_status_refuses_bad_run_and_unknown_keys(self):
+        for bad in ("", "x" * 129, "run\n1", "run\x001", 3, None,
+                    "ci\x1b[2K", "ci\u202e", "ci\x7f"):
+            with self.assertRaises(Denied, msg=repr(bad)):
+                vcs.parse_status_checks(
+                    {"checks": [{"check": "unit", "state": "failure",
+                                 "sha": SHA_A, "run": bad}]})
+        with self.assertRaises(Denied):
+            vcs.parse_status_checks(
+                {"checks": [{"check": "unit", "state": "failure",
+                             "sha": SHA_A, "bogus": 1}]})
+        with self.assertRaises(Denied):
+            vcs.parse_status_checks(
+                {"checks": [{"check": "unit", "state": "failure",
+                             "sha": SHA_A, "run": "ok", "bogus": 1}]})
+
+    def test_poller_stores_run_and_passes_it_to_record(self):
+        import dataclasses
+        from mizu import vcs as vcs_mod
+        from mizu.runtime import current_ci_failures, poll_ci
+        payload = {"checks": [{"check": "unit", "state": "failure",
+                               "sha": SHA_A, "run": "run-1"}]}
+        config = dataclasses.replace(self.config, vcs=adapter_settings(status_code(payload)))
+        seen = []
+        real_record = vcs_mod.record_ci_result
+
+        def wrapped(project, **kwargs):
+            seen.append(kwargs.get("run"))
+            return real_record(project, **kwargs)
+        vcs_mod.record_ci_result = wrapped
+        try:
+            state: dict = {}
+            event = poll_ci(config, self.project, state, now=0.0, interval=15.0,
+                            branches=["main"])
+        finally:
+            vcs_mod.record_ci_result = real_record
+        self.assertTrue(event["ok"])
+        self.assertEqual(seen, ["run-1"])
+        # Failures cache carries the identity.
+        self.assertEqual(state["failures"],
+                         {"main": [{"sha": SHA_A, "check": "unit", "run": "run-1"}]})
+        from mizu.fs import write_json
+        write_json(self.project.root / "vcs-poll.json",
+                   {"last_poll": 0.0, "failures": state["failures"]})
+        self.assertEqual(current_ci_failures(self.project),
+                         [{"branch": "main", "sha": SHA_A, "check": "unit",
+                           "run": "run-1"}])
+        # Re-poll with a new run keeps the same insight (provenance only,
+        # first-stored preserved) while the cache advances.
+        stored = self.project.insights.read(event["recorded"][0]["id"])
+        self.assertEqual(stored["run"], "run-1")
+        payload2 = {"checks": [{"check": "unit", "state": "failure",
+                                "sha": SHA_A, "run": "run-2"}]}
+        config2 = dataclasses.replace(self.config, vcs=adapter_settings(status_code(payload2)))
+        event2 = poll_ci(config2, self.project, state, now=15.0, interval=15.0,
+                         branches=["main"])
+        self.assertTrue(event2["ok"])
+        self.assertEqual(event2["recorded"][0]["id"], event["recorded"][0]["id"])
+        kept = self.project.insights.read(event["recorded"][0]["id"])
+        self.assertEqual(kept["run"], "run-1")
+        self.assertEqual(state["failures"],
+                         {"main": [{"sha": SHA_A, "check": "unit", "run": "run-2"}]})
+
+    def test_clean_drops_invalid_run_but_keeps_row(self):
+        from mizu.runtime import _clean_ci_failures
+        cleaned = _clean_ci_failures(
+            {"main": [{"sha": SHA_A, "check": "unit", "run": ""},
+                      {"sha": SHA_A, "check": "lint", "run": "ok-1"}]})
+        self.assertEqual(cleaned,
+                         {"main": [{"sha": SHA_A, "check": "unit"},
+                                   {"sha": SHA_A, "check": "lint", "run": "ok-1"}]})
+
+    def _wait_snapshot(self):
+        import time
+        gen = self.project.insights.generation()
+        cap = self.project.snapshots.capture_files(self.project.workspace)
+        wait = self.project.snapshots.create(
+            cap, goal=self.project.goal,
+            state="Now: parked\nNext: none\nTasks: none\nBlocking: none",
+            run=None, outcome="wait", summary="parked", verification=None,
+            wake_at=time.time() + 86400, inbox_seen=gen,
+            wake_generation=self.project.control().get("wake_generation", ""))
+        self.project.snapshots.publish(wait)
+        return self.project.snapshots.get()
+
+    def test_wake_new_run_due_same_run_parked(self):
+        import dataclasses
+        from mizu.fs import write_json
+        from mizu.runtime import should_run, wake_ci_failures, write_ci_wake
+        config = dataclasses.replace(
+            self.config, vcs={**self.config.vcs, "ci_branch": "mizu"})
+        self.project.config = config
+        snap = self._wait_snapshot()
+        base = 2000.0
+        write_json(self.project.root / "vcs-poll.json",
+                   {"last_poll": base,
+                    "failures": {"mizu": [{"sha": SHA_A, "check": "unit",
+                                           "run": "run-1"}]}})
+        self.assertTrue(should_run(self.project, snap, current_time=base,
+                                   role_name="worker", config=config))
+        write_ci_wake(self.project, "worker", "mizu",
+                      wake_ci_failures(self.project, config), snap["id"], base)
+        # Identical fact including the same run parks.
+        self.assertFalse(should_run(self.project, snap, current_time=base + 10,
+                                    role_name="worker", config=config))
+        # Same sha+check with a NEW run wakes.
+        write_json(self.project.root / "vcs-poll.json",
+                   {"last_poll": base + 11,
+                    "failures": {"mizu": [{"sha": SHA_A, "check": "unit",
+                                           "run": "run-2"}]}})
+        self.assertTrue(should_run(self.project, snap, current_time=base + 11,
+                                   role_name="worker", config=config))
+        write_ci_wake(self.project, "worker", "mizu",
+                      wake_ci_failures(self.project, config), snap["id"], base + 11)
+        self.assertFalse(should_run(self.project, snap, current_time=base + 12,
+                                    role_name="worker", config=config))
+
+    def test_wake_legacy_absent_run_stays_sha_keyed(self):
+        import dataclasses
+        from mizu.fs import write_json
+        from mizu.runtime import should_run, wake_ci_failures, write_ci_wake
+        config = dataclasses.replace(
+            self.config, vcs={**self.config.vcs, "ci_branch": "mizu"})
+        self.project.config = config
+        snap = self._wait_snapshot()
+        base = 3000.0
+        write_json(self.project.root / "vcs-poll.json",
+                   {"last_poll": base,
+                    "failures": {"mizu": [{"sha": SHA_A, "check": "unit"}]}})
+        write_ci_wake(self.project, "worker", "mizu",
+                      wake_ci_failures(self.project, config), snap["id"], base)
+        # Re-polled without identity: identical sha-keyed fact parks.
+        self.assertFalse(should_run(self.project, snap, current_time=base + 10,
+                                    role_name="worker", config=config))
+        # Old record without run mismatches a new fact with run exactly once.
+        write_json(self.project.root / "vcs-poll.json",
+                   {"last_poll": base + 11,
+                    "failures": {"mizu": [{"sha": SHA_A, "check": "unit",
+                                           "run": "run-9"}]}})
+        self.assertTrue(should_run(self.project, snap, current_time=base + 11,
+                                   role_name="worker", config=config))
+
+    def test_prompts_include_run_only_when_sent(self):
+        import dataclasses
+        import json
+        from mizu.fs import write_json
+        from mizu.runtime import current_ci_failures, prompt_for
+        from mizu.runtime import Context
+        from mizu.fs import mkdir
+        write_json(self.project.root / "vcs-poll.json",
+                   {"last_poll": 1.0,
+                    "failures": {"mizu": [{"sha": SHA_A, "check": "unit",
+                                           "run": "run-1"},
+                                          {"sha": SHA_B, "check": "lint"}]}})
+        rows = {row["check"]: row for row in current_ci_failures(self.project)}
+        self.assertEqual(rows["unit"]["run"], "run-1")
+        self.assertEqual(set(rows["lint"]), {"branch", "sha", "check"})
+        cfg = dataclasses.replace(self.config, vcs={**self.config.vcs, "ci_branch": "mizu"})
+        roles = dict(cfg.roles)
+        roles["reporter"] = dataclasses.replace(
+            roles["reporter"],
+            capabilities=tuple(list(roles["reporter"].capabilities) + ["vcs_read"]))
+        cfg = dataclasses.replace(cfg, roles=roles)
+        run = self.project.root / "runs" / "ci-run-probe"
+        mkdir(run)
+        ctx = Context(cfg, self.project, cfg.roles["reporter"], run,
+                      self.project.snapshots.get(), self.project.workspace)
+        prompt_rows = {row["check"]: row
+                       for row in json.loads(prompt_for(ctx))["ci_failures"]}
+        self.assertEqual(prompt_rows["unit"]["run"], "run-1")
+        self.assertNotIn("run", prompt_rows["lint"])

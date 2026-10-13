@@ -956,8 +956,27 @@ MAX_CI_CHECKS_PER_BRANCH = 16
 MAX_CI_FAILURE_BRANCHES = 128
 
 
+def _valid_ci_run(value) -> str | None:
+    """Return a valid adapter run identity or ``None`` (never raises).
+
+    Schema: opaque string 1-128 chars without newline/NUL or terminal
+    controls. Invalid reads as absent so rows without identity keep
+    exactly ``{sha, check}`` and all existing behavior holds.
+    """
+    try:
+        if not isinstance(value, str) or not value or len(value) > 128:
+            return None
+        if "\n" in value or "\x00" in value:
+            return None
+        from .vcs import _reject_terminal_controls as _reject_controls
+        _reject_controls(value, "Invalid CI run identity")
+        return value
+    except Exception:
+        return None
+
+
 def _clean_ci_failures(value) -> dict:
-    """Normalize a stored ``{branch: [{sha, check}]}`` mapping (never raises)."""
+    """Normalize a stored ``{branch: [{sha, check, run?}]}`` mapping (never raises)."""
     if not isinstance(value, dict):
         return {}
     out: dict = {}
@@ -987,13 +1006,17 @@ def _clean_ci_failures(value) -> dict:
                     continue
             except Exception:
                 continue
-            kept.append({"sha": sha, "check": check})
+            row = {"sha": sha, "check": check}
+            kept_run = _valid_ci_run(entry.get("run"))
+            if kept_run is not None:
+                row["run"] = kept_run
+            kept.append(row)
         out[branch] = kept
     return out
 
 
 def current_ci_failures(project, *, limit: int = MAX_CI_FAILURES) -> list:
-    """Return cached current CI failures as ``[{branch, sha, check}]`` (never raises).
+    """Return cached current CI failures as ``[{branch, sha, check, run?}]`` (never raises).
 
     Schema: best-effort read of the shared ``vcs-poll.json`` ``failures``
     mapping written by :func:`poll_ci`; flattened branch-major, sorted,
@@ -1011,9 +1034,14 @@ def current_ci_failures(project, *, limit: int = MAX_CI_FAILURES) -> list:
         if not isinstance(raw, dict):
             return []
         cleaned = _clean_ci_failures(raw.get("failures"))
-        flat = [{"branch": branch, "sha": entry["sha"], "check": entry["check"]}
-                for branch in sorted(cleaned)
-                for entry in cleaned[branch]]
+        flat = []
+        for branch in sorted(cleaned):
+            for entry in cleaned[branch]:
+                row = {"branch": branch, "sha": entry["sha"], "check": entry["check"]}
+                kept_run = _valid_ci_run(entry.get("run"))
+                if kept_run is not None:
+                    row["run"] = kept_run
+                flat.append(row)
         return flat[:max(0, int(limit))]
     except Exception:
         return []
@@ -1114,9 +1142,11 @@ def write_ci_wake(project, role_name, branch, present, snapshot_id, now=None) ->
     """Record that one role observed the current red (never raises).
 
     Schema: ``branch`` is the ``ci_branch`` string, ``present`` is the
-    presence list (``[{branch, sha, check}]``), ``snapshot_id`` is the
+    presence list (``[{branch, sha, check, run?}]``), ``snapshot_id`` is the
     published head observed, ``now`` is epoch seconds. Malformed inputs
-    write nothing; wake suppression must never break dispatch.
+    write nothing; wake suppression must never break dispatch. The fact
+    carries ``run`` when the entry has a valid identity and omits it
+    otherwise (prompts likewise include ``run`` only when sent).
     """
     try:
         path = _ci_wake_path(project, role_name)
@@ -1142,10 +1172,17 @@ def write_ci_wake(project, role_name, branch, present, snapshot_id, now=None) ->
                 check = entry.get("check")
                 if not isinstance(sha, str) or not isinstance(check, str):
                     continue
-                fact.append({"sha": sha, "check": check})
+                row = {"sha": sha, "check": check}
+                kept_run = _valid_ci_run(entry.get("run"))
+                if kept_run is not None:
+                    row["run"] = kept_run
+                fact.append(row)
         except Exception:
             return
-        fact.sort(key=lambda item: (item["sha"], item["check"]))
+        # Graceful upgrade without a version bump: old records without
+        # ``run`` keys mismatch new facts with ``run`` keys exactly once
+        # (due -> wake -> rewrite), then stay parked until the run changes.
+        fact.sort(key=lambda item: (item["sha"], item["check"], item.get("run", "")))
         write_json(path, {"version": CI_WAKE_VERSION, "branch": branch,
                           "fact": fact, "snapshot": snapshot_id, "at": at})
     except Exception:
@@ -1158,8 +1195,9 @@ def _ci_due(present, record, snapshot_id, now, rewake_seconds) -> bool:
     Schema: ``present`` is the ``wake_ci_failures`` list, ``record`` is the
     last :func:`read_ci_wake` dict (or None), ``snapshot_id`` is the current
     published head, ``now`` is epoch seconds. Due on first sighting (no
-    record), a changed branch/fact (new failing sha or check, including a
-    branch switch), a moved head, or an elapsed ``rewake_seconds`` interval.
+    record), a changed branch/fact (new failing sha, check, or run identity,
+    including a branch switch), a moved head, or an elapsed ``rewake_seconds``
+    interval.
     An empty presence is never due; a malformed record/at reads as due so a
     red is never silently deferred.
     """
@@ -1180,11 +1218,20 @@ def _ci_due(present, record, snapshot_id, now, rewake_seconds) -> bool:
         if record.get("version") != CI_WAKE_VERSION:
             return True
         try:
+            current_rows = []
+            for entry in present:
+                if (not isinstance(entry, dict)
+                        or not isinstance(entry.get("sha"), str)
+                        or not isinstance(entry.get("check"), str)):
+                    continue
+                row = {"sha": entry["sha"], "check": entry["check"]}
+                kept_run = _valid_ci_run(entry.get("run"))
+                if kept_run is not None:
+                    row["run"] = kept_run
+                current_rows.append(row)
             current_fact = sorted(
-                [{"sha": entry["sha"], "check": entry["check"]}
-                 for entry in present if isinstance(entry, dict)
-                 and isinstance(entry.get("sha"), str) and isinstance(entry.get("check"), str)],
-                key=lambda item: (item["sha"], item["check"]))
+                current_rows,
+                key=lambda item: (item["sha"], item["check"], item.get("run", "")))
         except Exception:
             return True
         raw_fact = record.get("fact")
@@ -1199,8 +1246,16 @@ def _ci_due(present, record, snapshot_id, now, rewake_seconds) -> bool:
                 check = entry.get("check")
                 if not isinstance(sha, str) or not isinstance(check, str):
                     return True
-                record_fact.append({"sha": sha, "check": check})
-            record_fact.sort(key=lambda item: (item["sha"], item["check"]))
+                row = {"sha": sha, "check": check}
+                if "run" in entry:
+                    kept_run = _valid_ci_run(entry.get("run"))
+                    if kept_run is None:
+                        return True
+                    row["run"] = kept_run
+                record_fact.append(row)
+            # Old records without ``run`` mismatch new facts with ``run``
+            # exactly once (graceful upgrade, no version bump).
+            record_fact.sort(key=lambda item: (item["sha"], item["check"], item.get("run", "")))
         except Exception:
             return True
         if record_fact != current_fact:
@@ -1394,9 +1449,13 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
                 receipt = _vcs.record_ci_result(
                     project, branch=branch, sha=entry["sha"],
                     check=entry["check"], state="failure",
-                    url=entry.get("url", ""))
+                    url=entry.get("url", ""), run=entry.get("run"))
                 failures += 1
-                rows.append({"sha": entry["sha"], "check": entry["check"]})
+                tick_row = {"sha": entry["sha"], "check": entry["check"]}
+                tick_run = _valid_ci_run(entry.get("run"))
+                if tick_run is not None:
+                    tick_row["run"] = tick_run
+                rows.append(tick_row)
                 if receipt.get("recorded"):
                     recorded.append({"id": receipt["id"], "branch": branch,
                                      "check": entry["check"]})

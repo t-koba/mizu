@@ -892,10 +892,12 @@ MAX_CHECKS = 1024
 def parse_status_checks(data: dict) -> list:
     """Validate a ``status`` adapter response into normalized check rows.
 
-    Schema: ``{"checks": [{check, state, sha, url?}]}``; ``check`` 1-256
+    Schema: ``{"checks": [{check, state, sha, url?, run?}]}``; ``check`` 1-256
     chars without newline/NUL, ``state`` 1-64 chars without newline/NUL,
     ``sha`` 40/64 lowercase hex, optional ``url`` at most 4096 chars
-    without newline/NUL. Bounds: at most 1024 checks. Trust: adapter
+    without newline/NUL, optional ``run`` 1-128 chars without
+    newline/NUL (opaque adapter run identity, stable per CI run across
+    polls). Bounds: at most 1024 checks. Trust: adapter
     facts stay external-untrusted; this only validates shape. Failure:
     ``Denied`` on missing/malformed shapes.
     """
@@ -906,7 +908,7 @@ def parse_status_checks(data: dict) -> list:
         raise Denied("VCS status must carry a checks array with at most 1024 entries")
     out = []
     for entry in checks:
-        if not isinstance(entry, dict) or set(entry) - {"check", "state", "sha", "url"}:
+        if not isinstance(entry, dict) or set(entry) - {"check", "state", "sha", "url", "run"}:
             raise Denied("Invalid VCS status check entry")
         check = entry.get("check")
         state = entry.get("state")
@@ -923,7 +925,15 @@ def parse_status_checks(data: dict) -> list:
         if not isinstance(url, str) or len(url) > 4096:
             raise Denied("Invalid CI log URL")
         _reject_terminal_controls(url, "Invalid CI log URL")
-        out.append({"check": check, "state": state, "sha": sha, "url": url})
+        row = {"check": check, "state": state, "sha": sha, "url": url}
+        if "run" in entry:
+            run = entry.get("run")
+            if (not isinstance(run, str) or not run or len(run) > 128
+                    or "\n" in run or "\x00" in run):
+                raise Denied("Invalid CI run identity")
+            _reject_terminal_controls(run, "Invalid CI run identity")
+            row["run"] = run
+        out.append(row)
     return out
 
 
