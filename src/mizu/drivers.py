@@ -77,7 +77,11 @@ def admit_invocation(context, *, unit: str) -> dict:
     if getattr(context, "invocation_admitted", False):
         return {"admitted": True}
     if context.request_count >= role_requests_per_run(context.config, context.role):
-        raise LimitExceeded("Per-run provider request budget exhausted")
+        from .runtime import WRAP_UP_REQUESTS
+        context.bound_hit = context.bound_hit or "requests"
+        if getattr(context, "wrap_up_requests", 0) >= WRAP_UP_REQUESTS:
+            raise LimitExceeded("Per-run provider request budget exhausted")
+        context.wrap_up_requests = getattr(context, "wrap_up_requests", 0) + 1
     project_name = getattr(getattr(context, "project", None), "name", "")
     try:
         Budget(context.config.data / "budget", context.config.limits.daily_requests,

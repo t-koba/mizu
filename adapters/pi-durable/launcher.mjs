@@ -329,8 +329,6 @@ async function runOnce(cfg) {
     if (typeof cfg[field] !== 'string' || !cfg[field]) throw new Error(`Effective configuration lacks ${field}`);
   }
   if (!Array.isArray(cfg.tools) || !cfg.tools.length) throw new Error('Effective configuration carries no bridge tools');
-  if (!Number.isInteger(cfg.max_turns) || cfg.max_turns < 1) throw new Error('Effective configuration lacks max_turns');
-  const maxTurns = cfg.max_turns;
   // Live-context bound: operator compaction thresholds ride the Harness
   // policy (read at every resolution, so retuning keeps the conversation).
   // Absent keeps the engine/provider default: no Mizu value is injected, so
@@ -389,18 +387,22 @@ async function runOnce(cfg) {
   let submission = null;
   const observations = [];
   async function admit() {
-    await request(bridge, '_budget', { sequence: ++sequence });
-    requests++;
-    if (requests > maxTurns && !boundTripped) {
-      // The grant's remaining turn budget is spent: stop Harness work
-      // instead of running unbounded inside one submission. wait() below
-      // settles the aborted submission; the flag maps it to turn_bound.
-      boundTripped = true;
-      try { if (submission) await submission.abort(context); } catch {}
-      const error = new Error('Durable turn bound exhausted');
-      error.code = 'TURN_BOUND';
+    try {
+      await request(bridge, '_budget', { sequence: ++sequence });
+    } catch (error) {
+      // The single per-unit spend bound (requests_per_run) is reached:
+      // stop Harness work instead of running unbounded inside one
+      // submission. wait() below settles the aborted submission; the flag
+      // maps it to request_bound. Any other admission failure keeps its
+      // own path (a daily-budget refusal still defers via admission_wait).
+      if (!boundTripped && error && typeof error.message === 'string'
+          && error.message.includes('Per-run provider request budget exhausted')) {
+        boundTripped = true;
+        try { if (submission) await submission.abort(context); } catch {}
+      }
       throw error;
     }
+    requests++;
   }
   async function reportUsage(usage, shape) {
     if (!usage) return;
@@ -455,7 +457,7 @@ async function runOnce(cfg) {
     const settled = await submission.wait(context);
     if (boundTripped) {
       const usage = await harness.usage(context).catch(() => null);
-      return { durable_result: true, status: 'turn_bound', reason: 'Durable turn bound exhausted',
+      return { durable_result: true, status: 'request_bound', reason: 'Per-run provider request budget exhausted',
         finish_called: finishCalled, sealed, requests, observed: observations,
         usage: usage?.models?.[`${cfg.provider}/${cfg.model}`] ?? null,
         usage_models: Object.keys(usage?.models ?? {}), answer: null };

@@ -580,6 +580,113 @@ class InsightRetrievalTests(Fixture):
         with self.assertRaises(Denied):
             ctx.handle("insights", {"action": "bogus"})
 
+class WrapUpTests(Fixture):
+    def test_requests_bound_ends_bounded_without_brake(self):
+        import dataclasses
+        from mizu.fs import read_json
+        from mizu.runtime import Engine
+        from support import ScriptDriver
+        roles = dict(self.config.roles)
+        roles["worker"] = dataclasses.replace(roles["worker"], requests_per_run=1)
+        config = dataclasses.replace(
+            self.config, roles=roles,
+            limits=dataclasses.replace(self.config.limits, max_failures=1))
+        def callback(ctx, prompt, profile):
+            # The first admitted sequence is spent by the driver; the next
+            # request hits the bound mid-turn with the model still alive.
+            ctx.handle("_budget", {"sequence": 2})
+            ctx.handle("finish", {"outcome": "wait", "summary": "saved under bound",
+                                  "state": "Now: wrapped.\nNext: resume.\nTasks: none\nBlocking: none"})
+        result = Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["finish"]["outcome"], "bounded")
+        self.assertEqual(result["finish"]["bound"], "requests")
+        self.assertEqual(self.project.snapshots.get()["outcome"], "bounded")
+        health = read_json(self.project.root / "health" / "worker.json")
+        self.assertEqual(health["consecutive_failures"], 0)
+        self.assertFalse(self.project.control()["paused"])
+
+    def test_escaped_bound_gets_one_reduced_wrap_up_attempt(self):
+        from mizu.errors import LimitExceeded
+        from mizu.runtime import Engine, WRAP_UP_OPS
+        from support import ScriptDriver
+        seen = []
+        def callback(ctx, prompt, profile):
+            if not seen:
+                seen.append("first")
+                ctx.bound_hit = "requests"
+                raise LimitExceeded("Per-run provider request budget exhausted")
+            seen.append("wrap-up")
+            seen.append(tuple(sorted(ctx.role.capabilities)))
+            seen.append(tuple(ctx.role.engine_tools))
+            ctx.handle("finish", {"outcome": "continue", "summary": "resumed and sealed",
+                                  "state": "Now: wrapped.\nNext: resume.\nTasks: none\nBlocking: none"})
+        result = Engine(self.config, driver=ScriptDriver(callback)).run(self.project, "worker")
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["finish"]["outcome"], "bounded")
+        self.assertEqual(result["wrap_up"], {"bound": "requests"})
+        grants = seen[2]
+        self.assertTrue(set(grants) <= set(WRAP_UP_OPS))
+        self.assertIn("finish", grants)
+        self.assertEqual(seen[3], ())
+
+    def test_wrap_up_prompt_states_bound(self):
+        from mizu.errors import LimitExceeded
+        from mizu.runtime import Engine
+        from support import ScriptDriver
+        prompts = []
+        def callback(ctx, prompt, profile):
+            prompts.append(prompt)
+            if len(prompts) == 1:
+                ctx.bound_hit = "tools"
+                raise LimitExceeded("Per-run tool limit exceeded")
+            ctx.handle("finish", {"outcome": "continue", "summary": "s",
+                                  "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+        Engine(self.config, driver=ScriptDriver(callback)).run(self.project, "worker")
+        self.assertEqual(len(prompts), 2)
+        self.assertIn("Per-run tools budget exhausted", prompts[1])
+
+    def test_no_finish_inside_wrap_up_fails_as_before(self):
+        import time
+        from mizu.errors import LimitExceeded
+        from mizu.fs import read_json
+        from mizu.runtime import Engine, should_run
+        from support import ScriptDriver
+        def callback(ctx, prompt, profile):
+            ctx.bound_hit = ctx.bound_hit or "requests"
+            raise LimitExceeded("Per-run provider request budget exhausted")
+        with self.assertRaises(LimitExceeded):
+            Engine(self.config, driver=ScriptDriver(callback)).run(self.project, "worker")
+        health = read_json(self.project.root / "health" / "worker.json")
+        self.assertEqual(health["consecutive_failures"], 1)
+
+    def test_bounded_snapshot_runs_again(self):
+        import time
+        from mizu.runtime import should_run
+        gen = self.project.insights.generation()
+        cap = self.project.snapshots.capture_files(self.project.workspace)
+        parked = self.project.snapshots.create(
+            cap, goal=self.project.goal, state="Wrapped.", run=None,
+            outcome="bounded", summary="Hit the bound after sealing.", verification=None,
+            inbox_seen=gen,
+            wake_generation=self.project.control().get("wake_generation", ""))
+        self.project.snapshots.publish(parked)
+        snap = self.project.snapshots.get()
+        self.assertEqual(snap["outcome"], "bounded")
+        self.assertTrue(should_run(self.project, snap, current_time=time.time()))
+
+    def test_daily_budget_refusal_is_not_wrap_up(self):
+        import dataclasses
+        from mizu.errors import InfraExceeded
+        config = dataclasses.replace(
+            self.config, limits=dataclasses.replace(self.config.limits, daily_requests=0))
+        self.project.config = config
+        ctx = self.context("worker")
+        ctx.config = config
+        with self.assertRaises(InfraExceeded):
+            ctx.handle("_budget", {"sequence": 1})
+        self.assertIsNone(ctx.bound_hit)
+
     def test_read_resolves_unique_prefix(self):
         snap = self.project.snapshots.get()["id"]
         full = self.project.insights.submit(source="searcher", title="Idea",

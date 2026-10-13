@@ -511,15 +511,27 @@ class PerRoleSpendTests(Fixture):
         ctx.config = config
         ctx.role = config.roles["worker"]
         ctx.handle("_hello", {})
-        ctx.handle("_budget", {"sequence": 1})
+        # Generic tool gate respects the same per-role bound: one files call
+        # fits, the second exceeds tools_per_run = 1 and trips wrap-up mode.
+        ctx.handle("files", {"offset": 0, "limit": 1})
         from mizu.errors import LimitExceeded
         with self.assertRaises(LimitExceeded):
-            ctx.handle("_budget", {"sequence": 2})
-        # Generic tool gate respects the same per-role bound: one files call
-        # fits, the second exceeds tools_per_run = 1.
-        ctx.handle("files", {"offset": 0, "limit": 1})
-        with self.assertRaises(LimitExceeded):
             ctx.handle("files", {"offset": 0, "limit": 1})
+        self.assertEqual(ctx.bound_hit, "tools")
+        # A wrap-up operation is still admitted from the fixed allowance.
+        ctx.handle("finish", {"outcome": "wait", "summary": "s", "state": "n"})
+        ctx2 = self.context("worker")
+        ctx2.config = config
+        ctx2.role = config.roles["worker"]
+        ctx2.handle("_hello", {})
+        ctx2.handle("_budget", {"sequence": 1})
+        # The first requests over the bound draw the wrap-up allowance (3);
+        # the fourth over-budget request refuses.
+        for sequence in (2, 3, 4):
+            ctx2.handle("_budget", {"sequence": sequence})
+        self.assertEqual(ctx2.bound_hit, "requests")
+        with self.assertRaises(LimitExceeded):
+            ctx2.handle("_budget", {"sequence": 5})
 
 
 class WebTransportFloorTests(unittest.TestCase):

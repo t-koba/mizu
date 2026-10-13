@@ -131,8 +131,14 @@ class SmokeProbeTests(Fixture):
             self.config.limits, requests_per_run=2, tools_per_run=5))
         ctx2.handle("_budget", {"sequence": 1})
         ctx2.handle("_budget", {"sequence": 2})
+        # Over-budget requests draw the fixed wrap-up allowance (3) before
+        # the bound refuses again.
+        ctx2.handle("_budget", {"sequence": 3})
+        ctx2.handle("_budget", {"sequence": 4})
+        ctx2.handle("_budget", {"sequence": 5})
+        self.assertEqual(ctx2.bound_hit, "requests")
         with self.assertRaisesRegex(LimitExceeded, "Per-run provider request budget exhausted"):
-            ctx2.handle("_budget", {"sequence": 3})
+            ctx2.handle("_budget", {"sequence": 6})
 
     def test_probe_policy_ignores_operator_consult_text(self):
         # Live smoke must test the engine/provider path only: even a consult

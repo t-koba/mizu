@@ -64,9 +64,8 @@ def durable_options(settings: dict) -> dict:
     retention = options.get("durable_retention_days", None)
     if retention is not None and (type(retention) is not int or not 0 <= retention <= 3650):
         raise ConfigError("durable_retention_days must be an integer in [0, 3650]")
-    max_turns = options.get("durable_max_turns", 128)
-    if type(max_turns) is not int or not 1 <= max_turns <= 1024:
-        raise ConfigError("durable_max_turns must be an integer in [1, 1024]")
+    if "durable_max_turns" in options:
+        raise ConfigError("durable_max_turns was removed; requests_per_run is the single per-unit spend bound")
     compaction: dict[str, int] = {}
     for option_key, policy_key in COMPACTION_FIELDS.items():
         if option_key not in options:
@@ -75,7 +74,7 @@ def durable_options(settings: dict) -> dict:
         if type(value) is not int or not 0 <= value <= COMPACTION_TOKEN_MAX:
             raise ConfigError(f"{option_key} must be an integer in [0, 1073741824]")
         compaction[policy_key] = value
-    return {"backend": backend, "resume": resume, "retention_days": retention, "max_turns": max_turns,
+    return {"backend": backend, "resume": resume, "retention_days": retention,
             "compaction": compaction or None}
 
 
@@ -103,7 +102,7 @@ def grant_for(settings: dict, role, model: dict) -> str:
     policy = role_policy_text(role)
     options_digest = digest(canonical({k: v for k, v in settings.get("options", {}).items()
                                        if k in ("thinkingLevel", "durable_backend", "durable_resume",
-                                                "durable_retention_days", "durable_max_turns",
+                                                "durable_retention_days",
                                                 "durable_compaction_reserve_tokens",
                                                 "durable_compaction_keep_recent_tokens",
                                                 "durable_compaction_background_tokens")}))
@@ -191,8 +190,6 @@ class PiDurableDriver:
             if started_record.get("resumed"):
                 check_grant(conn, run_key, grant)
             existing = len((load_run(conn, run_key) or {}).get("turns", []))
-            if existing >= policy["max_turns"]:
-                raise LimitExceeded("Durable turn bound exhausted for this run")
             reaped = None
             if policy["retention_days"] is not None:
                 # Reap only terminal runs of this session store; the active
@@ -203,15 +200,10 @@ class PiDurableDriver:
                 complete_run(conn, run_key, {"cancelled": True}, status="cancelled")
                 raise Cancelled("Run cancelled before durable dispatch")
             record_turn(conn, run_key, existing + 1, "prompt", {"bytes": len(prompt_bytes)})
-            # The shared budget covers persisted turns plus Harness steps: the
-            # just-recorded prompt turn leaves `remaining` admissions for this
-            # submission. Refuse without dispatch when nothing remains, so the
-            # grant is never exceeded by one.
-            remaining = policy["max_turns"] - (existing + 1)
-            if remaining < 1:
-                raise LimitExceeded("Durable turn bound exhausted for this run")
-            outcome = self._run_once(context, settings, model, prompt, profile, run_key, store_path,
-                                     remaining=remaining)
+            # No turn bound: every provider request inside the submission
+            # passes _budget admission, so requests_per_run alone bounds the
+            # unit and a refusal returns as request_bound below.
+            outcome = self._run_once(context, settings, model, prompt, profile, run_key, store_path)
             complete_turn(conn, run_key, existing + 1, {"engine": ENGINE}, state="completed")
             if settings["session"] == "persistent" and not context.ephemeral:
                 save_session(path, f"pi-durable:{session_key}",
@@ -245,28 +237,22 @@ class PiDurableDriver:
             except Exception:
                 pass
 
-    def _run_once(self, context, settings, model, prompt, profile, run_key, store_path,
-                   remaining: int = 128) -> dict:
+    def _run_once(self, context, settings, model, prompt, profile, run_key, store_path) -> dict:
         # One admitted durable submission: effective file in, one bounded
         # JSON result document out. The bridge stays open for the whole
         # submission so tool callbacks and admission share one deadline.
+        # Spend is bounded only by request admission, never a turn cap.
         policy = role_policy_text(context.role)
         atomic_write(context.run_dir / "system.md", policy.encode())
         cwd = context.run_dir / "controller"
         mkdir(cwd)
         options = dict(settings.get("options", {}))
-        # The turn budget is shared: persisted turns already spent on this
-        # run (including the just-recorded prompt turn) leave `remaining`
-        # admissions for the Harness submission, so retries and
-        # Harness-internal steps draw from one bound.
-        if not isinstance(remaining, int) or remaining < 1:
-            raise LimitExceeded("Durable turn bound exhausted for this run")
         policy_options = durable_options(settings)
         effective_config = {
             "provider": model["provider"], "model": model["model"],
             "instructions": policy, "tools": tool_definitions(context.role.capabilities),
             "cwd": str(cwd), "store": str(store_path), "requestId": run_key, "prompt": prompt,
-            "max_turns": remaining, "authPath": str(durable_auth_path(self.config)),
+            "authPath": str(durable_auth_path(self.config)),
         }
         # Unset keeps the engine/provider default: omit the field so the
         # Harness resolves its own built-in policy instead of a Mizu value.
@@ -389,21 +375,22 @@ def interpret_result(reported, context, model, thinking_level) -> None:
     """Validate the launcher result document and record usage evidence.
 
     Schema: ``reported`` is the parsed one-shot result (``durable_result``
-    true, ``status`` done/turn_bound/other). ``turn_bound`` maps to
+    true, ``status`` done/request_bound/other). ``request_bound`` maps to
     ``LimitExceeded`` so the spent budget surfaces as a bound, never a
     silent stop; other non-done statuses map to ``ModelFailure``. A done
     result still requires the ``mizu_finish`` seal and at least one
     admitted request, like the pi engine. Launcher requests/usage counters
-    are recorded before raising on ``turn_bound`` so the bound-exhausted
+    are recorded before raising on ``request_bound`` so the bound-exhausted
     path keeps its accounting. Bounds: usage counters pass
     through as-is; evidence stays local. Failure: ``ProtocolError``,
     ``ModelFailure`` or ``LimitExceeded``.
     """
     if not isinstance(reported, dict) or reported.get("durable_result") is not True:
         raise ProtocolError("Durable launcher returned an invalid result")
-    if reported.get("status") == "turn_bound":
+    if reported.get("status") == "request_bound":
         _record_launcher_evidence(reported, context, model, thinking_level)
-        raise LimitExceeded("Durable turn bound exhausted")
+        context.bound_hit = context.bound_hit or "requests"
+        raise LimitExceeded("Per-run provider request budget exhausted")
     if reported.get("status") != "done":
         raise ModelFailure("pi-durable", kind="unanswered",
                            message=str(reported.get("reason") or "submission unanswered"))

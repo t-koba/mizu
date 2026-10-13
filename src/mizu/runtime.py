@@ -65,6 +65,15 @@ INFRA_WAIT = (Busy, InfraExceeded)
 #: page limit, same bound as `mizu insight list`); prompt
 #: selection stays bounded by `[limits] pending_insights`.
 INSIGHT_RETRIEVAL_LIMIT = 1000
+#: Wrap-up allowance granted when a per-run spend bound is reached: extra
+#: model requests and extra wrap-up tool calls the unit may still spend to
+#: seal a clean `bounded` end instead of failing. Fixed and documented; the
+#: daily budget still applies to every admitted request.
+WRAP_UP_REQUESTS = 3
+WRAP_UP_TOOLS = 5
+#: Operations admitted during wrap-up (plus bridge bookkeeping). Everything
+#: else is refused once a per-run bound is reached.
+WRAP_UP_OPS = frozenset({"finish", "research", "submit_insight", "attach_evidence", "decide"})
 
 
 def is_infra_wait(exc: BaseException) -> bool:
@@ -145,6 +154,13 @@ class Context:
         self.runtime_usage: dict[int, dict] = {}
         self.runtime_models: dict[int, dict] = {}
         self.tool_count = 0
+        # Per-run spend-bound wrap-up: which bound was reached plus the spent
+        # wrap-up allowance. Set when a requests/tools refusal fires, so the
+        # unit can seal `bounded` instead of failing.
+        self.bound_hit: str | None = None
+        self.wrap_up_requests = 0
+        self.wrap_up_tools = 0
+        self.wrap_up_attempted = False
         self.finished: dict | None = None
         self.admission_error: str | None = None
         self.admission_wait = False
@@ -170,6 +186,13 @@ class Context:
         control = self.project.control()
         return (self.stop.is_set() or self.closed or not control.get("armed") or control.get("paused")
                 or time.monotonic() > self.deadline)
+
+    def _bound_message(self) -> str:
+        how = f"{WRAP_UP_REQUESTS - self.wrap_up_requests} requests and " \
+            f"{WRAP_UP_TOOLS - self.wrap_up_tools} wrap-up tools"
+        return (f"Per-run {self.bound_hit} budget exhausted; wrap-up only "
+                f"(finish, research, submit_insight, attach_evidence, decide) "
+                f"with {how} left")
 
     def handle(self, operation: str, arguments: dict) -> dict:
         if not isinstance(operation, str) or not isinstance(arguments, dict):
@@ -197,12 +220,17 @@ class Context:
                     for seq, value in self.runtime_usage.items()]})
                 return {"recorded": True}
             if operation == "_engine_tool":
+                if self.bound_hit is not None:
+                    raise Denied(self._bound_message())
                 if self.finished is not None:
                     raise Denied("This work unit is sealed")
                 if arguments.get("name") not in self.role.engine_tools:
                     raise Denied("Engine tool has no explicit grant")
                 self.tool_count += 1
                 if self.tool_count > role_tools_per_run(self.config, self.role):
+                    # Native tools are never wrap-up operations: record the
+                    # bound and refuse without drawing the allowance.
+                    self.bound_hit = self.bound_hit or "tools"
                     raise LimitExceeded("Per-run tool limit exceeded")
                 return {"allowed": True}
             if operation == "_budget":
@@ -214,7 +242,10 @@ class Context:
                         raise Denied("No model requests are permitted after finish")
                     if sequence not in self.request_sequences:
                         if self.request_count >= role_requests_per_run(self.config, self.role):
-                            raise LimitExceeded("Per-run provider request budget exhausted")
+                            self.bound_hit = self.bound_hit or "requests"
+                            if self.wrap_up_requests >= WRAP_UP_REQUESTS:
+                                raise LimitExceeded("Per-run provider request budget exhausted")
+                            self.wrap_up_requests += 1
                         try:
                             Budget(self.config.data / "budget", self.config.limits.daily_requests,
                                    self.config.limits.retention_days,
@@ -246,9 +277,14 @@ class Context:
                 raise Denied("This work unit is sealed; no tools may run after finish")
             if operation not in self.role.capabilities:
                 raise Denied(f"Role has no capability: {operation}")
+            if self.bound_hit is not None and operation not in WRAP_UP_OPS:
+                raise Denied(self._bound_message())
             self.tool_count += 1
             if self.tool_count > role_tools_per_run(self.config, self.role):
-                raise LimitExceeded("Per-run tool limit exceeded")
+                self.bound_hit = self.bound_hit or "tools"
+                if operation not in WRAP_UP_OPS or self.wrap_up_tools >= WRAP_UP_TOOLS:
+                    raise LimitExceeded("Per-run tool limit exceeded")
+                self.wrap_up_tools += 1
             validate(arguments, DEFINITIONS[operation][1])
             result = self.dispatch(operation, arguments)
             return result
@@ -716,7 +752,12 @@ class Context:
                 raise Denied("Completion requires passing the configured acceptance commands")
         wait = min(args.get("wait_seconds", self.config.limits.default_wait_seconds),
                    self.config.limits.maximum_wait_seconds)
-        self.finished = {**args, "wait_seconds": wait, "recorded_at": now()}
+        if self.bound_hit is not None:
+            # A seal after a spend bound is a bounded end, never a fresh
+            # verdict: the unit saved what it could and runs again.
+            args = {**args, "outcome": "bounded"}
+        self.finished = {**args, "wait_seconds": wait, "recorded_at": now(),
+                         **({"bound": self.bound_hit} if self.bound_hit is not None else {})}
         write_json(self.run_dir / "finish-intent.json", self.finished)
         return {"sealed": True}
 
@@ -1705,7 +1746,9 @@ class Engine:
                         # Anything else (no rule match, local admission
                         # refusal, stop) fails exactly as before.
                         if (context.cancelled() or self.stop.is_set()
-                                or getattr(context, "admission_error", None)):
+                                or getattr(context, "admission_error", None)
+                                or getattr(context, "bound_hit", None) is not None
+                                or getattr(context, "wrap_up_attempted", False)):
                             raise
                         matched = None
                         if decision and decision.get("profile") and selection_role is not None:
@@ -1738,11 +1781,11 @@ class Engine:
                                                    selector="")
                         context.role = role
                         # The failed attempt's bridge close cancelled this
-                        # context's operations; the fallback is a new engine
+                        # context's operations; the retry is a new engine
                         # connection, so reopen them. Deadline, budget, and
                         # tool counters stay accumulated on the reused context,
                         # but the failed attempt's seal never carries: the
-                        # fallback must finish and verify its own work.
+                        # retry must finish and verify its own work.
                         context.operations_stopped.clear()
                         context.finished = None
                         context.verification = None
@@ -1753,6 +1796,36 @@ class Engine:
                             container_runtime(self.config)
                             cleanup(self.config, project.root, role_name)
                         continue
+                    except LimitExceeded as exc:
+                        # A per-run spend bound with no finish sealed gets one
+                        # wrap-up attempt under reduced grants instead of an
+                        # error: the daily budget, an unmarked bound, an
+                        # already-spent allowance, or an already-sealed unit
+                        # still fail exactly as before.
+                        if (isinstance(exc, InfraExceeded)
+                                or getattr(context, "bound_hit", None) is None
+                                or getattr(context, "wrap_up_attempted", False)
+                                or context.finished is not None):
+                            raise
+                        grants = [cap for cap in WRAP_UP_OPS if cap in role.capabilities]
+                        if not grants:
+                            raise
+                        context.wrap_up_attempted = True
+                        context.role = dataclasses.replace(
+                            role, capabilities=tuple(grants), engine_tools=(), selector="")
+                        context.operations_stopped.clear()
+                        driver = self.resolve(role.profile)
+                        if getattr(driver, "requires_sandbox", True) and any(
+                                c in context.role.capabilities for c in ("exec", "experiment", "verify")):
+                            container_runtime(self.config)
+                            cleanup(self.config, project.root, role_name)
+                        notice = (f"Per-run {context.bound_hit} budget exhausted with no finish "
+                                  f"sealed. Wrap-up only: seal with finish (recorded as a bounded "
+                                  f"end) or use research, submit_insight, attach_evidence, decide. "
+                                  f"Keep the published state unless this run changed it. "
+                                  f"{WRAP_UP_REQUESTS - context.wrap_up_requests} requests and "
+                                  f"{WRAP_UP_TOOLS - context.wrap_up_tools} wrap-up tools remain.")
+                        model_result = driver.execute(context, notice + "\n\n" + prompt)
                     break
                 if context.cancelled():
                     raise Cancelled("Run stopped before publication")
@@ -1795,6 +1868,8 @@ class Engine:
                         write_prompt_state(session_dir, snapshot=snapshot["id"],
                                            inbox_generation=context.inbox_seen)
                 result["status"] = "completed"
+                if getattr(context, "wrap_up_attempted", False):
+                    result["wrap_up"] = {"bound": context.bound_hit}
                 write_json(run_dir / "result.json", result)
                 write_json(project.root / "observed" / f"{role_name}.json",
                            {"snapshot": snapshot["id"], "code_digest": snapshot["code_digest"]})
@@ -2065,7 +2140,7 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
     outcome = snapshot["outcome"]
     if outcome == "done":
         return False  # A completed objective needs an explicit wake or changed goal.
-    if outcome == "continue":
+    if outcome in ("continue", "bounded"):
         return True
     if project.insights.generation() != snapshot.get("inbox_seen", ""):
         return True

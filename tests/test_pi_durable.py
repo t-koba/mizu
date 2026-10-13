@@ -47,12 +47,16 @@ class PolicyTests(Fixture):
         model = {"provider": "p", "model": "m"}
         base = pi_durable.grant_for({"options": {}}, role, model)
         for key, value in (("durable_backend", "sqlite"), ("durable_resume", "fresh"),
-                           ("durable_retention_days", 30), ("durable_max_turns", 7),
+                           ("durable_retention_days", 30),
                            ("durable_compaction_reserve_tokens", 5000),
                            ("durable_compaction_keep_recent_tokens", 8000),
                            ("durable_compaction_background_tokens", 1000)):
             changed = pi_durable.grant_for({"options": {key: value}}, role, model)
             self.assertNotEqual(base, changed, key)
+
+    def test_removed_turn_bound_is_refused(self):
+        with self.assertRaises(ConfigError):
+            pi_durable.durable_options({"options": {"durable_max_turns": 80}})
 
     def test_unset_compaction_keeps_engine_default(self):
         # Unset must mean engine/provider default, not a Mizu value: the
@@ -96,7 +100,7 @@ class PolicyTests(Fixture):
                          conversation_settings(after)["options"])
         # Any other durable change still forks to a fresh conversation.
         self.config.profiles[profile]["options"] = {
-            **before["options"], "durable_max_turns": 7}
+            **before["options"], "durable_retention_days": 30}
         forked = effective(self.config, role, profile)
         path_forked, _ = session_record(self.context(), profile, forked)
         self.assertNotEqual(path_forked.parent.name, key_before)
@@ -115,8 +119,8 @@ class PolicyTests(Fixture):
         with self.assertRaises(ConfigError):
             effective(self.config, self.config.roles["worker"], profile)
 
-    def test_turn_bound_enforced(self):
-        profile = self._durable_profile(durable_max_turns=2)
+    def test_no_turn_precheck_dispatches_to_launcher(self):
+        profile = self._durable_profile()
         driver = pi_durable.PiDurableDriver(self.config)
         context = self.context()
         seen = {}
@@ -126,35 +130,12 @@ class PolicyTests(Fixture):
         driver._run_once = boom
         with self.assertRaises(ModelFailure):
             driver.execute(context, "hello", profile=profile)
-        # The shared budget subtracts the just-recorded prompt turn: with two
-        # allowed and nothing spent, one admission remains for the launcher.
-        self.assertEqual(seen.get("remaining"), 1)
-        # The interrupted attempt left persisted turns; the next submission
-        # records its prompt and finds nothing remains, so it is refused
-        # without dispatch instead of retried past the grant.
-        dispatched = {}
-        def never(*args, **kwargs):
-            dispatched["called"] = True
-            raise ModelFailure("pi-durable", kind="error", message="must not dispatch")
-        driver._run_once = never
-        with self.assertRaises(LimitExceeded):
-            driver.execute(context, "hello", profile=profile)
-        self.assertNotIn("called", dispatched)
+        # Spend is bounded only by request admission: dispatch proceeds with
+        # no turn cap passed down.
+        self.assertNotIn("remaining", seen)
+        self.assertTrue(seen.get("called", True))
 
-    def test_exhausted_budget_refuses_without_dispatch(self):
-        profile = self._durable_profile(durable_max_turns=1)
-        driver = pi_durable.PiDurableDriver(self.config)
-        context = self.context()
-        called = {}
-        def never(*args, **kwargs):
-            called["ran"] = True
-            raise AssertionError("must not dispatch past the grant")
-        driver._run_once = never
-        with self.assertRaises(LimitExceeded):
-            driver.execute(context, "hello", profile=profile)
-        self.assertNotIn("ran", called)
-
-    def test_turn_bound_result_maps_to_limit(self):
+    def test_request_bound_result_maps_to_limit(self):
         from mizu.errors import ProtocolError
         from mizu.usage import normalize
         context = self.context()
@@ -164,9 +145,10 @@ class PolicyTests(Fixture):
         context.model_evidence = {"requests": 0, "usage": [], "usage_known": False}
         model = {"provider": "p", "model": "m"}
         with self.assertRaises(LimitExceeded):
-            pi_durable.interpret_result({"durable_result": True, "status": "turn_bound",
+            pi_durable.interpret_result({"durable_result": True, "status": "request_bound",
                                          "reason": "spent", "requests": 5,
                                          "usage": {"input": 10, "output": 5}}, context, model, None)
+        self.assertEqual(context.bound_hit, "requests")
         # The bound-exhausted path keeps launcher accounting, like the done path.
         # Fallback usage stays in raw provider shape so usage accounting counts it.
         self.assertEqual(context.model_evidence["requests"], 5)
@@ -284,7 +266,7 @@ class AuthPathTests(Fixture):
             bridge_cls.return_value.__enter__.return_value.config_file = str(
                 context.run_dir / "bridge.json")
             driver._run_once(context, settings, model, "hello", profile,
-                             "run-key", Path("/tmp/store.sqlite"), remaining=5)
+                             "run-key", Path("/tmp/store.sqlite"))
         written = json.loads((context.run_dir / "pi-durable-effective.json").read_text())
         self.assertEqual(written["authPath"],
                          str(self.config.agent_dir("pi-durable") / "auth.json"))

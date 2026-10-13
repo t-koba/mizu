@@ -186,7 +186,7 @@ test('launcher refuses malformed compaction policy fail-closed', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'mizu-durable-'));
   try {
     const base = { provider: 'p', model: 'm', instructions: 'i', store: join(directory, 's.sqlite'),
-      requestId: 'r', prompt: 'go', cwd: directory, tools: [{ name: 't' }], max_turns: 4,
+      requestId: 'r', prompt: 'go', cwd: directory, tools: [{ name: 't' }],
       authPath: join(directory, 'auth.json') };
     const launcher = joinPath(dirname(fileURLToPath(import.meta.url)), '..', 'adapters', 'pi-durable', 'launcher.mjs');
     // Partial triples pass through (the Harness merges over its built-ins);
@@ -208,18 +208,20 @@ test('launcher refuses malformed compaction policy fail-closed', async () => {
   }
 });
 
-test('launcher refuses effective configuration without max_turns', async () => {
+test('launcher runs without a turn bound; requests_per_run governs spend', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'mizu-durable-'));
   try {
-    // Every field but max_turns: the gate must name the missing bound.
+    // No max_turns anywhere: the launcher must not name a missing turn
+    // bound. It still fails here, but on provider auth, not on max_turns.
     const cfg = { provider: 'p', model: 'm', instructions: 'i', store: join(directory, 's.sqlite'),
-      requestId: 'r', prompt: 'go', cwd: directory, tools: [{ name: 't' }] };
+      requestId: 'r', prompt: 'go', cwd: directory, tools: [{ name: 't' }],
+      authPath: join(directory, 'auth.json') };
     const file = join(directory, 'effective.json');
     writeFileSync(file, JSON.stringify(cfg));
     const launcher = joinPath(dirname(fileURLToPath(import.meta.url)), '..', 'adapters', 'pi-durable', 'launcher.mjs');
     const child = spawnSync(process.execPath, [launcher, file], { encoding: 'utf8' });
     assert.notEqual(child.status, 0);
-    assert.match(child.stderr, /max_turns/);
+    assert.doesNotMatch(child.stderr, /max_turns/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

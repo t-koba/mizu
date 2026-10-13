@@ -70,7 +70,7 @@ required). Operator tooling that concatenates configs
 |---|---|
 | `daily_requests` | Per-project provider admissions per day in the configured `timezone` (UTC default; 0 disables, max 100,000). Day-files older than `retention_days` are reaped. Pi counts logical model requests, Codex counts turns, Claude counts queries |
 | `shared_daily_requests` | Optional shared total across all projects sharing `data_dir` per day in the configured `timezone` (UTC default; 0 disables the shared cap, max 100,000). Per-project admissions also count toward this total; the tighter bound refuses first |
-| `requests_per_run`, `tools_per_run` | Per-work-unit request and tool bounds (project default; a role may override with `roles.<name>.requests_per_run` / `tools_per_run`, same range, unset keeps the project value); child consultations consume shared daily budget |
+| `requests_per_run`, `tools_per_run` | Per-work-unit request and tool bounds (project default; a role may override with `roles.<name>.requests_per_run` / `tools_per_run`, same range, unset keeps the project value); child consultations consume shared daily budget. Hitting a per-run bound grants a fixed wrap-up allowance (3 requests, 5 wrap-up tool calls limited to `finish`, `research`, `submit_insight`, `attach_evidence`, `decide`) so the unit can seal a clean `bounded` end that runs again like `continue` without counting toward `max_failures`; without a finish inside it the unit fails as before |
 | `run_seconds`, `command_seconds` | Deadlines for the overall work unit and individual container commands |
 | `idle_seconds`, `cooldown_seconds` | Daemon sleep between poll iterations and pause between work units |
 | `default_wait_seconds`, `maximum_wait_seconds` | Default and maximum model-selected wait times (1–86,400s) |
@@ -175,14 +175,14 @@ A profile explicitly selects `engine`, `provider`, `model`, and `session`
 that engine: Pi `thinkingLevel`, `settings`, `codemode`, `toolSearch`,
 `excludeTools`, `scopedModels`; pi-durable `thinkingLevel` plus
 `durable_backend` (`sqlite`), `durable_resume` (`compatible`|`fresh`),
-`durable_retention_days` (0-3650), `durable_max_turns` (1-1024), and the per-profile
+`durable_retention_days` (0-3650), and the per-profile
 live-context bound `durable_compaction_reserve_tokens`,
 `durable_compaction_keep_recent_tokens`, `durable_compaction_background_tokens`
 (each 0-1073741824; omit to keep the engine/provider default, 0 disables
-background). The turn
-budget is shared per run: persisted turns already spent leave the remainder
-for the launcher, which aborts the Harness submission past it (`turn_bound`
-maps to a bound error, never a silent stop). A set threshold rides the
+background). `requests_per_run` is the single per-unit spend bound on
+pi-durable too: every provider request inside the submission passes `_budget`
+admission, and a per-run refusal aborts the submission (`request_bound`
+maps to a bound error, never a silent stop) instead of failing the unit. A set threshold rides the
 Harness `settings.compaction` policy as a partial override (enabled stays true;
 disabling is not exposed): generation blocks to compact above `contextWindow -
 reserveTokens`, background starts `backgroundTokens` below that, and the summary keeps

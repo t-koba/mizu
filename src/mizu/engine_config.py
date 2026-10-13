@@ -61,7 +61,7 @@ def effective(config, role, profile):
         # refused here instead of silently ignored, and pi profiles cannot
         # carry durable policy that the pi engine never enforces.
         allowed = {'thinkingLevel', 'durable_backend', 'durable_resume',
-                   'durable_retention_days', 'durable_max_turns',
+                   'durable_retention_days',
                    'durable_compaction_reserve_tokens',
                    'durable_compaction_keep_recent_tokens',
                    'durable_compaction_background_tokens'}
