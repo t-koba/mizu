@@ -403,9 +403,16 @@ class Context:
         if args.get("id"):
             return self.project.insights.read(args["id"])
         # Prompt selection stays at pending_insights; explicit retrieval pages
-        # the whole pending set, so overflow items remain discoverable.
+        # the whole pending set, so overflow items remain discoverable. An
+        # explicit action instead pages decided insights (accepted work stays
+        # retrievable after it leaves the pending projection).
+        action = args.get("action")
+        if action is not None:
+            if action not in ("accept", "modify", "defer", "reject"):
+                raise Denied("Insight listing needs a supported action: accept, modify, defer, or reject")
         retrieval = min(args.get("offset", 0) + args.get("limit", 1000), INSIGHT_RETRIEVAL_LIMIT)
-        projection = self.project.insights.projection(limit=max(1, retrieval))
+        projection = self.project.insights.projection(
+            limit=max(1, retrieval), pending=action is None, action=action)
         response = page(projection['items'],args.get('offset',0),args.get('limit',1000),maximum=PREVIEW_BYTES*2)
         response['insights'] = response.pop('items')
         response['total'] = projection['total']

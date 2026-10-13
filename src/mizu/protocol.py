@@ -78,8 +78,8 @@ DEFINITIONS = {
                    "offset": PAGE_FIELDS["offset"], "limit": {"type": "integer", "minimum": 1, "maximum": 8192}}, ("url", "method"))),
     "search": ("Search configured feeds or the operator's search adapter. Returns results with stated scope and coverage.",
                obj({"query": text(1000),**PAGE_FIELDS}, ("query",))),
-    "insights": ("List pending proposals, or read one proposal by ID.",
-                 obj({"id": text(64), **PAGE_FIELDS})),
+    "insights": ("List pending proposals, or decided ones by action (accept/modify/defer/reject), or read one proposal by full ID or unique prefix.",
+                 obj({"id": text(64), "action": {"type": "string", "enum": ["accept", "modify", "defer", "reject"]}, **PAGE_FIELDS})),
     "decide": ("Record a proposal decision with action, reason and revisit fields. The defer action requires a revisit value. "
                "A defer may register one structured wait as {kind} with kind deadline (plus at: timezone-aware ISO "
                "timestamp), code_change, insight_decided (plus insight: proposal id), or dependency (plus recipient: "

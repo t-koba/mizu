@@ -515,6 +515,60 @@ class InsightRetrievalTests(Fixture):
         seen = [item["id"] for page in (first, overflow) for item in page["insights"]]
         self.assertEqual(len(set(seen)), 35)
 
+    def test_accepted_work_lists_by_action_after_leaving_pending(self):
+        snap = self.project.snapshots.get()["id"]
+        ids = [self.project.insights.submit(source="searcher", title=f"Idea {n}",
+                                            body="Evidence", base_snapshot=snap)["id"]
+               for n in range(3)]
+        self.project.insights.decide(ids[0], "accept", "sequenced", "", "test", expected_rev=1)
+        self.project.insights.decide(ids[1], "modify", "scoped", "", "test", expected_rev=1)
+        ctx = self.context("worker")
+        pending = ctx.handle("insights", {"offset": 0, "limit": 1000})
+        self.assertEqual(pending["total"], 1)
+        self.assertEqual([item["id"] for item in pending["insights"]], [ids[2]])
+        accepted = ctx.handle("insights", {"action": "accept", "offset": 0, "limit": 1000})
+        self.assertEqual(accepted["total"], 1)
+        self.assertEqual([item["id"] for item in accepted["insights"]], [ids[0]])
+        modified = ctx.handle("insights", {"action": "modify", "offset": 0, "limit": 1000})
+        self.assertEqual(modified["total"], 1)
+        self.assertEqual([item["id"] for item in modified["insights"]], [ids[1]])
+        rejected = ctx.handle("insights", {"action": "reject", "offset": 0, "limit": 1000})
+        self.assertEqual(rejected["total"], 0)
+        from mizu.errors import Denied
+        with self.assertRaises(Denied):
+            ctx.handle("insights", {"action": "withdraw"})
+        with self.assertRaises(Denied):
+            ctx.handle("insights", {"action": "bogus"})
+
+    def test_read_resolves_unique_prefix(self):
+        snap = self.project.snapshots.get()["id"]
+        full = self.project.insights.submit(source="searcher", title="Idea",
+                                            body="Evidence", base_snapshot=snap)["id"]
+        record = self.project.insights.read(full[:8])
+        self.assertEqual(record["id"], full)
+        self.assertEqual(record["title"], "Idea")
+        # The full id still reads exactly.
+        self.assertEqual(self.project.insights.read(full)["id"], full)
+
+    def test_ambiguous_prefix_and_garbage_are_refused(self):
+        from mizu.errors import Denied
+        snap = self.project.snapshots.get()["id"]
+        first = "deadbeef" + "1" + "0" * 23
+        second = "deadbeef" + "2" + "0" * 23
+        self.project.insights.submit(source="searcher", title="One", body="Evidence",
+                                     base_snapshot=snap, insight_id=first)
+        self.project.insights.submit(source="searcher", title="Two", body="Evidence",
+                                     base_snapshot=snap, insight_id=second)
+        with self.assertRaises(Denied):
+            self.project.insights.read("deadbeef")
+        self.assertEqual(self.project.insights.read("deadbeef1")["id"], first)
+        with self.assertRaises(Denied):
+            self.project.insights.read("f" * 8)
+        with self.assertRaises(Denied):
+            self.project.insights.read("not an id!")
+        with self.assertRaises(Denied):
+            self.project.insights.read("a" * 32)
+
 
 class PromptOrderTests(Fixture):
     def test_prompt_key_order_is_fixed(self):

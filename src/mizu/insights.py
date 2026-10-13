@@ -380,7 +380,7 @@ replacement insight without implying rejected substance.
             write_json(self.root / "inbox" / f"{insight_id}.json", record)
             return _normalize(record)
 
-    def projection(self, *, pending: bool = True, limit: int = 30) -> dict:
+    def projection(self, *, pending: bool = True, limit: int = 30, action: str | None = None) -> dict:
         heap = []
         total = 0
         for path in (self.root / "inbox").glob("*.json"):
@@ -394,6 +394,8 @@ replacement insight without implying rejected substance.
                 raw_decision = None if decision_path.is_symlink() else read_json(decision_path)
                 decision = _effective_decision(item_rev, raw_decision)
                 if pending and decision and decision["action"] != "defer":
+                    continue
+                if action is not None and (not decision or decision.get("action") != action):
                     continue
                 record = {k: item[k] for k in ("id", "source", "origin", "title", "created_at", "base_snapshot") if k in item}
                 if "origin" not in record:
@@ -427,13 +429,37 @@ replacement insight without implying rejected substance.
         return self.projection(pending=pending, limit=limit)["items"]
 
     def read(self, insight_id: str) -> dict:
-        path = self.root / "inbox" / f"{identifier(insight_id)}.json"
-        if path.is_symlink():
-            raise Denied("Insight not found")
-        record = read_json(path)
-        if not record:
-            raise Denied("Insight not found")
-        return _normalize(record)
+        try:
+            key = identifier(insight_id)
+        except Denied:
+            key = None
+        if key is not None:
+            path = self.root / "inbox" / f"{key}.json"
+            if not path.is_symlink():
+                record = read_json(path)
+                if record:
+                    return _normalize(record)
+            # A valid identifier with no exact file may be a unique prefix
+            # of a longer id (compacted state often keeps only a prefix).
+            prefix = key.lower()
+            if len(prefix) >= 32 or any(c not in "0123456789abcdef" for c in prefix):
+                raise Denied("Insight not found")
+            matches = []
+            for candidate in (self.root / "inbox").glob("*.json"):
+                if candidate.is_symlink():
+                    continue
+                stem = candidate.stem
+                if len(stem) > len(prefix) and stem.lower().startswith(prefix):
+                    matches.append(stem)
+            if not matches:
+                raise Denied("Insight not found")
+            if len(matches) > 1:
+                raise Denied("Ambiguous insight prefix; use the full id")
+            record = read_json(self.root / "inbox" / f"{matches[0]}.json")
+            if not record:
+                raise Denied("Insight not found")
+            return _normalize(record)
+        raise Denied("Insight not found")
 
     def scan_source(self, source: str) -> list[dict]:
         """Return every inbox record carrying the given source.

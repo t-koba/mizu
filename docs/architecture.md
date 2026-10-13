@@ -199,7 +199,12 @@ withdrawal unbinds the wait; unsupported conditions are refused at
 registration, naming the supported kinds instead of implying a schedule. Decided (non-deferred,
 revision-current) proposals older than
 `limits.retention_days` are reaped on ingest; their decisions persist in
-`decisions/` and `decision-history/`, so inbox scans stay bounded. The prompt
+`decisions/` and `decision-history/`, so inbox scans stay bounded. Decided
+work stays retrievable within retention: the `insights` tool lists decided
+proposals by action and reads by full id or unique prefix, so accepted work
+never depends on the model's memory across compaction. Tracking
+implementation completion ("done") stays with the writer's published state;
+the mechanism records decisions, never per-item done-ness. The prompt
 offer keeps the newest `limits.pending_insights` proposals so recent evidence
 is never hidden behind the bound. Worker discretion applies to proposals,
 not to the operator's goal or prohibitions.
