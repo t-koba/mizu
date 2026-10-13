@@ -254,6 +254,19 @@ proposed profile is conditional on that missing classification. Selection
 status shows raw saved observations, blocks and history; preview evaluates
 freshness at the current time.
 
+Quality evidence must be measured under the effective role grants, sandbox,
+image, and native tools, never imported from a model-only ranking: assess a
+frozen profile+driver+tools+image+grants bundle on a fixed, independently
+checked task known to be solvable under that exact policy. Record failures in
+the request/token/time/cost observations alongside successes (failed
+trajectories can cost as much as passing ones); hardening moves success and
+spend independently, mostly through workaround construction. When comparing
+recovery behavior, distinguish an impossible-by-policy task from one with a
+demonstrated compliant alternative, and keep denied-action/workaround
+evidence. The `scripts/comparison.py` conditions/evidence/limitations fields
+carry this without schema growth; the live smoke in docs/testing.md proves
+protocol interop only, never research quality or large-codebase utility.
+
 ## Execution and evidence contract
 
 Reported model failures are distinct from local protocol invariants. Pi provides
