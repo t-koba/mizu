@@ -8,7 +8,23 @@ from pathlib import Path
 from .errors import Denied
 from .fs import PREVIEW_BYTES, canonical
 from .process import environment, run
-from .web import Web
+from .web import (PROBE_RESPONSE_HEADERS_MAX, PROBE_RESPONSE_NAME_MAX,
+                  PROBE_RESPONSE_VALUE_MAX, Web)
+
+
+def _output_limit(operation: str, max_bytes: int) -> int:
+    """Finite combined stdout/stderr ceiling, including serialized receipts."""
+    floor = 2 * 1024 * 1024
+    if operation not in ("fetch", "probe"):
+        # Search keeps its existing finite aggregate cap, not a body envelope.
+        return floor
+    metadata_reserve = 64 * 1024
+    if operation == "probe":
+        metadata_reserve += 6 * PROBE_RESPONSE_HEADERS_MAX * (
+            PROBE_RESPONSE_NAME_MAX + PROBE_RESPONSE_VALUE_MAX)
+    # Six bytes per raw body byte covers JSON control escaping and UTF-8
+    # replacement decoding. Generated receipt metadata has fixed bounds.
+    return max(floor, 6 * max_bytes + metadata_reserve)
 
 
 def bounded(config, run_dir, operation, value, cancel, role: str = ""):
@@ -19,7 +35,8 @@ def bounded(config, run_dir, operation, value, cancel, role: str = ""):
     # Search may fetch multiple feeds, but remains bounded by the parent run deadline.
     timeout = config.web["timeout_seconds"] * (len(config.web["feeds"]) + 1) if operation == "search" else config.web["timeout_seconds"] + 2
     result = run([sys.executable, "-m", "mizu.web_worker"], timeout=min(timeout, config.limits.run_seconds),
-                 maximum=2 * 1024 * 1024, cancel=cancel, input_data=canonical(request),
+                 maximum=_output_limit(operation, config.web["max_bytes"]),
+                 cancel=cancel, input_data=canonical(request),
                  env=environment(extra={"PYTHONPATH": str(root)}))
     if result.exit_code != 0 or result.reason != "exited":
         raise Denied(f"Web operation failed ({result.reason}): {result.stderr[-2000:]}")

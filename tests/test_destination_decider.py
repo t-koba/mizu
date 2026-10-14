@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from support import Fixture
 from mizu.errors import Denied
-from mizu.web import Web
+from mizu.web import FETCH_CACHE_SCHEMA_VERSION, Web
 
 
 ALLOW = [sys.executable, "-c", "import json,sys; json.load(sys.stdin); print(json.dumps({'allow': True}))"]
@@ -112,7 +112,8 @@ class DeciderCacheBypassTests(Fixture):
                                 "content_type": "text/plain", "text": "CACHED-POISON",
                                 "trust": "external-untrusted",
                                 "fetch_policy_digest": fs_digest(canonical({
-                                    "hosts": [], "intranet": False, "max_bytes": 65536}))})
+                                    "hosts": [], "intranet": False, "max_bytes": 65536,
+                                    "receipt_schema": FETCH_CACHE_SCHEMA_VERSION}))})
 
         class LiveResponse:
             status = 200
@@ -175,7 +176,8 @@ class DeciderCacheBypassTests(Fixture):
                     "trust": "external-untrusted",
                     "fetch_policy_digest": fs_digest(canonical({
                         "hosts": sorted(web.settings["hosts"]),
-                        "intranet": False, "max_bytes": 65536}))})
+                        "intranet": False, "max_bytes": 65536,
+                        "receipt_schema": FETCH_CACHE_SCHEMA_VERSION}))})
 
         # Host order is not a policy change. Original/final gates still run.
         web.settings["hosts"].reverse()
@@ -222,7 +224,8 @@ class DeciderCacheBypassTests(Fixture):
                              ["start.example", "middle.example", "end.example"])
             cached = read_json(web.cache / f"{fs_digest(url.encode())}.json")
             self.assertEqual(cached["fetch_policy_digest"], fs_digest(canonical({
-                "hosts": sorted(web.settings["hosts"]), "intranet": False, "max_bytes": 65536})))
+                "hosts": sorted(web.settings["hosts"]), "intranet": False, "max_bytes": 65536,
+                "receipt_schema": FETCH_CACHE_SCHEMA_VERSION})))
             conn.reset_mock()
             addresses.reset_mock()
             web.settings["hosts"].remove("middle.example")
@@ -260,3 +263,35 @@ class DeciderCacheBypassTests(Fixture):
         self.assertEqual(record["text"], "LIVE-CONTENT")
         self.assertIn("fetch_policy_digest", record)
         self.assertEqual(read_json(cache_file), record)
+
+    def test_previous_receipt_schema_cache_misses(self):
+        import time
+        from unittest.mock import Mock, patch
+        from mizu.fs import canonical, digest as fs_digest, write_json
+
+        url = "https://example.com/live"
+        web = make_web(self.temporary.name,
+                       {"hosts": ["example.com"], "cache_seconds": 1800})
+        cache_file = web.cache / f"{fs_digest(url.encode())}.json"
+        # Receipt digest used before content-type metadata became bounded.
+        old_digest = fs_digest(canonical({"hosts": ["example.com"],
+                                          "intranet": False, "max_bytes": 65536}))
+        write_json(cache_file, {"id": "g" * 64, "url": url, "final_url": url,
+                                "retrieved_at": "2026-01-01T00:00:00Z",
+                                "retrieved_epoch": time.time(), "sha256": "h" * 64,
+                                "content_type": "text/" + "x" * 4096,
+                                "text": "LEGACY-CONTENT", "trust": "external-untrusted",
+                                "fetch_policy_digest": old_digest})
+        response = Mock(status=200)
+        response.getheader.side_effect = lambda name, default=None: {
+            "Content-Type": "text/plain"}.get(name, default)
+        response.read.return_value = b"LIVE-CONTENT"
+        with patch("mizu.web.public_addresses", return_value=[]), \
+             patch("mizu.web.PinnedHTTPS") as conn:
+            conn.return_value.getresponse.return_value = response
+            record = web.fetch(url)
+        conn.assert_called_once()
+        self.assertNotIn("cached", record)
+        self.assertEqual(record["text"], "LIVE-CONTENT")
+        self.assertEqual(record["content_type"], "text/plain")
+        self.assertNotEqual(record["fetch_policy_digest"], old_digest)

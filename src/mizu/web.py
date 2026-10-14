@@ -39,6 +39,10 @@ PROBE_HEADER_VALUE_MAX = 4096
 PROBE_RESPONSE_HEADERS_MAX = 64
 PROBE_RESPONSE_NAME_MAX = 256
 PROBE_RESPONSE_VALUE_MAX = 8192
+#: Media metadata bound shared by fetch and probe (characters).
+RESPONSE_MEDIA_MAX = 256
+#: Cache receipt schema bound into static-cache policy fingerprints.
+FETCH_CACHE_SCHEMA_VERSION = 2
 #: Credential/framing headers never sent from role input (fixed mechanism).
 PROBE_REFUSED_HEADERS = frozenset({
     "authorization", "proxy-authorization", "cookie", "cookie2",
@@ -253,7 +257,8 @@ class Web:
         policy_digest = None if decider else digest(canonical({
             "hosts": sorted(self.settings["hosts"]),
             "intranet": bool(self.settings.get("intranet", False)),
-            "max_bytes": self.settings["max_bytes"]}))
+            "max_bytes": self.settings["max_bytes"],
+            "receipt_schema": FETCH_CACHE_SCHEMA_VERSION}))
         cache_file = self.cache / f"{digest(url.encode())}.json"
         try:
             cached = None if decider else read_json(cache_file)
@@ -266,7 +271,7 @@ class Web:
                 and isinstance(cached.get("id"), str)
                 and cached.get("fetch_policy_digest") == policy_digest
                 and time.time() - float(epoch) < self.settings["cache_seconds"]):
-            # Legacy receipts without the digest miss; hits still re-check URLs.
+            # Legacy or prior-schema receipts miss; hits still re-check URLs.
             self.check_url(cached["url"], "fetch")
             self.check_url(cached["final_url"], "fetch")
             write_json(self.receipts / f"{cached['id']}.json", cached, exclusive=True)
@@ -304,7 +309,7 @@ class Web:
                 receipt = {"id": digest((original + "\n" + digest(raw) + "\n" + str(time.time_ns())).encode()),
                            "url": original, "final_url": url, "retrieved_at": now(),
                            "retrieved_epoch": time.time(), "sha256": digest(raw),
-                           "content_type": media, "text": text, "trust": "external-untrusted"}
+                           "content_type": media[:RESPONSE_MEDIA_MAX], "text": text, "trust": "external-untrusted"}
                 if not decider:
                     receipt["fetch_policy_digest"] = policy_digest
                     write_json(cache_file, receipt)
@@ -406,7 +411,7 @@ class Web:
             if len(raw) > self.settings["max_bytes"]:
                 raise Denied("Probe response exceeds byte limit")
             text = raw.decode("utf-8", "replace")
-            media = response.getheader("Content-Type", "").split(";")[0].strip()[:256]
+            media = response.getheader("Content-Type", "").split(";")[0].strip()[:RESPONSE_MEDIA_MAX]
             receipt = {"id": digest((url + "\n" + method + "\n" + digest(raw) + "\n" + str(time.time_ns())).encode()),
                        "url": url, "method": method, "status": status,
                        "headers": [{"name": n, "value": v} for n, v in raw_headers],

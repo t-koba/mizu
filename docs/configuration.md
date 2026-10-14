@@ -357,9 +357,20 @@ Configures outbound retrieval for `fetch` and `search`:
 | `search_command` | `[]` | Trusted argv command receiving/returning bounded JSON |
 | `destination_command` | `[]` | Trusted argv owning the destination decision per request (`url`, `host`, `role`, `capability` fetch/probe, redirect `hop`, `method`); stdin bounded JSON, stdout must be `{"allow": bool}`. Unset keeps the `hosts`/`probe_hosts` lists; when set the decider decides authoritatively per hop and anything but explicit `true` denies (fail closed). While set, `fetch` bypasses the response cache so every hop is decided live; `probe` never caches. HTTPS-only, port 443, DNS pinning, bounds and receipts stay in mechanism |
 | `intranet` | `false` | When true, permits any private unicast IP (`ip.is_private`); multicast, link-local, loopback, unspecified, and transition addresses stay refused |
-| `cache_seconds` | `1800` | Response cache TTL: reuse window and expired-entry reclamation age (`retrieved_epoch` vs now; epoch-less entries use mtime for reclamation only). Static-cache hits require the current fetch-policy digest (canonical sorted `hosts`, `intranet`, `max_bytes`); changes to these settings invalidate reuse and re-run live redirect checks. Legacy/incomplete receipts without the digest miss. Unused for `fetch` while `destination_command` is set (cache bypassed); still ages already-stored entries for reclamation |
+| `cache_seconds` | `1800` | Response cache TTL: reuse window and expired-entry reclamation age (`retrieved_epoch` vs now; epoch-less entries use mtime for reclamation only). Static-cache hits require the current fetch-policy digest (canonical sorted `hosts`, `intranet`, `max_bytes`, and receipt-schema version); changes to these settings or the receipt schema invalidate reuse and re-run live redirect checks. Legacy, prior-schema or incomplete receipts without the current digest miss. Unused for `fetch` while `destination_command` is set (cache bypassed); still ages already-stored entries for reclamation |
 | `timeout_seconds`| `20` | Request timeout |
-| `max_bytes` | `524288` | Maximum response payload (512 KiB) |
+| `max_bytes` | `524288` | Maximum raw response payload (512 KiB; 1–16,777,216); worker JSON expansion does not enlarge the raw response cap |
+
+The `fetch`/`probe` worker IPC ceiling accounts for JSON expansion and metadata
+separately from the unchanged raw response cap: combined stdout/stderr is limited
+to `max(2 MiB, 6 * max_bytes + metadata_reserve)`. The fixed metadata reserve is
+64 KiB for `fetch`; `probe` adds `6 * 64 * (256 + 8192)` bytes for its bounded
+response headers, which coexist with the body. Six covers worst-case JSON control
+escaping and UTF-8 replacement decoding. Generated `fetch` Content-Type and
+`probe` media metadata are limited to 256 characters without changing fetch media
+decisions. Oversized hand-edited cache objects still fail closed at the finite
+worker ceiling. `search` retains its existing 2 MiB combined worker output cap;
+this is not a universal search aggregate envelope.
 
 URL fragments are stripped client-side and never sent. Redirects re-validate hostname, port, and IP. Text/HTML/XML/JSON formats are supported; binary/PDF/image formats are rejected.
 
