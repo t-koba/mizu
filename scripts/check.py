@@ -11,6 +11,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -60,63 +61,57 @@ def _allow_list(value: str) -> frozenset:
     return frozenset(part.strip() for part in value.split(',') if part.strip())
 
 
-def unittest_failure_summary(output: str) -> str:
-    """Summarize unittest failures without echoing assertion values or host paths.
+def unittest_failure_summary(sidecar: Path) -> str:
+    """Read only the child's sanitized JSONL, never flattened traceback text.
 
-    The CI log adapter exposes only a bounded tail. Stable test IDs,
-    repository-local frame locations, and exception classes locate failures;
-    subTest parameters, temporary paths, and exception values stay out.
+    The private, run-local sidecar holds kind/test/type/path/line records (see
+    check_unittest.py). Reject missing, empty, malformed, oversized or unsafe
+    metadata generically. Summary bounds remain 500 characters per failure and
+    1500 total; test counts still come from unittest's standard final output.
     """
     import re
-    headers = list(re.finditer(r'^(FAIL|ERROR): (.+)$', output, re.M))
-    summaries = []
-    for index, header in enumerate(headers):
-        end = headers[index + 1].start() if index + 1 < len(headers) else len(output)
-        block = output[header.end():end]
-        test_name, separator, _ = header.group(2).partition(') (')
-        if separator:
-            test_name += ')'
-        location = ''
-        frame_re = re.compile(r'  File "([^"]+)", line (\d+), in [^\r\n]+')
-        frame_matches = []
-        error_type = ''
-        in_traceback = False
-        # Parse only the initial traceback stack, stopping at its exception
-        # header: message continuations can contain frame-shaped text.
-        for line in block.splitlines():
-            if not in_traceback:
-                if line in ('Traceback (most recent call last):',
-                            'Exception Group Traceback (most recent call last):'):
-                    in_traceback = True
-                continue
-            frame = frame_re.fullmatch(line)
-            if frame:
-                frame_matches.append((frame.group(1), frame.group(2)))
-                continue
-            if not line.strip() or line[0].isspace():
-                continue
-            if frame_matches:
-                match = re.fullmatch(r'([A-Za-z_][A-Za-z0-9_.]*)(?::.*)?', line)
-                if match:
-                    error_type = f' [{match.group(1)}]'
-            break
-        for filename, line in reversed(frame_matches):
-            normalized = filename.replace('\\', '/')
-            for directory in ('tests/', 'src/', 'scripts/', 'adapters/'):
-                marker = '/' + directory
-                position = normalized.rfind(marker)
-                if position >= 0:
-                    normalized = normalized[position + 1:]
-                    break
-                if normalized.startswith(directory):
-                    break
-            else:
-                normalized = normalized.rsplit('/', 1)[-1]
-            if normalized.startswith(('tests/', 'src/', 'scripts/', 'adapters/')):
-                location = f' @ {normalized}:{line}'
-                break
-        summaries.append(f'{header.group(1)} {test_name}{location}{error_type}'[:500])
-    return '; '.join(summaries)[:1500]
+    unavailable = 'unittest failure details unavailable'
+    try:
+        with sidecar.open('rb') as stream:
+            data = stream.read(1_000_001)
+        if not data or len(data) > 1_000_000:
+            return unavailable
+        summaries = []
+        for line in data.decode('utf-8').splitlines():
+            record = json.loads(line)
+            if not isinstance(record, dict) or set(record) != {'kind', 'test', 'type', 'path', 'line'}:
+                return unavailable
+            kind, test, error_type = record['kind'], record['test'], record['type']
+            if (kind not in ('FAIL', 'ERROR', 'UNEXPECTED SUCCESS')
+                    or not isinstance(test, str) or len(test) > 500
+                    or not re.fullmatch(r'[A-Za-z_]\w*(?:\.(?:[A-Za-z_]\w*|<locals>))*', test, re.ASCII)):
+                return unavailable
+            if error_type is not None and (not isinstance(error_type, str)
+                    or not re.fullmatch(r'[A-Za-z_]\w{0,199}', error_type, re.ASCII)):
+                return unavailable
+            path, number = record['path'], record['line']
+            if kind in ('FAIL', 'ERROR') and error_type is None:
+                return unavailable
+            if kind == 'UNEXPECTED SUCCESS' and (error_type is not None or path is not None or number is not None):
+                return unavailable
+            location = ''
+            if path is not None:
+                if (not isinstance(path, str) or not path or '\\' in path
+                        or any(part in ('', '.', '..') for part in path.split('/'))
+                        or Path(path).is_absolute() or type(number) is not int or number <= 0):
+                    return unavailable
+                resolved = (ROOT / path).resolve(strict=True)
+                resolved.relative_to(ROOT)
+                if not resolved.is_file() or resolved.relative_to(ROOT).as_posix() != path:
+                    return unavailable
+                location = f' @ {path}:{number}'
+            elif number is not None:
+                return unavailable
+            exception = f' [{error_type}]' if error_type else ''
+            summaries.append(f'{kind} {test}{location}{exception}'[:500])
+        return '; '.join(summaries)[:1500] or unavailable
+    except (OSError, ValueError, TypeError, RuntimeError):
+        return unavailable
 
 
 def durable_deps_status(adapter: Path) -> tuple:
@@ -199,18 +194,20 @@ def main():
                 process.kill()
                 exit_code = process.wait(timeout=30)
                 status = 'fail'
-                # A killed step prints no summary, so the report carries the
-                # last output: with timestamped verbose progress this names
-                # the test that never finished (and its quiet duration)
-                # instead of a bare run:0.
-                tail = ''.join(chunks)[-1500:]
-                details = f'timed out after {timeout} s; output tail: {tail.strip()}'
+                # Unittest diagnostics come only from structured metadata,
+                # even on timeout. Other steps retain their raw output tail;
+                # live timestamped progress still locates an unfinished test.
+                details = f'timed out after {timeout} s'
+                if failure_summary is None:
+                    tail = ''.join(chunks)[-1500:]
+                    details += f'; output tail: {tail.strip()}'
             reader.join(timeout=30)
         text = ''.join(chunks)
         if exit_code != 0:
             status = 'fail'
-            if failure_summary is not None and not details:
-                details = failure_summary(text)
+            if failure_summary is not None:
+                summary = failure_summary()
+                details = f'{details}; {summary}' if details else summary
         entry = {'name': name, 'status': status,
                  'seconds': round(time.monotonic() - started, 3), 'exit_code': exit_code}
         if details:
@@ -241,16 +238,21 @@ def main():
                 'failed': int(failed.group(1)) if failed else 0,
                 'skipped': int(re.search(r'^# skipped (\d+)', output, re.M).group(1)) if re.search(r'^# skipped (\d+)', output, re.M) else 0}
     # Timestamped verbose progress: on a timeout the killed step leaves the
-    # unfinished test as the last timestamped line (see output-tail
-    # details). Step budget 840 s: the suite measured 403-510 s on Windows
+    # unfinished test as the last timestamped line in the live log.
+    # Step budget 840 s: the suite measured 403-510 s on Windows
     # legs (775 tests) at b80b2379, but on 2026-10-11 the slowest
     # windows-latest leg hit the 780 s budget with every executed test
     # passing (steady ~1 s/test progress to the kill), so 840 s restores
     # headroom while staying inside the 1200 s job timeout; a true hang
     # still dies here with per-line arrival times as evidence, not a
     # silent raise.
-    execute('python-unit-and-contract-tests', [sys.executable, '-u', '-m', 'unittest', 'discover', '-s', 'tests', '-v'],
-            count=unittest_counts, failure_summary=unittest_failure_summary, timeout=840)
+    # The child owns structured exception metadata. Its new sidecar is private
+    # and deleted even on timeout; no failure/timeout details parse raw output.
+    with tempfile.TemporaryDirectory(prefix='mizu-unittest-') as temporary:
+        sidecar = Path(temporary) / 'failures.jsonl'
+        execute('python-unit-and-contract-tests',
+                [sys.executable, '-u', str(ROOT / 'scripts/check_unittest.py'), str(sidecar)],
+                count=unittest_counts, failure_summary=lambda: unittest_failure_summary(sidecar), timeout=840)
     if not shutil.which('node'):
         checks.append({'name': 'node-available', 'status': 'fail'})
     # bash is a POSIX convenience for shell-syntax checks, not a runtime
