@@ -30,7 +30,7 @@ Claudeは専用環境の公式Python Agent SDKを使います。権限コール�
 
 永続セッションはモデル、方針、権限、有効設定、リソース・アダプターの内容ダイジェストを識別に含めます。相談とsmokeは非永続です。再開失敗や壊れた記録を新規会話へ置換しません。実行物の認証と信頼された拡張の副作用まで、模擬provider検査で隔離を証明したとは扱いません。
 
-独立したobserver daemonはWriterのdone/wait/blockedを待機条件として流用しません。arm/pause、既存のOSスケジュールとon_changeが適用されます。子相談には親と別の実行枠が必要です。parallel_runs=1は子の消費前にBusyを返し、隠れた再試行をしません。
+独立したobserver daemonはWriterのdone/wait/blockedを待機条件として流用しません。arm/pause、既存のOSスケジュールとon_changeが適用されます。子相談・委譲は受付済みの呼出元が保持する実行枠を借り、別枠を取得しません。parallel_runs=1でも実行でき、相談の並列数はparallel_consultsで制限します。実行枠の受付がない呼出元は子の消費前にBusyを返し、子は枠を再貸与できません。
 
 ## Insight・利用量・通信
 

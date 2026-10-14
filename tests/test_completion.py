@@ -147,18 +147,17 @@ class CompletionTests(Fixture):
         from mizu.usage import summarize
         def work(ctx, *_):
             ctx.handle("finish", {"outcome": "wait", "summary": "observed"})
-        parent = self.context()
-        result = Engine(self.config, driver=ScriptDriver(work)).consult(parent, {"question": "review"})
+        result = self.admitted_call(Engine(self.config, driver=ScriptDriver(work)),
+                                    "consult", {"question": "review"})
         self.assertEqual(len(result["answers"]), 1)
         facts = summarize(self.project)
-        self.assertEqual(facts["totals"]["runs"], 1)
-        self.assertEqual(facts["totals"]["requests"], 1)
+        self.assertEqual(facts["totals"]["runs"], 2)  # Caller plus child, not parent references.
+        self.assertEqual(facts["totals"]["requests"], 2)
 
-    def test_consultation_slot_refusal_before_request(self):
-        config = dataclasses.replace(self.config, limits=dataclasses.replace(self.config.limits, parallel_runs=1))
+    def test_unadmitted_consultation_refusal_before_request(self):
         driver = ScriptDriver()
         with self.assertRaises(Busy):
-            Engine(config, driver=driver).consult(self.context(), {"question": "review"})
+            Engine(self.config, driver=driver).consult(self.context(), {"question": "review"})
         self.assertEqual(driver.calls, [])
 
     def test_backup_retains_incomplete_ingest(self):

@@ -17,6 +17,15 @@ def _strip_line(text: str, needle: str) -> str:
 
 
 class IncludeTests(Fixture):
+    def test_consult_fanout_bound_is_independent_of_caller_slots(self):
+        base = self.file.read_text()
+        self.assertIn("parallel_runs = 4", base)
+        self.assertIn("parallel_consults = 2", base)
+        self.file.write_text(base.replace("parallel_runs = 4", "parallel_runs = 1", 1))
+        config = load(self.file)
+        self.assertEqual(config.limits.parallel_runs, 1)
+        self.assertEqual(config.limits.parallel_consults, 2)
+
     def _split_idle(self, frag_name="shared.toml"):
         """Move idle_seconds out of the main file into a fragment."""
         text = self.file.read_text()

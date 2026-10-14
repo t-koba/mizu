@@ -223,6 +223,9 @@ class Context:
         self.wait_events: list = []
         self.obligations: list = []
         self.closed = False
+        # Host-only lease: set by Engine.run while its admission stack owns
+        # an execution slot. Ephemeral children never lend that slot onward.
+        self._slot_lease = False
         self.operations_stopped = threading.Event()
         self.verification: dict | None = None
         self.commentary: dict | None = None
@@ -2334,6 +2337,7 @@ class Engine:
                         project.snapshots.materialize(snapshot, workspace)
                 context = Context(self.config, project, role, run_dir, snapshot, workspace,
                                   stop=self.stop, consult=self.consult, delegate=self.delegate)
+                context._slot_lease = True
                 context.ephemeral = self.ephemeral
                 context.decision_events = decision_events
                 context.wait_events = wait_events
@@ -2622,6 +2626,7 @@ class Engine:
                 raise exc
             finally:
                 if context is not None:
+                    context._slot_lease = False
                     context.closed = True
                 with contextlib.suppress(OSError):
                     active.unlink(missing_ok=True)
@@ -2652,8 +2657,8 @@ class Engine:
             if role_name not in self.config.roles:
                 raise ConfigError(f"Consultation role is not configured: {role_name}")
             check_consult_role(role_name, self.config.roles[role_name])
-        if self.config.limits.parallel_runs <= 1:
-            raise Busy("Consultation needs an execution slot in addition to its parent")
+        if not parent._slot_lease or parent.closed:
+            raise Busy("Consultation requires a live admitted caller execution slot")
         capture = parent.project.snapshots.capture_files(parent.workspace)
         snap = parent.project.snapshots.create(capture, goal=parent.goal, state=parent.snapshot["state"],
                                               run=parent.run_dir.name, outcome="wait", summary="Consultation input")
@@ -2665,44 +2670,43 @@ class Engine:
             role = self.config.roles[role_name]
             profile = ""
             try:
-                with slot(self.config):
-                    mkdir(run_dir)
-                    if role.selector:
-                        # Config-only gate: preview() also requires project
-                        # enablement, but a consultation child is ephemeral
-                        # (slot only, no role lock, no dispatch gate), so any
-                        # configured read-only role qualifies as the docs say.
-                        # Resolve through the same bounded preview without the
-                        # project-membership check and without consuming routing.
-                        from .classification import prepare as _prepare_selection
-                        decision = _prepare_selection(
-                            self, parent.project, role,
-                            parent.project.snapshots.get(), None, preview=True)
-                        profile = decision.get("profile") or ""
-                        if not profile:
-                            raise Denied("Consultation selector has no selectable profile: "
-                                         + str(decision.get("reason") or "waiting"))
-                        role = dataclasses.replace(role, profile=profile, selector="")
-                    else:
-                        profile = role.profile
-                    write_json(run_dir / "started.json", {"run": run_dir.name,
-                               "parent_run": parent.run_dir.name, "role": role.name,
-                               "profile": profile, "snapshot": snap["id"], "started_at": now()})
-                    parent.project.snapshots.materialize(snap, workspace)
-                    ctx = Context(self.config, parent.project, role,
-                                  run_dir, snap, workspace, stop=parent.stop, goal=parent.goal)
-                    ctx.ephemeral = True
-                    model = self._execute(ctx, self.resolve(profile), prompt_for(ctx) + "\n\nQuestion:\n" + args["question"], profile=profile)
-                    if ctx.host_cancelled() or (ctx.finished is None and ctx.cancelled()):
-                        raise Cancelled("Consultation cancelled before completion")
-                    if ctx.finished is None:
-                        raise Denied("Consultation did not finish")
-                    result = {"run": run_dir.name, "parent_run": parent.run_dir.name,
-                              "role": role.name, "status": "completed", "finished_at": now(),
-                              "profile": profile, "snapshot": snap["id"],
-                              "answer": ctx.finished["summary"], "model": model}
-                    write_json(run_dir / "consultation.json", result)
-                    return result
+                mkdir(run_dir)
+                if role.selector:
+                    # Config-only gate: preview() also requires project
+                    # enablement, but a consultation child is ephemeral
+                    # (caller slot, no role lock, no dispatch gate), so any
+                    # configured read-only role qualifies as the docs say.
+                    # Resolve through the same bounded preview without the
+                    # project-membership check and without consuming routing.
+                    from .classification import prepare as _prepare_selection
+                    decision = _prepare_selection(
+                        self, parent.project, role,
+                        parent.project.snapshots.get(), None, preview=True)
+                    profile = decision.get("profile") or ""
+                    if not profile:
+                        raise Denied("Consultation selector has no selectable profile: "
+                                     + str(decision.get("reason") or "waiting"))
+                    role = dataclasses.replace(role, profile=profile, selector="")
+                else:
+                    profile = role.profile
+                write_json(run_dir / "started.json", {"run": run_dir.name,
+                           "parent_run": parent.run_dir.name, "role": role.name,
+                           "profile": profile, "snapshot": snap["id"], "started_at": now()})
+                parent.project.snapshots.materialize(snap, workspace)
+                ctx = Context(self.config, parent.project, role,
+                              run_dir, snap, workspace, stop=parent.stop, goal=parent.goal)
+                ctx.ephemeral = True
+                model = self._execute(ctx, self.resolve(profile), prompt_for(ctx) + "\n\nQuestion:\n" + args["question"], profile=profile)
+                if ctx.host_cancelled() or (ctx.finished is None and ctx.cancelled()):
+                    raise Cancelled("Consultation cancelled before completion")
+                if ctx.finished is None:
+                    raise Denied("Consultation did not finish")
+                result = {"run": run_dir.name, "parent_run": parent.run_dir.name,
+                          "role": role.name, "status": "completed", "finished_at": now(),
+                          "profile": profile, "snapshot": snap["id"],
+                          "answer": ctx.finished["summary"], "model": model}
+                write_json(run_dir / "consultation.json", result)
+                return result
             except Exception as exc:
                 result = {"run": run_dir.name, "parent_run": parent.run_dir.name,
                           "role": role_name, "status": "bounded" if isinstance(exc, RunDeadlineExceeded) else "interrupted",
@@ -2755,8 +2759,8 @@ class Engine:
         task = args.get("task") or ""
         if not task.strip():
             raise Denied("Delegation needs a self-contained task")
-        if self.config.limits.parallel_runs <= 1:
-            raise Busy("Delegation needs an execution slot in addition to its parent")
+        if not parent._slot_lease or parent.closed:
+            raise Busy("Delegation requires a live admitted caller execution slot")
         role = self.config.roles[role_name]
         # The child works the caller's tree, so it inherits the caller's
         # workspace value: live listing and writable execution for a writer
@@ -2772,72 +2776,71 @@ class Engine:
         ctx = None
         profile = ""
         try:
-            with slot(self.config):
-                mkdir(run_dir)
-                if role.selector:
-                    # Config-only gate like consultation: the child is
-                    # ephemeral (slot only), so any configured role
-                    # qualifies; resolve without consuming routing.
-                    from .classification import prepare as _prepare_selection
-                    decision = _prepare_selection(
-                        self, parent.project, role,
-                        parent.project.snapshots.get(), None, preview=True)
-                    profile = decision.get("profile") or ""
-                    if not profile:
-                        raise Denied("Delegation selector has no selectable profile: "
-                                     + str(decision.get("reason") or "waiting"))
-                    role = dataclasses.replace(role, profile=profile, selector="")
-                else:
-                    profile = role.profile
-                write_json(run_dir / "started.json", {"run": run_dir.name,
-                           "parent_run": parent.run_dir.name, "delegation": True,
-                           "role": role.name, "profile": profile, "snapshot": snap["id"],
-                           "workspace": str(parent.workspace), "started_at": now()})
-                driver = self.resolve(profile)
-                if getattr(driver, "requires_sandbox", True) and any(
-                        c in role.capabilities for c in ("exec", "experiment", "verify")):
-                    container_runtime(self.config)
-                    cleanup(self.config, parent.project.root, role_name)
-                ctx = Context(self.config, parent.project, role,
-                              run_dir, snap, parent.workspace, stop=parent.stop, goal=parent.goal)
-                ctx.ephemeral = True
-                ctx.consult = None
-                ctx.spend_role = parent.role
-                ctx.request_count = parent.request_count
-                ctx.tool_count = parent.tool_count
-                ctx.wrap_up_requests = parent.wrap_up_requests
-                ctx.wrap_up_tools = parent.wrap_up_tools
-                try:
-                    model = self._execute(ctx, driver, prompt_for(ctx) + "\n\nTask:\n" + task
-                                           + "\n\nCall finish once with a result summary (and short state) "
-                                           + "when done; that seal returns to the caller, it publishes nothing.")
-                finally:
-                    parent.request_count = ctx.request_count
-                    parent.tool_count = ctx.tool_count
-                    parent.wrap_up_requests = ctx.wrap_up_requests
-                    parent.wrap_up_tools = ctx.wrap_up_tools
-                    # Spend state the child tripped belongs to the unit:
-                    # a bound the delegation exceeded must coerce the
-                    # parent's seal too, and daily-refusal flags must
-                    # survive for the parent's own error handling.
-                    if ctx.bound_hit != "deadline":
-                        parent.bound_hit = parent.bound_hit or ctx.bound_hit
-                    parent.admission_wait = parent.admission_wait or ctx.admission_wait
-                    if ctx.admission_error:
-                        parent.admission_error = ctx.admission_error
-                if ctx.host_cancelled() or (ctx.finished is None and ctx.cancelled()):
-                    raise Cancelled("Delegation cancelled before completion")
-                if ctx.finished is None:
-                    raise Denied("Delegation did not finish")
-                result = {"run": run_dir.name, "parent_run": parent.run_dir.name,
-                          "role": role.name, "status": "completed", "finished_at": now(),
-                          "profile": profile, "snapshot": snap["id"],
-                          "answer": ctx.finished["summary"], "model": model}
-                write_json(run_dir / "delegation.json", result)
-                record = {"task": task, "role": role.name, "run": run_dir.name,
-                          "snapshot": snap["id"], "profile": profile, "answer": ctx.finished["summary"]}
-                write_json(parent.run_dir / "delegations" / f"{uuid.uuid4().hex}.json", record)
-                return record
+            mkdir(run_dir)
+            if role.selector:
+                # Config-only gate like consultation: the child is
+                # ephemeral (caller slot), so any configured role
+                # qualifies; resolve without consuming routing.
+                from .classification import prepare as _prepare_selection
+                decision = _prepare_selection(
+                    self, parent.project, role,
+                    parent.project.snapshots.get(), None, preview=True)
+                profile = decision.get("profile") or ""
+                if not profile:
+                    raise Denied("Delegation selector has no selectable profile: "
+                                 + str(decision.get("reason") or "waiting"))
+                role = dataclasses.replace(role, profile=profile, selector="")
+            else:
+                profile = role.profile
+            write_json(run_dir / "started.json", {"run": run_dir.name,
+                       "parent_run": parent.run_dir.name, "delegation": True,
+                       "role": role.name, "profile": profile, "snapshot": snap["id"],
+                       "workspace": str(parent.workspace), "started_at": now()})
+            driver = self.resolve(profile)
+            if getattr(driver, "requires_sandbox", True) and any(
+                    c in role.capabilities for c in ("exec", "experiment", "verify")):
+                container_runtime(self.config)
+                cleanup(self.config, parent.project.root, role_name)
+            ctx = Context(self.config, parent.project, role,
+                          run_dir, snap, parent.workspace, stop=parent.stop, goal=parent.goal)
+            ctx.ephemeral = True
+            ctx.consult = None
+            ctx.spend_role = parent.role
+            ctx.request_count = parent.request_count
+            ctx.tool_count = parent.tool_count
+            ctx.wrap_up_requests = parent.wrap_up_requests
+            ctx.wrap_up_tools = parent.wrap_up_tools
+            try:
+                model = self._execute(ctx, driver, prompt_for(ctx) + "\n\nTask:\n" + task
+                                       + "\n\nCall finish once with a result summary (and short state) "
+                                       + "when done; that seal returns to the caller, it publishes nothing.")
+            finally:
+                parent.request_count = ctx.request_count
+                parent.tool_count = ctx.tool_count
+                parent.wrap_up_requests = ctx.wrap_up_requests
+                parent.wrap_up_tools = ctx.wrap_up_tools
+                # Spend state the child tripped belongs to the unit:
+                # a bound the delegation exceeded must coerce the
+                # parent's seal too, and daily-refusal flags must
+                # survive for the parent's own error handling.
+                if ctx.bound_hit != "deadline":
+                    parent.bound_hit = parent.bound_hit or ctx.bound_hit
+                parent.admission_wait = parent.admission_wait or ctx.admission_wait
+                if ctx.admission_error:
+                    parent.admission_error = ctx.admission_error
+            if ctx.host_cancelled() or (ctx.finished is None and ctx.cancelled()):
+                raise Cancelled("Delegation cancelled before completion")
+            if ctx.finished is None:
+                raise Denied("Delegation did not finish")
+            result = {"run": run_dir.name, "parent_run": parent.run_dir.name,
+                      "role": role.name, "status": "completed", "finished_at": now(),
+                      "profile": profile, "snapshot": snap["id"],
+                      "answer": ctx.finished["summary"], "model": model}
+            write_json(run_dir / "delegation.json", result)
+            record = {"task": task, "role": role.name, "run": run_dir.name,
+                      "snapshot": snap["id"], "profile": profile, "answer": ctx.finished["summary"]}
+            write_json(parent.run_dir / "delegations" / f"{uuid.uuid4().hex}.json", record)
+            return record
         except Exception as exc:
             result = {"run": run_dir.name, "parent_run": parent.run_dir.name,
                       "role": role_name, "status": "bounded" if isinstance(exc, RunDeadlineExceeded) else "interrupted",

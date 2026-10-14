@@ -122,12 +122,14 @@ class DelegateTests(Fixture):
             engine.delegate(ctx, {"task": "t"})
         with self.assertRaises(Denied):
             engine.delegate(ctx, {"role": "helper", "task": "  "})
-        configured = dataclasses.replace(config, delegate_role="helper")
-        record = Engine(configured, driver=ScriptDriver(callback)).delegate(ctx, {"task": "t"})
-        # No model ran: the default role resolves, then the slot/model path
-        # fails only if misconfigured; here the child dispatches and the
-        # callback assertion proves dispatch happened with the default.
-        self.assertIn("run", record)
+
+    def test_configured_default_delegation_uses_admitted_caller(self):
+        config = dataclasses.replace(_configured(self), delegate_role="helper")
+        driver = ScriptDriver()
+        record = self.admitted_call(Engine(config, driver=driver), "delegate", {"task": "t"})
+        self.assertEqual(record["role"], "helper")
+        self.assertIn("answer", record)
+        self.assertEqual(len(driver.calls), 1)
 
     def test_nested_delegation_is_disabled(self):
         config = _configured(self)

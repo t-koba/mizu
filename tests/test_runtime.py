@@ -277,8 +277,7 @@ class EngineTests(Fixture):
         roles["advisor-b"] = dataclasses.replace(self.config.roles["consult"], name="advisor-b", profile="alternate")
         config = dataclasses.replace(self.config, roles=roles)
         engine = Engine(config, driver=ScriptDriver(answer))
-        parent = self.context()
-        result = engine.consult(parent, {"question": "What could fail?", "roles": ["advisor-a", "advisor-b"]})
+        result = self.admitted_call(engine, "consult", {"question": "What could fail?", "roles": ["advisor-a", "advisor-b"]})
         self.assertEqual({x["snapshot"] for x in result["answers"]}, {result["snapshot"]})
         self.assertEqual(len(result["answers"]), 2)
         self.assertEqual(result["roles"], ["advisor-a", "advisor-b"])
@@ -304,7 +303,7 @@ class EngineTests(Fixture):
         role = dataclasses.replace(self.config.roles["consult"], name="advisor")
         config = dataclasses.replace(self.config, roles={**self.config.roles, "advisor": role})
         engine = Engine(config, driver=ScriptDriver())
-        result = engine.consult(self.context(), {"question": "q?", "role": "advisor"})
+        result = self.admitted_call(engine, "consult", {"question": "q?", "role": "advisor"})
         self.assertEqual(result["roles"], ["advisor"])
         self.assertNotIn("aggregation", result)
 
@@ -314,7 +313,7 @@ class EngineTests(Fixture):
             seen.append(profile)
             ctx.handle("finish", {"outcome": "wait", "summary": "Own model"})
         engine = Engine(self.config, driver=ScriptDriver(answer))
-        result = engine.consult(self.context(), {"question": "Which model answers?"})
+        result = self.admitted_call(engine, "consult", {"question": "Which model answers?"})
         self.assertEqual(result["roles"], [self.config.consult_role])
         self.assertEqual(len(result["answers"]), 1)
         own = self.config.roles[self.config.consult_role].profile
@@ -330,7 +329,7 @@ class EngineTests(Fixture):
                               "rules": [{"when": {}, "candidates": [{"profile": "primary"}]}]}}
         config = dataclasses.replace(self.config, roles=roles, selectors=selectors)
         engine = Engine(config, driver=ScriptDriver())
-        result = engine.consult(self.context(), {"question": "q?"})
+        result = self.admitted_call(engine, "consult", {"question": "q?"})
         self.assertEqual(result["roles"], [config.consult_role])
         self.assertEqual(result["answers"][0]["profile"], "primary")
         self.assertEqual(result["answers"][0]["role"], config.consult_role)
@@ -348,7 +347,7 @@ class EngineTests(Fixture):
                               "rules": [{"when": {}, "candidates": [{"profile": "primary"}]}]}}
         config = dataclasses.replace(self.config, roles=roles, selectors=selectors)
         engine = Engine(config, driver=ScriptDriver())
-        result = engine.consult(self.context(), {"question": "q?", "roles": ["outsider", "sel-outsider"]})
+        result = self.admitted_call(engine, "consult", {"question": "q?", "roles": ["outsider", "sel-outsider"]})
         self.assertEqual(result["roles"], ["outsider", "sel-outsider"])
         by_role = {a["role"]: a for a in result["answers"]}
         self.assertIn("answer", by_role["outsider"])

@@ -265,8 +265,13 @@ child's local timeout cancels only the child. Parent deadlines keep ticking:
 after joining an expired finite parent cannot infer again. Claude/Codex request
 bounds enclose the entire query/turn, including tools; they do not claim to time
 every opaque provider HTTP subcall.
- Consultations
-share budget/slot limits and fail independently; they cannot edit code.
+Consultation and delegation lend the already admitted caller's execution slot
+while it joins; no additional slot is acquired, even with `parallel_runs = 1`.
+Only the live `Engine.run` caller owns that lease; unadmitted calls fail with
+`Busy` before child inference, and children cannot lend onward. Consultation
+fan-out stays bounded by `parallel_consults` and shares the daily budget;
+answers fail independently and cannot edit code. Delegation retains the caller's
+workspace lock throughout the join, preserving one writer.
 A resumed persistent session receives only an append-only delta (goal pin,
 current snapshot pin, proposals not yet offered, plus an `open_insights`
 statement of the still-undecided backlog with ids, total, and explicit

@@ -196,8 +196,14 @@ class RemainingTests(Fixture):
         def work(ctx,*_):
             ctx.model_evidence={'engine':'synthetic','requests':ctx.request_count,'usage_known':True,'usage':[{'input_tokens':9}]}
             stop.set()
-        parent=self.context();parent.stop=stop
-        result=Engine(self.config,driver=ScriptDriver(work),stop=stop).consult(parent,{'question':'review'})
+        from mizu.errors import Cancelled
+        result=None
+        engine=Engine(self.config,driver=ScriptDriver(work),stop=stop)
+        def caller(ctx,*_):
+            nonlocal result
+            result=engine.consult(ctx,{'question':'review'})
+        with self.assertRaises(Cancelled):
+            Engine(self.config,driver=ScriptDriver(caller),stop=stop).run(self.project,'reporter')
         self.assertIn('error',result['answers'][0])
         run_dir=self.project.root/'runs'/result['answers'][0]['run']
         from mizu.fs import read_json
@@ -339,14 +345,13 @@ class RemainingTests(Fixture):
         from mizu.runtime import Engine
         from mizu.fs import canonical,MAX_FRAME,read_json
         def work(ctx,*_):ctx.handle('finish',{'outcome':'wait','summary':'\x01'*12000})
-        parent=self.context()
         names=tuple(f'test-{n}' for n in range(8))
         base=self.config.roles['consult']
         roles=dict(self.config.roles)
         for n in names:
             roles[n]=dataclasses.replace(base,name=n)
         config=dataclasses.replace(self.config,roles=roles)
-        result=Engine(config,driver=ScriptDriver(work)).consult(parent,{'question':'\x01'*8000,'roles':list(names)})
+        result=self.admitted_call(Engine(config,driver=ScriptDriver(work)), 'consult',{'question':'\x01'*8000,'roles':list(names)})
         self.assertTrue(all(len(a['answer'])==12000 for a in result['answers']))
         self.assertLess(len(canonical({'content':[{'text':canonical(result).decode()}]})),MAX_FRAME)
         child=self.project.root/'runs'/result['answers'][0]['run']/'consultation.json'

@@ -417,20 +417,22 @@ class FinishSealTests(Fixture):
         roles["searcher"] = dataclasses.replace(roles["searcher"], capabilities=("files", "read", "finish"))
         config = dataclasses.replace(self.config, roles=roles)
         before = self.project.snapshots.get()["id"]
-        parent = self.context()
         def work(ctx, *_):
             ctx.handle("finish", FINISH)
             ctx.handle("_budget", {"sequence": 2})
         driver = ScriptDriver(work)
         engine = Engine(config, driver=driver)
-        consulted = engine.consult(parent, {"role": "consult", "question": "review"})["answers"][0]
-        delegated = engine.delegate(parent, {"role": "searcher", "task": "inspect"})
-        for record, filename in ((consulted, "consultation.json"), (delegated, "delegation.json")):
+        records = []
+        def caller(ctx, *_):
+            records.append((engine.consult(ctx, {"role": "consult", "question": "review"})["answers"][0], "consultation.json"))
+            records.append((engine.delegate(ctx, {"role": "searcher", "task": "inspect"}), "delegation.json"))
+            self.assertIsNone(ctx.admission_error)
+        Engine(config, driver=ScriptDriver(caller)).run(self.project, "reporter")
+        for record, filename in records:
             self.assertEqual(record["answer"], FINISH["summary"])
             stored = read_json(self.project.root / "runs" / record["run"] / filename)
             self.assertEqual(stored["status"], "completed")
             self.assertFalse(stored["model"]["settled"])
-        self.assertIsNone(parent.admission_error)
         self.assertEqual(self.project.snapshots.get()["id"], before)  # Children publish nothing.
 
     def test_finish_or_diagnostic_persistence_failure_remains_blocking(self):

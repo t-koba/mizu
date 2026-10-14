@@ -50,6 +50,21 @@ class Fixture(unittest.TestCase):
             self.project.snapshots.materialize(snap, workspace)
         return Context(self.config, self.project, role, run, snap, workspace)
 
+    def admitted_call(self, engine, operation, args):
+        """Exercise a child API from an Engine.run caller, never forge a lease.
+
+        A separate fake parent driver keeps child-driver observations intact;
+        the read-only reporter caller does not publish or skip unchanged code.
+        """
+        from mizu.runtime import Engine
+        response = None
+        def work(ctx, *_):
+            nonlocal response
+            response = getattr(engine, operation)(ctx, args)
+        Engine(engine.config, driver=ScriptDriver(work), stop=engine.stop).run(
+            self.project, "reporter")
+        return response
+
 
 class ScriptDriver:
     #: Test double: executes no commands, so Engine skips host sandbox checks.

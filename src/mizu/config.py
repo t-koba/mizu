@@ -584,8 +584,6 @@ def load(file: Path) -> Config:
     limits = Limits(**lim)
     if limits.default_wait_seconds > limits.maximum_wait_seconds:
         raise ConfigError("default wait exceeds maximum wait")
-    if limits.parallel_consults > limits.parallel_runs:
-        raise ConfigError("parallel_consults must not exceed parallel_runs")
     sb = data.get("sandbox", {})
     keys(sb, {f.name for f in dataclasses.fields(Sandbox)}, "sandbox")
     for k in ("memory_mb", "cpus", "pids", "temporary_mb", "file_mb"):
