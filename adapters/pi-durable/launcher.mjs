@@ -257,11 +257,12 @@ export function meterModels(models, hooks) {
   for (const name of streams) {
     const original = models[name].bind(models);
     models[name] = (...args) => {
-      const source = (async () => { await hooks.admit(); return original(...args); })();
+      let sequence;
+      const source = (async () => { sequence = await hooks.admit(); return original(...args); })();
       const pending = source.then(stream => stream.result()).then(async value => {
         await hooks.report(value?.usage, value);
         return value;
-      });
+      }).finally(async () => { if (sequence !== undefined) await hooks.done?.(sequence); });
       // The rejection stays visible to result()/iterator consumers; this
       // empty branch only stops an unconsumed stream from crashing the
       // process after the bound already tripped.
@@ -280,10 +281,14 @@ export function meterModels(models, hooks) {
     .filter(name => typeof models?.[name] === 'function')) {
     const original = models[name].bind(models);
     models[name] = async (...args) => {
-      await hooks.admit();
-      const result = await original(...args);
-      await hooks.report(result?.usage, result);
-      return result;
+      const sequence = await hooks.admit();
+      try {
+        const result = await original(...args);
+        await hooks.report(result?.usage, result);
+        return result;
+      } finally {
+        if (sequence !== undefined) await hooks.done?.(sequence);
+      }
     };
   }
 }
@@ -313,14 +318,12 @@ if (process.argv.includes('--check-contract') && invokedAsMain) {
   } catch (error) {
     fail(`Cannot read effective configuration: ${error.message}`);
   }
-  const watchdog = setTimeout(() => fail('Launcher watchdog deadline exceeded'), Number(cfg.deadline_ms) || 600000);
-  watchdog.unref?.();
+  // Python owns absolute request/wall deadlines and bounded process cleanup.
+  // A launcher-wide timer would cancel an admitted child during its join.
   try {
     process.stdout.write(JSON.stringify(await runOnce(cfg)) + '\n');
   } catch (error) {
     fail(error?.message || String(error));
-  } finally {
-    clearTimeout(watchdog);
   }
 }
 
@@ -500,8 +503,9 @@ async function runOnce(cfg) {
   let submission = null;
   const observations = [];
   async function admit() {
+    const admittedSequence = ++sequence;
     try {
-      await request(bridge, '_budget', { sequence: ++sequence });
+      await request(bridge, '_budget', { sequence: admittedSequence });
     } catch (error) {
       // The single per-unit spend bound (requests_per_run) is reached:
       // stop Harness work instead of running unbounded inside one
@@ -516,6 +520,7 @@ async function runOnce(cfg) {
       throw error;
     }
     requests++;
+    return admittedSequence;
   }
   async function reportUsage(usage, shape) {
     if (!usage) return;
@@ -524,7 +529,8 @@ async function runOnce(cfg) {
     await request(bridge, '_model_usage', { sequence: ++sequence, usage,
       model: { provider: cfg.provider, model: cfg.model, thinkingLevel: cfg.thinkingLevel ?? null } });
   }
-  meterModels(models, { admit, report: reportUsage });
+  meterModels(models, { admit, report: reportUsage,
+    done: sequence => request(bridge, '_request_done', { sequence }) });
 
   // Bridge tools as one durable extension. Intent commits before execute;
   // interrupted executions are never rerun (replay unsafe default), so an

@@ -187,10 +187,12 @@ class PiProtocolTests(Fixture):
         with self.assertRaises(ProtocolError):
             self.driver("bad-json").execute(ctx, "x")
 
-    def test_settled_without_finish_refused(self):
+    def test_normal_settled_without_finish_returns_for_host_followup(self):
         ctx = self.context("consult")
-        with self.assertRaises(ProtocolError):
-            self.driver("missing-finish").execute(ctx, "x")
+        result = self.driver("missing-finish").execute(ctx, "x")
+        self.assertIsNone(ctx.finished)
+        self.assertGreater(result["requests"], 0)
+        self.assertEqual(ctx.request_deadlines, {})
 
     def test_aborted_settlement_is_not_success(self):
         for scenario in ("aborted-settled", "aborted-nested"):

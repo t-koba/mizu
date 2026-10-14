@@ -67,7 +67,7 @@ class ClaudeDriver:
                                   'requests': 0, 'request_unit': 'query', 'usage': [], 'usage_known': False}
         cwd = (path.parent if settings['session'] == 'persistent' and not context.ephemeral else context.run_dir)/'controller'
         mkdir(cwd)
-        with Bridge(context.handle, tool_definitions(context.role.capabilities), timeout=self.config.limits.run_seconds,
+        with Bridge(context.handle, tool_definitions(context.role.capabilities), timeout=self.config.limits.model_request_seconds,
                     on_close=context.cancel_operations) as bridge:
             servers = connected_servers(context, settings)
             servers['mizu'] = mizu_server(bridge.config_file)
@@ -115,7 +115,7 @@ class ClaudeDriver:
                               environment(extra={'MIZU_BRIDGE_CONFIG': str(bridge.config_file)}), cwd, 'claude')
             result = None
             try:
-                ready = channel.receive(until=min(context.deadline, time.monotonic()+30))
+                ready = channel.receive(until=time.monotonic()+30)
                 if ready.get('type') != 'ready' or not context.hello.is_set():
                     raise ProtocolError('Claude SDK handshake failed: '+str(ready)[:4000])
                 admit_invocation(context, unit='query')
@@ -124,10 +124,12 @@ class ClaudeDriver:
                     event = channel.receive()
                     if event.get('type') == 'error':
                         if event.get('stage') == 'query':
+                            context.end_request(0)
                             raise ModelFailure('claude', kind=event.get('error_type'), code=event.get('code'),
                                                message=event.get('error', ''), retry_at=event.get('retry_at'))
                         raise ProtocolError(str(event.get('error'))[:4000])
                     if event.get('type') == 'result':
+                        context.end_request(0)
                         result = event
                         current = event.get('model_usage')
                         if current is not None:
@@ -137,9 +139,9 @@ class ClaudeDriver:
                                 cost_estimate_usd=sum(item['cost_estimate_usd'] for item in delta) if all('cost_estimate_usd' in item for item in delta) else None,
                                 cost_scope='Provider-reported model usage only; unreported auxiliary requests are unknown')
                         terminal_result(event)
-                        if context.finished is None:
-                            raise ProtocolError('Claude query completed without mizu_finish')
                         save_session(path, event['session_id'], current or {})
+                        # A normal result without a seal is handled centrally by
+                        # Engine._execute; retain the session for its follow-up.
                         break
             finally:
                 with contextlib.suppress(Exception):

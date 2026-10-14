@@ -274,6 +274,7 @@ class Limits:
     requests_per_run: int = 24
     tools_per_run: int = 64
     run_seconds: int = 1200
+    model_request_seconds: int = 1200
     command_seconds: int = 300
     idle_seconds: int = 15
     cooldown_seconds: int = 5
@@ -288,6 +289,10 @@ class Limits:
     #: of dropping the scheduled unit. 0 disables the wait (fail fast as
     #: before); draining, paused and unarmed projects never wait.
     busy_retry_seconds: int = 300
+    #: Additional finish-only turns after a normal engine return without a seal.
+    missing_finish_followups: int = 1
+    #: Whether exhausting those turns increments the existing failure brake.
+    missing_finish_counts_as_failure: bool = True
     output_bytes: int = 262144
     file_bytes: int = 8388608
     snapshot_bytes: int = 268435456
@@ -400,10 +405,12 @@ class Role:
     ci_wake: bool = False
     #: Per-role per-run spend overrides. None keeps the project `[limits]`
     #: value as default; a set value must lie in the same range as the
-    #: project bound. Only spend bounds live here (requests/tools); storage,
+    #: project bound. Storage,
     #: transport, budgets, slots and rotation stay project/host policy.
     requests_per_run: int | None = None
     tools_per_run: int | None = None
+    #: None inherits the project wall deadline; 0 disables only this wall.
+    run_seconds: int | None = None
 
 
 def role_requests_per_run(config: "Config", role: "Role") -> int:
@@ -431,6 +438,11 @@ def role_tools_per_run(config: "Config", role: "Role") -> int:
     if type(value) is int and value >= 1:
         return value
     return config.limits.tools_per_run
+
+
+def role_run_seconds(config: "Config", role: "Role") -> int:
+    """Resolve the role's wall policy once when its Context is created."""
+    return config.limits.run_seconds if role.run_seconds is None else role.run_seconds
 
 
 def role_policy_text(role: "Role") -> str:
@@ -554,8 +566,12 @@ def load(file: Path) -> Config:
                      "maximum_wait_seconds": (1, MAX_WAIT_SECONDS),
                      "daily_requests": (0, 100000), "shared_daily_requests": (0, 100000), "max_failures": (0, 1073741824),
                      "busy_retry_seconds": (0, 86400),
+                     "missing_finish_followups": (0, 3),
                      "free_disk_mb": (0, 1073741824)}
     for k, v in lim.items():
+        if k == "missing_finish_counts_as_failure":
+            boolean(v, "limits.missing_finish_counts_as_failure")
+            continue
         if k == "session_max_cost_usd":
             import math
             if type(v) not in (int, float) or isinstance(v, bool) or not math.isfinite(float(v)) \
@@ -739,7 +755,7 @@ def load(file: Path) -> Config:
             raise ConfigError(f"Role name '{name}' is reserved for the operator channel")
         keys(role, {"profile", "policy", "workspace", "capabilities", "engine_tools", "on_change",
                     "interval_seconds", "calendar", "daemon", "selector", "attributes",
-                    "decision_events", "decision_sources", "ci_wake", "requests_per_run", "tools_per_run"}, f"roles.{name}")
+                    "decision_events", "decision_sources", "ci_wake", "requests_per_run", "tools_per_run", "run_seconds"}, f"roles.{name}")
         profile = string(role.get("profile", ""), f"roles.{name}.profile")
         selector = string(role.get("selector", ""), f"roles.{name}.selector")
         if ("profile" in role) == ("selector" in role):
@@ -845,11 +861,14 @@ def load(file: Path) -> Config:
         role_tools = role.get("tools_per_run")
         if role_tools is not None:
             number(role_tools, f"roles.{name}.tools_per_run", 1, 1073741824)
+        role_seconds = role.get("run_seconds")
+        if role_seconds is not None:
+            number(role_seconds, f"roles.{name}.run_seconds", 0, 1073741824)
         roles[name] = Role(name, profile, policy, workspace, caps,
                            strings(role.get("engine_tools", []), "engine_tools"),
                            boolean(role.get("on_change", False), "on_change"), interval, calendar, daemon, selector, attrs,
                            decision_events=events, decision_sources=raw_sources, ci_wake=ci_wake,
-                           requests_per_run=role_requests, tools_per_run=role_tools)
+                           requests_per_run=role_requests, tools_per_run=role_tools, run_seconds=role_seconds)
     if not roles:
         raise ConfigError("At least one role is required")
     consult_role = string(data.get("consult_role", ""), "consult_role")

@@ -238,8 +238,11 @@ def session_record(context, profile, settings):
     if settings.get('engine') == 'pi-durable':
         identity = durable_session_identity(settings)
     else:
+        capabilities = getattr(context, 'session_identity_capabilities', None)
+        if capabilities is None:
+            capabilities = context.role.capabilities
         identity = {'settings': conversation_settings(settings), 'policy': role_policy_text(context.role),
-                    'goal': context.goal_digest, 'capabilities': context.role.capabilities,
+                    'goal': context.goal_digest, 'capabilities': capabilities,
                     'workspace': context.role.workspace, 'command': context.config.command(settings['engine']),
                     'adapter_digest': adapter_digest(settings['engine']),
                     'local_settings': local_settings_digest(context.config, settings['engine'])}

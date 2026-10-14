@@ -14,7 +14,7 @@
 
 ## 実行とエンジン
 
-通常のwork unitの完了は、hostのfinish seal、adapter/sessionのsettlement、最終公開を区別します。`finish`は検証後、`finish-intent.json`の書込みが成功して初めて受理・sealされます。検証や保存の失敗ではsealしません。seal後の新しい推論要求・ツール・変更操作は受付、カウンター、dispatchより前に拒否します。遅れて届く利用量は証跡としてのみ記録できます。
+通常のwork unitの完了は、hostのfinish seal、adapter/sessionのsettlement、最終公開を区別します。`finish`は検証後、`finish-intent.json`の書込みが成功して初めて受理・sealされます。検証や保存の失敗ではsealしません。seal後の新しい推論要求・ツール・変更操作は受付、カウンター、dispatchより前に拒否します。遅れて届く利用量は証跡としてのみ記録でき、`_request_done`は既に受付済みのrequest timerを閉じるだけです。
 
 seal後にdriver実行が拒否された追加要求、EOF、実行期限などで例外を返しても、既存のfinishを保持して通常の最終キャプチャ・検証・耐久性・公開検査へ進みます。そのsettlement例外によるselector fallbackや連続失敗・health brakeの加算は行いません。明示的なhost stop/pause/unarmは引き続きキャンセルします。例外の保持はdriver実行だけが対象で、最終検証・snapshot保存・公開・終了記録の失敗は成功へ変換しません。相談・委任の子もsealした回答を保持しますが、子のsealは公開ではありません。seal前の失敗方針と実行期限設定は変更しません。
 
@@ -99,3 +99,61 @@ CodexのwebSearch・collabAgentToolCallは公開item/started通知を監視し�
 engine_tools、seal、tool上限に違反する観測でturnを停止します。これは既に始まった
 ネイティブ操作の通知であり、要求前フックや外部副作用の巻戻しではありません。
 子threadのMizu操作は同じbridgeの親role権限を使います。
+
+
+## Normal turns without a finish seal
+
+A managed engine that returns normally with no host `mizu_finish` seal gets up to
+`[limits].missing_finish_followups` additional turns (default 1, range 0–3). Each
+follow-up reuses the work-unit context and its accumulated request/tool accounting,
+gets only the `finish` capability, and is constrained by the same daily/per-run
+admission and absolute run/request deadlines. The active engine session is resumed
+within the work unit; an ephemeral session remains run-local and is not carried to
+a later work unit. The follow-up prompt says not to repeat work and to seal with
+an accurate outcome. If those configured follow-up turns also return without a
+seal, the policy is exhausted.
+
+This applies only to positive normal terminal results: Pi `agent_settled`, Claude
+query `result`, Codex `turn/completed` with `completed`, and pi-durable `done`. A
+pi-durable `unanswered` settlement remains a provider/model failure. Transport,
+protocol, storage, cancellation, and final verification/publication failures are
+not converted into missing-finish retries. Deadline wrap-up stays separate and
+keeps its existing bounded no-seal outcome. On exhausted follow-ups,
+`[limits].missing_finish_counts_as_failure` defaults to `true`; setting it false
+only suppresses this outcome's failure-brake increment and does not mark the run
+completed or alter selector failure accounting.
+
+## Role walls and request deadlines
+
+`roles.<role>.run_seconds` is resolved once per run: unset inherits the positive
+`[limits].run_seconds` (default 1200), 0 disables only the role's whole-unit wall,
+and a positive integer sets that wall. `[limits].model_request_seconds` remains
+positive and finite (default 1200). Pi/pi-durable bound each admitted logical
+model request; Claude/Codex bound the enclosing query/turn, not each opaque HTTP
+subcall. Progress/heartbeats never renew these absolute monotonic deadlines.
+
+Finite runs enter wrap-up before wall exhaustion, reserving
+`min(model_request_seconds, run_seconds / (3 + 1))` seconds inside the wall.
+The existing 3-request/5-tool allowance is not extended; only `finish`,
+`research`, `submit_insight`, `attach_evidence`, and `decide` remain available.
+A finish in this mode stores outcome `bounded`. Wall exhaustion, normal return
+from deadline wrap-up without a finish, or exhaustion of its request/tool
+allowance records a bounded run result with `publication="not_published"`, never
+creates or publishes a snapshot and never increments `max_failures`.
+The reserved wrap-up transition precedes a later request/idle deadline, but
+never renews an absolute request timer. After a finish seal, `_request_done` may
+retire only an already-admitted timer; it cannot admit inference or tools. Earlier
+request timeouts and unrelated pre-seal protocol, storage, configuration, or
+provider errors still follow the
+existing failure rules, even if the wall expires too. A seal accepted before
+the wall expires remains irreversible, even if settlement later times out;
+explicit host cancellation and final integrity checks still fail closed.
+
+Admitted delegation/consultation joins use child-local wall/request deadlines,
+not the minimum with the parent. Parent transport cleanup drains the join before
+releasing its lock. Shared explicit stop, pause/unarm/authority revocation, and
+child-local timeouts still cancel their intended scopes. An expired finite
+parent gets no renewed inference after the join, even if the child sealed.
+Offline coverage is in `tests/test_deadlines.py` and the bridge/durable Node
+contract tests; these are synthetic clocks/RPC peers, not live-provider or OCI
+acceptance evidence.

@@ -61,9 +61,12 @@ for raw in sys.stdin.buffer:
         bridge("_model_usage", {"sequence": 2, "usage": {"input": 1, "output": 1}})
         emit({"type": "message_end", "message": {"role": "assistant", "content": "Unicode\u2028line\u2029end", "usage": {"input": 1, "output": 1}}})
         emit({"type": "agent_end"})  # A premature completion interpretation must fail the test.
-        if scenario != "missing-finish":
-            bridge("read", {"path": "app.py"})
+        should_finish = scenario != "missing-finish" and not (scenario == "finish-on-resume" and not effective.get("resume"))
+        if should_finish:
+            if scenario != "finish-on-resume":
+                bridge("read", {"path": "app.py"})
             bridge("finish", {"outcome": "wait", "summary": "After agent_end: \u2028 verified transport"})
+        bridge("_request_done", {"sequence": 1})
         if scenario == "aborted-settled":
             emit({"type": "agent_settled", "aborted": True})
         elif scenario == "aborted-nested":

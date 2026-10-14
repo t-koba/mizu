@@ -18,6 +18,7 @@ export function request(config, operation, args, signal) {
     let chunks = [];
     let settled = false;
     let deadline;
+    const joining = config.joined_operations?.includes(operation) === true;
     const socket = net.createConnection(endpoint);
     const finish = (error, value) => {
       if (settled) return;
@@ -31,13 +32,25 @@ export function request(config, operation, args, signal) {
     signal?.addEventListener("abort", abort, { once: true });
     // Absolute deadline: socket.setTimeout is idle-only and a trickling peer
     // would defer it indefinitely, so arm a wall-clock timer instead.
-    deadline = setTimeout(() => finish(new Error("Bridge deadline exceeded")), config.timeout_ms);
+    const expires = performance.now() + config.timeout_ms;
+    const expire = () => {
+      const remaining = expires - performance.now();
+      if (remaining <= 0) return finish(new Error("Bridge deadline exceeded"));
+      // Node clamps oversized timer delays to 1 ms. Chunk the wait, never
+      // renew the absolute deadline (including for trickling peers).
+      deadline = setTimeout(expire, Math.min(remaining, 2**31 - 1));
+    };
+    expire();
     socket.on("error", error => finish(error));
     socket.on("end", () => finish(new Error("Bridge closed before responding")));
     socket.on("connect", () => {
       const wire = JSON.stringify({ token: config.token, operation, arguments: args }) + "\n";
       if (Buffer.byteLength(wire) > 1048576) return finish(new Error("Request exceeds byte limit"));
       socket.write(wire);
+      // An admitted synchronous join is bounded by the host's child-local
+      // deadlines/cancellation. Before admission its host transport timer
+      // still applies. A caller-wide RPC timer must not shorten the child.
+      if (joining) clearTimeout(deadline);
     });
     socket.on("data", chunk => {
       bytes += chunk.length;

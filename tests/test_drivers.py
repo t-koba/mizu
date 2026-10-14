@@ -112,7 +112,7 @@ class SyntheticEngineTests(Fixture):
         with unittest.mock.patch.dict(os.environ,{'CODEX_AUTH_FILE':str(self.root/'absent')}):
             return ctx,driver.execute(ctx,'synthetic prompt')
 
-    def test_both_drivers_require_seal_and_record_honest_units(self):
+    def test_both_drivers_return_normal_unsealed_terminal_turns(self):
         for engine,unit in (('codex','turn'),('claude','query')):
             ctx,result=self.execute(engine)
             self.assertEqual(result['request_unit'],unit)
@@ -120,10 +120,78 @@ class SyntheticEngineTests(Fixture):
             self.assertTrue(result['usage_known'])
             self.assertIsNotNone(ctx.finished)
             self.assertTrue((ctx.run_dir/(engine+'-events.jsonl')).is_file())
-            with self.assertRaises(ProtocolError): self.execute(engine,'missing-finish')
+            missing,result=self.execute(engine,'missing-finish')
+            self.assertIsNone(missing.finished)
+            self.assertEqual(result['request_unit'],unit)
+            self.assertEqual(missing.request_deadlines, {})
+
+    def test_claude_and_codex_resume_one_finish_only_followup(self):
+        from mizu.runtime import Engine
+        for engine in ('claude', 'codex'):
+            for session in ('persistent', 'ephemeral'):
+                with self.subTest(engine=engine, session=session):
+                    ctx=self.context('consult')
+                    profile=ctx.role.profile
+                    raw={**self.config.profiles[profile], 'engine':engine, 'provider':'custom',
+                         'options':{}, 'session':session}
+                    engines={**self.config.engines,engine:{**self.config.engines[engine],
+                        'command':(sys.executable,str(ROOT/'tests/fake_engines.py'),engine,'finish-on-resume')}}
+                    config=dataclasses.replace(self.config,profiles={**self.config.profiles,profile:raw},engines=engines)
+                    ctx.config=config
+                    inner=CodexDriver(config) if engine=='codex' else ClaudeDriver(config)
+                    class RecordingDriver:
+                        requires_sandbox=False
+                        def __init__(self):
+                            self.grants=[]
+                            self.calls=0
+                        def execute(self, context, prompt, *, profile=None):
+                            self.calls += 1
+                            self.grants.append(context.role.capabilities)
+                            return inner.execute(context,prompt,profile=profile)
+                    driver=RecordingDriver()
+                    with unittest.mock.patch.dict(os.environ,{'CODEX_AUTH_FILE':str(self.root/'absent')}):
+                        model=Engine(config,driver=driver)._execute(ctx,driver,'Synthetic work')
+                    self.assertIsNotNone(ctx.finished)
+                    self.assertEqual(driver.calls,2)
+                    self.assertEqual(driver.grants[1],('finish',))
+                    self.assertEqual(ctx.request_count,2)
+                    self.assertEqual(ctx.request_deadlines,{})
+                    self.assertEqual(model['missing_finish']['used_followups'],1)
+
+    def test_pi_resumes_a_normal_unsealed_turn_for_one_finish_only_followup(self):
+        from mizu.runtime import Engine
+        for session in ('persistent', 'ephemeral'):
+            with self.subTest(session=session):
+                ctx=self.context('consult')
+                profile=ctx.role.profile
+                raw={**self.config.profiles[profile], 'engine':'pi', 'provider':'custom',
+                     'options':{}, 'session':session}
+                engines={**self.config.engines,'pi':{**self.config.engines['pi'],
+                    'command':(sys.executable,str(ROOT/'tests/fake_pi.py'),
+                               '--fake-scenario','finish-on-resume')}}
+                config=dataclasses.replace(self.config,profiles={**self.config.profiles,profile:raw},engines=engines)
+                ctx.config=config
+                inner=PiDriver(config)
+                class RecordingDriver:
+                    requires_sandbox=False
+                    def __init__(self):
+                        self.grants=[]
+                        self.calls=0
+                    def execute(self, context, prompt, *, profile=None):
+                        self.calls += 1
+                        self.grants.append(context.role.capabilities)
+                        return inner.execute(context,prompt,profile=profile)
+                driver=RecordingDriver()
+                model=Engine(config,driver=driver)._execute(ctx,driver,'Synthetic work')
+                self.assertIsNotNone(ctx.finished)
+                self.assertEqual(driver.calls,2)
+                self.assertEqual(driver.grants[1],('finish',))
+                self.assertEqual(ctx.request_count,2)
+                self.assertEqual(ctx.request_deadlines,{})
+                self.assertEqual(model['missing_finish']['used_followups'],1)
 
     def test_codex_terminal_failure_and_unanswerable_request(self):
-        for scenario in ('failed','interrupted','approval','mcp-failure','bad-json','exit'):
+        for scenario in ('failed','interrupted','approval','mcp-failure','provider-error-before-finish','bad-json','exit'):
             with self.subTest(scenario=scenario), self.assertRaises(ProtocolError): self.execute('codex',scenario)
 
     def test_claude_success_subtype_does_not_override_api_error(self):

@@ -115,15 +115,21 @@ class Channel:
                 self._put(None)
 
     def send(self, record):
-        send_bounded(self.process, canonical(record), deadline=self.context.deadline, cancel=self.context.cancelled)
+        deadline = self.context.transport_deadline()
+        try:
+            send_bounded(self.process, canonical(record),
+                         deadline=deadline if deadline is not None else time.monotonic() + self.context.config.limits.model_request_seconds,
+                         cancel=self.context.transport_cancelled)
+        except (Cancelled, LimitExceeded):
+            # This send uses the context's timers/predicate. Classify only its
+            # timeout/cancellation, never protocol or local persistence faults.
+            self.context.check_deadlines(wrap_up=True)
+            raise
 
     def receive(self, until=None):
         while True:
-            if time.monotonic() >= self.context.deadline:
-                raise LimitExceeded('Engine deadline exceeded')
-            if self.context.cancelled():
-                raise Cancelled('Run cancelled')
-            if until is not None and time.monotonic() >= until:
+            self.context.check_deadlines(wrap_up=True)
+            if self.context.joins_idle.is_set() and until is not None and time.monotonic() >= until:
                 raise ProtocolError('Engine handshake timed out')
             try:
                 item = self.records.get(timeout=.1)
@@ -132,10 +138,13 @@ class Channel:
             if isinstance(item, Exception):
                 raise item
             if item is None:
+                self.context.wait_for_joins()
+                self.context.check_deadlines()
                 raise ProtocolError('Engine exited before terminal event')
             return item
 
     def close(self):
+        self.context.wait_for_joins()
         self.stop.set()
         with contextlib.suppress(OSError, ValueError):
             self.process.stdin.close()

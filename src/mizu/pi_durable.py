@@ -24,7 +24,7 @@ from .drivers import EVENT_RECORD_BYTES
 from .engine_config import (MAX_SESSION_TOKENS, adapter_digest, effective,
                              save_session, session_generation, session_record,
                              session_token_total)
-from .errors import Cancelled, ConfigError, LimitExceeded, ProtocolError, ModelFailure
+from .errors import Cancelled, ConfigError, LimitExceeded, ProtocolError, ModelFailure, RunDeadlineExceeded
 from .fs import atomic_write, canonical, digest, mkdir, write_json
 from .pi_durable_store import (BACKENDS, RESUME_MODES, complete_run, complete_turn,
                                begin_run, check_grant, grant_digest, load_run,
@@ -206,6 +206,7 @@ class PiDurableDriver:
                 reaped = prune(conn, candidates, dry_run=False)
             if context.cancelled():
                 complete_run(conn, run_key, {"cancelled": True}, status="cancelled")
+                context.check_deadlines()
                 raise Cancelled("Run cancelled before durable dispatch")
             record_turn(conn, run_key, existing + 1, "prompt", {"bytes": len(prompt_bytes)})
             # No turn bound: every provider request inside the submission
@@ -248,7 +249,7 @@ class PiDurableDriver:
     def _run_once(self, context, settings, model, prompt, profile, run_key, store_path) -> dict:
         # One admitted durable submission: effective file in, one bounded
         # JSON result document out. The bridge stays open for the whole
-        # submission so tool callbacks and admission share one deadline.
+        # submission; each provider admission has its own absolute deadline.
         # Spend is bounded only by request admission, never a turn cap.
         policy = role_policy_text(context.role)
         atomic_write(context.run_dir / "system.md", policy.encode())
@@ -272,22 +273,23 @@ class PiDurableDriver:
             effective_config["thinkingLevel"] = options["thinkingLevel"]
         if options.get("cacheRetention") is not None:
             effective_config["cacheRetention"] = options["cacheRetention"]
-        deadline_ms = max(1, int(1000 * min(context.deadline - time.monotonic(),
-                                            self.config.limits.run_seconds)))
-        effective_config["deadline_ms"] = deadline_ms
         write_json(context.run_dir / "pi-durable-effective.json", effective_config)
         started = time.monotonic()
         context.model_evidence = {"profile": profile, **model, "engine": ENGINE, "requests": 0,
                                   "request_unit": "model_request", "usage": [], "usage_known": False}
-        with Bridge(context.handle, tool_definitions(context.role.capabilities), timeout=self.config.limits.run_seconds,
+        with Bridge(context.handle, tool_definitions(context.role.capabilities), timeout=self.config.limits.model_request_seconds,
                     on_close=context.cancel_operations) as bridge:
             env = environment(extra={"MIZU_BRIDGE_CONFIG": str(bridge.config_file)})
             env.update(_pi.credentials(self.config.file.parent / "credentials.env"))
             result = run(self.argv(context.role, context.run_dir, profile, context.goal_digest),
-                         timeout=min(max(0.0, context.deadline - time.monotonic()),
-                                     self.config.limits.run_seconds),
-                         maximum=RESULT_BYTES, cwd=cwd, env=env, cancel=context.cancelled)
-            if context.cancelled() or result.reason == "cancelled":
+                         timeout=context.transport_deadline,
+                         maximum=RESULT_BYTES, cwd=cwd, env=env, cancel=context.host_cancelled)
+            # Classify known transport timeouts/cancellation by their source.
+            # A normal error result is not a deadline merely because its parse
+            # or local cleanup finishes after the wall.
+            if result.reason in ("timeout", "cancelled"):
+                context.check_deadlines()
+            if context.host_cancelled() or result.reason == "cancelled":
                 raise Cancelled("Durable run cancelled")
             if result.reason == "timeout":
                 raise LimitExceeded("Durable run exceeded its deadline")
@@ -303,6 +305,7 @@ class PiDurableDriver:
             except (ValueError, UnicodeError) as exc:
                 raise ProtocolError("Durable launcher returned an invalid result") from exc
             interpret_result(reported, context, model, options.get("thinkingLevel"))
+            context.check_deadlines()
             if getattr(context, 'recovery_probe', False):
                 context.model_evidence['settled'] = True
             return {**context.model_evidence, "seconds": round(time.monotonic() - started, 3)}
@@ -391,8 +394,9 @@ def interpret_result(reported, context, model, thinking_level) -> None:
     to ``LimitExceeded`` so the spent budget surfaces as a bound, never a
     silent stop; only the known terminal ``unanswered`` status maps to
     ``ModelFailure``, while unknown statuses are ``ProtocolError``. A done
-    result still requires the ``mizu_finish`` seal and at least one
-    admitted request, like the pi engine. Launcher/runtime requests and
+    a normal ``done`` result may lack the host seal; Engine._execute applies
+    the configured bounded follow-up. A reported finish still must match the
+    host seal, and at least one request must have been admitted. Launcher/runtime requests and
     usage are recorded before raising on ``request_bound`` or terminal
     ``unanswered`` so failed submissions keep their accounting. Bounds:
     usage counters pass
@@ -404,6 +408,9 @@ def interpret_result(reported, context, model, thinking_level) -> None:
     if reported.get("status") == "request_bound":
         _record_launcher_evidence(reported, context, model, thinking_level)
         context.bound_hit = context.bound_hit or "requests"
+        from .runtime import WRAP_UP_REQUESTS
+        if context.bound_hit == "deadline" and context.wrap_up_requests >= WRAP_UP_REQUESTS:
+            raise RunDeadlineExceeded("Deadline wrap-up request allowance exhausted")
         raise LimitExceeded("Per-run provider request budget exhausted")
     if reported.get("status") == "unanswered":
         _record_launcher_evidence(reported, context, model, thinking_level)
@@ -413,10 +420,18 @@ def interpret_result(reported, context, model, thinking_level) -> None:
         raise ModelFailure("pi-durable", kind="unanswered", message=message)
     if reported.get("status") != "done":
         raise ProtocolError("Durable launcher returned an unknown settlement status")
-    if not reported.get("finish_called") or context.finished is None:
-        raise ProtocolError("Pi-durable settled without mizu_finish")
+    if type(reported.get("finish_called")) is not bool:
+        raise ProtocolError("Durable launcher returned an invalid finish flag")
     if context.request_count == 0:
         raise ProtocolError("No runtime request admission observed")
+    if not reported.get("finish_called") and context.finished is None:
+        # Only a positive normal `done` settlement reaches this branch.
+        # `unanswered` remains ModelFailure above; malformed/inconsistent
+        # finish reports still fail as protocol errors below.
+        _record_launcher_evidence(reported, context, model, thinking_level)
+        return
+    if not reported.get("finish_called") or context.finished is None:
+        raise ProtocolError("Durable finish report disagrees with host seal")
     runtime = _runtime_evidence(context, model, thinking_level)
     if runtime is not None:
         context.model_evidence.update(runtime)

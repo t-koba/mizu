@@ -88,6 +88,8 @@ def live(config: Config, profile: str | None = None, role_name: str | None = Non
     limits = dataclasses.replace(config.limits, requests_per_run=min(SMOKE_REQUESTS_PER_RUN, config.limits.requests_per_run),
                                  tools_per_run=min(SMOKE_TOOLS_PER_RUN, config.limits.tools_per_run),
                                  run_seconds=min(SMOKE_RUN_SECONDS, config.limits.run_seconds))
+    # Role-local unlimited/long walls must not lift the smoke's existing cap.
+    role = dataclasses.replace(role, run_seconds=min(limits.run_seconds, role.run_seconds or limits.run_seconds))
     config = dataclasses.replace(config, roles={**config.roles, role_name: role}, limits=limits)
     challenge = "mizu-probe-" + uuid.uuid4().hex[:12]
     name = "smoke-" + uuid.uuid4().hex[:16]

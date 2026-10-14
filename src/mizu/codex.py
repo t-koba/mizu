@@ -80,7 +80,7 @@ class CodexDriver:
         link = home/'auth.json'
         if source.is_file() and not link.exists():
             os.symlink(source, link)
-        with Bridge(context.handle, tool_definitions(context.role.capabilities), timeout=self.config.limits.run_seconds,
+        with Bridge(context.handle, tool_definitions(context.role.capabilities), timeout=self.config.limits.model_request_seconds,
                     on_close=context.cancel_operations) as bridge:
             options = dict(settings['options'])
             turn_options = options.pop('turn', {})
@@ -156,7 +156,7 @@ class CodexDriver:
                 sequence += 1
                 wanted = sequence
                 channel.send({'id': wanted, 'method': method, 'params': params})
-                handshake_deadline = min(context.deadline, time.monotonic()+30)
+                handshake_deadline = time.monotonic()+30
                 while True:
                     event = channel.receive(until=handshake_deadline)
                     if 'method' in event and 'id' in event:
@@ -232,6 +232,7 @@ class CodexDriver:
                     if event.get('method') == 'thread/tokenUsage/updated':
                         usage.observe(params['tokenUsage']['total'])
                     if event.get('method') == 'turn/completed' and params.get('turn', {}).get('id') == turn:
+                        context.end_request(0)
                         terminal = params['turn']
                         if terminal.get('status') == 'failed' and isinstance(terminal.get('error'), dict):
                             failure = terminal['error']
@@ -241,8 +242,9 @@ class CodexDriver:
                                                retry_at=failure.get('retry_at'))
                         if terminal.get('status') != 'completed':
                             raise ProtocolError('Codex turn '+str(terminal.get('status'))+': '+str(terminal.get('error'))[:4000])
-                        if context.finished is None:
-                            raise ProtocolError('Codex turn completed without mizu_finish')
+                        # Completed turns without a seal are handed to the
+                        # central bounded follow-up policy. Persist this thread
+                        # first so the follow-up can continue its context.
                         break
                 save_session(path, identifier, usage.total)
             finally:

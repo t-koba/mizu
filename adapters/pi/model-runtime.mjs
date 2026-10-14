@@ -25,11 +25,19 @@ export function meterRuntime(runtime, config, call = request) {
       // Virtual routing itself makes no provider request; its auxiliary calls
       // and recursively dispatched physical request use this same runtime.
       const admitted = model.api === 'pi-virtual' || options[reservation] === model;
+      let admittedSequence;
       const source = (async () => {
-        if (!admitted) await call(config, '_budget', { sequence: ++sequence });
+        if (!admitted) {
+          const candidate = ++sequence;
+          await call(config, '_budget', { sequence: candidate });
+          admittedSequence = candidate;
+        }
         return original(model, context, { ...options, [reservation]: model });
       })();
-      const result = track(source.then(stream => stream.result()).then(async value => { await record(value); return value; }));
+      const result = track(source.then(stream => stream.result()).then(async value => { await record(value); return value; })
+        .finally(async () => {
+          if (admittedSequence !== undefined) await call(config, '_request_done', { sequence: admittedSequence });
+        }));
       return {
         result: () => result,
         async *[Symbol.asyncIterator]() {
@@ -42,10 +50,15 @@ export function meterRuntime(runtime, config, call = request) {
   for (const name of ['classify', 'generateImages']) {
     const original = runtime[name].bind(runtime);
     runtime[name] = async (model, context, options) => {
-      await call(config, '_budget', { sequence: ++sequence });
-      const result = await original(model, context, options);
-      await record(result);
-      return result;
+      const admittedSequence = ++sequence;
+      await call(config, '_budget', { sequence: admittedSequence });
+      try {
+        const result = await original(model, context, options);
+        await record(result);
+        return result;
+      } finally {
+        await call(config, '_request_done', { sequence: admittedSequence });
+      }
     };
   }
   return { flush: async () => { await Promise.all([...pending]); } };

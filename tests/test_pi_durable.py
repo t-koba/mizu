@@ -1,11 +1,12 @@
 """Selectable pi-durable execution: distinct engine, durable recovery, replay safety."""
+import dataclasses
 import unittest
 
 from support import Fixture
 from mizu import pi_durable
 from mizu.drivers import driver_for
 from mizu.engine_config import effective
-from mizu.errors import ConfigError, LimitExceeded, ModelFailure
+from mizu.errors import ConfigError, LimitExceeded, ModelFailure, ProtocolError
 from mizu.engine_config import rotate_session, rotation_due, session_generation
 from mizu.pi_durable_store import (begin_run, check_grant, complete_run, complete_turn,
                                    grant_digest, load_run, open_store, project_context,
@@ -141,6 +142,64 @@ class PolicyTests(Fixture):
         # no turn cap passed down.
         self.assertNotIn("remaining", seen)
         self.assertTrue(seen.get("called", True))
+
+    def test_driver_applies_followup_to_positive_done_settlement(self):
+        from mizu.runtime import Engine
+        for session in ("persistent", "ephemeral"):
+            with self.subTest(session=session):
+                config = dataclasses.replace(self.config, profiles={
+                    **self.config.profiles, "primary": {**self.config.profiles["primary"],
+                        "engine": "pi-durable", "session": session, "options": {}}})
+                context = self.context("worker")
+                context.config = config
+                driver = pi_durable.PiDurableDriver(config)
+                run_keys = []
+                grants = []
+
+                def terminal(ctx, settings, model, prompt, profile, run_key, store_path):
+                    run_keys.append(run_key)
+                    grants.append(ctx.role.capabilities)
+                    ctx.model_evidence = {"profile": profile, **model, "engine": "pi-durable",
+                                          "requests": 0, "usage": [], "usage_known": False}
+                    ctx.handle("_hello", {})
+                    ctx.handle("_budget", {"sequence": 1})
+                    if len(run_keys) == 2:
+                        ctx.handle("finish", {"outcome": "wait", "summary": "sealed", "state": "done"})
+                    ctx.handle("_request_done", {"sequence": 1})
+                    reported = {"durable_result": True, "status": "done",
+                                "finish_called": len(run_keys) == 2, "requests": 1,
+                                "usage": {"input": 2, "output": 1}}
+                    pi_durable.interpret_result(reported, ctx, model, None)
+                    return {**ctx.model_evidence, "seconds": 0}
+
+                driver._run_once = terminal
+                model = Engine(config, driver=driver)._execute(context, driver, "synthetic durable work")
+                self.assertIsNotNone(context.finished)
+                self.assertEqual(len(run_keys), 2)
+                self.assertNotEqual(run_keys[0], run_keys[1])
+                self.assertEqual(grants[1], ("finish",))
+                self.assertEqual(context.request_count, 2)
+                self.assertEqual(context.request_deadlines, {})
+                self.assertEqual(model["missing_finish"]["used_followups"], 1)
+
+    def test_normal_done_without_finish_is_distinct_from_unanswered(self):
+        from mizu.usage import normalize
+        context = self.context()
+        context.handle("_hello", {})
+        context.handle("_budget", {"sequence": 1})
+        context.handle("_request_done", {"sequence": 1})
+        context.model_evidence = {"requests": 0, "usage": [], "usage_known": False}
+        model = {"provider": "p", "model": "m"}
+        pi_durable.interpret_result({
+            "durable_result": True, "status": "done", "finish_called": False,
+            "requests": 1, "usage": {"input": 6, "output": 2}}, context, model, None)
+        self.assertIsNone(context.finished)
+        self.assertEqual(context.request_deadlines, {})
+        self.assertEqual(context.model_evidence["requests"], 1)
+        self.assertEqual(normalize(context.model_evidence["usage"][0], "pi-durable")["input_tokens"], 6)
+        with self.assertRaisesRegex(ProtocolError, "invalid finish flag"):
+            pi_durable.interpret_result({"durable_result": True, "status": "done",
+                                         "finish_called": "false"}, context, model, None)
 
     def test_request_bound_result_maps_to_limit(self):
         from mizu.errors import ProtocolError

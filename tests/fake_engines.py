@@ -2,6 +2,7 @@
 import json
 import os
 import sys
+import time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'src'))
 from mizu.mcp_proxy import forward
@@ -13,8 +14,17 @@ def emit(record):
     print(json.dumps(record), flush=True)
 
 
-def finish(bridge):
+def stall():
+    # Progress is deliberately not a completion, admission, or usage event.
+    while True:
+        emit({'type': 'progress', 'method': 'synthetic/progress'})
+        time.sleep(.01)
+
+
+def finish(bridge, *, resumed=False):
     if scenario in ('missing-finish', 'provider-error-before-finish'):
+        return
+    if scenario == 'finish-on-resume' and not resumed:
         return
     forward(bridge, 'finish', {'outcome': 'wait', 'summary': 'Synthetic result', 'state': 'Review evidence'})
     if scenario == 'post-finish':
@@ -35,17 +45,20 @@ if engine == 'claude':
     forward(bridge, '_hello', {})
     emit({'type': 'ready'})
     query = json.loads(sys.stdin.readline())
+    if scenario == 'stalled-request':
+        stall()
     if scenario == 'query-error':
         emit({'type': 'error', 'stage': 'query', 'error_type': 'SyntheticProviderFailure', 'error': 'try elsewhere', 'code': 'synthetic-code', 'retry_at': 2000000000})
         sys.stdin.readline()
         raise SystemExit(0)
-    finish(bridge)
+    finish(bridge, resumed=bool(cfg.get('resume')))
     emit({'type': 'result', 'terminal_reason': 'api_error' if scenario == 'api-error' else 'completed',
           'subtype': 'success', 'is_error': False, 'session_id': cfg.get('resume') or 'session',
           'model_usage': {'actual-model': {'inputTokens': 10, 'outputTokens': 5}}})
     sys.stdin.readline()
 else:
     bridge = None
+    resumed = False
     for line in sys.stdin:
         message = json.loads(line)
         method, identifier = message.get('method'), message.get('id')
@@ -53,6 +66,7 @@ else:
             emit({'id': identifier, 'result': {}})
         elif method in ('thread/start', 'thread/resume'):
             params = message['params']
+            resumed = method == 'thread/resume'
             bridge = json.loads(Path(params['config']['mcp_servers']['mizu']['env']['MIZU_BRIDGE_CONFIG']).read_text())
             emit({'id': identifier, 'result': {'thread': {'id': params.get('threadId', 'thread')},
                   'model': params['model'], 'modelProvider': params['modelProvider']}})
@@ -60,6 +74,9 @@ else:
             tools = {tool['name']: {} for tool in bridge['tools']}
             emit({'id': identifier, 'result': {'data': [] if scenario == 'mcp-failure' else [{'name': 'mizu', 'tools': tools}]}})
         elif method == 'turn/start':
+            if scenario == 'stalled-request':
+                emit({'id': identifier, 'result': {'turn': {'id': 'turn'}}})
+                stall()
             if scenario == 'rpc-error':
                 emit({'id': identifier, 'error': {'code': -32000, 'message': 'synthetic failure'}})
                 continue
@@ -67,7 +84,7 @@ else:
                 emit({'id': 'ask', 'method': 'item/tool/requestUserInput', 'params': {}})
                 continue
             turn = 'turn'
-            finish(bridge)
+            finish(bridge, resumed=resumed)
             if scenario == 'native-after-finish':
                 emit({'method': 'item/started', 'params': {'threadId': 'thread',
                       'item': {'type': 'webSearch', 'id': 'late-web'}}})

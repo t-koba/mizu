@@ -8,7 +8,7 @@ from unittest.mock import patch
 from support import Fixture, ScriptDriver
 from test_selection import SelectionFixture
 from mizu.budget import Budget
-from mizu.errors import Cancelled, Denied, LimitExceeded, ModelFailure, ProtocolError
+from mizu.errors import Cancelled, Denied, InfraExceeded, LimitExceeded, MissingFinish, ModelFailure, ProtocolError
 from mizu.fs import read_json, write_json
 from mizu.runtime import Engine
 from mizu.selection import State
@@ -54,6 +54,194 @@ class FinishSealTests(Fixture):
         with self.assertRaises(Denied):
             Engine(self.config)._execute(ctx, driver, "late")
         self.assertEqual(driver.calls, [])
+
+    def test_request_done_only_retires_admitted_timer_after_finish(self):
+        ctx = self.context()
+        ctx.handle("_budget", {"sequence": 1})
+        ctx.handle("finish", FINISH)
+        sealed = read_json(ctx.run_dir / "finish-intent.json")
+        counters = (ctx.request_count, ctx.tool_count, ctx.wrap_up_requests, ctx.wrap_up_tools)
+        deadlines = dict(ctx.request_deadlines)
+        self.assertEqual(deadlines.keys(), {(0, 1)})
+
+        # Completion housekeeping is not new inference, even after the wall
+        # expires, but it must name a request this execution attempt admitted.
+        ctx.deadline = time.monotonic() - 1
+        self.assertEqual(ctx.handle("_request_done", {"sequence": 1}), {"recorded": True})
+        self.assertEqual(ctx.request_deadlines, {})
+        with self.assertRaises(Denied):
+            ctx.handle("_request_done", {"sequence": 2})
+        with self.assertRaises((Denied, LimitExceeded)):
+            ctx.handle("_budget", {"sequence": 2})
+        self.assertEqual(ctx.finished, sealed)
+        self.assertEqual(read_json(ctx.run_dir / "finish-intent.json"), sealed)
+        self.assertEqual((ctx.request_count, ctx.tool_count, ctx.wrap_up_requests, ctx.wrap_up_tools), counters)
+        self.assertEqual(ctx.request_sequences, {(0, 1)})
+        self.assertIsNone(ctx.admission_error)
+
+
+    def test_normal_terminal_turn_gets_one_finish_only_followup(self):
+        test_case = self
+        class FollowupDriver:
+            requires_sandbox = False
+            def __init__(self):
+                self.calls = []
+                self.grants = []
+            def execute(self, context, prompt, *, profile=None):
+                self.calls.append(prompt)
+                self.grants.append(context.role.capabilities)
+                context.handle("_hello", {})
+                context.handle("_budget", {"sequence": 1})
+                if len(self.calls) == 2:
+                    with test_case.assertRaises(Denied):
+                        context.handle("read", {"path": "app.py"})
+                    with test_case.assertRaises(Denied):
+                        context.handle("_engine_tool", {"name": "native"})
+                    context.handle("finish", FINISH)
+                context.handle("_request_done", {"sequence": 1})
+                return {"requests": context.request_count}
+
+        ctx = self.context()
+        driver = FollowupDriver()
+        model = Engine(self.config)._execute(ctx, driver, "Do the work")
+        self.assertIsNotNone(ctx.finished)
+        self.assertEqual(len(driver.calls), 2)
+        self.assertIn("prior turn returned normally", driver.calls[1])
+        self.assertNotIn("Do the work", driver.calls[1])
+        self.assertEqual(driver.grants[0], self.config.roles["worker"].capabilities)
+        self.assertEqual(driver.grants[1], ("finish",))
+        self.assertEqual(ctx.request_count, 2)
+        self.assertEqual(Budget(self.config.data / "budget", 100).usage(self.project.name)["used"], 2)
+        self.assertEqual(model["missing_finish"], {
+            "configured_followups": 1, "used_followups": 1, "exhausted": False,
+            "sealed": True, "counts_as_failure": True})
+        self.assertEqual(ctx.request_deadlines, {})
+
+    def test_followup_admission_still_obeys_daily_budget(self):
+        config = dataclasses.replace(self.config, limits=dataclasses.replace(
+            self.config.limits, daily_requests=1))
+        ctx = self.context()
+        ctx.config = config
+        class Driver:
+            requires_sandbox = False
+            def __init__(self):
+                self.calls = 0
+            def execute(self, context, prompt, *, profile=None):
+                self.calls += 1
+                context.handle("_hello", {})
+                context.handle("_budget", {"sequence": 1})
+                context.handle("_request_done", {"sequence": 1})
+                return {}
+        driver = Driver()
+        with self.assertRaises(InfraExceeded):
+            Engine(config)._execute(ctx, driver, "Do the work")
+        self.assertEqual(driver.calls, 2)
+        self.assertEqual(ctx.request_count, 1)
+        self.assertTrue(ctx.admission_wait)
+        self.assertEqual(ctx.missing_finish_evidence["used_followups"], 1)
+
+    def test_missing_finish_exhaustion_is_bounded_and_provider_errors_are_not_retried(self):
+        class NoFinishDriver:
+            requires_sandbox = False
+            def __init__(self, error=None):
+                self.calls = 0
+                self.error = error
+            def execute(self, context, prompt, *, profile=None):
+                self.calls += 1
+                context.handle("_hello", {})
+                context.handle("_budget", {"sequence": 1})
+                if self.error:
+                    raise self.error
+                context.handle("_request_done", {"sequence": 1})
+                return {"requests": context.request_count}
+
+        ctx = self.context()
+        driver = NoFinishDriver()
+        with self.assertRaises(MissingFinish) as caught:
+            Engine(self.config)._execute(ctx, driver, "Do the work")
+        self.assertEqual(driver.calls, 2)
+        self.assertEqual(caught.exception.evidence, {
+            "configured_followups": 1, "used_followups": 1, "exhausted": True,
+            "counts_as_failure": True})
+        self.assertEqual(ctx.missing_finish_evidence, caught.exception.evidence)
+
+        for error in (ModelFailure("claude", kind="provider", message="synthetic"),
+                      ProtocolError("synthetic protocol failure"),
+                      OSError(errno.EIO, "synthetic storage failure")):
+            with self.subTest(error=type(error).__name__):
+                failed = self.context()
+                driver = NoFinishDriver(error)
+                with self.assertRaises(type(error)):
+                    Engine(self.config)._execute(failed, driver, "Do the work")
+                self.assertEqual(driver.calls, 1)
+
+    def test_zero_followups_and_deadline_do_not_renew_the_run_wall(self):
+        zero = dataclasses.replace(self.config, limits=dataclasses.replace(
+            self.config.limits, missing_finish_followups=0))
+        ctx = self.context()
+        ctx.config = zero
+
+        class TerminalDriver:
+            requires_sandbox = False
+            def __init__(self, expire=False):
+                self.calls = 0
+                self.expire = expire
+            def execute(self, context, prompt, *, profile=None):
+                self.calls += 1
+                context.handle("_hello", {})
+                context.handle("_budget", {"sequence": 1})
+                context.handle("_request_done", {"sequence": 1})
+                if self.expire:
+                    context.deadline = time.monotonic() - 1
+                    self.deadline_after_return = context.deadline
+                return {"requests": context.request_count}
+
+        disabled = TerminalDriver()
+        with self.assertRaises(MissingFinish) as caught:
+            Engine(zero)._execute(ctx, disabled, "Do the work")
+        self.assertEqual(disabled.calls, 1)
+        self.assertEqual(caught.exception.evidence["configured_followups"], 0)
+
+        bounded = self.context()
+        deadline_driver = TerminalDriver(expire=True)
+        model = Engine(self.config)._execute(bounded, deadline_driver, "Do the work")
+        self.assertEqual(deadline_driver.calls, 1)
+        self.assertLess(bounded.deadline, time.monotonic())
+        self.assertEqual(bounded.deadline, deadline_driver.deadline_after_return)  # Never extended.
+        self.assertEqual(model["requests"], 1)
+        self.assertEqual(bounded.missing_finish_evidence["stopped_by"], "run_deadline")
+
+    def test_missing_finish_brake_option_is_scoped_to_exhaustion(self):
+        class NoFinishDriver:
+            requires_sandbox = False
+            def __init__(self):
+                self.context = None
+            def execute(self, context, prompt, *, profile=None):
+                self.context = context
+                context.handle("_hello", {})
+                context.handle("_budget", {"sequence": 1})
+                context.handle("_request_done", {"sequence": 1})
+                return {}
+
+        disabled = dataclasses.replace(self.config, limits=dataclasses.replace(
+            self.config.limits, missing_finish_followups=0, missing_finish_counts_as_failure=False))
+        disabled_driver = NoFinishDriver()
+        with self.assertRaises(MissingFinish) as disabled_error:
+            Engine(disabled, driver=disabled_driver).run(self.project, "worker")
+        self.assertEqual(read_json(disabled_driver.context.run_dir / "error.json")["missing_finish"],
+                         disabled_error.exception.evidence)
+        self.assertEqual(read_json(self.project.root / "health" / "worker.json", {})
+                         .get("consecutive_failures", 0), 0)
+
+        enabled = dataclasses.replace(self.config, limits=dataclasses.replace(
+            self.config.limits, missing_finish_followups=0, missing_finish_counts_as_failure=True))
+        enabled_driver = NoFinishDriver()
+        with self.assertRaises(MissingFinish) as enabled_error:
+            Engine(enabled, driver=enabled_driver).run(self.project, "worker")
+        self.assertEqual(read_json(enabled_driver.context.run_dir / "error.json")["missing_finish"],
+                         enabled_error.exception.evidence)
+        self.assertEqual(read_json(self.project.root / "health" / "worker.json", {})
+                         .get("consecutive_failures", 0), 1)
 
     def test_failed_validation_does_not_seal(self):
         for args in ({**FINISH, "summary": " "}, {**FINISH, "state": " "},

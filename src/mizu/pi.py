@@ -47,7 +47,7 @@ class PiDriver:
         observed = []
         context.model_evidence = {"profile": profile, **model, "engine": "pi", "requests": 0,
                                   "request_unit": "model_request", "usage": [], "usage_known": False}
-        with Bridge(context.handle, tool_definitions(context.role.capabilities), timeout=self.config.limits.run_seconds,
+        with Bridge(context.handle, tool_definitions(context.role.capabilities), timeout=self.config.limits.model_request_seconds,
                     on_close=context.cancel_operations) as bridge:
             env = environment(extra={"MIZU_BRIDGE_CONFIG": str(bridge.config_file)})
             env.update(credentials(self.config.file.parent / "credentials.env"))
@@ -56,7 +56,7 @@ class PiDriver:
                 # SDK emits its startup events after binding all extension handlers.
                 channel.send({"id": "state", "type": "get_state"})
                 while True:
-                    event = channel.receive(until=min(context.deadline, started+30))
+                    event = channel.receive(until=started+30)
                     if event.get("id") != "state":
                         continue
                     if not event.get("success") or not context.hello.is_set():
@@ -86,10 +86,13 @@ class PiDriver:
                             raise ProtocolError("Pi run aborted before settlement")
                         if context.request_count == 0:
                             raise ProtocolError("No runtime request admission observed")
-                        if context.finished is None:
-                            raise ProtocolError("Pi settled without mizu_finish")
-                        if settings["session"] == "persistent" and not context.ephemeral:
-                            save_session(path, session_file, {"tokens": _cumulative_tokens(saved, context)})
+                        # The session record is persistent only when settings
+                        # select that policy; otherwise session_record() places
+                        # it under this run, where a finish-only follow-up can
+                        # resume without carrying it into another work unit.
+                        save_session(path, session_file, {"tokens": _cumulative_tokens(saved, context)})
+                        # A normal settled response without a seal is returned
+                        # to Engine._execute for the bounded finish-only policy.
                         break
             finally:
                 context.model_evidence.update(requests=context.request_count, usage=list(context.runtime_usage.values()),

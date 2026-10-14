@@ -28,6 +28,34 @@ class IncludeTests(Fixture):
         frag.write_text("[limits]\nidle_seconds = 15\n")
         return frag
 
+    def test_missing_finish_policy_defaults_and_bounds(self):
+        config = load(self.file)
+        self.assertEqual(config.limits.missing_finish_followups, 1)
+        self.assertTrue(config.limits.missing_finish_counts_as_failure)
+
+        base = self.file.read_text()
+        disabled_text = base.replace("missing_finish_followups = 1", "missing_finish_followups = 0", 1)
+        disabled_text = disabled_text.replace("missing_finish_counts_as_failure = true",
+                                              "missing_finish_counts_as_failure = false", 1)
+        self.file.write_text(disabled_text)
+        disabled = load(self.file)
+        self.assertEqual(disabled.limits.missing_finish_followups, 0)
+        self.assertFalse(disabled.limits.missing_finish_counts_as_failure)
+
+        self.file.write_text(base.replace("missing_finish_followups = 1",
+                                          "missing_finish_followups = 3", 1))
+        self.assertEqual(load(self.file).limits.missing_finish_followups, 3)
+
+        for key, value in (("missing_finish_followups", "4"),
+                           ("missing_finish_followups", "-1"),
+                           ("missing_finish_counts_as_failure", '"false"')):
+            with self.subTest(key=key, value=value):
+                field = "missing_finish_followups = 1" if key == "missing_finish_followups" else \
+                    "missing_finish_counts_as_failure = true"
+                self.file.write_text(base.replace(field, f"{key} = {value}", 1))
+                with self.assertRaises(ConfigError):
+                    load(self.file)
+
     def test_include_merges_disjoint_fragment(self):
         self._split_idle()
         config = load(self.file)

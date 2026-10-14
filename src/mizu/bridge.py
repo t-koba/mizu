@@ -4,13 +4,14 @@ Transport structure (bridge.json)::
 
     {"transport": "unix" | "tcp",
      "socket": str | null, "host": str | null, "port": int | null,
-     "token": str, "timeout_ms": int, "tools": [...]}
+     "token": str, "timeout_ms": int, "tools": [...],
+     "joined_operations": ["consult" | "delegate", ...]}
 
 Unix-socket servers exist on POSIX; where they do not (Windows) the bridge
 serves 127.0.0.1 on an ephemeral port instead. Both transports carry the same
 LF-framed JSON envelope, the same per-run 256-bit token compared with
 hmac.compare_digest, and the same bounds (MAX_FRAME each way, timeout from
-run limits, request queue 16). Clients older than the ``transport`` field
+model-request limits, request queue 16). Clients older than the ``transport`` field
 treat a missing field as ``"unix"``.
 
 Trust: the config file is operator-owned and never mounted into command
@@ -23,6 +24,11 @@ operators must verify the dedicated account ACLs on the target OS.
 Cancellation/retry: serve_forever polls every 0.1s; __exit__ shuts down,
 closes and joins the worker thread (2s). Clients set a socket timeout from
 timeout_ms and perform no retries; a failed call surfaces to the run record.
+The host marks granted synchronous joins in joined_operations. Clients bound
+connect/send normally, then defer the reply timer to child-local host deadlines;
+parent transport cleanup drains admitted joins before closing their connection.
+Before admission the host engine's stall/request timer still applies. Progress
+never renews a logical-request deadline.
 
 Failure behavior: invalid configs and unsupported transports raise Denied
 loudly; unreachable servers and framing violations become {"ok": False}
@@ -189,7 +195,9 @@ class Bridge:
             endpoint = {"transport": "tcp", "socket": None, "host": self.host, "port": self.port}
         write_json(self.config_file, {**endpoint,
                                       "token": self.token, "timeout_ms": (self.timeout + 5) * 1000,
-                                      "tools": self.tools})
+                                      "tools": self.tools,
+                                      "joined_operations": [t["operation"] for t in self.tools
+                                                            if t.get("operation") in ("consult", "delegate")]})
         self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.1},
                                        name="mizu-bridge", daemon=True)
         self.thread.start()

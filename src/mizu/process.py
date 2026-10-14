@@ -120,10 +120,14 @@ def send_bounded(process, data: bytes, *, deadline: float, cancel: Callable[[], 
         _stop_io(stop, (thread,))
 
 
-def run(argv: Sequence[str], *, timeout: float, maximum: int,
+def run(argv: Sequence[str], *, timeout: float | Callable[[], float | None], maximum: int,
         cwd: Path | None = None, env: dict[str, str] | None = None,
         cancel: Callable[[], bool] = lambda: False, input_data: bytes = b"") -> Result:
     """Bound input/output/exit by one deadline, then stop and reap locally.
+
+    timeout is seconds, or a host callable returning an absolute monotonic
+    deadline. The callable may return None while an admitted operation/join
+    runs under its own bounds; ordinary command callers stay numeric.
 
     Raw polling pipes avoid buffered read locks, including when detached
     descendants retain pipe handles. POSIX signals the original process group;
@@ -133,9 +137,9 @@ def run(argv: Sequence[str], *, timeout: float, maximum: int,
     started = time.monotonic()
     if cancel():
         return Result(None, "", "", "cancelled", 0.0)
-    if timeout <= 0:
+    if not callable(timeout) and timeout <= 0:
         return Result(None, "", "", "timeout", 0.0)
-    deadline = started + timeout
+    deadline_at = timeout if callable(timeout) else lambda: started + timeout
     output = {"stdout": bytearray(), "stderr": bytearray()}
     process = _platform.spawn(list(argv), cwd=cwd, env=environment() if env is None else env,
                              stdin=subprocess.PIPE if input_data else subprocess.DEVNULL,
@@ -183,7 +187,8 @@ def run(argv: Sequence[str], *, timeout: float, maximum: int,
             if input_errors or errors:
                 reason = "input_error" if input_errors else "output_error"
                 break
-            if time.monotonic() >= deadline:
+            deadline = deadline_at()
+            if deadline is not None and time.monotonic() >= deadline:
                 reason = "timeout"
                 break
             if process.poll() is not None and not any(t.is_alive() for t in threads):
@@ -194,7 +199,7 @@ def run(argv: Sequence[str], *, timeout: float, maximum: int,
                 elif input_errors or errors:
                     reason = "input_error" if input_errors else "output_error"
                 break
-            stop.wait(min(.01, max(0, deadline-time.monotonic())))
+            stop.wait(.01 if deadline is None else min(.01, max(0, deadline-time.monotonic())))
     finally:
         stop.set()
         terminate(process, grace=0)

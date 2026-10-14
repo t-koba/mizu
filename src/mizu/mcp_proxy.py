@@ -69,12 +69,15 @@ def forward(config: dict, operation: str, arguments: dict) -> dict:
     try:
         client = _bridge_connect(config)
         client.sendall(wire)
+        joining = operation in config.get("joined_operations", [])
         data = bytearray()
         while True:
             remaining = deadline - time.monotonic()
-            if remaining <= 0:
+            if not joining and remaining <= 0:
                 raise Denied("Bridge deadline exceeded")
-            client.settimeout(remaining)
+            # Host child-local deadlines govern admitted joins; host transport
+            # cleanup closes the connection if no join was admitted.
+            client.settimeout(None if joining else remaining)
             try:
                 chunk = client.recv(65536)
             except (socket.timeout, TimeoutError) as exc:

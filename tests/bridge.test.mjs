@@ -185,3 +185,24 @@ test('bridge envelope requires boolean ok and object result', async t => {
     await assert.rejects(request(config,'read',{}), /Invalid bridge/);
   }
 });
+
+test('host-managed joins survive the caller RPC deadline without changing normal RPC bounds', async t => {
+  const cfg = await server(t, socket => {
+    setTimeout(() => socket.end('{"ok":true,"result":{"answer":"joined"}}\n'), 150);
+  });
+  cfg.timeout_ms = 50;
+  cfg.joined_operations = ['delegate', 'consult'];
+  assert.deepEqual(await request(cfg, 'delegate', {}), {answer:'joined'});
+});
+
+test('runtime completion pairs admission even without usage or on provider failure', async () => {
+  const runtime=fakeRuntime(), calls=[];
+  runtime.classify=async()=>({});
+  runtime.generateImages=async()=>{throw Error('provider');};
+  meterRuntime(runtime,{},async (_cfg,op,args)=>calls.push([op,args]));
+  await runtime.classify({},{});
+  await assert.rejects(runtime.generateImages({},{}), /provider/);
+  const admitted=calls.filter(([op])=>op==='_budget').map(([,args])=>args.sequence);
+  const completed=calls.filter(([op])=>op==='_request_done').map(([,args])=>args.sequence);
+  assert.deepEqual(completed, admitted);
+});

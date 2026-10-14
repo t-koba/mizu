@@ -21,6 +21,14 @@ class LimitExceeded(MizuError):
     code = 69
 
 
+class RunDeadlineExceeded(LimitExceeded):
+    """Wall or deadline wrap-up ended without a seal; bounded, not a fault."""
+
+
+class DeadlineWrapUp(LimitExceeded):
+    """Enter the existing wrap-up allowance before the wall expires."""
+
+
 class InfraExceeded(LimitExceeded):
     """Deferrable infrastructure limit: daily budget or disk reserve.
 
@@ -40,6 +48,14 @@ class Cancelled(MizuError):
 
 class ProtocolError(MizuError):
     code = 76
+
+
+class MissingFinish(MizuError):
+    """A normally settled managed turn exhausted its configured finish follow-ups."""
+    def __init__(self, *, configured: int, used: int, counts_as_failure: bool):
+        self.evidence = {"configured_followups": configured, "used_followups": used,
+                         "exhausted": True, "counts_as_failure": counts_as_failure}
+        super().__init__(f"Managed turn returned without mizu_finish after {used} follow-up(s)")
 
 
 class ModelFailure(ProtocolError):

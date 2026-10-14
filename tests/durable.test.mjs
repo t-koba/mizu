@@ -454,3 +454,19 @@ test('interrupted tools are never replayed by default', async () => {
   const tool = defineTool({ name: 'op', description: 'op', parameters: Type.Object({}), execute: async () => ({}) });
   assert.equal(tool.replay ?? 'unsafe', 'unsafe');
 });
+
+test('durable provider completion pairs admission without usage and on rejection', async () => {
+  const done=[], admitted=[];
+  let sequence=0;
+  const fake={
+    stream: async()=>({result:async()=>({}), async *[Symbol.asyncIterator]() {}}),
+    classify: async()=>{throw Error('provider');},
+  };
+  meterModels(fake, {
+    admit:async()=>{admitted.push(++sequence);return sequence;},
+    report:async()=>{}, done:async seq=>done.push(seq),
+  });
+  await fake.stream().result();
+  await assert.rejects(fake.classify(), /provider/);
+  assert.deepEqual(done, admitted);
+});

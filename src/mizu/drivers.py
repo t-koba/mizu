@@ -9,7 +9,7 @@ import json
 
 from .budget import Budget
 from .config import role_requests_per_run
-from .errors import Cancelled, ConfigError, InfraExceeded, LimitExceeded, ProtocolError
+from .errors import Cancelled, ConfigError, InfraExceeded, LimitExceeded, ProtocolError, RunDeadlineExceeded
 from .fs import write_json, canonical, now
 
 #: Driver stderr tail retained per run (bounded failure evidence).
@@ -72,13 +72,14 @@ def admit_invocation(context, *, unit: str) -> dict:
     """
     if context.finished is not None:
         raise ProtocolError("No inference after the work unit is sealed")
-    if context.cancelled():
-        raise Cancelled("Run cancelled before admission")
-    if getattr(context, "invocation_admitted", False):
+    context.check_deadlines()
+    if getattr(context, "invocation_admitted_attempt", None) == context.execution_attempt:
         return {"admitted": True}
     if getattr(context, 'recovery_probe', False):
         context.revalidate_admission()
-    over = context.request_count >= role_requests_per_run(context.config, context.spend_role or context.role)
+    context.check_deadlines()
+    context.enter_deadline_wrap_up()
+    over = context.bound_hit == "deadline" or context.request_count >= role_requests_per_run(context.config, context.spend_role or context.role)
     if over and getattr(context, 'recovery_probe', False):
         context.bound_hit = 'requests'
         context.admission_error = 'request_ceiling'
@@ -86,13 +87,15 @@ def admit_invocation(context, *, unit: str) -> dict:
     if over:
         from .runtime import WRAP_UP_REQUESTS
         if getattr(context, "wrap_up_requests", 0) >= WRAP_UP_REQUESTS:
+            if context.bound_hit == "deadline":
+                raise RunDeadlineExceeded("Deadline wrap-up request allowance exhausted")
             raise LimitExceeded("Per-run provider request budget exhausted")
     project_name = getattr(getattr(context, "project", None), "name", "")
     try:
         Budget(context.config.data / "budget", context.config.limits.daily_requests,
                context.config.limits.retention_days,
                context.config.limits.shared_daily_requests, context.config.timezone).take(
-                   f"{context.run_dir.name}:invocation", project=project_name)
+                   f"{context.run_dir.name}:{context.execution_attempt}:invocation", project=project_name)
     except InfraExceeded:
         if hasattr(context,'model_evidence'):
             context.model_evidence['admission_status']='rejected'
@@ -114,7 +117,9 @@ def admit_invocation(context, *, unit: str) -> dict:
         context.bound_hit = context.bound_hit or "requests"
         context.wrap_up_requests = getattr(context, "wrap_up_requests", 0) + 1
     context.request_count += 1
-    context.invocation_admitted = True
+    context.request_sequences.add((context.execution_attempt, 0))
+    context.start_request(0)  # One enclosing Claude query / Codex turn.
+    context.invocation_admitted_attempt = context.execution_attempt
     if getattr(context, 'recovery_probe', False):
         context.recovery_progress()
     if hasattr(context,"model_evidence"):

@@ -67,4 +67,8 @@ class ScriptDriver:
             self.callback(context, prompt, profile)
         if context.finished is None:
             context.handle("finish", {"outcome": "wait", "summary": "One observed result", "state": "Next step is explicit."})
+        if not context.operations_stopped.is_set():
+            for attempt, sequence in tuple(context.request_deadlines):
+                if attempt == context.execution_attempt:
+                    context.handle("_request_done", {"sequence": sequence})
         return {"requests": context.request_count, "profile": profile or context.role.profile}

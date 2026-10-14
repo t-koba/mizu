@@ -110,7 +110,11 @@ vector database or an automatically complete history search. Usage day buckets
 and the usage window edge use the configured `timezone` day boundary so
 `mizu usage` groups agree with `mizu budget` for the same day.
 
-`continue` starts another meaningful unit. `bounded` is a `continue` that hit a per-run spend bound after sealing: it saved what it could under the wrap-up allowance and runs again without counting toward `max_failures`. `wait` sleeps until its deadline,
+`continue` starts another meaningful unit. `bounded` is a `continue` that hit a per-run spend bound or entered finite-wall wrap-up before sealing: it saved what it could under the wrap-up allowance and runs again without counting toward `max_failures`. A whole-unit wall exhausted or deadline wrap-up ended without a seal instead
+records a bounded run result, without creating or publishing a snapshot or
+counting toward `max_failures`. Unrelated pre-seal faults still fail even if the
+wall also expires.
+`wait` sleeps until its deadline,
 new information, a changed goal, a human wake, or a cached current CI failure
 on the operator-selected `ci_branch` (polled red, independent of insight decisions, until green or superseded; empty disables the wake) for roles with `ci_wake` (writable roles by default; an unchanged red re-wakes only on a new failing sha/check, a moved head, or every `ci_rewake_seconds`). `blocked` needs a wake or new
 information. `done` is not reopened by news alone; an explicit wake or changed
@@ -251,7 +255,17 @@ the resumed conversation instead of forking it.
 A changed key opens fresh context;
 old sessions are kept for audit. No silent provider fallback or automatic replay
 is implemented. Operators can change profiles at a boundary, and Worker can
-request independent consultations against the same snapshot. Consultations
+request independent consultations against the same snapshot.
+Each consultation or delegation child has its own role wall (unset inherits the
+project value, `0` removes only that wall) and positive logical-request timer.
+The parent's wall does not shorten an admitted child, cancel its synchronous
+join, or trigger transport cleanup that releases the workspace early. Cleanup
+drains joins; explicit stop/pause/unarm still cancels the shared scope, and a
+child's local timeout cancels only the child. Parent deadlines keep ticking:
+after joining an expired finite parent cannot infer again. Claude/Codex request
+bounds enclose the entire query/turn, including tools; they do not claim to time
+every opaque provider HTTP subcall.
+ Consultations
 share budget/slot limits and fail independently; they cannot edit code.
 A resumed persistent session receives only an append-only delta (goal pin,
 current snapshot pin, proposals not yet offered, plus an `open_insights`

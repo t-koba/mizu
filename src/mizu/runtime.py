@@ -19,10 +19,10 @@ from pathlib import Path
 
 from . import platform as _platform
 from .budget import Budget
-from .config import Config, Role, load, role_policy_bytes, role_requests_per_run, role_tools_per_run
+from .config import Config, Role, load, role_policy_bytes, role_requests_per_run, role_tools_per_run, role_run_seconds
 from .doctor import container_runtime
 from .drivers import driver_for
-from .errors import Busy, Cancelled, ConfigError, Denied, InfraExceeded, LimitExceeded, MizuError, ModelFailure, ProtocolError
+from .errors import Busy, Cancelled, ConfigError, Denied, InfraExceeded, LimitExceeded, RunDeadlineExceeded, DeadlineWrapUp, MissingFinish, MizuError, ModelFailure, ProtocolError
 from .fs import canonical, digest, lock, mkdir, now, read_json, safe_read, write_json, PREVIEW_BYTES, page, text_preview, DIGEST
 from .project import Project
 from .protocol import DEFINITIONS, validate
@@ -53,8 +53,10 @@ def slot(config: Config):
 #: Infrastructure waits defer (Busy locks/slots, InfraExceeded daily-budget
 #: and disk-reserve guards) rather than counting toward the consecutive-failure
 #: brake. All other faults still count, including plain LimitExceeded bound
-#: faults (engine deadlines, per-record transport/RPC bounds, per-run
-#: tool/request bounds, file-count/snapshot bounds). Event-stream retention
+#: faults (logical-request deadlines, per-record transport/RPC bounds, per-run
+#: tool/request bounds, file-count/snapshot bounds). A whole-unit wall or
+#: deadline wrap-up ended without a seal is a bounded, non-failure result.
+#: Event-stream retention
 #: past the operator budget truncates retained evidence explicitly instead
 #: of failing the run. The error record is still written and
 #: the exception still raised, so nothing is hidden; the daemon surfaces it
@@ -172,7 +174,20 @@ class Context:
         self.inbox_seen = project.insights.generation()
         self.wake_generation = project.control().get("wake_generation", "")
         self.stop = stop or threading.Event()
-        self.deadline = time.monotonic() + config.limits.run_seconds
+        self.run_seconds = role_run_seconds(config, role)
+        started = time.monotonic()
+        self.deadline = started + self.run_seconds if self.run_seconds else None
+        # Reserve a final logical-request window, capped to one of the
+        # ordinary + three wrap-up windows so short runs still do useful work.
+        self.wrap_up_at = (self.deadline - min(config.limits.model_request_seconds,
+                                             self.run_seconds / (WRAP_UP_REQUESTS + 1))
+                           if self.deadline is not None else None)
+        self.request_deadlines: dict[tuple[int, int], float] = {}
+        self.transport_idle_deadline = started + config.limits.model_request_seconds
+        # Never hold mutex in transport polling: handle holds it while joining.
+        self.joins_idle = threading.Event()
+        self.joins_idle.set()
+        self.operation_active = threading.Event()
         self.mutex = threading.RLock()
         self.hello = threading.Event()
         self.request_count = 0
@@ -187,14 +202,17 @@ class Context:
         # Delegation children count against the caller's unit, so theirs
         # points at the caller; everyone else spends their own role.
         self.spend_role = None
-        # Per-run spend-bound wrap-up: which bound was reached plus the spent
-        # wrap-up allowance. Set when a requests/tools refusal fires, so the
+        # Per-run wrap-up: which bound was reached plus the spent allowance.
+        # Set by a requests/tools refusal or the reserved wall window, so the
         # unit can seal `bounded` instead of failing.
         self.bound_hit: str | None = None
         self.wrap_up_requests = 0
         self.wrap_up_tools = 0
         self.wrap_up_attempted = False
         self.finished: dict | None = None
+        self.missing_finish_evidence: dict | None = None
+        # Temporary follow-up grants do not fork an otherwise identical saved session.
+        self.session_identity_capabilities: tuple[str, ...] | None = None
         self.admission_error: str | None = None
         self.admission_wait = False
         # Selector failover identity for durable submissions. Retries and
@@ -214,7 +232,15 @@ class Context:
         self.sandbox = Sandbox(config, project.root, role.name, run_dir, cancel=self.tools_cancelled)
         self.web = Web(config.web, config.data / "web-cache", run_dir / "sources", role.name)
 
+    def wait_for_joins(self):
+        # Explicit stop is shared with children; still drain their cleanup
+        # before releasing the parent's workspace lock.
+        self.joins_idle.wait()
+
     def cancel_operations(self):
+        # Even an exited/failed parent transport must drain admitted children
+        # before releasing the writer lock or cleaning up their shared tree.
+        self.wait_for_joins()
         self.operations_stopped.set()
 
     def tools_cancelled(self):
@@ -226,12 +252,81 @@ class Context:
         return self.stop.is_set() or self.closed or not control.get("armed") or control.get("paused")
 
     def cancelled(self) -> bool:
-        return self.host_cancelled() or time.monotonic() > self.deadline
+        return self.host_cancelled() or (self.joins_idle.is_set() and self.wall_expired())
+
+    def wall_expired(self):
+        return self.deadline is not None and time.monotonic() >= self.deadline
+
+    def enter_deadline_wrap_up(self):
+        if (not getattr(self, "recovery_probe", False) and self.finished is None
+                and self.bound_hit is None and self.wrap_up_at is not None
+                and time.monotonic() >= self.wrap_up_at):
+            self.bound_hit = "deadline"
+            return True
+        return False
+
+    def start_request(self, sequence):
+        key = (self.execution_attempt, sequence)
+        self.request_deadlines.setdefault(key, time.monotonic() + self.config.limits.model_request_seconds)
+
+    def end_request(self, sequence):
+        key = (self.execution_attempt, sequence)
+        if key not in self.request_sequences:
+            raise Denied("Unknown completed request")
+        if self.request_deadlines.pop(key, None) is not None:
+            self.transport_idle_deadline = time.monotonic() + self.config.limits.model_request_seconds
+
+    def check_deadlines(self, *, wrap_up=False):
+        if self.host_cancelled():
+            raise Cancelled("Run stopped, paused or authority revoked")
+        if not self.joins_idle.is_set():
+            return  # Absolute deadlines keep ticking; never renew on join.
+        if self.wall_expired():
+            raise RunDeadlineExceeded("Whole-unit wall deadline exhausted")
+        requests = tuple(self.request_deadlines.values())
+        request_deadline = (min(requests) if requests else
+                            None if self.operation_active.is_set() else self.transport_idle_deadline)
+        # The reserved wall transition precedes a later request/idle timeout,
+        # even if polling sees both at once. Earlier request bounds still fail;
+        # neither transition nor joins renew an absolute request timer.
+        if wrap_up and (request_deadline is None or
+                        (self.wrap_up_at is not None and self.wrap_up_at < request_deadline)):
+            self.enter_deadline_wrap_up()
+            if self.finished is None and self.bound_hit == "deadline" and not self.wrap_up_attempted:
+                raise DeadlineWrapUp(self._bound_message())
+        if requests:
+            if time.monotonic() >= min(requests):
+                raise LimitExceeded("Logical model request deadline exhausted")
+        elif not self.operation_active.is_set() and time.monotonic() >= self.transport_idle_deadline:
+            raise LimitExceeded("Engine stalled between logical requests")
+
+    def transport_deadline(self):
+        self.check_deadlines(wrap_up=True)
+        if not self.joins_idle.is_set():
+            return None
+        requests = tuple(self.request_deadlines.values())
+        if not requests and self.operation_active.is_set():
+            return self.deadline  # Admitted Pi tools retain their own command/adapter bounds.
+        request = min(requests) if requests else self.transport_idle_deadline
+        return min(self.deadline, request) if self.deadline is not None else request
+
+    def transport_cancelled(self):
+        # send_bounded accepts a predicate; receive/process polling preserves
+        # the specific timeout type via check_deadlines instead.
+        if self.host_cancelled():
+            return True
+        if not self.joins_idle.is_set():
+            return False
+        requests = tuple(self.request_deadlines.values())
+        if not requests and self.operation_active.is_set():
+            return self.wall_expired()
+        request = min(requests) if requests else self.transport_idle_deadline
+        return self.wall_expired() or time.monotonic() >= request
 
     def _bound_message(self) -> str:
         how = f"{WRAP_UP_REQUESTS - self.wrap_up_requests} requests and " \
             f"{WRAP_UP_TOOLS - self.wrap_up_tools} wrap-up tools"
-        return (f"Per-run {self.bound_hit} budget exhausted; wrap-up only "
+        return (f"Per-run {self.bound_hit} bound reached; wrap-up only "
                 f"(finish, research, submit_insight, attach_evidence, decide) "
                 f"with {how} left")
 
@@ -239,12 +334,27 @@ class Context:
         if not isinstance(operation, str) or not isinstance(arguments, dict):
             raise Denied("Invalid operation")
         with self.mutex:
-            if self.tools_cancelled():
-                raise Cancelled("Run is stopped, paused or past its deadline")
+            if self.host_cancelled() or self.operations_stopped.is_set():
+                raise Cancelled("Run is stopped or paused")
+            post_seal_done = self.finished is not None and operation == "_request_done"
+            if self.wall_expired() and not post_seal_done:
+                raise RunDeadlineExceeded("Whole-unit wall deadline exhausted")
             # A seal is irreversible. Refuse before admission-error bookkeeping,
-            # counters, handshake or dispatch; usage may only add evidence.
-            if self.finished is not None and operation != "_model_usage":
+            # counters, handshake or dispatch. Usage adds evidence; _request_done
+            # only retires an already-admitted request timer.
+            if self.finished is not None and operation not in ("_model_usage", "_request_done"):
                 raise Denied("This work unit is sealed; no model requests or tools may run after finish")
+            # A request timer is never renewed by bookkeeping or another
+            # admission. Usage after a seal remains evidence-only.
+            if self.finished is None:
+                self.check_deadlines()
+            self.enter_deadline_wrap_up()
+            if operation == "_request_done":
+                sequence = arguments.get("sequence")
+                if type(sequence) is not int or sequence < 1:
+                    raise Denied("Invalid completed request sequence")
+                self.end_request(sequence)
+                return {"recorded": True}
             if operation == "_hello":
                 if arguments != {}:
                     raise Denied("Unsupported bridge handshake")
@@ -285,9 +395,11 @@ class Context:
                         raise Denied("Invalid request sequence")
                     sequence_key = (self.execution_attempt, sequence)
                     if sequence_key not in self.request_sequences:
-                        over = self.request_count >= role_requests_per_run(
+                        over = self.bound_hit == "deadline" or self.request_count >= role_requests_per_run(
                             self.config, self.spend_role or self.role)
                         if over and self.wrap_up_requests >= WRAP_UP_REQUESTS:
+                            if self.bound_hit == "deadline":
+                                raise RunDeadlineExceeded("Deadline wrap-up request allowance exhausted")
                             raise LimitExceeded("Per-run provider request budget exhausted")
                         try:
                             Budget(self.config.data / "budget", self.config.limits.daily_requests,
@@ -315,6 +427,7 @@ class Context:
                             self.bound_hit = self.bound_hit or "requests"
                             self.wrap_up_requests += 1
                         self.request_sequences.add(sequence_key)
+                        self.start_request(sequence)
                         self.request_count += 1
                         if hasattr(self, "model_evidence"):
                             self.model_evidence.update(requests=self.request_count, requests_known=True, admission_status="accepted")
@@ -328,14 +441,22 @@ class Context:
             if self.bound_hit is not None and operation not in WRAP_UP_OPS:
                 raise Denied(self._bound_message())
             self.tool_count += 1
-            if self.tool_count > role_tools_per_run(self.config, self.spend_role or self.role):
+            if self.bound_hit == "deadline" or self.tool_count > role_tools_per_run(self.config, self.spend_role or self.role):
                 self.bound_hit = self.bound_hit or "tools"
                 if operation not in WRAP_UP_OPS or self.wrap_up_tools >= WRAP_UP_TOOLS:
+                    if self.bound_hit == "deadline" and self.wrap_up_tools >= WRAP_UP_TOOLS:
+                        raise RunDeadlineExceeded("Deadline wrap-up tool allowance exhausted")
                     raise LimitExceeded("Per-run tool limit exceeded")
                 self.wrap_up_tools += 1
             validate(arguments, DEFINITIONS[operation][1])
-            result = self.dispatch(operation, arguments)
-            return result
+            self.operation_active.set()
+            try:
+                return self.dispatch(operation, arguments)
+            finally:
+                # Completion of actual admitted work is not a heartbeat and
+                # never resets an active request (Claude query / Codex turn).
+                self.transport_idle_deadline = time.monotonic() + self.config.limits.model_request_seconds
+                self.operation_active.clear()
 
     def dispatch(self, op: str, args: dict) -> dict:
         handler = self._DISPATCH.get(op)
@@ -776,12 +897,20 @@ class Context:
     def _op_consult(self, args: dict) -> dict:
         if self.consult is None:
             raise Denied("Nested consultation is disabled")
-        return self.consult(self, args)
+        self.joins_idle.clear()
+        try:
+            return self.consult(self, args)
+        finally:
+            self.joins_idle.set()
 
     def _op_delegate(self, args: dict) -> dict:
         if self.delegate is None:
             raise Denied("Nested delegation is disabled")
-        return self.delegate(self, args)
+        self.joins_idle.clear()
+        try:
+            return self.delegate(self, args)
+        finally:
+            self.joins_idle.set()
 
     def _op_report(self, args: dict) -> dict:
         self.commentary = args
@@ -1800,19 +1929,122 @@ class Engine:
         return driver_for(self.config, profile, self._drivers)
 
     def _execute(self, context: Context, driver, prompt: str, **kwargs) -> dict:
-        """Preserve a durable host seal, not a claim of adapter settlement.
+        """Preserve a durable host seal and recover only normal unsealed returns.
 
-        Only driver execution is caught. Unsealed failures propagate unchanged;
-        explicit host cancellation still cancels. Sealed driver faults leave
-        bounded local diagnostics and the partial model evidence. Record
-        writes and all final integrity/publication checks still fail closed.
-        Recovery probes do not use this work-unit completion path.
+        A normally settled turn without a seal gets the configured, finish-only
+        follow-up allowance. Provider/protocol faults and explicit cancellation
+        keep their existing paths. Deadline wrap-up remains separate and bounded.
+        Final record, integrity, and publication failures still fail closed.
         """
         if context.finished is not None:
             raise Denied("No inference after the work unit is sealed")
+        context.request_deadlines.clear()
+        context.transport_idle_deadline = time.monotonic() + context.config.limits.model_request_seconds
         try:
-            return driver.execute(context, prompt, **kwargs)
+            try:
+                model_result = driver.execute(context, prompt, **kwargs)
+            except DeadlineWrapUp:
+                if context.finished is not None:
+                    raise
+                if context.host_cancelled():
+                    raise Cancelled("Run stopped before deadline wrap-up")
+                if context.wall_expired():
+                    raise RunDeadlineExceeded("Whole-unit wall deadline exhausted")
+                context.wrap_up_attempted = True
+                context.role = dataclasses.replace(context.role,
+                    capabilities=tuple(c for c in context.role.capabilities if c in WRAP_UP_OPS),
+                    engine_tools=(), selector="")
+                context.operations_stopped.clear()
+                context.request_deadlines.clear()  # The failed transport was reaped, not renewed.
+                context.transport_idle_deadline = time.monotonic() + context.config.limits.model_request_seconds
+                context.execution_attempt += 1
+                model_result = driver.execute(context, context._bound_message() + "\n\n" + prompt, **kwargs)
+
+            if context.finished is None:
+                if context.host_cancelled():
+                    raise Cancelled("Run stopped before finish")
+                # The reserved deadline transition (or an already-used wrap-up)
+                # is authoritative; a missing finish there follows its existing
+                # bounded/failure behavior, not this separate policy.
+                if context.wrap_up_attempted or context.bound_hit == "deadline" or context.wall_expired():
+                    if context.wall_expired() or context.bound_hit == "deadline":
+                        context.missing_finish_evidence = {
+                            "configured_followups": context.config.limits.missing_finish_followups,
+                            "used_followups": 0, "exhausted": False,
+                            "stopped_by": "run_deadline",
+                            "counts_as_failure": context.config.limits.missing_finish_counts_as_failure}
+                    return model_result
+                if context.request_deadlines:
+                    raise ProtocolError("Terminal turn left an active model-request deadline")
+
+                configured = context.config.limits.missing_finish_followups
+                used = 0
+                base_role = context.role
+                followup_prompt = (
+                    "The prior turn returned normally without calling mizu_finish. "
+                    "This work unit remains open. Do not repeat the work or call any other tool; "
+                    "call mizu_finish now with an accurate outcome and summary. No action may follow the seal.")
+                while context.finished is None and used < configured:
+                    if context.host_cancelled():
+                        raise Cancelled("Run stopped before missing-finish follow-up")
+                    if context.wall_expired():
+                        context.missing_finish_evidence = {
+                            "configured_followups": configured, "used_followups": used,
+                            "exhausted": False, "stopped_by": "run_deadline",
+                            "counts_as_failure": context.config.limits.missing_finish_counts_as_failure}
+                        return model_result
+                    if context.request_deadlines:
+                        raise ProtocolError("Terminal turn left an active model-request deadline")
+                    context.check_deadlines()
+                    used += 1
+                    context.missing_finish_evidence = {
+                        "configured_followups": configured, "used_followups": used,
+                        "exhausted": False, "sealed": False,
+                        "counts_as_failure": context.config.limits.missing_finish_counts_as_failure}
+                    context.attempt_ordinal += 1
+                    context.execution_attempt += 1
+                    context.role = dataclasses.replace(base_role, capabilities=("finish",),
+                                                       engine_tools=(), selector="")
+                    previous_session_capabilities = context.session_identity_capabilities
+                    context.session_identity_capabilities = base_role.capabilities
+                    context.operations_stopped.clear()
+                    context.transport_idle_deadline = time.monotonic() + context.config.limits.model_request_seconds
+                    try:
+                        model_result = driver.execute(context, followup_prompt, **kwargs)
+                    finally:
+                        context.role = base_role
+                        context.session_identity_capabilities = previous_session_capabilities
+                    if context.finished is None and context.request_deadlines:
+                        raise ProtocolError("Finish follow-up left an active model-request deadline")
+                    if context.finished is None and (context.bound_hit == "deadline" or context.wall_expired()):
+                        context.missing_finish_evidence = {
+                            "configured_followups": configured, "used_followups": used,
+                            "exhausted": False, "stopped_by": "run_deadline",
+                            "counts_as_failure": context.config.limits.missing_finish_counts_as_failure}
+                        return model_result
+
+                if context.finished is None and context.host_cancelled():
+                    raise Cancelled("Run stopped before missing-finish exhaustion")
+                if context.finished is None:
+                    context.missing_finish_evidence = {
+                        "configured_followups": configured, "used_followups": used,
+                        "exhausted": True,
+                        "counts_as_failure": context.config.limits.missing_finish_counts_as_failure}
+                    raise MissingFinish(configured=configured, used=used,
+                                        counts_as_failure=context.config.limits.missing_finish_counts_as_failure)
+
+                context.missing_finish_evidence = {
+                    "configured_followups": configured, "used_followups": used,
+                    "exhausted": False, "sealed": True,
+                    "counts_as_failure": context.config.limits.missing_finish_counts_as_failure}
+                context.model_evidence = {**getattr(context, "model_evidence", {}),
+                                          "missing_finish": context.missing_finish_evidence}
+                if isinstance(model_result, dict):
+                    model_result = {**model_result, "missing_finish": context.missing_finish_evidence}
+
+            return model_result
         except Exception as exc:
+            context.wait_for_joins()
             if context.finished is None:
                 raise
             if context.host_cancelled():
@@ -2202,7 +2434,7 @@ class Engine:
                         # error: the daily budget, an unmarked bound, an
                         # already-spent allowance still fail exactly as before.
                         # Sealed driver errors were retained by _execute.
-                        if (isinstance(exc, InfraExceeded)
+                        if (isinstance(exc, (InfraExceeded, RunDeadlineExceeded))
                                 or getattr(context, "bound_hit", None) is None
                                 or getattr(context, "wrap_up_attempted", False)
                                 or context.finished is not None):
@@ -2228,9 +2460,11 @@ class Engine:
                         context.execution_attempt += 1
                         model_result = self._execute(context, driver, notice + "\n\n" + prompt)
                     break
-                if context.host_cancelled() or (context.finished is None and context.cancelled()):
+                if context.host_cancelled():
                     raise Cancelled("Run stopped before publication")
                 if context.finished is None:
+                    if context.bound_hit == "deadline" or context.wall_expired():
+                        raise RunDeadlineExceeded("Deadline-bounded run ended without finish")
                     raise Denied("Missing finish intent")
                 finished = context.finished
                 if role.workspace == "write":
@@ -2303,6 +2537,22 @@ class Engine:
                            {"consecutive_failures": 0, "last_run": run_id, "updated_at": now()})
                 return result
             except BaseException as exc:
+                if (isinstance(exc, RunDeadlineExceeded) and context is not None
+                        and context.finished is None and not context.host_cancelled()):
+                    result = {"run": run_id, "role": role_name, "status": "bounded",
+                              "bound": "deadline", "finished_at": now(), "error": str(exc),
+                              "publication": "not_published", "snapshot": snapshot["id"],
+                              "code_digest": snapshot["code_digest"],
+                              "model": getattr(context, "model_evidence", {})}
+                    try:
+                        write_json(run_dir / "result.json", result)
+                    except Exception as record_error:
+                        # A deadline is non-failing only when its bounded result
+                        # is durably recorded. Preserve ordinary storage-fault
+                        # handling (including health accounting) if that fails.
+                        exc = record_error
+                    else:
+                        return result
                 if isinstance(exc, ModelFailure) and context is not None and context.admission_error:
                     if getattr(context, "admission_wait", False):
                         exc = InfraExceeded(f"{self.config.timezone} daily model-request budget exhausted")
@@ -2341,7 +2591,11 @@ class Engine:
                              **({"selection": decision} if decision else {}),
                              **({"model_failure": exc.evidence} if isinstance(exc, ModelFailure) else {}),
                              **({"selection_action": handled} if handled else {}),
-                             **({"selection_retries": selection_retries} if selection_retries else {})}
+                             **({"selection_retries": selection_retries} if selection_retries else {}),
+                             **({"missing_finish": getattr(exc, "evidence", None)
+                                  or getattr(context, "missing_finish_evidence", None)}
+                                if isinstance(exc, MissingFinish)
+                                or getattr(context, "missing_finish_evidence", None) else {})}
                     if model_result is not None:
                         error["model"] = model_result
                     elif context is not None and hasattr(context, "model_evidence"):
@@ -2354,7 +2608,9 @@ class Engine:
                             "error": str(exc), "selection": decision, "selection_action": handled,
                             **({"selection_retries": selection_retries} if selection_retries else {}),
                             "next_evaluation_at": time.time() + self.config.limits.cooldown_seconds}
-                if not is_deferred(exc, context):
+                suppress_missing_finish_brake = (isinstance(exc, MissingFinish)
+                                                 and not self.config.limits.missing_finish_counts_as_failure)
+                if not is_deferred(exc, context) and not suppress_missing_finish_brake:
                     with contextlib.suppress(OSError, ValueError, TypeError):
                         health = read_json(project.root / "health" / f"{role_name}.json", {})
                         failures = health.get("consecutive_failures", 0) + 1
@@ -2436,7 +2692,6 @@ class Engine:
                     ctx = Context(self.config, parent.project, role,
                                   run_dir, snap, workspace, stop=parent.stop, goal=parent.goal)
                     ctx.ephemeral = True
-                    ctx.deadline = min(ctx.deadline, parent.deadline)
                     model = self._execute(ctx, self.resolve(profile), prompt_for(ctx) + "\n\nQuestion:\n" + args["question"], profile=profile)
                     if ctx.host_cancelled() or (ctx.finished is None and ctx.cancelled()):
                         raise Cancelled("Consultation cancelled before completion")
@@ -2450,8 +2705,8 @@ class Engine:
                     return result
             except Exception as exc:
                 result = {"run": run_dir.name, "parent_run": parent.run_dir.name,
-                          "role": role_name, "status": "interrupted", "finished_at": now(),
-                          "profile": profile, "snapshot": snap["id"], "error": str(exc)}
+                          "role": role_name, "status": "bounded" if isinstance(exc, RunDeadlineExceeded) else "interrupted",
+                          "finished_at": now(), "profile": profile, "snapshot": snap["id"], "error": str(exc)}
                 if ctx is not None and hasattr(ctx, "model_evidence"):
                     result["model"] = ctx.model_evidence
                 try:
@@ -2552,7 +2807,6 @@ class Engine:
                 ctx.tool_count = parent.tool_count
                 ctx.wrap_up_requests = parent.wrap_up_requests
                 ctx.wrap_up_tools = parent.wrap_up_tools
-                ctx.deadline = min(ctx.deadline, parent.deadline)
                 try:
                     model = self._execute(ctx, driver, prompt_for(ctx) + "\n\nTask:\n" + task
                                            + "\n\nCall finish once with a result summary (and short state) "
@@ -2566,7 +2820,8 @@ class Engine:
                     # a bound the delegation exceeded must coerce the
                     # parent's seal too, and daily-refusal flags must
                     # survive for the parent's own error handling.
-                    parent.bound_hit = parent.bound_hit or ctx.bound_hit
+                    if ctx.bound_hit != "deadline":
+                        parent.bound_hit = parent.bound_hit or ctx.bound_hit
                     parent.admission_wait = parent.admission_wait or ctx.admission_wait
                     if ctx.admission_error:
                         parent.admission_error = ctx.admission_error
@@ -2585,8 +2840,8 @@ class Engine:
                 return record
         except Exception as exc:
             result = {"run": run_dir.name, "parent_run": parent.run_dir.name,
-                      "role": role_name, "status": "interrupted", "finished_at": now(),
-                      "profile": profile, "snapshot": snap["id"], "error": str(exc)}
+                      "role": role_name, "status": "bounded" if isinstance(exc, RunDeadlineExceeded) else "interrupted",
+                      "finished_at": now(), "profile": profile, "snapshot": snap["id"], "error": str(exc)}
             if ctx is not None and hasattr(ctx, "model_evidence"):
                 result["model"] = ctx.model_evidence
             try:
