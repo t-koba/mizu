@@ -383,14 +383,14 @@ class RecoveryProbeTests(SelectionFixture):
 
     def test_fresh_launch_limits_and_budget_reach_context_and_driver(self):
         self.setup_probe()
-        # This test covers fresh-config propagation, not host tzdata. Use a
-        # deterministic Tokyo offset so the contract also runs on Windows,
-        # where the optional IANA database may not be installed.
+        # This test covers fresh-config propagation, not host tzdata or deadline
+        # expiry. Use a deterministic Tokyo offset and a long non-default wall
+        # so it runs on Windows without IANA data or timing out on slow workers.
         test_zone = dt.timezone(dt.timedelta(hours=9), 'Asia/Tokyo')
         with patch('mizu.config.ZoneInfo', return_value=test_zone):
             fresh = dataclasses.replace(self.config, timezone='Asia/Tokyo',
                                        limits=dataclasses.replace(self.config.limits, requests_per_run=1,
-                                                                  daily_requests=7, shared_daily_requests=8, run_seconds=9))
+                                                                  daily_requests=7, shared_daily_requests=8, run_seconds=60))
             driver = ProbeDriver()
             with patch('mizu.probes.driver_for', return_value=driver) as choose:
                 result = service_due(self.config, 'sample', 'worker', threading.Event(),
@@ -402,7 +402,7 @@ class RecoveryProbeTests(SelectionFixture):
             self.assertEqual(config.limits.requests_per_run, 1)
             self.assertEqual(config.limits.daily_requests, 7)
             self.assertEqual(config.limits.shared_daily_requests, 8)
-            self.assertEqual(config.limits.run_seconds, 9)
+            self.assertEqual(config.limits.run_seconds, 60)
             self.assertEqual(config.timezone, 'Asia/Tokyo')
         budget_files = list((self.config.data / 'budget').glob('????-??-??.json'))
         self.assertEqual(len(budget_files), 1)
