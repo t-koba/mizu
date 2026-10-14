@@ -260,11 +260,22 @@ class QueueTests(Fixture):
 
     def test_fail_fast_cannot_bypass_sleeping_ticket_even_with_a_free_slot(self):
         self.tune(parallel_runs=1, idle_seconds=30)
+        enqueued = threading.Event()
+        sleeping = threading.Event()
+        class WaitSignal(threading.Event):
+            def wait(self, timeout=None):
+                sleeping.set()
+                return super().wait(timeout)
+        stop = WaitSignal()
+        original_enqueue = _Queue._enqueue
+        def enqueue_and_signal(queue_obj, tickets):
+            original_enqueue(queue_obj, tickets)
+            enqueued.set()
         with self.raw_slots():
-            thread, stop, outcome = self.waiter()
-            self.until(lambda: len(self.tickets()) == 1)
-            # Force deterministic sleep before freeing capacity.
-            time.sleep(0.05)
+            with patch.object(_Queue, '_enqueue', enqueue_and_signal):
+                thread, stop, outcome = self.waiter(stop=stop)
+                self.assertTrue(enqueued.wait(5), 'waiting caller did not serialize its ticket')
+                self.assertTrue(sleeping.wait(5), 'waiting caller did not enter its retry sleep')
         with self.assertRaises(Busy), slot(self.config):
             pass
         with self.assertRaises(Busy), admission(self.config, wait=False):
