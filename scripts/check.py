@@ -239,20 +239,19 @@ def main():
                 'skipped': int(re.search(r'^# skipped (\d+)', output, re.M).group(1)) if re.search(r'^# skipped (\d+)', output, re.M) else 0}
     # Timestamped verbose progress: on a timeout the killed step leaves the
     # unfinished test as the last timestamped line in the live log.
-    # Step budget 840 s: the suite measured 403-510 s on Windows
-    # legs (775 tests) at b80b2379, but on 2026-10-11 the slowest
-    # windows-latest leg hit the 780 s budget with every executed test
-    # passing (steady ~1 s/test progress to the kill), so 840 s restores
-    # headroom while staying inside the 1200 s job timeout; a true hang
-    # still dies here with per-line arrival times as evidence, not a
-    # silent raise.
+    # Step budget 1000 s: the 2026-10-14 windows-latest/Python 3.11
+    # leg hit 840 s while progress was still reaching
+    # test_vcs_ci.CiStatusTests.test_poll_disabled_adapter_never_polls;
+    # no final test summary was available. The 1000 s cap leaves 200 s
+    # within the 1200 s job timeout for setup and later checks, while a
+    # true hang still leaves timestamped per-test progress as evidence.
     # The child owns structured exception metadata. Its new sidecar is private
     # and deleted even on timeout; no failure/timeout details parse raw output.
     with tempfile.TemporaryDirectory(prefix='mizu-unittest-') as temporary:
         sidecar = Path(temporary) / 'failures.jsonl'
         execute('python-unit-and-contract-tests',
                 [sys.executable, '-u', str(ROOT / 'scripts/check_unittest.py'), str(sidecar)],
-                count=unittest_counts, failure_summary=lambda: unittest_failure_summary(sidecar), timeout=840)
+                count=unittest_counts, failure_summary=lambda: unittest_failure_summary(sidecar), timeout=1000)
     if not shutil.which('node'):
         checks.append({'name': 'node-available', 'status': 'fail'})
     # bash is a POSIX convenience for shell-syntax checks, not a runtime

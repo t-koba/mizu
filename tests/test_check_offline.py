@@ -368,7 +368,7 @@ class UnittestFailureSummaryTests(unittest.TestCase):
                 entry = next(c for c in receipt['checks'] if c['name'] == 'python-unit-and-contract-tests')
                 details = entry['details']
                 self.assertEqual(entry['status'], 'fail')
-                self.assertEqual(budgets[0], 840)
+                self.assertEqual(budgets[0], 1000)
                 self.assertEqual(entry['tests'], {'run': 3, 'failed': 3, 'skipped': 1})
                 self.assertFalse(paths[0].parent.exists(), 'private sidecar directory must be cleaned')
                 self.assertNotIn('raw_fixture_value', details)
@@ -381,7 +381,7 @@ class UnittestFailureSummaryTests(unittest.TestCase):
                 else:
                     self.assertIn('unittest failure details unavailable', details)
                 if timed_out:
-                    self.assertIn('timed out after 840 s', details)
+                    self.assertIn('timed out after 1000 s', details)
                 self.assertIn('[+', output.getvalue(), 'live timestamped output is still relayed')
 
 
