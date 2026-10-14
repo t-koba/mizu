@@ -166,6 +166,10 @@ class EngineTests(Fixture):
         result = Engine(self.config, driver=ScriptDriver()).run(self.project, "worker")
         self.assertEqual(result["status"], "completed")
         self.assertNotEqual(self.project.snapshots.get()["id"], old)
+        started = read_json(self.project.root / "runs" / result["run"] / "started.json")
+        self.assertIs(type(started["admission_elapsed_seconds"]), float)
+        self.assertGreaterEqual(started["admission_elapsed_seconds"], 0.0)
+        self.assertLess(started["admission_elapsed_seconds"], 5.0)
         self.assertFalse(list((self.project.root / "active").glob("*.json")))
 
     def test_failure_preserves_uncommitted_changes_not_snapshot(self):

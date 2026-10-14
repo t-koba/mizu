@@ -135,13 +135,13 @@ class QueueTests(Fixture):
                 process.join(5)
             process.close()
 
-    def waiter(self, *, resources=(), stop=None, check=None, config=None):
+    def waiter(self, *, resources=(), stop=None, check=None, config=None, capture_elapsed=False):
         stop = stop if stop is not None else threading.Event()
         result = []
         def work():
             try:
-                with admission(config or self.config, resources, wait=True, stop=stop, check=check):
-                    result.append('admitted')
+                with admission(config or self.config, resources, wait=True, stop=stop, check=check) as elapsed:
+                    result.append(('admitted', elapsed) if capture_elapsed else 'admitted')
             except BaseException as exc:
                 result.append(exc)
         thread = threading.Thread(target=work)
@@ -204,6 +204,19 @@ class QueueTests(Fixture):
         self.assertEqual(self.active.value, 0)
         with self.raw_slots():
             pass
+
+    def test_admission_yields_elapsed_time_after_waiting(self):
+        self.tune(parallel_runs=1, idle_seconds=0.01)
+        with self.raw_slots():
+            thread, stop, outcome = self.waiter(capture_elapsed=True)
+            self.until(lambda: len(self.tickets(synchronized=True)) == 1)
+            time.sleep(0.05)
+        thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(outcome), 1)
+        self.assertEqual(outcome[0][0], 'admitted')
+        self.assertGreaterEqual(outcome[0][1], 0.05)
+        self.assertLess(outcome[0][1], 5)
 
     def test_success_releases_single_pending_place_before_caller_cleanup(self):
         self.tune(parallel_runs=1)

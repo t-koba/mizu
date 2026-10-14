@@ -235,7 +235,8 @@ def admission(config, resources=(), *, wait=False, stop=None, check=None):
     """
     stop = stop if stop is not None else threading.Event()
     window = max(0, config.limits.busy_retry_seconds) if wait else 0
-    deadline = time.monotonic() + window
+    admission_started = time.monotonic()
+    deadline = admission_started + window
     queue = _Queue(config, resources)
     retrying = False
     try:
@@ -265,7 +266,7 @@ def admission(config, resources=(), *, wait=False, stop=None, check=None):
                     check()
                 if retrying and time.monotonic() >= deadline:
                     raise Busy("Execution admission wait expired")
-                yield
+                yield max(0.0, time.monotonic() - admission_started)
             return
     finally:
         queue.close()

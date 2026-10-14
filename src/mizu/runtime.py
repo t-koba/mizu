@@ -2083,13 +2083,13 @@ class Engine:
             raise InfraExceeded("Free disk space is below the configured reserve")
 
     def _admit(self, project: Project, role_name: str, role: Role, stack: contextlib.ExitStack,
-               *, wait: bool) -> None:
-        """Hold dispatch locks only after bounded FIFO admission; see admission.py."""
+               *, wait: bool) -> float:
+        """Hold dispatch locks after FIFO admission and return its elapsed time."""
         resources = [project.root / "locks" / f"run-{role_name}.lock"]
         if role.workspace == "write":
             resources.append(project.root / "locks" / "workspace.lock")
-        stack.enter_context(admission(self.config, resources, wait=wait, stop=self.stop,
-                                      check=lambda: self._check_admission(project)))
+        return stack.enter_context(admission(self.config, resources, wait=wait, stop=self.stop,
+                                             check=lambda: self._check_admission(project)))
 
     def run(self, project: Project, role_name: str, *, attributes=None, retry_busy: bool = False,
                 event_trigger: bool = False) -> dict:
@@ -2097,7 +2097,7 @@ class Engine:
             raise Denied("Role is not enabled for this project")
         role = self.config.roles[role_name]
         with contextlib.ExitStack() as stack:
-            self._admit(project, role_name, role, stack, wait=retry_busy)
+            admission_elapsed = self._admit(project, role_name, role, stack, wait=retry_busy)
             project.insights.ingest_editor(keep_days=project.config.limits.retention_days)
             snapshot = project.snapshots.get()
             cursor = read_json(project.root / "observed" / f"{role_name}.json", {})
@@ -2213,6 +2213,7 @@ class Engine:
                         pass
                 write_json(run_dir / "started.json", {"run": run_id, "role": role_name,
                             "snapshot": snapshot["id"], "started_at": now(),
+                            "admission_elapsed_seconds": round(admission_elapsed, 6),
                             "admission": admission, "decision_events": len(decision_events),
                             "wait_events": len(wait_events),
                             "obligation_events": len(obligations),
