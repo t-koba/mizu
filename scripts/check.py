@@ -60,6 +60,45 @@ def _allow_list(value: str) -> frozenset:
     return frozenset(part.strip() for part in value.split(',') if part.strip())
 
 
+def unittest_failure_summary(output: str) -> str:
+    """Summarize unittest failures without echoing assertion values or host paths.
+
+    The CI log adapter exposes only a bounded tail. Test names, repository-local
+    frame locations, and exception classes are enough to locate a failure while
+    keeping temporary paths and arbitrary assertion data out of the summary.
+    """
+    import re
+    headers = list(re.finditer(r'^(FAIL|ERROR): (.+)$', output, re.M))
+    summaries = []
+    for index, header in enumerate(headers):
+        end = headers[index + 1].start() if index + 1 < len(headers) else len(output)
+        block = output[header.end():end]
+        location = ''
+        frames = re.findall(r'^\s*File "([^"]+)", line (\d+), in [^\r\n]+$', block, re.M)
+        for filename, line in reversed(frames):
+            normalized = filename.replace('\\', '/')
+            for directory in ('tests/', 'src/', 'scripts/', 'adapters/'):
+                marker = '/' + directory
+                position = normalized.rfind(marker)
+                if position >= 0:
+                    normalized = normalized[position + 1:]
+                    break
+                if normalized.startswith(directory):
+                    break
+            else:
+                normalized = normalized.rsplit('/', 1)[-1]
+            if normalized.startswith(('tests/', 'src/', 'scripts/', 'adapters/')):
+                location = f' @ {normalized}:{line}'
+                break
+        error_type = ''
+        for line in block.splitlines():
+            match = re.match(r'^\s*([A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception|Failure))(?::|$)', line)
+            if match:
+                error_type = f' [{match.group(1)}]'
+        summaries.append(f'{header.group(1)} {header.group(2)}{location}{error_type}'[:500])
+    return '; '.join(summaries)[:1500]
+
+
 def durable_deps_status(adapter: Path) -> tuple:
     """Check pinned adapter dependencies are installed at pinned versions.
 
@@ -112,7 +151,7 @@ def main():
     # a hung step leaves the last-running test visible, and a step timeout
     # is recorded as a structured failure with the partial output counted
     # instead of crashing the gate before the receipt is written.
-    def execute(name, command, *, count=None, timeout=600):
+    def execute(name, command, *, count=None, failure_summary=None, timeout=600):
         started = time.monotonic()
         print(f'== {name} ==', flush=True)
         chunks: list[str] = []
@@ -150,6 +189,8 @@ def main():
         text = ''.join(chunks)
         if exit_code != 0:
             status = 'fail'
+            if failure_summary is not None and not details:
+                details = failure_summary(text)
         entry = {'name': name, 'status': status,
                  'seconds': round(time.monotonic() - started, 3), 'exit_code': exit_code}
         if details:
@@ -189,7 +230,7 @@ def main():
     # still dies here with per-line arrival times as evidence, not a
     # silent raise.
     execute('python-unit-and-contract-tests', [sys.executable, '-u', '-m', 'unittest', 'discover', '-s', 'tests', '-v'],
-            count=unittest_counts, timeout=840)
+            count=unittest_counts, failure_summary=unittest_failure_summary, timeout=840)
     if not shutil.which('node'):
         checks.append({'name': 'node-available', 'status': 'fail'})
     # bash is a POSIX convenience for shell-syntax checks, not a runtime

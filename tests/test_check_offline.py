@@ -69,6 +69,43 @@ class DurableDepsProbeTests(unittest.TestCase):
         self.assertEqual((state, details), ("ready", ""))
 
 
+class UnittestFailureSummaryTests(unittest.TestCase):
+    def test_failure_summary_keeps_test_and_repo_location_but_redacts_values(self):
+        output = r"""======================================================================
+FAIL: test_expected_result (tests.test_example.ExampleTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "D:\a\mizu\mizu\tests\test_example.py", line 42, in test_expected_result
+    self.assertEqual(actual, expected)
+AssertionError: private_fixture_value
+
+----------------------------------------------------------------------
+Ran 1 test in 0.1s
+FAILED (failures=1)
+"""
+        summary = CHECK.unittest_failure_summary(output)
+        self.assertIn('FAIL test_expected_result (tests.test_example.ExampleTests)', summary)
+        self.assertIn('tests/test_example.py:42', summary)
+        self.assertIn('[AssertionError]', summary)
+        self.assertNotIn('D:/a/', summary)
+        self.assertNotIn('private_fixture_value', summary)
+
+    def test_error_and_failure_names_are_both_reported(self):
+        output = """ERROR: test_error (tests.test_example.ExampleTests)
+Traceback (most recent call last):
+  File "tests/test_example.py", line 10, in test_error
+OSError: example
+
+FAIL: test_failure (tests.test_example.ExampleTests)
+Traceback (most recent call last):
+  File "tests/test_example.py", line 20, in test_failure
+AssertionError: example
+"""
+        summary = CHECK.unittest_failure_summary(output)
+        self.assertIn('ERROR test_error (tests.test_example.ExampleTests)', summary)
+        self.assertIn('FAIL test_failure (tests.test_example.ExampleTests)', summary)
+
+
 class DurableGateEntryTests(unittest.TestCase):
     NAME = 'node-durable-contract-tests'
 
