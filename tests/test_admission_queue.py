@@ -169,25 +169,25 @@ class QueueTests(Fixture):
                 initial.enter_context(manager)
                 manager.enter_context(lock(self.config.data / 'slots' / f'{i}.lock', blocking=False))
             first, release_first, _ = self.process(0)
-            self.until(lambda: len(self.tickets()) == 1)
+            self.until(lambda: len(self.tickets(synchronized=True)) == 1)
             second, release_second, _ = self.process(1)
-            self.until(lambda: len(self.tickets()) == 2)
+            self.until(lambda: len(self.tickets(synchronized=True)) == 2)
             overflow, _, _ = self.process(2)
             self.message(('Busy', 2))
             overflow.join(5)
-            self.assertEqual(len(self.tickets()), 2)
+            self.assertEqual(len(self.tickets(synchronized=True)), 2)
             held[0].close()
             self.message(('entered', 0))
-            self.assertEqual(len(self.tickets()), 1)
+            self.assertEqual(len(self.tickets(synchronized=True)), 1)
             with self.assertRaises(queue.Empty):
                 self.results.get(timeout=0.1)
             held[1].close()
             self.message(('entered', 1))
-            self.assertEqual(self.tickets(), [])
+            self.assertEqual(self.tickets(synchronized=True), [])
             # Both slots remain held by callers. A new ticket cannot leak a
             # third active slot, and runs after the first active caller exits.
             third, release_third, _ = self.process(3)
-            self.until(lambda: len(self.tickets()) == 1)
+            self.until(lambda: len(self.tickets(synchronized=True)) == 1)
             self.assertEqual(self.active.value, 2)
             with self.assertRaises(queue.Empty):
                 self.results.get(timeout=0.1)
@@ -200,7 +200,7 @@ class QueueTests(Fixture):
                 process.join(5)
                 self.assertFalse(process.is_alive())
                 self.assertEqual(process.exitcode, 0)
-        self.assertEqual(self.tickets(), [])
+        self.assertEqual(self.tickets(synchronized=True), [])
         self.assertEqual(self.active.value, 0)
         with self.raw_slots():
             pass
@@ -231,18 +231,18 @@ class QueueTests(Fixture):
         self.tune(parallel_runs=1)
         with self.raw_slots():
             process, _, _ = self.process(0)
-            self.until(lambda: len(self.tickets()) == 1)
-            old = self.tickets()[0]['id']
+            self.until(lambda: len(self.tickets(synchronized=True)) == 1)
+            old = self.tickets(synchronized=True)[0]['id']
             process.terminate()
             process.join(5)
             self.assertFalse(process.is_alive())
             replacement, release, _ = self.process(1)
-            self.until(lambda: len(self.tickets()) == 1 and self.tickets()[0]['id'] != old)
+            self.until(lambda: len(self.tickets(synchronized=True)) == 1 and self.tickets(synchronized=True)[0]['id'] != old)
         self.message(('entered', 1))
         release.set()
         replacement.join(5)
         self.assertFalse(replacement.is_alive())
-        self.assertEqual(self.tickets(), [])
+        self.assertEqual(self.tickets(synchronized=True), [])
         self.assertEqual(len(list((self.config.data / 'slots').glob('pending-*.lock'))), 1)
 
     def test_fail_fast_cannot_bypass_sleeping_ticket_even_with_a_free_slot(self):
@@ -279,19 +279,19 @@ class QueueTests(Fixture):
                 path = workspace_lock if blocked == 'workspace' else role_lock
                 with lock(path, blocking=False):
                     thread, stop, outcome = self.waiter(resources=resources)
-                    self.until(lambda: len(self.tickets()) == 1)
+                    self.until(lambda: len(self.tickets(synchronized=True)) == 1)
                     with self.raw_slots():
                         pass  # Sleeping writer consumes no active capacity.
                     if blocked == 'workspace':
                         with lock(role_lock, blocking=False):
                             pass  # Partial acquisition also released.
                     with admission(self.config, (self.project.root / 'locks/run-reporter.lock',), wait=True):
-                        self.assertEqual(len(self.tickets()), 1)
+                        self.assertEqual(len(self.tickets(synchronized=True)), 1)
                     self.assertTrue(thread.is_alive())
                 thread.join(5)
                 self.assertFalse(thread.is_alive())
                 self.assertEqual(outcome, ['admitted'])
-                self.assertEqual(self.tickets(), [])
+                self.assertEqual(self.tickets(synchronized=True), [])
                 with self.raw_slots(), lock(role_lock, blocking=False), lock(workspace_lock, blocking=False):
                     pass
 
@@ -303,7 +303,7 @@ class QueueTests(Fixture):
                 pass
             self.assertGreaterEqual(time.monotonic() - started, 0.1)
             self.assertEqual(self.tickets(), [])
-            self.tune(idle_seconds=30)
+            self.tune(idle_seconds=30, busy_retry_seconds=15)
             thread, stop, outcome = self.waiter()
             self.until(lambda: len(self.tickets()) == 1)
             stop.set()
@@ -327,7 +327,7 @@ class QueueTests(Fixture):
         # the list. A subsequent admission must reap it *before* cap/order.
         with self.raw_slots():
             thread, stop, outcome = self.waiter()
-            self.until(lambda: len(self.tickets()) == 1)
+            self.until(lambda: len(self.tickets(synchronized=True)) == 1)
             # The waiter may still be finishing the enqueue transaction
             # after its row becomes visible. Wait for that transaction, then
             # hold the lock so close() deterministically exercises its
