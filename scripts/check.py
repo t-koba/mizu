@@ -63,9 +63,9 @@ def _allow_list(value: str) -> frozenset:
 def unittest_failure_summary(output: str) -> str:
     """Summarize unittest failures without echoing assertion values or host paths.
 
-    The CI log adapter exposes only a bounded tail. Test names, repository-local
-    frame locations, and exception classes are enough to locate a failure while
-    keeping temporary paths and exception values out of the summary.
+    The CI log adapter exposes only a bounded tail. Stable test IDs,
+    repository-local frame locations, and exception classes locate failures;
+    subTest parameters, temporary paths, and exception values stay out.
     """
     import re
     headers = list(re.finditer(r'^(FAIL|ERROR): (.+)$', output, re.M))
@@ -73,6 +73,9 @@ def unittest_failure_summary(output: str) -> str:
     for index, header in enumerate(headers):
         end = headers[index + 1].start() if index + 1 < len(headers) else len(output)
         block = output[header.end():end]
+        test_name, separator, _ = header.group(2).partition(') (')
+        if separator:
+            test_name += ')'
         location = ''
         frame_re = re.compile(r'  File "([^"]+)", line (\d+), in [^\r\n]+')
         frame_matches = []
@@ -112,7 +115,7 @@ def unittest_failure_summary(output: str) -> str:
             if normalized.startswith(('tests/', 'src/', 'scripts/', 'adapters/')):
                 location = f' @ {normalized}:{line}'
                 break
-        summaries.append(f'{header.group(1)} {header.group(2)}{location}{error_type}'[:500])
+        summaries.append(f'{header.group(1)} {test_name}{location}{error_type}'[:500])
     return '; '.join(summaries)[:1500]
 
 

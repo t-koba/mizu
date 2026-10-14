@@ -132,6 +132,21 @@ private_fixture_value
         self.assertNotIn('test_fake.py:55', summary)
         self.assertNotIn('fixture_marker', summary)
 
+    def test_subtest_parameter_values_are_not_reported(self):
+        import io
+        class ParamTest(unittest.TestCase):
+            def test_parameter(self):
+                with self.subTest(synthetic_marker='fixture_value'):
+                    self.fail('assertion detail')
+        stream = io.StringIO()
+        result = unittest.TextTestRunner(stream=stream, verbosity=2).run(
+            unittest.defaultTestLoader.loadTestsFromTestCase(ParamTest))
+        self.assertEqual(len(result.failures), 1)
+        summary = CHECK.unittest_failure_summary(stream.getvalue())
+        self.assertIn('test_parameter', summary)
+        self.assertNotIn('fixture_value', summary)
+        self.assertNotIn('assertion detail', summary)
+
     def test_error_and_failure_names_are_both_reported(self):
         output = """ERROR: test_error (tests.test_example.ExampleTests)
 Traceback (most recent call last):
