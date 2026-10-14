@@ -519,7 +519,7 @@ class DeadlineTests(Fixture):
         driver = UnsealedDriver(work)
         original = write_json
         def fail_bounded_result(path, value, *args, **kwargs):
-            if str(path).endswith("/result.json") and isinstance(value, dict) and value.get("bound") == "deadline":
+            if path.name == "result.json" and isinstance(value, dict) and value.get("bound") == "deadline":
                 raise OSError(errno.EIO, "synthetic bounded-record storage fault")
             return original(path, value, *args, **kwargs)
         with patch("mizu.runtime.write_json", side_effect=fail_bounded_result), \
