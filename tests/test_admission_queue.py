@@ -152,6 +152,18 @@ class QueueTests(Fixture):
         self.addCleanup(cleanup)
         return thread, stop, result
 
+    def queued_waiter(self, **kwargs):
+        """Start a blocked waiter and signal only after its ticket is written."""
+        written = threading.Event()
+        original_enqueue = _Queue._enqueue
+        def enqueue_and_signal(queue_obj, tickets):
+            original_enqueue(queue_obj, tickets)
+            written.set()
+        with patch.object(_Queue, '_enqueue', enqueue_and_signal):
+            thread, stop, result = self.waiter(**kwargs)
+            self.assertTrue(written.wait(5), 'waiting caller did not serialize its ticket')
+        return thread, stop, result
+
     def raw_slots(self):
         stack = contextlib.ExitStack()
         try:
@@ -328,8 +340,7 @@ class QueueTests(Fixture):
             self.assertGreaterEqual(time.monotonic() - started, 0.1)
             self.assertEqual(self.tickets(), [])
             self.tune(idle_seconds=30, busy_retry_seconds=15)
-            thread, stop, outcome = self.waiter()
-            self.until(lambda: len(self.tickets()) == 1)
+            thread, stop, outcome = self.queued_waiter()
             stop.set()
             thread.join(5)
             self.assertIsInstance(outcome[0], Busy)
@@ -339,8 +350,7 @@ class QueueTests(Fixture):
                 if cancelled.is_set():
                     raise Cancelled('offline admission cancellation')
             self.tune()
-            thread, _, outcome = self.waiter(check=check)
-            self.until(lambda: len(self.tickets()) == 1)
+            thread, _, outcome = self.queued_waiter(check=check)
             cancelled.set()
             thread.join(5)
             self.assertIsInstance(outcome[0], Cancelled)
