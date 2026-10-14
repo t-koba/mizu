@@ -287,8 +287,16 @@ class SelectionTests(SelectionFixture):
         def callback(ctx, prompt, profile):
             raise ModelFailure('custom', code='synthetic-exhausted')
         driver = ScriptDriver(callback)
-        with patch('mizu.selection.time.time', return_value=1000):
-            failed = Engine(self.config, driver=driver).run(self.project, role.name)
+        recorded = []
+        original_result = State.result
+        def count_result(state, decision, **kwargs):
+            if kwargs.get('error') is not None:
+                recorded.append(decision['profile'])
+            return original_result(state, decision, **kwargs)
+        with patch.object(State, 'result', count_result):
+            with patch('mizu.selection.time.time', return_value=1000):
+                failed = Engine(self.config, driver=driver).run(self.project, role.name)
+        self.assertEqual(recorded, ['primary', 'alternate'])
         # Both candidates fail under a matching rule: exactly two attempts,
         # then fail as before with the superseded attempt audited.
         self.assertEqual(failed['status'], 'deferred')
@@ -328,8 +336,16 @@ class SelectionTests(SelectionFixture):
         def callback(ctx, prompt, profile):
             raise ModelFailure('custom', code='unrelated-boom')
         driver = ScriptDriver(callback)
-        with self.assertRaises(ModelFailure):
-            Engine(self.config, driver=driver).run(self.project, role.name)
+        recorded = []
+        original_result = State.result
+        def count_result(state, decision, **kwargs):
+            if kwargs.get('error') is not None:
+                recorded.append(decision['profile'])
+            return original_result(state, decision, **kwargs)
+        with patch.object(State, 'result', count_result):
+            with self.assertRaises(ModelFailure):
+                Engine(self.config, driver=driver).run(self.project, role.name)
+        self.assertEqual(recorded, ['primary'])
         self.assertEqual(len(driver.calls), 1)
         self.assertEqual(State(self.config).read()['blocks'], {})
 

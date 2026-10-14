@@ -1954,6 +1954,8 @@ class Engine:
             selection_role = None
             selection_retries: list = []
             max_selection_attempts = 1
+            selection_attempt = 0
+            recorded_selection_failure = None
             model_result = None
             result = None
             workspace = project.workspace if role.workspace == "write" else run_dir / "input"
@@ -2109,6 +2111,12 @@ class Engine:
                             from .selection import State as _FallbackState
                             matched = _FallbackState(self.config).result(
                                 decision, run=run_id, error=exc)
+                            recorded_selection_failure = {
+                                "attempt": selection_attempt,
+                                "decision": digest(canonical(decision)),
+                                "error": exc,
+                                "action": matched,
+                            }
                         if not matched:
                             raise
                         fallback_attempt += 1
@@ -2130,6 +2138,7 @@ class Engine:
                             # keeping its decision for the failure record.
                             raise exc
                         decision = reselected
+                        selection_attempt += 1
                         write_json(run_dir / "selection.json", decision)
                         role = dataclasses.replace(selection_role, profile=decision["profile"],
                                                    selector="")
@@ -2271,8 +2280,21 @@ class Engine:
                         exc = ProtocolError("Local admission failed: " + context.admission_error)
                 handled = None
                 if decision and decision.get("profile") and isinstance(exc, ModelFailure) and context is not None and not context.cancelled():
-                    from .selection import State
-                    handled = State(self.config).result(decision, run=run_id, error=exc)
+                    identity = {
+                        "attempt": selection_attempt,
+                        "decision": digest(canonical(decision)),
+                    }
+                    if (isinstance(recorded_selection_failure, dict) and
+                            recorded_selection_failure.get("error") is exc and
+                            all(recorded_selection_failure.get(key) == value
+                                for key, value in identity.items())):
+                        # The fallback loop already applied this exact failure
+                        # before reselection. Reuse its result rather than
+                        # extending a cooldown/block with a second timestamp.
+                        handled = recorded_selection_failure["action"]
+                    else:
+                        from .selection import State
+                        handled = State(self.config).result(decision, run=run_id, error=exc)
                 # Publication is an observed fact, even if subsequent work failed.
                 with contextlib.suppress(OSError, ValueError, TypeError):
                     publication = "unknown"
