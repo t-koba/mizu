@@ -1,6 +1,7 @@
 """Recovery contract with synthetic drivers only; no live provider/auth calls."""
 import copy
 import dataclasses
+import datetime as dt
 import json
 import os
 import sys
@@ -382,13 +383,18 @@ class RecoveryProbeTests(SelectionFixture):
 
     def test_fresh_launch_limits_and_budget_reach_context_and_driver(self):
         self.setup_probe()
-        fresh = dataclasses.replace(self.config, timezone='Asia/Tokyo',
-                                   limits=dataclasses.replace(self.config.limits, requests_per_run=1,
-                                                              daily_requests=7, shared_daily_requests=8, run_seconds=9))
-        driver = ProbeDriver()
-        with patch('mizu.probes.driver_for', return_value=driver) as choose:
-            result = service_due(self.config, 'sample', 'worker', threading.Event(),
-                                 reload_config=lambda: fresh, at=1010)
+        # This test covers fresh-config propagation, not host tzdata. Use a
+        # deterministic Tokyo offset so the contract also runs on Windows,
+        # where the optional IANA database may not be installed.
+        test_zone = dt.timezone(dt.timedelta(hours=9), 'Asia/Tokyo')
+        with patch('mizu.config.ZoneInfo', return_value=test_zone):
+            fresh = dataclasses.replace(self.config, timezone='Asia/Tokyo',
+                                       limits=dataclasses.replace(self.config.limits, requests_per_run=1,
+                                                                  daily_requests=7, shared_daily_requests=8, run_seconds=9))
+            driver = ProbeDriver()
+            with patch('mizu.probes.driver_for', return_value=driver) as choose:
+                result = service_due(self.config, 'sample', 'worker', threading.Event(),
+                                     reload_config=lambda: fresh, at=1010)
         self.assertEqual(result['status'], 'success')
         launched_config = choose.call_args.args[0]
         context = driver.calls[0][0]
