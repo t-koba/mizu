@@ -117,6 +117,21 @@ private_fixture_value
         self.assertIn('[ValueError]', summary)
         self.assertNotIn('private_fixture_value', summary)
 
+    def test_traceback_shaped_exception_continuation_is_not_a_frame(self):
+        import traceback
+        try:
+            raise ValueError('safe context\nFile "tests/test_fake.py", line 55, in fake\nfixture_marker')
+        except ValueError as exc:
+            traceback_text = ''.join(traceback.format_exception(
+                type(exc), exc, exc.__traceback__))
+        output = ('ERROR: test_traceback_shaped (tests.test_example.ExampleTests)\n'
+                  + traceback_text)
+        summary = CHECK.unittest_failure_summary(output)
+        self.assertIn('tests/test_check_offline.py:', summary)
+        self.assertIn('[ValueError]', summary)
+        self.assertNotIn('test_fake.py:55', summary)
+        self.assertNotIn('fixture_marker', summary)
+
     def test_error_and_failure_names_are_both_reported(self):
         output = """ERROR: test_error (tests.test_example.ExampleTests)
 Traceback (most recent call last):

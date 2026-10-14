@@ -74,10 +74,30 @@ def unittest_failure_summary(output: str) -> str:
         end = headers[index + 1].start() if index + 1 < len(headers) else len(output)
         block = output[header.end():end]
         location = ''
-        frame_matches = list(re.finditer(
-            r'^[ \t]*File "([^"]+)", line (\d+), in [^\r\n]+$', block, re.M))
-        frames = [(frame.group(1), frame.group(2)) for frame in frame_matches]
-        for filename, line in reversed(frames):
+        frame_re = re.compile(r'  File "([^"]+)", line (\d+), in [^\r\n]+')
+        frame_matches = []
+        error_type = ''
+        in_traceback = False
+        # Parse only the initial traceback stack, stopping at its exception
+        # header: message continuations can contain frame-shaped text.
+        for line in block.splitlines():
+            if not in_traceback:
+                if line in ('Traceback (most recent call last):',
+                            'Exception Group Traceback (most recent call last):'):
+                    in_traceback = True
+                continue
+            frame = frame_re.fullmatch(line)
+            if frame:
+                frame_matches.append((frame.group(1), frame.group(2)))
+                continue
+            if not line.strip() or line[0].isspace():
+                continue
+            if frame_matches:
+                match = re.fullmatch(r'([A-Za-z_][A-Za-z0-9_.]*)(?::.*)?', line)
+                if match:
+                    error_type = f' [{match.group(1)}]'
+            break
+        for filename, line in reversed(frame_matches):
             normalized = filename.replace('\\', '/')
             for directory in ('tests/', 'src/', 'scripts/', 'adapters/'):
                 marker = '/' + directory
@@ -91,18 +111,6 @@ def unittest_failure_summary(output: str) -> str:
                 normalized = normalized.rsplit('/', 1)[-1]
             if normalized.startswith(('tests/', 'src/', 'scripts/', 'adapters/')):
                 location = f' @ {normalized}:{line}'
-                break
-        error_type = ''
-        if frame_matches:
-            # The exception header is the first unindented line after the
-            # final traceback frame. Do not scan message continuation lines:
-            # they can contain arbitrary values that resemble class names.
-            for line in block[frame_matches[-1].end():].splitlines():
-                if not line.strip() or line[0].isspace():
-                    continue
-                match = re.fullmatch(r'([A-Za-z_][A-Za-z0-9_.]*)(?::.*)?', line)
-                if match:
-                    error_type = f' [{match.group(1)}]'
                 break
         summaries.append(f'{header.group(1)} {header.group(2)}{location}{error_type}'[:500])
     return '; '.join(summaries)[:1500]
