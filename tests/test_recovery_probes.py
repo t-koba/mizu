@@ -6,10 +6,12 @@ import json
 import os
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 from test_selection import SelectionFixture, specification
+from mizu.admission import admission
 from mizu.budget import Budget
 from mizu.cli import execute, parser
 from mizu.drivers import admit_invocation
@@ -113,6 +115,38 @@ class RecoveryProbeTests(SelectionFixture):
         self.store.result(self.first, run='completed', at=1001)
         self.assertEqual(read_json(self.store.path)['version'], 2)
         self.assertEqual(self.store.read()['blocks'], legacy['blocks'])
+
+    def test_fail_fast_probe_cannot_bypass_a_pending_caller(self):
+        action = self.setup_probe()
+        stop = threading.Event()
+        config = dataclasses.replace(self.config, limits=dataclasses.replace(
+            self.config.limits, idle_seconds=0.02))
+        resource = self.project.root / "locks/run-pending.lock"
+        def wait():
+            try:
+                with admission(config, (resource,), wait=True, stop=stop):
+                    pass
+            except Exception:
+                pass
+        thread = threading.Thread(target=wait)
+        try:
+            with lock(resource, blocking=False):
+                thread.start()
+                deadline = time.monotonic() + 5
+                while not read_json(config.data / "slots/queue.json", {}).get("tickets"):
+                    if time.monotonic() >= deadline:
+                        self.fail("caller did not enqueue")
+                    time.sleep(0.01)
+                result, driver = self.service(config=config)
+                self.assertEqual(result['status'], 'deferred')
+                self.assertEqual(result['reason'], 'locks_unavailable')
+                self.assertEqual(driver.calls, [])
+                self.assertTrue(active(self.contribution(action), 1011))
+        finally:
+            stop.set()
+            thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(read_json(config.data / "slots/queue.json")["tickets"], [])
 
     def test_paid_success_has_no_work_unit_side_effects(self):
         action = self.setup_probe()

@@ -284,11 +284,10 @@ class Limits:
     max_failures: int = 3
     parallel_runs: int = 4
     parallel_consults: int = 2
-    #: Bounded wait for capacity: a one-shot `mizu run` (the unit the
-    #: platform schedulers dispatch) that finds every execution slot or
-    #: role lock busy waits up to this many seconds for release instead
-    #: of dropping the scheduled unit. 0 disables the wait (fail fast as
-    #: before); draining, paused and unarmed projects never wait.
+    #: Bounded FIFO admission wait for one-shot `mizu run`; pending capacity
+    #: is derived from parallel_runs (one waiter per slot). Overflow defers
+    #: immediately. 0 disables waiting; fail-fast callers cannot bypass the
+    #: queue. Draining, paused and unarmed projects never wait.
     busy_retry_seconds: int = 300
     #: Additional finish-only turns after a normal engine return without a seal.
     missing_finish_followups: int = 1

@@ -1,6 +1,7 @@
 """Child slot lending with offline drivers and real local admission locks."""
 import dataclasses
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -84,6 +85,54 @@ class ChildSlotTests(Fixture):
                 self.assertEqual(len(driver.calls), 2)
                 with slot(config):  # Admission releases the slot after the join.
                     pass
+
+    def test_children_keep_the_single_caller_slot_while_an_outsider_is_queued(self):
+        for operation in ("consult", "delegate"):
+            with self.subTest(operation=operation):
+                config = self.configured()
+                roles = dict(config.roles)
+                roles["reporter"] = dataclasses.replace(roles["reporter"], on_change=False)
+                config = dataclasses.replace(config, roles=roles, limits=dataclasses.replace(
+                    config.limits, idle_seconds=0.02))
+                stop = threading.Event()
+                outcome, threads = [], []
+                def outsider():
+                    try:
+                        outcome.append(Engine(config, driver=ScriptDriver(), stop=stop).run(
+                            self.project, "reporter", retry_busy=True))
+                    except BaseException as exc:
+                        outcome.append(exc)
+                def work(ctx, *_):
+                    if ctx.role.name == "worker":
+                        ctx.handle(operation, self.args(operation))
+                        ctx.handle("finish", FINISH)
+                    else:
+                        thread = threading.Thread(target=outsider)
+                        threads.append(thread)
+                        thread.start()
+                        deadline = time.monotonic() + 5
+                        while not read_json(config.data / "slots/queue.json", {}).get("tickets"):
+                            if time.monotonic() >= deadline:
+                                self.fail("outsider did not enqueue")
+                            time.sleep(0.01)
+                        self.assertEqual(outcome, [])
+                        with self.assertRaises(Busy), slot(config):
+                            pass
+                        with self.assertRaises(Busy), lock(
+                                self.project.root / "locks/workspace.lock", blocking=False):
+                            pass
+                        ctx.handle("finish", FINISH)
+                try:
+                    result = Engine(config, driver=ScriptDriver(work)).run(self.project, "worker")
+                    self.assertEqual(result["status"], "completed")
+                    threads[0].join(10)
+                    self.assertFalse(threads[0].is_alive())
+                    self.assertEqual(outcome[0]["status"], "completed")
+                    self.assertEqual(read_json(config.data / "slots/queue.json")["tickets"], [])
+                finally:
+                    stop.set()
+                    for thread in threads:
+                        thread.join(5)
 
     def test_unadmitted_calls_fail_before_capture_or_inference_even_with_free_slots(self):
         for parallel_runs in (1, 4):

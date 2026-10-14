@@ -267,6 +267,55 @@ bounds enclose the entire query/turn, including tools; they do not claim to time
 every opaque provider HTTP subcall.
 Consultation and delegation lend the already admitted caller's execution slot
 while it joins; no additional slot is acquired, even with `parallel_runs = 1`.
+
+Caller admission uses a bounded FIFO list in `data/slots/queue.json`, protected
+by a short, nonblocking `queue.lock` transaction. The pending cap is derived
+from `parallel_runs` (one waiter per configured slot), separate from the active
+`N.lock` file-lock cap. Only retrying callers enqueue; overflow and fail-fast
+contention remain `Busy` infrastructure deferrals. A retrying ticket may skip
+older tickets whose role/workspace locks are unavailable, but never a ready
+one. Skipped tickets retain their original FIFO position. Fail-fast callers,
+including recovery probes, refuse admission while any live ticket is pending.
+
+Waiting holds only a pending-liveness lock, never role, workspace or slot
+locks. Before attempting admission and after acquiring dispatch locks, normal
+control, stop, budget and disk guards are checked afresh; snapshots, triggers
+and selectors are still evaluated after admission, not serialized in tickets.
+The queue transaction performs no model calls or policy selection. Pending
+lock files use fixed indices and are never unlinked; the kernel releases them
+on process death. Successful dispatch removes the ticket and releases its
+pending lock within the same queue transaction, so the pending place is
+immediately reusable. Timeout, stop and errors invalidate the ticket by
+releasing that lock; removal is immediate if the queue guard is available,
+otherwise the next transaction reaps the inactive record before ordering or
+capacity checks. No PID-reuse test or provider-cache TTL is needed.
+
+Queue state is local coordination data, not authority: version 1 contains only
+`version` and FIFO `tickets`; each ticket contains a unique 32-character lowercase
+hex `id`, a unique integer `owner` in `[0, parallel_runs)`, and zero to two
+`resources`. Resources are canonical `project/locks/run-role.lock` or
+`project/locks/workspace.lock` names relative to `data/projects`, with project
+and role using the normal identifier schema (at most 63 characters). Absolute
+paths, traversal, aliases and other lock names are invalid. Ticket count and
+the file read/parser byte bound are derived from `parallel_runs` and the largest
+canonical ticket. Queue state is opened nonblocking and without following the
+final symlink where the OS supports those flags; `fstat` must identify a regular
+file before any read. FIFOs and other special files fail closed with generic
+`Busy`, as do open/read errors (a missing state file alone means an empty queue).
+On systems without `O_NOFOLLOW` (notably Windows), a pre-open `lstat` rejects
+existing links and special files, but cannot prevent a concurrent replacement
+with a symlink; there is no portable atomic no-follow/nonblocking open there.
+The local data directory and its parent paths must remain operator-controlled.
+The opened file's size is checked against the byte bound
+before reading; individual reads request at most 65,536 bytes rather than
+allocating for the potentially enormous configured theoretical bound. Reading
+stops at EOF or after at most the byte bound plus one overflow-detection byte,
+also rejecting growth after the size check before parsing. This adds no separate
+pending-cap or total-state-byte policy; memory usage still scales with actual
+state bytes. Oversized, unreadable or malformed state fails closed with `Busy`
+before liveness or resource probes or queue rewrites. This is local filesystem
+coordination, not a remote or network-filesystem scheduler. It does not rank cache affinity, preempt a
+running driver, or change caller slot lending or writer workspace ownership.
 Only the live `Engine.run` caller owns that lease; unadmitted calls fail with
 `Busy` before child inference, and children cannot lend onward. Consultation
 fan-out stays bounded by `parallel_consults` and shares the daily budget;
