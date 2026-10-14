@@ -161,7 +161,8 @@ thinkingLevel = "off"
 [vcs]
 command = []                 # Trusted argv executable for upstream sync; JSON stdin/stdout, never a shell string. Empty disables.
 timeout_seconds = 20         # Per-invocation deadline for the adapter.
-max_bytes = 524288           # Maximum adapter response payload (512 KiB).
+max_bytes = 524288           # Maximum adapter request/response payload (512 KiB).
+diagnostic_bytes = 2048      # Model-visible stderr tail on a nonzero exit; 0 disables, maximum 8192.
 ci_branch = ""               # Authoritative CI/reporting branch exposed as ci_branch to vcs_read roles (e.g. "mizu"); only this branch wakes a parked writer, empty disables wake and exposure.
 ci_rewake_seconds = 1800     # Unchanged-red re-wake interval in seconds (60-86400); an unchanged red still re-wakes eventually.
 retire_grant = false         # Explicit operator grant for vcs_retire; false disables retirement.
@@ -190,11 +191,13 @@ intranet = false                 # Policy-selected private-network retrieval. tr
 cache_seconds = 1800
 timeout_seconds = 20
 max_bytes = 524288
+diagnostic_bytes = 2048     # Failed configured-program stderr tail; 0 disables, maximum 8192.
 
 [materialize]
 command = []                 # Trusted argv executable for offline-input materialization; JSON stdin/stdout, never a shell string. Empty disables.
 timeout_seconds = 20         # Per-invocation deadline for the adapter.
 max_bytes = 524288           # Maximum adapter request/response payload (512 KiB).
+diagnostic_bytes = 2048      # Failed adapter stderr tail sent to the model; 0 disables, maximum 8192.
 
 [roles.worker]
 profile = "primary"

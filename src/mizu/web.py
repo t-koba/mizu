@@ -19,7 +19,9 @@ from pathlib import Path
 from . import __version__
 from .errors import Denied
 from .fs import canonical, digest, now, read_json, write_json
-from .process import run
+from .process import (
+    ADAPTER_DIAGNOSTIC_BYTES_DEFAULT, adapter_failure_diagnostic, run,
+)
 
 #: Retained search candidates across adapter and feeds. Matches the tool
 #: page limit so explicit paging can walk everything the sources returned.
@@ -156,7 +158,9 @@ def decider_allows(settings: dict, *, url: str, host: str, role: str,
     Schema: stdin ``{"url", "host", "role", "capability", "hop", "method"}``;
     stdout must be a JSON object with ``"allow"`` boolean. Bounds: deadline
     ``timeout_seconds``, payload ``max_bytes``. Trust: operator-owned argv,
-    never model input. Failure: anything but an explicit ``true`` denies.
+    never model input. Failure: anything but explicit ``true`` denies; a
+    normally exited nonzero command includes the configured bounded stderr
+    tail, while a valid denial remains a plain fail-closed refusal.
     """
     command = settings.get("destination_command", [])
     if not command:
@@ -166,6 +170,11 @@ def decider_allows(settings: dict, *, url: str, host: str, role: str,
                              "capability": capability, "hop": hop, "method": method})
         result = run(list(command), timeout=settings["timeout_seconds"],
                      maximum=settings["max_bytes"], input_data=payload)
+        if result.reason == "exited" and type(result.exit_code) is int and result.exit_code != 0:
+            diagnostic = adapter_failure_diagnostic(
+                result, source="web destination", maximum_bytes=settings.get(
+                    "diagnostic_bytes", ADAPTER_DIAGNOSTIC_BYTES_DEFAULT))
+            raise Denied(f"Destination decider refused: {host}{diagnostic}")
         if result.exit_code != 0 or result.reason != "exited":
             return False
         data = json.loads(result.stdout)
@@ -484,8 +493,10 @@ class Web:
         its per-feed bound, or feed matches exceed the remaining slots. The
         adapter keeps ranking priority: its results come first, then feed
         matches fill the remaining slots. Trust: external-untrusted. Retry: per-feed
-        best-effort, errors listed. Evidence: source_receipt per feed result.
-        Failure: Denied for bad query/adapter shape. One non-HTTPS adapter
+        best-effort, errors listed. A normally exited nonzero search command may
+        include the configured bounded stderr tail, labelled external-untrusted.
+        Evidence: source_receipt per feed result. Failure: Denied for bad
+        query/adapter shape. One non-HTTPS adapter
         row never fails the whole call: like feed links, it is dropped so the
         remaining results still return (fetching a kept URL still needs its
         own allowlist grant).
@@ -498,7 +509,10 @@ class Web:
                          maximum=self.settings["max_bytes"],
                          input_data=json.dumps({"query": query}).encode() + b"\n")
             if result.exit_code != 0 or result.reason != "exited":
-                raise Denied("Configured search program failed")
+                diagnostic = adapter_failure_diagnostic(
+                    result, source="web search", maximum_bytes=self.settings.get(
+                        "diagnostic_bytes", ADAPTER_DIAGNOSTIC_BYTES_DEFAULT))
+                raise Denied(f"Configured search program failed{diagnostic}")
             data = json.loads(result.stdout)
             if not isinstance(data, dict) or not isinstance(data.get("results"), list):
                 raise Denied("Search adapter must return a JSON object with a results array")

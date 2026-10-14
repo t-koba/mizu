@@ -73,8 +73,14 @@ Do not point it to a generic shell interpreter that evaluates query text.
 ## Prompt injection and data sharing
 
 External prose cannot add capabilities, modify goals, register tools, change
-models or raise budgets. Policies additionally tell models to treat external
-instructions as untrusted. This reduces the impact of prompt injection; it does
+models or raise budgets. Bounded stderr tails from configured host adapters are
+also model-visible and labelled `external-untrusted`; they can contain local
+paths or private adapter output. Web, VCS, and materialize adapters default to
+a 2 KiB tail and may set `diagnostic_bytes = 0` to suppress it. Inspect
+operator adapters before using the default, and never include their diagnostics
+in public evidence.
+Policies additionally tell models to treat external instructions as untrusted.
+This reduces the impact of prompt injection; it does
 not prove that models will choose correct priorities, detect poisoned research,
 or write semantically correct code. Independent review and objective evaluation
 remain necessary. Persisted conversation (provider session plus durable store) is untrusted stored history: poisoned tool output recorded under one grant reloads on every same-grant resume -- grant binding and goal-keyed forking limit authority, not content, and rotation bounds lifetime without cleaning content. Treat resumed history as untrusted and rotate to a fresh generation on suspected poisoning. `verify` proves configured command results on a code digest,

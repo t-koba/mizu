@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .errors import ConfigError
 from .fs import ID
+from .process import ADAPTER_DIAGNOSTIC_BYTES_DEFAULT, ADAPTER_DIAGNOSTIC_BYTES_MAX
 CAPABILITIES = frozenset({"diff", "files", "read", "exec", "experiment", "verify", "fetch", "probe",
                           "search", "insights", "decide", "submit_insight", "revise_insight", "withdraw_insight", "attach_evidence", "consult", "delegate",
                           "report", "finish", "sync", "vcs_read", "vcs_publish",
@@ -885,11 +886,11 @@ def load(file: Path) -> Config:
             raise ConfigError(f"delegate_role is not a configured role: {delegate_role}")
     timezone = string(data.get("timezone", "UTC"), "timezone")
     web = data.get("web", {})
-    keys(web, {"hosts", "feeds", "cache_seconds", "timeout_seconds", "max_bytes", "search_command",
-               "destination_command",
-               "intranet", "probe_hosts", "probe_methods"}, "web")
+    keys(web, {"hosts", "feeds", "cache_seconds", "timeout_seconds", "max_bytes", "diagnostic_bytes",
+               "search_command", "destination_command", "intranet", "probe_hosts", "probe_methods"}, "web")
     web = {"hosts": [], "feeds": [], "cache_seconds": 1800, "timeout_seconds": 20,
-           "max_bytes": 524288, "search_command": [], "destination_command": [], "intranet": False,
+           "max_bytes": 524288, "diagnostic_bytes": ADAPTER_DIAGNOSTIC_BYTES_DEFAULT,
+           "search_command": [], "destination_command": [], "intranet": False,
            "probe_hosts": [], "probe_methods": [], **web}
     for k in ("hosts", "feeds", "search_command", "destination_command", "probe_hosts", "probe_methods"):
         strings(web[k], f"web.{k}")
@@ -903,16 +904,18 @@ def load(file: Path) -> Config:
         raise ConfigError("web.probe_methods must not contain duplicates")
     for k in ("cache_seconds", "timeout_seconds", "max_bytes"):
         number(web[k], f"web.{k}", 1, 16777216)
+    number(web["diagnostic_bytes"], "web.diagnostic_bytes", 0, ADAPTER_DIAGNOSTIC_BYTES_MAX)
     web["intranet"] = boolean(web["intranet"], "web.intranet")
     vcs = data.get("vcs", {})
-    keys(vcs, {"command", "timeout_seconds", "max_bytes", "ci_branch", "ci_rewake_seconds",
+    keys(vcs, {"command", "timeout_seconds", "max_bytes", "diagnostic_bytes", "ci_branch", "ci_rewake_seconds",
                "poll_enabled",
                "poll_interval_seconds", "poll_max_branches",
                "poll_fetch_timeout_seconds", "poll_status_timeout_seconds",
                "retire_grant", "owned_prefixes", "protected_refs",
                "close_grant", "merge_grant"}, "vcs")
     vcs = {"command": [], "timeout_seconds": 20,
-           "max_bytes": 524288, "ci_branch": "", "ci_rewake_seconds": 1800,
+           "max_bytes": 524288, "diagnostic_bytes": ADAPTER_DIAGNOSTIC_BYTES_DEFAULT,
+           "ci_branch": "", "ci_rewake_seconds": 1800,
            "poll_enabled": False,
            "poll_interval_seconds": 300, "poll_max_branches": 4,
            "poll_fetch_timeout_seconds": 30,
@@ -924,6 +927,7 @@ def load(file: Path) -> Config:
         raise ConfigError("vcs.command must be a nonempty argv array without newlines")
     for k in ("timeout_seconds", "max_bytes"):
         number(vcs[k], f"vcs.{k}", 1, 16777216)
+    number(vcs["diagnostic_bytes"], "vcs.diagnostic_bytes", 0, ADAPTER_DIAGNOSTIC_BYTES_MAX)
     vcs["ci_branch"] = string(vcs["ci_branch"], "vcs.ci_branch")
     if vcs["ci_branch"] and (len(vcs["ci_branch"]) > 256 or any(c.isspace() for c in vcs["ci_branch"])):
         raise ConfigError("vcs.ci_branch must be empty or a branch name without whitespace (at most 256 chars)")
@@ -944,13 +948,15 @@ def load(file: Path) -> Config:
     number(vcs["poll_fetch_timeout_seconds"], "vcs.poll_fetch_timeout_seconds", 1, 300)
     number(vcs["poll_status_timeout_seconds"], "vcs.poll_status_timeout_seconds", 1, 300)
     mat = data.get("materialize", {})
-    keys(mat, {"command", "timeout_seconds", "max_bytes"}, "materialize")
-    mat = {"command": [], "timeout_seconds": 20, "max_bytes": 524288, **mat}
+    keys(mat, {"command", "timeout_seconds", "max_bytes", "diagnostic_bytes"}, "materialize")
+    mat = {"command": [], "timeout_seconds": 20, "max_bytes": 524288,
+           "diagnostic_bytes": ADAPTER_DIAGNOSTIC_BYTES_DEFAULT, **mat}
     strings(mat["command"], "materialize.command")
     if mat["command"] and any(not s or "\n" in s for s in mat["command"]):
         raise ConfigError("materialize.command must be a nonempty argv array without newlines")
     for k in ("timeout_seconds", "max_bytes"):
         number(mat[k], f"materialize.{k}", 1, 16777216)
+    number(mat["diagnostic_bytes"], "materialize.diagnostic_bytes", 0, ADAPTER_DIAGNOSTIC_BYTES_MAX)
     return Config(file, path_value(string(data.get("data_dir", "~/.local/state/mizu"), "data_dir"), file.parent),
                   environments, limits, sandbox, profiles, roles, consult_role, delegate_role, timezone, web, vcs, mat,
                   strings(data.get("exclude", [".git", ".pi", ".env", ".env.*", ".venv",

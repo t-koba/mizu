@@ -66,6 +66,7 @@ class MaterializeAdapterTests(Fixture):
         # Existing configs without [materialize] keep loading, disabled.
         self.assertEqual(self.config.materialize.get("command"), [])
         self.assertEqual(self.config.materialize.get("timeout_seconds"), 20)
+        self.assertEqual(self.config.materialize.get("diagnostic_bytes"), 2048)
 
     def test_config_unknown_key_refused(self):
         text = self.file.read_text()

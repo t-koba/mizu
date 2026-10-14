@@ -10,7 +10,9 @@ external-untrusted until applied as workspace edits and verified.
 Retry/cancellation: single invocation under `timeout_seconds`; no shell retry.
 Evidence: caller binds results to digests/receipts.
 Failure: `Denied` on unconfigured adapter, oversize request, timeout,
-oversize output, nonzero exit, malformed JSON, or digest mismatch.
+oversize output, nonzero exit, malformed JSON, or digest mismatch. A normally
+exited nonzero adapter may attach the configured `diagnostic_bytes` tail of
+stderr, labelled external-untrusted; zero disables it.
 
 First use (this slice): the adapter warms host caches that are already
 mounted read-only via static `[sandbox] mounts` (e.g. a cargo/npm cache
@@ -28,7 +30,9 @@ import json
 
 from .errors import Denied
 from .fs import canonical, digest
-from .process import run
+from .process import (
+    ADAPTER_DIAGNOSTIC_BYTES_DEFAULT, adapter_failure_diagnostic, run,
+)
 
 #: Declarative request bound: a description of desired inputs, not a script.
 SPEC_MAX = 8192
@@ -43,7 +47,8 @@ def invoke(settings: dict, spec: str) -> dict:
     product, interpreted by the operator adapter). Response
     `{"content": str, "digest": 64 hex, "cache": str optional}` where
     `digest` must equal sha256 over `fs.canonical(content)` recomputed
-    locally. `cache` names the warmed location for audit only.
+    locally. `cache` names the warmed location for audit only. On a normal
+    nonzero exit, the configured stderr tail is model-visible and untrusted.
     """
     command = settings.get("command", [])
     timeout = settings.get("timeout_seconds", 20)
@@ -67,7 +72,10 @@ def invoke(settings: dict, spec: str) -> dict:
     if result.reason == "output_limit":
         raise Denied("Materialize adapter response exceeds byte limit")
     if result.exit_code != 0 or result.reason != "exited":
-        raise Denied(f"Configured materialize program failed ({result.reason})")
+        diagnostic = adapter_failure_diagnostic(
+            result, source="materialize", maximum_bytes=settings.get(
+                "diagnostic_bytes", ADAPTER_DIAGNOSTIC_BYTES_DEFAULT))
+        raise Denied(f"Configured materialize program failed ({result.reason}){diagnostic}")
     try:
         data = json.loads(result.stdout)
     except (ValueError, RecursionError) as exc:

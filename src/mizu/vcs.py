@@ -31,7 +31,9 @@ from pathlib import Path
 
 from .errors import Denied
 from .fs import atomic_write, canonical, safe_read
-from .process import run
+from .process import (
+    ADAPTER_DIAGNOSTIC_BYTES_DEFAULT, adapter_failure_diagnostic, run,
+)
 
 #: Virtual tool prefix for injected upstream refs. Model ``files``/``read``
 #: paths use this prefix; on disk the store lives outside the product
@@ -98,7 +100,10 @@ def invoke(settings: dict, request: dict) -> dict:
     if result.reason == "output_limit":
         raise Denied("VCS adapter response exceeds byte limit")
     if result.exit_code != 0 or result.reason != "exited":
-        raise Denied(f"Configured VCS program failed ({result.reason})")
+        diagnostic = adapter_failure_diagnostic(
+            result, source="VCS", maximum_bytes=settings.get(
+                "diagnostic_bytes", ADAPTER_DIAGNOSTIC_BYTES_DEFAULT))
+        raise Denied(f"Configured VCS program failed ({result.reason}){diagnostic}")
     try:
         data = json.loads(result.stdout)
     except (ValueError, RecursionError) as exc:

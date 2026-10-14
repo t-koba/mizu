@@ -11,6 +11,7 @@ class VcsConfigTests(Fixture):
         self.assertEqual(self.config.vcs["command"], [])
         self.assertEqual(self.config.vcs["timeout_seconds"], 20)
         self.assertEqual(self.config.vcs["max_bytes"], 524288)
+        self.assertEqual(self.config.vcs["diagnostic_bytes"], 2048)
 
     def test_example_config_documents_vcs(self):
         from support import ROOT
@@ -18,6 +19,7 @@ class VcsConfigTests(Fixture):
         self.assertIn("[vcs]", example)
         self.assertIn("timeout_seconds", example)
         self.assertIn("max_bytes", example)
+        self.assertIn("diagnostic_bytes", example)
 
     def test_unknown_vcs_keys_fail(self):
         path = self.root / "config/bad-vcs.toml"
@@ -39,7 +41,8 @@ class VcsConfigTests(Fixture):
 
     def test_bounds_refused(self):
         for key, value in (("timeout_seconds", 0), ("max_bytes", 0),
-                           ("timeout_seconds", 16777217), ("max_bytes", 99999999)):
+                           ("timeout_seconds", 16777217), ("max_bytes", 99999999),
+                           ("diagnostic_bytes", -1), ("diagnostic_bytes", 8193)):
             path = self.root / "config/bad-bound.toml"
             base = self.file.read_text()
             lines = base.splitlines()

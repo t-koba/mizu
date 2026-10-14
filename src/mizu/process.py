@@ -12,6 +12,11 @@ from pathlib import Path
 
 from . import platform as _platform
 
+#: Configurable per-adapter default for model-visible failure diagnostics.
+ADAPTER_DIAGNOSTIC_BYTES_DEFAULT = 2048
+#: Fixed mechanism ceiling for a single model-visible adapter diagnostic.
+ADAPTER_DIAGNOSTIC_BYTES_MAX = 8192
+
 
 @dataclasses.dataclass(frozen=True)
 class Result:
@@ -20,6 +25,29 @@ class Result:
     stderr: str
     reason: str
     seconds: float
+
+
+def adapter_failure_diagnostic(result: Result, *, source: str, maximum_bytes: int) -> str:
+    """Return a bounded, labelled stderr tail only for a normal nonzero exit.
+
+    The excerpt is model-visible and external-untrusted. Other failure reasons
+    keep their existing generic handling; a disabled/invalid byte allowance
+    returns no excerpt. The hard ceiling protects callers even before config
+    validation.
+    """
+    if (result.reason != "exited" or type(result.exit_code) is not int or result.exit_code == 0
+            or type(maximum_bytes) is not int or maximum_bytes <= 0):
+        return ""
+    limit = min(maximum_bytes, ADAPTER_DIAGNOSTIC_BYTES_MAX)
+    raw = result.stderr.encode("utf-8")
+    if not raw:
+        return ""
+    truncated = len(raw) > limit
+    excerpt = raw[-limit:].decode("utf-8", "ignore").rstrip()
+    if not excerpt.strip():
+        return ""
+    tail = f"; tail capped at {limit} bytes" if truncated else ""
+    return f"\nAdapter stderr (external-untrusted; {source}{tail}):\n{excerpt}"
 
 
 def _text(raw: bytearray) -> str:
