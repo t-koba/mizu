@@ -2110,7 +2110,7 @@ class Engine:
                         if decision and decision.get("profile") and selection_role is not None:
                             from .selection import State as _FallbackState
                             matched = _FallbackState(self.config).result(
-                                decision, run=run_id, error=exc)
+                                decision, run=run_id, attempt=selection_attempt, error=exc)
                             recorded_selection_failure = {
                                 "attempt": selection_attempt,
                                 "decision": digest(canonical(decision)),
@@ -2219,7 +2219,7 @@ class Engine:
                         wake_generation=context.wake_generation)
                 if decision:
                     from .selection import State
-                    State(self.config).result(decision, run=run_id)
+                    State(self.config).result(decision, run=run_id, attempt=selection_attempt)
                 result = {"run": run_id, "role": role_name, "status": "prepared", "finished_at": now(),
                           "finish": finished, "model": model_result, "snapshot": snapshot["id"],
                           **({"selection": decision} if decision else {})}
@@ -2294,7 +2294,7 @@ class Engine:
                         handled = recorded_selection_failure["action"]
                     else:
                         from .selection import State
-                        handled = State(self.config).result(decision, run=run_id, error=exc)
+                        handled = State(self.config).result(decision, run=run_id, attempt=selection_attempt, error=exc)
                 # Publication is an observed fact, even if subsequent work failed.
                 with contextlib.suppress(OSError, ValueError, TypeError):
                     publication = "unknown"
@@ -2768,12 +2768,17 @@ def daemon(config: Config, name: str, role_name: str) -> None:
     try:
         with lock(config.data / "locks" / f"daemon-{name}-{role_name}.lock", blocking=False):
             upstream_state: dict = {"last_fetch": None}
+            ordinary_after = 0.0
             while not stop.is_set():
                 try:
                     updated = load(config.file)
                     if updated.data != config.data:
                         raise ConfigError("Changing data_dir requires a daemon restart")
                     config = updated
+                    from .probes import service_due, next_deadline
+                    probe = service_due(config, name, role_name, stop)
+                    if probe is not None:
+                        print(json.dumps(probe, ensure_ascii=False), flush=True)
                     project = Project(config, name)
                     project.insights.ingest_editor(keep_days=config.limits.retention_days)
                     if vcs_poll_enabled(config):
@@ -2784,18 +2789,34 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                     role = config.roles[role_name]
                     ready = should_run(project, project.snapshots.get(), role_name=role_name) if role.workspace == "write" else (
                         project.control().get("armed") and not project.control().get("paused") and not project.control().get("draining"))
-                    if ready:
+                    if ready and time.monotonic() >= ordinary_after:
                         result = Engine(config, stop=stop).run(project, role_name)
                         print(json.dumps(result, ensure_ascii=False), flush=True)
                         delay = config.limits.cooldown_seconds if role.workspace == "write" else config.limits.idle_seconds
                         if result.get("status") in ("waiting", "deferred"):
                             # Poll at idle cadence as well, to observe operator fact/config updates.
                             delay = min(config.limits.idle_seconds, max(0.1, result["next_evaluation_at"] - time.time()))
+                        # Probe polling must not accelerate ordinary cooldowns.
+                        ordinary_after = time.monotonic() + delay
+                        delay = min(delay, config.limits.idle_seconds)
+                        probe_at = next_deadline(config, name, role_name)
+                        if probe_at is not None:
+                            delay = min(delay, max(0.1, probe_at - time.time()))
                         stop.wait(delay)
                         continue
                 except (MizuError, OSError, ValueError) as exc:
                     print(json.dumps({"event": "run_deferred", "error": str(exc), "time": now()}), flush=True)
-                stop.wait(config.limits.idle_seconds)
+                from .probes import next_deadline
+                delay = config.limits.idle_seconds
+                if ordinary_after > time.monotonic():
+                    delay = min(delay, ordinary_after - time.monotonic())
+                try:
+                    probe_at = next_deadline(config, name, role_name)
+                    if probe_at is not None:
+                        delay = min(delay, max(0.1, probe_at - time.time()))
+                except (MizuError, OSError, ValueError):
+                    pass
+                stop.wait(delay)
     finally:
         for sig, handler in old.items():
             signal.signal(sig, handler)

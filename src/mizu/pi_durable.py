@@ -172,7 +172,8 @@ class PiDurableDriver:
         project_name = getattr(getattr(context, "project", None), "name", "unknown")
         model = self.config.model(profile)
         grant = grant_for(settings, context.role, model)
-        store_path = store_path_for(self.config.data, project_name, context.role.name, session_key)
+        store_path = (context.run_dir / 'durable.sqlite' if getattr(context, 'recovery_probe', False)
+                      else store_path_for(self.config.data, project_name, context.role.name, session_key))
         pruned_generations = []
         if generation and not store_path.exists():
             # First dispatch after rotation: retire the abandoned
@@ -302,6 +303,8 @@ class PiDurableDriver:
             except (ValueError, UnicodeError) as exc:
                 raise ProtocolError("Durable launcher returned an invalid result") from exc
             interpret_result(reported, context, model, options.get("thinkingLevel"))
+            if getattr(context, 'recovery_probe', False):
+                context.model_evidence['settled'] = True
             return {**context.model_evidence, "seconds": round(time.monotonic() - started, 3)}
 
 

@@ -146,4 +146,6 @@ class ClaudeDriver:
                     channel.send({'type': 'interrupt'})
                 channel.close()
                 context.model_evidence['requests'] = context.request_count
+        if getattr(context, 'recovery_probe', False):
+            context.model_evidence['settled'] = True
         return {**context.model_evidence, 'session_id': result['session_id'], 'seconds': round(time.monotonic()-started, 3)}

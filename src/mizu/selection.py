@@ -1,6 +1,7 @@
 """Declarative selection: bounded facts and predicates, no provider policy or IO callbacks."""
 from __future__ import annotations
 
+import copy
 import math
 import time
 
@@ -9,6 +10,11 @@ from .fs import DIGEST, ID, canonical, digest, lock, read_json, text_preview, wr
 
 MAX_BYTES = 1024 * 1024
 MAX_ITEMS = 64
+MAX_STATE_ITEMS = 8192
+MAX_TERMINAL_CONTRIBUTIONS = 256
+MAX_PROBE_EVENTS = 8
+INTENT_RESERVE_BYTES = 512
+INTENT_TERMINAL_RESERVE_BYTES = 128
 UNKNOWN = object()
 
 #: Default bounds for classifier work inputs (operator policy may override
@@ -190,10 +196,17 @@ def validate_selectors(value, profiles, base):
             validate_condition(rule.get('when', {}))
             attributes(rule.get('attributes'))
         for rule in items(spec.get('on_error', []), 'on_error'):
-            table(rule, {'when', 'scope', 'seconds', 'until'}, 'error rule')
+            table(rule, {'when', 'scope', 'seconds', 'until', 'probe_seconds'}, 'error rule')
             validate_condition(rule.get('when', {}))
             if rule.get('scope') not in ('profile', 'group'):
                 raise ConfigError('Error scope must be profile or group')
+            if 'probe_seconds' in rule:
+                seconds(rule['probe_seconds'])
+                if 'until' in rule:
+                    raise ConfigError('Probe rules cannot use until')
+                if 'seconds' in rule:
+                    seconds(rule['seconds'])
+                continue
             if ('seconds' in rule) == ('until' in rule):
                 raise ConfigError('Error rule needs seconds or until')
             if 'seconds' in rule:
@@ -269,14 +282,15 @@ def groups(config):
 
 
 class State:
-    """Operator state only. One lock/atomic file; reads (including preview) do not write."""
+    """Selection evidence. One lock/atomic file; reads (including preview) do not write."""
     def __init__(self, config):
         self.config = config
         self.root = config.data / 'selection'
         self.path = self.root / 'state.json'
 
     def read(self):
-        empty = {'version': 1, 'observations': {}, 'blocks': {}, 'history': {}}
+        empty = {'version': 2, 'observations': {}, 'blocks': {}, 'history': {},
+                 'contributions': {}, 'receipts': {}, 'events': {}, 'exhausted': False}
         if not self.path.exists():
             return empty
         try:
@@ -284,15 +298,25 @@ class State:
                 raise ValueError('unsafe or oversized file')
             state = read_json(self.path)
             bounded(state)
-            if set(state) != set(empty) or type(state['version']) is not int or state['version'] != 1:
+            if state.get('version') == 1 and type(state['version']) is int:
+                if set(state) != {'version', 'observations', 'blocks', 'history'}:
+                    raise ValueError('invalid legacy fields')
+                state = {**empty, **state, 'version': 2}
+                try:
+                    bounded(state)
+                except ConfigError:
+                    # A full legacy file cannot accommodate new ledger fields.
+                    # Retain it unchanged and expose a read-time capacity latch.
+                    state['exhausted'] = True
+            if set(state) != set(empty) or type(state['version']) is not int or state['version'] != 2:
                 raise ValueError('invalid version/fields')
-            for field in ('observations', 'blocks', 'history'):
-                if not isinstance(state[field], dict) or len(state[field]) > 8192:
+            for field in ('observations', 'blocks', 'history', 'contributions', 'receipts', 'events'):
+                if not isinstance(state[field], dict) or len(state[field]) > MAX_STATE_ITEMS:
                     raise ValueError('invalid state table')
             for group, observation in state['observations'].items():
                 self.validate_observation({'group': group, **observation}, configured=False)
             for key, block in state['blocks'].items():
-                table(block, {'created_at', 'until', 'run'}, 'saved block')
+                table(block, {'created_at', 'until', 'run', 'selector', 'rule', 'error_rule', 'sponsor', 'role'}, 'saved block')
                 timestamp(block['created_at']); timestamp(block['until'])
                 if not isinstance(block['run'], str) or len(block['run']) > 128:
                     raise ValueError('invalid run')
@@ -307,14 +331,53 @@ class State:
                     raise ValueError('invalid history')
                 if 'error' in history and not isinstance(history['error'], dict):
                     raise ValueError('invalid history error')
+            if type(state['exhausted']) is not bool:
+                raise ValueError('invalid capacity latch')
+            for identity, receipt in state['receipts'].items():
+                if (not DIGEST.fullmatch(identity) or set(receipt) != {'payload', 'action'}
+                        or not DIGEST.fullmatch(receipt['payload']) or not isinstance(receipt['action'], dict)):
+                    raise ValueError('invalid probe receipt')
+                action = receipt['action']
+                fields = {'rule', 'until', 'scope', 'probe_seconds', 'contribution'}
+                if (set(action) != fields or action['scope'] not in ('profile', 'group')
+                        or type(action['rule']) is not int or not 0 <= action['rule'] < MAX_ITEMS):
+                    raise ValueError('invalid probe receipt action fields')
+                seconds(action['probe_seconds'])
+                if action['contribution'] != identity or identity not in state['contributions']:
+                    raise ValueError('invalid receipt contribution')
+                if action['until'] is not None:
+                    timestamp(action['until'])
+            for identity, contribution in state['contributions'].items():
+                validate_contribution(identity, contribution)
+                if identity not in state['receipts']:
+                    raise ValueError('missing contribution receipt')
+            for identity, event in state['events'].items():
+                validate_event(identity, event)
+            for identity, c in state['contributions'].items():
+                for field in ('claim', 'last_event'):
+                    if c[field] is not None and (c[field] not in state['events']
+                            or state['events'][c[field]]['contribution'] != identity):
+                        raise ValueError('missing/mismatched event reference')
             return state
         except (OSError, ValueError, TypeError, KeyError) as exc:
             raise ConfigError('Unreadable or corrupt selection state') from exc
 
     def save(self, state):
-        if any(len(state[key]) > 8192 for key in ('observations', 'blocks', 'history')):
+        prune_terminal_contributions(state)
+        if any(len(state[key]) > MAX_STATE_ITEMS for key in
+               ('observations', 'blocks', 'history', 'contributions', 'receipts', 'events')):
             raise ConfigError('Selection state table exceeds 8192 entries')
+        # Reserve room for a capacity latch even when the next write cannot fit.
+        bounded({**state, 'exhausted': False})
         write_json(self.path, bounded(state))
+
+    def save_or_close(self, state, previous):
+        try:
+            self.save(state)
+        except ConfigError:
+            previous['exhausted'] = True
+            self.save(previous)
+            raise ConfigError('Selection ledger capacity exhausted; active obligations retained, selection closed')
 
     def validate_observation(self, observation, *, configured=True):
         table(observation, {'group', 'observed_at', 'expires_at', 'facts'}, 'observation')
@@ -350,23 +413,47 @@ class State:
             self.save(state)
         return {'deleted': group}
 
-    def result(self, decision, *, run, error=None, at=None):
-        at = time.time() if at is None else at
+    def result(self, decision, *, run, attempt=0, error=None, at=None):
+        """Persist an idempotent receipt only for a matched probe failure.
+
+        Time is deliberately excluded from the payload; while retained, the
+        first accounting time owns the probe action. Conflicting reports fail closed.
+        """
+        if not isinstance(run, str) or not 1 <= len(run) <= 128 or type(attempt) is not int or not 0 <= attempt <= 64:
+            raise ConfigError('Invalid selection attempt identity')
+        at = time.time() if at is None else timestamp(at)
         profile = decision['profile']
-        spec = self.config.selectors[decision['selector']]
-        matched = None
-        if isinstance(error, ModelFailure):
-            facts = {**decision['facts'], 'error': error.evidence}
-            for index, rule in enumerate(spec.get('on_error', [])):
-                if evaluate(rule.get('when', {}), facts) is not True:
-                    continue
-                until = at + rule['seconds'] if 'seconds' in rule else error.evidence.get('retry_at')
-                if type(until) not in (int, float) or until <= at:
-                    continue
-                matched = {'rule': index, 'until': until, 'scope': rule['scope']}
-                break
+        identity = digest(canonical({'project': decision['facts'].get('project'),
+                                    'role': decision['facts'].get('role'), 'run': run, 'attempt': attempt}))
+        payload = digest(canonical({'decision': decision, 'error': error.evidence if isinstance(error, ModelFailure)
+                                    else ('local_error' if error else None)}))
         with lock(self.root / 'state.lock'):
-            state = self.read()
+            previous_state = self.read()
+            state = copy.deepcopy(previous_state)
+            receipt = state['receipts'].get(identity)
+            if receipt:
+                if receipt['payload'] != payload:
+                    raise ConfigError('Conflicting selection attempt replay')
+                return receipt['action']
+            if state['exhausted']:
+                raise ConfigError('Selection ledger capacity exhausted')
+            spec = self.config.selectors[decision['selector']]
+            matched = None
+            if isinstance(error, ModelFailure):
+                facts = {**decision['facts'], 'error': error.evidence}
+                for index, rule in enumerate(spec.get('on_error', [])):
+                    if evaluate(rule.get('when', {}), facts) is not True:
+                        continue
+                    if 'probe_seconds' in rule:
+                        until = at + rule['seconds'] if 'seconds' in rule else None
+                        matched = {'rule': index, 'until': until, 'scope': rule['scope'],
+                                   'probe_seconds': rule['probe_seconds'], 'contribution': identity}
+                    else:
+                        until = at + rule['seconds'] if 'seconds' in rule else error.evidence.get('retry_at')
+                        if type(until) not in (int, float) or until <= at:
+                            continue
+                        matched = {'rule': index, 'until': until, 'scope': rule['scope']}
+                    break
             previous = state['history'].get(profile, {})
             if previous.get('at', 0) <= at:
                 state['history'][profile] = {'status': 'failed' if error else 'completed', 'at': at, 'run': run,
@@ -374,11 +461,253 @@ class State:
             if matched:
                 target = profile if matched['scope'] == 'profile' else decision['group']
                 key = matched['scope'] + ':' + target
-                old = state['blocks'].get(key, {})
-                state['blocks'][key] = {'created_at': max(at, old.get('created_at', 0)),
-                                       'until': max(matched['until'], old.get('until', 0)), 'run': run}
-            self.save(state)
+                if 'probe_seconds' in matched:
+                    from .probes import target_binding, sponsor_binding
+                    sponsor, role = decision['facts']['project'], decision['facts']['role']
+                    binding = decision.get('probe_target') or target_binding(self.config, profile)
+                    state['contributions'][identity] = {
+                        'key': key, 'profile': profile, 'sponsor': sponsor, 'role': role,
+                        'sponsor_binding': decision.get('probe_sponsor') or sponsor_binding(self.config, sponsor, role),
+                        'target': binding, 'selector': decision['selector'], 'rule': decision['rule'],
+                        'error_rule': matched['rule'], 'created_at': at, 'until': matched['until'],
+                        'probe_seconds': matched['probe_seconds'], 'next_probe_at': at + matched['probe_seconds'],
+                        'status': 'active', 'revision': 1, 'claim': None, 'last_event': None, 'reason': None}
+                else:
+                    old = state['blocks'].get(key, {})
+                    state['blocks'][key] = {'created_at': max(at, old.get('created_at', 0)),
+                                           'until': max(matched['until'], old.get('until', 0)), 'run': run,
+                                           'selector': decision['selector'], 'rule': decision['rule'],
+                                           'error_rule': matched['rule'], 'sponsor': decision['facts'].get('project'),
+                                           'role': decision['facts'].get('role')}
+            if matched and 'probe_seconds' in matched:
+                state['receipts'][identity] = {'payload': payload, 'action': matched}
+            self.save_or_close(state, previous_state)
         return matched
+
+    def probe_progress(self, identity, *, revision, claim, requests, model=None):
+        """Persist admission/usage on the intent too, so crashes retain spend evidence."""
+        with lock(self.root / 'state.lock'):
+            previous = self.read()
+            state = copy.deepcopy(previous)
+            c = state['contributions'].get(identity)
+            e = state['events'].get(claim)
+            if not c or c['revision'] != revision or c['claim'] != claim or not e or e['status'] != 'intent':
+                raise ConfigError('Recovery claim lost during admission')
+            state['events'][claim] = consume_intent_reservation(
+                e, {'requests': requests, 'admitted': requests > 0, 'model': model})
+            e = state['events'][claim]
+            validate_event(claim, e)
+            self.save_or_close(state, previous)
+
+    def probe_update(self, identity, *, revision, claim, event=None, recover=False, at=None, reason=None):
+        """Fence a terminal event/recovery against its exact contribution and claim.
+
+        Terminal evidence is a separate durable write *before* recovery. No
+        caller may turn an intent/unknown/failure into recovery.
+        """
+        at = time.time() if at is None else timestamp(at)
+        with lock(self.root / 'state.lock'):
+            previous = self.read()
+            state = copy.deepcopy(previous)
+            c = state['contributions'].get(identity)
+            if not c or c['revision'] != revision or c['claim'] != claim or c['status'] != 'active':
+                return False
+            if event is not None:
+                validate_event(claim, event)
+                old = state['events'].get(claim)
+                if not old or old['status'] != 'intent' or event['contribution'] != identity or event['revision'] != revision:
+                    return False
+                if len(canonical(event)) > len(canonical(old)):
+                    raise ConfigError('Probe terminal evidence exceeds its intent reservation')
+                state['events'][claim] = event
+                c['last_event'] = claim
+                prune_probe_events(state, identity)
+                self.save_or_close(state, previous)
+                return True
+            e = state['events'].get(claim)
+            if (not e or e['status'] == 'intent' or e['contribution'] != identity
+                    or e['revision'] != revision or e['target'] != c['target']):
+                return False
+            if recover:
+                if (e['status'] != 'success' or not e['admitted'] or e['requests'] < 1 or not e['settled'] or not e['challenge_ok']
+                        or e['target'] != c['target'] or not active(c, at)):
+                    return False
+                c['status'] = 'recovered'
+            elif c['until'] is not None and c['until'] <= at:
+                c['status'] = 'expired'
+            c.update(claim=None, last_event=claim, revision=revision + 1,
+                     next_probe_at=at + c['probe_seconds'], reason=reason)
+            prune_probe_events(state, identity)
+            self.save_or_close(state, previous)
+            return True
+
+
+CONTRIBUTION_FIELDS = {'key', 'profile', 'sponsor', 'role', 'sponsor_binding', 'target', 'selector', 'rule',
+                       'error_rule', 'created_at', 'until', 'probe_seconds', 'next_probe_at', 'status',
+                       'revision', 'claim', 'last_event', 'reason'}
+EVENT_FIELDS = {'contribution', 'revision', 'target', 'started_at', 'finished_at', 'status',
+                'admitted', 'settled', 'challenge_ok', 'requests', 'model', 'reason'}
+
+
+def validate_contribution(identity, c):
+    if not DIGEST.fullmatch(identity) or set(c) != CONTRIBUTION_FIELDS:
+        raise ConfigError('Invalid probe contribution')
+    for field in ('profile', 'sponsor', 'role', 'selector'):
+        name(c[field])
+    if not c['key'].startswith(('profile:', 'group:')):
+        raise ConfigError('Invalid probe scope')
+    name(c['key'].split(':', 1)[1])
+    for field in ('target', 'sponsor_binding'):
+        if not isinstance(c[field], str) or not DIGEST.fullmatch(c[field]):
+            raise ConfigError('Invalid probe binding')
+    for field in ('created_at', 'next_probe_at'):
+        timestamp(c[field])
+    if c['until'] is not None:
+        timestamp(c['until'])
+    seconds(c['probe_seconds'])
+    if c['status'] not in ('active', 'recovered', 'expired') or type(c['revision']) is not int or c['revision'] < 1:
+        raise ConfigError('Invalid contribution revision/status')
+    for field in ('rule', 'error_rule'):
+        if type(c[field]) is not int or not 0 <= c[field] < MAX_ITEMS:
+            raise ConfigError('Invalid probe rule')
+    for field in ('claim', 'last_event'):
+        if c[field] is not None and (not isinstance(c[field], str) or not DIGEST.fullmatch(c[field])):
+            raise ConfigError('Invalid probe event reference')
+    if c['reason'] is not None:
+        name(c['reason'])
+
+
+def validate_event(identity, e):
+    fields = EVENT_FIELDS | ({'reserve'} if isinstance(e, dict) and e.get('status') == 'intent' else set())
+    if not DIGEST.fullmatch(identity) or not isinstance(e, dict) or set(e) != fields:
+        raise ConfigError('Invalid probe event')
+    if ('reserve' in e and (not isinstance(e['reserve'], str)
+                            or not INTENT_TERMINAL_RESERVE_BYTES <= len(e['reserve']) <= INTENT_RESERVE_BYTES
+                            or e['reserve'].strip())):
+        raise ConfigError('Invalid probe intent reservation')
+    bounded(e, 4096)
+    for field in ('contribution', 'target'):
+        if not isinstance(e[field], str) or not DIGEST.fullmatch(e[field]):
+            raise ConfigError('Invalid probe event binding')
+    if type(e['revision']) is not int or e['revision'] < 1:
+        raise ConfigError('Invalid probe event revision')
+    timestamp(e['started_at'])
+    if e['finished_at'] is not None:
+        timestamp(e['finished_at'])
+    if e['status'] not in ('intent', 'success', 'failure', 'cancelled', 'unknown', 'deferred'):
+        raise ConfigError('Invalid probe event status')
+    for field in ('admitted', 'settled', 'challenge_ok'):
+        if type(e[field]) is not bool:
+            raise ConfigError('Invalid probe event verdict')
+    if type(e['requests']) is not int or not 0 <= e['requests'] <= 4:
+        raise ConfigError('Invalid probe admissions')
+    if e['reason'] is not None:
+        name(e['reason'])
+    if e['model'] is not None:
+        model = e['model']
+        if (not isinstance(model, dict) or set(model) != {'usage_known', 'tokens'}
+                or type(model['usage_known']) is not bool or not isinstance(model['tokens'], dict)
+                or set(model['tokens']) - {'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens', 'other_tokens'}
+                or any(type(v) not in (int, float) or not 0 <= v <= 2**53 for v in model['tokens'].values())):
+            raise ConfigError('Invalid probe model evidence')
+
+
+def consume_intent_reservation(event, updates):
+    """Replace reserved intent bytes with progress evidence without growing the record."""
+    if event.get('status') != 'intent' or not isinstance(event.get('reserve'), str):
+        raise ConfigError('Recovery intent reservation is unavailable')
+    updated = {**event, **updates}
+    growth = len(canonical(updated)) - len(canonical(event))
+    reserve = event['reserve']
+    if growth > len(reserve) - INTENT_TERMINAL_RESERVE_BYTES:
+        raise ConfigError('Recovery progress exceeds its intent reservation')
+    if growth > 0:
+        updated['reserve'] = reserve[:-growth]
+    return updated
+
+
+def terminal_intent(event, updates):
+    """Remove intent padding and require terminal evidence to fit the saved claim."""
+    updated = {**event, **updates}
+    updated.pop('reserve', None)
+    if len(canonical(updated)) > len(canonical(event)):
+        raise ConfigError('Probe terminal evidence exceeds its intent reservation')
+    return updated
+
+
+def prune_probe_events(state, identity):
+    """Keep the latest eight events, without deleting the active or visible result."""
+    contribution = state['contributions'].get(identity)
+    if not contribution:
+        return
+    events = [(key, event) for key, event in state['events'].items()
+              if event['contribution'] == identity]
+    protected = {key for key in (contribution['claim'], contribution['last_event']) if key}
+    protected.update(key for key, event in events if event['status'] == 'intent')
+    removable = sorted((event['started_at'], event['revision'], key) for key, event in events
+                       if event['status'] != 'intent' and key not in protected)
+    excess = max(0, len(events) - MAX_PROBE_EVENTS)
+    for _, _, key in removable[:excess]:
+        state['events'].pop(key, None)
+
+
+def prune_terminal_contributions(state):
+    """Retain only the 256 newest terminal probe obligations and their evidence."""
+    terminal = sorted((c['created_at'], identity) for identity, c in state['contributions'].items()
+                      if c['status'] in ('recovered', 'expired'))
+    for _, identity in terminal[:-MAX_TERMINAL_CONTRIBUTIONS]:
+        state['contributions'].pop(identity, None)
+        state['receipts'].pop(identity, None)
+        for event_id in [key for key, event in state['events'].items()
+                         if event['contribution'] == identity]:
+            state['events'].pop(event_id, None)
+
+
+def active(contribution, at):
+    return contribution['status'] == 'active' and (contribution['until'] is None or contribution['until'] > at)
+
+
+def blocks_for(state, key, at):
+    fixed = state['blocks'].get(key)
+    return ([fixed] if fixed and fixed['until'] > at else []) + [
+        c for c in state['contributions'].values() if c['key'] == key and active(c, at)]
+
+
+def project_status(config, project, *, at=None):
+    """Only relevant block metadata; never shared history/errors or task facts."""
+    at = time.time() if at is None else at
+    state = State(config).read()
+    keys = set()
+    for role_name in project.roles:
+        role = config.roles[role_name]
+        if role.selector:
+            for rule in config.selectors[role.selector]['rules']:
+                for c in rule['candidates']:
+                    keys.update(('profile:' + c['profile'], 'group:' + c.get('group', c['profile'])))
+    fixed = [{'key': k, **v} for k, v in state['blocks'].items() if k in keys and v['until'] > at]
+    # Local display-only caches. Admission always performs uncached checks.
+    from .probes import sponsor_authorization, target_authorization
+    sponsors, targets = {}, {}
+    probes = []
+    for identity, c in state['contributions'].items():
+        if not active(c, at) or not (c['key'] in keys or c['sponsor'] == project.name):
+            continue
+        e = state['events'].get(c['claim'] or c['last_event'])
+        sponsor_key = digest(canonical([c['sponsor'], c['role'], c['sponsor_binding']]))
+        target_key = digest(canonical([c['profile'], c['target']]))
+        if sponsor_key not in sponsors:
+            sponsors[sponsor_key] = sponsor_authorization(config, c)[0]
+        reason = sponsors[sponsor_key]
+        if reason is None:
+            if target_key not in targets:
+                targets[target_key] = target_authorization(config, c)
+            reason = targets[target_key]
+        if e is not None:
+            e = {key: value for key, value in e.items() if key != 'reserve'}
+        probes.append({'contribution': identity, **c, 'last_result': e, 'authorization_reason': reason})
+    return {'exhausted': state['exhausted'], 'fixed_blocks': fixed, 'probe_blocks': probes,
+            'next_probe_at': min((c['next_probe_at'] for c in probes), default=None),
+            'ledger_entries': len(state['receipts']), 'event_entries': len(state['events'])}
 
 
 def base_facts(project, role, snapshot, explicit=None):
@@ -498,16 +827,21 @@ def select(config, role, facts, sources, *, at=None, classification=None):
             reasons = []
             if evaluate(candidate.get('when', {}), candidate_facts) is not True:
                 reasons.append('condition_false_or_unknown')
+            if state['exhausted']:
+                reasons.append('selection_capacity_exhausted')
             for key in ('profile:'+profile, 'group:'+group):
-                block = state['blocks'].get(key)
-                if block and block['until'] > at:
+                for block in blocks_for(state, key, at):
                     obs = observations[group]
                     recovered = ('recover_when' in candidate and obs['fresh'] and
                                  obs['observed_at'] > block['created_at'] and
                                  evaluate(candidate['recover_when'], candidate_facts) is True)
                     if not recovered:
-                        reasons.append(key)
-                        times.append(block['until'])
+                        if key not in reasons:
+                            reasons.append(key)
+                        if block['until'] is not None:
+                            times.append(block['until'])
+                        if block.get('next_probe_at', 0) > at:
+                            times.append(block['next_probe_at'])
             if reasons:
                 decision['excluded'].append({'profile': profile, 'reasons': reasons})
             else:
@@ -515,6 +849,12 @@ def select(config, role, facts, sources, *, at=None, classification=None):
                 break
         break
     decision['next_evaluation_at'] = min(times)
+    if decision['profile'] and any('probe_seconds' in r for r in spec.get('on_error', [])):
+        from .probes import target_binding, sponsor_binding
+        # Capture the authority BEFORE execution, not after mutable native files
+        # may have changed during the failed request. Preview reads only.
+        decision['probe_target'] = target_binding(config, decision['profile'])
+        decision['probe_sponsor'] = sponsor_binding(config, facts['project'], facts['role'])
     return bounded(decision, 262144)
 
 

@@ -18,6 +18,11 @@ from .pi import credentials
 from .protocol import tool_definitions
 
 
+def auth_source():
+    """Selected operator auth locator only; never read credential content."""
+    return Path(os.environ.get('CODEX_AUTH_FILE', str(Path.home()/'.codex/auth.json'))).expanduser()
+
+
 class TokenUsage:
     """Monotone cumulative observations; repeated/reordered notifications add nothing."""
     FIELDS = ('inputTokens', 'outputTokens', 'cachedInputTokens', 'reasoningOutputTokens', 'totalTokens')
@@ -71,7 +76,7 @@ class CodexDriver:
         cwd = context.run_dir / 'controller'
         mkdir(cwd)
         # Authentication is operator-owned; this pointer never enters model evidence.
-        source = Path(os.environ.get('CODEX_AUTH_FILE', str(Path.home()/'.codex/auth.json'))).expanduser()
+        source = auth_source()
         link = home/'auth.json'
         if source.is_file() and not link.exists():
             os.symlink(source, link)
@@ -257,4 +262,6 @@ class CodexDriver:
                 finally:
                     with contextlib.suppress(OSError):
                         link.unlink()
+        if getattr(context, 'recovery_probe', False):
+            context.model_evidence['settled'] = True
         return {**context.model_evidence, 'conversation_id': identifier, 'seconds': round(time.monotonic()-started, 3)}

@@ -100,6 +100,8 @@ class PiDriver:
                 with contextlib.suppress(Exception):
                     channel.send({"type": "abort"})
                 channel.close()
+        if getattr(context, 'recovery_probe', False):
+            context.model_evidence['settled'] = True
         return {**context.model_evidence, "seconds": round(time.monotonic()-started, 3)}
 
 

@@ -54,14 +54,137 @@ observation for that candidate's group newer than the block**. This override is
 not permanent: if the observation expires before the block does, the block
 applies again. A newer observation alone does not silently clear blocks.
 
-Each `on_error` entry accepts `when`, `scope` (`profile` or `group`), and exactly
-one of `seconds` or `until = "error.retry_at"`. The first matching entry with a
+A fixed `on_error` entry accepts `when`, `scope` (`profile` or `group`), and
+exactly one of `seconds` or `until = "error.retry_at"`. Without `probe_seconds`,
+fixed deadlines and overlap semantics are unchanged. The first matching entry with a
 usable future deadline applies. An unavailable/past retry time does not match an
 `until` action; a later fixed-duration rule can provide an explicit alternative.
 Overlapping blocks retain the latest expiry. Shared groups represent operator
 chosen quota scopes, never guessed from provider names or credentials. Active
 blocks persist across configuration changes and restarts until expiry or an
 explicitly configured observation-based recovery.
+
+
+### Optional paid recovery probes
+
+An error rule may instead opt into an exact-target recovery obligation:
+
+```toml
+[[selectors.coding.on_error]]
+when = {path = "error.code", op = "eq", value = "EXPLICIT_PROVIDER_CODE"}
+scope = "group"
+probe_seconds = 60
+seconds = 3600 # optional upper expiry, measured from the original failure
+```
+
+`scope` is required. `probe_seconds` is an integer in 1..31,536,000 seconds;
+there is no default and no probing without this explicit grant. In probe mode,
+`seconds` is an optional upper bound, also in that interval range. `until` is
+rejected. Without an upper bound the obligation remains until an exact-target
+probe succeeds. `counts_as_failure` is not accepted; ordinary failure-brake
+accounting is unchanged.
+
+A group block excludes **all** candidates in the operator-selected group, but
+its probe always targets the exact profile whose attempt failed, never an
+alternate or a group representative. Every failure contributes independently:
+two failing profiles in one group require two recoveries, and one profile's
+older recovery does not clear a newer failure. Fixed blocks retain their
+maximum expiry independently of probe obligations, in either creation order.
+Candidate `recover_when` remains a local, freshness-bound eligibility override;
+it neither deletes nor mutates any underlying fixed block or probe obligation.
+An overridden candidate does not cancel the paid obligation.
+
+Before the failed attempt executes, selection captures an opaque binding to its
+effective profile (engine/provider/model/session/options/resources/native
+content), reviewed adapter content, native settings, command argv and resolved
+executable bytes (at most 256 MiB). It also binds digests of the configured engine
+directory and credential-source locators: `credentials.env` beside the main
+configuration for Pi-family engines and Codex providers using environment
+credentials, and Codex's selected `CODEX_AUTH_FILE` (or its default auth locator). The sponsor is that exact project and role,
+bound to the project directory identity and `project.toml` content, not just its
+name. Changing/deleting a target, relevant native content, command, sponsoring
+project configuration, or enabled role never silently retargets an obligation.
+Restoring the same target/sponsor binding permits later retries; a replacement
+project with the same name is not a substitute sponsor. These bindings contain
+no credential content and expose digests, not private paths. Secret refreshes
+within the same source remain possible: credential bytes/values are never read
+for binding. Consequently, switching account identity at the same source path
+(including changing its symlink destination or inherited environment credential
+values) cannot be detected by this binding without reading secrets.
+
+The project's role daemon services at most one due probe event per loop,
+**before** ordinary readiness, on-change, done/wait outcome, or wake gating.
+A daemon must be running for the sponsoring role; this does not add services
+or timers for non-daemon roles. It rechecks at least at `idle_seconds` cadence
+and waits for an earlier probe/upper-expiry deadline when present. These extra
+ticks do not shorten the ordinary role cooldown. Probe
+admission still requires armed, unpaused, not draining, and not stopped. It
+uses the normal role lock, writer lock where applicable, and execution slot;
+there is no lock across inference on the shared selection state. Lock contention,
+budget refusal and loss of target/sponsor retain the block with visible reason
+codes, and retry no sooner than the next configured probe interval. Configuration
+is reloaded after claiming and again after acquiring launch locks, before setup
+or driver execution; a changed data root, sponsor or target defers without
+admission. Context and driver receive fresh configured limits. Context request
+and non-Pi invocation admission revalidate uncached authority and refresh Budget
+limits immediately before admission as well. These reads are not atomic with
+configuration edits, Budget admission, or the provider request: a revocation
+after the last read (or after admission but before the provider call) can still
+race an already-authorized request. Postflight checks can prevent recovery, not
+undo payment or refund an admission.
+
+A probe uses the configured driver directly in a fresh ephemeral session, an
+empty workspace, a fixed minimal challenge policy, and only `finish`. It never
+runs selection/classification/fallback, consumes routing, receives goal/task
+text, allocates `projects/.../runs`, publishes snapshots, or changes role health.
+Native tools and external MCP/resource/extension/plugin/skill/hook surfaces are
+not granted. Profiles requiring those surfaces (including Pi codemode/tool
+search) defer as `native_tools_incompatible` rather than being silently reduced
+to another profile. Other driver-specific incompatibilities fail closed through
+normal driver checks. Durable probe stores are disposable event-local stores,
+not retained project conversations.
+
+The live ceiling is 90 seconds, two admitted model requests, and one finish tool
+call; smaller sponsoring-role/configured limits win, and no wrap-up requests
+are granted. Requests go through the normal Context/driver admission to the
+**real sponsoring project's Budget**, including its shared daily limit. This
+is separate paid event accounting, not an ordinary run or a quota reservation.
+Logical admissions and reported token usage are not provider bills or HTTP
+request counts. Ordinary run-based usage reports exclude probes; probe spend
+is retained in the event ledger, while Budget totals include both.
+
+Success requires a verified driver settlement, at least one confirmed
+admission, matching configured target identity (no explicitly contrary provider
+or model in either `usage_observations` or `observed_models`, including assistant
+messages without usage attribution; missing identity remains unknown), an exact challenge-only `finish` seal, and authorization rechecked
+against current configuration. Merely calling finish, an unknown/missing
+terminal result, a cancellation, wrong target/challenge, or a failed driver
+never recovers. The intent/claim is durably saved before launch, admissions and
+known numeric usage update that intent, and a terminal event is saved **before**
+applying recovery. Recovery is fenced by contribution, revision and claim;
+it releases only that contribution. Failed probes leave all blocks in place.
+
+Event records have bounded numeric usage/admission counts and stable reason
+codes, not prompts, private paths, arbitrary exception messages or raw completion
+text. Driver scratch/evidence files live in a disposable selection event
+directory and are removed on settlement. After a hard crash they are cleaned
+when that claim is next serviced. Concurrent daemons cannot spend twice on the
+same claim. An interrupted intent waits until its 90-second live ceiling,
+is marked `unknown`, and then waits a full probe interval before a fresh claim.
+A terminal success left unapplied by a crash is likewise treated as uncertain,
+not replayed to guess recovery. Budget retains its claim-bound admission even
+if a crash interrupts the admission-to-event write; missing evidence never
+becomes a success.
+
+`mizu status PROJECT` includes `selection`: relevant active fixed/probe profile
+and group blocks, selector/selection rule/error rule, upper expiry, sponsor,
+next probe, last event/result, current authorization reason and saved defer
+reason. Shared group blocks may name another sponsor but never expose its task,
+errors or history. Legacy fixed blocks have only their original expiry/run
+metadata. `mizu selection status` remains the raw, bounded shared ledger view,
+including completed/expired receipts and probe events. Status deduplicates target and
+sponsor authorization checks by opaque identities within each read only; it
+writes no ledger/cache and its display cache is never used for admission.
 
 A run whose main-model error matches an `on_error` rule falls back within the
 same dispatch: the recorded block applies to an immediate re-selection, and
@@ -375,16 +498,44 @@ Selection configuration, input JSON and the shared state file are bounded at
 1 MiB; each state table has at most 8192 entries. Classifier cache files are
 bounded at 64 KiB. Existing run/tool/usage evidence bounds remain in force.
 
-State lives under `data/selection/state.json` (version 1). Updates use a shared
-lock and atomic replacement; reads and preview do not mutate it. No lock is
-held across model inference. Concurrent failures retain the latest block end;
+State lives under `data/selection/state.json` (version 2). Version 1 reads migrate
+in memory as fixed-only state; the next update writes version 2. No probe policy
+is guessed for old blocks. Updates use a shared state lock and atomic replacement; reads and preview do not mutate it. The
+shared state lock is not held across inference; probe execution retains its per-contribution claim
+fence, and the normal role/workspace/slot admission locks remain scoped to their work unit. Concurrent failures retain the latest block end;
 this does not reserve quota, prevent already-running requests, or guarantee
 account limits. State is not silently reset on parse/schema failures or
 oversize data. Removing obsolete policy names does not destroy their audit
-state. Back up the global selection directory separately from project backups;
-project backups include project-local classification caches and run evidence.
+state. A probe attempt identity includes project, role, run and the selected
+candidate attempt ordinal (distinct from pi-durable's request ordinal).
 
-`tests/test_selection.py` uses synthetic facts/driver doubles and controlled time
+Persistent attempt receipts are stored only for failures matched to `probe_seconds`.
+Ordinary successes, unmatched failures and fixed blocks have no receipt; the
+live runtime guards duplicate selector-failure accounting, and a completed
+`Engine.run` returns once under its unique run id with no resume/replay path.
+While retained, a probe receipt makes identical replay return the original
+action without extending deadlines/revisions or resurrecting a recovered or
+expired contribution; conflicting reports for the same identity are refused.
+Replay after retention pruning is not a supported product path.
+
+At most 256 terminal (recovered or expired) contributions and their receipts
+are retained. When another contribution becomes terminal, the oldest terminal
+contribution is pruned together with its receipt and all its events; active
+contributions and receipts are never pruned. Each contribution keeps at most
+the latest 8 probe events, including an active intent/current claim. Only older
+terminal events may be pruned, and the latest event/status remains visible.
+Each intent event reserves 512 bytes for admission/progress and terminal
+proof; progress consumes that padding while preserving at least 128 bytes for a
+terminal result, and the terminal transition removes any remainder. Each state table still has at most 8192 entries, each probe event is
+at most 4 KiB, and the whole state remains at most 1 MiB. At true active-obligation
+capacity overflow, existing active evidence is retained and a visible
+`exhausted` latch closes selector admission and new probes rather than dropping
+an active obligation. A full legacy file exposes the same latch without
+rewriting it. Back up the global selection directory separately from project
+backups; project backups include project-local classification caches and run
+evidence.
+
+`tests/test_selection.py` and `tests/test_recovery_probes.py` use synthetic facts/driver doubles and controlled time
 for failover, recovery, unknowns, classification, concurrency, publication and
 usage attribution. Offline tests and actual installed Pi SDK with faux provider
 are separate from live-provider authentication, quota reset and real OCI tests.

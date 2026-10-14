@@ -84,6 +84,7 @@ class Project:
         return reset
 
     def status(self) -> dict:
+        from .selection import project_status
         snapshot = self.snapshots.get()
         budget = Budget(self.config.data / "budget", self.config.limits.daily_requests,
                         self.config.limits.retention_days,
@@ -93,6 +94,7 @@ class Project:
                 "outcome": snapshot["outcome"], "summary": snapshot["summary"],
                 "verification": snapshot["verification"], "state": snapshot["state"],
                 "goal_digest": snapshot.get("goal_digest"), "wake_at": snapshot.get("wake_at"),
+                "selection": project_status(self.config, self),
                 "health": {p.stem: read_json(p) for p in (self.root / "health").glob("*.json") if not p.is_symlink()},
                 "active": {p.stem: read_json(p) for p in (self.root / "active").glob("*.json") if not p.is_symlink()},
                 "pending_insights": self.insights.list(limit=self.config.limits.pending_insights),

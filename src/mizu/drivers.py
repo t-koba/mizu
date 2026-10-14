@@ -76,7 +76,13 @@ def admit_invocation(context, *, unit: str) -> dict:
         raise Cancelled("Run cancelled before admission")
     if getattr(context, "invocation_admitted", False):
         return {"admitted": True}
+    if getattr(context, 'recovery_probe', False):
+        context.revalidate_admission()
     over = context.request_count >= role_requests_per_run(context.config, context.spend_role or context.role)
+    if over and getattr(context, 'recovery_probe', False):
+        context.bound_hit = 'requests'
+        context.admission_error = 'request_ceiling'
+        raise LimitExceeded('Recovery request ceiling reached')
     if over:
         from .runtime import WRAP_UP_REQUESTS
         if getattr(context, "wrap_up_requests", 0) >= WRAP_UP_REQUESTS:
@@ -109,6 +115,8 @@ def admit_invocation(context, *, unit: str) -> dict:
         context.wrap_up_requests = getattr(context, "wrap_up_requests", 0) + 1
     context.request_count += 1
     context.invocation_admitted = True
+    if getattr(context, 'recovery_probe', False):
+        context.recovery_progress()
     if hasattr(context,"model_evidence"):
         context.model_evidence.update(requests=context.request_count,requests_known=True,admission_status="accepted")
     write_json(context.run_dir / "admission.json", {"run":context.run_dir.name,
