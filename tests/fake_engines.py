@@ -14,7 +14,7 @@ def emit(record):
 
 
 def finish(bridge):
-    if scenario == 'missing-finish':
+    if scenario in ('missing-finish', 'provider-error-before-finish'):
         return
     forward(bridge, 'finish', {'outcome': 'wait', 'summary': 'Synthetic result', 'state': 'Review evidence'})
     if scenario == 'post-finish':
@@ -75,8 +75,8 @@ else:
             emit({'method': 'thread/tokenUsage/updated', 'params': {'threadId': 'thread', 'turnId': turn,
                   'tokenUsage': {'total': {'inputTokens': 10, 'outputTokens': 5}}}})
             emit({'method': 'turn/completed', 'params': {'threadId': 'thread', 'turn': {'id': turn,
-                  'status': 'failed' if scenario in ('failed', 'provider-error') else 'interrupted' if scenario == 'interrupted' else 'completed',
-                  **({'error': {'message': 'synthetic failure', 'code': 'synthetic-code', 'codexErrorInfo': {'synthetic': {'httpStatusCode': 503}}}} if scenario == 'provider-error' else {})}}})
+                  'status': 'failed' if scenario in ('failed', 'provider-error', 'provider-error-before-finish') else 'interrupted' if scenario == 'interrupted' else 'completed',
+                  **({'error': {'message': 'synthetic failure', 'code': 'synthetic-code', 'codexErrorInfo': {'synthetic': {'httpStatusCode': 503}}}} if scenario in ('provider-error', 'provider-error-before-finish') else {})}}})
             emit({'id': identifier, 'result': {'turn': {'id': turn}}})
         elif method == 'turn/interrupt':
             break

@@ -42,7 +42,9 @@ HTTP retry を HTTP 要求ごとに計測したとは扱わない。
 
 codemode、tool search、MCP は専用設定で選択し、実際のツール実行には
 `engine_tools` の明示許可を必要とする。表示・非表示・active 状態は権限ではない。
-`finish` は model-only。構造化結果を返し、seal と `agent_settled` が揃って完了する。
+`finish` は model-only。構造化結果を返し、adapterの正常settlementにはsealと`agent_settled`の両方を確認する。
+通常のwork unitではhostのfinish sealは不可逆で、後続のadapter障害はsettlement失敗として記録し、
+最終検証・公開検査を続ける（[完了契約](completion-contracts.md)）。
 運用者拡張は信頼された同一プロセスのコードであり、OCI で隔離されたものではない。
 
 ## Codex

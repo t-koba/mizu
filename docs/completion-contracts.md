@@ -14,6 +14,12 @@
 
 ## 実行とエンジン
 
+通常のwork unitの完了は、hostのfinish seal、adapter/sessionのsettlement、最終公開を区別します。`finish`は検証後、`finish-intent.json`の書込みが成功して初めて受理・sealされます。検証や保存の失敗ではsealしません。seal後の新しい推論要求・ツール・変更操作は受付、カウンター、dispatchより前に拒否します。遅れて届く利用量は証跡としてのみ記録できます。
+
+seal後にdriver実行が拒否された追加要求、EOF、実行期限などで例外を返しても、既存のfinishを保持して通常の最終キャプチャ・検証・耐久性・公開検査へ進みます。そのsettlement例外によるselector fallbackや連続失敗・health brakeの加算は行いません。明示的なhost stop/pause/unarmは引き続きキャンセルします。例外の保持はdriver実行だけが対象で、最終検証・snapshot保存・公開・終了記録の失敗は成功へ変換しません。相談・委任の子もsealした回答を保持しますが、子のsealは公開ではありません。seal前の失敗方針と実行期限設定は変更しません。
+
+保持したsettlement障害はrun内の`adapter-settlement.json`と終了証跡の`model.settlement`に記録します。schemaは`status = "failed"`、`execution_attempt`、`error_type`（最大128文字）、`error`（最大4,000 Unicode文字）、`recorded_at`です。例外テキストはローカルの未信頼診断で、再送や判定の指示ではありません。既に取得したモデル・利用量証跡を残し、`model.settled = false`を明示します。`status = "completed"`はhostのwork unit完了を表し、adapterや永続sessionの正常settlementを主張せず、sessionのprompt cursorも更新しません。診断記録の保存失敗も伝播します。durable-Piのsettlementを推測・生成せず、recovery probeは引き続き確認済みdriver settlement、受付、要求モデルとchallengeを必要とします。
+
 実行の準備はactive記録から終了記録・後片付けまで一つの例外処理範囲です。実行・子相談記録は現行構造で、`run`、子の`parent_run`、`role`、`status`、開始・終了時刻、モデル証跡を持ちます。失敗や中断にも既に取得した利用量と受付回数を残します。Codex/Claudeの受信利用量を先にメモリ上の終了証跡へ登録し、その後にイベントログを保存します。ログ保存失敗でも利用量の取得済み事実を失いません。I/O障害で終了記録自体が保存できない場合は元のエラーを保持して伝播します。active削除の失敗が元の原因を上書きすることはありません。
 
 子プロセスの入力、出力、キャンセルは同じ実行期限で管理します。生のパイプをポーリングし、期限・停止時は入力を中止して読取スレッドを回収します。管理下driverの後片付けはstdinを閉じ、通常終了を1秒待ち、process groupへ1秒の停止猶予を与え、読取スレッドを各0.5秒回収します。OSの起動・シグナル処理そのものに厳密な実時間保証はありません。POSIXの別グループへ逃れた子孫をプロセスグループだけで隔離したとは扱わず、OCI境界の実機確認に分けます。入力・出力エラーは正常終了へ変換せず、部分送信の結果をunknownとして再送しません。管理下driverではstdout証跡4MiB、stderr証跡256KiBを別々に制限します。PiのRPC入力も停止可能な送信を使います。部分送信を再試行しません。POSIXではプロセスグループ、Windowsでは起動時に停止状態からkill-on-close Job Objectへ所属させてから再開する構成です。通常終了でもJobを閉じます。ブリッジの終了は新規受付の停止、Contextの操作停止、接続の遮断、処理中ハンドラーの回収の順です。

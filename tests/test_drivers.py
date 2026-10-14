@@ -136,7 +136,7 @@ class SyntheticEngineTests(Fixture):
         from mizu.selection import validate_selectors
         engines = dict(self.config.engines)
         profiles = dict(self.config.profiles)
-        for profile, engine, scenario in (('primary', 'codex', 'provider-error'), ('alternate', 'claude', 'normal')):
+        for profile, engine, scenario in (('primary', 'codex', 'provider-error-before-finish'), ('alternate', 'claude', 'normal')):
             profiles[profile] = {**profiles[profile], 'engine': engine, 'provider': 'synthetic', 'options': {}, 'session': 'ephemeral'}
             engines[engine] = {**engines[engine], 'command': (sys.executable, str(ROOT/'tests/fake_engines.py'), engine, scenario)}
         spec = {'retry_seconds': 10, 'rules': [{'candidates': [{'profile': 'primary'}, {'profile': 'alternate'}]}],
@@ -149,13 +149,39 @@ class SyntheticEngineTests(Fixture):
             first = Engine(config).run(self.project, 'worker')
             second = Engine(config).run(self.project, 'worker')
         # The matched profile block falls back within the first dispatch:
-        # codex fails, claude completes it, and no second run is needed.
+        # codex fails before sealing, claude completes it, and no second run is needed.
         self.assertEqual(first['status'], 'completed')
         self.assertEqual(first['model']['engine'], 'claude')
         self.assertEqual(first['selection']['profile'], 'alternate')
         self.assertEqual(second['status'], 'completed')
         self.assertEqual(second['model']['engine'], 'claude')
         self.assertEqual(second['selection']['profile'], 'alternate')
+        self.assertFalse(self.project.control()['paused'])
+
+    def test_runtime_keeps_seal_after_synthetic_codex_terminal_failure(self):
+        from mizu.runtime import Engine
+        profile = {**self.config.profiles['primary'], 'engine': 'codex', 'provider': 'synthetic',
+                   'options': {}, 'session': 'ephemeral'}
+        engine = {**self.config.engines['codex'],
+                  'command': (sys.executable, str(ROOT/'tests/fake_engines.py'), 'codex', 'provider-error')}
+        role = dataclasses.replace(self.config.roles['worker'], workspace='read', capabilities=('finish',))
+        config = dataclasses.replace(self.config, profiles={**self.config.profiles, 'primary': profile},
+            engines={**self.config.engines, 'codex': engine}, roles={**self.config.roles, 'worker': role},
+            limits=dataclasses.replace(self.config.limits, max_failures=1))
+        with unittest.mock.patch.dict(os.environ, {'CODEX_AUTH_FILE': str(self.root/'absent')}):
+            result = Engine(config).run(self.project, 'worker')
+        run = self.project.root/'runs'/result['run']
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(result['finish'], read_json(run/'finish-intent.json'))
+        self.assertEqual(result['finish']['summary'], 'Synthetic result')
+        self.assertEqual(result['model']['engine'], 'codex')
+        self.assertEqual(result['model']['requests'], 1)
+        self.assertEqual(result['model']['request_unit'], 'turn')
+        self.assertTrue(result['model']['usage_known'])
+        self.assertFalse(result['model']['settled'])
+        self.assertEqual(result['model']['settlement']['error_type'], 'ModelFailure')
+        self.assertFalse((run/'error.json').exists())
+        self.assertEqual(read_json(self.project.root/'health/worker.json')['consecutive_failures'], 0)
         self.assertFalse(self.project.control()['paused'])
 
     def test_native_failure_facts_are_preserved_without_guessing(self):

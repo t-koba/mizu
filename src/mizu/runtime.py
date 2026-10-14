@@ -220,10 +220,13 @@ class Context:
     def tools_cancelled(self):
         return self.operations_stopped.is_set() or self.cancelled()
 
-    def cancelled(self) -> bool:
+    def host_cancelled(self) -> bool:
+        """Explicit host cancellation, distinct from the adapter run deadline."""
         control = self.project.control()
-        return (self.stop.is_set() or self.closed or not control.get("armed") or control.get("paused")
-                or time.monotonic() > self.deadline)
+        return self.stop.is_set() or self.closed or not control.get("armed") or control.get("paused")
+
+    def cancelled(self) -> bool:
+        return self.host_cancelled() or time.monotonic() > self.deadline
 
     def _bound_message(self) -> str:
         how = f"{WRAP_UP_REQUESTS - self.wrap_up_requests} requests and " \
@@ -238,6 +241,10 @@ class Context:
         with self.mutex:
             if self.tools_cancelled():
                 raise Cancelled("Run is stopped, paused or past its deadline")
+            # A seal is irreversible. Refuse before admission-error bookkeeping,
+            # counters, handshake or dispatch; usage may only add evidence.
+            if self.finished is not None and operation != "_model_usage":
+                raise Denied("This work unit is sealed; no model requests or tools may run after finish")
             if operation == "_hello":
                 if arguments != {}:
                     raise Denied("Unsupported bridge handshake")
@@ -262,8 +269,6 @@ class Context:
             if operation == "_engine_tool":
                 if self.bound_hit is not None:
                     raise Denied(self._bound_message())
-                if self.finished is not None:
-                    raise Denied("This work unit is sealed")
                 if arguments.get("name") not in self.role.engine_tools:
                     raise Denied("Engine tool has no explicit grant")
                 self.tool_count += 1
@@ -278,8 +283,6 @@ class Context:
                     sequence = arguments.get("sequence")
                     if type(sequence) is not int or sequence < 1:
                         raise Denied("Invalid request sequence")
-                    if self.finished is not None:
-                        raise Denied("No model requests are permitted after finish")
                     sequence_key = (self.execution_attempt, sequence)
                     if sequence_key not in self.request_sequences:
                         over = self.request_count >= role_requests_per_run(
@@ -320,8 +323,6 @@ class Context:
                 except MizuError as exc:
                     self.admission_error = str(exc)
                     raise
-            if self.finished is not None:
-                raise Denied("This work unit is sealed; no tools may run after finish")
             if operation not in self.role.capabilities:
                 raise Denied(f"Role has no capability: {operation}")
             if self.bound_hit is not None and operation not in WRAP_UP_OPS:
@@ -808,9 +809,10 @@ class Context:
             # A seal after a spend bound is a bounded end, never a fresh
             # verdict: the unit saved what it could and runs again.
             args = {**args, "outcome": "bounded"}
-        self.finished = {**args, "wait_seconds": wait, "recorded_at": now(),
-                         **({"bound": self.bound_hit} if self.bound_hit is not None else {})}
-        write_json(self.run_dir / "finish-intent.json", self.finished)
+        finished = {**args, "wait_seconds": wait, "recorded_at": now(),
+                    **({"bound": self.bound_hit} if self.bound_hit is not None else {})}
+        write_json(self.run_dir / "finish-intent.json", finished)
+        self.finished = finished
         return {"sealed": True}
 
     def _op_exec(self, args: dict) -> dict:
@@ -1797,6 +1799,34 @@ class Engine:
             return self.driver
         return driver_for(self.config, profile, self._drivers)
 
+    def _execute(self, context: Context, driver, prompt: str, **kwargs) -> dict:
+        """Preserve a durable host seal, not a claim of adapter settlement.
+
+        Only driver execution is caught. Unsealed failures propagate unchanged;
+        explicit host cancellation still cancels. Sealed driver faults leave
+        bounded local diagnostics and the partial model evidence. Record
+        writes and all final integrity/publication checks still fail closed.
+        Recovery probes do not use this work-unit completion path.
+        """
+        if context.finished is not None:
+            raise Denied("No inference after the work unit is sealed")
+        try:
+            return driver.execute(context, prompt, **kwargs)
+        except Exception as exc:
+            if context.finished is None:
+                raise
+            if context.host_cancelled():
+                raise Cancelled("Run stopped after finish") from exc
+            settlement = {"status": "failed", "execution_attempt": context.execution_attempt,
+                          "error_type": type(exc).__name__[:128], "error": str(exc)[:4000],
+                          "recorded_at": now()}
+        # No synthetic session or durable-Pi result: only evidence already
+        # observed by the driver, explicitly marked as not settled.
+        context.model_evidence = {**getattr(context, "model_evidence", {}),
+                                  "settled": False, "settlement": settlement}
+        write_json(context.run_dir / "adapter-settlement.json", settlement)
+        return context.model_evidence
+
     def preview(self, project: Project, role_name: str, attributes=None) -> dict:
         if role_name not in project.roles:
             raise Denied("Role is not enabled for this project")
@@ -2093,7 +2123,7 @@ class Engine:
                 while True:
                     context.execution_attempt += 1
                     try:
-                        model_result = driver.execute(context, prompt)
+                        model_result = self._execute(context, driver, prompt)
                     except ModelFailure as exc:
                         # A matched on_error rule falls back within this
                         # dispatch: the block just recorded applies to the
@@ -2146,9 +2176,9 @@ class Engine:
                         # The failed attempt's bridge close cancelled this
                         # context's operations; the retry is a new engine
                         # connection, so reopen them. Deadline, budget, and
-                        # tool counters stay accumulated on the reused context,
-                        # but the failed attempt's seal never carries: the
-                        # retry must finish and verify its own work.
+                        # tool counters stay accumulated on the reused context.
+                        # Only unsealed failures reach fallback; the retry must
+                        # finish and verify its own work.
                         # A terminal unanswered durable settlement is known
                         # not to be an in-flight recovery. Give the selected
                         # fallback its own idempotency key; every other error
@@ -2158,7 +2188,6 @@ class Engine:
                                 and exc.evidence.get("kind") == "unanswered"):
                             context.attempt_ordinal += 1
                         context.operations_stopped.clear()
-                        context.finished = None
                         context.verification = None
                         context.commentary = None
                         driver = self.resolve(role.profile)
@@ -2171,8 +2200,8 @@ class Engine:
                         # A per-run spend bound with no finish sealed gets one
                         # wrap-up attempt under reduced grants instead of an
                         # error: the daily budget, an unmarked bound, an
-                        # already-spent allowance, or an already-sealed unit
-                        # still fail exactly as before.
+                        # already-spent allowance still fail exactly as before.
+                        # Sealed driver errors were retained by _execute.
                         if (isinstance(exc, InfraExceeded)
                                 or getattr(context, "bound_hit", None) is None
                                 or getattr(context, "wrap_up_attempted", False)
@@ -2197,9 +2226,9 @@ class Engine:
                                   f"{WRAP_UP_REQUESTS - context.wrap_up_requests} requests and "
                                   f"{WRAP_UP_TOOLS - context.wrap_up_tools} wrap-up tools remain.")
                         context.execution_attempt += 1
-                        model_result = driver.execute(context, notice + "\n\n" + prompt)
+                        model_result = self._execute(context, driver, notice + "\n\n" + prompt)
                     break
-                if context.cancelled():
+                if context.host_cancelled() or (context.finished is None and context.cancelled()):
                     raise Cancelled("Run stopped before publication")
                 if context.finished is None:
                     raise Denied("Missing finish intent")
@@ -2250,7 +2279,8 @@ class Engine:
                     record_routing(project, role_name, finished, snapshot, context.goal_digest, run_id)
                 if context.commentary is not None:
                     result["artifact"] = publish(project, snapshot, context.commentary, run_id=run_id)
-                if session_dir is not None:
+                # A retained host seal does not confirm session settlement.
+                if session_dir is not None and model_result.get("settled") is not False:
                     with contextlib.suppress(OSError, ValueError, TypeError):
                         from .engine_config import write_prompt_state
                         write_prompt_state(session_dir, snapshot=snapshot["id"],
@@ -2407,8 +2437,8 @@ class Engine:
                                   run_dir, snap, workspace, stop=parent.stop, goal=parent.goal)
                     ctx.ephemeral = True
                     ctx.deadline = min(ctx.deadline, parent.deadline)
-                    model = self.resolve(profile).execute(ctx, prompt_for(ctx) + "\n\nQuestion:\n" + args["question"], profile=profile)
-                    if ctx.cancelled():
+                    model = self._execute(ctx, self.resolve(profile), prompt_for(ctx) + "\n\nQuestion:\n" + args["question"], profile=profile)
+                    if ctx.host_cancelled() or (ctx.finished is None and ctx.cancelled()):
                         raise Cancelled("Consultation cancelled before completion")
                     if ctx.finished is None:
                         raise Denied("Consultation did not finish")
@@ -2524,7 +2554,7 @@ class Engine:
                 ctx.wrap_up_tools = parent.wrap_up_tools
                 ctx.deadline = min(ctx.deadline, parent.deadline)
                 try:
-                    model = driver.execute(ctx, prompt_for(ctx) + "\n\nTask:\n" + task
+                    model = self._execute(ctx, driver, prompt_for(ctx) + "\n\nTask:\n" + task
                                            + "\n\nCall finish once with a result summary (and short state) "
                                            + "when done; that seal returns to the caller, it publishes nothing.")
                 finally:
@@ -2540,7 +2570,7 @@ class Engine:
                     parent.admission_wait = parent.admission_wait or ctx.admission_wait
                     if ctx.admission_error:
                         parent.admission_error = ctx.admission_error
-                if ctx.cancelled():
+                if ctx.host_cancelled() or (ctx.finished is None and ctx.cancelled()):
                     raise Cancelled("Delegation cancelled before completion")
                 if ctx.finished is None:
                     raise Denied("Delegation did not finish")

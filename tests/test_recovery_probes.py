@@ -142,6 +142,19 @@ class RecoveryProbeTests(SelectionFixture):
         self.assertFalse(context.run_dir.exists())
         self.assertNotIn(b'mizu-recovery-', canonical(event))
 
+    def test_finish_seal_without_driver_settlement_does_not_recover(self):
+        action = self.setup_probe()
+        class FailingSettlement(ProbeDriver):
+            def execute(self, context, prompt, *, profile):
+                super().execute(context, prompt, profile=profile)
+                raise ProtocolError('synthetic post-seal settlement failure')
+        result, driver = self.service(FailingSettlement())
+        self.assertIsNotNone(driver.calls[0][0].finished)
+        self.assertEqual(result['status'], 'failure')
+        self.assertEqual(result['reason'], 'driver_failed')
+        self.assertTrue(active(self.contribution(action), 1011))
+        self.assertFalse(self.store.read()['events'][result['id']]['settled'])
+
     def test_fixed_and_probe_overlap_both_orders(self):
         for fixed_first in (False, True):
             with self.subTest(fixed_first=fixed_first):
