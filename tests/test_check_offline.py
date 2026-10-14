@@ -90,6 +90,21 @@ FAILED (failures=1)
         self.assertNotIn('D:/a/', summary)
         self.assertNotIn('private_fixture_value', summary)
 
+    def test_exception_types_without_common_suffix_are_reported(self):
+        output = """ERROR: test_exit (tests.test_example.ExampleTests)
+Traceback (most recent call last):
+  File "tests/test_example.py", line 10, in test_exit
+SystemExit: 2
+
+ERROR: test_stop (tests.test_example.ExampleTests)
+Traceback (most recent call last):
+  File "tests/test_example.py", line 20, in test_stop
+StopIteration
+"""
+        summary = CHECK.unittest_failure_summary(output)
+        self.assertIn('[SystemExit]', summary)
+        self.assertIn('[StopIteration]', summary)
+
     def test_error_and_failure_names_are_both_reported(self):
         output = """ERROR: test_error (tests.test_example.ExampleTests)
 Traceback (most recent call last):

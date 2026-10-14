@@ -91,10 +91,11 @@ def unittest_failure_summary(output: str) -> str:
                 location = f' @ {normalized}:{line}'
                 break
         error_type = ''
-        for line in block.splitlines():
-            match = re.match(r'^\s*([A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception|Failure))(?::|$)', line)
+        for line in reversed(block.splitlines()):
+            match = re.fullmatch(r'([A-Za-z_][A-Za-z0-9_.]*)(?::.*)?', line.strip())
             if match:
                 error_type = f' [{match.group(1)}]'
+                break
         summaries.append(f'{header.group(1)} {header.group(2)}{location}{error_type}'[:500])
     return '; '.join(summaries)[:1500]
 
