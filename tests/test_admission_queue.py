@@ -77,8 +77,12 @@ class QueueTests(Fixture):
         limits.update(changes)
         self.config = dataclasses.replace(self.config, limits=dataclasses.replace(self.config.limits, **limits))
 
-    def tickets(self):
-        return read_json(self.config.data / 'slots/queue.json', {'tickets': []})['tickets']
+    def tickets(self, *, synchronized=False):
+        path = self.config.data / 'slots/queue.json'
+        if synchronized:
+            with lock(self.config.data / 'slots/queue.lock'):
+                return read_json(path, {'tickets': []})['tickets']
+        return read_json(path, {'tickets': []})['tickets']
 
     def until(self, predicate):
         deadline = time.monotonic() + 10
@@ -324,7 +328,11 @@ class QueueTests(Fixture):
         with self.raw_slots():
             thread, stop, outcome = self.waiter()
             self.until(lambda: len(self.tickets()) == 1)
-            with lock(self.config.data / 'slots/queue.lock', blocking=False):
+            # The waiter may still be finishing the enqueue transaction
+            # after its row becomes visible. Wait for that transaction, then
+            # hold the lock so close() deterministically exercises its
+            # nonblocking cleanup path.
+            with lock(self.config.data / 'slots/queue.lock'):
                 stop.set()
                 thread.join(5)
                 self.assertFalse(thread.is_alive())
@@ -638,20 +646,45 @@ class QueueTests(Fixture):
                 driver = ScriptDriver()
                 outcome = []
                 engine = Engine(self.config, driver=driver)
+                ticket_seen = threading.Event()
+                dispatch_check = threading.Event()
+                continue_check = threading.Event()
+                original_check = engine._check_admission
+
+                def check_at_dispatch(project):
+                    # After the test has observed the queued ticket, its
+                    # disappearance means attempt() acquired the slot and is
+                    # performing the final check before provider dispatch.
+                    if ticket_seen.is_set() and not self.tickets(synchronized=True):
+                        dispatch_check.set()
+                        if not continue_check.wait(5):
+                            raise RuntimeError('dispatch-check test barrier timed out')
+                    original_check(project)
+
+                engine._check_admission = check_at_dispatch
+
                 def run():
                     try:
                         engine.run(self.project, 'worker', retry_busy=True)
                     except BaseException as exc:
                         outcome.append(exc)
-                with patch('mizu.runtime.shutil.disk_usage') as disk:
-                    disk.return_value.free = 1048576
-                    self.config = dataclasses.replace(self.config, limits=dataclasses.replace(
-                        self.config.limits, free_disk_mb=1))
-                    engine.config = self.config
-                    with self.raw_slots():
-                        thread = threading.Thread(target=run)
-                        thread.start()
-                        self.until(lambda: len(self.tickets()) == 1)
+
+                thread = None
+                try:
+                    with patch('mizu.runtime.shutil.disk_usage') as disk:
+                        disk.return_value.free = 1048576
+                        self.config = dataclasses.replace(self.config, limits=dataclasses.replace(
+                            self.config.limits, free_disk_mb=1))
+                        engine.config = self.config
+                        held = self.raw_slots()
+                        try:
+                            thread = threading.Thread(target=run)
+                            thread.start()
+                            self.until(lambda: len(self.tickets(synchronized=True)) == 1)
+                            ticket_seen.set()
+                        finally:
+                            held.close()
+                        self.assertTrue(dispatch_check.wait(5), 'engine did not reach dispatch revalidation')
                         if change == 'pause':
                             self.project.set_control(paused=True)
                         elif change == 'unarm':
@@ -662,12 +695,20 @@ class QueueTests(Fixture):
                             Budget(self.config.data / 'budget', 1).take('offline', project='sample')
                         elif change == 'disk':
                             disk.return_value.free = 0
-                    thread.join(5)
+                        continue_check.set()
+                        thread.join(5)
+                finally:
+                    # Never let a failed assertion strand a retrying Engine
+                    # thread or carry its queue ticket into the next subtest.
+                    continue_check.set()
+                    engine.stop.set()
+                    if thread is not None:
+                        thread.join(5)
+                    for path in (self.config.data / 'budget').glob('*.json'):
+                        path.unlink()
+                self.assertIsNotNone(thread)
                 self.assertFalse(thread.is_alive())
                 expected = Busy if change == 'drain' else Denied if change in ('pause', 'unarm') else InfraExceeded
                 self.assertIsInstance(outcome[0], expected)
                 self.assertEqual(driver.calls, [])
-                self.assertEqual(self.tickets(), [])
-                # Reset only offline budget fixture between cases.
-                for path in (self.config.data / 'budget').glob('*.json'):
-                    path.unlink()
+                self.assertEqual(self.tickets(synchronized=True), [])
