@@ -105,6 +105,18 @@ StopIteration
         self.assertIn('[SystemExit]', summary)
         self.assertIn('[StopIteration]', summary)
 
+    def test_multiline_exception_value_is_not_reported_as_a_type(self):
+        output = """ERROR: test_multiline (tests.test_example.ExampleTests)
+Traceback (most recent call last):
+  File "tests/test_example.py", line 30, in test_multiline
+    raise ValueError('safe context')
+ValueError: safe context
+private_fixture_value
+"""
+        summary = CHECK.unittest_failure_summary(output)
+        self.assertIn('[ValueError]', summary)
+        self.assertNotIn('private_fixture_value', summary)
+
     def test_error_and_failure_names_are_both_reported(self):
         output = """ERROR: test_error (tests.test_example.ExampleTests)
 Traceback (most recent call last):

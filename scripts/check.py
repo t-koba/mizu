@@ -65,7 +65,7 @@ def unittest_failure_summary(output: str) -> str:
 
     The CI log adapter exposes only a bounded tail. Test names, repository-local
     frame locations, and exception classes are enough to locate a failure while
-    keeping temporary paths and arbitrary assertion data out of the summary.
+    keeping temporary paths and exception values out of the summary.
     """
     import re
     headers = list(re.finditer(r'^(FAIL|ERROR): (.+)$', output, re.M))
@@ -74,7 +74,9 @@ def unittest_failure_summary(output: str) -> str:
         end = headers[index + 1].start() if index + 1 < len(headers) else len(output)
         block = output[header.end():end]
         location = ''
-        frames = re.findall(r'^\s*File "([^"]+)", line (\d+), in [^\r\n]+$', block, re.M)
+        frame_matches = list(re.finditer(
+            r'^[ \t]*File "([^"]+)", line (\d+), in [^\r\n]+$', block, re.M))
+        frames = [(frame.group(1), frame.group(2)) for frame in frame_matches]
         for filename, line in reversed(frames):
             normalized = filename.replace('\\', '/')
             for directory in ('tests/', 'src/', 'scripts/', 'adapters/'):
@@ -91,10 +93,16 @@ def unittest_failure_summary(output: str) -> str:
                 location = f' @ {normalized}:{line}'
                 break
         error_type = ''
-        for line in reversed(block.splitlines()):
-            match = re.fullmatch(r'([A-Za-z_][A-Za-z0-9_.]*)(?::.*)?', line.strip())
-            if match:
-                error_type = f' [{match.group(1)}]'
+        if frame_matches:
+            # The exception header is the first unindented line after the
+            # final traceback frame. Do not scan message continuation lines:
+            # they can contain arbitrary values that resemble class names.
+            for line in block[frame_matches[-1].end():].splitlines():
+                if not line.strip() or line[0].isspace():
+                    continue
+                match = re.fullmatch(r'([A-Za-z_][A-Za-z0-9_.]*)(?::.*)?', line)
+                if match:
+                    error_type = f' [{match.group(1)}]'
                 break
         summaries.append(f'{header.group(1)} {header.group(2)}{location}{error_type}'[:500])
     return '; '.join(summaries)[:1500]
