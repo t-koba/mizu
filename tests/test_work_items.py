@@ -456,6 +456,13 @@ class WorkItemTests(Fixture):
             self.change()
         self.assertEqual(list(target.iterdir()), [])
 
+    def test_page_open_checks_missing_work_item_history_directory_once(self):
+        from mizu.work_items import _directory
+        with patch("mizu.work_items._directory", wraps=_directory) as checks:
+            self.store.page_open()
+        matching = [call for call in checks.call_args_list if call.args[0] == self.directory.parent]
+        self.assertEqual(len(matching), 1)
+
     def test_page_open_reuses_scanned_seed_event_without_rereading_it(self):
         path = f"decision-history/{self.item_id[3:]}.json"
         read = self.store._read

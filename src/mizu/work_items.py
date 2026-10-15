@@ -164,7 +164,7 @@ class WorkItems:
             self._seed(seed_id)  # Validate the immutable seed's complete field/value contract.
         return {"rev": revision, "action": action}
 
-    def _recover_temporary_writes(self, item_id: str) -> None:
+    def _recover_temporary_writes(self, item_id: str) -> bool:
         """Remove only atomic-write leftovers while holding insights.lock.
 
         A regular orphan temporary is uncommitted and ignored. On POSIX, a
@@ -176,7 +176,7 @@ class WorkItems:
             raise Denied("Invalid work-item ID")
         directory = self.root / "work-items" / item_id
         if not _directory(directory.parent) or not _directory(directory):
-            return
+            return False
         temporary_entries = []
         revision_inodes = []
         with os.scandir(directory) as entries:
@@ -219,6 +219,7 @@ class WorkItems:
             removed = True
         if removed:
             sync_dir(directory)
+        return True
 
     def _stored_wait(self, value) -> dict:
         """Validate normalized waits without rebasing stored code-change evidence."""
@@ -278,10 +279,14 @@ class WorkItems:
         elif record["snapshot_id"] is not None or record["verification"] is not None:
             raise Denied("Only completed work items carry snapshot evidence")
 
-    def _get(self, item_id: str, *, seed_event: dict | None = None) -> dict:
+    def _get(self, item_id: str, *, seed_event: dict | None = None,
+             history_exists: bool | None = None) -> dict:
         current = self._seed(item_id, seed_event)  # Validate the seed; never scan history/inbox.
+        # Reuse the immediate under-lock recovery result instead of restatting these paths.
+        if history_exists is False:
+            return current
         directory = self.root / "work-items" / item_id
-        if not _directory(directory.parent) or not _directory(directory):
+        if history_exists is None and (not _directory(directory.parent) or not _directory(directory)):
             return current
         revisions = set()
         with os.scandir(directory) as entries:
@@ -309,13 +314,13 @@ class WorkItems:
         records raise Denied/LimitExceeded; local I/O/lock failures propagate.
         """
         with lock(self.root / "locks" / "insights.lock"):
-            self._recover_temporary_writes(item_id)
-            return self._get(item_id)
+            history_exists = self._recover_temporary_writes(item_id)
+            return self._get(item_id, history_exists=history_exists)
 
     def _projection_unlocked(self, item_id: str, *, seed_event: dict | None = None) -> dict:
         """Build a projection while the caller holds insights.lock."""
-        self._recover_temporary_writes(item_id)
-        item = self._get(item_id, seed_event=seed_event)
+        history_exists = self._recover_temporary_writes(item_id)
+        item = self._get(item_id, seed_event=seed_event, history_exists=history_exists)
         origin_id = item["origin"]["insight_id"]
         origin_rev = item["origin"]["rev"]
         current_rev = self._origin_revision(origin_id)
@@ -545,8 +550,8 @@ class WorkItems:
         if type(expected_rev) is not int or expected_rev < 1:
             raise Denied("Expected revision must be a positive integer")
         with lock(self.root / "locks" / "insights.lock"):
-            self._recover_temporary_writes(item_id)
-            current = self._get(item_id)
+            history_exists = self._recover_temporary_writes(item_id)
+            current = self._get(item_id, history_exists=history_exists)
             if current["rev"] != expected_rev:
                 raise Denied("Work item changed; re-read before transitioning")
             registered = None
