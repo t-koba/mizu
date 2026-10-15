@@ -231,7 +231,9 @@ retention/expiration is not implemented, so those citations remain durable.
 `projection(item_id)` returns one bounded view (`item`, `current_origin_rev`,
 `stale`, `redecision`) without changing the immutable seed or CAS record. A newer
 origin revision is stale until that revision has an `accept`, `modify`, `defer`
-or `reject` decision; `withdraw` does not clear staleness. Missing current
+or `reject` decision; `withdraw` does not clear staleness. Re-decisions must
+match the action-specific decision schema; an accept/modify must also match its
+immutable decision-history event and pass seed validation. Missing current
 origin data is reported stale, while unsafe or malformed origin records fail
 closed. This projection does not yet gate internal transitions.
 
@@ -252,10 +254,15 @@ lock for the enumeration; no list index is maintained. Unsafe or malformed
 committed history, seeds, or state fail closed. Only recognized regular
 `.new-<8-char>` orphan temporaries are ignored, never promoted; unexpected
 names and unsafe temporaries fail closed. Recognized per-item atomic-write
-leftovers are recovered under the lock. Paging is a live view across calls,
-not a transaction snapshot, so concurrent state changes can move rows between
-pages. No public visibility or free-text
-Tasks-retirement claim follows from this internal method. Public
+leftovers are recovered under the lock. Paging is a live view across calls, not a transaction snapshot. The exclusive
+last-key cursor avoids offset shifts when an earlier row closes, but new IDs
+that sort at or before the cursor may be absent from that continuation; an
+empty page after a cursor does not mean the collection is empty. `total` and
+`coverage_complete` describe only each call's locked scan. A fresh traversal
+starts with a null cursor and checks `total`, `truncated` and
+`coverage_complete` on each page, but still receives no transaction-consistent
+multi-page snapshot. No public visibility or free-text Tasks-retirement claim
+follows from this internal method. Public
 prompt/tool/CLI/status/explain visibility, policy configuration,
 backfill/reconciliation and replacement of free-text Tasks remain unfinished.
 **Free-text Tasks in writer state are still needed.**

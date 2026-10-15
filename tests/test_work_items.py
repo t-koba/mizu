@@ -80,6 +80,39 @@ class WorkItemTests(Fixture):
         self.assertEqual(self.store.get(self.item_id), self.seed)
         self.assertEqual(decision["action"], "defer")
 
+    def test_projection_rejects_incomplete_current_decision(self):
+        self.project.insights.revise(self.proposal["id"], source="worker", title="Revised scope",
+                                     body="Changed claims", base_snapshot=None, expected_rev=1)
+        path = self.project.root / "decisions" / f"{self.proposal['id']}.json"
+        write_json(path, {"id": self.proposal["id"], "rev": 2, "action": "accept"})
+        with self.assertRaises(Denied):
+            self.store.projection(self.item_id)
+
+    def test_projection_validates_current_accept_seed_before_clearing_stale(self):
+        self.project.insights.revise(self.proposal["id"], source="worker", title="Revised scope",
+                                     body="Changed claims", base_snapshot=None, expected_rev=1)
+        self.project.insights.decide(self.proposal["id"], "accept", "reviewed again", "",
+                                     "run-redecision", expected_rev=2)
+        view = self.store.projection(self.item_id)
+        self.assertFalse(view["stale"])
+        self.assertEqual(view["redecision"], {"rev": 2, "action": "accept"})
+        path = self.project.root / "decisions" / f"{self.proposal['id']}.json"
+        record = json.loads(path.read_text())
+        record["work_item"]["title"] = None
+        write_json(path, record)
+        with self.assertRaises(Denied):
+            self.store.projection(self.item_id)
+
+    def test_projection_keeps_withdrawn_revision_stale(self):
+        self.project.insights.revise(self.proposal["id"], source="worker", title="Revised scope",
+                                     body="Changed claims", base_snapshot=None, expected_rev=1)
+        withdrawal = self.project.insights.withdraw(
+            self.proposal["id"], source="worker", reason="Withdraw revised proposal", expected_rev=2)
+        self.assertIsNone(withdrawal["run"])
+        view = self.store.projection(self.item_id)
+        self.assertTrue(view["stale"])
+        self.assertIsNone(view["redecision"])
+
     def test_projection_treats_missing_origin_as_stale(self):
         (self.project.root / "inbox" / f"{self.proposal['id']}.json").unlink()
         view = self.store.projection(self.item_id)
@@ -448,6 +481,25 @@ class WorkItemTests(Fixture):
             cursor = page["next_cursor"]
         self.assertEqual(seen, expected)
         self.assertEqual(len(seen), len(set(seen)))
+
+    def test_page_open_live_cursor_does_not_offset_skip_after_earlier_close(self):
+        extra_ids = []
+        for index in range(3):
+            proposal = self.project.insights.submit(
+                source="worker", title=f"Live page item {index}", body="Enumerate this item", base_snapshot=None)
+            decision = self.project.insights.decide(
+                proposal["id"], "accept", "reviewed", "", f"live-page-{index}", expected_rev=1)
+            extra_ids.append(decision["work_item"]["id"])
+        expected = sorted([self.item_id, *extra_ids])
+        first = self.store.page_open(limit=2)
+        self.assertEqual([row["id"] for row in first["items"]], expected[:2])
+        self.assertEqual(first["next_cursor"], expected[1])
+        self.store.transition(expected[0], expected_rev=1, status="dropped", actor="worker",
+                              reason="Closed after first live page")
+        second = self.store.page_open(cursor=first["next_cursor"], limit=2)
+        self.assertEqual(second["total"], 3)
+        self.assertEqual([row["id"] for row in second["items"]], expected[2:])
+        self.assertFalse(second["truncated"])
 
     def test_page_open_validates_cursor_and_exact_integer_limit(self):
         for cursor in ("", "wi_" + "A" * 32, "../anything", 1, True):

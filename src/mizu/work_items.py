@@ -124,11 +124,40 @@ class WorkItems:
         decision = self._optional_record(f"decisions/{insight_id}.json")
         if decision is None:
             return None
-        revision = decision.get("rev", 1)
-        if (decision.get("id") != insight_id or type(revision) is not int or revision < 1
-                or decision.get("action") not in ("accept", "modify", "defer", "reject", "withdraw")):
+        action = decision.get("action")
+        fields = {"id", "action", "reason", "revisit", "run", "created_at", "rev"}
+        if action in ("accept", "modify"):
+            fields.add("work_item")
+        elif action == "withdraw":
+            fields.add("actor")
+        elif action not in ("defer", "reject"):
             raise Denied("Invalid current work-item origin decision")
-        return {"rev": revision, "action": decision["action"]}
+        revision = decision.get("rev")
+        if (set(decision) != fields or decision.get("id") != insight_id
+                or type(revision) is not int or revision < 1
+                or not isinstance(decision.get("reason"), str) or not decision["reason"].strip()
+                or not isinstance(decision.get("revisit"), str)
+                or (action == "defer" and not decision["revisit"].strip())
+                or (action == "withdraw" and decision["revisit"] != "")
+                or (action == "withdraw" and decision.get("run") is not None
+                    and (not isinstance(decision["run"], str) or not decision["run"]))
+                or (action != "withdraw"
+                    and (not isinstance(decision.get("run"), str) or not decision["run"]))
+                or not _timestamp(decision.get("created_at"))):
+            raise Denied("Malformed current work-item origin decision")
+        if action == "withdraw":
+            identifier(decision["actor"])
+        elif action in ("accept", "modify"):
+            seed = decision["work_item"]
+            if (not isinstance(seed, dict) or not isinstance(seed.get("id"), str)
+                    or ITEM_ID.fullmatch(seed["id"]) is None):
+                raise Denied("Malformed current work-item origin decision seed")
+            seed_id = seed["id"]
+            event = self._read(f"decision-history/{seed_id[3:]}.json")
+            if event != decision:
+                raise Denied("Current work-item origin decision differs from its immutable event")
+            self._seed(seed_id)  # Validate the immutable seed's complete field/value contract.
+        return {"rev": revision, "action": action}
 
     def _recover_temporary_writes(self, item_id: str) -> None:
         """Remove only atomic-write leftovers while holding insights.lock.
@@ -330,8 +359,9 @@ class WorkItems:
         history is scanned. Legacy accept/modify events lacking a seed are
         counted, never guessed as open. The page is internal and read-only
         apart from recognized work-item atomic-write recovery under the shared
-        lock. Cursors page a live view: changes between calls can move rows.
-        Unsafe/malformed committed JSON, seeds or state fail closed; only
+        lock. Cursors page a live view: changes between calls can move rows;
+        a last-key cursor avoids offset shifts on earlier closes but does not
+        freeze membership. Unsafe/malformed committed JSON, seeds or state fail closed; only
         recognized regular orphan atomic-write temporaries are ignored, never
         promoted, while unexpected names and unsafe temporaries fail closed.
         """
