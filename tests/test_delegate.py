@@ -3,7 +3,7 @@ import dataclasses
 import json
 import unittest
 from support import Fixture, ScriptDriver
-from mizu.errors import ConfigError, Denied
+from mizu.errors import ConfigError, Denied, LimitExceeded, RunDeadlineExceeded
 from mizu.fs import read_json
 from mizu.runtime import Engine, check_delegate_role
 
@@ -67,9 +67,6 @@ class DelegateTests(Fixture):
         self.assertEqual(len(parent_records), 1)
 
     def test_delegated_overspend_coerces_parent_seal(self):
-        import dataclasses
-        from mizu.runtime import Engine
-        from support import ScriptDriver
         config = _configured(self)
         roles = dict(config.roles)
         roles["worker"] = dataclasses.replace(roles["worker"], requests_per_run=2)
@@ -78,14 +75,19 @@ class DelegateTests(Fixture):
 
         def callback(ctx, prompt, profile):
             if ctx.role.name == "worker":
-                response = ctx.handle("delegate", {"role": "helper", "task": "spend"})
+                ctx.handle("delegate", {"role": "helper", "task": "spend"})
                 seen["bound"] = ctx.bound_hit
+                seen["child_requests"] = ctx.delegated_wrap_up_requests
+                # Child used its full share; the root retains one request.
+                ctx.handle("_budget", {"sequence": 2})
+                seen["root_requests"] = ctx.wrap_up_requests
                 ctx.handle("finish", {"outcome": "continue", "summary": "parent seals",
                                       "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
             else:
-                # One admitted sequence is spent by the driver; the next
-                # request exceeds the caller's bound inside the child.
+                # ScriptDriver's request reaches the normal cap; these two
+                # admitted requests use the delegated-child share.
                 ctx.handle("_budget", {"sequence": 2})
+                ctx.handle("_budget", {"sequence": 3})
                 seen["child_bound"] = ctx.bound_hit
                 ctx.handle("finish", {"outcome": "continue", "summary": "child seals",
                                       "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
@@ -94,6 +96,86 @@ class DelegateTests(Fixture):
         self.assertEqual(result["status"], "completed")
         self.assertEqual(seen["child_bound"], "requests")
         self.assertEqual(seen["bound"], "requests")
+        self.assertEqual(seen["child_requests"], config.limits.delegate_wrap_up_requests)
+        self.assertEqual(seen["root_requests"], 1)
+        self.assertEqual(result["finish"]["outcome"], "bounded")
+
+    def test_child_deadline_aggregate_share_preserves_root_request(self):
+        config = _configured(self)
+        roles = dict(config.roles)
+        roles["worker"] = dataclasses.replace(roles["worker"], requests_per_run=6)
+        config = dataclasses.replace(config, roles=roles)
+        seen = {"children": 0, "pool_exhausted": False}
+
+        def callback(ctx, prompt, profile):
+            if ctx.role.name == "worker":
+                responses = [ctx.handle("delegate", {"role": "helper", "task": str(i)})
+                             for i in range(3)]
+                seen["parent_bound"] = ctx.bound_hit
+                seen["child_requests"] = ctx.delegated_wrap_up_requests
+                seen["root_requests_before_seal"] = ctx.wrap_up_requests
+                seen["third_status"] = responses[2].get("status", "completed")
+                ctx.handle("_budget", {"sequence": 2})
+                seen["root_requests_after_seal_request"] = ctx.wrap_up_requests
+                ctx.handle("finish", {"outcome": "continue", "summary": "root sealed",
+                                      "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+            else:
+                seen["children"] += 1
+                ctx.bound_hit = "deadline"  # Child-local deadline only.
+                if seen["children"] <= 2:
+                    ctx.handle("_budget", {"sequence": 2})
+                else:
+                    with self.assertRaises(RunDeadlineExceeded):
+                        ctx.handle("_budget", {"sequence": 2})
+                    seen["pool_exhausted"] = True
+                ctx.handle("finish", {"outcome": "continue", "summary": "child bounded",
+                                      "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+
+        result = Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(seen["children"], 3)
+        self.assertTrue(seen["pool_exhausted"])
+        self.assertEqual(seen["third_status"], "completed")
+        self.assertIsNone(seen["parent_bound"])
+        self.assertEqual(seen["child_requests"], config.limits.delegate_wrap_up_requests)
+        self.assertEqual(seen["root_requests_before_seal"], 0)
+        self.assertEqual(seen["root_requests_after_seal_request"], 1)
+        self.assertEqual(result["finish"]["outcome"], "bounded")
+
+    def test_tool_bound_child_leaves_root_finish_tool(self):
+        config = _configured(self)
+        roles = dict(config.roles)
+        roles["worker"] = dataclasses.replace(roles["worker"], tools_per_run=2)
+        roles["helper"] = dataclasses.replace(
+            roles["helper"], capabilities=tuple([*roles["helper"].capabilities, "research"]))
+        config = dataclasses.replace(config, roles=roles)
+        seen = {}
+
+        def callback(ctx, prompt, profile):
+            if ctx.role.name == "worker":
+                ctx.handle("delegate", {"role": "helper", "task": "spend tools"})
+                seen["bound"] = ctx.bound_hit
+                seen["child_tools"] = ctx.delegated_wrap_up_tools
+                ctx.handle("finish", {"outcome": "continue", "summary": "root seals",
+                                      "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+                seen["root_tools"] = ctx.wrap_up_tools
+            else:
+                ctx.handle("files", {"limit": 1, "offset": 0})
+                with self.assertRaises(LimitExceeded):
+                    ctx.handle("read", {})
+                dispatch = ctx.dispatch
+                ctx.dispatch = lambda operation, arguments: ({} if operation == "research"
+                                                             else dispatch(operation, arguments))
+                for _ in range(config.limits.delegate_wrap_up_tools - 1):
+                    ctx.handle("research", {"state": "{}", "expected_generation": 0})
+                ctx.handle("finish", {"outcome": "continue", "summary": "child seals",
+                                      "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+
+        result = Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(seen["bound"], "tools")
+        self.assertEqual(seen["child_tools"], config.limits.delegate_wrap_up_tools)
+        self.assertEqual(seen["root_tools"], 1)
         self.assertEqual(result["finish"]["outcome"], "bounded")
 
     def test_forbidden_grants_are_refused(self):

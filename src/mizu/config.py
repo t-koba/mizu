@@ -274,6 +274,10 @@ class Limits:
     shared_daily_requests: int = 0
     requests_per_run: int = 24
     tools_per_run: int = 64
+    # Aggregate share of the fixed run wrap-up allowance usable by delegated
+    # children; the root retains at least one request and one wrap-up tool.
+    delegate_wrap_up_requests: int = 2
+    delegate_wrap_up_tools: int = 4
     run_seconds: int = 1200
     model_request_seconds: int = 1200
     command_seconds: int = 300
@@ -557,6 +561,8 @@ def load(file: Path) -> Config:
     # daily_requests 0 disables (fail-closed); max_failures 0 disables the
     # auto-pause brake only (budgets/deadlines still bound spend and time).
     _LIMIT_RANGES = {"history_index": (8, 1000000), "prompt_snapshots": (1, 64),
+                     "delegate_wrap_up_requests": (0, 2),
+                     "delegate_wrap_up_tools": (0, 4),
                      "retention_days": (0, 3650), "pending_insights": (1, 1000),
                      "decision_events_limit": (1, 100),
                      "event_log_compress_days": (0, 3650), "event_log_retention_days": (0, 3650),

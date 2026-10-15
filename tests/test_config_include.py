@@ -65,6 +65,34 @@ class IncludeTests(Fixture):
                 with self.assertRaises(ConfigError):
                     load(self.file)
 
+    def test_delegate_wrap_up_share_defaults_and_bounds(self):
+        config = load(self.file)
+        self.assertEqual(config.limits.delegate_wrap_up_requests, 2)
+        self.assertEqual(config.limits.delegate_wrap_up_tools, 4)
+
+        base = self.file.read_text()
+        for requests, tools in ((0, 0), (1, 3), (2, 4)):
+            with self.subTest(requests=requests, tools=tools):
+                text = base.replace("delegate_wrap_up_requests = 2",
+                                    f"delegate_wrap_up_requests = {requests}", 1)
+                text = text.replace("delegate_wrap_up_tools = 4",
+                                    f"delegate_wrap_up_tools = {tools}", 1)
+                self.file.write_text(text)
+                limits = load(self.file).limits
+                self.assertEqual(limits.delegate_wrap_up_requests, requests)
+                self.assertEqual(limits.delegate_wrap_up_tools, tools)
+        for key, value in (("delegate_wrap_up_requests", "-1"),
+                           ("delegate_wrap_up_requests", "3"),
+                           ("delegate_wrap_up_tools", "-1"),
+                           ("delegate_wrap_up_tools", "5"),
+                           ("delegate_wrap_up_tools", "true")):
+            with self.subTest(key=key, value=value):
+                text = base.replace(f"{key} = {2 if key.endswith('requests') else 4}",
+                                    f"{key} = {value}", 1)
+                self.file.write_text(text)
+                with self.assertRaises(ConfigError):
+                    load(self.file)
+
     def test_include_merges_disjoint_fragment(self):
         self._split_idle()
         config = load(self.file)

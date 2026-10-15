@@ -243,6 +243,11 @@ class Context:
         self.bound_hit: str | None = None
         self.wrap_up_requests = 0
         self.wrap_up_tools = 0
+        # Delegated children use an aggregate share of these same fixed
+        # allowances; the top-level context retains all unused capacity.
+        self.delegated_child = False
+        self.delegated_wrap_up_requests = 0
+        self.delegated_wrap_up_tools = 0
         self.wrap_up_attempted = False
         self.finished: dict | None = None
         self.missing_finish_evidence: dict | None = None
@@ -448,9 +453,16 @@ class Context:
         request = min(requests) if requests else self.transport_idle_deadline
         return self.wall_expired() or time.monotonic() >= request
 
+    def _wrap_up_remaining(self) -> tuple[int, int]:
+        if self.delegated_child:
+            return (self.config.limits.delegate_wrap_up_requests - self.delegated_wrap_up_requests,
+                    self.config.limits.delegate_wrap_up_tools - self.delegated_wrap_up_tools)
+        return (WRAP_UP_REQUESTS - self.wrap_up_requests - self.delegated_wrap_up_requests,
+                WRAP_UP_TOOLS - self.wrap_up_tools - self.delegated_wrap_up_tools)
+
     def _bound_message(self) -> str:
-        how = f"{WRAP_UP_REQUESTS - self.wrap_up_requests} requests and " \
-            f"{WRAP_UP_TOOLS - self.wrap_up_tools} wrap-up tools"
+        requests_left, tools_left = self._wrap_up_remaining()
+        how = f"{max(0, requests_left)} requests and {max(0, tools_left)} wrap-up tools"
         return (f"Per-run {self.bound_hit} bound reached; wrap-up only "
                 f"(finish, research, submit_insight, attach_evidence, decide) "
                 f"with {how} left")
@@ -544,7 +556,11 @@ class Context:
                     if sequence_key not in self.request_sequences:
                         over = self.bound_hit in ("deadline", "drain") or self.request_count >= role_requests_per_run(
                             self.config, self.spend_role or self.role)
-                        if over and self.wrap_up_requests >= WRAP_UP_REQUESTS:
+                        requests_used = (self.delegated_wrap_up_requests if self.delegated_child else
+                                         self.wrap_up_requests + self.delegated_wrap_up_requests)
+                        requests_limit = (self.config.limits.delegate_wrap_up_requests if self.delegated_child
+                                          else WRAP_UP_REQUESTS)
+                        if over and requests_used >= requests_limit:
                             if self.bound_hit == "drain":
                                 raise DrainYieldExceeded("Per-run provider request budget exhausted")
                             if self.bound_hit == "deadline":
@@ -574,7 +590,10 @@ class Context:
                             # succeeds: an infrastructure refusal must not
                             # burn the allowance or mislabel the context.
                             self.bound_hit = self.bound_hit or "requests"
-                            self.wrap_up_requests += 1
+                            if self.delegated_child:
+                                self.delegated_wrap_up_requests += 1
+                            else:
+                                self.wrap_up_requests += 1
                         self.request_sequences.add(sequence_key)
                         self.start_request(sequence)
                         self.request_count += 1
@@ -597,13 +616,20 @@ class Context:
             self.tool_count += 1
             if self.bound_hit in ("deadline", "drain") or self.tool_count > role_tools_per_run(self.config, self.spend_role or self.role):
                 self.bound_hit = self.bound_hit or "tools"
-                if operation not in WRAP_UP_OPS or self.wrap_up_tools >= WRAP_UP_TOOLS:
-                    if self.bound_hit == "drain" and self.wrap_up_tools >= WRAP_UP_TOOLS:
+                tools_used = (self.delegated_wrap_up_tools if self.delegated_child else
+                              self.wrap_up_tools + self.delegated_wrap_up_tools)
+                tools_limit = (self.config.limits.delegate_wrap_up_tools if self.delegated_child
+                               else WRAP_UP_TOOLS)
+                if operation not in WRAP_UP_OPS or tools_used >= tools_limit:
+                    if self.bound_hit == "drain" and tools_used >= tools_limit:
                         raise DrainYieldExceeded("Drain wrap-up tool allowance exhausted")
-                    if self.bound_hit == "deadline" and self.wrap_up_tools >= WRAP_UP_TOOLS:
+                    if self.bound_hit == "deadline" and tools_used >= tools_limit:
                         raise RunDeadlineExceeded("Deadline wrap-up tool allowance exhausted")
                     raise LimitExceeded("Per-run tool limit exceeded")
-                self.wrap_up_tools += 1
+                if self.delegated_child:
+                    self.delegated_wrap_up_tools += 1
+                else:
+                    self.wrap_up_tools += 1
             validate(arguments, DEFINITIONS[operation][1])
             self.operation_active.set()
             self._activity_change(lambda: setattr(self, "_activity_operation", operation),
@@ -3223,10 +3249,11 @@ class Engine:
             ctx.ephemeral = True
             ctx.consult = None
             ctx.spend_role = parent.role
+            ctx.delegated_child = True
             ctx.request_count = parent.request_count
             ctx.tool_count = parent.tool_count
-            ctx.wrap_up_requests = parent.wrap_up_requests
-            ctx.wrap_up_tools = parent.wrap_up_tools
+            ctx.delegated_wrap_up_requests = parent.delegated_wrap_up_requests
+            ctx.delegated_wrap_up_tools = parent.delegated_wrap_up_tools
             try:
                 model = self._execute(ctx, driver, prompt_for(ctx) + "\n\nTask:\n" + task
                                        + "\n\nCall finish once with a result summary (and short state) "
@@ -3234,8 +3261,8 @@ class Engine:
             finally:
                 parent.request_count = ctx.request_count
                 parent.tool_count = ctx.tool_count
-                parent.wrap_up_requests = ctx.wrap_up_requests
-                parent.wrap_up_tools = ctx.wrap_up_tools
+                parent.delegated_wrap_up_requests = ctx.delegated_wrap_up_requests
+                parent.delegated_wrap_up_tools = ctx.delegated_wrap_up_tools
                 # Spend state the child tripped belongs to the unit:
                 # a bound the delegation exceeded must coerce the
                 # parent's seal too, and daily-refusal flags must
