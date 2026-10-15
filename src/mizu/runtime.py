@@ -995,7 +995,9 @@ class Context:
     def _op_vcs_dispose(self, args: dict) -> dict:
         # Proposal disposition: close/merge an external proposal at the
         # exact assessed head, base, and target behind the matching
-        # per-action grant. Close is routine terminal reconciliation
+        # per-action grant; close_if_adopted is a separately pinned,
+        # adapter-conditional close that retains even a refusal receipt.
+        # Close is routine terminal reconciliation
         # behind close_grant alone. Merge promotes the integrated tree:
         # it additionally requires a recorded human GO approval for the
         # tree, checked before the adapter spawns, so main/release
@@ -1014,9 +1016,32 @@ class Context:
         # content never authorizes this merge.
         if self.role.workspace == "none":
             raise Denied("Proposal disposition requires a visible workspace")
+        op = args.get("op")
+        if op == "close_if_adopted":
+            expected = {"op", *_vcs.CLOSE_IF_ADOPTED_PINS}
+            if set(args) != expected:
+                raise Denied("Conditional close requires op and exactly the six observed pins")
+            pins = {key: args[key] for key in _vcs.CLOSE_IF_ADOPTED_PINS}
+            try:
+                data = _vcs.close_if_adopted_via(self.config.vcs, pins)
+            except OSError as exc:
+                raise Denied(f"Conditional proposal close is unavailable: {exc}") from exc
+            record = {"disposed": data["closed"], "op": data["op"],
+                      **pins, "predicate": data["predicate"],
+                      "closed": data["closed"],
+                      "trust": "external-untrusted",
+                      "evidence": "vcs-dispose.json",
+                      "adapter_receipt": data["adapter_receipt"]}
+            # A valid refusal is durable evidence too: do not refetch,
+            # retry, fall through to merge, or treat false as an exception.
+            write_json(self.run_dir / "vcs-dispose.json", record)
+            return record
+        if op not in ("close", "merge") or set(args) != {
+                "op", "id", "sha", "base", "target", "branch"}:
+            raise Denied("Invalid proposal disposition arguments")
         approval = None
         code_digest = None
-        if args["op"] == "merge":
+        if op == "merge":
             captured = self.project.snapshots.capture_files(self.workspace)
             if captured.get("skipped"):
                 raise Denied("Proposal disposition requires a representable snapshot")

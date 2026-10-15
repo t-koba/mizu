@@ -1393,8 +1393,103 @@ def retire_via(settings: dict, branch, expected_sha) -> dict:
 #: after approved integration.
 DISPOSE_OPS = frozenset({"close", "merge"})
 
+#: Predicate named by the operator-reported conditional-close adapter path.
+CLOSE_IF_ADOPTED_PREDICATE = "changed-path-tree-entries/v1"
+#: Exact observed proposal and target pins required for conditional close.
+CLOSE_IF_ADOPTED_PINS = ("id", "head_sha", "base_sha", "target_repo",
+                          "target_ref", "target_sha")
+MAX_CLOSE_IF_ADOPTED_REASON = 4096
+MAX_CLOSE_IF_ADOPTED_MISMATCHES = 50
+MAX_CLOSE_IF_ADOPTED_PATH = 4096
+MAX_CLOSE_IF_ADOPTED_CHANGED_PATHS = 2000
+
 #: Terminal proposal states; only these confirm a final disposition.
 TERMINAL_STATES = frozenset({"closed", "merged"})
+
+
+def close_if_adopted_via(settings: dict, pins: dict) -> dict:
+    """Ask the trusted adapter to close only when its adoption predicate holds.
+
+    Schema: requires ``settings.close_grant is True`` and exactly the pins
+    ``{id, head_sha, base_sha, target_repo, target_ref, target_sha}``; the
+    adapter receives those values unchanged with ``op=close_if_adopted``.
+    Its response must echo every pin exactly, name predicate
+    ``changed-path-tree-entries/v1``, provide a strict boolean ``closed``,
+    and a nonblank ``reason`` of at most 4096 characters. Only the optional
+    paired ``mismatched_paths``/``mismatched_count`` fields are accepted:
+    count is an integer in 0..2000, with 0..min(count, 50) distinct,
+    nonempty paths of at most 4096 characters each. A closed receipt cannot
+    report mismatches. Reason and paths reject terminal controls.
+    Bounds: these field limits plus the single ``invoke`` timeout and byte
+    limits. Trust:
+    operator-owned adapter only; its receipt remains external-untrusted and
+    is preserved verbatim. Retry/cancellation: one invocation, no refetch,
+    retry, or merge; a valid ``closed: false`` is a retained refusal, not an
+    error. Evidence: returned ``adapter_receipt`` contains the complete
+    response. Failure: ``Denied`` without the grant, on malformed pins,
+    missing/mismatched echoes, a different predicate, or malformed response.
+
+    The host adapter's own ``[vcs] close_adopted`` gate is separate; this
+    function neither configures nor independently verifies that policy or
+    the adapter's adoption calculation.
+    """
+    if not isinstance(settings, dict) or settings.get("close_grant") is not True:
+        raise Denied("Proposal close is not granted in VCS configuration")
+    if not isinstance(pins, dict) or set(pins) != set(CLOSE_IF_ADOPTED_PINS):
+        raise Denied("Conditional close requires the exact proposal and target pins")
+    identity = pins.get("id")
+    if not isinstance(identity, str) or not identity or len(identity) > 128:
+        raise Denied("Invalid VCS proposal id for conditional close")
+    _reject_terminal_controls(identity, "Invalid VCS proposal id for conditional close")
+    for key in ("head_sha", "base_sha", "target_sha"):
+        if not isinstance(pins.get(key), str) or not _SHA.fullmatch(pins[key]):
+            raise Denied(f"Invalid {key} for conditional close")
+    _check_repo(pins.get("target_repo"))
+    check_branch(pins.get("target_ref"))
+
+    request = {"op": "close_if_adopted", **pins}
+    data = invoke(settings, request)
+    if not isinstance(data, dict):
+        raise Denied("VCS adapter must return a conditional-close receipt")
+    required = set(CLOSE_IF_ADOPTED_PINS) | {"predicate", "closed", "reason"}
+    optional = {"mismatched_paths", "mismatched_count"}
+    if not required <= set(data) or set(data) - required - optional:
+        raise Denied("VCS adapter returned an invalid conditional-close receipt shape")
+    for key in CLOSE_IF_ADOPTED_PINS:
+        if data[key] != pins[key]:
+            raise Denied(f"VCS adapter must confirm conditional-close pin '{key}'")
+    if data["predicate"] != CLOSE_IF_ADOPTED_PREDICATE:
+        raise Denied("VCS adapter must confirm the changed-path-tree-entries/v1 predicate")
+    if type(data["closed"]) is not bool:
+        raise Denied("VCS adapter must return a boolean conditional-close result")
+    reason = data["reason"]
+    if (not isinstance(reason, str) or not reason.strip()
+            or len(reason) > MAX_CLOSE_IF_ADOPTED_REASON):
+        raise Denied("VCS adapter must return a bounded conditional-close reason")
+    _reject_terminal_controls(reason, "Invalid conditional-close reason")
+    has_paths = "mismatched_paths" in data
+    has_count = "mismatched_count" in data
+    if has_paths != has_count:
+        raise Denied("VCS adapter mismatch evidence must include paths and count together")
+    if has_paths:
+        paths, count = data["mismatched_paths"], data["mismatched_count"]
+        if (not isinstance(paths, list) or len(paths) > MAX_CLOSE_IF_ADOPTED_MISMATCHES
+                or type(count) is not int or not 0 <= count <= MAX_CLOSE_IF_ADOPTED_CHANGED_PATHS
+                or len(paths) > min(count, MAX_CLOSE_IF_ADOPTED_MISMATCHES)):
+            raise Denied("VCS adapter returned invalid conditional-close mismatch evidence")
+        for path in paths:
+            if (not isinstance(path, str) or not path
+                    or len(path) > MAX_CLOSE_IF_ADOPTED_PATH):
+                raise Denied("VCS adapter returned an invalid conditional-close mismatch path")
+            _reject_terminal_controls(path, "Invalid conditional-close mismatch path")
+        if len(set(paths)) != len(paths):
+            raise Denied("VCS adapter returned duplicate conditional-close mismatch paths")
+        if data["closed"] and count:
+            raise Denied("A closed conditional-close receipt cannot report mismatched paths")
+    return {"op": "close_if_adopted", **pins,
+            "predicate": CLOSE_IF_ADOPTED_PREDICATE,
+            "closed": data["closed"], "adapter_receipt": data,
+            "trust": "external-untrusted"}
 
 
 def dispose_via(settings: dict, op: str, proposal_id: str, expected_sha,

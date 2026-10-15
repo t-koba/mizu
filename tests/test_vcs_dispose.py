@@ -4,6 +4,7 @@ import json
 import sys
 import unittest
 import uuid
+from unittest.mock import patch
 
 from support import Fixture
 from mizu import vcs
@@ -332,3 +333,233 @@ class VcsDisposeRecoveryTests(Fixture):
         self.assertTrue(out["disposed"])
         self.assertEqual(out["sha"], SHA_B)
         self.assertEqual(out["state"], "closed")
+
+CLOSE_IF_PINS = {
+    "id": PROPOSAL_ID,
+    "head_sha": SHA_A,
+    "base_sha": BASE_A,
+    "target_repo": "forge:owner/repo",
+    "target_ref": TARGET,
+    "target_sha": SHA_B,
+}
+
+
+def close_if_args(**over):
+    return {"op": "close_if_adopted", **CLOSE_IF_PINS, **over}
+
+
+def close_if_code(payload, marker=None):
+    expected = {"op": "close_if_adopted", **CLOSE_IF_PINS}
+    code = ("import sys,json; request=json.load(sys.stdin); "
+            "assert request == %r; " % expected)
+    if marker is not None:
+        code += ("from pathlib import Path; marker=Path(%r); "
+                 "count=int(marker.read_text()) if marker.exists() else 0; "
+                 "marker.write_text(str(count+1)); " % str(marker))
+    return code + "print(%r)" % json.dumps(payload)
+
+
+def close_if_receipt(*, closed, **over):
+    return {**CLOSE_IF_PINS,
+            "predicate": "changed-path-tree-entries/v1",
+            "closed": closed, "reason": "adopted" if closed else "not_adopted",
+            **over}
+
+
+class VcsCloseIfAdoptedTests(Fixture):
+    def context(self, code, *, close_grant=True, capabilities=True):
+        extra = ["vcs_dispose"] if capabilities else []
+        config, role = with_caps(self, "worker", extra)
+        if not capabilities:
+            role = dataclasses.replace(role, capabilities=tuple(
+                cap for cap in role.capabilities if cap != "vcs_dispose"))
+            config = dataclasses.replace(config,
+                                         roles={**config.roles, role.name: role})
+        settings = granted(code, close=close_grant)
+        config = dataclasses.replace(config, vcs=settings)
+        return make_context(self, config, role)
+
+    def test_conditional_close_refusal_is_returned_and_retained(self):
+        payload = close_if_receipt(
+            closed=False, reason="close_adopted_disabled_or_not_adopted")
+        calls = self.root / "adapter-calls.txt"
+        ctx = self.context(close_if_code(payload, calls))
+        out = ctx.handle("vcs_dispose", close_if_args())
+        self.assertFalse(out["closed"])
+        self.assertFalse(out["disposed"])
+        self.assertEqual(out["predicate"], "changed-path-tree-entries/v1")
+        self.assertEqual(out["adapter_receipt"], payload)
+        evidence = json.loads((ctx.run_dir / "vcs-dispose.json").read_text())
+        self.assertEqual(evidence["adapter_receipt"], payload)
+        self.assertEqual(evidence["id"], CLOSE_IF_PINS["id"])
+        self.assertFalse(evidence["closed"])
+        self.assertEqual(calls.read_text(), "1")
+
+    def test_conditional_close_retains_truncated_mismatch_receipt(self):
+        payload = close_if_receipt(
+            closed=False, reason="tree_mismatch",
+            mismatched_paths=[f"src/example{i}.py" for i in range(50)],
+            mismatched_count=51)
+        calls = self.root / "adapter-calls.txt"
+        ctx = self.context(close_if_code(payload, calls))
+        out = ctx.handle("vcs_dispose", close_if_args())
+        self.assertFalse(out["closed"])
+        self.assertFalse(out["disposed"])
+        self.assertEqual(out["adapter_receipt"], payload)
+        self.assertEqual(json.loads((ctx.run_dir / "vcs-dispose.json").read_text()), out)
+        self.assertEqual(calls.read_text(), "1")
+
+    def test_conditional_close_success_retains_adapter_receipt(self):
+        payload = close_if_receipt(closed=True)
+        ctx = self.context(close_if_code(payload))
+        out = ctx.handle("vcs_dispose", close_if_args())
+        self.assertTrue(out["closed"])
+        self.assertTrue(out["disposed"])
+        self.assertEqual(out["adapter_receipt"], payload)
+        self.assertEqual(json.loads((ctx.run_dir / "vcs-dispose.json").read_text()), out)
+
+    def test_conditional_close_requires_mizu_close_grant(self):
+        self.assertFalse(self.config.vcs["close_grant"])
+        with self.assertRaisesRegex(Denied, "not granted"):
+            vcs.close_if_adopted_via(adapter_settings("raise SystemExit(77)"),
+                                     dict(CLOSE_IF_PINS))
+        ctx = self.context(close_if_code(close_if_receipt(closed=True)),
+                           close_grant=False)
+        with self.assertRaisesRegex(Denied, "not granted"):
+            ctx.handle("vcs_dispose", close_if_args())
+        self.assertFalse((ctx.run_dir / "vcs-dispose.json").exists())
+
+    def test_conditional_close_requires_role_capability(self):
+        ctx = self.context(close_if_code(close_if_receipt(closed=True)),
+                           capabilities=False)
+        with self.assertRaisesRegex(Denied, "no capability: vcs_dispose"):
+            ctx.handle("vcs_dispose", close_if_args())
+        self.assertFalse((ctx.run_dir / "vcs-dispose.json").exists())
+
+    def assert_receipt_denied(self, payload):
+        # Parser matrix only: no host adapter, and no subprocess per case.
+        with patch.object(vcs, "invoke", return_value=payload) as invoke:
+            with self.assertRaises(Denied):
+                vcs.close_if_adopted_via({"close_grant": True}, dict(CLOSE_IF_PINS))
+            invoke.assert_called_once_with({"close_grant": True}, close_if_args())
+
+    def test_conditional_close_requires_every_receipt_field(self):
+        valid = close_if_receipt(closed=False)
+        for key in valid:
+            with self.subTest(missing=key):
+                self.assert_receipt_denied({k: v for k, v in valid.items() if k != key})
+
+    def test_conditional_close_requires_exact_pin_echoes(self):
+        valid = close_if_receipt(closed=False)
+        for key, value in CLOSE_IF_PINS.items():
+            for bad in (None, True, 1, [], {}, "", value + "stale", "x" * 4097):
+                with self.subTest(pin=key, value=bad):
+                    self.assert_receipt_denied({**valid, key: bad})
+
+    def test_conditional_close_rejects_malformed_receipt(self):
+        valid = close_if_receipt(closed=False)
+        cases = [None, [], [valid], "receipt", 0, False]
+        cases += [{**valid, "predicate": value} for value in
+                  (None, True, 1, [], {}, "", "changed-path-tree-entries/v2",
+                   "changed-path-tree-entries/v1 ")]
+        cases += [{**valid, "closed": value} for value in
+                  (None, 0, 1, "true", "false", [], {})]
+        cases += [{**valid, "reason": value} for value in
+                  (None, True, 1, [], {}, "", "   ", "x" * 4097)]
+        # Do not admit extra fields, even plausible adapter metadata.
+        cases += [{**valid, key: value} for key, value in
+                  (("unexpected", True), ("op", "close_if_adopted"),
+                   ("trust", "trusted"), ("mismatched_count", 1),
+                   ("mismatched_paths", []))]
+        for index, payload in enumerate(cases):
+            with self.subTest(case=index):
+                self.assert_receipt_denied(payload)
+
+    def test_conditional_close_rejects_bad_mismatch_evidence(self):
+        valid = close_if_receipt(closed=False)
+        cases = [(value, 0) for value in (None, True, 0, "path.py", {})]
+        cases += [([], value) for value in
+                  (None, True, False, "0", 0.0, [], {}, -1, 2001)]
+        # More listed paths than the mismatch count, more than 50 paths,
+        # and an out-of-range count are invalid. Partial lists are allowed.
+        cases += [(["path.py"], 0), (["path0.py", "path1.py"], 1),
+                  ([f"path{i}.py" for i in range(51)], 2000),
+                  ([f"path{i}.py" for i in range(50)], 2001),
+                  (["path.py"], True), (["path.py"], 1.0),
+                  (["same.py", "same.py"], 2)]
+        cases += [([value], 1) for value in
+                  (None, True, 1, [], {}, "", "p" * 4097)]
+        for index, (paths, count) in enumerate(cases):
+            with self.subTest(case=index):
+                self.assert_receipt_denied(
+                    {**valid, "mismatched_paths": paths, "mismatched_count": count})
+
+    def test_conditional_close_rejects_terminal_controls(self):
+        for char in ("\x00", "\n", "\r", "\t", "\x1b", "\x7f", "\x85", "\u202e"):
+            with self.subTest(control=repr(char)):
+                self.assert_receipt_denied(close_if_receipt(
+                    closed=False, reason="reason" + char))
+                self.assert_receipt_denied(close_if_receipt(
+                    closed=False, mismatched_paths=["path" + char], mismatched_count=1))
+
+    def test_conditional_close_rejects_closed_with_mismatches(self):
+        for count, listed in ((1, 0), (1, 1), (50, 1), (51, 0), (51, 50), (2000, 0)):
+            with self.subTest(count=count, listed=listed):
+                self.assert_receipt_denied(close_if_receipt(
+                    closed=True, mismatched_count=count,
+                    mismatched_paths=[f"path{i}.py" for i in range(listed)]))
+
+    def test_conditional_close_accepts_partial_mismatch_lists_without_altering_receipt(self):
+        for count, listed in ((0, 0), (1, 1), (49, 1), (50, 1),
+                              (51, 1), (51, 0), (2000, 50)):
+            payload = close_if_receipt(
+                closed=False, mismatched_count=count,
+                mismatched_paths=[f"src/example{i}.py" for i in range(listed)])
+            with self.subTest(count=count, listed=listed), patch.object(
+                    vcs, "invoke", return_value=payload):
+                out = vcs.close_if_adopted_via({"close_grant": True}, dict(CLOSE_IF_PINS))
+                self.assertFalse(out["closed"])
+                self.assertEqual(out["adapter_receipt"], payload)
+                self.assertEqual(out["trust"], "external-untrusted")
+        payload = close_if_receipt(closed=True, mismatched_paths=[], mismatched_count=0)
+        with patch.object(vcs, "invoke", return_value=payload):
+            out = vcs.close_if_adopted_via({"close_grant": True}, dict(CLOSE_IF_PINS))
+            self.assertTrue(out["closed"])
+            self.assertEqual(out["adapter_receipt"], payload)
+
+    def test_conditional_close_accepts_reason_and_path_size_limits(self):
+        payload = close_if_receipt(
+            closed=False, reason="理由" * 2048,
+            mismatched_paths=["路" * 4096], mismatched_count=1)
+        with patch.object(vcs, "invoke", return_value=payload):
+            out = vcs.close_if_adopted_via({"close_grant": True}, dict(CLOSE_IF_PINS))
+            self.assertEqual(out["adapter_receipt"], payload)
+
+    def test_conditional_close_malformed_refusal_is_not_recorded(self):
+        calls = self.root / "adapter-calls.txt"
+        ctx = self.context(close_if_code(close_if_receipt(closed=False, reason=""), calls))
+        with self.assertRaises(Denied):
+            ctx.handle("vcs_dispose", close_if_args())
+        self.assertFalse((ctx.run_dir / "vcs-dispose.json").exists())
+        self.assertEqual(calls.read_text(), "1")
+
+    def test_conditional_close_tool_schema_accepts_only_action_fields(self):
+        from mizu.protocol import DEFINITIONS, validate
+        validate(close_if_args(), DEFINITIONS["vcs_dispose"][1])
+        with self.assertRaises(Denied):
+            validate({**close_if_args(), "unexpected": True},
+                     DEFINITIONS["vcs_dispose"][1])
+
+    def test_conditional_close_rejects_invalid_pins_before_adapter(self):
+        settings = {"command": ["/nonexistent-adapter"],
+                    "timeout_seconds": 5, "max_bytes": 524288,
+                    "close_grant": True}
+        invalid = (
+            {**CLOSE_IF_PINS, "head_sha": "stale"},
+            {**CLOSE_IF_PINS, "target_ref": "../main"},
+            {**CLOSE_IF_PINS, "target_repo": ""},
+            {**CLOSE_IF_PINS, "unexpected": True},
+        )
+        for pins in invalid:
+            with self.subTest(pins=pins), self.assertRaises(Denied):
+                vcs.close_if_adopted_via(settings, pins)
