@@ -172,6 +172,7 @@ merge_grant = false          # Explicit operator grant for vcs_dispose merge; fa
 owned_prefixes = []          # Temporary integration namespaces (e.g. ["mizu/"]); only these retire.
 protected_refs = []          # Exact long-lived refs that always win (e.g. ["main"]); never retire.
 poll_enabled = false         # Explicit opt-in for daemon upstream/CI polling; false disables.
+poll_proposals_enabled = false # Additional opt-in for proposal observations; also requires poll_enabled.
 poll_interval_seconds = 300  # Daemon poll cadence in seconds (15-86400).
 poll_max_branches = 4            # CI branches polled per daemon tick (1-64).
 poll_fetch_timeout_seconds = 30  # Daemon fetch adapter cap in seconds (1-300).

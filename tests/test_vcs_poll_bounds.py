@@ -13,6 +13,7 @@ from mizu.runtime import (MAX_CI_BRANCHES, capped_vcs_settings, poll_ci,
 class PollBoundsTests(Fixture):
     def test_disabled_by_default(self):
         self.assertFalse(vcs_poll_enabled(self.config))
+        self.assertFalse(self.config.vcs["poll_proposals_enabled"])
         self.assertEqual(vcs_poll_interval(self.config), 300.0)
 
     def test_opt_in_requires_command_and_flag(self):

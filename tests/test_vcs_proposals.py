@@ -8,6 +8,8 @@ from pathlib import Path
 from support import Fixture
 from mizu import vcs
 from mizu.errors import Denied
+from mizu.runtime import poll_proposals, poll_project_vcs
+from unittest import mock
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
@@ -333,6 +335,208 @@ class ProposalSchemaV2Tests(Fixture):
         self.assertIsNone(out["complete"])
         self.assertIsNone(out["cursor"])
         self.assertIsNone(out["proposals"][0]["reviews"])
+
+class ProposalPollingTests(Fixture):
+    def _config(self, **updates):
+        settings = {**self.config.vcs, "command": ["offline-vcs"],
+                    "poll_enabled": True, "poll_proposals_enabled": True,
+                    **updates}
+        return dataclasses.replace(self.config, vcs=settings)
+
+    def test_proposal_poll_requires_both_opt_ins_and_adapter(self):
+        calls = []
+        reader = lambda settings, op, params: calls.append((op, params)) or {
+            "proposals": [], "complete": True, "cursor": None}
+        state = {}
+        for config in (self._config(poll_proposals_enabled=False),
+                       self._config(poll_enabled=False),
+                       self._config(command=[])):
+            self.assertIsNone(poll_proposals(config, self.project, state,
+                                             now=0, interval=15, reader=reader))
+        self.assertEqual(calls, [])
+        self.assertNotIn("last_proposal_poll", state)
+        event = poll_proposals(self._config(), self.project, state, now=0,
+                               interval=15, reader=reader)
+        self.assertTrue(event["ok"])
+        self.assertEqual(calls, [("proposals", {})])
+
+    def test_complete_observations_dedupe_and_revise_on_changed_facts(self):
+        config = self._config()
+        state = {}
+        rows = [proposal(), proposal(), proposal(head_sha=SHA_B)]
+        calls = []
+
+        def reader(settings, op, params):
+            calls.append((op, params))
+            return {"proposals": [rows.pop(0)], "complete": True,
+                    "cursor": None}
+
+        first = poll_proposals(config, self.project, state, now=0,
+                                interval=10, reader=reader)
+        self.assertEqual(first["event"], "proposal_poll")
+        self.assertTrue(first["ok"])
+        self.assertEqual(first["observed"], 1)
+        self.assertEqual(first["changed"], 1)
+        insight_id = vcs.proposal_insight_id("forge:owner/repo#1")
+        initial = self.project.insights.read(insight_id)
+        self.assertEqual(initial["source"], "vcs")
+
+        duplicate = poll_proposals(config, self.project, state, now=10,
+                                   interval=10, reader=reader)
+        self.assertEqual(duplicate["changed"], 0)
+        self.assertEqual(self.project.insights.read(insight_id)["rev"],
+                         initial["rev"])
+
+        revised = poll_proposals(config, self.project, state, now=20,
+                                 interval=10, reader=reader)
+        self.assertEqual(revised["changed"], 1)
+        current = self.project.insights.read(insight_id)
+        self.assertEqual(current["rev"], initial["rev"] + 1)
+        self.assertIn(SHA_B, current["body"])
+        self.assertEqual(len(calls), 3)
+
+    def test_partial_page_cursor_persists_and_resumes_across_daemon_state(self):
+        open_row = json.dumps(proposal())
+        merged_row = json.dumps(proposal(state="merged"))
+        code = f'''import json, sys
+request = json.load(sys.stdin)
+open_row = json.loads({open_row!r})
+merged_row = json.loads({merged_row!r})
+if request["op"] == "fetch":
+    response = {{"refs": {{}}}}
+elif request["op"] == "status":
+    response = {{"checks": []}}
+elif request["op"] == "proposals":
+    if request.get("cursor") == "next-page-token":
+        response = {{"proposals": [merged_row], "complete": True}}
+    else:
+        response = {{"proposals": [open_row], "complete": False,
+                    "cursor": "next-page-token"}}
+else:
+    raise SystemExit("unexpected operation")
+print(json.dumps(response))
+'''
+        config = dataclasses.replace(
+            self.config,
+            vcs={**self.config.vcs, "command": [sys.executable, "-c", code],
+                 "poll_enabled": True, "poll_proposals_enabled": True})
+        first_state = {"last_fetch": None}
+        first_events = poll_project_vcs(config, self.project, first_state,
+                                        now=100.0, interval=15.0)
+        first_proposal = next(e for e in first_events
+                              if e["event"] == "proposal_poll")
+        self.assertTrue(first_proposal["ok"])
+        self.assertTrue(first_proposal["has_cursor"])
+        shared = json.loads((self.project.root / "vcs-poll.json").read_text())
+        self.assertEqual(shared["proposal_cursor"], "next-page-token")
+
+        # A new in-memory daemon state must resume from the persisted token.
+        second_state = {"last_fetch": None}
+        second_events = poll_project_vcs(config, self.project, second_state,
+                                         now=115.0, interval=15.0)
+        second_proposal = next(e for e in second_events
+                               if e["event"] == "proposal_poll")
+        self.assertTrue(second_proposal["ok"])
+        self.assertFalse(second_proposal["has_cursor"])
+        stored = self.project.insights.read(
+            vcs.proposal_insight_id("forge:owner/repo#1"))
+        self.assertIn("Proposal forge:owner/repo#1 merged", stored["title"])
+        shared = json.loads((self.project.root / "vcs-poll.json").read_text())
+        self.assertIsNone(shared["proposal_cursor"])
+
+    def test_missing_proposal_row_does_not_change_open_observation(self):
+        existing = vcs.record_proposal_state(self.project, proposal())
+        before = self.project.insights.read(existing["id"])
+        event = poll_proposals(
+            self._config(), self.project, {}, now=1.0, interval=15.0,
+            reader=lambda settings, op, params: {
+                "proposals": [], "complete": True, "cursor": None})
+        self.assertTrue(event["ok"])
+        after = self.project.insights.read(existing["id"])
+        self.assertEqual(after["title"], before["title"])
+        self.assertEqual(after["body"], before["body"])
+        self.assertEqual(after["rev"], before["rev"])
+        self.assertIn("open", after["title"])
+
+    def test_non_advancing_cursor_is_visible_and_preserves_cursor(self):
+        state = {"proposal_cursor": "same-token"}
+        event = poll_proposals(
+            self._config(), self.project, state, now=50.0, interval=15.0,
+            reader=lambda settings, op, params: {
+                "proposals": [], "complete": False, "cursor": "same-token"})
+        self.assertFalse(event["ok"])
+        self.assertIn("did not advance", event["error"])
+        self.assertEqual(state["proposal_cursor"], "same-token")
+        self.assertEqual(state["last_proposal_poll"], 50.0)
+
+    def test_recording_failure_is_visible_and_keeps_input_cursor(self):
+        state = {"proposal_cursor": "useful-token"}
+        reader = lambda settings, op, params: {
+            "proposals": [proposal()], "complete": False,
+            "cursor": "next-token"}
+        with mock.patch("mizu.runtime._vcs.record_proposal_state",
+                        side_effect=OSError("insight storage unavailable")):
+            event = poll_proposals(self._config(), self.project, state,
+                                   now=60.0, interval=15.0, reader=reader)
+        self.assertFalse(event["ok"])
+        self.assertIn("insight storage unavailable", event["error"])
+        self.assertEqual(event["recorded"], 0)
+        self.assertEqual(state["proposal_cursor"], "useful-token")
+        self.assertEqual(state["last_proposal_poll"], 60.0)
+        self.assertEqual(event["trust"], "external-untrusted")
+
+    def test_poll_failure_is_visible_and_preserves_cursor(self):
+        state = {"proposal_cursor": "useful-token"}
+        calls = []
+
+        def fail(settings, op, params):
+            calls.append((op, params))
+            raise Denied("adapter unavailable")
+
+        config = self._config()
+        event = poll_proposals(config, self.project, state, now=77.0,
+                               interval=15.0, reader=fail)
+        self.assertEqual(event["event"], "proposal_poll")
+        self.assertFalse(event["ok"])
+        self.assertIn("adapter unavailable", event["error"])
+        self.assertEqual(event["observed"], 0)
+        self.assertEqual(state["last_proposal_poll"], 77.0)
+        self.assertEqual(state["proposal_cursor"], "useful-token")
+        self.assertEqual(calls, [("proposals", {"cursor": "useful-token"})])
+        self.assertIsNone(poll_proposals(config, self.project, state,
+                                         now=78.0, interval=15.0, reader=fail))
+        self.assertEqual(len(calls), 1)
+
+    def test_recording_failure_keeps_page_cursor_for_retry(self):
+        state = {"proposal_cursor": "old-token"}
+        with mock.patch("mizu.vcs.record_proposal_state",
+                        side_effect=Denied("recording unavailable")):
+            event = poll_proposals(
+                self._config(), self.project, state, now=1.0, interval=15.0,
+                reader=lambda settings, op, params: {
+                    "proposals": [proposal()], "complete": False,
+                    "cursor": "new-token"})
+        self.assertFalse(event["ok"])
+        self.assertIn("recording unavailable", event["error"])
+        self.assertEqual(state["proposal_cursor"], "old-token")
+
+    def test_poll_state_write_failure_is_visible_for_proposal_tick(self):
+        def proposal_tick(config, project, state, *, now, interval):
+            state["last_proposal_poll"] = now
+            state["proposal_cursor"] = "next-token"
+            return {"event": "proposal_poll", "ok": True,
+                    "observed": 0, "recorded": 0, "changed": 0,
+                    "complete": False, "has_cursor": True}
+
+        with (mock.patch("mizu.runtime.poll_upstream", return_value=None),
+              mock.patch("mizu.runtime.poll_ci", return_value=None),
+              mock.patch("mizu.runtime.poll_proposals", side_effect=proposal_tick),
+              mock.patch("mizu.runtime.write_json", side_effect=OSError("disk full"))):
+            events = poll_project_vcs(self._config(), self.project, {},
+                                      now=3.0, interval=15.0)
+        event = next(item for item in events if item["event"] == "proposal_poll")
+        self.assertFalse(event["ok"])
+        self.assertIn("Could not persist proposal poll state", event["error"])
 
 
 if __name__ == "__main__":

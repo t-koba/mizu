@@ -907,7 +907,7 @@ def load(file: Path) -> Config:
     web["intranet"] = boolean(web["intranet"], "web.intranet")
     vcs = data.get("vcs", {})
     keys(vcs, {"command", "timeout_seconds", "max_bytes", "diagnostic_bytes", "ci_branch", "ci_rewake_seconds",
-               "poll_enabled",
+               "poll_enabled", "poll_proposals_enabled",
                "poll_interval_seconds", "poll_max_branches",
                "poll_fetch_timeout_seconds", "poll_status_timeout_seconds",
                "retire_grant", "owned_prefixes", "protected_refs",
@@ -915,7 +915,7 @@ def load(file: Path) -> Config:
     vcs = {"command": [], "timeout_seconds": 20,
            "max_bytes": 524288, "diagnostic_bytes": ADAPTER_DIAGNOSTIC_BYTES_DEFAULT,
            "ci_branch": "", "ci_rewake_seconds": 1800,
-           "poll_enabled": False,
+           "poll_enabled": False, "poll_proposals_enabled": False,
            "poll_interval_seconds": 300, "poll_max_branches": 4,
            "poll_fetch_timeout_seconds": 30,
            "poll_status_timeout_seconds": 15, "retire_grant": False,
@@ -942,6 +942,7 @@ def load(file: Path) -> Config:
             raise ConfigError("vcs.protected_refs must hold branch names without whitespace (at most 256 chars)")
     number(vcs["ci_rewake_seconds"], "vcs.ci_rewake_seconds", 60, 86400)
     vcs["poll_enabled"] = boolean(vcs["poll_enabled"], "vcs.poll_enabled")
+    vcs["poll_proposals_enabled"] = boolean(vcs["poll_proposals_enabled"], "vcs.poll_proposals_enabled")
     number(vcs["poll_interval_seconds"], "vcs.poll_interval_seconds", 15, 86400)
     number(vcs["poll_max_branches"], "vcs.poll_max_branches", 1, 64)
     number(vcs["poll_fetch_timeout_seconds"], "vcs.poll_fetch_timeout_seconds", 1, 300)

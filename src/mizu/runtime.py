@@ -1138,6 +1138,17 @@ def vcs_poll_status_timeout(config) -> int:
         return POLL_CALL_TIMEOUT_CAP
     return _vcs_poll_number(settings, "poll_status_timeout_seconds",
                             POLL_CALL_TIMEOUT_CAP)
+
+
+def vcs_poll_proposals_enabled(config) -> bool:
+    """True only when global VCS polling and proposal polling are opted in."""
+    try:
+        return (vcs_poll_enabled(config)
+                and config.vcs.get("poll_proposals_enabled") is True)
+    except (AttributeError, TypeError):
+        return False
+
+
 #: Shared per-project poll state (persisted timestamps) and lock name.
 POLL_STATE_FILE = "vcs-poll.json"
 POLL_LOCK_NAME = "vcs-poll.lock"
@@ -1151,6 +1162,20 @@ MAX_CI_FAILURES = 32
 MAX_CI_CHECKS_PER_BRANCH = 16
 #: Bound for stored branches with failures (rotation prunes absent refs).
 MAX_CI_FAILURE_BRANCHES = 128
+#: Opaque adapter pagination tokens are persisted for resumption, but never
+#: rendered into events or prompts. The VCS schema fixes this bound.
+MAX_PROPOSAL_CURSOR = 256
+
+
+def _valid_proposal_cursor(value) -> str | None:
+    """Return a usable opaque proposal cursor, else None (never raises)."""
+    try:
+        if not isinstance(value, str) or not value or len(value) > MAX_PROPOSAL_CURSOR:
+            return None
+        _vcs._reject_terminal_controls(value, "Invalid VCS proposals cursor")
+        return value
+    except Denied:
+        return None
 
 
 def _valid_ci_run(value) -> str | None:
@@ -1685,6 +1710,91 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
         state["last_error"] = str(exc)
         return {"event": "ci_poll", "ok": False,
                 "error": str(exc), "time": now_iso()}
+
+
+def poll_proposals(config, project, state: dict, *, now: float,
+                   interval: float, reader=None) -> dict | None:
+    """Observe at most one external-proposal page on each opted-in tick.
+
+    Schema: state stores ``last_proposal_poll`` and an opaque
+    ``proposal_cursor`` across ticks. Bounds: one normalized proposal page
+    (at most 256 rows) per due tick, using the existing status timeout cap.
+    Trust: host-side observation only; validated rows are recorded through
+    ``vcs.record_proposal_state`` and never imply state for missing rows.
+    Retry/cancellation: no same-tick retries; the timestamp advances on all
+    failures, while the cursor advances only after the entire page is
+    recorded successfully. Evidence: one bounded ``proposal_poll`` event.
+    Failure: adapter, malformed-page, or recording errors are visible as
+    ``ok=False``; a failed page preserves its input cursor for retry.
+    """
+    if not vcs_poll_proposals_enabled(config):
+        return None
+    if not upstream_fetch_due(state.get("last_proposal_poll"), now, interval):
+        return None
+    state["last_proposal_poll"] = now
+    cursor = _valid_proposal_cursor(state.get("proposal_cursor"))
+    params = {"cursor": cursor} if cursor is not None else {}
+
+    def _default_reader(settings, op, request):
+        return _vcs.read_via(
+            capped_vcs_settings(settings, vcs_poll_status_timeout(config)),
+            op, request)
+
+    do_read = reader if reader is not None else _default_reader
+    observed = 0
+    recorded = 0
+    changed = 0
+    try:
+        data = do_read(config.vcs, "proposals", params)
+        if not isinstance(data, dict):
+            raise Denied("VCS proposals response must be an object")
+        rows = data.get("proposals")
+        complete = data.get("complete")
+        next_cursor = data.get("cursor")
+        if not isinstance(rows, list) or len(rows) > _vcs.MAX_PROPOSALS:
+            raise Denied("VCS proposals response must carry a bounded proposals array")
+        if complete is not None and not isinstance(complete, bool):
+            raise Denied("Invalid VCS proposals completeness flag")
+        if next_cursor is not None and _valid_proposal_cursor(next_cursor) is None:
+            raise Denied("Invalid VCS proposals cursor")
+        if complete is False and next_cursor is None:
+            raise Denied("Incomplete VCS proposals page must carry a cursor")
+        if complete is False and next_cursor == cursor:
+            raise Denied("Incomplete VCS proposals cursor did not advance")
+
+        observed = len(rows)
+        for row in rows:
+            receipt = _vcs.record_proposal_state(project, row, origin="daemon")
+            recorded += 1
+            if receipt.get("changed") is True:
+                changed += 1
+
+        # Do not move/clear the cursor until every validated row has been
+        # recorded. Re-reading a partially committed page is safe because
+        # record_proposal_state has stable, change-gated deduplication.
+        if complete is True:
+            state["proposal_cursor"] = None
+        elif next_cursor is not None:
+            state["proposal_cursor"] = next_cursor
+        else:
+            # No completeness/cursor metadata is the legacy, non-paginated
+            # response shape; it represents one complete enumeration.
+            state["proposal_cursor"] = None
+        state["proposal_last_error"] = ""
+        return {"event": "proposal_poll", "ok": True,
+                "observed": observed, "recorded": recorded,
+                "changed": changed,
+                "complete": complete,
+                "has_cursor": state.get("proposal_cursor") is not None,
+                "trust": "external-untrusted", "time": now_iso()}
+    except (Denied, OSError, ValueError, TypeError) as exc:
+        message = str(exc) or type(exc).__name__
+        message = message[:512]
+        state["proposal_last_error"] = message
+        return {"event": "proposal_poll", "ok": False,
+                "observed": observed, "recorded": recorded,
+                "error": message, "trust": "external-untrusted",
+                "time": now_iso()}
 
 
 def now_iso() -> str:
@@ -3049,21 +3159,31 @@ def _wall(value):
 def refresh_poll_state(state: dict, shared: dict) -> dict:
     """Refresh in-memory poll state from shared persisted state.
 
-    Schema: ``state`` is the daemon in-memory ``{"last_fetch", "ci": {"last_poll"}}``;
-    ``shared`` is the flat ``vcs-poll.json`` mapping. Returns the ``ci`` sub-state.
+    Schema: ``state`` is daemon in-memory poll state (fetch, CI, proposal
+    timestamp/cursor); ``shared`` is the flat ``vcs-poll.json`` mapping.
+    Returns the ``ci`` sub-state.
     Bounds: numeric timestamps only; anything else is ignored. Trust: local
     operator state, never model input. Failure: never raises.
     """
     ci_state = state.setdefault("ci", {})
     if not isinstance(shared, dict):
         return ci_state
-    for key, target in (("last_fetch", state), ("last_poll", ci_state)):
+    for key, target in (("last_fetch", state), ("last_poll", ci_state),
+                        ("last_proposal_poll", state)):
         seen = _wall(shared.get(key))
         if seen is None:
             continue
         current = _wall(target.get(key))
         if current is None or seen > current:
             target[key] = seen
+    if "proposal_cursor" in shared:
+        stored_cursor = shared.get("proposal_cursor")
+        if stored_cursor is None:
+            state["proposal_cursor"] = None
+        else:
+            valid_cursor = _valid_proposal_cursor(stored_cursor)
+            if valid_cursor is not None:
+                state["proposal_cursor"] = valid_cursor
     if isinstance(shared.get("failures"), dict):
         merged = _clean_ci_failures(ci_state.get("failures"))
         for branch, rows in _clean_ci_failures(shared.get("failures")).items():
@@ -3077,7 +3197,7 @@ def poll_project_vcs(config, project, state: dict, *, now: float, interval: floa
 
     Schema: ``state`` is daemon in-memory poll state; ``now`` is wall-clock
     seconds; returns the due poll events (possibly empty). Bounds: at most one
-    fetch plus one CI tick per call under adapter timeout caps. Trust: host
+    fetch, one CI tick, and one proposal page per call under timeout caps. Trust: host
     side only; refs and CI facts stay external-untrusted. Retry/cancellation:
     no retry; timestamps advance even on failure. Evidence: returned events and
     the shared ``vcs-poll.json`` timestamps. Failure: never raises; a missed
@@ -3097,11 +3217,28 @@ def poll_project_vcs(config, project, state: dict, *, now: float, interval: floa
             polled = poll_ci(config, project, ci_state, now=now, interval=interval)
             if polled is not None:
                 events.append(polled)
-            with contextlib.suppress(OSError, ValueError, TypeError):
+            proposals = poll_proposals(config, project, state, now=now,
+                                       interval=interval)
+            if proposals is not None:
+                events.append(proposals)
+            try:
                 write_json(project.root / POLL_STATE_FILE,
                            {"last_fetch": state.get("last_fetch"),
                             "last_poll": ci_state.get("last_poll"),
+                            "last_proposal_poll": state.get("last_proposal_poll"),
+                            "proposal_cursor": state.get("proposal_cursor"),
                             "failures": _clean_ci_failures(ci_state.get("failures"))})
+            except (OSError, ValueError, TypeError) as exc:
+                # Do not report a proposal page as successful when its cursor
+                # and tick timestamp could not be durably resumed. Other VCS
+                # polling retains its existing best-effort state semantics.
+                proposal_event = next((event for event in events
+                                       if event.get("event") == "proposal_poll"), None)
+                if proposal_event is not None and proposal_event.get("ok"):
+                    message = str(exc) or type(exc).__name__
+                    proposal_event.update(
+                        ok=False,
+                        error=f"Could not persist proposal poll state: {message}"[:512])
             return events
     except Busy:
         return []
