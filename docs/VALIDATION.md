@@ -20,7 +20,7 @@
 
 ## 運用者報告（2026-10-03 13:07 UTC–2026-10-15 11:30 UTC）
 
-以下は運用者が報告した値で、受入判定やこのworkspaceでの独立検証を意味しません。レシートは添付されていません。
+以下は運用者が報告したaggregate-indexの値で、受入判定やこのworkspaceでの独立検証を意味しません。raw receiptは添付されておらず、各runを正確なrelease/code SHAへ結び付けるper-run release bindingも提供されていません。したがって集計から特定digestの実運用、run単位の再現性、またはrelease acceptanceを推定しません。
 
 | 対象 | 運用者報告 | この記録での評価 |
 |---|---|---|
