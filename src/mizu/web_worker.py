@@ -12,9 +12,9 @@ from .process import environment, run
 from .web import (PROBE_RESPONSE_HEADERS_MAX, PROBE_RESPONSE_NAME_MAX,
                   PROBE_RESPONSE_VALUE_MAX, Web)
 
-# One MiB for the bounded config/settings plus one MiB for sixfold JSON
-# escaping of the probe body/headers and fixed envelope/path overhead.
-MAX_WEB_WORKER_INPUT_BYTES = 2 * MAX_INCLUDE_BYTES
+# TOML strings with literal tabs/newlines can double when canonicalized; reserve
+# two config budgets plus one budget for the schema-bounded escaped probe frame.
+MAX_WEB_WORKER_INPUT_BYTES = 3 * MAX_INCLUDE_BYTES
 
 
 def _output_limit(operation: str, max_bytes: int) -> int:

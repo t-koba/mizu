@@ -12,7 +12,7 @@ from unittest.mock import Mock, patch
 
 from support import Fixture
 from mizu.errors import Denied
-from mizu.config import MAX_INCLUDE_BYTES
+from mizu.config import MAX_INCLUDE_BYTES, load
 from mizu.fs import PREVIEW_BYTES, canonical, digest, now, read_json, write_json
 from mizu.process import environment
 from mizu.protocol import DEFINITIONS
@@ -81,6 +81,28 @@ class WebWorkerTests(Fixture):
                 with self.assertRaisesRegex(Denied, "Host is not allowlisted"):
                     bounded(config, self.root / "run", "probe", value, lambda: False)
 
+    def test_large_valid_toml_settings_and_escaped_probe_reach_real_worker(self):
+        text = self.file.read_text()
+        command_line = next(line for line in text.splitlines()
+                            if line.lstrip().startswith("search_command ="))
+        tab_args = (",\n").join("'" * 3 + "\t" * 108000 + "'" * 3 for _ in range(9))
+        large_command = "search_command = [\n" + tab_args + "\n]"
+        text = text.replace(command_line, large_command)
+        self.file.write_text(text)
+        self.assertLessEqual(self.file.stat().st_size, MAX_INCLUDE_BYTES)
+        config = load(self.file)
+        config = dataclasses.replace(config, web={**config.web,
+            "probe_hosts": ["allowed.example"], "probe_methods": ["POST"]})
+        value = {"url": "https://denied.example/path", "method": "POST",
+                 "headers": [], "body": "\x01" * 32768}
+        frame = canonical({"settings": config.web, "cache": str(config.data / "web-cache"),
+                           "receipts": str(self.root / "run" / "sources"), "operation": "probe",
+                           "value": value, "role": ""})
+        self.assertGreater(len(frame), 2 * MAX_INCLUDE_BYTES)
+        self.assertLessEqual(len(frame), MAX_WEB_WORKER_INPUT_BYTES)
+        with self.assertRaisesRegex(Denied, "Host is not allowlisted"):
+            bounded(config, self.root / "run", "probe", value, lambda: False)
+
     def test_parent_rejects_oversized_worker_settings_before_spawn(self):
         config = self.fetch_config()
         config = dataclasses.replace(config, web={**config.web,
@@ -110,8 +132,8 @@ class WebWorkerLimitTests(unittest.TestCase):
                          + properties["method"]["maxLength"]
                          + headers["maxItems"] * (header_properties["name"]["maxLength"]
                                                     + header_properties["value"]["maxLength"]))
-        required = MAX_INCLUDE_BYTES + 6 * escaped_chars + 64 * 1024
-        self.assertEqual(MAX_WEB_WORKER_INPUT_BYTES, 2 * MAX_INCLUDE_BYTES)
+        required = 2 * MAX_INCLUDE_BYTES + 6 * escaped_chars + 2 * 64 * 1024
+        self.assertEqual(MAX_WEB_WORKER_INPUT_BYTES, 3 * MAX_INCLUDE_BYTES)
         self.assertLessEqual(required, MAX_WEB_WORKER_INPUT_BYTES)
 
     def test_worker_rejects_oversized_stdin_before_json_parse(self):
