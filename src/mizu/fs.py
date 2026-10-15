@@ -93,10 +93,16 @@ def atomic_write(path: Path, data: bytes, *, exclusive: bool = False,
             os.fsync(stream.fileno())
         if exclusive:
             try:
-                try:
-                    os.link(temporary, path, follow_symlinks=False)
-                except (TypeError, NotImplementedError):
-                    os.link(temporary, path)
+                if _platform.IS_WINDOWS:
+                    # Windows rename is atomic and fails if the destination
+                    # exists; unlike a hard link, it leaves no second name if
+                    # cleanup of the temporary path is delayed by the host.
+                    os.rename(temporary, path)
+                else:
+                    try:
+                        os.link(temporary, path, follow_symlinks=False)
+                    except (TypeError, NotImplementedError):
+                        os.link(temporary, path)
             except FileExistsError:
                 if path.is_symlink() or path.read_bytes() != data:
                     raise Denied(f"Immutable object conflict: {path.name}") from None

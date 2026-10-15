@@ -40,6 +40,9 @@ class FileTests(unittest.TestCase):
         atomic_write(path, b"first", exclusive=True)
         with self.assertRaises(Denied):
             atomic_write(path, b"other", exclusive=True)
+        self.assertEqual(path.stat().st_nlink, 1)
+        self.assertEqual(safe_read(self.root, "record", 5), b"first")
+        self.assertFalse(list(self.root.glob(".new-*")))
 
     def test_bad_relative_paths(self):
         for path in ("/etc/passwd", "../x", "a/../x", "a//x", "", ".", "x\\y", "x\x00y"):
