@@ -466,6 +466,16 @@ class WorkItemTests(Fixture):
             self.change()
         self.assertEqual(list(target.iterdir()), [])
 
+    def test_page_open_scans_work_item_history_directory_once(self):
+        self.change()
+        original = os.scandir
+        with patch("mizu.work_items.os.scandir", wraps=original) as scans:
+            page = self.store.page_open()
+        self.assertEqual([row["id"] for row in page["items"]], [self.item_id])
+        matching = [call for call in scans.call_args_list
+                    if call.args and call.args[0] == self.directory]
+        self.assertEqual(len(matching), 1)
+
     def test_page_open_checks_missing_work_item_history_directory_once(self):
         from mizu.work_items import _directory
         with patch("mizu.work_items._directory", wraps=_directory) as checks:

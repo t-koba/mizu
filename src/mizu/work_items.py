@@ -33,6 +33,7 @@ MAX_HISTORY_TEMPORARIES = 64
 _TEMP_NAME = re.compile(r"\.new-[A-Za-z0-9_]{8}\Z")
 _REVISION_NAME = re.compile(r"(?:[2-9]|[1-9][0-9]{1,2})\.json\Z")
 _DECISION_EVENT_NAME = re.compile(r"[0-9a-f]{32}\.json\Z")
+_HISTORY_UNSET = object()
 
 
 def _reject_json_constant(value: str):
@@ -173,36 +174,44 @@ class WorkItems:
             self._seed(seed_id)  # Validate the immutable seed's complete field/value contract.
         return {"rev": revision, "action": action}
 
-    def _recover_temporary_writes(self, item_id: str) -> bool:
-        """Remove only atomic-write leftovers while holding insights.lock.
+    def _recover_temporary_writes(self, item_id: str) -> set[int] | None:
+        """Recover atomic-write leftovers and return validated revision names.
 
-        A regular orphan temporary is uncommitted and ignored. On POSIX, a
-        crash after link() can leave a .new-* hard link beside its committed
-        revision; remove that alias only when exactly one valid revision name
-        identifies the same inode. Unknown names and unsafe links fail closed.
+        A regular orphan temporary is uncommitted. On POSIX, a crash after
+        link() can leave a .new-* alias beside its committed revision; remove
+        it only when exactly one regular revision name identifies the same
+        inode. The returned set lets the locked reader reuse this bounded scan.
         """
         if not isinstance(item_id, str) or ITEM_ID.fullmatch(item_id) is None:
             raise Denied("Invalid work-item ID")
         directory = self.root / "work-items" / item_id
         if not _directory(directory.parent) or not _directory(directory):
-            return False
+            return None
         temporary_entries = []
         revision_inodes = []
+        revisions = set()
         with os.scandir(directory) as entries:
             for count, entry in enumerate(entries):
                 if count >= MAX_REVISIONS:
                     raise Denied("Work-item directory exceeds recovery bound")
                 if _TEMP_NAME.fullmatch(entry.name):
                     temporary_entries.append(entry)
-                elif _REVISION_NAME.fullmatch(entry.name):
-                    try:
-                        info = _entry_stat(entry)
-                    except OSError as exc:
-                        raise Denied("Unstable work-item revision entry") from exc
-                    if (int(entry.name[:-5]) <= MAX_REVISIONS
-                            and stat.S_ISREG(info.st_mode)
-                            and not getattr(info, "st_file_attributes", 0) & 0x400):
-                        revision_inodes.append((info.st_dev, info.st_ino, entry))
+                    continue
+                if len(revisions) >= MAX_REVISIONS - 1:
+                    raise Denied("Work-item history exceeds revision bound")
+                if _REVISION_NAME.fullmatch(entry.name) is None:
+                    raise Denied("Invalid work-item history entry")
+                revision = int(entry.name[:-5])
+                if revision > MAX_REVISIONS:
+                    raise Denied("Work-item history exceeds revision bound")
+                revisions.add(revision)
+                try:
+                    info = _entry_stat(entry)
+                except OSError as exc:
+                    raise Denied("Unstable work-item revision entry") from exc
+                if (stat.S_ISREG(info.st_mode)
+                        and not getattr(info, "st_file_attributes", 0) & 0x400):
+                    revision_inodes.append((info.st_dev, info.st_ino, entry))
         removed = False
         for entry in temporary_entries:
             try:
@@ -228,7 +237,7 @@ class WorkItems:
             removed = True
         if removed:
             sync_dir(directory)
-        return True
+        return revisions
 
     def _stored_wait(self, value) -> dict:
         """Validate normalized waits without rebasing stored code-change evidence."""
@@ -289,25 +298,29 @@ class WorkItems:
             raise Denied("Only completed work items carry snapshot evidence")
 
     def _get(self, item_id: str, *, seed_event: dict | None = None,
-             history_exists: bool | None = None) -> dict:
-        current = self._seed(item_id, seed_event)  # Validate the seed; never scan history/inbox.
-        # Reuse the immediate under-lock recovery result instead of restatting these paths.
-        if history_exists is False:
+             history_revisions=_HISTORY_UNSET) -> dict:
+        current = self._seed(item_id, seed_event)  # Validate the immutable seed before replaying revisions.
+        # The storage auditor calls this read-only without recovery. Keep its
+        # bounded fail-closed scan; locked readers pass the recovery scan result.
+        if history_revisions is _HISTORY_UNSET:
+            directory = self.root / "work-items" / item_id
+            if not _directory(directory.parent) or not _directory(directory):
+                return current
+            revisions = set()
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if len(revisions) >= MAX_REVISIONS - 1:
+                        raise Denied("Work-item history exceeds revision bound")
+                    if _REVISION_NAME.fullmatch(entry.name) is None:
+                        raise Denied("Invalid work-item history entry")
+                    revision = int(entry.name[:-5])
+                    if revision > MAX_REVISIONS:
+                        raise Denied("Work-item history exceeds revision bound")
+                    revisions.add(revision)
+        elif history_revisions is None:
             return current
-        directory = self.root / "work-items" / item_id
-        if history_exists is None and (not _directory(directory.parent) or not _directory(directory)):
-            return current
-        revisions = set()
-        with os.scandir(directory) as entries:
-            for entry in entries:
-                if len(revisions) >= MAX_REVISIONS - 1:
-                    raise Denied("Work-item history exceeds revision bound")
-                if not re.fullmatch(r"(?:[2-9]|[1-9][0-9]{1,2})\.json", entry.name):
-                    raise Denied("Invalid work-item history entry")
-                revision = int(entry.name[:-5])
-                if revision > MAX_REVISIONS:
-                    raise Denied("Work-item history exceeds revision bound")
-                revisions.add(revision)
+        else:
+            revisions = history_revisions
         if revisions != set(range(2, len(revisions) + 2)):
             raise Denied("Gapped work-item history")
         for revision in range(2, len(revisions) + 2):
@@ -323,13 +336,13 @@ class WorkItems:
         records raise Denied/LimitExceeded; local I/O/lock failures propagate.
         """
         with lock(self.root / "locks" / "insights.lock"):
-            history_exists = self._recover_temporary_writes(item_id)
-            return self._get(item_id, history_exists=history_exists)
+            history_revisions = self._recover_temporary_writes(item_id)
+            return self._get(item_id, history_revisions=history_revisions)
 
     def _projection_unlocked(self, item_id: str, *, seed_event: dict | None = None) -> dict:
         """Build a projection while the caller holds insights.lock."""
-        history_exists = self._recover_temporary_writes(item_id)
-        item = self._get(item_id, seed_event=seed_event, history_exists=history_exists)
+        history_revisions = self._recover_temporary_writes(item_id)
+        item = self._get(item_id, seed_event=seed_event, history_revisions=history_revisions)
         origin_id = item["origin"]["insight_id"]
         origin_rev = item["origin"]["rev"]
         current_rev = self._origin_revision(origin_id)
@@ -559,8 +572,8 @@ class WorkItems:
         if type(expected_rev) is not int or expected_rev < 1:
             raise Denied("Expected revision must be a positive integer")
         with lock(self.root / "locks" / "insights.lock"):
-            history_exists = self._recover_temporary_writes(item_id)
-            current = self._get(item_id, history_exists=history_exists)
+            history_revisions = self._recover_temporary_writes(item_id)
+            current = self._get(item_id, history_revisions=history_revisions)
             if current["rev"] != expected_rev:
                 raise Denied("Work item changed; re-read before transitioning")
             registered = None
