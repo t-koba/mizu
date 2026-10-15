@@ -96,7 +96,8 @@ class RemainingTests(Fixture):
         trace=self.root/'trace';shutil.copytree(base,trace)
         result=subprocess.run([sys.executable,str(script),str(trace),'trace','0'],env=env,capture_output=True,text=True,check=True,timeout=5)
         events=json.loads(result.stdout)
-        self.assertTrue({'write','fsync','replace','link'} <= {e[0] for e in events})
+        required = {'write', 'fsync', 'replace', 'rename' if os.name == 'nt' else 'link'}
+        self.assertTrue(required <= {e[0] for e in events})
         def check_recovered(root):
             restarted=Snapshots(root/'store',excludes=(),max_file=1024,max_bytes=4096,max_files=4)
             current=restarted.get()

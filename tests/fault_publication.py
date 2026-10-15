@@ -21,7 +21,7 @@ def run_case(root, mode, point):
             if mode == 'crash':
                 os._exit(86)
             raise OSError(errno.ENOSPC if mode == 'enospc' else errno.EIO, 'injected')
-    originals = {name:getattr(fs.os,name) for name in ('fsync','replace','link')}
+    originals = {name:getattr(fs.os,name) for name in ('fsync','replace','link','rename')}
     def wrapper(name):
         def call(*args,**kwargs):
             boundary(name,'before')
