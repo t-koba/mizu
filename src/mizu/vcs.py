@@ -30,7 +30,7 @@ import stat
 from pathlib import Path
 
 from .errors import Denied
-from .fs import atomic_write, canonical, safe_read
+from .fs import atomic_write, canonical, digest, safe_read
 from .process import (
     ADAPTER_DIAGNOSTIC_BYTES_DEFAULT, adapter_failure_diagnostic, run,
 )
@@ -980,6 +980,9 @@ def _check_endpoint(value) -> dict:
 
 #: Maximum independent reviews per proposal row.
 MAX_REVIEWS = 64
+#: Fixed UTF-8 budget for individual check facts retained in one insight.
+#: Oversized sets keep a deterministic digest and bounded detail preview.
+MAX_PROPOSAL_CHECK_DETAIL_BYTES = 16 * 1024
 #: Closed-form review verdicts; a dismissed approval no longer approves.
 REVIEW_VERDICTS = frozenset({"approved", "changes_requested", "dismissed"})
 
@@ -1078,13 +1081,14 @@ def proposal_insight_id(proposal_id: str) -> str:
 
 
 def proposal_facts(proposal: dict) -> tuple[str, str]:
-    """Render the stable title and facts body for a validated proposal.
+    """Render stable, bounded facts for an external proposal observation.
 
-    The body covers identity, state, draft/mergeable flags, head/base
-    endpoints and check rows only: per-run log URLs vary without meaning
-    and stay available via ``vcs_read`` ``proposals``. Repeats with
-    identical facts resubmit identical content, so unchanged observations
-    never wake new work.
+    Identity, state, draft/mergeable flags, endpoints, check rows and
+    revision-bound reviews are durable facts; per-run log URLs are omitted.
+    When check-detail UTF-8 bytes exceed the fixed budget, retain a
+    failure-first preview plus a digest over all normalized check name/state/
+    sha tuples, so omitted changes still revise the insight. The full current
+    check result remains available through ``vcs_read`` ``proposals``.
     """
     row = parse_proposals({"proposals": [proposal]})[0]
     title = f"Proposal {row['id']} {row['state']}"
@@ -1095,8 +1099,30 @@ def proposal_facts(proposal: dict) -> tuple[str, str]:
              f"mergeable: {row['mergeable'] if row['mergeable'] is not None else 'unknown'}",
              _format_endpoint("head", row["head"]),
              _format_endpoint("base", row["base"])]
-    for check in row["checks"]:
-        lines.append(f"check: {check['check']} {check['state']} {check['sha']}")
+    checks = [{"check": item["check"], "state": item["state"],
+               "sha": item["sha"]} for item in row["checks"]]
+    check_lines = [f"check: {item['check']} {item['state']} {item['sha']}"
+                   for item in checks]
+    check_bytes = sum(len((line + "\n").encode("utf-8")) for line in check_lines)
+    if check_bytes <= MAX_PROPOSAL_CHECK_DETAIL_BYTES:
+        lines.extend(check_lines)
+    elif checks:
+        stable_checks = sorted(checks,
+                               key=lambda item: (item["check"], item["state"], item["sha"]))
+        check_digest = digest(canonical(stable_checks))
+        preview = sorted(checks, key=lambda item: (
+            item["state"] != "failure", item["check"], item["state"], item["sha"]))
+        details = []
+        used = 0
+        for item in preview:
+            line = f"check: {item['check']} {item['state']} {item['sha']}"
+            size = len((line + "\n").encode("utf-8"))
+            if used + size <= MAX_PROPOSAL_CHECK_DETAIL_BYTES:
+                details.append(line)
+                used += size
+        lines.append(f"checks: total={len(checks)} sha256={check_digest} "
+                     f"shown={len(details)} omitted={len(checks) - len(details)}")
+        lines.extend(details)
     if row["reviews"] is None:
         lines.append("reviews: unknown")
     elif not row["reviews"]:

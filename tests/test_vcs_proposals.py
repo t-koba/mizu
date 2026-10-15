@@ -8,6 +8,7 @@ from pathlib import Path
 from support import Fixture
 from mizu import vcs
 from mizu.errors import Denied
+from mizu.fs import PREVIEW_BYTES, canonical
 from mizu.runtime import poll_proposals, poll_project_vcs
 from unittest import mock
 
@@ -394,6 +395,55 @@ class ProposalPollingTests(Fixture):
         self.assertEqual(current["rev"], initial["rev"] + 1)
         self.assertIn(SHA_B, current["body"])
         self.assertEqual(len(calls), 3)
+
+    def test_large_valid_checks_are_bounded_and_omitted_changes_revise(self):
+        row = proposal()
+        row["head"] = {"repo": "r" * 256, "ref": "h" * 256, "sha": SHA_A}
+        row["base"] = {"repo": "r" * 256, "ref": "b" * 256, "sha": SHA_B}
+        row["reviews"] = [
+            {"reviewer": "\\" * 128, "verdict": "approved", "sha": SHA_A}
+            for _ in range(64)
+        ]
+        row["checks"] = [
+            {"check": f"{index:04d}" + "n" * 252,
+             "state": "s" * 64, "sha": SHA_A}
+            for index in range(500)
+        ]
+        row["checks"][-1]["state"] = "failure"
+        self.assertLess(len(canonical(row)), 524288)
+        changed = {**row, "checks": [dict(check) for check in row["checks"]]}
+        changed["checks"][-1]["state"] = "x" * 64
+        responses = [row, changed]
+        config = self._config()
+        state = {}
+
+        def reader(settings, op, params):
+            return {"proposals": [responses.pop(0)], "complete": True}
+
+        first = poll_proposals(config, self.project, state, now=0.0,
+                               interval=10.0, reader=reader)
+        self.assertTrue(first["ok"], first)
+        self.assertEqual(first["recorded"], 1)
+        insight_id = vcs.proposal_insight_id(row["id"])
+        stored = self.project.insights.read(insight_id)
+        body = stored["body"]
+        self.assertIn("checks: total=500 sha256=", body)
+        self.assertIn("omitted=", body)
+        self.assertIn(f"check: {row['checks'][-1]['check']} failure {SHA_A}", body)
+        self.assertLessEqual(len(canonical({
+            "id": stored["id"], "source": stored["source"],
+            "title": stored["title"], "body": body,
+            "base_snapshot": stored["base_snapshot"],
+            "run": stored["run"], "origin": stored["origin"],
+        })), PREVIEW_BYTES)
+
+        second = poll_proposals(config, self.project, state, now=10.0,
+                                interval=10.0, reader=reader)
+        self.assertTrue(second["ok"], second)
+        self.assertEqual(second["changed"], 1)
+        updated = self.project.insights.read(insight_id)
+        self.assertEqual(updated["rev"], stored["rev"] + 1)
+        self.assertNotEqual(updated["body"], body)
 
     def test_partial_page_cursor_persists_and_resumes_across_daemon_state(self):
         open_row = json.dumps(proposal())
