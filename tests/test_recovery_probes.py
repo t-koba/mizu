@@ -98,7 +98,7 @@ class RecoveryProbeTests(SelectionFixture):
         spec = specification()
         for fields in ({'probe_seconds': 0, 'scope': 'group'}, {'probe_seconds': 31536001, 'scope': 'group'},
                        {'probe_seconds': 10}, {'probe_seconds': 10, 'scope': 'profile', 'until': 'error.retry_at'},
-                       {'scope': 'profile', 'seconds': 2, 'counts_as_failure': False}):
+                       {'scope': 'profile', 'seconds': 2, 'counts_as_failure': 'false'}):
             spec['on_error'] = [fields]
             with self.assertRaises(ConfigError):
                 validate_selectors({'dynamic': spec}, self.config.profiles, self.file.parent)
@@ -756,7 +756,10 @@ class RecoveryProbeTests(SelectionFixture):
         self.assertTrue(active(self.contribution(action), 1021))
 
     def test_only_matched_probe_failures_persist_attempt_receipts(self):
-        self.setup_probe()
+        default_action = self.setup_probe()
+        self.assertFalse(default_action['counts_as_failure'])
+        self.assertNotIn('counts_as_failure',
+                         self.store.read()['receipts'][default_action['contribution']]['action'])
         self.store.path.unlink()
         self.spec['on_error'] = [{'scope': 'group', 'seconds': 10}]
         self.store.result(self.first, run='fixed', error=ModelFailure('pi'), at=1000)
@@ -771,6 +774,21 @@ class RecoveryProbeTests(SelectionFixture):
         self.assertEqual(set(state['receipts']), {action['contribution']})
         saved = self.store.path.read_bytes()
         self.assertEqual(self.store.result(self.first, run='matched', error=ModelFailure('pi', code='matched'), at=2000), action)
+        self.assertEqual(self.store.path.read_bytes(), saved)
+
+    def test_opted_in_probe_failure_policy_survives_receipt_replay(self):
+        spec = specification()
+        spec['on_error'] = [{'scope': 'group', 'probe_seconds': 10,
+                             'counts_as_failure': True}]
+        role, _ = self.setup_selection(spec)
+        self.store = State(self.config)
+        self.first = self.decision(role)
+        action = self.record_failure()
+        self.assertTrue(action['counts_as_failure'])
+        receipt = self.store.read()['receipts'][action['contribution']]['action']
+        self.assertTrue(receipt['counts_as_failure'])
+        saved = self.store.path.read_bytes()
+        self.assertEqual(self.record_failure(), action)
         self.assertEqual(self.store.path.read_bytes(), saved)
 
     def test_long_running_probe_events_and_ordinary_successes_stay_bounded(self):

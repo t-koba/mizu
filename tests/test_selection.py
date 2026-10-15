@@ -72,6 +72,78 @@ class SelectionFixture(Fixture):
 
 
 class SelectionTests(SelectionFixture):
+    def test_on_error_failure_brake_policy_defaults_false_and_is_strict_boolean(self):
+        defaulted = specification()
+        validate_selectors({'dynamic': defaulted}, self.config.profiles, self.file.parent)
+        self.assertIs(defaulted['on_error'][0]['counts_as_failure'], False)
+        for enabled in (False, True):
+            explicit = specification()
+            explicit['on_error'][0]['counts_as_failure'] = enabled
+            validate_selectors({'dynamic': explicit}, self.config.profiles, self.file.parent)
+            self.assertIs(explicit['on_error'][0]['counts_as_failure'], enabled)
+        for invalid in ('false', 0, 1, None):
+            malformed = specification()
+            malformed['on_error'][0]['counts_as_failure'] = invalid
+            with self.subTest(value=invalid), self.assertRaises(ConfigError):
+                validate_selectors({'dynamic': malformed}, self.config.profiles, self.file.parent)
+
+    def test_matched_terminal_error_does_not_advance_brake_by_default(self):
+        spec = specification()
+        spec['rules'][0]['candidates'] = spec['rules'][0]['candidates'][:1]
+        role, _ = self.setup_selection(spec)
+        self.config = dataclasses.replace(self.config, limits=dataclasses.replace(
+            self.config.limits, max_failures=1))
+        self.project.config = self.config
+
+        def fail(*_):
+            raise ModelFailure('synthetic', code='synthetic-exhausted')
+
+        result = Engine(self.config, driver=ScriptDriver(fail)).run(self.project, role.name)
+        self.assertEqual(result['status'], 'deferred')
+        error = read_json(self.project.root / 'runs' / result['run'] / 'error.json')
+        self.assertFalse(error['selection_action']['counts_as_failure'])
+        self.assertEqual(read_json(self.project.root / 'health' / 'worker.json', {})
+                         .get('consecutive_failures', 0), 0)
+        self.assertFalse(self.project.control().get('paused', False))
+
+    def test_unmatched_selector_error_still_advances_brake(self):
+        spec = specification()
+        spec['rules'][0]['candidates'] = spec['rules'][0]['candidates'][:1]
+        spec['on_error'][0]['when'] = cond('error.code', 'eq', 'not-this-error')
+        role, _ = self.setup_selection(spec)
+        self.config = dataclasses.replace(self.config, limits=dataclasses.replace(
+            self.config.limits, max_failures=1))
+        self.project.config = self.config
+
+        def fail(*_):
+            raise ModelFailure('synthetic', code='synthetic-exhausted')
+
+        with self.assertRaises(ModelFailure):
+            Engine(self.config, driver=ScriptDriver(fail)).run(self.project, role.name)
+        self.assertEqual(read_json(self.project.root / 'health' / 'worker.json')
+                         ['consecutive_failures'], 1)
+        self.assertTrue(self.project.control().get('paused'))
+
+    def test_matched_terminal_error_can_explicitly_advance_brake(self):
+        spec = specification()
+        spec['rules'][0]['candidates'] = spec['rules'][0]['candidates'][:1]
+        spec['on_error'][0]['counts_as_failure'] = True
+        role, _ = self.setup_selection(spec)
+        self.config = dataclasses.replace(self.config, limits=dataclasses.replace(
+            self.config.limits, max_failures=1))
+        self.project.config = self.config
+
+        def fail(*_):
+            raise ModelFailure('synthetic', code='synthetic-exhausted')
+
+        result = Engine(self.config, driver=ScriptDriver(fail)).run(self.project, role.name)
+        self.assertEqual(result['status'], 'deferred')
+        self.assertTrue(result['selection_action']['counts_as_failure'])
+        error = read_json(self.project.root / 'runs' / result['run'] / 'error.json')
+        self.assertTrue(error['selection_action']['counts_as_failure'])
+        self.assertEqual(read_json(self.project.root / 'health' / 'worker.json')['consecutive_failures'], 1)
+        self.assertTrue(self.project.control().get('paused'))
+
     def test_exhaustion_alternate_recovery_and_restart(self):
         role, _ = self.setup_selection()
         first = self.decision(role)

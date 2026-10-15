@@ -32,6 +32,7 @@ candidates = [
 when = {path = "error.code", op = "eq", value = "EXPLICIT_PROVIDER_CODE"}
 scope = "group"
 seconds = 900
+# counts_as_failure = true # optional; defaults to false
 
 [roles.worker]
 selector = "coding" # replaces profile; retain policy/workspace/grants/schedule
@@ -64,6 +65,14 @@ chosen quota scopes, never guessed from provider names or credentials. Active
 blocks persist across configuration changes and restarts until expiry or an
 explicitly configured observation-based recovery.
 
+Every `on_error` rule may set `counts_as_failure` (strict boolean, default
+`false`). A matched terminal error still blocks its configured scope and returns
+a deferred/waiting outcome; by default it does not advance the role's consecutive
+failure brake. Setting it to `true` opts that terminal matched outcome into the
+existing brake and its configured auto-pause threshold. A successful fallback
+still completes normally and clears the consecutive count. Unmatched errors and
+rules without a usable future deadline keep the existing generic failure behavior.
+
 
 ### Optional paid recovery probes
 
@@ -81,8 +90,9 @@ seconds = 3600 # optional upper expiry, measured from the original failure
 there is no default and no probing without this explicit grant. In probe mode,
 `seconds` is an optional upper bound, also in that interval range. `until` is
 rejected. Without an upper bound the obligation remains until an exact-target
-probe succeeds. `counts_as_failure` is not accepted; ordinary failure-brake
-accounting is unchanged.
+probe succeeds. The common `counts_as_failure` option applies to probe rules too;
+its default is false, with explicit true opting a terminal matched probe failure
+into the existing role failure brake.
 
 A group block excludes **all** candidates in the operator-selected group, but
 its probe always targets the exact profile whose attempt failed, never an

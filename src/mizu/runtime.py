@@ -79,6 +79,18 @@ def is_infra_wait(exc: BaseException) -> bool:
     return isinstance(exc, INFRA_WAIT)
 
 
+def _record_health_failure(project, role_name, run_id, exc, maximum):
+    """Advance the existing role failure brake once for a terminal failure."""
+    with contextlib.suppress(OSError, ValueError, TypeError):
+        health = read_json(project.root / "health" / f"{role_name}.json", {})
+        failures = health.get("consecutive_failures", 0) + 1
+        write_json(project.root / "health" / f"{role_name}.json",
+                   {"consecutive_failures": failures, "last_run": run_id,
+                    "error": str(exc), "updated_at": now()})
+        if maximum > 0 and failures >= maximum and not isinstance(exc, Cancelled):
+            project.set_control(paused=True, reason="Repeated failures; inspect health and run records")
+
+
 def is_deferred(exc: BaseException, context=None) -> bool:
     """True when a failure defers rather than counting toward the brake.
 
@@ -2594,6 +2606,12 @@ class Engine:
                     if result is not None:
                         write_json(run_dir / "result.json", {**result, "status": "interrupted", **error})
                 if handled:
+                    counts_as_failure = handled.get("counts_as_failure", False)
+                    if type(counts_as_failure) is not bool:
+                        raise ConfigError("Invalid selector counts_as_failure policy")
+                    if counts_as_failure:
+                        _record_health_failure(project, role_name, run_id, exc,
+                                               self.config.limits.max_failures)
                     return {"run": run_id, "role": role_name, "status": "deferred",
                             "error": str(exc), "selection": decision, "selection_action": handled,
                             **({"selection_retries": selection_retries} if selection_retries else {}),
@@ -2601,14 +2619,8 @@ class Engine:
                 suppress_missing_finish_brake = (isinstance(exc, MissingFinish)
                                                  and not self.config.limits.missing_finish_counts_as_failure)
                 if not is_deferred(exc, context) and not suppress_missing_finish_brake:
-                    with contextlib.suppress(OSError, ValueError, TypeError):
-                        health = read_json(project.root / "health" / f"{role_name}.json", {})
-                        failures = health.get("consecutive_failures", 0) + 1
-                        write_json(project.root / "health" / f"{role_name}.json",
-                                   {"consecutive_failures": failures, "last_run": run_id, "error": str(exc), "updated_at": now()})
-                        if self.config.limits.max_failures > 0 and \
-                                failures >= self.config.limits.max_failures and not isinstance(exc, Cancelled):
-                            project.set_control(paused=True, reason="Repeated failures; inspect health and run records")
+                    _record_health_failure(project, role_name, run_id, exc,
+                                           self.config.limits.max_failures)
                 raise exc
             finally:
                 if context is not None:

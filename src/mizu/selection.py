@@ -196,8 +196,13 @@ def validate_selectors(value, profiles, base):
             validate_condition(rule.get('when', {}))
             attributes(rule.get('attributes'))
         for rule in items(spec.get('on_error', []), 'on_error'):
-            table(rule, {'when', 'scope', 'seconds', 'until', 'probe_seconds'}, 'error rule')
+            table(rule, {'when', 'scope', 'seconds', 'until', 'probe_seconds',
+                         'counts_as_failure'}, 'error rule')
             validate_condition(rule.get('when', {}))
+            counts_as_failure = rule.get('counts_as_failure', False)
+            if type(counts_as_failure) is not bool:
+                raise ConfigError('counts_as_failure must be boolean')
+            rule['counts_as_failure'] = counts_as_failure
             if rule.get('scope') not in ('profile', 'group'):
                 raise ConfigError('Error scope must be profile or group')
             if 'probe_seconds' in rule:
@@ -339,8 +344,10 @@ class State:
                     raise ValueError('invalid probe receipt')
                 action = receipt['action']
                 fields = {'rule', 'until', 'scope', 'probe_seconds', 'contribution'}
-                if (set(action) != fields or action['scope'] not in ('profile', 'group')
-                        or type(action['rule']) is not int or not 0 <= action['rule'] < MAX_ITEMS):
+                if (set(action) not in (fields, fields | {'counts_as_failure'})
+                        or action['scope'] not in ('profile', 'group')
+                        or type(action['rule']) is not int or not 0 <= action['rule'] < MAX_ITEMS
+                        or ('counts_as_failure' in action and type(action['counts_as_failure']) is not bool)):
                     raise ValueError('invalid probe receipt action fields')
                 seconds(action['probe_seconds'])
                 if action['contribution'] != identity or identity not in state['contributions']:
@@ -434,7 +441,8 @@ class State:
             if receipt:
                 if receipt['payload'] != payload:
                     raise ConfigError('Conflicting selection attempt replay')
-                return receipt['action']
+                return {**receipt['action'],
+                        'counts_as_failure': receipt['action'].get('counts_as_failure', False)}
             if state['exhausted']:
                 raise ConfigError('Selection ledger capacity exhausted')
             spec = self.config.selectors[decision['selector']]
@@ -444,15 +452,18 @@ class State:
                 for index, rule in enumerate(spec.get('on_error', [])):
                     if evaluate(rule.get('when', {}), facts) is not True:
                         continue
+                    counts_as_failure = rule.get('counts_as_failure', False)
                     if 'probe_seconds' in rule:
                         until = at + rule['seconds'] if 'seconds' in rule else None
                         matched = {'rule': index, 'until': until, 'scope': rule['scope'],
-                                   'probe_seconds': rule['probe_seconds'], 'contribution': identity}
+                                   'probe_seconds': rule['probe_seconds'], 'contribution': identity,
+                                   'counts_as_failure': counts_as_failure}
                     else:
                         until = at + rule['seconds'] if 'seconds' in rule else error.evidence.get('retry_at')
                         if type(until) not in (int, float) or until <= at:
                             continue
-                        matched = {'rule': index, 'until': until, 'scope': rule['scope']}
+                        matched = {'rule': index, 'until': until, 'scope': rule['scope'],
+                                   'counts_as_failure': counts_as_failure}
                     break
             previous = state['history'].get(profile, {})
             if previous.get('at', 0) <= at:
@@ -480,7 +491,12 @@ class State:
                                            'error_rule': matched['rule'], 'sponsor': decision['facts'].get('project'),
                                            'role': decision['facts'].get('role')}
             if matched and 'probe_seconds' in matched:
-                state['receipts'][identity] = {'payload': payload, 'action': matched}
+                action = dict(matched)
+                # False is the historical behavior; omitting it keeps existing
+                # receipts bounded and readable without changing their meaning.
+                if not action['counts_as_failure']:
+                    action.pop('counts_as_failure')
+                state['receipts'][identity] = {'payload': payload, 'action': action}
             self.save_or_close(state, previous_state)
         return matched
 
