@@ -172,7 +172,7 @@ def _selection(config, role) -> dict:
 def _snapshot(project) -> dict:
     try:
         snapshot = project.snapshots.get()
-    except (Denied, OSError, ValueError, TypeError, KeyError, AttributeError):
+    except (Denied, OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
         return {"status": "unavailable", "scope": "project", "record": None}
     return {"status": "current", "scope": "project", "record": {
         "id": snapshot["id"], "code_digest": snapshot["code_digest"],

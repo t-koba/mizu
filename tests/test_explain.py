@@ -129,6 +129,15 @@ class ExplainTests(Fixture):
         self.assertFalse((self.project.root / "objects").exists())
         self.assertFalse((self.project.root / "snapshots").exists())
 
+    def test_deeply_nested_snapshot_is_reported_unavailable(self):
+        from mizu.explain import _snapshot
+
+        snapshot = self.project.snapshots.get()
+        path = self.project.root / "snapshots" / (snapshot["id"] + ".json")
+        path.write_text("[" * 10000 + "]" * 10000)
+        self.assertEqual(_snapshot(self.project), {
+            "status": "unavailable", "scope": "project", "record": None})
+
     def test_unreadable_role_record_fails_closed_and_emits_no_file_text(self):
         health = self.project.root / "health" / "worker.json"
         health.parent.mkdir(exist_ok=True)
