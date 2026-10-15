@@ -23,6 +23,7 @@ ITEM_ID = re.compile(r"wi_([0-9a-f]{32})\Z")
 STATUSES = ("open", "doing", "blocked", "done", "dropped")
 SEED_FIELDS = {"id", "title", "origin", "status", "rev", "holder", "created_at", "updated_at"}
 EVENT_FIELDS = SEED_FIELDS | {"actor", "transition", "reason", "wait", "snapshot_id", "verification"}
+MAX_PROJECTION_BYTES = PREVIEW_BYTES + 256
 _TEMP_NAME = re.compile(r"\.new-[A-Za-z0-9_]{8}\Z")
 _REVISION_NAME = re.compile(r"(?:[2-9]|[1-9][0-9]{1,2})\.json\Z")
 
@@ -80,6 +81,44 @@ class WorkItems:
                 or seed["created_at"] != event["created_at"] or seed["updated_at"] != event["created_at"]):
             raise Denied("Work-item seed does not match decision event")
         return seed
+
+    def _optional_record(self, name: str) -> dict | None:
+        """Read one optional bounded record, refusing unsafe store paths."""
+        parts = name.split("/")
+        if (len(parts) != 2 or parts[0] not in ("inbox", "decisions")
+                or not parts[1].endswith(".json")):
+            raise Denied("Invalid work-item origin record path")
+        identifier(parts[1][:-5])
+        if not _directory(self.root / parts[0]):
+            return None
+        path = self.root / name
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            return None
+        if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                or info.st_nlink != 1 or getattr(info, "st_file_attributes", 0) & 0x400):
+            raise Denied("Unsafe work-item origin record")
+        return self._read(name)
+
+    def _origin_revision(self, insight_id: str) -> int | None:
+        current = self._optional_record(f"inbox/{insight_id}.json")
+        if current is None:
+            return None
+        revision = current.get("rev", 1)
+        if (current.get("id") != insight_id or type(revision) is not int or revision < 1):
+            raise Denied("Invalid current work-item origin insight")
+        return revision
+
+    def _current_decision(self, insight_id: str) -> dict | None:
+        decision = self._optional_record(f"decisions/{insight_id}.json")
+        if decision is None:
+            return None
+        revision = decision.get("rev", 1)
+        if (decision.get("id") != insight_id or type(revision) is not int or revision < 1
+                or decision.get("action") not in ("accept", "modify", "defer", "reject", "withdraw")):
+            raise Denied("Invalid current work-item origin decision")
+        return {"rev": revision, "action": decision["action"]}
 
     def _recover_temporary_writes(self, item_id: str) -> None:
         """Remove only atomic-write leftovers while holding insights.lock.
@@ -228,6 +267,42 @@ class WorkItems:
         with lock(self.root / "locks" / "insights.lock"):
             self._recover_temporary_writes(item_id)
             return self._get(item_id)
+
+    def projection(self, item_id: str) -> dict:
+        """Return one bounded item plus revision-derived origin staleness.
+
+        The immutable item remains the CAS authority. A newer origin revision
+        stays stale until a current-revision accept/modify/defer/reject decision
+        exists; author withdrawal is not a substantive re-decision. A missing
+        origin is stale, never silently treated as current. This is an internal
+        read projection, not prompt/tool/CLI/status exposure.
+        """
+        with lock(self.root / "locks" / "insights.lock"):
+            self._recover_temporary_writes(item_id)
+            item = self._get(item_id)
+            origin_id = item["origin"]["insight_id"]
+            origin_rev = item["origin"]["rev"]
+            current_rev = self._origin_revision(origin_id)
+            redecision = None
+            if current_rev is None:
+                stale = True
+            elif current_rev < origin_rev:
+                raise Denied("Origin insight revision predates its work item")
+            elif current_rev == origin_rev:
+                stale = False
+            else:
+                decision = self._current_decision(origin_id)
+                if decision is not None and decision["rev"] > current_rev:
+                    raise Denied("Origin decision revision is ahead of its insight")
+                redecision = (decision if decision is not None and decision["rev"] == current_rev
+                              and decision["action"] in ("accept", "modify", "defer", "reject")
+                              else None)
+                stale = redecision is None
+            view = {"item": item, "current_origin_rev": current_rev,
+                    "stale": stale, "redecision": redecision}
+            if len(canonical(view)) > MAX_PROJECTION_BYTES:
+                raise LimitExceeded("Work-item projection exceeds byte bound")
+            return view
 
     def transition(self, item_id: str, *, expected_rev, status, actor, reason=None,
                    wait=None, snapshot_id=None) -> dict:

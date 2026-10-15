@@ -9,8 +9,8 @@ from unittest.mock import patch
 
 from support import Fixture
 from mizu.errors import Denied, LimitExceeded
-from mizu.fs import PREVIEW_BYTES, write_json
-from mizu.work_items import MAX_REVISIONS, WorkItems
+from mizu.fs import PREVIEW_BYTES, canonical, write_json
+from mizu.work_items import MAX_PROJECTION_BYTES, MAX_REVISIONS, WorkItems
 
 
 class WorkItemTests(Fixture):
@@ -56,6 +56,59 @@ class WorkItemTests(Fixture):
             self.assertEqual(self.store.get(self.item_id), self.seed)
         reads.assert_called_once_with(f"decision-history/{self.item_id[3:]}.json")
         self.assertFalse(self.directory.exists())
+
+    def test_projection_marks_revision_stale_until_current_decision(self):
+        view = self.store.projection(self.item_id)
+        self.assertEqual(view["item"], self.seed)
+        self.assertEqual(view["current_origin_rev"], 1)
+        self.assertFalse(view["stale"])
+        self.assertIsNone(view["redecision"])
+        self.project.insights.revise(self.proposal["id"], source="worker", title="Revised scope",
+                                     body="Changed claims", base_snapshot=None, expected_rev=1)
+        pending = self.store.projection(self.item_id)
+        self.assertEqual(pending["current_origin_rev"], 2)
+        self.assertTrue(pending["stale"])
+        self.assertIsNone(pending["redecision"])
+        decision = self.project.insights.decide(
+            self.proposal["id"], "defer", "Reassess after new evidence", "revisit the revised scope",
+            "run-redecision", expected_rev=2)
+        settled = self.store.projection(self.item_id)
+        self.assertEqual(settled["current_origin_rev"], 2)
+        self.assertFalse(settled["stale"])
+        self.assertEqual(settled["redecision"], {"rev": 2, "action": "defer"})
+        self.assertEqual(settled["item"]["origin"], self.seed["origin"])
+        self.assertEqual(self.store.get(self.item_id), self.seed)
+        self.assertEqual(decision["action"], "defer")
+
+    def test_projection_treats_missing_origin_as_stale(self):
+        (self.project.root / "inbox" / f"{self.proposal['id']}.json").unlink()
+        view = self.store.projection(self.item_id)
+        self.assertIsNone(view["current_origin_rev"])
+        self.assertTrue(view["stale"])
+
+    def test_projection_is_byte_bounded(self):
+        event = self.change(reason="r" * (PREVIEW_BYTES - 2048))
+        view = self.store.projection(self.item_id)
+        self.assertEqual(view["item"], event)
+        self.assertLessEqual(len(canonical(view)), MAX_PROJECTION_BYTES)
+
+    def test_projection_rejects_symlinked_current_decision(self):
+        self.project.insights.revise(self.proposal["id"], source="worker", title="Revised scope",
+                                     body="Changed claims", base_snapshot=None, expected_rev=1)
+        path = self.project.root / "decisions" / f"{self.proposal['id']}.json"
+        target = self.project.root / "saved-decision.json"
+        path.rename(target)
+        self.symlink(target, path)
+        with self.assertRaises(Denied):
+            self.store.projection(self.item_id)
+
+    def test_projection_rejects_symlinked_origin(self):
+        path = self.project.root / "inbox" / f"{self.proposal['id']}.json"
+        target = self.project.root / "saved-origin.json"
+        path.rename(target)
+        self.symlink(target, path)
+        with self.assertRaises(Denied):
+            self.store.projection(self.item_id)
 
     def test_seed_decision_is_bounded_before_persisting(self):
         proposal = self.project.insights.submit(

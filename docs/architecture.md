@@ -228,11 +228,15 @@ later publication-history retention. Backup/restore includes these histories;
 storage audit/reclaim protects their cited snapshot manifests. Work-item
 retention/expiration is not implemented, so those citations remain durable.
 
-Origin-insight revision staleness is not yet projected by this internal getter;
-public readers/transitions must not treat the seed as current work until that
-state is added. Public prompt/tool/CLI/status/explain visibility, policy
-configuration, backfill/reconciliation and replacement of free-text Tasks also
-remain unfinished. **Free-text Tasks in writer state are still needed.**
+`projection(item_id)` returns one bounded view (`item`, `current_origin_rev`,
+`stale`, `redecision`) without changing the immutable seed or CAS record. A newer
+origin revision is stale until that revision has an `accept`, `modify`, `defer`
+or `reject` decision; `withdraw` does not clear staleness. Missing current
+origin data is reported stale, while unsafe or malformed origin records fail
+closed. This projection does not yet gate internal transitions. Public
+prompt/tool/CLI/status/explain visibility, policy configuration,
+backfill/reconciliation and replacement of free-text Tasks also remain
+unfinished. **Free-text Tasks in writer state are still needed.**
 Author withdrawal (`mizu insight withdraw`, submitter or operator only)
 closes a pending proposal with an actor-labelled rev-bound record in
 the same decision store; it is refused over a revision-current substantive
