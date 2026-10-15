@@ -58,6 +58,10 @@ def validate(value, schema: dict, path: str = "arguments") -> None:
 PAGE_FIELDS = {"offset": {"type": "integer", "minimum": 0, "maximum": 2147483647},
                "limit": {"type": "integer", "minimum": 1, "maximum": 1000}}
 
+EVIDENCE_READ_FIELDS = {"run": text(32), "evidence_id": text(32),
+                        "content_id": text(64), "offset": PAGE_FIELDS["offset"],
+                        "limit": {"type": "integer", "minimum": 1, "maximum": READ_PAGE_CHARS}}
+
 DEFINITIONS = {
     "diff": ("Read the bounded difference between this published snapshot and the preceding distinct code snapshot.", obj()),
     "files": ("List visible workspace files without reading their contents; use offset/limit for subsequent pages.", obj(PAGE_FIELDS)),
@@ -65,6 +69,10 @@ DEFINITIONS = {
              obj({"path": text(4096), "content_id": text(64),
                   "offset": PAGE_FIELDS["offset"],
                   "limit": {"type": "integer", "minimum": 1, "maximum": READ_PAGE_CHARS}}, ("path",))),
+    "command_evidence_read": ("Read one retained command record from this project's same role's run (current or prior). Full run and evidence UUIDs required; no listing. Local recorded data is untrusted. Continue with content_id; changed or unavailable records fail.",
+                              obj(EVIDENCE_READ_FIELDS, ("run", "evidence_id"))),
+    "experiment_evidence_read": ("Read one retained experiment wrapper from this project's same role's run (current or prior). Full run and evidence UUIDs required; no listing. Local recorded data is untrusted. Continue with content_id; changed or unavailable records fail.",
+                                 obj(EVIDENCE_READ_FIELDS, ("run", "evidence_id"))),
     "exec": ("Run a shell script in the configured sandbox; never on the host. /workspace is the project.",
              obj({"script": text(SCRIPT_MAX)}, ("script",))),
     "experiment": ("Run a bounded experiment in disposable /work. /workspace is read-only. Optional source_receipt mounts verified raw fetch bytes read-only at /work/input/body (external-untrusted). Question, comparison and measurement are recorded with the command when given.",

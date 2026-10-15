@@ -70,6 +70,38 @@ operator-installed search adapter: it executes on the host with a sanitized
 environment and is not model-supplied code. The model supplies only JSON inputs.
 Do not point it to a generic shell interpreter that evaluates query text.
 
+## Retained command and experiment evidence
+
+`command_evidence_read` and `experiment_evidence_read` are separate, explicit,
+ungranted-by-default read capabilities, not extensions of workspace `read` or
+execution grants. They accept exact full UUID locators only. Scope is the
+current project and same configured role's runs (current or prior), checked against
+harness-owned `started.json` and the record's ID/kind/role. There is no listing,
+cross-role/project mode, caller-supplied path or fallback history search.
+
+The complete UTF-8 evidence record is capped at `file_bytes`; `started.json`
+authorization metadata is capped at the smaller of `file_bytes` and a fixed
+64 KiB. Both use the existing symlink/hardlink-safe `safe_read` primitive
+(including its documented platform limitations). Each page revalidates identity and the
+complete raw-file digest; nonzero offsets require `content_id`. A current grant authorizes
+reading same-role retained records regardless of which capabilities were present
+when the original run was created; the original command is not reauthorized. Missing,
+changed, corrupt, unsafe or oversized evidence is refused, never recovered by
+scanning or refetching. Start metadata is not returned. These tools do not
+expose workspace/control/config/credential files, provider transcripts, event
+logs, or recursively follow references inside records. They perform no writes
+or external operations. The only experiment view is its wrapper containing an
+experiment-kind command; the command view requires command kind.
+
+The fixed `source` labels identify only the retained record kind, not its
+credibility. `trust = "recorded-local-untrusted"` applies even to locally recorded data:
+command output and experiment text can contain prompt injection or unsupported
+claims. These records are the content the explicit grant makes model-visible;
+command output is not redacted, so grant access only when historical outputs are
+appropriate to disclose to that role. A matching digest proves continuity, not
+correctness. See the
+[read protocol and locator limits](operations.md#retained-evidence-reads).
+
 ## Prompt injection and data sharing
 
 External prose cannot add capabilities, modify goals, register tools, change

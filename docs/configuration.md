@@ -83,7 +83,7 @@ required). Operator tooling that concatenates configs
 | `missing_finish_followups` | Extra finish-only turns after a managed engine normally returns without `mizu_finish` (0–3; default 1; 0 keeps fail-fast behavior). Every new query/turn/request uses existing admission, per-run and daily budgets, and the same absolute deadlines. The active session continues only within this work unit; ephemeral sessions stay run-local. Provider/transport/protocol errors and explicit cancellation are never relabeled or retried |
 | `missing_finish_counts_as_failure` | Whether exhausting the missing-finish follow-ups increments the existing failure brake (boolean; default `true`, preserving today's behavior). Scoped only to this terminal missing-finish outcome; it does not change selector `counts_as_failure` rules |
 | `output_bytes` | Maximum captured stdout/stderr per command |
-| `file_bytes` | Maximum whole-file byte size admitted by `read`; larger text files are paged in 8,192-character responses, with `content_id` verification across pages |
+| `file_bytes` | Maximum complete-file byte size admitted by `read` and retained-evidence records; default 8 MiB. The `started.json` authorization record is additionally capped at 64 KiB. Admitted files are paged in 8,192-character responses, with `content_id` verification across pages |
 | `snapshot_bytes`, `snapshot_files` | Total visible snapshot size and file-count bounds |
 | `history_index` | Maximum published snapshot IDs retained in the immutable history generation (8–1,000,000; manifests stay on disk) |
 | `prompt_snapshots` | Number of recent anchored snapshot summaries offered to prompts (1–64) |
@@ -139,7 +139,8 @@ Safety-critical bounds are fixed in code rather than exposed as configuration kn
 | Category | Bound | Value | Purpose |
 |---|---|---|---|
 | **Framing & Preview** | `PREVIEW_BYTES` (`fs.py`) | 128 KiB | Diff/insight/editor preview and canonical list bounds; CLI stdin framing |
-| | `READ_PAGE_CHARS` (`fs.py`) | 8,192 characters | Per-response `read` text bound, separate from the whole-file `file_bytes` cap |
+| | `READ_PAGE_CHARS` (`fs.py`) | 8,192 characters | Per-response workspace/evidence read text bound, separate from the whole-file `file_bytes` cap |
+| | `MAX_STARTED_EVIDENCE_BYTES` (`runtime.py`) | 64 KiB | Hard ceiling for run metadata used only to authorize retained-evidence reads; `file_bytes` may lower it |
 | | `MAX_FRAME` (`fs.py`) | 1 MiB | Maximum JSON-RPC message size across bridge and MCP servers |
 | **Tool inputs** | `exec` / `experiment` script | 64 KiB | Sandbox command size (`SCRIPT_MAX`) |
 | **Adapter diagnostics** | `ADAPTER_DIAGNOSTIC_BYTES_MAX` (`process.py`) | 8 KiB | Hard ceiling for any configured model-visible stderr excerpt; per-adapter `diagnostic_bytes` may lower it or disable it |
@@ -376,6 +377,8 @@ models are recorded. Model usage excludes unreported auxiliary billing.
 | `files`, `read`, `diff` | Bounded file view and anchored published changes |
 | `exec` | Container command; workspace mode determines source writability |
 | `experiment` | Container command with readonly source and ephemeral work area |
+| `command_evidence_read` | Read an exact retained command record from this project's same configured role's run (current or prior); no listing or path input; ungranted by default |
+| `experiment_evidence_read` | Read an exact retained experiment wrapper from this project's same configured role's run (current or prior); independent of the command grant; ungranted by default |
 | `verify` | Execute operator-owned command strings and bind proof to code digest |
 | `fetch`, `search` | Allowlisted retrieval / trusted discovery adapter |
 | `probe` | One policy-bounded HTTPS request to `probe_hosts` with an allowlisted method and bounded headers/body; observes status, headers and bounded body with a receipt (no redirects, no credentials) |
@@ -395,6 +398,14 @@ models are recorded. Model usage excludes unreported auxiliary billing.
 | `research_read` | Read this role's own current research state record with its generation (read roles and consultation roles may hold it) |
 | `research` | Replace this role's own current research state record under the read generation; stale generations refused, audit in `research-state.json` (consultation roles cannot hold it) |
 | `finish` | Seal result; cannot acquire new permissions |
+
+Neither `read`, `exec` nor `experiment` implies either retained-evidence grant.
+The two grants are independent and expose only their own record kind. Their
+scope is fixed to the current project and same configured role (current or prior
+runs); there is no cross-role/project setting. A current grant permits reading
+that role's retained records regardless of the original run's capability set;
+the original command is not reauthorized. See [retained-evidence reads](operations.md#retained-evidence-reads)
+for locators, paging, byte bounds, trust and failure behavior.
 
 Consultation and delegation require a live caller execution-slot lease from `Engine.run` (unadmitted calls fail with `Busy` before child inference). They use that held slot without acquiring another; consultation fan-out is bounded by `parallel_consults`, and child contexts cannot lend onward.
 

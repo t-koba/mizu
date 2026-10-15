@@ -191,7 +191,12 @@ class SourceContinuationTests(Fixture):
         self.assertTrue(mounts[0].endswith(':ro') or mounts[0].endswith(':ro,z') or 'readonly' in mounts[0])
         self.assertIn('--network=' + self.config.sandbox.network, argv)
         self.assertEqual(body.read_bytes(), RAW)
-        evidence = read_json(self.ctx.run_dir / result['evidence'])
+        self.assertEqual(result['run'], self.ctx.run_dir.name)
+        self.assertEqual(result['evidence'], f"experiments/{result['id']}.json")
+        wrapper = read_json(self.ctx.run_dir / result['evidence'])
+        evidence = wrapper['command']
+        self.assertEqual(evidence['id'], result['id'])
+        self.assertEqual(evidence['kind'], 'experiment')
         self.assertEqual(evidence['source'], {'receipt_id': identity, 'representation': 'raw-response-body',
                                                'byte_length': len(RAW), 'sha256': digest(RAW)})
         self.assertEqual(evidence['source_trust'], 'external-untrusted')

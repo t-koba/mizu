@@ -9,6 +9,7 @@ import contextlib
 import dataclasses
 import json
 import os
+import re
 import shutil
 import signal
 import threading
@@ -63,6 +64,14 @@ INSIGHT_RETRIEVAL_LIMIT = 1000
 #: Fixed memory bounds for run-local pre-send admission identities.
 MAX_ENGINE_TOOL_INVOCATIONS = 4096
 MAX_ENGINE_TOOL_ID = 256
+
+#: Exact retained-evidence locators, never prefixes or filesystem paths.
+EVIDENCE_UUID = re.compile(r"[0-9a-f]{32}\Z")
+MAX_STARTED_EVIDENCE_BYTES = 65536
+
+
+def _reject_nonfinite_json(value: str):
+    raise ValueError("Non-finite JSON value")
 
 #: Wrap-up allowance granted when a per-run spend bound is reached: extra
 #: model requests and extra wrap-up tool calls the unit may still spend to
@@ -687,6 +696,59 @@ class Context:
                 "offset": offset, "next_offset": end if end < len(text) else None,
                 "truncated": end < len(text)}
 
+    def _read_retained_evidence(self, kind: str, args: dict) -> dict:
+        """Read exactly two bounded files; no discovery, fallback or writes.
+
+        started.json is capped at min(file_bytes, 64 KiB); the complete evidence
+        record uses file_bytes. Identity is harness-owned run metadata plus the configured caller role;
+        record contents remain untrusted. Every page revalidates both files.
+        Unsafe/unavailable/corrupt records fail without a retry or history scan.
+        """
+        run, evidence_id = args["run"], args["evidence_id"]
+        if any(not isinstance(value, str) or not EVIDENCE_UUID.fullmatch(value)
+               for value in (run, evidence_id)):
+            raise Denied("Evidence requires full lowercase 32-hex run and evidence UUIDs")
+        offset, limit = args.get("offset", 0), args.get("limit", READ_PAGE_CHARS)
+        expected = args.get("content_id")
+        if offset and expected is None:
+            raise Denied("Evidence continuation requires content_id")
+        if expected is not None and (not isinstance(expected, str) or not DIGEST.fullmatch(expected)):
+            raise Denied("Invalid evidence content_id")
+        prefix = f"runs/{run}/"
+        evidence = f"{kind}/{evidence_id}.json"
+        maximum = self.config.limits.file_bytes
+        started_maximum = min(maximum, MAX_STARTED_EVIDENCE_BYTES)
+        try:
+            started = json.loads(safe_read(self.project.root, prefix + "started.json", started_maximum)
+                                 .decode("utf-8"), parse_constant=_reject_nonfinite_json)
+            if (not isinstance(started, dict) or started.get("run") != run
+                    or started.get("role") != self.role.name):
+                raise Denied("Evidence run identity or role mismatch")
+            data = safe_read(self.project.root, prefix + evidence, maximum)
+            text = data.decode("utf-8")
+            record = json.loads(text, parse_constant=_reject_nonfinite_json)
+        except (UnicodeError, ValueError, RecursionError) as exc:
+            raise Denied("Corrupt retained evidence or run metadata") from exc
+        command = record.get("command") if kind == "experiments" and isinstance(record, dict) else record
+        expected_kind = "experiment" if kind == "experiments" else "command"
+        if (not isinstance(command, dict) or command.get("id") != evidence_id
+                or command.get("kind") != expected_kind or command.get("role") != self.role.name):
+            raise Denied("Evidence record identity, kind or role mismatch")
+        content_id = digest(data)
+        if expected is not None and expected != content_id:
+            raise Denied("Evidence changed since the previous page")
+        end = min(len(text), offset + limit)
+        return {"source": "retained-" + expected_kind + "-evidence", "trust": "recorded-local-untrusted",
+                "run": run, "evidence_id": evidence_id, "evidence": evidence,
+                "text": text[offset:end], "content_id": content_id, "offset": offset,
+                "next_offset": end if end < len(text) else None, "truncated": end < len(text)}
+
+    def _op_command_evidence_read(self, args: dict) -> dict:
+        return self._read_retained_evidence("commands", args)
+
+    def _op_experiment_evidence_read(self, args: dict) -> dict:
+        return self._read_retained_evidence("experiments", args)
+
     def _op_exec_experiment(self, op: str, args: dict) -> dict:
         if self.role.workspace == "none":
             raise Denied("This role has no workspace")
@@ -703,7 +765,8 @@ class Context:
         response = {key:result[key] for key in ('id','kind','exit_code','reason','seconds','writable') if key in result}
         for key in ('script','stdout','stderr'):
             response[key],response[key+'_truncated'] = text_preview(result.get(key,''))
-        response['evidence'] = 'commands/'+result['id']+'.json'
+        response['run'] = self.run_dir.name
+        response['evidence'] = ('experiments/' if op == 'experiment' else 'commands/')+result['id']+'.json'
         return response
 
     def _op_verify(self, args: dict) -> dict:
@@ -1181,6 +1244,8 @@ class Context:
 
     _DISPATCH = {
         "diff": _op_diff, "files": _op_files, "read": _op_read,
+        "command_evidence_read": _op_command_evidence_read,
+        "experiment_evidence_read": _op_experiment_evidence_read,
         "exec": _op_exec, "experiment": _op_experiment, "verify": _op_verify,
         "fetch": _op_fetch, "probe": _op_probe, "search": _op_search, "insights": _op_insights,
         "decide": _op_decide, "submit_insight": _op_submit_insight,

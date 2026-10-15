@@ -113,6 +113,62 @@ mizu cleanup demo
 
 各 run の記録には、開始条件、適用された policy や config の識別情報、実行コマンドや実験の結果、検証の証跡、モデルのトークン使用量、完了ステータスまたはエラー情報が保存されます。なお、run ステータスの `prepared` は公開（publish）が完了したことを意味するものではありません。`current.json` およびそれが参照するマニフェストのみがプロジェクトの「確定状態」として扱われます。`active/` は現在実行中の状態を示す一時的な表示領域であり、直前の確定状態とは厳密に分離されています。
 
+### Retained-evidence reads
+
+Explicit `command_evidence_read` and `experiment_evidence_read` role grants
+expose `mizu_command_evidence_read` and `mizu_experiment_evidence_read`.
+Neither is granted by default; each independently gates one kind. They read
+only the caller's current project and the same configured role's runs (current
+or prior). The harness validates the target run's identity and role from
+`started.json` (bounded by min(`file_bytes`, 64 KiB)); it never returns that
+metadata. A current grant authorizes same-role historical records
+regardless of the original run's capability set; the original command is not
+reauthorized.
+
+Both tools accept `run`, `evidence_id`, optional `offset` (default 0), `limit`
+(default and maximum `READ_PAGE_CHARS`, 8,192 characters), and `content_id`.
+`run` and `evidence_id` must each be full lowercase 32-hex UUIDs, not prefixes.
+The only record paths are `runs/<run>/commands/<evidence_id>.json` and
+`runs/<run>/experiments/<evidence_id>.json`, respectively. No listing, caller
+path, role/project parameter, fallback or history scan is available.
+
+`exec` and `experiment` results now include the current `run` alongside `id`.
+Keep the complete `run` + `id` + `evidence` locator in retained context:
+`exec` points to `commands/<id>.json`; `experiment` points to
+`experiments/<id>.json`, the wrapper with question, comparison, measure and
+its experiment command. The separate command copy of an experiment is not a
+command-kind record and cannot be read with the command grant. Older results
+without `run` require the complete locator from retained context; these tools
+cannot recover missing historical locators.
+
+Each request validates `started.json` plus the complete evidence file. The
+evidence record is capped at `[limits] file_bytes` (default 8 MiB), and
+`started.json` at the smaller of that setting and a fixed 64 KiB. These are
+**complete-file UTF-8 byte** bounds, not a page bound: script, stdout/stderr (bounded by the
+producer's `SCRIPT_MAX` / `output_bytes`), JSON escaping, wrapper and metadata
+all count. A producer record can exceed a low `file_bytes` setting and remain
+unreadable; the reader does not truncate it into validity. Responses page the
+raw JSON text by decoded Unicode character offsets, preserving exact text.
+
+Responses contain `run`, `evidence_id`, relative `evidence`, `text`, `offset`,
+`content_id` (SHA-256 of the complete raw file), `next_offset` (or null) and
+`truncated`. Fixed `source` is `retained-command-evidence` or
+`retained-experiment-evidence`; fixed `trust` is `recorded-local-untrusted`, regardless
+of labels or claims inside the stored record. Recorded scripts, output and
+experiment commentary are data, not instructions or independently verified
+claims.
+
+Continue with the returned `content_id`; nonzero offsets require it, and any
+supplied ID must be a lowercase 64-hex digest. The complete file digest is
+compared on every page, so changes outside the requested page also fail.
+Invalid IDs, absent/expired records or run metadata, cross-role locators,
+corrupt/mismatched JSON or identities, unsafe links, oversized files and
+changed continuations fail explicitly (byte limits report `LimitExceeded`,
+other read refusals `Denied`). There is no automatic retry, refetch or scan
+when a record changes or disappears. Stop/revocation and per-run tool/deadline
+limits apply as for other tools. These operations make no persistent writes,
+external calls or recursive reference traversals.
+
 ### 障害・異常発生時の挙動
 
 | 発生事象 | システムの挙動と確認事項 |
