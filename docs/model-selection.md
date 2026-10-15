@@ -122,12 +122,15 @@ for binding. Consequently, switching account identity at the same source path
 (including changing its symlink destination or inherited environment credential
 values) cannot be detected by this binding without reading secrets.
 
-The project's role daemon services at most one due probe event per loop,
-**before** ordinary readiness, on-change, done/wait outcome, or wake gating.
-A daemon must be running for the sponsoring role; this does not add services
-or timers for non-daemon roles. It rechecks at least at `idle_seconds` cadence
-and waits for an earlier probe/upper-expiry deadline when present. These extra
-ticks do not shorten the ordinary role cooldown. Probe
+Any daemon for the project services at most one due probe event per loop,
+**before** ordinary readiness, on-change, done/wait outcome, or wake gating;
+contribution selection is project-scoped, not tied to the daemon's role. The
+probe still revalidates the stored sponsoring role, target, budget and locks.
+This adds no services or timers: at least one project daemon must be running;
+a non-daemon sponsor alone does not install a probe service. The daemon rechecks
+at least at `idle_seconds` cadence and waits for an earlier probe/upper-expiry
+deadline when present. These extra ticks do not shorten the ordinary role
+cooldown. Probe
 admission still requires armed, unpaused, not draining, and not stopped. It
 uses the normal role lock, writer lock where applicable, and execution slot;
 there is no lock across inference on the shared selection state. Lock contention,

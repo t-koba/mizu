@@ -63,7 +63,7 @@ class RecoveryProbeTests(SelectionFixture):
     def service(self, driver=None, *, at=1010, config=None, reload_config=None, stop=None):
         config = config or self.config
         driver = driver or ProbeDriver()
-        result = service_due(config, 'sample', 'worker', stop or threading.Event(),
+        result = service_due(config, 'sample', stop or threading.Event(),
                              resolve=lambda profile: driver, reload_config=reload_config or (lambda: config), at=at)
         return result, driver
 
@@ -427,7 +427,7 @@ class RecoveryProbeTests(SelectionFixture):
                                                                   daily_requests=7, shared_daily_requests=8, run_seconds=60))
             driver = ProbeDriver()
             with patch('mizu.probes.driver_for', return_value=driver) as choose:
-                result = service_due(self.config, 'sample', 'worker', threading.Event(),
+                result = service_due(self.config, 'sample', threading.Event(),
                                      reload_config=lambda: fresh, at=1010)
         self.assertEqual(result['status'], 'success')
         launched_config = choose.call_args.args[0]
@@ -596,7 +596,7 @@ class RecoveryProbeTests(SelectionFixture):
         self.assertTrue(active(self.contribution(action), 1011))
         self.assertIsNone(self.decision(self.role, 1011)['profile'])
         self.assertTrue(self.project.status()['selection']['exhausted'])
-        self.assertIsNone(next_deadline(self.config, 'sample', 'worker', at=1011))
+        self.assertIsNone(next_deadline(self.config, 'sample', at=1011))
         self.assertEqual(len(self.store.read()['receipts']), 1)
         # Independent event exhaustion retains every prior record and obligation.
         state = self.store.read(); state['exhausted'] = False; self.store.save(state)
@@ -608,7 +608,7 @@ class RecoveryProbeTests(SelectionFixture):
 
     def test_status_deadlines_and_no_unrelated_task_data(self):
         action = self.setup_probe(upper=50)
-        self.assertEqual(next_deadline(self.config, 'sample', 'worker', at=1001), 1010)
+        self.assertEqual(next_deadline(self.config, 'sample', at=1001), 1010)
         self.assertEqual(self.decision(self.role, 1001)['next_evaluation_at'], 1010)
         # Controlled times make this active for project status.
         with patch('mizu.selection.time.time', return_value=1001):
@@ -673,17 +673,26 @@ class RecoveryProbeTests(SelectionFixture):
                     return False
                 real_service = service_due
                 driver = ProbeDriver()
-                def run_probe(config, name, role, stop):
-                    result = real_service(config, name, role, stop, resolve=lambda p: driver,
+                def run_probe(config, project_name, stop):
+                    result = real_service(config, project_name, stop, resolve=lambda p: driver,
                                           reload_config=lambda: self.config, at=1010)
                     stop.set()
                     return result
+                contribution = next(iter(self.store.read()['contributions'].values()))
+                self.assertEqual(contribution['role'], 'worker')
                 snapshot = {**self.project.snapshots.get(), 'outcome': outcome}
-                with patch('mizu.runtime.load', return_value=self.config), patch('mizu.runtime.vcs_poll_enabled', return_value=False), \
+                # The resident loop belongs to a different role. It must still
+                # service this project's worker contribution using the stored
+                # worker authorization and locks.
+                observer = dataclasses.replace(self.config.roles['worker'], name='observer',
+                                               daemon=True, workspace='write')
+                daemon_config = dataclasses.replace(self.config,
+                                                    roles={**self.config.roles, 'observer': observer})
+                with patch('mizu.runtime.load', return_value=daemon_config), patch('mizu.runtime.vcs_poll_enabled', return_value=False), \
                      patch('mizu.probes.service_due', run_probe), patch('mizu.runtime.should_run', side_effect=readiness), \
                      patch.object(type(self.project.snapshots), 'get', return_value=snapshot), patch('builtins.print'), \
                      patch.object(Engine, 'run') as run:
-                    daemon(self.config, 'sample', 'worker')
+                    daemon(daemon_config, 'sample', 'observer')
                 self.assertEqual(len(driver.calls), 1)
                 run.assert_not_called()
                 self.store.path.unlink()

@@ -3286,7 +3286,7 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                         raise ConfigError("Changing data_dir requires a daemon restart")
                     config = updated
                     from .probes import service_due, next_deadline
-                    probe = service_due(config, name, role_name, stop)
+                    probe = service_due(config, name, stop)
                     if probe is not None:
                         print(json.dumps(probe, ensure_ascii=False), flush=True)
                     project = Project(config, name)
@@ -3309,7 +3309,7 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                         # Probe polling must not accelerate ordinary cooldowns.
                         ordinary_after = time.monotonic() + delay
                         delay = min(delay, config.limits.idle_seconds)
-                        probe_at = next_deadline(config, name, role_name)
+                        probe_at = next_deadline(config, name)
                         if probe_at is not None:
                             delay = min(delay, max(0.1, probe_at - time.time()))
                         stop.wait(delay)
@@ -3321,7 +3321,7 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                 if ordinary_after > time.monotonic():
                     delay = min(delay, ordinary_after - time.monotonic())
                 try:
-                    probe_at = next_deadline(config, name, role_name)
+                    probe_at = next_deadline(config, name)
                     if probe_at is not None:
                         delay = min(delay, max(0.1, probe_at - time.time()))
                 except (MizuError, OSError, ValueError):

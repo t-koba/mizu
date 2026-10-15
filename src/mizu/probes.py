@@ -195,24 +195,27 @@ def _event(identity, c, at):
             'reserve': ' ' * INTENT_RESERVE_BYTES}
 
 
-def next_deadline(config, sponsor, role, *, at=None):
+def next_deadline(config, project_name, *, at=None):
+    """Return the earliest deadline for any contribution sponsored by this project."""
     at = time.time() if at is None else at
     state = State(config).read()
     if state['exhausted']:
         return None
     times = []
     for c in state['contributions'].values():
-        if active(c, at) and c['sponsor'] == sponsor and c['role'] == role:
+        if active(c, at) and c['sponsor'] == project_name:
             times.append(c['next_probe_at'])
             if c['until'] is not None:
                 times.append(c['until'])
     return min(times, default=None)
 
 
-def service_due(config, sponsor, role, stop, *, resolve=None, reload_config=None, at=None):
-    """Service at most one due contribution, including before readiness gating.
+def service_due(config, project_name, stop, *, resolve=None, reload_config=None, at=None):
+    """Service one due project contribution before a daemon's readiness gate.
 
-    A persisted intent plus an obligation lock prevents duplicate spending. An
+    Any daemon for the project may service it; _service still revalidates the
+    stored sponsor and role and uses their locks, budget and exact target. A
+    persisted intent plus an obligation lock prevents duplicate spending. An
     abandoned intent is settled as unknown only after the live ceiling; its
     next attempt waits a full probe interval. Terminal success is never replayed
     after a crash to guess whether recovery was applied.
@@ -221,7 +224,7 @@ def service_due(config, sponsor, role, stop, *, resolve=None, reload_config=None
     at = clock()
     store = State(config)
     due = sorted((c['next_probe_at'], identity) for identity, c in store.read()['contributions'].items()
-                 if c['status'] == 'active' and c['sponsor'] == sponsor and c['role'] == role
+                 if c['status'] == 'active' and c['sponsor'] == project_name
                  and (c['next_probe_at'] <= at or c['until'] is not None and c['until'] <= at))
     for _, identity in due:
         try:
