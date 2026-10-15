@@ -61,6 +61,11 @@ def _allow_list(value: str) -> frozenset:
     return frozenset(part.strip() for part in value.split(',') if part.strip())
 
 
+def _unittest_timeout_seconds(platform: str | None = None) -> int:
+    """Keep the slow Windows suite below the workflow's 20-minute job cap."""
+    return 1150 if (os.name if platform is None else platform) == 'nt' else 1000
+
+
 def unittest_failure_summary(sidecar: Path) -> str:
     """Read only the child's sanitized JSONL, never flattened traceback text.
 
@@ -239,19 +244,19 @@ def main():
                 'skipped': int(re.search(r'^# skipped (\d+)', output, re.M).group(1)) if re.search(r'^# skipped (\d+)', output, re.M) else 0}
     # Timestamped verbose progress: on a timeout the killed step leaves the
     # unfinished test as the last timestamped line in the live log.
-    # Step budget 1000 s: the 2026-10-14 windows-latest/Python 3.11
-    # leg hit 840 s while progress was still reaching
-    # test_vcs_ci.CiStatusTests.test_poll_disabled_adapter_never_polls;
-    # no final test summary was available. The 1000 s cap leaves 200 s
-    # within the 1200 s job timeout for setup and later checks, while a
-    # true hang still leaves timestamped per-test progress as evidence.
+    # Windows/Python 3.13 CI was still making steady unittest progress
+    # in test_single_id when the 1000 s child cap killed it. Use a
+    # 1150 s Windows-only cap within the 1200 s job timeout; other platforms
+    # retain 1000 s. Timestamped progress still distinguishes a slow suite from
+    # a stalled test, and the job retains time for post-suite checks.
     # The child owns structured exception metadata. Its new sidecar is private
     # and deleted even on timeout; no failure/timeout details parse raw output.
     with tempfile.TemporaryDirectory(prefix='mizu-unittest-') as temporary:
         sidecar = Path(temporary) / 'failures.jsonl'
         execute('python-unit-and-contract-tests',
                 [sys.executable, '-u', str(ROOT / 'scripts/check_unittest.py'), str(sidecar)],
-                count=unittest_counts, failure_summary=lambda: unittest_failure_summary(sidecar), timeout=1000)
+                count=unittest_counts, failure_summary=lambda: unittest_failure_summary(sidecar),
+                timeout=_unittest_timeout_seconds())
     if not shutil.which('node'):
         checks.append({'name': 'node-available', 'status': 'fail'})
     # bash is a POSIX convenience for shell-syntax checks, not a runtime

@@ -35,6 +35,12 @@ def write_adapter(base: Path, deps, installed: dict):
     return base
 
 
+class CheckTimeoutTests(unittest.TestCase):
+    def test_windows_unit_suite_has_extra_headroom_only(self):
+        self.assertEqual(CHECK._unittest_timeout_seconds('nt'), 1150)
+        self.assertEqual(CHECK._unittest_timeout_seconds('posix'), 1000)
+
+
 class DurableDepsProbeTests(unittest.TestCase):
     def test_ready_when_pinned_versions_installed(self):
         import tempfile
