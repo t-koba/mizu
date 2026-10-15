@@ -2883,12 +2883,13 @@ class Engine:
                                     c in context.role.capabilities for c in ("exec", "experiment", "verify")):
                                 container_runtime(self.config)
                                 cleanup(self.config, project.root, role_name)
+                            requests_left, tools_left = context._wrap_up_remaining()
                             notice = (f"Per-run {context.bound_hit} budget exhausted with no finish "
                                       f"sealed. Wrap-up only: seal with finish (recorded as a bounded "
                                       f"end) or use research, submit_insight, attach_evidence, decide. "
                                       f"Keep the published state unless this run changed it. "
-                                      f"{WRAP_UP_REQUESTS - context.wrap_up_requests} requests and "
-                                      f"{WRAP_UP_TOOLS - context.wrap_up_tools} wrap-up tools remain.")
+                                      f"{max(0, requests_left)} requests and "
+                                      f"{max(0, tools_left)} wrap-up tools remain.")
                             if context.bound_hit == "drain":
                                 notice = context._bound_message()
                             context.execution_attempt += 1

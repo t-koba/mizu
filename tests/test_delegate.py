@@ -178,6 +178,36 @@ class DelegateTests(Fixture):
         self.assertEqual(seen["root_tools"], 1)
         self.assertEqual(result["finish"]["outcome"], "bounded")
 
+    def test_root_fallback_notice_uses_residual_after_child_spend(self):
+        config = _configured(self)
+        roles = dict(config.roles)
+        roles["worker"] = dataclasses.replace(
+            roles["worker"], requests_per_run=2, tools_per_run=1)
+        config = dataclasses.replace(config, roles=roles)
+        seen = {}
+
+        def callback(ctx, prompt, profile):
+            if ctx.role.name != "worker":
+                ctx.handle("_budget", {"sequence": 2})
+                ctx.handle("_budget", {"sequence": 3})
+                ctx.handle("finish", {"outcome": "continue", "summary": "child sealed",
+                                      "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+                return
+            if ctx.execution_attempt == 1:
+                ctx.handle("delegate", {"role": "helper", "task": "use child allowance"})
+                self.assertEqual(ctx.delegated_wrap_up_requests, 2)
+                self.assertEqual(ctx.delegated_wrap_up_tools, 1)
+                raise LimitExceeded("exercise ordinary root fallback")
+            seen["notice"] = prompt
+            ctx.handle("finish", {"outcome": "continue", "summary": "root sealed",
+                                  "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+
+        result = Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["finish"]["outcome"], "bounded", (seen, result["finish"]))
+        self.assertIn("1 requests and 4 wrap-up tools remain", seen["notice"])
+        self.assertNotIn("3 requests and 5 wrap-up tools remain", seen["notice"])
+
     def test_forbidden_grants_are_refused(self):
         from mizu.runtime import DELEGATE_FORBIDDEN
         base = self.config.roles["searcher"]
