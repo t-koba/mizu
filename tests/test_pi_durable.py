@@ -143,44 +143,301 @@ class PolicyTests(Fixture):
         self.assertNotIn("remaining", seen)
         self.assertTrue(seen.get("called", True))
 
-    def test_driver_applies_followup_to_positive_done_settlement(self):
+    def _normal_launcher(self, context, dispatches, *, seal_on=2):
+        """Fake only the child process; exercise the real driver, bridge and SQLite."""
+        import json
+        from pathlib import Path
+        from mizu.bridge import connect
+        from mizu.errors import Denied
+        from mizu.process import Result
+
+        def launch(argv, **kwargs):
+            cfg = json.loads(Path(argv[-1]).read_text())
+            bridge = json.loads(Path(kwargs["env"]["MIZU_BRIDGE_CONFIG"]).read_text())
+            dispatches.append(cfg)
+            conn = open_store(Path(cfg["store"]))
+            try:
+                rows = conn.execute("SELECT run_key FROM durable_runs WHERE run_key LIKE ?",
+                                    (context.run_dir.name + "%",)).fetchall()
+                self.assertEqual(rows, [(context.run_dir.name + (
+                    f"-a{context.attempt_ordinal}" if context.attempt_ordinal else ""),)])
+                record = load_run(conn, rows[0][0])
+                authority = context.turn_authority_role or context.role
+                grant = pi_durable.grant_for(effective(context.config, authority, "primary"),
+                                             authority, context.config.model("primary"))
+                check_grant(conn, rows[0][0], grant)
+                self.assertEqual(record["grant_digest"], grant)
+                self.assertEqual(record["turns"][-1]["payload"]["request_id"], cfg["requestId"])
+            finally:
+                conn.close()
+
+            def call(operation, arguments):
+                with connect(bridge) as sock:
+                    sock.sendall((json.dumps({"token": bridge["token"], "operation": operation,
+                                               "arguments": arguments}) + "\n").encode())
+                    with sock.makefile("rb") as stream:
+                        return json.loads(stream.readline())
+
+            self.assertTrue(call("_hello", {})["ok"])
+            self.assertTrue(call("_budget", {"sequence": 1})["ok"])
+            if len(dispatches) > 1:
+                self.assertEqual([t["operation"] for t in cfg["tools"]], ["finish"])
+                self.assertEqual([t["operation"] for t in bridge["tools"]], ["finish"])
+                self.assertFalse(call("files", {})["ok"])
+                with self.assertRaisesRegex(Denied, "no capability"):
+                    context.handle("files", {})
+            sealed = len(dispatches) == seal_on
+            if sealed:
+                self.assertTrue(call("finish", {"outcome": "wait", "summary": "sealed",
+                                                "state": "done"})["ok"])
+            self.assertTrue(call("_request_done", {"sequence": 1})["ok"])
+            return Result(0, json.dumps({"durable_result": True, "status": "done",
+                                        "finish_called": sealed, "requests": 1}), "", "exited", 0)
+        return launch
+
+    def test_driver_applies_followup_in_same_work_unit_with_narrowed_tools(self):
+        from pathlib import Path
+        from unittest import mock
         from mizu.runtime import Engine
         for session in ("persistent", "ephemeral"):
-            with self.subTest(session=session):
-                config = dataclasses.replace(self.config, profiles={
-                    **self.config.profiles, "primary": {**self.config.profiles["primary"],
-                        "engine": "pi-durable", "session": session, "options": {}}})
-                context = self.context("worker")
+            for resume in ("compatible", "fresh"):
+                with self.subTest(session=session, resume=resume):
+                    config = dataclasses.replace(self.config, profiles={
+                        **self.config.profiles, "primary": {**self.config.profiles["primary"],
+                            "engine": "pi-durable", "session": session,
+                            "options": {"durable_resume": resume}}})
+                    context = self.context("worker")
+                    context.config = config
+                    context.attempt_ordinal = 2  # Already-selected candidate; follow-up must not advance it.
+                    driver = pi_durable.PiDurableDriver(config)
+                    dispatches = []
+                    with mock.patch("mizu.pi_durable.run", self._normal_launcher(context, dispatches)):
+                        model = Engine(config, driver=driver)._execute(context, driver, "synthetic durable work")
+                    self.assertEqual(context.finished["summary"], "sealed")
+                    self.assertEqual(len(dispatches), 2)
+                    self.assertEqual(context.attempt_ordinal, 2)
+                    self.assertEqual(dispatches[0]["store"], dispatches[1]["store"])
+                    key = context.run_dir.name + "-a2"
+                    self.assertEqual([d["requestId"] for d in dispatches], [key, key + "-t2"])
+                    conn = open_store(Path(dispatches[0]["store"]))
+                    try:
+                        record = load_run(conn, key)
+                        self.assertEqual(record["status"], "completed")
+                        self.assertTrue(record["result"]["sealed"])
+                        self.assertEqual([t["state"] for t in record["turns"]], ["completed"] * 2)
+                        with self.assertRaisesRegex(ConfigError, "authority differs"):
+                            begin_run(conn, run_key=key, session_key=record["session_key"],
+                                      project=record["project"], role=record["role"], grant="changed")
+                    finally:
+                        conn.close()
+                    self.assertEqual(context.request_count, 2)
+                    self.assertEqual(context.request_deadlines, {})
+                    self.assertEqual(model["missing_finish"]["used_followups"], 1)
+
+    def test_clean_unsealed_exhaustion_is_terminal(self):
+        from pathlib import Path
+        from unittest import mock
+        from mizu.errors import MissingFinish
+        from mizu.runtime import Engine
+        for allowance in (0, 1, 3):
+            config = dataclasses.replace(self.config,
+                limits=dataclasses.replace(self.config.limits, missing_finish_followups=allowance),
+                profiles={**self.config.profiles, "primary": {**self.config.profiles["primary"],
+                    "engine": "pi-durable", "options": {}}})
+            context = self.context()
+            context.config = config
+            driver = pi_durable.PiDurableDriver(config)
+            dispatches = []
+            with mock.patch("mizu.pi_durable.run", self._normal_launcher(context, dispatches, seal_on=99)):
+                with self.assertRaises(MissingFinish):
+                    Engine(config, driver=driver)._execute(context, driver, "no seal")
+            self.assertEqual(len(dispatches), 1 + allowance)
+            self.assertEqual(len({d["requestId"] for d in dispatches}), 1 + allowance)
+            conn = open_store(Path(dispatches[0]["store"]))
+            try:
+                record = load_run(conn, context.run_dir.name)
+                self.assertEqual(record["status"], "completed")
+                self.assertFalse(record["result"]["sealed"])
+                self.assertTrue(all(t["state"] == "completed" for t in record["turns"]))
+            finally:
+                conn.close()
+
+    def test_reduced_grant_wrapups_keep_authority_and_work_unit(self):
+        from mizu.errors import DeadlineWrapUp
+        from mizu.runtime import Engine, WRAP_UP_OPS
+        for bound in ("deadline", "requests"):
+            config = dataclasses.replace(self.config, profiles={
+                **self.config.profiles, "primary": {**self.config.profiles["primary"],
+                    "engine": "pi-durable", "options": {"durable_resume": "fresh"}}})
+            driver = pi_durable.PiDurableDriver(config)
+            driver.requires_sandbox = False  # No process/command is executed by this test.
+            dispatches = []
+            def turn(ctx, settings, model, prompt, profile, run_key, store_path):
+                dispatches.append((ctx, run_key, store_path, ctx._durable_request_id))
+                authority = ctx.turn_authority_role or ctx.role
+                conn = open_store(store_path)
+                try:
+                    check_grant(conn, run_key, pi_durable.grant_for(settings, authority, model))
+                finally:
+                    conn.close()
+                if len(dispatches) == 1:
+                    ctx.bound_hit = bound
+                    if bound == "deadline":
+                        raise DeadlineWrapUp("wrap up")
+                    raise LimitExceeded("per-run requests exhausted")
+                self.assertEqual(ctx.role.capabilities,
+                                 tuple(c for c in authority.capabilities if c in WRAP_UP_OPS)
+                                 if bound == "deadline" else
+                                 tuple(c for c in WRAP_UP_OPS if c in authority.capabilities))
+                self.assertEqual(ctx.role.engine_tools, ())
+                ctx.handle("_hello", {})
+                ctx.handle("_budget", {"sequence": 1})
+                ctx.handle("finish", {"outcome": "wait", "summary": "bounded", "state": "done"})
+                ctx.handle("_request_done", {"sequence": 1})
+                return {"engine": "pi-durable", "requests": 1}
+            driver._run_once = turn
+            engine = Engine(config, driver=driver)
+            if bound == "deadline":
+                context = self.context()
                 context.config = config
-                driver = pi_durable.PiDurableDriver(config)
-                run_keys = []
-                grants = []
+                engine._execute(context, driver, "work")
+            else:
+                engine.run(self.project, "worker")  # Exercises the outer spend-wrap-up transition.
+            self.assertEqual(len(dispatches), 2)
+            self.assertEqual(dispatches[0][1:3], dispatches[1][1:3])
+            self.assertEqual(dispatches[1][3], dispatches[0][3] + "-t2")
+            context = dispatches[0][0]
+            self.assertEqual(context.attempt_ordinal, 0)
+            self.assertIsNone(context.turn_authority_role)
+            self.assertFalse(context.turn_continuation)
+            conn = open_store(dispatches[0][2])
+            try:
+                record = load_run(conn, dispatches[0][1])
+                self.assertTrue(record["result"]["sealed"])
+                self.assertEqual(record["status"], "completed")
+            finally:
+                conn.close()
 
-                def terminal(ctx, settings, model, prompt, profile, run_key, store_path):
-                    run_keys.append(run_key)
-                    grants.append(ctx.role.capabilities)
-                    ctx.model_evidence = {"profile": profile, **model, "engine": "pi-durable",
-                                          "requests": 0, "usage": [], "usage_known": False}
-                    ctx.handle("_hello", {})
-                    ctx.handle("_budget", {"sequence": 1})
-                    if len(run_keys) == 2:
-                        ctx.handle("finish", {"outcome": "wait", "summary": "sealed", "state": "done"})
-                    ctx.handle("_request_done", {"sequence": 1})
-                    reported = {"durable_result": True, "status": "done",
-                                "finish_called": len(run_keys) == 2, "requests": 1,
-                                "usage": {"input": 2, "output": 1}}
-                    pi_durable.interpret_result(reported, ctx, model, None)
-                    return {**ctx.model_evidence, "seconds": 0}
+    def test_interrupted_recovery_matches_prompt_and_turn_grant_and_reuses_id(self):
+        import copy
+        profile = self._durable_profile()
+        driver = pi_durable.PiDurableDriver(self.config)
+        context = self.context()
+        dispatches = []
+        def interrupted(ctx, *args):
+            dispatches.append(ctx._durable_request_id)
+            raise ModelFailure("pi-durable", kind="error", message="uncertain")
+        driver._run_once = interrupted
+        with self.assertRaises(ModelFailure):
+            driver.execute(context, "original prompt", profile=profile)
+        # New process/context has no host continuation permission. Neither a
+        # changed prompt nor narrowed turn may recover the uncertain request.
+        recovered = copy.copy(context)
+        del recovered._durable_dispatch
+        with self.assertRaisesRegex(ConfigError, "prompt or turn grant differs"):
+            driver.execute(recovered, "modified prompt", profile=profile)
+        recovered.turn_authority_role = context.role
+        recovered.role = dataclasses.replace(context.role, capabilities=("finish",))
+        with self.assertRaisesRegex(ConfigError, "prompt or turn grant differs"):
+            driver.execute(recovered, "original prompt", profile=profile)
+        self.assertEqual(len(dispatches), 1)
+        recovered.role = context.role
+        with self.assertRaises(ModelFailure):
+            driver.execute(recovered, "original prompt", profile=profile)
+        self.assertEqual(dispatches, [context.run_dir.name] * 2)
 
-                driver._run_once = terminal
-                model = Engine(config, driver=driver)._execute(context, driver, "synthetic durable work")
-                self.assertIsNotNone(context.finished)
-                self.assertEqual(len(run_keys), 2)
-                self.assertNotEqual(run_keys[0], run_keys[1])
-                self.assertEqual(grants[1], ("finish",))
-                self.assertEqual(context.request_count, 2)
-                self.assertEqual(context.request_deadlines, {})
-                self.assertEqual(model["missing_finish"]["used_followups"], 1)
+    def test_fresh_refuses_interrupted_recovery_even_with_continuation_flag(self):
+        import copy
+        profile = self._durable_profile(durable_resume="fresh")
+        driver = pi_durable.PiDurableDriver(self.config)
+        context = self.context()
+        calls = []
+        def interrupted(*args):
+            calls.append(1)
+            raise ProtocolError("interrupted")
+        driver._run_once = interrupted
+        with self.assertRaises(ProtocolError):
+            driver.execute(context, "work", profile=profile)
+        recovered = copy.copy(context)
+        del recovered._durable_dispatch
+        recovered.turn_continuation = True  # A persisted/crash context alone cannot authorize it.
+        with self.assertRaisesRegex(ConfigError, "resume mode is fresh"):
+            driver.execute(recovered, "work", profile=profile)
+        self.assertEqual(len(calls), 1)
+
+    def test_deadline_wrap_up_failure_restores_temporary_authority(self):
+        import dataclasses
+        from mizu.errors import DeadlineWrapUp
+        from mizu.runtime import Engine, WRAP_UP_OPS
+        config = dataclasses.replace(self.config, profiles={
+            **self.config.profiles, "primary": {**self.config.profiles["primary"],
+                "engine": "pi-durable", "options": {}}})
+        context = self.context()
+        context.config = config
+        original = context.role
+        context.turn_authority_role = original
+        context.turn_continuation = False
+        context.role = dataclasses.replace(original, capabilities=("finish",), engine_tools=())
+        driver = pi_durable.PiDurableDriver(config)
+        driver.requires_sandbox = False
+        calls = []
+
+        def fail_after_wrap(ctx, *args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise DeadlineWrapUp("reserved wall boundary")
+            self.assertIs(ctx.turn_authority_role, original)
+            self.assertEqual(ctx.role.capabilities,
+                             tuple(c for c in original.capabilities if c in WRAP_UP_OPS))
+            raise ModelFailure("pi-durable", kind="error", message="wrap transport failed")
+
+        driver.execute = fail_after_wrap
+        with self.assertRaisesRegex(ModelFailure, "wrap transport failed"):
+            Engine(config, driver=driver)._execute(context, driver, "work")
+        self.assertEqual(len(calls), 2)
+        self.assertIs(context.turn_authority_role, original)
+        self.assertFalse(context.turn_continuation)
+        # Preserve _execute's existing narrowed Context.role end state.
+        self.assertEqual(context.role.capabilities,
+                         tuple(c for c in original.capabilities if c in WRAP_UP_OPS))
+
+    def test_driver_faults_do_not_trigger_missing_finish_followup(self):
+        from mizu.errors import Cancelled
+        from mizu.runtime import Engine
+        for fault in (ModelFailure("pi-durable", kind="error", message="provider"),
+                      ProtocolError("bad transport result"), OSError("storage"), Cancelled("stop")):
+            config = dataclasses.replace(self.config, profiles={
+                **self.config.profiles, "primary": {**self.config.profiles["primary"],
+                    "engine": "pi-durable", "options": {}}})
+            context = self.context()
+            context.config = config
+            driver = pi_durable.PiDurableDriver(config)
+            calls = []
+            def fail(*args):
+                calls.append(1)
+                raise fault
+            driver._run_once = fail
+            with self.assertRaises(type(fault)):
+                Engine(config, driver=driver)._execute(context, driver, "work")
+            self.assertEqual(len(calls), 1)
+            self.assertIsNone(context.missing_finish_evidence)
+
+    def test_session_finalization_error_after_unsealed_return_is_not_followed_up(self):
+        from unittest import mock
+        from mizu.runtime import Engine
+        config = dataclasses.replace(self.config, profiles={
+            **self.config.profiles, "primary": {**self.config.profiles["primary"],
+                "engine": "pi-durable", "session": "persistent", "options": {}}})
+        context = self.context()
+        context.config = config
+        driver = pi_durable.PiDurableDriver(config)
+        dispatches = []
+        with mock.patch("mizu.pi_durable.run", self._normal_launcher(context, dispatches)), \
+                mock.patch("mizu.pi_durable.save_session", side_effect=OSError("session storage failed")):
+            with self.assertRaisesRegex(OSError, "session storage failed"):
+                Engine(config, driver=driver)._execute(context, driver, "work")
+        self.assertEqual(len(dispatches), 1)
+        self.assertIsNone(context.missing_finish_evidence)
 
     def test_normal_done_without_finish_is_distinct_from_unanswered(self):
         from mizu.usage import normalize
@@ -235,7 +492,7 @@ class PolicyTests(Fixture):
         self.assertTrue(context.model_evidence["usage_known"])
         self.assertEqual(normalize(context.model_evidence["usage"][0], "pi-durable")["input_tokens"], 3)
 
-    def test_runtime_usage_preferred_over_aggregated(self):
+    def test_runtime_usage_preferred_over_launcher_delta(self):
         from mizu.usage import normalize, summarize
         from mizu.fs import mkdir, write_json
         context = self.context()
@@ -343,6 +600,119 @@ class PolicyTests(Fixture):
         self.assertEqual(facts["totals"]["output_tokens"], 5)
         self.assertEqual(facts["totals"]["requests"], 2)
         self.assertEqual(facts["totals"]["unknown_usage_runs"], 1)
+
+    def test_same_context_followup_combines_host_and_launcher_delta_once(self):
+        self._check_followup_usage_delta(host_report=True)
+
+    def test_same_context_followup_saves_launcher_deltas_without_host_reports(self):
+        self._check_followup_usage_delta(host_report=False)
+
+    def _check_followup_usage_delta(self, *, host_report):
+        import json
+        profile = self._durable_profile()
+        self.config.profiles[profile]["session"] = "persistent"
+        role = self.config.roles["worker"]
+        driver = pi_durable.PiDurableDriver(self.config)
+        context = self.context()
+        host_usage = {"input": 10, "output": 2}
+        dispatch_delta = {"input": 20, "output": 3}
+        calls = []
+
+        def dispatch(ctx, settings, selected_model, prompt, selected_profile, run_key, store_path):
+            index = len(calls)
+            calls.append(index)
+            ctx.model_evidence = {
+                "profile": selected_profile, **selected_model, "engine": "pi-durable",
+                "requests": 0, "request_unit": "model_request",
+                "usage": [], "usage_known": False,
+            }
+            ctx.handle("_hello", {})
+            ctx.handle("_budget", {"sequence": 1})
+            if index == 0:
+                if host_report:
+                    ctx.handle("_model_usage", {
+                        "sequence": 1, "usage": host_usage, "model": selected_model})
+                # Deliberately disagree when host evidence exists: it wins.
+                reported_usage = {"input": 999, "output": 999} if host_report else host_usage
+                finish_called = False
+            else:
+                # Earlier attempt's host report remains in Context, but this
+                # dispatch has only its own launcher delta, excluding the first
+                # turn's 10 input + 2 output cumulative session counters.
+                reported_usage = dispatch_delta
+                ctx.handle("finish", {"outcome": "wait", "summary": "sealed",
+                                       "state": "done"})
+                finish_called = True
+            ctx.handle("_request_done", {"sequence": 1})
+            reported = {"durable_result": True, "status": "done",
+                        "finish_called": finish_called, "requests": 1,
+                        "usage": dict(reported_usage)}
+            pi_durable.interpret_result(
+                reported, ctx, selected_model,
+                settings.get("options", {}).get("thinkingLevel"))
+            return dict(ctx.model_evidence)
+
+        driver._run_once = dispatch
+        first = driver.execute(context, "first", profile=profile)
+        self.assertEqual(first["usage"], [host_usage])
+        self.assertEqual(first["requests"], 1)
+        session_file = next((self.project.root / "sessions" / role.name).rglob("session.json"))
+        self.assertEqual(json.loads(session_file.read_text())["usage"], {"tokens": 12})
+
+        context.execution_attempt += 1
+        context.turn_continuation = True
+        final = driver.execute(context, "follow-up", profile=profile)
+        self.assertEqual(final["usage"], [host_usage, dispatch_delta])
+        self.assertEqual(final["requests"], 2)
+        self.assertEqual(context.model_evidence["usage"], [host_usage, dispatch_delta])
+        self.assertEqual(context.model_evidence["requests"], 2)
+        self.assertTrue(context.model_evidence["usage_known"])
+        self.assertEqual(json.loads(session_file.read_text())["usage"], {"tokens": 35})
+        self.assertEqual(len(calls), 2)
+
+    def test_completed_sealed_duplicate_restores_host_finish(self):
+        from pathlib import Path
+        profile = self._durable_profile()
+        driver = pi_durable.PiDurableDriver(self.config)
+        context = self.context()
+        finish = {"outcome": "wait", "summary": "saved host seal", "state": "preserved",
+                  "wait_seconds": 60, "recorded_at": "2026-10-15T00:00:00+00:00"}
+        calls = []
+
+        def sealed(ctx, *args):
+            calls.append(1)
+            ctx.finished = dict(finish)
+            return {"engine": "pi-durable", "requests": 1}
+
+        driver._run_once = sealed
+        first = driver.execute(context, "work", profile=profile)
+        conn = open_store(Path(first["durable"]["store"]))
+        try:
+            record = load_run(conn, context.run_dir.name)
+            self.assertEqual(record["result"]["finish"], finish)
+        finally:
+            conn.close()
+        context.finished = None
+        duplicate = driver.execute(context, "work", profile=profile)
+        self.assertEqual(context.finished, finish)
+        self.assertTrue(duplicate["durable"]["duplicate"])
+        self.assertEqual(len(calls), 1)
+
+    def test_completed_unsealed_duplicate_fails_closed(self):
+        profile = self._durable_profile()
+        driver = pi_durable.PiDurableDriver(self.config)
+        context = self.context()
+        calls = []
+
+        def unsealed(*args):
+            calls.append(1)
+            return {"engine": "pi-durable", "requests": 1}
+
+        driver._run_once = unsealed
+        driver.execute(context, "work", profile=profile)
+        with self.assertRaisesRegex(ConfigError, "unsealed run requires in-process continuation"):
+            driver.execute(context, "work", profile=profile)
+        self.assertEqual(len(calls), 1)
 
     def test_persistent_session_saves_cumulative_tokens(self):
         profile = self._durable_profile()
@@ -575,9 +945,9 @@ class SessionIsolationTests(Fixture):
         finally:
             conn.close()
         # Crash recovery kept the same conversation: one run row, now
-        # completed, holding a prompt turn from each attempt.
+        # completed, holding the same persisted prompt turn and submission id.
         self.assertEqual(record["status"], "completed")
-        self.assertEqual(len(record["turns"]), 2)
+        self.assertEqual(len(record["turns"]), 1)
 
     def test_terminal_unanswered_fallback_uses_new_row_and_preserves_unknown(self):
         from pathlib import Path
@@ -749,7 +1119,7 @@ class SessionIsolationTests(Fixture):
         finally:
             conn.close()
         self.assertEqual(record["status"], "completed")
-        self.assertEqual(len(record["turns"]), 2)
+        self.assertEqual(len(record["turns"]), 1)
 
     def test_corrupt_generation_refuses_instead_of_resuming(self):
         profile = self._durable_profile()

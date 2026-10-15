@@ -232,7 +232,44 @@ keep it unless they declare a store-incompatible change. Other engines keep rota
 any effective change outside their live keys. The explicit fresh start is
 `mizu session reset PROJECT --role ROLE`, which deletes that role's persistent sessions
 and durable stores (refused while the role has an active run); usage and age rotation
-bounds still apply to every engine. Pi SDK knobs
+bounds still apply to every engine.
+
+For a durable work unit, the persisted grant must exactly equal the current
+configured authority even when the host narrows a continuation's turn role.
+Only the effective turn's tools are exposed and authorized: a missing-finish
+follow-up exposes only `finish`. A normal unsealed return is stored as terminal
+`completed` with `sealed: false`; this is not a host finish seal. If the configured
+follow-up allowance is exhausted, no active run row is stranded. An explicit,
+one-dispatch, in-process host authorization may continue that same work unit
+(and the existing reduced-grant budget/deadline wrap-up paths); it does not change
+which failures qualify. The work-unit key and grant stay fixed. The first
+turn's Harness `requestId` is the work-unit key; subsequent authorized turns
+have distinct request IDs using `<key>-t<sequence>`. Selector candidate
+ordinals (`-a<ordinal>`) still advance
+only on selector failover, not on missing-finish follow-ups.
+
+`durable_resume` defaults to `compatible`: interrupted-turn recovery reuses its
+persisted request id only when the prompt digest and effective turn grant match,
+in addition to exact work-unit grant equality. Changed or legacy incomplete
+turn metadata fails closed. Interrupted unsafe tool effects are never replayed;
+the Harness reports unknown/interrupted completion instead. `fresh` refuses
+persisted-run recovery (including after a crash), but permits the explicit
+in-process host-authorized continuation above. Provider, transport, protocol,
+storage, cancellation and finalization failures are not missing-finish returns.
+
+Pi-durable model accounting prefers the host's current per-request
+`_model_usage` reports. If those are absent, the launcher's `reported.usage`
+is a **per-dispatch delta**, never the Harness's cumulative session total,
+on both normal settlement and `request_bound`. The launcher snapshots usage
+before recovery is unpaused and subtracts it after settlement for the selected
+provider/model. Only known nonnegative monotone counters are returned (token
+counts are safe integers; costs are finite numbers, at most JavaScript's
+`MAX_SAFE_INTEGER`). An absent model in a valid initial map is a known-zero
+baseline; missing/malformed snapshots or counters and counter regressions stay
+unknown and are omitted (or `null` when none are known), not fabricated as zero.
+No accounting read admits a provider request.
+
+Pi SDK knobs
 are refused on pi-durable profiles and durable policy is refused on pi
 profiles instead of silently ignored. pi-durable resolves the exact model
 over built-in providers only; custom provider setups stay on pi. Pi operators bound
@@ -288,17 +325,22 @@ the bridge and publication contract.
 | Engine | Managed interface | Completion | Admission unit |
 |---|---|---|---|
 | Pi | `createAgentSession`, `ModelRuntime`, `runRpcMode` | `agent_settled` and seal | Logical model request (includes auxiliary inference) |
-| Pi-durable | Pinned pi-durable Harness over file-backed SQLite, one admitted submission per engine attempt with stable requestId resume binding | Settled submission and seal | Logical model request (includes auxiliary inference) |
+| Pi-durable | Pinned pi-durable Harness over file-backed SQLite; one admitted submission per engine attempt, with per-turn Harness request IDs bound to the durable work-unit grant key | Settled submission and seal | Logical model request (includes auxiliary inference) |
 | Codex | `app-server --listen stdio://` | `turn/completed` with completed status and seal | Turn |
 | Claude | Official Python Agent SDK in separate interpreter | `terminal_reason=completed`, successful subtype, no error and seal | Query |
 
-For pi-durable, `requestId` is the durable run key: retrying a candidate with
-the same id returns its stored submission/settlement and does not admit a new
-provider request. Selector failover gets a new id only after a known terminal
-`pi-durable` `unanswered` failure and an eligible fallback has actually been
-selected; the bounded attempt suffix leaves the session/store and all durable
-grant and replay checks intact. Other or uncertain failures retain the id and
-therefore refuse a changed grant rather than forking around unresolved work.
+For pi-durable, the durable work-unit key is bound to the exact persisted
+work-unit grant; it is not itself the per-turn Harness request ID in every
+submission. The first turn uses the work-unit key as its Harness `requestId`,
+and later authorized turns use `<key>-t<sequence>`. Replaying a compatible
+completed sealed candidate restores its persisted host finish without new
+admission; an unsealed completed row requires its one-dispatch in-process
+continuation and cannot be replayed as a fresh terminal. Selector failover gets
+a new work-unit key only after a known terminal `pi-durable` `unanswered` failure
+and an eligible fallback has actually been selected; the bounded attempt suffix
+leaves the session/store and all durable grant and replay checks intact. Other
+or uncertain failures retain the work-unit key and therefore refuse a changed
+grant rather than forking around unresolved work.
 
 Settings that collide with runtime-owned prompt/model/bridge/session fields
 fail before input; they are never silently overwritten. Native engine errors

@@ -205,6 +205,9 @@ class Context:
         self.missing_finish_evidence: dict | None = None
         # Temporary follow-up grants do not fork an otherwise identical saved session.
         self.session_identity_capabilities: tuple[str, ...] | None = None
+        # Host-only authority and permission for a reduced-grant continuation.
+        self.turn_authority_role = None
+        self.turn_continuation = False
         self.admission_error: str | None = None
         self.admission_wait = False
         # Selector failover identity for durable submissions. Retries and
@@ -1946,14 +1949,23 @@ class Engine:
                 if context.wall_expired():
                     raise RunDeadlineExceeded("Whole-unit wall deadline exhausted")
                 context.wrap_up_attempted = True
-                context.role = dataclasses.replace(context.role,
-                    capabilities=tuple(c for c in context.role.capabilities if c in WRAP_UP_OPS),
-                    engine_tools=(), selector="")
-                context.operations_stopped.clear()
-                context.request_deadlines.clear()  # The failed transport was reaped, not renewed.
-                context.transport_idle_deadline = time.monotonic() + context.config.limits.model_request_seconds
-                context.execution_attempt += 1
-                model_result = driver.execute(context, context._bound_message() + "\n\n" + prompt, **kwargs)
+                previous_authority = context.turn_authority_role
+                previous_continuation = context.turn_continuation
+                authority = previous_authority or context.role
+                context.turn_authority_role = authority
+                context.turn_continuation = True
+                try:
+                    context.role = dataclasses.replace(authority,
+                        capabilities=tuple(c for c in authority.capabilities if c in WRAP_UP_OPS),
+                        engine_tools=(), selector="")
+                    context.operations_stopped.clear()
+                    context.request_deadlines.clear()  # The failed transport was reaped, not renewed.
+                    context.transport_idle_deadline = time.monotonic() + context.config.limits.model_request_seconds
+                    context.execution_attempt += 1
+                    model_result = driver.execute(context, context._bound_message() + "\n\n" + prompt, **kwargs)
+                finally:
+                    context.turn_authority_role = previous_authority
+                    context.turn_continuation = previous_continuation
 
             if context.finished is None:
                 if context.host_cancelled():
@@ -1975,6 +1987,7 @@ class Engine:
                 configured = context.config.limits.missing_finish_followups
                 used = 0
                 base_role = context.role
+                authority = context.turn_authority_role or base_role
                 followup_prompt = (
                     "The prior turn returned normally without calling mizu_finish. "
                     "This work unit remains open. Do not repeat the work or call any other tool; "
@@ -1996,8 +2009,11 @@ class Engine:
                         "configured_followups": configured, "used_followups": used,
                         "exhausted": False, "sealed": False,
                         "counts_as_failure": context.config.limits.missing_finish_counts_as_failure}
-                    context.attempt_ordinal += 1
                     context.execution_attempt += 1
+                    previous_authority = context.turn_authority_role
+                    previous_continuation = context.turn_continuation
+                    context.turn_authority_role = authority
+                    context.turn_continuation = True
                     context.role = dataclasses.replace(base_role, capabilities=("finish",),
                                                        engine_tools=(), selector="")
                     previous_session_capabilities = context.session_identity_capabilities
@@ -2008,6 +2024,8 @@ class Engine:
                         model_result = driver.execute(context, followup_prompt, **kwargs)
                     finally:
                         context.role = base_role
+                        context.turn_authority_role = previous_authority
+                        context.turn_continuation = previous_continuation
                         context.session_identity_capabilities = previous_session_capabilities
                     if context.finished is None and context.request_deadlines:
                         raise ProtocolError("Finish follow-up left an active model-request deadline")
@@ -2405,22 +2423,32 @@ class Engine:
                         if not grants:
                             raise
                         context.wrap_up_attempted = True
-                        context.role = dataclasses.replace(
-                            role, capabilities=tuple(grants), engine_tools=(), selector="")
-                        context.operations_stopped.clear()
-                        driver = self.resolve(role.profile)
-                        if getattr(driver, "requires_sandbox", True) and any(
-                                c in context.role.capabilities for c in ("exec", "experiment", "verify")):
-                            container_runtime(self.config)
-                            cleanup(self.config, project.root, role_name)
-                        notice = (f"Per-run {context.bound_hit} budget exhausted with no finish "
-                                  f"sealed. Wrap-up only: seal with finish (recorded as a bounded "
-                                  f"end) or use research, submit_insight, attach_evidence, decide. "
-                                  f"Keep the published state unless this run changed it. "
-                                  f"{WRAP_UP_REQUESTS - context.wrap_up_requests} requests and "
-                                  f"{WRAP_UP_TOOLS - context.wrap_up_tools} wrap-up tools remain.")
-                        context.execution_attempt += 1
-                        model_result = self._execute(context, driver, notice + "\n\n" + prompt)
+                        previous_authority = context.turn_authority_role
+                        previous_continuation = context.turn_continuation
+                        authority = previous_authority or role
+                        context.turn_authority_role = authority
+                        context.turn_continuation = True
+                        try:
+                            context.role = dataclasses.replace(
+                                authority, capabilities=tuple(c for c in WRAP_UP_OPS if c in authority.capabilities),
+                                engine_tools=(), selector="")
+                            context.operations_stopped.clear()
+                            driver = self.resolve(role.profile)
+                            if getattr(driver, "requires_sandbox", True) and any(
+                                    c in context.role.capabilities for c in ("exec", "experiment", "verify")):
+                                container_runtime(self.config)
+                                cleanup(self.config, project.root, role_name)
+                            notice = (f"Per-run {context.bound_hit} budget exhausted with no finish "
+                                      f"sealed. Wrap-up only: seal with finish (recorded as a bounded "
+                                      f"end) or use research, submit_insight, attach_evidence, decide. "
+                                      f"Keep the published state unless this run changed it. "
+                                      f"{WRAP_UP_REQUESTS - context.wrap_up_requests} requests and "
+                                      f"{WRAP_UP_TOOLS - context.wrap_up_tools} wrap-up tools remain.")
+                            context.execution_attempt += 1
+                            model_result = self._execute(context, driver, notice + "\n\n" + prompt)
+                        finally:
+                            context.turn_authority_role = previous_authority
+                            context.turn_continuation = previous_continuation
                     break
                 if context.host_cancelled():
                     raise Cancelled("Run stopped before publication")

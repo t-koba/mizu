@@ -125,7 +125,8 @@ class PiDurableDriver:
 
     def execute(self, context, prompt: str, *, profile: str | None = None) -> dict:
         profile = profile or context.role.profile
-        settings = effective(self.config, context.role, profile)
+        authority = getattr(context, "turn_authority_role", None) or context.role
+        settings = effective(self.config, authority, profile)
         if settings.get("engine") != ENGINE:
             raise ConfigError("pi-durable driver requires a pi-durable profile")
         policy = durable_options(settings)
@@ -171,7 +172,7 @@ class PiDurableDriver:
             session_key = f"run-{context.run_dir.name}"
         project_name = getattr(getattr(context, "project", None), "name", "unknown")
         model = self.config.model(profile)
-        grant = grant_for(settings, context.role, model)
+        grant = grant_for(settings, authority, model)
         store_path = (context.run_dir / 'durable.sqlite' if getattr(context, 'recovery_probe', False)
                       else store_path_for(self.config.data, project_name, context.role.name, session_key))
         pruned_generations = []
@@ -183,41 +184,101 @@ class PiDurableDriver:
                 self.config.data, project=project_name, role=context.role.name,
                 base_key=base_key, generation=generation)
         conn = open_store(store_path)
-        existing = 0
+        seq = None
+        # Permission is host-only and process-local. Persisted rows alone never
+        # authorize a new turn, including in fresh mode. Selector ordinals still
+        # identify candidates; turn request ids identify submissions within one.
+        identity = (run_key, str(store_path), grant)
+        continuing = (getattr(context, "turn_continuation", False)
+                      and getattr(context, "_durable_dispatch", None) == identity)
+        context.turn_continuation = False  # Consume the host's one-dispatch permission.
         try:
-            if policy["resume"] == "fresh" and load_run(conn, run_key) is not None:
+            if policy["resume"] == "fresh" and load_run(conn, run_key) is not None and not continuing:
                 raise ConfigError("Durable resume mode is fresh; retry with a new run")
             started_record = begin_run(conn, run_key=run_key, session_key=session_key,
                                        project=project_name, role=context.role.name, grant=grant)
-            if started_record.get("resumed") and started_record.get("status") == "completed":
-                # Duplicate submission: return the saved result without new admission.
-                result = dict(started_record["result"] or {})
+            if (started_record.get("resumed") and started_record.get("status") == "completed"
+                    and not continuing):
+                # Only a persisted host seal makes completed replay useful:
+                # a clean unsealed return needs the explicit in-process
+                # continuation, never another futile terminal response.
+                result = started_record.get("result")
+                if not isinstance(result, dict):
+                    raise ConfigError("Durable completed run lacks a replayable host finish")
+                if result.get("sealed") is not True or not isinstance(result.get("finish"), dict):
+                    if result.get("sealed") is False:
+                        raise ConfigError("Durable completed unsealed run requires in-process continuation")
+                    raise ConfigError("Durable completed run lacks a replayable host finish")
+                context.finished = dict(result["finish"])
+                result = dict(result)
+                result.pop("finish", None)
                 result["durable"] = {"resumed": True, "duplicate": True,
                                      "projection": project_context(conn, run_key)}
                 return result
             if started_record.get("resumed"):
                 check_grant(conn, run_key, grant)
-            existing = len((load_run(conn, run_key) or {}).get("turns", []))
+            record = load_run(conn, run_key)
+            turns = record["turns"]
+            payload = {"bytes": len(prompt_bytes), "prompt_digest": digest(prompt_bytes),
+                       "turn_grant": grant_for(settings, context.role, model)}
+            if continuing:
+                if (record.get("result") or {}).get("sealed"):
+                    raise ConfigError("Durable continuation refused after seal")
+                seq = len(turns) + 1
+            elif turns:
+                # Recover the *same* interrupted submission, never manufacture
+                # a new id for uncertain effects. The Harness's replay-unsafe
+                # tools retain unknown completion rather than executing again.
+                last = turns[-1]
+                if (last["state"] not in ("started", "unknown")
+                        or not last["payload"].get("request_id")
+                        or any(last["payload"].get(k) != v for k, v in payload.items())):
+                    raise ConfigError("Durable recovery refused: prompt or turn grant differs, or turn settled")
+                seq = last["seq"]
+                payload = last["payload"]
+            else:
+                seq = 1
+            request_id = run_key if seq == 1 else f"{run_key}-t{seq}"
+            if "request_id" in payload and payload["request_id"] != request_id:
+                raise ConfigError("Durable recovery refused: submission identity differs")
+            payload["request_id"] = request_id
             reaped = None
             if policy["retention_days"] is not None:
-                # Reap only terminal runs of this session store; the active
-                # run is never a candidate. Accounting is reported, not silent.
+                # Reap only other terminal runs: this unit may be continuing
+                # a clean unsealed return. Accounting is reported, not silent.
                 candidates = retention_candidates(conn, retention_days=policy["retention_days"])
-                reaped = prune(conn, candidates, dry_run=False)
+                reaped = prune(conn, [key for key in candidates if key != run_key], dry_run=False)
             if context.cancelled():
                 complete_run(conn, run_key, {"cancelled": True}, status="cancelled")
                 context.check_deadlines()
                 raise Cancelled("Run cancelled before durable dispatch")
-            record_turn(conn, run_key, existing + 1, "prompt", {"bytes": len(prompt_bytes)})
+            record_turn(conn, run_key, seq, "prompt", payload)
+            context._durable_dispatch = identity
+            context._durable_request_id = request_id
             # No turn bound: every provider request inside the submission
             # passes _budget admission, so requests_per_run alone bounds the
             # unit and a refusal returns as request_bound below.
+            dispatch_attempt = context.execution_attempt
+            context._durable_dispatch_usage = None
             outcome = self._run_once(context, settings, model, prompt, profile, run_key, store_path)
-            complete_turn(conn, run_key, existing + 1, {"engine": ENGINE}, state="completed")
+            complete_turn(conn, run_key, seq, {"engine": ENGINE}, state="completed")
             if settings["session"] == "persistent" and not context.ephemeral:
+                dispatch_usage = getattr(context, "_durable_dispatch_usage", None)
+                if dispatch_usage is None:
+                    runtime = _runtime_evidence(context, model, settings.get("options", {}).get("thinkingLevel"),
+                                                execution_attempt=dispatch_attempt)
+                    dispatch_usage = (runtime["usage"] if runtime is not None
+                                      else outcome.get("usage", []))
+                session_outcome = {**outcome, "usage": dispatch_usage}
                 save_session(path, f"pi-durable:{session_key}",
-                             {"tokens": _cumulative_tokens(saved, outcome)})
-            complete_run(conn, run_key, {"engine": outcome.get("engine"), "requests": outcome.get("requests")}, status="completed")
+                             {"tokens": _cumulative_tokens(saved, session_outcome)})
+            # A clean unsealed return is terminal, even when no follow-up is
+            # allowed. Only explicit in-process host permission may reopen it.
+            run_result = {"engine": outcome.get("engine"), "requests": outcome.get("requests"),
+                          "sealed": context.finished is not None}
+            if context.finished is not None:
+                run_result["finish"] = context.finished
+            complete_run(conn, run_key, run_result, status="completed")
             outcome["durable"] = {"resumed": bool(started_record.get("resumed")), "duplicate": False,
                                   "store": str(store_path), "projection": project_context(conn, run_key),
                                   "grant": grant, "reaped": reaped,
@@ -226,10 +287,10 @@ class PiDurableDriver:
         except (Cancelled, ProtocolError, ModelFailure, ConfigError, LimitExceeded):
             try:
                 record = load_run(conn, run_key)
-                if record is not None and record["status"] == "active":
+                if seq is not None and record is not None and record["status"] == "active":
                     # Uncertain side-effect completion: mark unknown, never assume.
                     try:
-                        complete_turn(conn, run_key, existing + 1,
+                        complete_turn(conn, run_key, seq,
                                       {"uncertain": True}, state="unknown")
                     except Exception:
                         pass
@@ -260,7 +321,8 @@ class PiDurableDriver:
         effective_config = {
             "provider": model["provider"], "model": model["model"],
             "instructions": policy, "tools": tool_definitions(context.role.capabilities),
-            "cwd": str(cwd), "store": str(store_path), "requestId": run_key, "prompt": prompt,
+            "cwd": str(cwd), "store": str(store_path),
+            "requestId": getattr(context, "_durable_request_id", run_key), "prompt": prompt,
             "authPath": str(durable_auth_path(self.config)),
         }
         # Unset keeps the engine/provider default: omit the field so the
@@ -311,7 +373,7 @@ class PiDurableDriver:
             return {**context.model_evidence, "seconds": round(time.monotonic() - started, 3)}
 
 
-def _runtime_evidence(context, model, thinking_level) -> dict | None:
+def _runtime_evidence(context, model, thinking_level, *, execution_attempt=None) -> dict | None:
     """Host-recorded per-request evidence, like the pi engine.
 
     Schema: reads ``context.runtime_usage`` (``_model_usage`` reports also
@@ -322,7 +384,11 @@ def _runtime_evidence(context, model, thinking_level) -> dict | None:
     Failure: never raises; malformed state reads as absent.
     """
     try:
-        items = sorted(getattr(context, "runtime_usage", {}).items())
+        items = list(getattr(context, "runtime_usage", {}).items())
+        if execution_attempt is not None:
+            items = [(key, value) for key, value in items
+                     if isinstance(key, tuple) and len(key) == 2 and key[0] == execution_attempt]
+        items.sort()
     except Exception:
         return None
     if not items:
@@ -341,49 +407,96 @@ def _runtime_evidence(context, model, thinking_level) -> dict | None:
         observations.append({"usage": value,
                              "provider": identity.get("provider"),
                              "model": identity.get("model")})
-    try:
-        observed = list(models.values())
-    except Exception:
-        observed = []
+    if execution_attempt is not None:
+        observed = [models.get(seq) for seq, _ in items if models.get(seq)]
+    else:
+        try:
+            observed = list(models.values())
+        except Exception:
+            observed = []
     if not observed:
         observed = [{**model, "thinkingLevel": thinking_level}]
     try:
-        requests = int(getattr(context, "request_count", 0) or 0)
+        if execution_attempt is not None and hasattr(context, "request_sequences"):
+            requests = sum(1 for attempt, _ in context.request_sequences
+                           if attempt == execution_attempt)
+        else:
+            requests = int(getattr(context, "request_count", 0) or 0)
     except Exception:
         requests = 0
     return {"requests": requests, "usage": usages, "usage_known": True,
             "observed_models": observed, "usage_observations": observations}
 
 
-def _record_launcher_evidence(reported, context, model, thinking_level) -> None:
-    """Record launcher requests/usage into run evidence (raw shapes).
-
-    Schema: prefers host-recorded per-request ``runtime_usage`` (the same
-    source the pi engine records, also persisted in
-    ``runtime-usage.json``); the launcher-aggregated ``harness.usage``
-    document is only a fallback when no per-request report arrived.
-    Raw provider shapes are stored as-is so ``usage.normalize`` counts
-    them under this engine; nothing is remapped to canonical keys here.
-    Bounds: evidence stays local. Failure: never invents tokens.
-    """
-    runtime = _runtime_evidence(context, model, thinking_level)
+def _dispatch_usage(reported, context, model, thinking_level) -> list[dict]:
+    """Usage for this one Harness dispatch, with its own launcher delta fallback."""
+    runtime = _runtime_evidence(context, model, thinking_level,
+                                execution_attempt=getattr(context, "execution_attempt", None))
     if runtime is not None:
-        if not runtime["requests"]:
-            try:
-                reported_requests = int((reported.get("requests", 0) if isinstance(reported, dict) else 0) or 0)
-            except Exception:
-                reported_requests = 0
-            runtime["requests"] = reported_requests
-        context.model_evidence.update(runtime)
-        return
+        return runtime["usage"]
     usage = reported.get("usage") if isinstance(reported, dict) else None
-    if isinstance(usage, dict):
-        context.model_evidence.update(requests=int(reported.get("requests", 0) or 0),
-                                      usage=[dict(usage)], usage_known=True,
-                                      observed_models=[{**model, "thinkingLevel": thinking_level}],
-                                      usage_observations=[{"usage": dict(usage), **model}])
+    return [dict(usage)] if isinstance(usage, dict) else []
+
+
+def _record_launcher_evidence(reported, context, model, thinking_level) -> None:
+    """Record this dispatch's host-preferred evidence in the run total.
+
+    Schema: each execution attempt contributes its host per-request usage,
+    when present, otherwise its launcher per-dispatch delta (not session totals). Attempt-keyed replacement
+    prevents a retry from counting the same usage or requests twice. Raw
+    provider shapes are retained. Bounds: evidence stays local. Failure:
+    never invents token usage.
+    """
+    attempt = getattr(context, "execution_attempt", None)
+    runtime = _runtime_evidence(context, model, thinking_level,
+                                execution_attempt=attempt)
+    usage = None
+    if runtime is not None:
+        usage = list(runtime["usage"])
+        requests = runtime["requests"]
+        if not requests:
+            try:
+                requests = int((reported.get("requests", 0)
+                                if isinstance(reported, dict) else 0) or 0)
+            except Exception:
+                requests = 0
+        observed_models = runtime["observed_models"]
+        observations = runtime["usage_observations"]
+        usage_known = True
     else:
-        context.model_evidence.update(requests=int((reported.get("requests", 0) if isinstance(reported, dict) else 0) or 0))
+        reported_usage = reported.get("usage") if isinstance(reported, dict) else None
+        usage = [dict(reported_usage)] if isinstance(reported_usage, dict) else []
+        try:
+            requests = int((reported.get("requests", 0)
+                            if isinstance(reported, dict) else 0) or 0)
+        except Exception:
+            requests = 0
+        observed_models = ([{**model, "thinkingLevel": thinking_level}]
+                           if usage else [])
+        observations = ([{"usage": usage[0], **model}] if usage else [])
+        usage_known = bool(usage)
+
+    attempts = getattr(context, "_durable_attempt_evidence", None)
+    if not isinstance(attempts, dict):
+        attempts = {}
+        context._durable_attempt_evidence = attempts
+    # Execution attempts are unique across turns and selector candidates;
+    # reassigning the current key also makes retries idempotent.
+    key = attempt if isinstance(attempt, int) else len(attempts)
+    attempts[key] = {"requests": requests, "usage": usage,
+                     "usage_known": usage_known,
+                     "observed_models": observed_models,
+                     "usage_observations": observations}
+
+    ordered = [attempts[index] for index in sorted(attempts)]
+    total_requests = sum(item["requests"] for item in ordered)
+    all_usage = [entry for item in ordered for entry in item["usage"]]
+    known = any(item["usage_known"] for item in ordered)
+    all_models = [entry for item in ordered for entry in item["observed_models"]]
+    all_observations = [entry for item in ordered for entry in item["usage_observations"]]
+    context.model_evidence.update(requests=total_requests, usage=all_usage,
+                                  usage_known=known, observed_models=all_models,
+                                  usage_observations=all_observations)
 
 
 def interpret_result(reported, context, model, thinking_level) -> None:
@@ -405,6 +518,7 @@ def interpret_result(reported, context, model, thinking_level) -> None:
     """
     if not isinstance(reported, dict) or reported.get("durable_result") is not True:
         raise ProtocolError("Durable launcher returned an invalid result")
+    context._durable_dispatch_usage = _dispatch_usage(reported, context, model, thinking_level)
     if reported.get("status") == "request_bound":
         _record_launcher_evidence(reported, context, model, thinking_level)
         context.bound_hit = context.bound_hit or "requests"
@@ -432,18 +546,7 @@ def interpret_result(reported, context, model, thinking_level) -> None:
         return
     if not reported.get("finish_called") or context.finished is None:
         raise ProtocolError("Durable finish report disagrees with host seal")
-    runtime = _runtime_evidence(context, model, thinking_level)
-    if runtime is not None:
-        context.model_evidence.update(runtime)
-        return
-    usage = reported.get("usage")
-    if isinstance(usage, dict):
-        context.model_evidence.update(requests=int(reported.get("requests", 0) or 0),
-                                      usage=[dict(usage)], usage_known=True,
-                                      observed_models=[{**model, "thinkingLevel": thinking_level}],
-                                      usage_observations=[{"usage": dict(usage), **model}])
-    else:
-        context.model_evidence.update(requests=int(reported.get("requests", 0) or 0))
+    _record_launcher_evidence(reported, context, model, thinking_level)
 
 
 def _cumulative_tokens(saved, outcome) -> int:

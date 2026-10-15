@@ -16,7 +16,7 @@ import { createServer } from 'node:net';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join as joinPath } from 'node:path';
-import { agentChanges, credentialsFromFile, meterModels, settlementFields, submitWithCurrentAgent }
+import { agentChanges, credentialsFromFile, meterModels, settlementFields, submitWithCurrentAgent, usageDelta }
   from '../adapters/pi-durable/launcher.mjs';
 import { AssistantEntry, BACKGROUND_CONTEXT, Harness, Type, createModels, createRegistry,
   defineExtension, defineTool, fauxAssistantMessage, fauxProvider, fauxToolCall,
@@ -73,6 +73,133 @@ test('requestId submit is idempotent and settles with usage', async () => {
     const usage = await harness.usage(context);
     assert.ok(usage.models['test-only/model']);
     await harness.close(context);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('usage delta returns only bounded known monotone model counters', () => {
+  const key = 'test-only/model';
+  const snapshot = value => ({ models: { [key]: value } });
+  const before = snapshot({ input: 10, output: 2, cacheRead: 4, cacheWrite: 3,
+    totalTokens: 19, reasoning: 1, cacheWrite1h: 2, cost: { input: 0.25, total: 0.5 } });
+  const after = snapshot({ input: 17, output: 5, cacheRead: 6, cacheWrite: 4,
+    totalTokens: 32, reasoning: 2, cacheWrite1h: 4, cost: { input: 0.5, total: 0.75 } });
+  const original = structuredClone([before, after]);
+  assert.deepEqual(usageDelta(before, after, key), { input: 7, output: 3, cacheRead: 2,
+    cacheWrite: 1, totalTokens: 13, reasoning: 1, cacheWrite1h: 2, cost: { input: 0.25, total: 0.25 } });
+  assert.deepEqual([before, after], original); // pure; neither snapshot moves
+  assert.deepEqual(usageDelta({ models: {} }, after, key), after.models[key]);
+  assert.deepEqual(usageDelta(before, before, key), { input: 0, output: 0, cacheRead: 0,
+    cacheWrite: 0, totalTokens: 0, reasoning: 0, cacheWrite1h: 0, cost: { input: 0, total: 0 } });
+  assert.deepEqual(usageDelta(before, snapshot({ input: 12, output: 1, cacheRead: '8',
+    reasoning: NaN, totalTokens: Infinity, cacheWrite: -1, cacheWrite1h: 2.5,
+    cost: { total: Number.MAX_SAFE_INTEGER + 1 } }), key), { input: 2 });
+  for (const bad of [undefined, null, {}, [], { models: null }, { models: [] }, snapshot(null), snapshot([])]) {
+    assert.equal(usageDelta(bad, after, key), null);
+    assert.equal(usageDelta(before, bad, key), null);
+  }
+  for (const bad of [undefined, null, '4', true, -1, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, 1.5]) {
+    assert.equal(usageDelta(snapshot({ input: bad }), snapshot({ input: 10 }), key), null);
+    assert.equal(usageDelta({ models: {} }, snapshot({ input: bad }), key), null);
+  }
+  assert.equal(usageDelta(snapshot({}), snapshot({ input: 10, cost: { total: 1 } }), key), null);
+  assert.equal(usageDelta(before, { models: {} }, key), null);
+  assert.equal(usageDelta(before, { models: { 'other/model': { input: 99 } } }, key), null);
+});
+
+test('two request IDs in reopened SQLite report dispatch deltas, not session totals', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'mizu-durable-usage-'));
+  try {
+    const env = backend();
+    const calls = [];
+    const models = env.models;
+    meterModels(models, {
+      admit: async () => 1, report: async usage => { calls.push(structuredClone(usage)); },
+    });
+    const file = join(directory, 's.sqlite');
+    const agent = { model: { provider: 'test-only', modelId: 'model' },
+      tools: env.tools, instructions: 'Do work.', cwd: directory };
+    const key = 'test-only/model';
+    const one = await Harness.open(await openNodeSqliteStorage(file), { models, registry: env.registry }, context);
+    env.faux.setResponses([fauxAssistantMessage('Work completed without finish.')]);
+    const first = await submitWithCurrentAgent(one, agent,
+      { type: 'input', content: 'work', requestId: 'unit' }, context);
+    assert.equal((await first.submission.wait(context)).status, 'done');
+    const firstTotal = await one.usage(context);
+    const firstDelta = usageDelta(first.usageBefore, firstTotal, key);
+    assert.deepEqual(firstDelta, calls[0]);
+    assert.ok(firstDelta.totalTokens > 0);
+    await one.close(context);
+
+    const two = await Harness.open(await openNodeSqliteStorage(file), { models, registry: env.registry }, context);
+    env.faux.setResponses([fauxAssistantMessage([fauxToolCall('finish', {})], { stopReason: 'toolUse' })]);
+    const second = await submitWithCurrentAgent(two, agent,
+      { type: 'input', content: 'finish only', requestId: 'unit-t2' }, context);
+    assert.notEqual(second.submission.id, first.submission.id);
+    assert.deepEqual(second.usageBefore, firstTotal);
+    assert.equal((await second.submission.wait(context)).status, 'done');
+    const secondTotal = await two.usage(context);
+    const secondDelta = usageDelta(second.usageBefore, secondTotal, key);
+    assert.equal(calls.length, 2);
+    assert.deepEqual(secondDelta, calls[1]); // independent per-request provider observation
+    assert.ok(secondDelta.totalTokens > 0);
+    assert.equal(firstDelta.totalTokens + secondDelta.totalTokens, secondTotal.models[key].totalTokens);
+    assert.notDeepEqual(secondDelta, secondTotal.models[key]); // old + new must not be returned
+    await two.close(context);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('normal no-finish return admits a distinct finish-only continuation in the same store', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'mizu-durable-'));
+  try {
+    const env = backend();
+    const file = join(directory, 's.sqlite');
+    const one = await Harness.open(await openNodeSqliteStorage(file),
+      { models: env.models, registry: env.registry }, context);
+    const agent = { model: { provider: 'test-only', modelId: 'model' },
+      tools: env.tools, instructions: 'Do work.', cwd: directory };
+    env.faux.setResponses([
+      fauxAssistantMessage([fauxToolCall('probe', {})], { stopReason: 'toolUse' }),
+      fauxAssistantMessage('Work is complete, but no finish was called.'),
+    ]);
+    const { submission: first } = await submitWithCurrentAgent(one, agent,
+      { type: 'input', content: 'work', requestId: 'unit' }, context);
+    assert.equal((await first.wait(context)).status, 'done');
+    assert.equal(env.calls(), 0);
+    assert.equal(env.seen.length, 1);
+    assert.equal(env.faux.state.callCount, 2);
+    await one.close(context);
+
+    // Like a second one-shot launcher: same SQLite store, but only finish is
+    // registered and exposed. Configuring the retained agent must narrow it.
+    const finishTools = env.tools.filter(tool => tool.name === 'finish');
+    const registry = createRegistry();
+    registry.install(defineExtension({ name: 'test', tools: finishTools }));
+    const two = await Harness.open(await openNodeSqliteStorage(file),
+      { models: env.models, registry }, context);
+    const finishAgent = { ...agent, tools: finishTools };
+    env.faux.setResponses([
+      fauxAssistantMessage([fauxToolCall('finish', {})], { stopReason: 'toolUse' }),
+    ]);
+    // Negative control: reusing the first request id cannot produce a finish.
+    const duplicate = await submitWithCurrentAgent(two, finishAgent,
+      { type: 'input', content: 'work', requestId: 'unit' }, context);
+    assert.equal(duplicate.submission.id, first.id);
+    assert.equal((await duplicate.submission.wait(context)).status, 'done');
+    assert.equal(env.faux.state.callCount, 2);
+    assert.equal(env.calls(), 0);
+    const { root, submission: second } = await submitWithCurrentAgent(two, finishAgent,
+      { type: 'input', content: 'finish only', requestId: 'unit-t2' }, context);
+    assert.notEqual(second.id, first.id);
+    assert.equal((await second.wait(context)).status, 'done');
+    assert.deepEqual((await root.agent(context)).tools.map(tool => tool.name), ['finish']);
+    assert.equal(env.faux.state.callCount, 3);
+    assert.equal(env.calls(), 1);
+    assert.equal(env.seen.length, 1);
+    await two.close(context);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -275,6 +402,10 @@ function setupHarness(agent, { resolved = agent, applied = agent, failAt } = {})
       assert.equal(options.agent, agent);
       return root;
     },
+    async usage(ctx) {
+      await step('usage', ctx);
+      return { models: {} };
+    },
     resume() { calls.push('resume'); },
   };
   return { harness, root, submission, calls, changes, inputs };
@@ -290,7 +421,7 @@ const currentInput = { type: 'input', content: 'go', requestId: 'same-store-requ
 test('launcher validates agent readback before resume and submit', { timeout: 1000 }, async () => {
   const fake = setupHarness(currentAgent, { resolved: retainedAgent });
   const result = await submitWithCurrentAgent(fake.harness, currentAgent, currentInput, context);
-  assert.deepEqual(fake.calls, ['root', 'read', 'configure', 'readback', 'resume', 'submit']);
+  assert.deepEqual(fake.calls, ['root', 'read', 'configure', 'readback', 'usage', 'resume', 'submit']);
   assert.deepEqual(fake.changes, [currentAgent]);
   assert.equal(fake.inputs[0], currentInput); // content and replay requestId pass through unchanged
   assert.equal(result.root, fake.root);
@@ -300,7 +431,7 @@ test('launcher validates agent readback before resume and submit', { timeout: 10
 test('launcher resumes after a current agent read without redundant configure', { timeout: 1000 }, async () => {
   const fake = setupHarness(currentAgent);
   await submitWithCurrentAgent(fake.harness, currentAgent, currentInput, context);
-  assert.deepEqual(fake.calls, ['root', 'read', 'resume', 'submit']);
+  assert.deepEqual(fake.calls, ['root', 'read', 'usage', 'resume', 'submit']);
   assert.deepEqual(fake.changes, []);
   assert.equal(fake.inputs[0], currentInput);
 });
@@ -319,6 +450,23 @@ for (const [failAt, expected] of [
     assert.deepEqual(fake.inputs, []);
   });
 }
+
+test('launcher preserves an immutable baseline before resume can work', async () => {
+  const fake = setupHarness(currentAgent);
+  const snapshot = { models: { 'test-only/current': { input: 5 } } };
+  fake.harness.usage = async () => snapshot;
+  fake.harness.resume = () => { snapshot.models['test-only/current'].input = 99; };
+  const result = await submitWithCurrentAgent(fake.harness, currentAgent, currentInput, context);
+  assert.deepEqual(result.usageBefore, { models: { 'test-only/current': { input: 5 } } });
+});
+
+test('failed usage snapshot stays unknown without changing submission semantics', async () => {
+  const fake = setupHarness(currentAgent, { failAt: 'usage' });
+  const result = await submitWithCurrentAgent(fake.harness, currentAgent, currentInput, context);
+  assert.equal(result.usageBefore, null);
+  assert.equal(result.submission, fake.submission);
+  assert.deepEqual(fake.calls, ['root', 'read', 'usage', 'resume', 'submit']);
+});
 
 test('launcher never resumes when agent readback does not converge', { timeout: 1000 }, async () => {
   const fake = setupHarness(currentAgent, { resolved: retainedAgent, applied: retainedAgent });
@@ -516,9 +664,59 @@ test('launcher settles a model-admission failure from its process entrypoint', {
   }
 });
 
-test('interrupted tools are never replayed by default', async () => {
-  const tool = defineTool({ name: 'op', description: 'op', parameters: Type.Object({}), execute: async () => ({}) });
-  assert.equal(tool.replay ?? 'unsafe', 'unsafe');
+test('interrupted unsafe tool intent is not replayed on same-request recovery', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'mizu-durable-'));
+  try {
+    const file = join(directory, 's.sqlite');
+    const effect = join(directory, 'effect');
+    const support = new URL('../adapters/pi-durable/test-support.mjs', import.meta.url).href;
+    // Crash after the durable intent and an external side effect, but before
+    // the tool result commit. No mocked tasks or SQLite writes.
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+      import { writeFileSync } from 'node:fs';
+      import { BACKGROUND_CONTEXT as context, Harness, Type, createModels, createRegistry,
+        defineExtension, defineTool, fauxProvider, fauxAssistantMessage, fauxToolCall,
+        openNodeSqliteStorage } from ${JSON.stringify(support)};
+      const models = createModels();
+      const faux = fauxProvider({ provider: 'test-only', models: [{ id: 'model',
+        contextWindow: 32768, maxTokens: 1024 }] });
+      models.setProvider(faux.provider);
+      const probe = defineTool({ name: 'probe', description: 'Record one execution',
+        parameters: Type.Object({}), execute: async () => {
+          writeFileSync(${JSON.stringify(effect)}, 'executed once');
+          process.exit(0);
+        } });
+      const registry = createRegistry();
+      registry.install(defineExtension({ name: 'test', tools: [probe] }));
+      const harness = await Harness.open(await openNodeSqliteStorage(${JSON.stringify(file)}),
+        { models, registry }, context);
+      const root = await harness.root(context, { agent: { model: { provider: 'test-only', modelId: 'model' },
+        tools: [probe], instructions: 'Call probe.' } });
+      faux.setResponses([fauxAssistantMessage([fauxToolCall('probe', {})], { stopReason: 'toolUse' })]);
+      const submission = await root.submit({ type: 'input', content: 'go', requestId: 'uncertain' }, context);
+      await submission.wait(context);
+      process.exit(9); // Must exit from inside the tool instead.
+    `], { encoding: 'utf8', timeout: 10000 });
+    assert.equal(child.status, 0, child.stderr);
+    assert.equal(readFileSync(effect, 'utf8'), 'executed once');
+    const env = backend();
+    const harness = await Harness.open(await openNodeSqliteStorage(file),
+      { models: env.models, registry: env.registry }, context);
+    env.faux.setResponses([
+      fauxAssistantMessage([fauxToolCall('finish', {})], { stopReason: 'toolUse' }),
+    ]);
+    const agent = { model: { provider: 'test-only', modelId: 'model' },
+      tools: env.tools, instructions: 'Call probe.' };
+    const { submission } = await submitWithCurrentAgent(harness, agent,
+      { type: 'input', content: 'go', requestId: 'uncertain' }, context);
+    assert.equal((await submission.wait(context)).status, 'done');
+    assert.equal(env.seen.length, 0); // Recovery reports interrupted, never executes probe again.
+    assert.equal(env.calls(), 1);
+    assert.equal(readFileSync(effect, 'utf8'), 'executed once');
+    await harness.close(context);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('durable provider completion pairs admission without usage and on rejection', async () => {

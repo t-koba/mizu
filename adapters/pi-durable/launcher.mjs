@@ -16,7 +16,7 @@
  *   never rerun (default replay unsafe): the model gets an `interrupted`
  *   result, matching the Python driver's unknown-completion rule.
  * - harness.resume(): continue work a dead process left unfinished.
- * - harness.usage(): per provider/model + per tool spend.
+ * - harness.usage(): cumulative per provider/model + per tool spend.
  *
  * Authority preserved from the pi engine: exact provider/model pin (built-in
  * providers only; custom models.json providers refuse loudly), bridge tools
@@ -406,6 +406,39 @@ export function agentChanges(resolved, wanted) {
   return change;
 }
 
+/** Per-dispatch fallback from cumulative Harness usage snapshots for one model.
+ * Only known, monotone counters are returned (tokens: safe integers; cost:
+ * finite numbers, both bounded by MAX_SAFE_INTEGER). Missing/malformed reads,
+ * counters and regressions stay unknown, not zero. The one known-zero baseline
+ * is an absent model in a valid initial models map. Optional counters missing
+ * from an existing model are not assumed zero. Unknown fields are ignored.
+ */
+export function usageDelta(before, after, key) {
+  const record = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+  if (!record(before?.models) || !record(after?.models)
+      || !Object.hasOwn(after.models, key) || !record(after.models[key])) return null;
+  const initial = !Object.hasOwn(before.models, key);
+  const previous = initial ? {} : before.models[key];
+  if (!record(previous)) return null;
+  const current = after.models[key];
+  const subtract = (old, next, fields, integer) => {
+    const result = {};
+    const valid = value => typeof value === 'number' && Number.isFinite(value)
+      && value >= 0 && value <= Number.MAX_SAFE_INTEGER && (!integer || Number.isSafeInteger(value));
+    for (const field of fields) {
+      const start = initial ? 0 : (record(old) && Object.hasOwn(old, field) ? old[field] : undefined);
+      const end = record(next) && Object.hasOwn(next, field) ? next[field] : undefined;
+      if (valid(start) && valid(end) && end >= start) result[field] = end - start;
+    }
+    return result;
+  };
+  const delta = subtract(previous, current,
+    ['input', 'output', 'cacheRead', 'cacheWrite', 'cacheWrite1h', 'reasoning', 'totalTokens'], true);
+  const cost = subtract(previous.cost, current.cost, ['input', 'output', 'cacheRead', 'cacheWrite', 'total'], false);
+  if (Object.keys(cost).length) delta.cost = cost;
+  return Object.keys(delta).length ? delta : null;
+}
+
 /** Validate the current agent before unpausing recovery in the same session. */
 export async function submitWithCurrentAgent(harness, agent, input, context) {
   const root = await harness.root(context, { agent });
@@ -427,9 +460,13 @@ export async function submitWithCurrentAgent(harness, agent, input, context) {
   }
   // An unchanged first read is already the convergence check. In either case,
   // do not enable recovered work until current authority is confirmed.
+  // Snapshot before resume can dispatch recovered work, not merely before
+  // submit. Clone so a mutable provider/SDK result cannot move the baseline.
+  let usageBefore = null;
+  try { usageBefore = structuredClone(await harness.usage(context)); } catch { /* unknown */ }
   harness.resume(); // continue work a dead process left unfinished
   const submission = await root.submit(input, context);
-  return { root, submission };
+  return { root, submission, usageBefore };
 }
 
 async function runOnce(cfg) {
@@ -576,7 +613,7 @@ async function runOnce(cfg) {
     const agent = { model: { provider: cfg.provider, modelId: cfg.model },
       tools, instructions: cfg.instructions, cwd: cfg.cwd };
     if (cfg.thinkingLevel) agent.thinkingLevel = cfg.thinkingLevel;
-    const { root, submission: currentSubmission } = await submitWithCurrentAgent(harness, agent,
+    const { root, submission: currentSubmission, usageBefore } = await submitWithCurrentAgent(harness, agent,
       { type: 'input', content: cfg.prompt, requestId: cfg.requestId }, context);
     submission = currentSubmission;
     const settled = await submission.wait(context);
@@ -584,7 +621,7 @@ async function runOnce(cfg) {
       const usage = await harness.usage(context).catch(() => null);
       return { durable_result: true, status: 'request_bound', reason: 'Per-run provider request budget exhausted',
         finish_called: finishCalled, sealed, requests, observed: observations,
-        usage: usage?.models?.[`${cfg.provider}/${cfg.model}`] ?? null,
+        usage: usageDelta(usageBefore, usage, `${cfg.provider}/${cfg.model}`),
         usage_models: Object.keys(usage?.models ?? {}), answer: null };
     }
     const usage = await harness.usage(context);
@@ -602,7 +639,7 @@ async function runOnce(cfg) {
     return { durable_result: true, ...settlementFields(settled),
       finish_called: finishCalled, sealed,
       requests, observed: observations,
-      usage: usage?.models?.[key] ?? null,
+      usage: usageDelta(usageBefore, usage, key),
       usage_models: Object.keys(usage?.models ?? {}), answer };
   } finally {
     await harness.close(context).catch(() => {});
