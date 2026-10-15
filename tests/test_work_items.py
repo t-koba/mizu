@@ -5,12 +5,13 @@ import json
 import os
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from support import Fixture
 from mizu.errors import Denied, LimitExceeded
 from mizu.fs import PREVIEW_BYTES, canonical, write_json
-from mizu.work_items import (MAX_OPEN_ROW_BYTES, MAX_PROJECTION_BYTES, MAX_REVISIONS, WorkItems)
+from mizu.work_items import (MAX_OPEN_ROW_BYTES, MAX_PROJECTION_BYTES, MAX_REVISIONS, WorkItems,
+                             _entry_stat)
 
 
 class WorkItemTests(Fixture):
@@ -42,6 +43,15 @@ class WorkItemTests(Fixture):
         if publish:
             store.publish(snapshot)
         return snapshot
+
+    def test_entry_stat_uses_full_windows_link_metadata(self):
+        entry = Mock(path=r"C:\store\entry", stat=Mock())
+        expected = object()
+        with patch("mizu.work_items.IS_WINDOWS", True), \
+                patch("mizu.work_items.os.stat", return_value=expected) as path_stat:
+            self.assertIs(_entry_stat(entry), expected)
+        path_stat.assert_called_once_with(entry.path, follow_symlinks=False)
+        entry.stat.assert_not_called()
 
     def test_seed_lookup_is_direct_and_does_not_use_mutable_insight(self):
         self.assertIs(self.store.insights, self.project.insights)

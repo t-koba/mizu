@@ -18,6 +18,7 @@ from pathlib import Path
 from .errors import Denied, LimitExceeded
 from .fs import (DIGEST, PREVIEW_BYTES, canonical, identifier, lock, now, safe_read,
                  sync_dir, text_preview, write_json)
+from .platform import IS_WINDOWS
 
 MAX_REVISIONS = 256  # Includes the immutable seed at revision 1.
 ITEM_ID = re.compile(r"wi_([0-9a-f]{32})\Z")
@@ -43,6 +44,14 @@ def _timestamp(value) -> bool:
         return isinstance(value, str) and dt.datetime.fromisoformat(value).tzinfo is not None
     except ValueError:
         return False
+
+
+def _entry_stat(entry):
+    """Get non-following metadata, including inode/link fields on Windows."""
+    if IS_WINDOWS:
+        # Windows DirEntry.stat() deliberately returns zero for st_dev/ino/nlink.
+        return os.stat(entry.path, follow_symlinks=False)
+    return entry.stat(follow_symlinks=False)
 
 
 def _directory(path: Path) -> bool:
@@ -187,7 +196,7 @@ class WorkItems:
                     temporary_entries.append(entry)
                 elif _REVISION_NAME.fullmatch(entry.name):
                     try:
-                        info = entry.stat(follow_symlinks=False)
+                        info = _entry_stat(entry)
                     except OSError as exc:
                         raise Denied("Unstable work-item revision entry") from exc
                     if (int(entry.name[:-5]) <= MAX_REVISIONS
@@ -197,7 +206,7 @@ class WorkItems:
         removed = False
         for entry in temporary_entries:
             try:
-                info = entry.stat(follow_symlinks=False)
+                info = _entry_stat(entry)
             except OSError as exc:
                 raise Denied("Unsafe work-item temporary") from exc
             if (not stat.S_ISREG(info.st_mode)
@@ -375,7 +384,7 @@ class WorkItems:
                 if len(temporary_info) >= MAX_HISTORY_TEMPORARIES:
                     raise Denied("Too many decision-history temporaries")
                 try:
-                    info = entry.stat(follow_symlinks=False)
+                    info = _entry_stat(entry)
                 except OSError as exc:
                     raise Denied("Unstable decision-history temporary") from exc
                 if (not stat.S_ISREG(info.st_mode)
@@ -396,7 +405,7 @@ class WorkItems:
                     if _DECISION_EVENT_NAME.fullmatch(entry.name) is None:
                         continue
                     try:
-                        info = entry.stat(follow_symlinks=False)
+                        info = _entry_stat(entry)
                     except OSError as exc:
                         raise Denied("Unstable decision-history entry") from exc
                     key = (info.st_dev, info.st_ino)
@@ -459,7 +468,7 @@ class WorkItems:
                     for entry in entries:
                         if _TEMP_NAME.fullmatch(entry.name):
                             try:
-                                info = entry.stat(follow_symlinks=False)
+                                info = _entry_stat(entry)
                             except OSError as exc:
                                 raise Denied("Unstable decision-history temporary") from exc
                             if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
@@ -471,7 +480,7 @@ class WorkItems:
                         if _DECISION_EVENT_NAME.fullmatch(entry.name) is None:
                             raise Denied("Invalid committed decision-history filename")
                         try:
-                            info = entry.stat(follow_symlinks=False)
+                            info = _entry_stat(entry)
                         except OSError as exc:
                             raise Denied("Unstable decision-history entry") from exc
                         if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
