@@ -29,7 +29,7 @@ class FinishSealTests(Fixture):
         counters = (ctx.request_count, ctx.tool_count, ctx.wrap_up_requests, ctx.wrap_up_tools)
         sequences = set(ctx.request_sequences)
         operations = (("_budget", {"sequence": 1}), ("_budget", {"sequence": 2}),
-                      ("_budget", {"sequence": "invalid"}), ("_engine_tool", {"name": "ungranted"}),
+                      ("_budget", {"sequence": "invalid"}), ("_engine_tool", {"name": "ungranted", "invocation_id": "sdk-ungranted"}),
                       ("_hello", {}), ("read", {"path": "app.py"}), ("exec", {"script": "true"}),
                       ("report", {"summary": "late"}), ("finish", FINISH))
         with patch("mizu.runtime.Budget.take") as take, patch.object(ctx, "dispatch") as dispatch:
@@ -96,7 +96,7 @@ class FinishSealTests(Fixture):
                     with test_case.assertRaises(Denied):
                         context.handle("read", {"path": "app.py"})
                     with test_case.assertRaises(Denied):
-                        context.handle("_engine_tool", {"name": "native"})
+                        context.handle("_engine_tool", {"name": "native", "invocation_id": "sdk-native"})
                     context.handle("finish", FINISH)
                 context.handle("_request_done", {"sequence": 1})
                 return {"requests": context.request_count}

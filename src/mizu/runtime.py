@@ -60,6 +60,10 @@ INFRA_WAIT = (Busy, InfraExceeded)
 #: page limit, same bound as `mizu insight list`); prompt
 #: selection stays bounded by `[limits] pending_insights`.
 INSIGHT_RETRIEVAL_LIMIT = 1000
+#: Fixed memory bounds for run-local pre-send admission identities.
+MAX_ENGINE_TOOL_INVOCATIONS = 4096
+MAX_ENGINE_TOOL_ID = 256
+
 #: Wrap-up allowance granted when a per-run spend bound is reached: extra
 #: model requests and extra wrap-up tool calls the unit may still spend to
 #: seal a clean `bounded` end instead of failing. Fixed and documented; the
@@ -214,6 +218,8 @@ class Context:
         self.request_sequences: set[tuple[int, int]] = set()
         self.runtime_usage: dict[tuple[int, int], dict] = {}
         self.runtime_models: dict[tuple[int, int], dict] = {}
+        # Adapter pre-send identities; never supplied by model tool arguments.
+        self.engine_tool_invocations: dict[tuple[int, str], str] = {}
         self.tool_count = 0
         # Delegation spend sharing: the role whose per-run caps bind spend.
         # Delegation children count against the caller's unit, so theirs
@@ -489,14 +495,27 @@ class Context:
             if operation == "_engine_tool":
                 if self.bound_hit is not None:
                     raise Denied(self._bound_message())
-                if arguments.get("name") not in self.role.engine_tools:
+                name = arguments.get("name")
+                invocation_id = arguments.get("invocation_id")
+                if (not isinstance(invocation_id, str) or not invocation_id.strip()
+                        or len(invocation_id) > MAX_ENGINE_TOOL_ID or not invocation_id.isprintable()):
+                    raise Denied("Invalid engine tool invocation id")
+                if not isinstance(name, str) or name not in self.role.engine_tools:
                     raise Denied("Engine tool has no explicit grant")
+                key = (self.execution_attempt, invocation_id)
+                if key in self.engine_tool_invocations:
+                    if self.engine_tool_invocations[key] != name:
+                        raise Denied("Engine tool invocation id reused for a different name")
+                    return {"allowed": True}
+                if len(self.engine_tool_invocations) >= MAX_ENGINE_TOOL_INVOCATIONS:
+                    raise LimitExceeded("Engine tool invocation evidence bound exceeded")
                 self.tool_count += 1
                 if self.tool_count > role_tools_per_run(self.config, self.spend_role or self.role):
                     # Native tools are never wrap-up operations: record the
                     # bound and refuse without drawing the allowance.
                     self.bound_hit = self.bound_hit or "tools"
                     raise LimitExceeded("Per-run tool limit exceeded")
+                self.engine_tool_invocations[key] = name
                 return {"allowed": True}
             if operation == "_budget":
                 self.enter_drain_wrap_up()

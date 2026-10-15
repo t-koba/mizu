@@ -84,7 +84,18 @@ else:
                 emit({'id': 'ask', 'method': 'item/tool/requestUserInput', 'params': {}})
                 continue
             turn = 'turn'
-            finish(bridge, resumed=resumed)
+            if scenario == 'other-thread-native':
+                emit({'method': 'item/started', 'params': {'threadId': 'other-thread',
+                      'item': {'type': 'webSearch', 'id': 'unrelated-web'}}})
+            unexpected = {
+                'native-before-finish': {'type': 'webSearch', 'id': 'unexpected-web'},
+                'external-before-finish': {'type': 'mcpToolCall', 'server': 'fake', 'tool': 'search', 'id': 'unexpected-mcp'},
+                'collab-before-finish': {'type': 'collabAgentToolCall', 'tool': 'spawnAgent', 'id': 'unexpected-child'},
+            }.get(scenario)
+            if unexpected:
+                emit({'method': 'item/started', 'params': {'threadId': 'thread', 'item': unexpected}})
+            else:
+                finish(bridge, resumed=resumed)
             if scenario == 'native-after-finish':
                 emit({'method': 'item/started', 'params': {'threadId': 'thread',
                       'item': {'type': 'webSearch', 'id': 'late-web'}}})

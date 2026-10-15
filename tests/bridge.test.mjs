@@ -143,8 +143,48 @@ test('extension authenticates startup and finish has structured model-only outpu
 });
 test('native and codemode nested calls use explicit bridge grants', async () => {
   const r = registration({ request: async (_cfg, op) => { if (op === '_engine_tool') throw Error('denied'); } });
-  assert.equal((await r.events.tool_call({toolName:'ungranted',parentToolCallId:'parent'})).block,true);
+  assert.equal((await r.events.tool_call({toolName:'ungranted',toolCallId:'parent/0',parentToolCallId:'parent'})).block,true);
 });
+test('Pi pre-call metadata identity is forwarded before synthetic server execution', async () => {
+  const trace = [];
+  const r = registration({ request: async (_cfg, op, args) => {
+    assert.equal(op, '_engine_tool');
+    assert.deepEqual(args, {name:'extra', invocation_id:'sdk-parent/0'});
+    trace.push('admission');
+    return {allowed:true};
+  } });
+  const result = await r.events.tool_call({type:'tool_call', toolName:'extra',
+    toolCallId:'sdk-parent/0', parentToolCallId:'sdk-parent',
+    input:{invocation_id:'model-forged-id', toolCallId:'model-forged-id'}});
+  if (!result?.block) trace.push('fake-tool-server');
+  assert.deepEqual(trace, ['admission', 'fake-tool-server']);
+  await r.events.tool_call({toolName:'mizu_finish',toolCallId:'bridge-id'});
+  assert.deepEqual(trace, ['admission', 'fake-tool-server']); // Bridge tools bypass native admission.
+});
+
+test('Pi pre-call denial or absent admission blocks before synthetic server execution', async () => {
+  for (const mode of ['denied', 'missing-id', 'not-allowed', 'malformed-response']) {
+    let reached = false, calls = 0;
+    const r = registration({ request: async (_cfg, op, args) => {
+      assert.equal(op, '_engine_tool');
+      calls++;
+      if (mode === 'denied') throw Error('denied by host');
+      if (mode === 'missing-id') {
+        assert.equal(args.invocation_id, undefined);
+        throw Error('invalid invocation id');
+      }
+      return mode === 'not-allowed' ? {allowed:false} : {};
+    } });
+    const result = await r.events.tool_call({type:'tool_call', toolName:'extra',
+      ...(mode === 'missing-id' ? {} : {toolCallId:'sdk-id'}),
+      input:{invocation_id:'model-forged-id', toolCallId:'model-forged-id'}});
+    if (!result?.block) reached = true;
+    assert.equal(calls, 1);
+    assert.equal(result.block, true);
+    assert.equal(reached, false);
+  }
+});
+
 function fakeRuntime() {
   return {
     stream(_model,_context,options) { const result = Promise.resolve({usage:{input:1}}); return {result:()=>result}; },

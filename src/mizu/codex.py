@@ -11,7 +11,7 @@ from .drivers import admit_invocation
 from .engine_channel import Channel
 from .config import role_policy_text
 from .engine_config import effective, connected_servers, mizu_server, session_record, save_session
-from .errors import ModelFailure, ConfigError, ProtocolError
+from .errors import ModelFailure, ConfigError, ProtocolError, Denied
 from .fs import mkdir, write_json
 from .process import environment
 from .pi import credentials
@@ -62,6 +62,10 @@ class CodexDriver:
     def execute(self, context, prompt, *, profile=None):
         profile = profile or context.role.profile
         settings = effective(self.config, context.role, profile)
+        if context.role.engine_tools:
+            # item/started is post-dispatch, not an admission boundary. Do not
+            # even launch app-server (or its extra MCP servers) under this grant.
+            raise ConfigError('Codex engine_tools require an unavailable pre-send adapter')
         path, saved = session_record(context, profile, settings)
         usage = TokenUsage(saved.get('usage') if saved else None)
         identifier = turn = None
@@ -214,21 +218,16 @@ class CodexDriver:
                         server_request(event)
                         continue
                     params = event.get('params', {})
-                    if event.get('method') == 'item/started':
-                        item = params.get('item', {})
-                        if item.get('type') == 'webSearch':
-                            context.handle('_engine_tool', {'name': 'web_search'})
-                        elif item.get('type') == 'collabAgentToolCall':
-                            # Native tools inherit the same thread configuration; the
-                            # notification is evidence, not a request-before hook.
-                            grant = {'spawnAgent': 'spawn_agent', 'sendInput': 'send_input',
-                                     'sendMessage': 'send_message', 'followupTask': 'followup_task',
-                                     'interruptAgent': 'interrupt_agent', 'listAgents': 'list_agents',
-                                     'wait': 'wait_agent', 'closeAgent': 'close_agent',
-                                     'resumeAgent': 'resume_agent'}.get(item.get('tool'))
-                            context.handle('_engine_tool', {'name': grant})
                     if params.get('threadId') != identifier:
                         continue
+                    if event.get('method') == 'item/started':
+                        item = params.get('item', {})
+                        if (item.get('type') in ('webSearch', 'collabAgentToolCall',
+                                                 'commandExecution', 'fileChange', 'dynamicToolCall')
+                                or (item.get('type') == 'mcpToolCall' and item.get('server') != 'mizu')):
+                            # Evidence of a protocol/capability violation, never
+                            # successful admission or a retroactive tool count.
+                            raise Denied('Codex extra tool dispatched without a pre-send boundary')
                     if event.get('method') == 'thread/tokenUsage/updated':
                         usage.observe(params['tokenUsage']['total'])
                     if event.get('method') == 'turn/completed' and params.get('turn', {}).get('id') == turn:

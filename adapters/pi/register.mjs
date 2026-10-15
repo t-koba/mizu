@@ -20,7 +20,15 @@ export function register(pi, Type, config, dependencies = {}) {
   }
   pi.on('tool_call', async event => {
     if (config.tools.some(tool => tool.name === event.toolName)) return;
-    try { await call(config, '_engine_tool', { name: event.toolName }); }
+    // Pi 1.1.0 ToolCallEvent.toolCallId is SDK event metadata (including
+    // parent/n nested ids), separate from event.input. Missing ids fail closed
+    // in Context; never fall back to model-supplied arguments or parent ids.
+    try {
+      const result = await call(config, '_engine_tool', {
+        name: event.toolName, invocation_id: event.toolCallId,
+      });
+      if (result?.allowed !== true) return { block: true, reason: 'Tool admission refused' };
+    }
     catch (error) { return { block: true, reason: String(error) }; }
   });
   pi.on('session_start', async () => {

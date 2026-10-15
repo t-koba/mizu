@@ -322,7 +322,12 @@ Bounds (fixed mechanism): at most 16 parts, each at most 64 KiB, 256 KiB total. 
 Mizu operations; `engine_tools` grants native or external MCP tools such as
 `codemode`, `web_search`, or `mcp__docs__search`. Exposure and automatic approval
 never grant execution authority. Native host command/file tools cannot bypass
-the bridge and publication contract.
+the bridge and publication contract. Codex currently refuses any nonempty
+`engine_tools` role before launching app-server: its current adapter has no
+pre-send admission hook. Native/extra tools (including extra MCP tools) remain
+unavailable there until such an adapter exists; this does not alter operator
+grants. Pi and Claude require a trusted SDK invocation identity at their pre-call
+boundary; see [admission bounds and trust](completion-contracts.md#extra-tool-pre-send-admission).
 
 | Engine | Managed interface | Completion | Admission unit |
 |---|---|---|---|

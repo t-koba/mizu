@@ -700,7 +700,7 @@ class RecoveryProbeTests(SelectionFixture):
     def test_only_finish_and_hard_request_tool_bounds(self):
         action = self.setup_probe()
         def bounds(context):
-            for op, args in (('_engine_tool', {'name': 'read'}), ('read', {'path': 'PROJECT.md'}),
+            for op, args in (('_engine_tool', {'name': 'read', 'invocation_id': 'sdk-read'}), ('read', {'path': 'PROJECT.md'}),
                              ('finish', {'outcome': 'done', 'summary': 'wrong', 'next_profile': 'alternate'})):
                 with self.assertRaises(Denied): context.handle(op, args)
             context.handle('_budget', {'sequence': 2})

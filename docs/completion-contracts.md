@@ -84,8 +84,8 @@ terminal 前の EOF は成功になりません。停止時は公開 interrupt �
 Pi の `_budget` は一意な論理要求 sequence を予約し、`_model_usage` は有限で
 最大 64 KiB の要求ごとの利用量・実モデル証跡を受け取ります（最大 4096 件）。
 後者は seal 後も取得済み事実の記録として受け付けます。
-`_engine_tool` は明示許可と seal / tool 上限を検査します。native 承認・表示・
-ツール検索で権限は増えません。拡張や plugin は運用者が信頼したローカルコードで、
+`_engine_tool` は送信前に明示許可と seal / tool 上限を検査します（下記参照）。
+native 承認・表示・ツール検索で権限は増えません。拡張や plugin は運用者が信頼したローカルコードで、
 adapter と同じ権限範囲です。モデルが選ぶ command / stdio MCP は OCI floor を使います。
 
 Codex の turn と Claude の query の受付は内側の全 HTTP / LLM 要求を計測する
@@ -96,10 +96,52 @@ HTTP 要求数へ換算しません。観測不能な補助請求や料金総額
 アダプター停止後にその名前だけを既存runtimeの削除APIで回収します。回収失敗は
 成功へ変換せず停止します。回収は各runtime操作15秒の上限で、OSやruntime自体の
 厳密な実時間保証ではありません。
-CodexのwebSearch・collabAgentToolCallは公開item/started通知を監視し、roleの
-engine_tools、seal、tool上限に違反する観測でturnを停止します。これは既に始まった
-ネイティブ操作の通知であり、要求前フックや外部副作用の巻戻しではありません。
-子threadのMizu操作は同じbridgeの親role権限を使います。
+Codex の `item/started` は送信後の通知であり、受付には使いません。
+現行 adapter は送信前 hook を持たないため、`engine_tools` が空でない role は
+app-server・追加 MCP の起動前に `ConfigError` で拒否します。native / extra tool は
+送信前 adapter ができるまで利用できません。grant 自体は変更しません。
+無許可の native / extra tool 開始通知は `Denied` として turn を停止し、
+受付成功や tool count として記録しません。通知後の外部副作用を巻き戻す保証はありません。
+
+### Extra-tool pre-send admission
+
+The adapter-only `_engine_tool` bridge request is
+`{"name": "explicitly-granted-name", "invocation_id": "sdk-call-id"}`.
+The id must be a nonempty printable Unicode string (Python `str.isprintable`),
+at most 256 characters: no controls, format characters, or line separators.
+The role must explicitly grant the name; exposure and native permission approval
+are not grants. The id comes from SDK event metadata, never model tool arguments.
+Mizu bridge tools keep their existing admission path and do not use this request.
+
+`Context` keeps at most 4096 successfully admitted `(execution_attempt, id)` entries
+in memory for the run, without eviction or durable replay promises. A repeat with
+the same name returns `{"allowed": true}` without another `tool_count` increment;
+reusing an id for a different name is `Denied`. A new execution attempt scopes the
+id anew but does not reset run spend or the memory bound. A missing/invalid id or
+ungranted name is `Denied` before counting. A full identity table refuses new ids
+with `LimitExceeded` before counting; already-known ids need no new storage.
+The existing stop, deadline, seal, and latched spend/drain checks still run before
+deduplication. Repeats cannot bypass them. Tool-limit exhaustion keeps its existing
+`LimitExceeded` / latched `tools` behavior. Native tools never use wrap-up allowance.
+This is admission idempotency, not a guarantee that a vendor never executes twice.
+
+Claude's sole counting boundary is the SDK `PreToolUse` callback, using its
+`tool_use_id` parameter. `can_use_tool` is a non-counting allowlist check, so either
+callback order charges once. A bridge error or anything other than explicit
+`allowed: true` denies the pre-send hook. Pi forwards `tool_call.toolCallId`;
+missing ids fail closed, with no model-input or parent-id fallback. In the locked
+Pi 1.1.0 contract, `ToolCallEventBase.toolCallId` is separate from `input`;
+`AgentSession._beforeToolCall` copies `toolCall.id` to it, and the agent loop awaits
+`beforeToolCall` and checks `block` before executing. Pi assigns nested calls
+`<parent id>/<n>`. These SDKs and reviewed local extensions are trusted to preserve
+call identity and invoke the boundary before sending. They are not untrusted model
+arguments. No adapter-generated fallback identity is needed for this contract.
+
+Evidence here is offline only: central admission tests, a fake Claude SDK with
+both callbacks and a synthetic server boundary, Pi hook fixtures with conflicting
+model-input ids and pre-execution denial, and a mocked Codex launch boundary plus
+synthetic unexpected notifications. They do not establish real provider or
+installed-adapter behavior, nor rollback or cancellation of already-sent effects.
 
 
 ## Normal turns without a finish seal

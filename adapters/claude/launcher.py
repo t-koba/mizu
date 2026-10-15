@@ -37,27 +37,31 @@ async def main():
     if forbidden & grants:
         raise ValueError('Native host tools bypass the OCI bridge')
 
-    async def gate(name):
-        if name in mizu_tools:
-            # The actual operation always passes through the bridge, including nested calls.
-            return True
-        try:
-            await asyncio.to_thread(forward, bridge, '_engine_tool', {'name': name})
-            return True
-        except Exception:
-            return False
+    def granted(name):
+        # SDK fields are untrusted: malformed names deny without a hash error.
+        # Permission can run as well as PreToolUse: allowlist only, no counting.
+        return isinstance(name, str) and (name in mizu_tools or name in grants)
 
     async def permission(name, inputs, context):
-        if await gate(name):
+        if granted(name):
             return PermissionResultAllow(updated_input=inputs)
-        return PermissionResultDeny(message='Tool has no Mizu grant or the run is sealed', interrupt=True)
+        return PermissionResultDeny(message='Tool has no Mizu grant', interrupt=True)
 
     async def before_tool(inputs, tool_use_id, context):
         name = inputs.get('tool_name', '')
-        if await gate(name):
+        allowed = isinstance(name, str) and name in mizu_tools
+        if isinstance(name, str) and not allowed and name in grants:
+            try:
+                # SDK callback identity, never a field in model-supplied tool_input.
+                result = await asyncio.to_thread(forward, bridge, '_engine_tool',
+                                                {'name': name, 'invocation_id': tool_use_id})
+                allowed = result.get('allowed') is True
+            except Exception:
+                allowed = False
+        if allowed:
             return {'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'allow'}}
         return {'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'deny',
-                                       'permissionDecisionReason': 'Tool has no Mizu grant or run is sealed'}}
+                                       'permissionDecisionReason': 'Tool admission refused'}}
 
     options = dict(cfg['options'])
     # Operator hook declarations remain native settings; the grant hook cannot be replaced.

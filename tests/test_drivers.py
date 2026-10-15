@@ -91,16 +91,16 @@ class EngineConfigTests(Fixture):
     def test_seal_gates_extra_and_nested_operations(self):
         ctx=self.context('consult')
         ctx.role=dataclasses.replace(ctx.role,engine_tools=('tool',))
-        self.assertTrue(ctx.handle('_engine_tool',{'name':'tool'})['allowed'])
-        with self.assertRaises(Denied): ctx.handle('_engine_tool',{'name':'other'})
+        self.assertTrue(ctx.handle('_engine_tool',{'name':'tool','invocation_id':'sdk-tool'})['allowed'])
+        with self.assertRaises(Denied): ctx.handle('_engine_tool',{'name':'other','invocation_id':'sdk-other'})
         ctx.handle('finish',{'outcome':'wait','summary':'done'})
-        with self.assertRaises(Denied): ctx.handle('_engine_tool',{'name':'tool'})
+        with self.assertRaises(Denied): ctx.handle('_engine_tool',{'name':'tool','invocation_id':'sdk-tool'})
         with self.assertRaises(Denied): ctx.handle('_budget',{'sequence':1})
 
 
 class SyntheticEngineTests(Fixture):
-    def execute(self,engine,scenario='normal',persistent=False):
-        ctx=self.context('consult')
+    def execute(self,engine,scenario='normal',persistent=False,context=None):
+        ctx=context or self.context('consult')
         profile=ctx.role.profile
         raw={**self.config.profiles[profile], 'engine':engine, 'provider':'custom', 'options':{},
              'session':'persistent' if persistent else 'ephemeral'}
@@ -111,6 +111,43 @@ class SyntheticEngineTests(Fixture):
         driver=CodexDriver(config) if engine=='codex' else ClaudeDriver(config)
         with unittest.mock.patch.dict(os.environ,{'CODEX_AUTH_FILE':str(self.root/'absent')}):
             return ctx,driver.execute(ctx,'synthetic prompt')
+
+    def test_codex_extra_tool_grants_refuse_before_any_launch_or_admission(self):
+        for grant in ('web_search', 'spawn_agent', 'mcp__synthetic__search'):
+            with self.subTest(grant=grant):
+                ctx = self.context('consult')
+                ctx.role = dataclasses.replace(ctx.role, engine_tools=(grant,))
+                profile = ctx.role.profile
+                config = dataclasses.replace(self.config, profiles={**self.config.profiles, profile:
+                    {**self.config.profiles[profile], 'engine': 'codex', 'options': {}}})
+                ctx.config = config
+                with unittest.mock.patch('mizu.codex.Channel') as app_server, \
+                     unittest.mock.patch('mizu.codex.connected_servers') as tool_servers, \
+                     unittest.mock.patch('mizu.codex.Bridge') as bridge:
+                    with self.assertRaisesRegex(ConfigError, 'pre-send'):
+                        CodexDriver(config).execute(ctx, 'synthetic prompt')
+                app_server.assert_not_called()
+                tool_servers.assert_not_called()
+                bridge.assert_not_called()
+                self.assertEqual(ctx.request_count, 0)
+                self.assertEqual(ctx.tool_count, 0)
+                self.assertEqual(ctx.engine_tool_invocations, {})
+                self.assertEqual(ctx.role.engine_tools, (grant,))
+
+    def test_unexpected_codex_tool_notifications_are_not_admission(self):
+        for scenario in ('native-before-finish', 'external-before-finish', 'collab-before-finish'):
+            with self.subTest(scenario=scenario):
+                ctx = self.context('consult')
+                with self.assertRaisesRegex(Denied, 'pre-send boundary'):
+                    self.execute('codex', scenario, context=ctx)
+                self.assertEqual(ctx.tool_count, 0)
+                self.assertEqual(ctx.engine_tool_invocations, {})
+                self.assertIsNone(ctx.finished)
+
+    def test_unrelated_codex_thread_tool_notification_does_not_abort_current_turn(self):
+        ctx = self.context('consult')
+        _evidence = self.execute('codex', 'other-thread-native', context=ctx)
+        self.assertEqual(ctx.engine_tool_invocations, {})
 
     def test_both_drivers_return_normal_unsealed_terminal_turns(self):
         for engine,unit in (('codex','turn'),('claude','query')):

@@ -94,8 +94,13 @@ acceptance tests operator-owned or review the test diff before `done`; acceptanc
 All engines expose only the capability-filtered `mizu_*` tools; model-driven
 commands execute in the container with the operator-selected network posture. Pi additionally
 starts with no built-in tools at all. Codex fixes `shell_tool=false` and marks its `mizu`
-MCP server `required`, while sandbox mode (`read-only`, `workspace-write`), web search,
-and subagents are profile-selectable (defaulting to read-only, disabled, and false). Claude
+MCP server `required` and accepts only `read-only` sandbox mode. Native/extra tools,
+including web search, subagents, and extra MCP tools, are unavailable in the current
+Codex adapter: a nonempty `engine_tools` grant refuses before app-server launch
+because there is no pre-send hook. Unexpected extra-tool start notifications stop
+the turn, never count as admission, and cannot undo already-sent effects. Pi and
+Claude admit extra tools once per SDK invocation identity at their pre-call hooks
+(see [the trust and bounds contract](completion-contracts.md#extra-tool-pre-send-admission)). Claude
 disables built-in tools with `--tools ""`, uses strict per-run MCP configuration,
 and autoapproves only capability-granted MCP tools. It never uses skip-permissions.
 Residual risk: vendor CLIs can have managed settings and implementation-specific
