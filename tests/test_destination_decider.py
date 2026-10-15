@@ -262,7 +262,9 @@ class DeciderCacheBypassTests(Fixture):
         self.assertNotIn("cached", record)
         self.assertEqual(record["text"], "LIVE-CONTENT")
         self.assertIn("fetch_policy_digest", record)
-        self.assertEqual(read_json(cache_file), record)
+        cached = read_json(cache_file)
+        self.assertEqual({k: v for k, v in cached.items() if k != "id"},
+                         {k: v for k, v in record.items() if k not in ("id", "receipt_id", "raw_available")})
 
     def test_previous_receipt_schema_cache_misses(self):
         import time

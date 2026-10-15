@@ -18,7 +18,7 @@ from pathlib import Path
 
 from . import __version__
 from .errors import Denied
-from .fs import canonical, digest, now, read_json, write_json
+from .fs import DIGEST, atomic_write, canonical, digest, now, read_json, safe_read, write_json
 from .process import (
     ADAPTER_DIAGNOSTIC_BYTES_DEFAULT, adapter_failure_diagnostic, run,
 )
@@ -72,6 +72,16 @@ class Text(HTMLParser):
     def handle_data(self, data):
         if not self.skip:
             self.parts.append(data)
+
+
+def decode_fetch(raw: bytes, media: str) -> str:
+    """Use identical UTF-8 replacement and HTML normalization on first/replay reads."""
+    text = raw.decode("utf-8", "replace")
+    if media == "text/html":
+        parser = Text()
+        parser.feed(text)
+        text = "".join(parser.parts)
+    return text
 
 
 def match_host(host: str, entries: list[str]) -> str | None:
@@ -231,6 +241,87 @@ class Web:
     def __init__(self, settings: dict, cache: Path, receipts: Path, role: str = ""):
         self.settings, self.cache, self.receipts, self.role = settings, cache, receipts, role
 
+    def _scope(self) -> str:
+        # Bind content-addressed records to this evidence area, not a shared cache.
+        return digest(str(self.receipts.resolve()).encode())
+
+    def retain(self, kind: str, result: dict, raw: bytes | None = None) -> dict:
+        """Publish one immutable, run-scoped result; raw fetches store no text."""
+        result = {k: v for k, v in result.items() if k not in ("id", "receipt_id", "result_id")}
+        stored = dict(result)
+        if kind == "fetch":
+            result["raw_available"] = stored["raw_available"] = raw is not None
+        record = {"kind": kind, "scope": self._scope(), "result": stored}
+        if raw is not None:
+            if kind != "fetch" or len(raw) > self.settings["max_bytes"]:
+                raise Denied("Invalid retained raw body")
+            stored.pop("text", None)
+            record["body"] = {"representation": "raw-response-body",
+                              "byte_length": len(raw), "sha256": digest(raw)}
+        identity = digest(canonical(record))
+        if kind == "search":
+            target = self.receipts / f"search-{identity}.json"
+        else:
+            target = self.receipts / identity / "receipt.json"
+        if raw is not None:
+            payload_dir = target.parent / "payload"
+            atomic_write(payload_dir / "body", raw, exclusive=True, mode=0o444)
+            # The enclosing run directory remains private; expose only this
+            # body-only mount root to the non-root experiment user.
+            payload_dir.chmod(0o755)
+            (payload_dir / "body").chmod(0o444)
+        write_json(target, record, exclusive=True)
+        if kind == "search":
+            return {**result, "result_id": identity}
+        return {**result, "id": identity, "receipt_id": identity}
+
+    def _load(self, identity: str, kind: str) -> dict:
+        if not isinstance(identity, str) or not DIGEST.fullmatch(identity):
+            raise Denied("Invalid continuation ID")
+        name = f"search-{identity}.json" if kind == "search" else f"{identity}/receipt.json"
+        # Match the existing worker body/metadata envelopes, not unbounded JSON.
+        maximum = (2 * 1024 * 1024 + 1024 if kind == "search" else
+                   6 * self.settings["max_bytes"] + 4 * 1024 * 1024)
+        try:
+            record = json.loads(safe_read(self.receipts, name, maximum))
+            if (not isinstance(record, dict) or digest(canonical(record)) != identity
+                    or record.get("kind") != kind or record.get("scope") != self._scope()
+                    or not isinstance(record.get("result"), dict)):
+                raise ValueError("identity, scope or kind mismatch")
+        except (OSError, ValueError, TypeError) as exc:
+            raise Denied("Invalid or corrupt continuation record") from exc
+        return record
+
+    def _body(self, identity: str, record: dict) -> bytes:
+        metadata = record.get("body")
+        if not isinstance(metadata, dict):
+            raise Denied("Fetch receipt has no retained raw body")
+        if (record["result"].get("raw_available") is not True
+                or metadata.get("representation") != "raw-response-body"):
+            raise Denied("Fetch receipt has no retained raw body")
+        raw = safe_read(self.receipts, f"{identity}/payload/body", self.settings["max_bytes"])
+        if (type(metadata.get("byte_length")) is not int
+                or len(raw) != metadata["byte_length"] or digest(raw) != metadata.get("sha256")
+                or metadata.get("sha256") != record["result"].get("sha256")):
+            raise Denied("Retained raw body length or SHA-256 mismatch")
+        return raw
+
+    def raw_source(self, identity: str) -> tuple[Path, dict]:
+        """Verify exact bytes immediately before an experiment; never retrieve."""
+        record = self._load(identity, "fetch")
+        self._body(identity, record)
+        return self.receipts / identity / "payload", {"receipt_id": identity, **record["body"]}
+
+    def replay(self, identity: str, kind: str) -> dict:
+        record = self._load(identity, kind)
+        result = dict(record["result"])
+        if "body" in record:
+            raw = self._body(identity, record)
+            result["text"] = decode_fetch(raw, result.get("content_type", ""))
+        if kind == "search":
+            return {**result, "result_id": identity}
+        return {**result, "id": identity, "receipt_id": identity}
+
     def check_url(self, url: str, capability: str, hop: int = 0, method: str = "") -> tuple[str, str]:
         """Gate one destination: static lists or the configured decider.
 
@@ -283,8 +374,7 @@ class Web:
             # Legacy or prior-schema receipts miss; hits still re-check URLs.
             self.check_url(cached["url"], "fetch")
             self.check_url(cached["final_url"], "fetch")
-            write_json(self.receipts / f"{cached['id']}.json", cached, exclusive=True)
-            return {**cached, "cached": True}
+            return self.retain("fetch", {**cached, "cached": True})
         for hop in range(4):
             host, path = self.check_url(url, "fetch", hop)
             intranet = bool(self.settings.get("intranet", False))
@@ -310,11 +400,7 @@ class Web:
                 if media and not (media.startswith("text/") or media in (
                         "application/xml", "application/json", "application/atom+xml", "application/rss+xml")):
                     raise Denied("Only text, JSON and XML documents are supported")
-                text = raw.decode("utf-8", "replace")
-                if media == "text/html":
-                    parser = Text()
-                    parser.feed(text)
-                    text = "".join(parser.parts)
+                text = decode_fetch(raw, media)
                 receipt = {"id": digest((original + "\n" + digest(raw) + "\n" + str(time.time_ns())).encode()),
                            "url": original, "final_url": url, "retrieved_at": now(),
                            "retrieved_epoch": time.time(), "sha256": digest(raw),
@@ -322,8 +408,7 @@ class Web:
                 if not decider:
                     receipt["fetch_policy_digest"] = policy_digest
                     write_json(cache_file, receipt)
-                write_json(self.receipts / f"{receipt['id']}.json", receipt, exclusive=True)
-                return receipt
+                return self.retain("fetch", receipt, raw)
             finally:
                 connection.close()
         raise Denied("Too many redirects")
@@ -427,8 +512,7 @@ class Web:
                        "media": media, "retrieved_at": now(),
                        "retrieved_epoch": time.time(), "sha256": digest(raw),
                        "text": text, "trust": "external-untrusted"}
-            write_json(self.receipts / f"{receipt['id']}.json", receipt, exclusive=True)
-            return receipt
+            return self.retain("probe", receipt)
         finally:
             connection.close()
 

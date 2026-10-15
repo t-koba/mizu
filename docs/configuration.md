@@ -463,7 +463,65 @@ URL fragments are stripped client-side and never sent. Redirects re-validate hos
 
 Transport floor (fixed mechanism, not policy): every `fetch`/`probe`/feed retrieval is HTTPS-only on port 443 with no URL credentials and DNS pinning, even when `destination_command` decides the destination or `hosts` widens to `*`. Which hosts, feeds, adapters, deciders, intranet reach, timeouts, cache windows and byte caps apply is operator policy above; how bytes move (encrypted TLS, standard port, no creds in URLs, pinned DNS, bounded receipts) stays in mechanism so cleartext or non-standard-port retrieval cannot be enabled by configuration. Credentials in URLs stay refused.
 
-`probe` reuses `[web] timeout_seconds`/`max_bytes`/`intranet` with its own `probe_hosts`/`probe_methods` allowlists. It sends one request (caller headers at most 16, names 128, values 4096; credential/framing headers refused) with a bounded body (at most `max_bytes`, 32 KiB tool-input cap), follows no redirects (3xx returns as observation), never caches, and records a `sources/<id>.json` receipt (`status`, bounded headers, `sha256`, `trust: external-untrusted`). Non-2xx statuses return as observation, never as failure.
+`probe` reuses `[web] timeout_seconds`/`max_bytes`/`intranet` with its own `probe_hosts`/`probe_methods` allowlists. It sends one request (caller headers at most 16, names 128, values 4096; credential/framing headers refused) with a bounded body (at most `max_bytes`, 32 KiB tool-input cap), follows no redirects (3xx returns as observation), never caches, and records a `sources/<id>/receipt.json` receipt (`status`, bounded headers, `sha256`, `trust: external-untrusted`). Non-2xx statuses return as observation, never as failure.
+
+### Immutable Web continuation and experiment input
+
+A new `fetch` takes `url`; a new `probe` takes `url` and `method` (and optional
+`headers`/`body`); a new `search` takes `query`. Each invokes the existing bounded
+worker once, with the existing transport, redirects/feed behavior, media checks,
+request/response limits and failure classifications. There is no automatic retry.
+Fetch/probe return a 64-lowercase-hex `receipt_id` (also `id`); search returns a
+64-lowercase-hex `result_id`. To continue **in the same run**, omit the original
+request fields and pass only the ID and optional `offset`/`limit`, for example:
+
+```json
+{"receipt_id": "<receipt_id from fetch or probe>", "offset": 8192, "limit": 8192}
+{"result_id": "<result_id from search>", "offset": 100, "limit": 100}
+```
+
+Continuation reads only immutable run evidence: it does not call the worker,
+recheck destinations, consult a cache, send another POST, fetch again or rerun
+search. Mixed ID/request fields, missing/malformed IDs, wrong-kind, corrupt and
+other-run records fail explicitly, never falling back to a request. Supplying
+URL/method again is an explicit **new** probe, not continuation. Text offsets
+remain character offsets (limit 1–8192, default 8192); search uses its existing
+row paging (limit 1–1000, default 1000) and bounded previews. Results remain
+`external-untrusted`. Normal tool cancellation/deadlines still apply; local
+continuation uses bounded safe reads with no retry or subprocess.
+
+Fetch/probe records live at `sources/<receipt_id>/receipt.json`; search records
+at `sources/search-<result_id>.json`. IDs bind canonical record content, kind and
+run scope; replay verifies these with bounded, non-link-following reads. A live
+fetch retains the exact response bytes in the receipt's body-only `payload`
+directory as `body` with representation `raw-response-body`, under
+`[web] max_bytes`, binding byte length and SHA-256. It does not also store normalized
+text in the run receipt: continuation decodes UTF-8 with replacement and applies
+the same HTML text extraction as the initial response. The existing shared cache
+remains text-only; a cache-hit receipt is pageable but has `raw_available: false`
+and cannot supply experiment bytes. No raw bytes are reconstructed from text and
+there is no global raw-body cache. Probe/search replay their first stored result.
+
+`experiment` accepts optional `source_receipt` naming a same-run **fetch** receipt
+with retained raw bytes. The harness verifies receipt identity and the actual
+body's length and SHA-256 immediately before launch, then bind-mounts the
+body-only payload directory read-only at `/work/input`; the bytes are
+`/work/input/body`. Example input:
+
+```json
+{"script": "wc -c /work/input/body", "source_receipt": "<receipt_id from live fetch>"}
+```
+
+No source path or arbitrary mount is accepted. Missing, corrupt, other-run,
+probe/search and raw-unavailable receipts are refused without refetch or
+substitution. There is no implicit source execution, archive extraction or network
+operation. The experiment's script is still an explicit sandbox command; source
+content stays `external-untrusted`. Command evidence records only source receipt
+ID, representation, byte length and digest (plus the trust label), not raw
+content or host source paths. `/workspace` remains read-only and `/work` disposable; `[sandbox] network`
+is unchanged (default `none`). Offline fake-transport and argv tests establish
+replay/integrity and constructed mount flags, not live-provider behavior or actual
+OCI isolation.
 
 ## Offline materialization
 

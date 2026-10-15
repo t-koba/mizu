@@ -23,8 +23,9 @@ from pathlib import Path
 from . import platform as _platform
 from .config import Config
 from .errors import ConfigError, Denied
-from .fs import SCRIPT_MAX, digest, mkdir, now, write_json
+from .fs import DIGEST, SCRIPT_MAX, digest, mkdir, now, write_json
 from .process import Result, environment, run
+from .web import Web
 
 #: Single-mode cgroup parents already prepared in this process.
 _PREPARED_SINGLE: set[str] = set()
@@ -314,7 +315,7 @@ class Sandbox:
         return command
 
     def argv(self, name: str, workspace: Path, script: str, *, writable: bool,
-             experiment: bool = False) -> list[str]:
+             experiment: bool = False, source_receipt: str | None = None) -> list[str]:
         """Build the container argv from fixed floors plus policy selections.
 
         Schema/bounds: fixed floor (read-only root, cap-drop, no-new-privs,
@@ -325,6 +326,9 @@ class Sandbox:
         execute(). Failure: ConfigError for missing image/paths.
         """
         cfg = self.config.sandbox
+        if source_receipt is not None and (not experiment or not isinstance(source_receipt, str)
+                                           or not DIGEST.fullmatch(source_receipt)):
+            raise Denied("Experiment source requires a valid fetch receipt ID")
         if not cfg.image:
             raise ConfigError("Build and pin sandbox.image before running commands")
         source = str(workspace.resolve())
@@ -349,18 +353,33 @@ class Sandbox:
         if experiment:
             command.extend(["--tmpfs", f"/work:rw,nosuid,nodev,size={cfg.temporary_mb}m,mode=1777",
                             "--workdir", "/work"])
+            if source_receipt is not None:
+                source_payload = self.run_dir / "sources" / source_receipt / "payload"
+                self._validate_mount_paths(str(source_payload), rejected)
+                command += bind_args(str(source_payload), "/work/input", readonly=True,
+                                     selinux=selinux, linux=linux)
         else:
             command.extend(["--workdir", "/workspace"])
         command.extend(["--entrypoint", cfg.entrypoint, cfg.image, "-c", script])
         return command
 
     def execute(self, workspace: Path, script: str, *, writable: bool,
-                experiment: bool = False, timeout: int | None = None) -> dict:
+                experiment: bool = False, timeout: int | None = None,
+                source_receipt: str | None = None) -> dict:
         if not isinstance(script, str) or not script.strip() or len(script.encode()) > SCRIPT_MAX:
             raise Denied("Command must be nonempty and at most 64 KiB")
+        if source_receipt is not None and not experiment:
+            raise Denied("source_receipt is only available to experiments")
         # Clamp an explicit timeout to the configured command deadline.
         limit = self.config.limits.command_seconds
         timeout = limit if timeout is None else min(timeout, limit)
+        web = None
+        source_metadata = None
+        if source_receipt is not None:
+            # Refuse invalid evidence before any container-runtime call. Recheck
+            # the bytes once more immediately before launch below.
+            web = Web(self.config.web, self.config.data / "web-cache", self.run_dir / "sources")
+            _, source_metadata = web.raw_source(source_receipt)
         operation = uuid.uuid4().hex
         name = f"mizu-{self.label}-{operation[:12]}"
         env = runtime_env(self.config)
@@ -375,7 +394,18 @@ class Sandbox:
         write_json(self.run_dir / "commands" / f"{operation}.started.json", record)
         try:
             assert_no_checkpoint(self.config, env)
-            result = run(self.argv(name, workspace, script, writable=writable, experiment=experiment),
+            argv = self.argv(name, workspace, script, writable=writable,
+                             experiment=experiment, source_receipt=source_receipt)
+            if source_receipt is not None:
+                # This only reads run-local evidence. No URL, model path, cache,
+                # adapter, extraction or execution of source content is involved.
+                _, metadata = web.raw_source(source_receipt)
+                if metadata != source_metadata:
+                    raise Denied("Experiment source changed before launch")
+                record["source"] = metadata
+                record["source_trust"] = "external-untrusted"
+                write_json(self.run_dir / "commands" / f"{operation}.started.json", record)
+            result = run(argv,
                          timeout=timeout, maximum=self.config.limits.output_bytes, cancel=self.cancel, env=env)
             record.update(dataclasses.asdict(result))
         except OSError as exc:

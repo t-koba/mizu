@@ -52,8 +52,10 @@ class WebWorkerTests(Fixture):
         run_dir = self.root / "run"
         # No parent mocks: bounded starts mizu.web_worker through process.run.
         result = bounded(config, run_dir, "fetch", receipt["url"], lambda: False)
-        self.assertEqual(result, {**receipt, "cached": True})
-        self.assertEqual(read_json(run_dir / "sources" / f"{receipt['id']}.json"), receipt)
+        self.assertEqual(result, {**receipt, "id": result["receipt_id"],
+                                  "receipt_id": result["receipt_id"], "cached": True, "raw_available": False})
+        web = Web(config.web, config.data / "web-cache", run_dir / "sources")
+        self.assertEqual(web.replay(result["receipt_id"], "fetch"), result)
 
     def test_default_plain_fetch_round_trips(self):
         self.assertEqual(self.config.web["max_bytes"], 524288)
@@ -204,8 +206,10 @@ class FetchMediaTests(Fixture):
         self.assertEqual(record["content_type"], media[:RESPONSE_MEDIA_MAX])
         self.assertEqual(record["text"], raw.decode("utf-8"))
         response.read.assert_called_once_with(config.web["max_bytes"] + 1)
-        self.assertEqual(read_json(web.receipts / f"{record['id']}.json"), record)
-        self.assertEqual(read_json(web.cache / f"{digest(record['url'].encode())}.json"), record)
+        self.assertEqual(web.replay(record["receipt_id"], "fetch"), record)
+        cached = read_json(web.cache / f"{digest(record['url'].encode())}.json")
+        self.assertEqual({k: v for k, v in cached.items() if k != "id"},
+                         {k: v for k, v in record.items() if k not in ("id", "receipt_id", "raw_available")})
 
 
 if __name__ == "__main__":

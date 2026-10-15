@@ -69,7 +69,17 @@ indexing with lexical matching. Empty feeds and empty adapter mean no discovery.
 `fetch` returns a receipt identifying original URL, final URL, retrieval time,
 content hash, type and extracted text. Reports should distinguish what the
 source says from what a local experiment measured. Repeated identical content
-fetched at different times has separate receipts. HTML script/style content is
+fetched live at different times has separate receipts. Continue fetch/probe with
+`receipt_id` plus `offset`/`limit` only, or search with `result_id` plus
+`offset`/`limit` only: same-run continuation reads verified immutable evidence,
+never a second retrieval/probe/search. ID and original request fields cannot be
+mixed. Live fetch receipts retain exact bytes; text-only cache hits remain
+pageable but are not experiment inputs. Optional experiment `source_receipt`
+mounts verified raw fetch bytes read-only at `/work/input/body`, retaining the
+`external-untrusted` label and existing sandbox network policy. It accepts no
+source path and performs no refetch, extraction or implicit source execution.
+See [configuration](configuration.md#immutable-web-continuation-and-experiment-input)
+for bounds, evidence and failure behavior. HTML script/style content is
 removed; PDFs and image-only pages are not interpreted. Add a separately isolated
 PDF extractor only with an explicit grant and tested resource bounds.
 

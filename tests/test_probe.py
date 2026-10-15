@@ -134,7 +134,7 @@ class ProbeTests(Fixture):
         self.assertEqual(headers.get("X-Test"), "1")
         self.assertNotIn("Authorization", headers)
         # Receipt persisted
-        receipts = list((Path(self.temporary.name) / "receipts").glob("*.json"))
+        receipts = list((Path(self.temporary.name) / "receipts").glob("*/receipt.json"))
         self.assertEqual(len(receipts), 1)
 
     def test_no_redirect_follow_and_no_cache(self):
@@ -160,8 +160,12 @@ class ProbeTests(Fixture):
         self.assertIn("probe", CAPABILITIES)
         self.assertIn("probe", DEFINITIONS)
         validate({"url": "https://probe.example/x", "method": "GET"}, DEFINITIONS["probe"][1])
-        with self.assertRaises(Denied):
-            validate({"url": "https://probe.example/x"}, DEFINITIONS["probe"][1])
+        validate({"receipt_id": "a" * 64}, DEFINITIONS["probe"][1])
+        # Conditional request requirements are enforced before dispatch.
+        with patch("mizu.runtime.bounded") as bounded:
+            with self.assertRaises(Denied):
+                self.context()._op_probe({"url": "https://probe.example/x"})
+            bounded.assert_not_called()
 
     def test_runtime_dispatch_pages_body(self):
         import dataclasses

@@ -580,8 +580,9 @@ class Context:
             raise Denied("This role has no workspace")
         if op == "exec" and self.role.workspace == "write":
             self.verification = None
+        source = {"source_receipt": args["source_receipt"]} if "source_receipt" in args else {}
         result = self.sandbox.execute(self.workspace, args["script"],
-                                      writable=self.role.workspace == "write", experiment=op == "experiment")
+                                      writable=self.role.workspace == "write", experiment=op == "experiment", **source)
         if op == "experiment":
             science = {key: args.get(key, "") for key in ("question", "comparison", "measure")}
             write_json(self.run_dir / "experiments" / f"{result['id']}.json", {**science, "command": result})
@@ -617,8 +618,15 @@ class Context:
             for command in self.verification['commands']], 'evidence':'verification.json'}
 
     def _op_fetch(self, args: dict) -> dict:
-        record = bounded(self.config, self.run_dir, "fetch", args["url"], self.tools_cancelled,
-                         self.role.name)
+        if "receipt_id" in args:
+            if "url" in args:
+                raise Denied("Supply receipt_id or url, not both")
+            record = self.web.replay(args["receipt_id"], "fetch")
+        else:
+            if "url" not in args:
+                raise Denied("Fetch requires url or receipt_id")
+            record = bounded(self.config, self.run_dir, "fetch", args["url"], self.tools_cancelled,
+                             self.role.name)
         text = record.get('text','')
         offset,limit = args.get('offset',0),args.get('limit',8192)
         end = min(len(text),offset+limit)
@@ -626,10 +634,17 @@ class Context:
                 'next_offset':end if end<len(text) else None,'truncated':end<len(text)}
 
     def _op_probe(self, args: dict) -> dict:
-        payload = {"url": args["url"], "method": args["method"],
-                   "headers": args.get("headers", []), "body": args.get("body", "")}
-        record = bounded(self.config, self.run_dir, "probe", payload, self.tools_cancelled,
-                         self.role.name)
+        if "receipt_id" in args:
+            if any(key in args for key in ("url", "method", "headers", "body")):
+                raise Denied("Supply receipt_id or a new probe request, not both")
+            record = self.web.replay(args["receipt_id"], "probe")
+        else:
+            if "url" not in args or "method" not in args:
+                raise Denied("Probe requires url and method, or receipt_id")
+            payload = {"url": args["url"], "method": args["method"],
+                       "headers": args.get("headers", []), "body": args.get("body", "")}
+            record = bounded(self.config, self.run_dir, "probe", payload, self.tools_cancelled,
+                             self.role.name)
         text = record.get('text','')
         offset,limit = args.get('offset',0),args.get('limit',8192)
         end = min(len(text),offset+limit)
@@ -637,10 +652,17 @@ class Context:
                 'next_offset':end if end<len(text) else None,'truncated':end<len(text)}
 
     def _op_search(self, args: dict) -> dict:
-        record = bounded(self.config, self.run_dir, "search", args["query"], self.tools_cancelled,
-                         self.role.name)
-        evidence_id=digest(canonical(record))
-        write_json(self.run_dir/'sources'/('search-'+evidence_id+'.json'),record,exclusive=True)
+        if "result_id" in args:
+            if "query" in args:
+                raise Denied("Supply result_id or query, not both")
+            record = self.web.replay(args["result_id"], "search")
+        else:
+            if "query" not in args:
+                raise Denied("Search requires query or result_id")
+            record = bounded(self.config, self.run_dir, "search", args["query"], self.tools_cancelled,
+                             self.role.name)
+            record = self.web.retain("search", record)
+        evidence_id = record["result_id"]
         rows=[]
         for item in record.get('results',[]):
             row={}
@@ -653,6 +675,7 @@ class Context:
             rows.append(row)
         response=page(rows,args.get('offset',0),args.get('limit',1000),maximum=PREVIEW_BYTES*2)
         response['results']=response.pop('items')
+        response['result_id'] = evidence_id
         response['evidence']='sources/search-'+evidence_id+'.json'
         for key in ('scope','trust','feeds_total','feeds_consulted'):
             if key in record:response[key]=record[key]
