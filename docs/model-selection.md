@@ -439,9 +439,12 @@ A matched error action saves its evidence and blocks the failed profile or
 group; the same dispatch then continues on the next eligible candidate, one
 attempt each bounded by the candidate count, and never replays the blocked
 profile within the run. Only when no candidate remains eligible does the unit
-return `status = "deferred"`. Neither the fallback attempts nor the deferral
-increment the ordinary consecutive failure brake, which counts dispatches; a
-completed fallback resets it. An unmatched failure follows the existing health/pause behavior.
+return `status = "deferred"`. Fallback attempts remain within one dispatch and
+do not each advance the brake. The ordinary brake advances once for a terminal
+failure dispatch: a matched terminal deferral does not count by default, but
+setting its matched `on_error` rule's `counts_as_failure` to `true` opts it into
+that single increment. A completed fallback resets the consecutive count. An
+unmatched failure follows the existing health/pause behavior.
 `status = "waiting"` means no main-model invocation was made. Both results
 provide `next_evaluation_at`. The daemon uses interruptible waits and rechecks
 at least at its configured idle cadence so external updates can be noticed.
