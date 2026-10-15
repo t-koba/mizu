@@ -15,6 +15,7 @@ import io
 import json
 import os
 import shutil
+import stat
 import tarfile
 import tempfile
 import time
@@ -23,15 +24,19 @@ import uuid
 from pathlib import Path
 
 from .config import keys, strings
-from .errors import Denied
-from .fs import DIGEST, atomic_write, identifier, lock, mkdir, now, read_json, sync_dir, write_json, relative_parts
+from .errors import Denied, LimitExceeded
+from .fs import (DIGEST, PREVIEW_BYTES, atomic_write, identifier, lock, mkdir, now,
+                 read_json, safe_read, sync_dir, write_json, relative_parts)
 from .project import Project, check_verify, read_goal
 from .snapshot import open_store
 
 #: Project members covered by backup/restore (plus backup.json on restore).
-MEMBERS = ("project.toml", "PROJECT.md", "control.json", "current.json", "snapshots", "objects",
-           "inbox", "insight-ids", "insight-revisions", "histories", ".ingest", "decisions", "decision-history", "decision-cursors", "waits", "runs", "sessions", "artifacts", "health", "observed",
-           "maintenance", "spool", "selection")
+MEMBERS = (
+    "project.toml", "PROJECT.md", "control.json", "current.json", "snapshots", "objects",
+    "inbox", "insight-ids", "insight-revisions", "histories", ".ingest", "decisions",
+    "decision-history", "decision-cursors", "work-items", "waits", "runs", "sessions",
+    "artifacts", "health", "observed", "maintenance", "spool", "selection",
+)
 
 
 @contextlib.contextmanager
@@ -357,7 +362,7 @@ def prune(project: Project, *, apply: bool = False, keep_artifacts: int = DEFAUL
     Only top-level run-dir logs and expired
     web-cache entries are candidates; result/error/consultation/
     started/selection/admission/usage records, snapshots, objects, sessions,
-    decisions, and proposals are never candidates.
+    decisions, proposals, and work-item histories are never candidates.
     Trust: operator-invoked maintenance under quiescence (paused + locks);
     paths are local recorded state, never model input. The web cache is
     shared under ``data_dir``; the invoking project's TTL decides expiry and
@@ -464,7 +469,7 @@ def prune(project: Project, *, apply: bool = False, keep_artifacts: int = DEFAUL
             removed["audit"] = audit.relative_to(project.root).as_posix()
     return {"applied": apply, **removed,
             "retained": "All result/error/consultation/started/selection/usage records, snapshots, "
-                        "content objects, sessions, decisions, proposals, and insight revisions. "
+                        "content objects, sessions, decisions, proposals, insight revisions, and work-item histories. "
                         "Artifact documents beyond the kept count, "
                         "bulky engine logs beyond operator retention, and "
                         "web-cache entries expired past cache_seconds are disposable projections; "
@@ -652,7 +657,43 @@ def _audit_collect(project: Project) -> dict:
                 insight_ids.add(digest_id)
         except OSError:
             continue
-    referenced_ids = set(history_ids) | set(run_ids) | set(artifact_ids) | set(insight_ids)
+    work_item_ids: set[str] = set()
+    work_item_events_skipped = 0
+    work_items_dir = root / "work-items"
+    try:
+        try:
+            work_items_info = work_items_dir.lstat()
+        except FileNotFoundError:
+            work_items_info = None
+        if work_items_info is not None:
+            if (stat.S_ISLNK(work_items_info.st_mode)
+                    or not stat.S_ISDIR(work_items_info.st_mode)):
+                work_item_events_skipped += 1
+            else:
+                with os.scandir(work_items_dir) as item_directories:
+                    for item_entry in item_directories:
+                        if (item_entry.is_symlink()
+                                or not item_entry.is_dir(follow_symlinks=False)):
+                            work_item_events_skipped += 1
+                            continue
+                        try:
+                            # Immutable append events make the internal read
+                            # stable without taking the writer lock; reclaim
+                            # calls this again under project quiescence.
+                            current = project.work_items._get(item_entry.name)
+                        except (Denied, LimitExceeded, OSError, ValueError):
+                            work_item_events_skipped += 1
+                            continue
+                        if current.get("status") == "done":
+                            digest_id = _audit_digest(current.get("snapshot_id"))
+                            if digest_id is None:
+                                work_item_events_skipped += 1
+                            else:
+                                work_item_ids.add(digest_id)
+    except OSError:
+        work_item_events_skipped += 1
+    referenced_ids = (set(history_ids) | set(run_ids) | set(artifact_ids)
+                      | set(insight_ids) | set(work_item_ids))
     unreferenced = sorted(sid for sid in manifests if sid not in referenced_ids)
     unreferenced_bytes = 0
     for sid in unreferenced:
@@ -696,6 +737,8 @@ def _audit_collect(project: Project) -> dict:
         "run_ids": run_ids,
         "artifact_ids": artifact_ids,
         "insight_ids": insight_ids,
+        "work_item_ids": work_item_ids,
+        "work_item_events_skipped": work_item_events_skipped,
         "generations": generations,
         "histories_bytes": histories_bytes,
         "unreferenced": unreferenced,
@@ -719,7 +762,8 @@ def audit(project: Project) -> dict:
     objects: {count, bytes, referenced_count, referenced_bytes,
     orphan_count, orphan_bytes, orphan_sample, orphan_truncated, skipped},
     references: {history_snapshots, run_snapshots, artifact_snapshots,
-    insight_snapshots}, preview_only: True}``. Counts and byte totals are
+    insight_snapshots, work_item_snapshots}, work_item_events_skipped,
+    preview_only: True}``. Counts and byte totals are
     exact; sample lists hold at most ``_AUDIT_SAMPLE`` sorted IDs with a
     truncation flag.
     Bounds: reference JSON files above ``_AUDIT_JSON_BYTES`` are skipped
@@ -784,9 +828,11 @@ def audit(project: Project) -> dict:
             "run_snapshots": len(collected["run_ids"]),
             "artifact_snapshots": len(collected["artifact_ids"]),
             "insight_snapshots": len(collected["insight_ids"]),
+            "work_item_snapshots": len(collected["work_item_ids"]),
         },
+        "work_item_events_skipped": collected["work_item_events_skipped"],
         "preview_only": True,
-        "retained": "All manifests, history generations, objects, runs, artifacts, sessions, decisions, proposals, and insight revisions are retained; this preview removes nothing. "
+        "retained": "All manifests, history generations, objects, runs, artifacts, sessions, decisions, proposals, insight revisions, and work-item histories are retained; this preview removes nothing. "
                     "Web-cache entries expired past cache_seconds are disposable (see sessions/web_cache); "
                     "sessions are durable audit evidence and are accounted, never reclaimed.",
     }
@@ -796,24 +842,27 @@ def reclaim(project: Project, *, apply: bool = False) -> dict:
     """List (or apply) removal of unreferenced manifests and orphan objects.
 
     Schema: ``{applied, snapshots: [relative manifest paths], objects:
-    [relative object paths], unreferenced_bytes, orphan_bytes, audit?}``.
+    [relative object paths], unreferenced_bytes, orphan_bytes,
+    work_item_events_skipped, audit?}``.
     The candidate sets are exactly what ``audit()`` reports in full: manifests
-    outside every durable reference (live/history/run/artifact/insight) and
+    outside every durable reference (live/history/run/artifact/insight/work-item) and
     objects referenced by no manifest on disk. Full ID lists are returned
     (sorted); use ``audit()`` for the bounded display samples.
     Bounds: same bounded reads, digest checks, and symlink skipping as
     ``audit()``; history generations are never candidates, and neither are
-    runs, artifacts, sessions, decisions, proposals, or insight revisions.
+    runs, artifacts, sessions, decisions, proposals, insight revisions, or work-item histories.
     Trust: operator-invoked maintenance; the explicit ``--apply`` invocation
     behind quiescence (paused + locks) is the grant. Candidates are
     recomputed inside the quiescent section, so a stale preview can never
-    authorize a removal.
+    authorize a removal. If work-item history was unreadable, apply refuses
+    to reclaim because completion references may be hidden.
     Retry/cancellation: dry-run (default) is read-only, lock-free, and
     idempotent. Apply writes a ``maintenance/storage-*.json`` audit record;
     a second reclaim converges on objects orphaned by manifest removal.
     Evidence: returns removed/retained paths plus the maintenance audit path.
-    Failure: Denied for symlinks at removal time or a non-quiescent project
-    when applying; per-file read faults are skipped, never raised.
+    Failure: Denied for unsafe work-item history, symlinks at removal time, or
+    a non-quiescent project when applying; faults in other reference stores are
+    skipped, never raised.
     """
     if not apply:
         collected = _audit_collect(project)
@@ -823,12 +872,15 @@ def reclaim(project: Project, *, apply: bool = False) -> dict:
             "objects": [f"objects/{name}" for name in collected["orphan"]],
             "unreferenced_bytes": collected["unreferenced_bytes"],
             "orphan_bytes": sum(collected["object_sizes"][name] for name in collected["orphan"]),
-            "retained": "All live/history/run/artifact/insight-referenced manifests, history generations, "
-                        "runs, artifacts, sessions, decisions, proposals, and insight revisions. "
+            "retained": "All live/history/run/artifact/insight/work-item-referenced manifests, history generations, "
+                        "runs, artifacts, sessions, decisions, proposals, insight revisions, and work-item histories. "
                         "Repeat audit/reclaim converges on newly orphaned objects.",
+            "work_item_events_skipped": collected["work_item_events_skipped"],
         }
     with quiescent(project):
         collected = _audit_collect(project)
+        if collected["work_item_events_skipped"]:
+            raise Denied("Unreadable work-item history; cannot safely reclaim snapshot references")
         manifest_paths = [project.root / "snapshots" / f"{sid}.json" for sid in collected["unreferenced"]]
         object_paths = [project.root / "objects" / name for name in collected["orphan"]]
         for path in (*manifest_paths, *object_paths):
@@ -854,13 +906,16 @@ def reclaim(project: Project, *, apply: bool = False) -> dict:
         record = project.root / "maintenance" / f"storage-{int(time.time())}-{uuid.uuid4().hex[:8]}.json"
         write_json(record, {"applied_at": now(), **removed,
                             "unreferenced_bytes": collected["unreferenced_bytes"],
-                            "orphan_bytes": sum(collected["object_sizes"][name] for name in collected["orphan"])})
+                            "orphan_bytes": sum(collected["object_sizes"][name] for name in collected["orphan"]),
+                            "work_item_snapshots": len(collected["work_item_ids"]),
+                            "work_item_events_skipped": 0})
         sync_dir(record.parent)
         removed["audit"] = record.relative_to(project.root).as_posix()
     return {"applied": True, **removed,
-            "retained": "All live/history/run/artifact/insight-referenced manifests, history generations, "
-                        "runs, artifacts, sessions, decisions, proposals, and insight revisions. "
-                        "Repeat audit/reclaim converges on newly orphaned objects."}
+            "retained": "All live/history/run/artifact/insight/work-item-referenced manifests, history generations, "
+                        "runs, artifacts, sessions, decisions, proposals, insight revisions, and work-item histories. "
+                        "Repeat audit/reclaim converges on newly orphaned objects.",
+            "work_item_events_skipped": 0}
 
 
 def artifact_candidates(project: Project, keep: int) -> list[Path]:

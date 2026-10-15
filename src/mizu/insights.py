@@ -529,6 +529,8 @@ replacement insight without implying rejected substance.
                     "created_at": stamped,
                     "updated_at": stamped,
                 }
+                if len(canonical(record)) > PREVIEW_BYTES:
+                    raise LimitExceeded("Decision event with work-item seed exceeds byte bound")
             with lock(self.root / "locks" / "decisions.lock"):
                 write_json(self.root / "decision-history" / f"{event_id}.json", record, exclusive=True)
                 write_json(self.root / "decisions" / f"{insight_id}.json", record)

@@ -22,6 +22,29 @@ class RestoreTests(Fixture):
         with self.assertRaises(Denied):
             restore(self.config, 'restored', archive)
 
+
+    def test_roundtrip_preserves_work_item_completion_evidence(self):
+        proposal = self.project.insights.submit(
+            source="worker", title="Restore durable work", body="Keep transition evidence", base_snapshot=None)
+        decision = self.project.insights.decide(
+            proposal["id"], "accept", "reviewed", "", "run-restore", expected_rev=1)
+        captured = self.project.snapshots.capture_files(self.project.workspace)
+        verification = {"passed": True, "code_digest": captured["code_digest"], "run": "run-restore"}
+        snapshot = self.project.snapshots.create(
+            captured, goal=self.project.goal, state="Verified work item", run="run-restore",
+            outcome="done", summary="Completion evidence", verification=verification)
+        self.project.snapshots.publish(snapshot)
+        completed = self.project.work_items.transition(
+            decision["work_item"]["id"], expected_rev=1, status="done", actor="worker",
+            snapshot_id=snapshot["id"])
+        self.project.set_control(paused=True)
+        archive = self.root / "work-items.tar.gz"
+        backup(self.project, archive)
+        restore(self.config, "restored", archive)
+        restored = Project(self.config, "restored")
+        self.assertEqual(restored.work_items.get(decision["work_item"]["id"]), completed)
+        self.assertTrue((restored.root / "snapshots" / f"{snapshot['id']}.json").is_file())
+
     def malicious(self, name, kind=None):
         archive = self.root / 'malicious.tar.gz'
         with tarfile.open(archive, 'w:gz') as tar:

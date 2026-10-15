@@ -16,6 +16,7 @@ from .fs import atomic_write, identifier, lock, mkdir, now, read_json, safe_read
 from .insights import Insights
 from .process import environment, run
 from .snapshot import open_store
+from .work_items import WorkItems
 
 
 class Project:
@@ -42,6 +43,7 @@ class Project:
         self.snapshots = open_store(self.root, config, create_dirs=not read_only)
         self.insights = Insights(self.root, retention_days=config.limits.retention_days)
         self.insights.snapshots = self.snapshots
+        self.work_items = WorkItems(self.root, self.snapshots, self.insights)
         from .role_state import RoleStateStore
         self.role_state = RoleStateStore(self.root / "role-state",
                                          max_bytes=config.limits.role_state_bytes)

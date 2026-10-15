@@ -36,6 +36,7 @@ inputs. The trusted host adapter never executes model-provided host commands.
 | `sandbox.py`, `process.py` | Bounded execution, termination, cleanup | Experiment usefulness |
 | `snapshot.py` | Content objects, immutable manifests, published pointer | Semantic correctness |
 | `insights.py` | Submission identity, revisable proposals with separate audit, decision history, initial work-item seeds | Acceptance or rejection |
+| `work_items.py` | Internal append-audited work-item CAS and completion evidence | Public visibility, prioritization and policy |
 | `web.py` | Allowed retrieval, policy-bounded protocol observation, and external source receipts | Scientific truth |
 | `materialize.py` | Generic offline-input adapter (spec in, digest-bound content out) | Ecosystem resolution, cache policy |
 | `editor.py` | Snapshot export and read/propose MCP | Code editing |
@@ -184,11 +185,49 @@ pending. An `accept` or `modify` decision also places an initial durable
 matching current-decision record). Its ID is `wi_<event-uuid-hex>`; it records
 the current insight title and `{insight_id, rev}` origin, starts `open` at item
 revision 1 with no holder, and uses the decision timestamp for creation and
-update. `defer` and `reject` do not create a seed. This is only an initial
-durable seed: work-item transition lifecycle, prompt/tool exposure, and
-replacement of free-text Tasks are not implemented, so writer state remains
-necessary. Author withdrawal (`mizu insight withdraw`, submitter or operator
-only) closes a pending proposal with an actor-labelled rev-bound record in
+update. `defer` and `reject` do not create a seed.
+
+`Project.work_items` provides an **internal-only** `get(item_id)` and
+`transition(item_id, *, expected_rev, status, actor, reason=None, wait=None,
+snapshot_id=None)` layer. It resolves the seed directly from
+`decision-history/<event-hex>.json`, validating the accept/modify event and
+nested seed without scanning the inbox or decision history. The event's title
+is the immutable title authority, not the subsequently revisable insight.
+Reads and mutations share `locks/insights.lock` with insight revisions and
+seed creation. A positive non-bool expected revision must match; each change
+exclusively atomically appends the full state to
+`work-items/<item-id>/<next-rev>.json`. There is no mutable index or pointer.
+Reconstruction requires consecutive revisions, with at most 256 revisions
+including the seed and 128 KiB per seed/event record. Unsafe links, unknown IDs,
+malformed/oversized records, gaps and exhausted bounds fail closed; a stale
+CAS writes nothing and must be re-read, not blindly retried. Lock/I/O failures
+propagate; cancellation/process death releases the kernel lock.
+
+Statuses are `open`, `doing`, `blocked`, `done`, `dropped`. Same-status changes
+and changes from terminal `done`/`dropped` are refused; other statuses can move
+to any different status. Title/origin/creation time stay fixed; every event
+records its revision, update time, caller-supplied actor, from/to transition,
+and explicit reason/wait/snapshot/verification fields (null when absent).
+Actor is trusted internal attribution, not a new authorization grant. `doing`
+assigns the actor as holder, `blocked` preserves the holder or assigns the
+actor, and other statuses clear it. Blocking requires a wait normalized by
+the existing Insights validator, but registers **no scheduler wait or wake**.
+Dropping requires a nonempty reason. Completion requires `Snapshots.get()`
+validation and membership in retained published history. The stored
+verification must have `passed is True` and a code digest matching the
+snapshot. The snapshot ID
+and verification are copied into the immutable completion event, surviving
+later publication-history retention. Backup/restore includes these histories;
+storage audit/reclaim protects their cited snapshot manifests. Work-item
+retention/expiration is not implemented, so those citations remain durable.
+
+Origin-insight revision staleness is not yet projected by this internal getter;
+public readers/transitions must not treat the seed as current work until that
+state is added. Public prompt/tool/CLI/status/explain visibility, policy
+configuration, backfill/reconciliation and replacement of free-text Tasks also
+remain unfinished. **Free-text Tasks in writer state are still needed.**
+Author withdrawal (`mizu insight withdraw`, submitter or operator only)
+closes a pending proposal with an actor-labelled rev-bound record in
 the same decision store; it is refused over a revision-current substantive
 decision and over an unseen revision, a repeated request is a no-op, and
 `reject` keeps meaning substantive rejection. A role with configured

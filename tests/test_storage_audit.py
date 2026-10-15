@@ -44,6 +44,55 @@ class StorageAuditTests(Fixture):
         self.assertTrue((self.project.root / "objects" / orphan).exists())
         self.assertTrue((self.project.root / "snapshots" / f"{snap['id']}.json").exists())
 
+
+    def completed_work_item(self):
+        proposal = self.project.insights.submit(
+            source="worker", title="Retain evidence", body="Verify the snapshot reference", base_snapshot=None)
+        decision = self.project.insights.decide(
+            proposal["id"], "accept", "reviewed", "", "run-work-item", expected_rev=1)
+        captured = self.project.snapshots.capture_files(self.project.workspace)
+        verification = {"passed": True, "code_digest": captured["code_digest"], "run": "run-work-item"}
+        snapshot = self.project.snapshots.create(
+            captured, goal=self.project.goal, state="Verified work item", run="run-work-item",
+            outcome="done", summary="Completion evidence", verification=verification)
+        self.project.snapshots.publish(snapshot)
+        completed = self.project.work_items.transition(
+            decision["work_item"]["id"], expected_rev=1, status="done", actor="worker",
+            snapshot_id=snapshot["id"])
+        return decision["work_item"]["id"], snapshot, completed
+
+    def test_completed_work_item_reference_survives_history_pruning_and_reclaim(self):
+        item_id, completed_snapshot, _completed = self.completed_work_item()
+        self.project.snapshots.history_index = 1
+        captured = self.project.snapshots.capture_files(self.project.workspace)
+        newer = self.project.snapshots.create(
+            captured, goal=self.project.goal, state="New head", run=None,
+            outcome="wait", summary="Retire old history")
+        self.project.snapshots.publish(newer)
+        report = audit(self.project)
+        self.assertGreaterEqual(report["references"]["work_item_snapshots"], 1)
+        self.assertEqual(report["work_item_events_skipped"], 0)
+        self.assertNotIn(completed_snapshot["id"], report["snapshots"]["unreferenced_sample"])
+        self.project.set_control(paused=True)
+        result = reclaim(self.project, apply=True)
+        self.assertNotIn(f"snapshots/{completed_snapshot['id']}.json", result["snapshots"])
+        self.assertTrue((self.project.root / "snapshots" / f"{completed_snapshot['id']}.json").is_file())
+        self.assertEqual(self.project.work_items.get(item_id)["status"], "done")
+
+    def test_unreadable_work_item_history_blocks_snapshot_reclaim(self):
+        proposal = self.project.insights.submit(
+            source="worker", title="Malformed history", body="Do not discard evidence", base_snapshot=None)
+        decision = self.project.insights.decide(
+            proposal["id"], "accept", "reviewed", "", "run-work-item", expected_rev=1)
+        item_path = self.project.root / "work-items" / decision["work_item"]["id"] / "2.json"
+        item_path.parent.mkdir(parents=True)
+        item_path.write_bytes(b"{not-json")
+        self.project.set_control(paused=True)
+        report = audit(self.project)
+        self.assertGreater(report["work_item_events_skipped"], 0)
+        with self.assertRaises(Denied):
+            reclaim(self.project, apply=True)
+
     def test_run_reference_protects_snapshot(self):
         from mizu.fs import write_json
         run = self.project.root / "runs" / "probe"
