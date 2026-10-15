@@ -333,6 +333,12 @@ class EngineTests(Fixture):
         self.assertEqual(result["answers"][0]["role"], "advisor-a")
         self.assertIn("error", result["answers"][1])
         self.assertEqual(result["answers"][1]["role"], "advisor-b")
+        for answer in result["answers"]:
+            child_dir = self.project.root / "runs" / answer["run"]
+            evidence_path = child_dir / ("error.json" if "error" in answer else "consultation.json")
+            activity = read_json(evidence_path)["activity"]
+            self.assertEqual(activity["schema"], 1)
+            self.assertGreaterEqual(activity["elapsed_seconds"], 0.0)
 
     def test_agent_cannot_select_unapproved_consult_model(self):
         with self.assertRaises(ConfigError):
@@ -626,6 +632,169 @@ class InsightRetrievalTests(Fixture):
             ctx.handle("insights", {"action": "withdraw"})
         with self.assertRaises(Denied):
             ctx.handle("insights", {"action": "bogus"})
+
+class ActivityEvidenceTests(Fixture):
+    def test_activity_bucket_precedence_is_exclusive(self):
+        ctx = self.context()
+        ctx.request_sequences.add((ctx.execution_attempt, 1))
+        clock = [100.0]
+        with patch("mizu.runtime.time.monotonic", side_effect=lambda: clock[0]):
+            ctx._activity_origin = ctx._activity_last = clock[0]
+            ctx._activity_current = "other"
+            ctx._activity_seconds.clear()
+            ctx._activity_counts.clear()
+            clock[0] = 101.0
+            ctx.start_request(1)
+            clock[0] = 103.0
+            ctx._activity_change(lambda: setattr(ctx, "_activity_operation", "exec"),
+                                 count="tool_call:exec")
+            clock[0] = 107.0
+            ctx._activity_change(lambda: setattr(ctx, "_activity_join", "consult"),
+                                 count="join:consult")
+            clock[0] = 112.0
+            ctx._activity_change(lambda: setattr(ctx, "_activity_join", None))
+            clock[0] = 114.0
+            ctx._activity_change(lambda: setattr(ctx, "_activity_operation", None))
+            clock[0] = 118.0
+            ctx.end_request(1)
+            clock[0] = 120.0
+            ctx._activity_change(lambda: setattr(ctx, "_activity_operation", "experiment"),
+                                 count="tool_call:experiment")
+            clock[0] = 122.0
+            ctx._activity_change(lambda: setattr(ctx, "_activity_operation", None))
+            clock[0] = 123.0
+            ctx._activity_change(lambda: setattr(ctx, "_activity_operation", "read"),
+                                 count="tool_call:read")
+            clock[0] = 126.0
+            ctx._activity_change(lambda: setattr(ctx, "_activity_operation", None))
+            clock[0] = 128.0
+            activity = ctx.activity_summary()
+
+        self.assertEqual(activity["schema"], 1)
+        self.assertEqual(activity["elapsed_seconds"], 28.0)
+        self.assertEqual(activity["exclusive_seconds"], {
+            "join:consult": 5.0,
+            "local_exec:exec": 6.0,
+            "local_exec:experiment": 2.0,
+            "model_request": 6.0,
+            "other": 6.0,
+            "tool:read": 3.0,
+        })
+        self.assertEqual(sum(activity["exclusive_seconds"].values()), activity["elapsed_seconds"])
+        self.assertEqual(activity["counts"], {
+            "join:consult": 1,
+            "model_request": 1,
+            "tool_call:exec": 1,
+            "tool_call:experiment": 1,
+            "tool_call:read": 1,
+        })
+        self.assertEqual(activity["max_concurrent_model_requests"], 1)
+        self.assertEqual(activity["open_model_requests"], 0)
+
+    def test_activity_accounting_stays_consistent_when_a_transition_raises(self):
+        ctx = self.context()
+        clock = [100.0]
+        with patch("mizu.runtime.time.monotonic", side_effect=lambda: clock[0]):
+            ctx._activity_origin = ctx._activity_last = clock[0]
+            ctx._activity_current = "other"
+            ctx._activity_seconds.clear()
+            clock[0] = 102.0
+            with self.assertRaisesRegex(RuntimeError, "transition failed"):
+                ctx._activity_change(lambda: (_ for _ in ()).throw(RuntimeError("transition failed")))
+            clock[0] = 105.0
+            activity = ctx.activity_summary()
+        self.assertEqual(activity["elapsed_seconds"], 5.0)
+        self.assertEqual(activity["exclusive_seconds"], {"other": 5.0})
+
+    def test_tool_and_join_buckets_close_after_exceptions(self):
+        ctx = self.context()
+        with patch.object(ctx, "dispatch", side_effect=RuntimeError("tool failed")):
+            with self.assertRaisesRegex(RuntimeError, "tool failed"):
+                ctx.handle("read", {"path": "app.py"})
+        self.assertIsNone(ctx._activity_operation)
+        self.assertIn("tool:read", ctx.activity_summary()["exclusive_seconds"])
+
+        def fail_join(*_):
+            raise RuntimeError("child failed")
+
+        ctx.consult = fail_join
+        with self.assertRaisesRegex(RuntimeError, "child failed"):
+            ctx._op_consult({})
+        self.assertIsNone(ctx._activity_join)
+        self.assertTrue(ctx.joins_idle.is_set())
+        activity = ctx.activity_summary()
+        self.assertIn("join:consult", activity["exclusive_seconds"])
+        self.assertEqual(activity["counts"]["join:consult"], 1)
+
+    def test_request_concurrency_is_per_context_and_aggregate(self):
+        ctx = self.context()
+        ctx.request_sequences.update({(ctx.execution_attempt, 1), (ctx.execution_attempt, 2)})
+        clock = [10.0]
+        with patch("mizu.runtime.time.monotonic", side_effect=lambda: clock[0]):
+            ctx._activity_origin = ctx._activity_last = clock[0]
+            ctx._activity_seconds.clear()
+            clock[0] = 11.0
+            ctx.start_request(1)
+            clock[0] = 12.0
+            ctx.start_request(2)
+            clock[0] = 13.0
+            ctx.end_request(1)
+            clock[0] = 14.0
+            ctx.end_request(2)
+            clock[0] = 15.0
+            ctx.request_sequences.add((ctx.execution_attempt, 3))
+            ctx.start_request(3)
+            clock[0] = 16.0
+            ctx.clear_request_deadlines()
+            activity = ctx.activity_summary()
+        self.assertEqual(activity["max_concurrent_model_requests"], 2)
+        self.assertEqual(activity["counts"]["model_request"], 3)
+        self.assertEqual(activity["open_model_requests"], 0)
+        self.assertEqual(activity["reaped_model_requests"], 1)
+
+    def test_normal_bounded_and_interrupted_runs_persist_activity(self):
+        from mizu.fs import read_json
+
+        def check(record, status):
+            self.assertEqual(record["status"], status)
+            activity = record["activity"]
+            self.assertEqual(activity["schema"], 1)
+            self.assertGreaterEqual(activity["elapsed_seconds"], 0.0)
+            self.assertLessEqual(sum(activity["exclusive_seconds"].values()),
+                                 activity["elapsed_seconds"] + 0.00001)
+            self.assertGreaterEqual(activity["max_concurrent_model_requests"], 0)
+
+        normal = Engine(self.config, driver=ScriptDriver()).run(self.project, "worker")
+        normal_record = read_json(self.project.root / "runs" / normal["run"] / "result.json")
+        check(normal_record, "completed")
+
+        roles = dict(self.config.roles)
+        roles["worker"] = dataclasses.replace(roles["worker"], requests_per_run=1)
+        bounded_config = dataclasses.replace(self.config, roles=roles)
+
+        def bounded(ctx, *_):
+            ctx.handle("_budget", {"sequence": 2})
+            ctx.handle("finish", {"outcome": "wait", "summary": "sealed under bound",
+                                   "state": "Now: bounded.\nNext: resume.\nTasks: none\nBlocking: none"})
+
+        bounded_result = Engine(bounded_config, driver=ScriptDriver(bounded)).run(self.project, "worker")
+        bounded_record = read_json(self.project.root / "runs" / bounded_result["run"] / "result.json")
+        check(bounded_record, "completed")
+        self.assertEqual(bounded_record["finish"]["outcome"], "bounded")
+
+        def interrupted(ctx, *_):
+            ctx.handle("_budget", {"sequence": 1})
+            raise ProtocolError("synthetic interruption")
+
+        with self.assertRaises(ProtocolError):
+            Engine(self.config, driver=ScriptDriver(interrupted)).run(self.project, "worker")
+        errors = list((self.project.root / "runs").glob("*/error.json"))
+        error = max(errors, key=lambda path: path.stat().st_mtime_ns)
+        error_record = read_json(error)
+        check(error_record, "interrupted")
+        self.assertEqual(error_record["activity"]["open_model_requests"], 1)
+        self.assertEqual(error_record["activity"]["reaped_model_requests"], 0)
+
 
 class WrapUpTests(Fixture):
     def test_requests_bound_ends_bounded_without_brake(self):

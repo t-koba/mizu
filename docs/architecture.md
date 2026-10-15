@@ -85,6 +85,36 @@ standard local filesystem semantics. Use a local filesystem, not NFS/object-stor
 with weaker locking/rename guarantees. Disk/host failure recovery is not a
 substitute for independent backups. Snapshots have hashes, not digital signatures.
 
+## Activity evidence
+
+Each runtime context records a schema-1 `activity` aggregate in durable run
+records: `result.json` for normally sealed or wall-bounded main runs,
+`error.json` for interrupted main runs, and `consultation.json` /
+`delegation.json` (or child `error.json`) for child runs. It contains
+`elapsed_seconds`, `exclusive_seconds`, aggregate `counts`, and
+`max_concurrent_model_requests`, `open_model_requests`, and
+`reaped_model_requests`. Exclusive buckets are `model_request`,
+`local_exec:exec`, `local_exec:experiment`, `local_exec:verify`, `tool:<operation>`,
+`join:consult`, `join:delegate`, and `other`; the applicable bucket precedence is
+join, tool, active logical-request span, then other. Thus spans within one
+context are not double-counted. Counts are totals by fixed operation kind,
+not an event log, and request concurrency is maximum overlap within that
+context only. `open_model_requests` identifies active requests at capture;
+`reaped_model_requests` counts active spans discarded when retrying after a
+transport failure. Count keys are `model_request`, `tool_call:<operation>`,
+and `join:<kind>`; they count starts/attempts. Child and parent wall spans can
+overlap and are not a global sum.
+
+This is host-observed wall time from context creation through evidence capture,
+not CPU time. A `model_request` is the logical interval from Mizu request admission through
+completion bookkeeping (or deadline reaping/evidence capture if an
+interrupted request remains unclosed); it does not measure or attribute
+provider-side wait. Tool spans cover Mizu bridge operations; the three
+`local_exec:*` spans cover Mizu exec, experiment, and verification handlers.
+Opaque provider work and native tools are not timed. The aggregate is persisted
+at run boundaries, not live-active telemetry, and does not report global
+concurrency.
+
 ## State and history
 
 A snapshot ties together goal, compact state, code digest, verification evidence,

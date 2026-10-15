@@ -188,6 +188,17 @@ class Context:
                                              self.run_seconds / (WRAP_UP_REQUESTS + 1))
                            if self.deadline is not None else None)
         self.request_deadlines: dict[tuple[int, int], float] = {}
+        # Bounded aggregate activity evidence: these buckets are exclusive,
+        # with joins over tools and tools over logical model-request spans.
+        self._activity_origin = started
+        self._activity_last = started
+        self._activity_current = "other"
+        self._activity_seconds: dict[str, float] = {}
+        self._activity_counts: dict[str, int] = {}
+        self._activity_operation: str | None = None
+        self._activity_join: str | None = None
+        self._activity_max_requests = 0
+        self._activity_reaped_requests = 0
         self.request_failure_pending = False
         self.transport_idle_deadline = started + config.limits.model_request_seconds
         # Never hold mutex in transport polling: handle holds it while joining.
@@ -298,16 +309,74 @@ class Context:
         finally:
             self.mutex.release()
 
+    def _activity_bucket(self) -> str:
+        if self._activity_join is not None:
+            return "join:" + self._activity_join
+        if self._activity_operation is not None:
+            kind = "local_exec" if self._activity_operation in ("exec", "experiment", "verify") else "tool"
+            return kind + ":" + self._activity_operation
+        if self.request_deadlines:
+            return "model_request"
+        return "other"
+
+    def _activity_change(self, change, *, count: str | None = None) -> None:
+        current = time.monotonic()
+        self._activity_seconds[self._activity_current] = (
+            self._activity_seconds.get(self._activity_current, 0.0)
+            + max(0.0, current - self._activity_last))
+        # Advance the accounting boundary even if a state mutation fails, then
+        # derive the bucket from the state that actually remains. This prevents
+        # an exception from charging the same interval again on the next read.
+        self._activity_last = current
+        try:
+            change()
+        finally:
+            self._activity_current = self._activity_bucket()
+        if count is not None:
+            self._activity_counts[count] = self._activity_counts.get(count, 0) + 1
+
+    def activity_summary(self) -> dict:
+        """Return bounded exclusive wall-time totals for this Context only."""
+        with self.mutex:
+            current = time.monotonic()
+            seconds = dict(self._activity_seconds)
+            seconds[self._activity_current] = (
+                seconds.get(self._activity_current, 0.0)
+                + max(0.0, current - self._activity_last))
+            return {"schema": 1, "elapsed_seconds": round(current - self._activity_origin, 6),
+                    "exclusive_seconds": {key: round(value, 6)
+                                          for key, value in sorted(seconds.items())},
+                    "counts": dict(sorted(self._activity_counts.items())),
+                    "max_concurrent_model_requests": self._activity_max_requests,
+                    "open_model_requests": len(self.request_deadlines),
+                    "reaped_model_requests": self._activity_reaped_requests}
+
+    def clear_request_deadlines(self):
+        with self.mutex:
+            if self.request_deadlines:
+                reaped = len(self.request_deadlines)
+                self._activity_change(self.request_deadlines.clear)
+                self._activity_reaped_requests += reaped
+
     def start_request(self, sequence):
         key = (self.execution_attempt, sequence)
-        self.request_deadlines.setdefault(key, time.monotonic() + self.config.limits.model_request_seconds)
+        with self.mutex:
+            if key in self.request_deadlines:
+                return
+            deadline = time.monotonic() + self.config.limits.model_request_seconds
+            self._activity_change(lambda: self.request_deadlines.setdefault(key, deadline),
+                                  count="model_request")
+            self._activity_max_requests = max(self._activity_max_requests,
+                                               len(self.request_deadlines))
 
     def end_request(self, sequence):
         key = (self.execution_attempt, sequence)
-        if key not in self.request_sequences:
-            raise Denied("Unknown completed request")
-        if self.request_deadlines.pop(key, None) is not None:
-            self.transport_idle_deadline = time.monotonic() + self.config.limits.model_request_seconds
+        with self.mutex:
+            if key not in self.request_sequences:
+                raise Denied("Unknown completed request")
+            if key in self.request_deadlines:
+                self._activity_change(lambda: self.request_deadlines.pop(key, None))
+                self.transport_idle_deadline = time.monotonic() + self.config.limits.model_request_seconds
 
     def check_deadlines(self, *, wrap_up=False):
         if self.host_cancelled():
@@ -506,12 +575,15 @@ class Context:
                 self.wrap_up_tools += 1
             validate(arguments, DEFINITIONS[operation][1])
             self.operation_active.set()
+            self._activity_change(lambda: setattr(self, "_activity_operation", operation),
+                                  count="tool_call:" + operation)
             try:
                 return self.dispatch(operation, arguments)
             finally:
                 # Completion of actual admitted work is not a heartbeat and
                 # never resets an active request (Claude query / Codex turn).
                 self.transport_idle_deadline = time.monotonic() + self.config.limits.model_request_seconds
+                self._activity_change(lambda: setattr(self, "_activity_operation", None))
                 self.operation_active.clear()
 
     def dispatch(self, op: str, args: dict) -> dict:
@@ -994,18 +1066,22 @@ class Context:
         if self.consult is None:
             raise Denied("Nested consultation is disabled")
         self.joins_idle.clear()
+        self._activity_change(lambda: setattr(self, "_activity_join", "consult"), count="join:consult")
         try:
             return self.consult(self, args)
         finally:
+            self._activity_change(lambda: setattr(self, "_activity_join", None))
             self.joins_idle.set()
 
     def _op_delegate(self, args: dict) -> dict:
         if self.delegate is None:
             raise Denied("Nested delegation is disabled")
         self.joins_idle.clear()
+        self._activity_change(lambda: setattr(self, "_activity_join", "delegate"), count="join:delegate")
         try:
             return self.delegate(self, args)
         finally:
+            self._activity_change(lambda: setattr(self, "_activity_join", None))
             self.joins_idle.set()
 
     def _op_report(self, args: dict) -> dict:
@@ -2144,7 +2220,7 @@ class Engine:
         """
         if context.finished is not None:
             raise Denied("No inference after the work unit is sealed")
-        context.request_deadlines.clear()
+        context.clear_request_deadlines()
         context.transport_idle_deadline = time.monotonic() + context.config.limits.model_request_seconds
         try:
             try:
@@ -2174,7 +2250,7 @@ class Engine:
                         capabilities=tuple(c for c in authority.capabilities if c in WRAP_UP_OPS),
                         engine_tools=(), selector="")
                     context.operations_stopped.clear()
-                    context.request_deadlines.clear()  # The failed transport was reaped, not renewed.
+                    context.clear_request_deadlines()  # The failed transport was reaped, not renewed.
                     context.transport_idle_deadline = time.monotonic() + context.config.limits.model_request_seconds
                     context.execution_attempt += 1
                     model_result = driver.execute(context, context._bound_message() + "\n\n" + prompt, **kwargs)
@@ -2701,6 +2777,7 @@ class Engine:
                     State(self.config).result(decision, run=run_id, attempt=selection_attempt)
                 result = {"run": run_id, "role": role_name, "status": "prepared", "finished_at": now(),
                           "finish": finished, "model": model_result, "snapshot": snapshot["id"],
+                          "activity": context.activity_summary(),
                           **({"selection": decision} if decision else {})}
                 write_json(run_dir / "result.json", result)
                 if role.workspace == "write":
@@ -2760,7 +2837,8 @@ class Engine:
                               "finished_at": now(), "error": str(exc),
                               "publication": "not_published", "snapshot": snapshot["id"],
                               "code_digest": snapshot["code_digest"],
-                              "model": getattr(context, "model_evidence", {})}
+                              "model": getattr(context, "model_evidence", {}),
+                              "activity": context.activity_summary()}
                     try:
                         write_json(run_dir / "result.json", result)
                     except Exception as record_error:
@@ -2805,6 +2883,7 @@ class Engine:
                              "status": "interrupted", "error": str(exc), "finished_at": now(),
                              "publication": publication,
                              "durability": "unconfirmed" if isinstance(exc, OSError) or publication == "unknown" or _platform.IS_WINDOWS else "confirmed",
+                             **({"activity": context.activity_summary()} if context is not None else {}),
                              **({"selection": decision} if decision else {}),
                              **({"model_failure": exc.evidence} if isinstance(exc, ModelFailure) else {}),
                              **({"selection_action": handled} if handled else {}),
@@ -2917,15 +2996,18 @@ class Engine:
                 result = {"run": run_dir.name, "parent_run": parent.run_dir.name,
                           "role": role.name, "status": "completed", "finished_at": now(),
                           "profile": profile, "snapshot": snap["id"],
-                          "answer": ctx.finished["summary"], "model": model}
+                          "answer": ctx.finished["summary"], "model": model,
+                          "activity": ctx.activity_summary()}
                 write_json(run_dir / "consultation.json", result)
                 return result
             except Exception as exc:
                 result = {"run": run_dir.name, "parent_run": parent.run_dir.name,
                           "role": role_name, "status": "bounded" if isinstance(exc, RunDeadlineExceeded) else "interrupted",
                           "finished_at": now(), "profile": profile, "snapshot": snap["id"], "error": str(exc)}
-                if ctx is not None and hasattr(ctx, "model_evidence"):
-                    result["model"] = ctx.model_evidence
+                if ctx is not None:
+                    result["activity"] = ctx.activity_summary()
+                    if hasattr(ctx, "model_evidence"):
+                        result["model"] = ctx.model_evidence
                 try:
                     mkdir(run_dir)
                     write_json(run_dir / "error.json", result)
@@ -3048,7 +3130,8 @@ class Engine:
             result = {"run": run_dir.name, "parent_run": parent.run_dir.name,
                       "role": role.name, "status": "completed", "finished_at": now(),
                       "profile": profile, "snapshot": snap["id"],
-                      "answer": ctx.finished["summary"], "model": model}
+                      "answer": ctx.finished["summary"], "model": model,
+                      "activity": ctx.activity_summary()}
             write_json(run_dir / "delegation.json", result)
             record = {"task": task, "role": role.name, "run": run_dir.name,
                       "snapshot": snap["id"], "profile": profile, "answer": ctx.finished["summary"]}
@@ -3058,8 +3141,10 @@ class Engine:
             result = {"run": run_dir.name, "parent_run": parent.run_dir.name,
                       "role": role_name, "status": "bounded" if isinstance(exc, RunDeadlineExceeded) else "interrupted",
                       "finished_at": now(), "profile": profile, "snapshot": snap["id"], "error": str(exc)}
-            if ctx is not None and hasattr(ctx, "model_evidence"):
-                result["model"] = ctx.model_evidence
+            if ctx is not None:
+                result["activity"] = ctx.activity_summary()
+                if hasattr(ctx, "model_evidence"):
+                    result["model"] = ctx.model_evidence
             try:
                 mkdir(run_dir)
                 write_json(run_dir / "error.json", result)

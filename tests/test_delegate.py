@@ -61,6 +61,8 @@ class DelegateTests(Fixture):
         self.assertFalse((child_runs[0] / "input").exists())
         delegation = read_json(child_runs[0] / "delegation.json")
         self.assertEqual(delegation["answer"], "child saw marker")
+        self.assertEqual(delegation["activity"]["schema"], 1)
+        self.assertGreaterEqual(delegation["activity"]["elapsed_seconds"], 0.0)
         parent_records = list((runs / result["run"] / "delegations").glob("*.json"))
         self.assertEqual(len(parent_records), 1)
 

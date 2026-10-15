@@ -502,6 +502,7 @@ class DeadlineTests(Fixture):
         result = Engine(self.config, driver=ScriptDriver(work)).run(self.project, "worker")
         self.assertEqual(result["status"], "bounded")
         self.assertEqual(result["publication"], "not_published")
+        self.assertEqual(result["activity"]["schema"], 1)
         self.assertNotIn("finish", result)
         self.assertEqual(read_json(self.project.root / "health/worker.json"), health)
         self.assertEqual(self.project.snapshots.get()["id"], before["id"])
@@ -629,7 +630,9 @@ class DeadlineTests(Fixture):
         result = Engine(config, driver=ScriptDriver(work)).run(self.project, "worker")
         self.assertEqual(result["finish"]["outcome"], "wait")
         child = next(self.project.root.glob("runs/*/error.json"))
-        self.assertEqual(read_json(child)["status"], "bounded")
+        child_record = read_json(child)
+        self.assertEqual(child_record["status"], "bounded")
+        self.assertEqual(child_record["activity"]["schema"], 1)
 
     def test_explicit_stop_pause_and_unarm_still_cancel_joined_children(self):
         for action in ("stop", "pause", "unarm"):
