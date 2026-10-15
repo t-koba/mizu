@@ -34,7 +34,7 @@ The mechanism owns safety, resource, and evidence invariants plus the fixed comm
 vocabularies; policy owns who, when, in what words, and what counts as good. A knob is
 added only when an operator would plausibly turn it; otherwise the constant stays in code, named here.
 Fixed in code (not knobs): smoke probe 4 requests / 5 tools / 120 s (`smoke.py`); framing
-`PREVIEW_BYTES` 128 KiB / `MAX_FRAME` 1 MiB / `SCRIPT_MAX` 64 KiB (`fs.py`); include
+`PREVIEW_BYTES` 128 KiB / `READ_PAGE_CHARS` 8,192 / `MAX_FRAME` 1 MiB / `SCRIPT_MAX` 64 KiB (`fs.py`); include
 8 deep / 32 files / 1 MiB total / 32 entries per file (`config.py`); role policy 16 parts /
 64 KiB each / 256 KiB total; sandbox verify-command fan-out 32 (`project.py`) and
 `--userns=keep-id` floor (`sandbox.py`); lock liveness 30 s (`fs.py`); usage scans
@@ -159,7 +159,7 @@ framing/memory bounds, sandbox floors, and liveness bounds stay fixed in code.
 | Infra-wait classes (`Busy`/`InfraExceeded` defer, `LimitExceeded` counts) | type-based | Stays fixed | Fault taxonomy prevents hiding real faults; operator controls brake via `max_failures` plus budget/disk thresholds |
 | `POLL_CALL/FETCH_TIMEOUT_CAP`, `MAX_CI_BRANCHES` (`runtime.py`) | 15 s / 30 s / 4 | Moves to policy | Per-tick liveness bound keeps the daemon responsive; now `[vcs] poll_status_timeout_seconds`, `poll_fetch_timeout_seconds`, `poll_max_branches` with the same defaults (worst case ~90 s at defaults) |
 | `poll_interval_seconds`, `pending_insights`, `prompt_snapshots`, `history_index`, `retention_days`, event-log days | configured | Already policy | Existing `[limits]`/`[vcs]` knobs with documented defaults |
-| `PREVIEW_BYTES`, `MAX_FRAME`, `SCRIPT_MAX`, insight/report/finish/consult/search sizes | 128 KiB / 1 MiB / 64 KiB / 60 KiB / 48 KiB / 12+32 KiB / 8 KiB+8 / 1k+4k | Stays fixed | Framing and memory safety: unbounded reads or messages risk OOM and protocol desync |
+| `PREVIEW_BYTES`, `READ_PAGE_CHARS`, `MAX_FRAME`, `SCRIPT_MAX`, insight/report/finish/consult/search sizes | 128 KiB / 8,192 chars / 1 MiB / 64 KiB / 60 KiB / 48 KiB / 12+32 KiB / 8 KiB+8 / 1k+4k | Stays fixed | Framing and memory safety: unbounded reads or messages risk OOM and protocol desync |
 | `MAX_WEB_WORKER_INPUT_BYTES` (`web_worker.py`) | 3 MiB | Stays fixed | Covers 2x canonical expansion of the 1 MiB TOML budget plus escaped valid probe input; parent and child reject overflow before parsing |
 | Sandbox termination, `MAX_VERIFY_COMMANDS`, include depth/files/bytes, web redirect/media, restore `--max-bytes` | 1 s+5 s / 32 / 8+32+1 MiB / 3 / 1 GiB | Stays fixed | Termination, fan-out, recursion, and archive-bomb safety floors |
 | `MAX_RUNS_SCANNED`, `MAX_RECENT_ENTRIES`, record size caps (`usage.py`) | 5000 / 200 / 1 MiB | Stays fixed | Unbounded run scans stall usage; records stay complete on disk |

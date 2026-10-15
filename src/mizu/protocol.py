@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from .config import MAX_WAIT_SECONDS
 from .errors import Denied
-from .fs import SCRIPT_MAX
+from .fs import READ_PAGE_CHARS, SCRIPT_MAX
 
 #: MCP protocol versions accepted by the capsule and bridge servers.
 MCP_VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18")
@@ -61,8 +61,10 @@ PAGE_FIELDS = {"offset": {"type": "integer", "minimum": 0, "maximum": 2147483647
 DEFINITIONS = {
     "diff": ("Read the bounded difference between this published snapshot and the preceding distinct code snapshot.", obj()),
     "files": ("List visible workspace files without reading their contents; use offset/limit for subsequent pages.", obj(PAGE_FIELDS)),
-    "read": ("Read a relative workspace text file. Never follows symbolic or hard links.",
-             obj({"path": text(4096)}, ("path",))),
+    "read": ("Read a relative workspace text file in bounded character-offset pages. Continue with the returned content_id; a changed file fails. Never follows symbolic or hard links.",
+             obj({"path": text(4096), "content_id": text(64),
+                  "offset": PAGE_FIELDS["offset"],
+                  "limit": {"type": "integer", "minimum": 1, "maximum": READ_PAGE_CHARS}}, ("path",))),
     "exec": ("Run a shell script in the configured sandbox; never on the host. /workspace is the project.",
              obj({"script": text(SCRIPT_MAX)}, ("script",))),
     "experiment": ("Run a bounded experiment in disposable /work. /workspace is read-only. Optional source_receipt mounts verified raw fetch bytes read-only at /work/input/body (external-untrusted). Question, comparison and measurement are recorded with the command when given.",

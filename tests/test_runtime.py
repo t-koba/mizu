@@ -55,6 +55,50 @@ class SnapshotTests(Fixture):
             initialize(config, "failed", self.root / "source", self.goal, ["worker"], [])
         self.assertFalse((self.config.data / "projects/failed").exists())
 
+    def test_read_pages_large_files_pins_content_and_bounds_responses(self):
+        from mizu.fs import canonical, digest, MAX_FRAME, PREVIEW_BYTES, READ_PAGE_CHARS
+        from mizu.protocol import DEFINITIONS, validate
+        ctx = self.context()
+        raw = b"a" * (PREVIEW_BYTES + 1000) + b"\xff\x00" + b"z" * 500
+        (ctx.workspace / "large.txt").write_bytes(raw)
+        first = ctx._op_read({"path": "large.txt"})
+        self.assertEqual(first["content_id"], digest(raw))
+        self.assertEqual(first["offset"], 0)
+        self.assertEqual(len(first["text"]), READ_PAGE_CHARS)
+        self.assertEqual(first["next_offset"], READ_PAGE_CHARS)
+        pages = [first["text"]]
+        offset = first["next_offset"]
+        while offset is not None:
+            result = ctx._op_read({"path": "large.txt", "content_id": first["content_id"],
+                                   "offset": offset, "limit": READ_PAGE_CHARS})
+            self.assertEqual(result["content_id"], first["content_id"])
+            self.assertLessEqual(len(result["text"]), READ_PAGE_CHARS)
+            pages.append(result["text"])
+            offset = result["next_offset"]
+        self.assertEqual("".join(pages), raw.decode("utf-8", "replace"))
+        with self.assertRaises(Denied):
+            ctx._op_read({"path": "large.txt", "offset": READ_PAGE_CHARS})
+        changed = raw[:-1] + b"!"
+        (ctx.workspace / "large.txt").write_bytes(changed)
+        with self.assertRaisesRegex(Denied, "changed since the previous page"):
+            ctx._op_read({"path": "large.txt", "content_id": first["content_id"],
+                          "offset": READ_PAGE_CHARS})
+        limited = self.context()
+        limited.config = dataclasses.replace(
+            limited.config,
+            limits=dataclasses.replace(limited.config.limits, file_bytes=len(changed) - 1))
+        with self.assertRaises(LimitExceeded):
+            limited._op_read({"path": "large.txt"})
+        validate({"path": "large.txt", "content_id": "a" * 64,
+                  "offset": READ_PAGE_CHARS, "limit": READ_PAGE_CHARS}, DEFINITIONS["read"][1])
+        with self.assertRaises(Denied):
+            validate({"path": "large.txt", "limit": READ_PAGE_CHARS + 1}, DEFINITIONS["read"][1])
+        controls = b"\x01" * READ_PAGE_CHARS
+        (ctx.workspace / "controls.txt").write_bytes(controls)
+        result = ctx._op_read({"path": "controls.txt"})
+        frame = canonical({"content": [{"text": canonical(result).decode()}]})
+        self.assertLess(len(frame), MAX_FRAME)
+
     def test_init_posture_defaults_unarmed(self):
         project = initialize(self.config, "calm", self.root / "source", self.goal, ["worker"], [])
         self.assertEqual(project.control()["armed"], False)

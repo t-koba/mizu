@@ -19,9 +19,12 @@ from .errors import Busy, Denied, LimitExceeded
 
 ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,62}\Z")
 DIGEST = re.compile(r"[0-9a-f]{64}\Z")
-#: Fixed mechanism preview bound (128 KiB): read/diff/editor/insight framing.
-#: Not a TOML knob; file_bytes/snapshot_bytes stay operator policy.
+#: Fixed mechanism preview bound (128 KiB): diff/editor/insight previews and
+#: canonical list framing. Not a TOML knob; file_bytes/snapshot_bytes stay policy.
 PREVIEW_BYTES = 131072
+#: Maximum decoded characters in one file-read page. This keeps escaped tool
+#: responses well below the protocol frame bound even for control-heavy text.
+READ_PAGE_CHARS = 8192
 #: MCP/socket LF framing bound shared by the bridge, the MCP proxy and the
 #: Editor capsule server (each rejects anything above it).
 MAX_FRAME = 1024 * 1024

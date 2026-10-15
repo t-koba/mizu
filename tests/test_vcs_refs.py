@@ -8,6 +8,7 @@ from pathlib import Path
 from support import Fixture
 from mizu import vcs
 from mizu.errors import Denied
+from mizu.fs import digest
 from mizu.snapshot import Snapshots
 
 SHA_A = "a" * 40
@@ -136,8 +137,11 @@ class VcsRefInjectionTests(Fixture):
         vcs.inject_refs(self.project.root, {"main": SHA_A})
         worker = self.context("worker")
         self.assertIn("refs/remotes/upstream/main", worker.handle("files", {})["files"])
-        self.assertEqual(worker.handle("read", {"path": "refs/remotes/upstream/main"}),
-                         {"path": "refs/remotes/upstream/main", "text": SHA_A})
+        result = worker.handle("read", {"path": "refs/remotes/upstream/main"})
+        self.assertEqual(result["path"], "refs/remotes/upstream/main")
+        self.assertEqual(result["text"], SHA_A)
+        self.assertEqual(result["content_id"], digest(SHA_A.encode()))
+        self.assertIsNone(result["next_offset"])
         # Read roles see refs from the harness store even though their
         # materialized snapshot input excludes them.
         reviewer = self.context("reviewer")

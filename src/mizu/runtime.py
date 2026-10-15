@@ -24,7 +24,8 @@ from .config import Config, Role, load, role_policy_bytes, role_requests_per_run
 from .doctor import container_runtime
 from .drivers import driver_for
 from .errors import Busy, Cancelled, ConfigError, Denied, InfraExceeded, LimitExceeded, RunDeadlineExceeded, DeadlineWrapUp, DrainYieldExceeded, MissingFinish, MizuError, ModelFailure, ProtocolError
-from .fs import canonical, digest, lock, mkdir, now, read_json, safe_read, write_json, PREVIEW_BYTES, page, text_preview, DIGEST
+from .fs import (canonical, digest, lock, mkdir, now, read_json, safe_read, write_json,
+                 PREVIEW_BYTES, READ_PAGE_CHARS, page, text_preview, DIGEST)
 from .project import Project
 from .protocol import DEFINITIONS, validate
 from .report import previous as _previous_report, publish
@@ -561,19 +562,36 @@ class Context:
         return [_vcs.REF_PREFIX_PATH + "/" + name for name in refs]
 
     def _op_read(self, args: dict) -> dict:
-        ref = _vcs.split_ref_path(args["path"])
+        path = args["path"]
+        offset, limit = args.get("offset", 0), args.get("limit", READ_PAGE_CHARS)
+        expected = args.get("content_id")
+        if offset and expected is None:
+            raise Denied("Read continuation requires content_id")
+        if expected is not None and (not isinstance(expected, str) or not DIGEST.fullmatch(expected)):
+            raise Denied("Invalid read content_id")
+        ref = _vcs.split_ref_path(path)
         if ref is not None:
             if self.role.workspace == "none":
                 raise Denied("Path is not exposed to this role")
             try:
                 text = _vcs.read_ref(self.project.root, ref)
             except OSError as exc:
-                raise Denied(f"Upstream ref is unavailable: {exc}") from exc
-            return {"path": args["path"], "text": text}
-        if self.role.workspace == "none" or self.project.snapshots.excluded(args["path"]):
-            raise Denied("Path is not exposed to this role")
-        data = safe_read(self.workspace, args["path"], min(self.config.limits.file_bytes, PREVIEW_BYTES))
-        return {"path": args["path"], "text": data.decode("utf-8", "replace")}
+                raise Denied(f"Upstream refs are unavailable: {exc}") from exc
+            data = text.encode("utf-8")
+        else:
+            if self.role.workspace == "none" or self.project.snapshots.excluded(path):
+                raise Denied("Path is not exposed to this role")
+            # file_bytes bounds the complete file; READ_PAGE_CHARS separately
+            # bounds the decoded text returned in one protocol response.
+            data = safe_read(self.workspace, path, self.config.limits.file_bytes)
+            text = data.decode("utf-8", "replace")
+        content_id = digest(data)
+        if expected is not None and expected != content_id:
+            raise Denied("Read file changed since the previous page")
+        end = min(len(text), offset + limit)
+        return {"path": path, "text": text[offset:end], "content_id": content_id,
+                "offset": offset, "next_offset": end if end < len(text) else None,
+                "truncated": end < len(text)}
 
     def _op_exec_experiment(self, op: str, args: dict) -> dict:
         if self.role.workspace == "none":

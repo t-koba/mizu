@@ -83,7 +83,7 @@ required). Operator tooling that concatenates configs
 | `missing_finish_followups` | Extra finish-only turns after a managed engine normally returns without `mizu_finish` (0–3; default 1; 0 keeps fail-fast behavior). Every new query/turn/request uses existing admission, per-run and daily budgets, and the same absolute deadlines. The active session continues only within this work unit; ephemeral sessions stay run-local. Provider/transport/protocol errors and explicit cancellation are never relabeled or retried |
 | `missing_finish_counts_as_failure` | Whether exhausting the missing-finish follow-ups increments the existing failure brake (boolean; default `true`, preserving today's behavior). Scoped only to this terminal missing-finish outcome; it does not change selector `counts_as_failure` rules |
 | `output_bytes` | Maximum captured stdout/stderr per command |
-| `file_bytes` | Maximum readable file size |
+| `file_bytes` | Maximum whole-file byte size admitted by `read`; larger text files are paged in 8,192-character responses, with `content_id` verification across pages |
 | `snapshot_bytes`, `snapshot_files` | Total visible snapshot size and file-count bounds |
 | `history_index` | Maximum published snapshot IDs retained in the immutable history generation (8–1,000,000; manifests stay on disk) |
 | `prompt_snapshots` | Number of recent anchored snapshot summaries offered to prompts (1–64) |
@@ -138,7 +138,8 @@ Safety-critical bounds are fixed in code rather than exposed as configuration kn
 
 | Category | Bound | Value | Purpose |
 |---|---|---|---|
-| **Framing & Preview** | `PREVIEW_BYTES` (`fs.py`) | 128 KiB | File read clamp, diff preview cutoff, and CLI stdin framing |
+| **Framing & Preview** | `PREVIEW_BYTES` (`fs.py`) | 128 KiB | Diff/insight/editor preview and canonical list bounds; CLI stdin framing |
+| | `READ_PAGE_CHARS` (`fs.py`) | 8,192 characters | Per-response `read` text bound, separate from the whole-file `file_bytes` cap |
 | | `MAX_FRAME` (`fs.py`) | 1 MiB | Maximum JSON-RPC message size across bridge and MCP servers |
 | **Tool inputs** | `exec` / `experiment` script | 64 KiB | Sandbox command size (`SCRIPT_MAX`) |
 | **Adapter diagnostics** | `ADAPTER_DIAGNOSTIC_BYTES_MAX` (`process.py`) | 8 KiB | Hard ceiling for any configured model-visible stderr excerpt; per-adapter `diagnostic_bytes` may lower it or disable it |
