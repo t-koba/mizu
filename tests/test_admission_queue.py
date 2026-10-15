@@ -79,10 +79,18 @@ class QueueTests(Fixture):
 
     def tickets(self, *, synchronized=False):
         path = self.config.data / 'slots/queue.json'
-        if synchronized:
-            with lock(self.config.data / 'slots/queue.lock'):
-                return read_json(path, {'tickets': []})['tickets']
-        return read_json(path, {'tickets': []})['tickets']
+        if not synchronized:
+            return read_json(path, {'tickets': []})['tickets']
+        lock_path = self.config.data / 'slots/queue.lock'
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                with lock(lock_path, blocking=False):
+                    return read_json(path, {'tickets': []})['tickets']
+            except Busy:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.005)
 
     def until(self, predicate):
         deadline = time.monotonic() + 10
@@ -313,9 +321,40 @@ class QueueTests(Fixture):
                 workspace_lock = self.project.root / 'locks/workspace.lock'
                 resources = (role_lock, workspace_lock)
                 path = workspace_lock if blocked == 'workspace' else role_lock
+                resource_names = tuple(p.relative_to(self.config.data / 'projects').as_posix()
+                                       for p in resources)
+                resource_attempted = threading.Event()
+                resource_check_seen = False
+                original_attempt = _Queue.attempt
+                original_resources = _Queue._resources
+
+                def resources_and_mark(queue_obj, stack, paths):
+                    nonlocal resource_check_seen
+                    if queue_obj.resources == resource_names and tuple(paths) == resource_names:
+                        resource_check_seen = True
+                    return original_resources(queue_obj, stack, paths)
+
+                def attempt_and_signal(queue_obj, *, enqueue):
+                    nonlocal resource_check_seen
+                    if queue_obj.resources == resource_names:
+                        resource_check_seen = False
+                    try:
+                        return original_attempt(queue_obj, enqueue=enqueue)
+                    except Busy:
+                        # Signal only after a resource check failed and
+                        # attempt() closed its partial ExitStack/transaction.
+                        if (queue_obj.resources == resource_names and queue_obj.alive is not None
+                                and resource_check_seen):
+                            resource_attempted.set()
+                        raise
+
                 with lock(path, blocking=False):
-                    thread, stop, outcome = self.waiter(resources=resources)
-                    self.until(lambda: len(self.tickets(synchronized=True)) == 1)
+                    with patch.object(_Queue, '_resources', resources_and_mark), \
+                            patch.object(_Queue, 'attempt', attempt_and_signal):
+                        thread, stop, outcome = self.waiter(resources=resources)
+                        self.until(lambda: len(self.tickets(synchronized=True)) == 1)
+                        self.assertTrue(resource_attempted.wait(5),
+                                        'waiter did not finish its blocked resource attempt')
                     with self.raw_slots():
                         pass  # Sleeping writer consumes no active capacity.
                     if blocked == 'workspace':
