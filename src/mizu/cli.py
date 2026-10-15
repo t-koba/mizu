@@ -36,6 +36,9 @@ def parser() -> argparse.ArgumentParser:
     initialize.add_argument("--armed", action="store_true",
                             help="Start armed (operator has reviewed the source at init time)")
     initialize.add_argument("--verify", action="append", default=[], help="Operator-owned acceptance command; repeatable")
+    explain = sub.add_parser("explain", help="Show bounded recorded evidence for one project role; not a scheduler verdict")
+    explain.add_argument("project", help="Managed project name")
+    explain.add_argument("--role", default=None, help="Enabled project role (default: only project role, else required)")
     for name in ("status", "arm", "pause", "resume", "wake", "disarm", "drain"):
         p = sub.add_parser(name, help={"status": "Show control, snapshot, budget and health",
                                        "arm": "Arm after reviewing configuration",
@@ -416,6 +419,18 @@ def execute(args):
         serve(args.bundle, args.outbox)
         return None
     config = load(args.config)
+    if args.command == "explain":
+        from .project import Project
+        from .explain import explain
+        project = Project(config, args.project, read_only=True)
+        enabled_roles = tuple(dict.fromkeys(project.roles))
+        if args.role is None:
+            if len(enabled_roles) != 1:
+                raise ConfigError("Specify --role: project has multiple enabled roles")
+            role_name = enabled_roles[0]
+        else:
+            role_name = args.role
+        return explain(config, project, role_name)
     if args.command == "session":
         from .project import Project
         from .engine_config import reset_role_sessions

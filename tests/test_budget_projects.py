@@ -1,6 +1,7 @@
 """M9: per-project request budget with an optional shared total. Offline only."""
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from support import Fixture
 from mizu.budget import Budget
@@ -44,6 +45,19 @@ class PerProjectBudgetTests(unittest.TestCase):
         usage = budget.usage("alpha")
         self.assertEqual((usage["used"], usage["limit"]), (1, 10))
         self.assertEqual((usage["shared_used"], usage["shared_limit"]), (2, 2))
+
+    def test_peek_is_bounded_read_only_and_does_not_reap(self):
+        budget = Budget(self.root, 5)
+        budget.take("one", project="alpha")
+        with patch.object(budget, "gc", side_effect=AssertionError("gc called")):
+            report = budget.peek("alpha")
+        self.assertEqual(report["status"], "current")
+        self.assertEqual((report["used"], report["shared_used"]), (1, 1))
+        self.assertEqual(budget.peek("beta")["used"], 0)
+        path = self.root / f"{budget._today()}.json"
+        path.write_text("not json")
+        self.assertEqual(budget.peek("alpha")["status"], "unavailable")
+        self.assertNotIn("used", budget.peek("alpha"))
 
     def test_usage_reports_both_and_rejects_bad_names(self):
         budget = Budget(self.root, 5)

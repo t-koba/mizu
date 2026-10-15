@@ -14,23 +14,25 @@ from .fs import DIGEST, PREVIEW_BYTES, atomic_write, canonical, digest, mkdir, n
 from .vcs import REF_PREFIX
 
 
-def open_store(root: Path, config) -> "Snapshots":
+def open_store(root: Path, config, *, create_dirs: bool = True) -> "Snapshots":
     """Build a Snapshots view with the operator's limits. Single construction site."""
     limits = config.limits
     return Snapshots(root, excludes=config.exclude, max_file=limits.file_bytes,
                      max_bytes=limits.snapshot_bytes, max_files=limits.snapshot_files,
-                     history_index=limits.history_index)
+                     history_index=limits.history_index, create_dirs=create_dirs)
 
 
 class Snapshots:
     def __init__(self, root: Path, *, excludes: tuple[str, ...], max_file: int,
-                 max_bytes: int, max_files: int, history_index: int = 128):
+                 max_bytes: int, max_files: int, history_index: int = 128,
+                 create_dirs: bool = True):
         self.root = root
         self.excludes = excludes
         self.max_file, self.max_bytes, self.max_files = max_file, max_bytes, max_files
         self.history_index = history_index
-        mkdir(root / "objects")
-        mkdir(root / "snapshots")
+        if create_dirs:
+            mkdir(root / "objects")
+            mkdir(root / "snapshots")
 
     def excluded(self, name: str) -> bool:
         # Legacy in-workspace upstream-ref subtree (pre-move): the store now

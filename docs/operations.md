@@ -209,3 +209,14 @@ mizu init harness-candidate --source /path/to/reviewed/clean/source \
 Git リポジトリからソースツリーを取り込む場合、作業ツリーがクリーンな状態（未コミットの変更がない状態）である必要があります。通常のディレクトリを取り込む場合は、不要な一時ファイルなどを除外した上でコピーされます。Maintainer による改善提案や修正結果は必ず人間がレビューし、公式リポジトリおよび新版ソースツリーに反映した上で、改めて通常のセットアップ手順に従って導入してください。
 
 サービス名は `mizu-<プロジェクト名の文字数>-<プロジェクト名>-<ロール名>` です。旧名の定義は所有を確認して手動移行します。macOS/Windowsのcalendarには `timezone = "local"` を明示します。所有一覧と時刻基準は [契約と移行](completion-contracts.md) を参照してください。
+
+### 記録済み根拠の説明
+
+```sh
+mizu explain demo                 # プロジェクトに有効な役割が1つの場合
+mizu explain demo --role worker   # 複数役割の場合は対象を明示
+```
+
+`mizu explain` は単一役割の JSON 根拠ビューを標準出力に返します。トップレベルは `schema_version` / `generated_at` / `project` / `role` / `observation` / `project_facts` / `role_facts` です。`project_facts` は保存済み control（reasonは512文字まで）、プロジェクト全体の現在snapshot、読み取り専用budget peekです。`role_facts` は対象roleのhealth/active記録、設定済みprofile/selector、daemon/interval/calendar/on-change/decision-event/source/CI-wake設定、選択制約を含みます。選択制約ではblock key、sponsor project/role、rule、probeのnext timeと`until`、観測時刻での`probe_due`を示します（実際のprobe起動やsponsor認可を確認した意味ではありません）。selectorが設定されたroleでは、run履歴を走査しないため`current_choice`は`unknown`です。selectorがなければ設定済みprofileを示します。出典はローカルのbounded current recordと静的role設定に限り、任意のerror textやInsight本文は出力しません。control/health/activeは各64 KiB、selection stateは既存の1 MiB上限、budget peekは当日ファイル4 MiB上限で、budget peekは`gc`を行いません。コマンドは状態を書き換えず、engine/modelやVCS、service managerを呼びません。欠損・不正な個別記録は`absent` / `unavailable`として値を捏造せず示します。設定やproject/role指定が無効ならstderrにエラーを出して失敗します。修復後はコマンドを再実行してください。
+
+選択結果の予測、run 履歴の走査、Insight 本文の読み込み、queue や process/service-manager の確認は行いません。正確な次回起動、外部サービス状態、役割の最終完了 outcome、queue 順位、active process の生存・yield 可否、および pending Insight/structured wait は未検査であるため `unknown` として明示します。snapshot の outcome はプロジェクト全体の outcome であり、この役割の outcome ではありません。この出力は複数ファイルをまたぐ非 atomic な記録時点の観測で、scheduler verdict ではなく、役割が実行されるかどうかを示すものではありません。既存の `mizu status` は従来どおりです。

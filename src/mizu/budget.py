@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
+import stat
 from pathlib import Path
 
-from .errors import Denied, InfraExceeded
-from .fs import atomic_write, canonical, identifier, lock, read_json
+from .errors import Denied, InfraExceeded, LimitExceeded
+from .fs import atomic_write, canonical, identifier, lock, read_json, safe_read
 
 #: Day-file byte bound (~160K admissions at ~25 B/entry); count cap binds first.
 BUDGET_DAY_BYTES = 4 * 1024 * 1024
@@ -190,6 +192,59 @@ class Budget:
                 "exhausted_projects": exhausted,
                 "shared_exhausted": bool(self.shared_daily > 0 and shared >= self.shared_daily),
                 "bytes": size, "reaped": reaped}
+
+    def peek(self, project: str = "") -> dict:
+        """Read today's bounded budget counters without reaping or writing.
+
+        Bounds: one ``YYYY-MM-DD.json`` file up to ``BUDGET_DAY_BYTES``.
+        Trust: local ledger only. Missing day files report zero counters;
+        unsafe, oversized, malformed, or unreadable files report
+        ``status="unavailable"`` with no inferred counters. This method never
+        calls ``gc`` and is suitable for read-only evidence projections.
+        """
+        project = self._check_project(project)
+        day = self._today()
+        path = self.root / f"{day}.json"
+        empty = {"day": day, "zone": self.timezone, "used": 0, "limit": self.daily,
+                 "shared_used": 0, "shared_limit": self.shared_daily,
+                 "bytes": 0, "status": "absent"}
+        try:
+            root_info = self.root.lstat()
+        except FileNotFoundError:
+            return {**empty, "project": project}
+        except OSError:
+            return {"status": "unavailable", "project": project}
+        if not stat.S_ISDIR(root_info.st_mode) or stat.S_ISLNK(root_info.st_mode):
+            return {"status": "unavailable", "project": project}
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            return {**empty, "project": project}
+        except OSError:
+            return {"status": "unavailable", "project": project}
+        if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                or info.st_nlink != 1 or info.st_size > BUDGET_DAY_BYTES):
+            return {"status": "unavailable", "project": project}
+        try:
+            data = safe_read(self.root, f"{day}.json", BUDGET_DAY_BYTES)
+            record = json.loads(data, parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+            if not isinstance(record, dict):
+                raise ValueError
+            requests = record.get("requests", [])
+            projects = record.get("projects", {})
+            if (not isinstance(requests, list) or any(not isinstance(item, str) for item in requests)
+                    or not isinstance(projects, dict)
+                    or any(not isinstance(name, str) or not isinstance(entries, list)
+                           or any(not isinstance(item, str) for item in entries)
+                           for name, entries in projects.items())):
+                raise ValueError
+            return {"status": "current", "day": day, "zone": self.timezone,
+                    "used": len(projects.get(project, [])), "limit": self.daily,
+                    "shared_used": len(requests), "shared_limit": self.shared_daily,
+                    "bytes": len(data),
+                    "project": project}
+        except (Denied, LimitExceeded, OSError, ValueError, TypeError, RecursionError):
+            return {"status": "unavailable", "project": project}
 
     def usage(self, project: str = "") -> dict:
         """Report per-project usage plus the shared day total.

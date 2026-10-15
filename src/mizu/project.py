@@ -11,22 +11,27 @@ from pathlib import Path
 
 from .budget import Budget
 from .config import Config, keys, strings
-from .errors import ConfigError, Denied
-from .fs import atomic_write, identifier, lock, mkdir, now, read_json, sync_dir, write_json
+from .errors import ConfigError, Denied, LimitExceeded
+from .fs import atomic_write, identifier, lock, mkdir, now, read_json, safe_read, sync_dir, write_json
 from .insights import Insights
 from .process import environment, run
 from .snapshot import open_store
 
 
 class Project:
-    def __init__(self, config: Config, name: str):
+    def __init__(self, config: Config, name: str, *, read_only: bool = False):
         self.config, self.name = config, identifier(name)
         self.root = config.data / "projects" / name
         self.workspace = self.root / "workspace"
         try:
-            self.settings = tomllib.loads((self.root / "project.toml").read_text(encoding="utf-8"))
-        except (OSError, tomllib.TOMLDecodeError) as exc:
-            raise ConfigError(f"Project is not initialized: {name}") from exc
+            if read_only:
+                raw_settings = safe_read(self.root, "project.toml", 65536)
+                self.settings = tomllib.loads(raw_settings.decode("utf-8"))
+            else:
+                self.settings = tomllib.loads((self.root / "project.toml").read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, Denied, LimitExceeded) as exc:
+            complaint = "Cannot read bounded project settings" if read_only else f"Project is not initialized: {name}"
+            raise ConfigError(complaint) from exc
         keys(self.settings, {"roles", "verify", "attributes"}, "project")
         from .selection import attributes
         attributes(self.settings.get("attributes", {}))
@@ -34,7 +39,7 @@ class Project:
         self.verify = check_verify(self.settings.get("verify", []))
         if not self.roles or any(r not in config.roles for r in self.roles):
             raise ConfigError("Project roles must refer to configured roles")
-        self.snapshots = open_store(self.root, config)
+        self.snapshots = open_store(self.root, config, create_dirs=not read_only)
         self.insights = Insights(self.root, retention_days=config.limits.retention_days)
         self.insights.snapshots = self.snapshots
         from .role_state import RoleStateStore
