@@ -249,12 +249,17 @@ any exist, and their current state is never inferred. Rows include current
 origin staleness/redecision, a structured wait for blocked items, and an
 optional reason preview of at most 1024 UTF-8 bytes. Limits are 1–100 rows,
 8192 canonical bytes per row, and 1 MiB for the complete response; selection
-uses O(limit) row memory. The scan is O(decision-history) and holds the shared
-lock for the enumeration; no list index is maintained. Unsafe or malformed
-committed history, seeds, or state fail closed. Only recognized regular
-`.new-<8-char>` orphan temporaries are ignored, never promoted; unexpected
-names and unsafe temporaries fail closed. Recognized per-item atomic-write
-leftovers are recovered under the lock. Paging is a live view across calls, not a transaction snapshot. The exclusive
+uses O(limit) row memory plus bounded temporary/alias metadata (at most 64 of
+each). A bounded temporary-name pass precedes the O(decision-history) enumeration
+under the shared lock, and stats only recognized temporary files. Event inode
+matching is done only when a post-link alias is found, before any origin
+projection is read. No list index is maintained.
+Unsafe or malformed committed history, seeds, or state fail closed. Recognized
+regular `.new-<8-char>` orphan temporaries are removed, never promoted. A
+post-link hard-link alias is removed only when exactly one regular committed
+event filename has the same inode; unmatched aliases, unexpected names, and
+unsafe temporaries fail closed. Recognized per-item atomic-write leftovers are
+also recovered under the lock. Paging is a live view across calls, not a transaction snapshot. The exclusive
 last-key cursor avoids offset shifts when an earlier row closes, but new IDs
 that sort at or before the cursor may be absent from that continuation; an
 empty page after a cursor does not mean the collection is empty. `total` and

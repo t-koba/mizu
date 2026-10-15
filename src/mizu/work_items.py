@@ -28,6 +28,7 @@ MAX_PROJECTION_BYTES = PREVIEW_BYTES + 256
 MAX_OPEN_PAGE_ROWS = 100
 MAX_OPEN_ROW_BYTES = 8192
 MAX_OPEN_PAGE_BYTES = 1024 * 1024
+MAX_HISTORY_TEMPORARIES = 64
 _TEMP_NAME = re.compile(r"\.new-[A-Za-z0-9_]{8}\Z")
 _REVISION_NAME = re.compile(r"(?:[2-9]|[1-9][0-9]{1,2})\.json\Z")
 _DECISION_EVENT_NAME = re.compile(r"[0-9a-f]{32}\.json\Z")
@@ -347,6 +348,72 @@ class WorkItems:
         with lock(self.root / "locks" / "insights.lock"):
             return self._projection_unlocked(item_id)
 
+    def _recover_decision_history_temporaries(self, history: Path) -> bool:
+        """Remove safe atomic-write leftovers while insights.lock is held.
+
+        A lone regular temporary is uncommitted. A post-link alias is removed
+        only when exactly one regular event filename identifies the same inode.
+        Recovery state is bounded independently of the append-only history.
+        """
+        if not _directory(history):
+            return False
+        temporary_info = []
+        aliases = {}
+        with os.scandir(history) as entries:
+            for entry in entries:
+                if not _TEMP_NAME.fullmatch(entry.name):
+                    continue
+                if len(temporary_info) >= MAX_HISTORY_TEMPORARIES:
+                    raise Denied("Too many decision-history temporaries")
+                try:
+                    info = entry.stat(follow_symlinks=False)
+                except OSError as exc:
+                    raise Denied("Unstable decision-history temporary") from exc
+                if (not stat.S_ISREG(info.st_mode)
+                        or getattr(info, "st_file_attributes", 0) & 0x400):
+                    raise Denied("Unsafe decision-history temporary")
+                if (info.st_nlink not in (1, 2)
+                        or (info.st_nlink == 2 and info.st_ino <= 0)):
+                    raise Denied("Unrecognized decision-history temporary link count")
+                temporary_info.append((entry.path, info))
+                if info.st_nlink == 2:
+                    key = (info.st_dev, info.st_ino)
+                    aliases.setdefault(key, []).append(entry.path)
+
+        if aliases:
+            matches = {key: [] for key in aliases}
+            with os.scandir(history) as entries:
+                for entry in entries:
+                    if _DECISION_EVENT_NAME.fullmatch(entry.name) is None:
+                        continue
+                    try:
+                        info = entry.stat(follow_symlinks=False)
+                    except OSError as exc:
+                        raise Denied("Unstable decision-history entry") from exc
+                    key = (info.st_dev, info.st_ino)
+                    if key not in matches:
+                        continue
+                    if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 2
+                            or getattr(info, "st_file_attributes", 0) & 0x400):
+                        raise Denied("Unsafe decision-history alias target")
+                    matches[key].append(entry.name)
+                    if len(matches[key]) > 1:
+                        raise Denied("Ambiguous decision-history alias target")
+            if any(len(paths) != 1 or len(matches[key]) != 1
+                   for key, paths in aliases.items()):
+                raise Denied("Unrecognized decision-history temporary hard link")
+
+        removed = False
+        for path, _ in temporary_info:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                continue
+            removed = True
+        if removed:
+            sync_dir(history)
+        return True
+
     def page_open(self, *, cursor=None, limit=25) -> dict:
         """Return a bounded live page of seeded, currently open work items.
 
@@ -358,12 +425,14 @@ class WorkItems:
         complete response at most 1 MiB. Selection keeps O(limit) rows while
         history is scanned. Legacy accept/modify events lacking a seed are
         counted, never guessed as open. The page is internal and read-only
-        apart from recognized work-item atomic-write recovery under the shared
-        lock. Cursors page a live view: changes between calls can move rows;
-        a last-key cursor avoids offset shifts on earlier closes but does not
-        freeze membership. Unsafe/malformed committed JSON, seeds or state fail closed; only
-        recognized regular orphan atomic-write temporaries are ignored, never
-        promoted, while unexpected names and unsafe temporaries fail closed.
+        apart from recognized decision-history and per-item atomic-write
+        recovery under the shared lock. Recovery removes recognized regular
+        orphan temporaries without promotion; post-link aliases require exactly
+        one matching event inode.
+        Cursors page a live view: changes between calls can move rows; a last-key
+        cursor avoids offset shifts on earlier closes but does not freeze
+        membership. Unsafe/malformed committed JSON, seeds or state fail closed;
+        unmatched/unsafe temporaries and unexpected names fail closed.
         """
         if cursor is not None and (not isinstance(cursor, str) or ITEM_ID.fullmatch(cursor) is None):
             raise Denied("Invalid work-item cursor")
@@ -376,7 +445,7 @@ class WorkItems:
             total = 0
             eligible = 0
             unseeded_decisions = 0
-            if _directory(history):
+            if self._recover_decision_history_temporaries(history):
                 with os.scandir(history) as entries:
                     for entry in entries:
                         if _TEMP_NAME.fullmatch(entry.name):

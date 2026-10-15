@@ -547,11 +547,44 @@ class WorkItemTests(Fixture):
         self.assertEqual(page["unseeded_decisions"], 1)
         self.assertFalse(page["coverage_complete"])
 
+    def test_page_open_recovers_post_link_decision_history_temporary(self):
+        history = self.project.root / "decision-history"
+        temporary = history / ".new-alias123"
+        try:
+            os.link(self.seed_path, temporary)
+        except (OSError, NotImplementedError):
+            self.skipTest("Hard links unavailable")
+        self.assertEqual(self.seed_path.stat().st_nlink, 2)
+        page = self.store.page_open()
+        self.assertEqual([row["id"] for row in page["items"]], [self.item_id])
+        self.assertFalse(temporary.exists())
+        self.assertEqual(self.seed_path.stat().st_nlink, 1)
+
+    def test_page_open_recovers_current_redecision_alias_before_projection(self):
+        self.project.insights.revise(self.proposal["id"], source="worker", title="Revised scope",
+                                     body="Changed claims", base_snapshot=None, expected_rev=1)
+        decision = self.project.insights.decide(
+            self.proposal["id"], "accept", "reassessed", "", "run-redecision", expected_rev=2)
+        history = self.project.root / "decision-history"
+        event_path = history / f"{decision['work_item']['id'][3:]}.json"
+        temporary = history / ".new-redec123"
+        try:
+            os.link(event_path, temporary)
+        except (OSError, NotImplementedError):
+            self.skipTest("Hard links unavailable")
+        page = self.store.page_open(limit=10)
+        self.assertEqual(page["total"], 2)
+        self.assertEqual([row["id"] for row in page["items"]],
+                         sorted((self.item_id, decision["work_item"]["id"])))
+        self.assertFalse(temporary.exists())
+        self.assertEqual(event_path.stat().st_nlink, 1)
+
     def test_page_open_fails_closed_on_malformed_committed_history_and_ignores_temporary(self):
         history = self.project.root / "decision-history"
         temporary = history / ".new-leftover"
         temporary.write_bytes(b"uncommitted")
         self.assertEqual([row["id"] for row in self.store.page_open()["items"]], [self.item_id])
+        self.assertFalse(temporary.exists())
         unknown = history / "unexpected.data"
         unknown.write_text("not a committed event")
         with self.assertRaises(Denied):
@@ -561,6 +594,20 @@ class WorkItemTests(Fixture):
         bad.write_bytes(b"{not-json")
         with self.assertRaises(Denied):
             self.store.page_open()
+
+    def test_page_open_rejects_unmatched_decision_history_hard_link(self):
+        history = self.project.root / "decision-history"
+        outside = self.project.root / "outside-decision-event"
+        outside.write_bytes(b"not a committed event")
+        temporary = history / ".new-extern12"
+        try:
+            os.link(outside, temporary)
+        except (OSError, NotImplementedError):
+            self.skipTest("Hard links unavailable")
+        with self.assertRaisesRegex(Denied, "Unrecognized decision-history temporary hard link"):
+            self.store.page_open()
+        self.assertTrue(temporary.exists())
+        self.assertEqual(outside.read_bytes(), b"not a committed event")
 
     def test_concurrent_same_revision_has_one_winner(self):
         barrier = threading.Barrier(2)
