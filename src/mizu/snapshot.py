@@ -9,9 +9,12 @@ import stat
 from pathlib import Path
 
 from . import platform as _platform
-from .errors import Denied, LimitExceeded
-from .fs import DIGEST, PREVIEW_BYTES, atomic_write, canonical, digest, mkdir, now, publish_pointer, read_json, safe_read, safe_read_info, write_json, relative_parts
+from .errors import Denied, LimitExceeded, SnapshotConflict
+from .fs import DIGEST, PREVIEW_BYTES, atomic_write, canonical, digest, lock, mkdir, now, publish_pointer, read_json, safe_read, safe_read_info, write_json, relative_parts
 from .vcs import REF_PREFIX
+
+
+_CURRENT_PARENT = object()
 
 
 def open_store(root: Path, config, *, create_dirs: bool = True) -> "Snapshots":
@@ -148,24 +151,144 @@ class Snapshots:
 
     def create(self, captured: dict, *, goal: str, state: str, run: str | None,
                outcome: str, summary: str, verification: dict | None = None,
-               wake_at: float | None = None, inbox_seen: str = "", wake_generation: str = "") -> dict:
+               wake_at: float | None = None, inbox_seen: str = "", wake_generation: str = "",
+               parent: str | None | object = _CURRENT_PARENT) -> dict:
+        """Persist an immutable capture; publication is a separate CAS operation.
+
+        Omitted parent captures the current published ID. Derived callers must
+        pass the exact snapshot they started from. None is an initial root only
+        (no current pointer); explicit IDs must already exist in this store.
+        No pointer moves on creation or failure.
+        """
+        if parent is _CURRENT_PARENT or parent is None:
+            history = self._history_ids()
+            if parent is None and history:
+                raise Denied("A root snapshot requires an empty publication store")
+            parent = history[-1] if history else None
+        if parent is not None:
+            if not isinstance(parent, str) or not DIGEST.fullmatch(parent):
+                raise Denied("Invalid parent snapshot ID")
+            self.get(parent)
         record = {**captured, "created_at": now(), "goal": goal,
                   "goal_digest": digest(goal.encode()), "state": state, "run": run,
                   "outcome": outcome, "summary": summary, "verification": verification,
-                  "wake_at": wake_at, "inbox_seen": inbox_seen, "wake_generation": wake_generation}
+                  "wake_at": wake_at, "inbox_seen": inbox_seen, "wake_generation": wake_generation,
+                  "parent": parent}
         record["id"] = digest(canonical(record))
         write_json(self.root / "snapshots" / f"{record['id']}.json", record, exclusive=True)
         return record
 
     def publish(self, snapshot: dict) -> None:
-        # This pointer is the commit point. A manifest exists before it can be visible.
-        self.get(snapshot["id"])
-        history = self._history_ids()
-        if snapshot["id"] not in history:
-            history = [*history, snapshot["id"]][-self.history_index:]
-        generation = digest(canonical(history))
-        write_json(self.root / "histories" / (generation + ".json"), history, exclusive=True)
-        publish_pointer(self.root, {"snapshot": snapshot["id"], "history": generation}, name="current.json")
+        """Publish under one store-scoped fs.lock, after validating stored data.
+
+        New records compare their parent (including an initial None) with the
+        current ID. SnapshotConflict leaves history/current untouched; retrying
+        the already-current ID is a no-op. Legacy records without parent remain
+        readable; parentless legacy records may initialize an empty store but
+        cannot replace an existing head. Caller-supplied fields never override
+        a stored record's CAS. Immutable history precedes the durable pointer commit;
+        I/O failure can leave an unreferenced generation, as before. No external
+        I/O or admission changes; fs.lock releases on exit/process death.
+        """
+        with lock(self.root / "locks" / "publication.lock"):
+            record = self.get(snapshot["id"])
+            history = self._history_ids()
+            current = history[-1] if history else None
+            if current == record["id"]:
+                return
+            if "parent" in record:
+                if record["parent"] != current:
+                    raise SnapshotConflict("Snapshot parent is no longer current")
+                if record["parent"] is not None:
+                    self.get(record["parent"])
+            elif current is not None:
+                # Old records remain readable, but without a bound base they
+                # cannot replace a head whose lineage is already advancing.
+                raise SnapshotConflict("Legacy snapshot has no compare-and-swap parent")
+            # This pointer is the commit point. The manifest and history exist
+            # before they can be visible; keep the existing durability order.
+            if record["id"] not in history:
+                history = [*history, record["id"]][-self.history_index:]
+            generation = digest(canonical(history))
+            write_json(self.root / "histories" / (generation + ".json"), history, exclusive=True)
+            publish_pointer(self.root, {"snapshot": record["id"], "history": generation}, name="current.json")
+
+    def merge(self, base: str, head: str, target: str) -> tuple[dict | None, list[str]]:
+        """Three-way path merge of exact stored IDs, without reading object bytes.
+
+        head must directly name base as parent; target must descend from base
+        within history_index. Inputs are untrusted and checked by get, paths
+        and aggregate bounds.
+        Complete entries (digest/size/mode) merge atomically, never as text.
+        Return (capture, []) on success, suitable for create(parent=target), or
+        (None, sorted conflict paths) for divergent edits or host/path-prefix
+        collisions. No partial capture is publishable. Invalid inputs raise
+        Denied; input/output count or byte overflow raises LimitExceeded.
+        This is read-only, deterministic and safe to retry/cancel between calls;
+        returned code_digest binds the merged manifest, not publication authority.
+        """
+        records = []
+        for sid in (base, head, target):
+            # None must not invoke get's moving-current convenience interface.
+            if not isinstance(sid, str) or not DIGEST.fullmatch(sid):
+                raise Denied("Merge requires exact snapshot IDs")
+            record = self.get(sid)
+            self._manifest_bounds(record["files"])
+            records.append(record)
+        before, ours, theirs = records
+        if ours.get("parent") != base:
+            raise Denied("Merge head must be directly based on base")
+        ancestor = theirs
+        for _ in range(self.history_index):
+            if ancestor["id"] == base:
+                break
+            parent = ancestor.get("parent")
+            if parent is None:
+                raise Denied("Merge target must descend from base")
+            ancestor = self.get(parent)
+        else:
+            raise Denied("Merge target ancestry exceeds retained history bound")
+        files, conflicts = {}, set()
+        for name in sorted(set(before["files"]) | set(ours["files"]) | set(theirs["files"])):
+            old, left, right = (r["files"].get(name) for r in records)
+            if left == right or right == old:
+                entry = left
+            elif left == old:
+                entry = right
+            else:
+                conflicts.add(name)
+                continue
+            if entry is not None:
+                files[name] = dict(entry)
+        # Each input's paths are valid, but their union may not be. Report both
+        # sides of a collision rather than selecting an arbitrary survivor.
+        normalized = {}
+        for name in files:
+            key = name.casefold() if _platform.IS_WINDOWS else name
+            normalized.setdefault(key, []).append(name)
+        for key, names in normalized.items():
+            if len(names) > 1:
+                conflicts.update(names)
+            parts = key.split("/")
+            for i in range(1, len(parts)):
+                prefix = "/".join(parts[:i])
+                if prefix in normalized:
+                    conflicts.update(names)
+                    conflicts.update(normalized[prefix])
+        if conflicts:
+            return None, sorted(conflicts)
+        self.validate_paths(files)
+        total = self._manifest_bounds(files)
+        return {"files": files, "code_digest": digest(canonical(files)),
+                "skipped": [], "bytes": total}, []
+
+    def _manifest_bounds(self, files: dict) -> int:
+        if len(files) > self.max_files:
+            raise LimitExceeded("Snapshot file count exceeded")
+        total = sum(entry["bytes"] for entry in files.values())
+        if total > self.max_bytes:
+            raise LimitExceeded("Snapshot byte limit exceeded")
+        return total
 
     def get(self, snapshot_id: str | None = None) -> dict:
         if snapshot_id is None:
@@ -180,9 +303,13 @@ class Snapshots:
         record = read_json(self.root / "snapshots" / f"{snapshot_id}.json")
         if record is None:
             raise Denied("Snapshot not found")
+        if not isinstance(record, dict):
+            raise Denied("Invalid snapshot record")
         body = {k: v for k, v in record.items() if k != "id"}
         if record.get("id") != snapshot_id or digest(canonical(body)) != snapshot_id:
             raise Denied("Snapshot integrity failure")
+        if "parent" in record and record["parent"] is not None and (not isinstance(record["parent"], str) or not DIGEST.fullmatch(record["parent"])):
+            raise Denied("Invalid parent snapshot ID")
         if not isinstance(record.get("files"), dict):
             raise Denied("Invalid snapshot files")
         if digest(canonical(record["files"])) != record.get("code_digest"):

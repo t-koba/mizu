@@ -17,6 +17,11 @@ class Denied(MizuError):
     code = 77
 
 
+class SnapshotConflict(MizuError):
+    """Publication lost a parent compare-and-swap; recapture or merge before retry."""
+    code = 75
+
+
 class LimitExceeded(MizuError):
     code = 69
 

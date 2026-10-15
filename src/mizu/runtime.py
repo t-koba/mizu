@@ -2893,7 +2893,7 @@ class Engine:
                         outcome=finished["outcome"], summary=finished["summary"], verification=verification,
                         wake_at=time.time() + finished["wait_seconds"] if finished["outcome"] == "wait" else None,
                         inbox_seen=context.inbox_seen,
-                        wake_generation=context.wake_generation)
+                        wake_generation=context.wake_generation, parent=context.snapshot["id"])
                 if decision:
                     from .selection import State
                     State(self.config).result(decision, run=run_id, attempt=selection_attempt)
