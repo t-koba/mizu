@@ -36,6 +36,7 @@ import { openNodeSqliteStorage } from '@earendil-works/pi-durable/storage/sqlite
 import { request, typeSchema } from './bridge-client.mjs';
 
 const CONTRACT_EXPORTS = ['Harness', 'createRegistry', 'defineExtension', 'defineTool', 'openNodeSqliteStorage', 'builtinModels'];
+const MAX_SETTLEMENT_DETAIL_CHARS = 4000;
 
 /**
  * File-backed provider credentials over Pi's login store (auth.json).
@@ -331,8 +332,6 @@ if (process.argv.includes('--check-contract') && invokedAsMain) {
  * Provider error text is evidence, not a status code; Python pairs it with the
  * unchanged settlement reason for configured error predicates.
  */
-const MAX_SETTLEMENT_DETAIL_CHARS = 4000;
-
 function boundedSettlementDetail(value) {
   if (typeof value !== 'string') return undefined;
   let end = 0;

@@ -11,7 +11,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { createServer } from 'node:net';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join as joinPath } from 'node:path';
@@ -446,6 +447,71 @@ test('launcher runs without a turn bound; requests_per_run governs spend', async
     assert.notEqual(child.status, 0);
     assert.doesNotMatch(child.stderr, /max_turns/);
   } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('launcher settles a model-admission failure from its process entrypoint', { timeout: 10000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'mizu-durable-launcher-error-'));
+  const operations = [];
+  const server = createServer(socket => {
+    let input = '';
+    let handled = false;
+    socket.on('data', chunk => {
+      input += chunk.toString('utf8');
+      const newline = input.indexOf('\n');
+      if (handled || newline < 0) return;
+      handled = true;
+      const request = JSON.parse(input.slice(0, newline));
+      operations.push(request.operation);
+      socket.end(JSON.stringify({ ok: false, error: 'synthetic local admission refusal' }) + '\n');
+    });
+  });
+  try {
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    const address = server.address();
+    assert.ok(address && typeof address === 'object');
+    const authPath = join(directory, 'auth.json');
+    const bridgePath = join(directory, 'bridge.json');
+    const configPath = join(directory, 'effective.json');
+    writeFileSync(authPath, JSON.stringify({ openai: { type: 'api_key', key: 'offline-test-key' } }));
+    writeFileSync(bridgePath, JSON.stringify({ transport: 'tcp', host: '127.0.0.1', port: address.port,
+      timeout_ms: 2000, token: 'local-test', joined_operations: [] }));
+    writeFileSync(configPath, JSON.stringify({ provider: 'openai', model: 'gpt-4o-mini',
+      instructions: 'test', store: join(directory, 'store.sqlite'), requestId: 'offline-test',
+      prompt: 'test', cwd: directory, authPath,
+      tools: [{ name: 'finish', description: 'Seal', operation: 'finish',
+        inputSchema: { type: 'object', properties: {}, required: [] } }] }));
+    const launcher = joinPath(dirname(fileURLToPath(import.meta.url)), '..', 'adapters', 'pi-durable', 'launcher.mjs');
+    const childEnv = { PATH: process.env.PATH ?? '', HOME: directory, USERPROFILE: directory,
+      TMP: directory, TEMP: directory, MIZU_BRIDGE_CONFIG: bridgePath };
+    for (const name of ['SystemRoot', 'WINDIR']) {
+      if (process.env[name]) childEnv[name] = process.env[name];
+    }
+    const child = spawn(process.execPath, [launcher, configPath], {
+      cwd: dirname(launcher), env: childEnv, stdio: ['ignore', 'pipe', 'pipe'], timeout: 8000,
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk; });
+    child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
+    const { code, signal } = await new Promise((resolve, reject) => {
+      child.once('error', reject);
+      child.once('close', (exitCode, exitSignal) => resolve({ code: exitCode, signal: exitSignal }));
+    });
+    assert.equal(code, 0, stderr);
+    assert.equal(signal, null);
+    assert.ok(operations.length > 0);
+    assert.ok(operations.every(operation => operation === '_budget'));
+    const result = JSON.parse(stdout.trim());
+    assert.equal(result.durable_result, true);
+    assert.notEqual(result.status, 'done');
+    assert.match(result.detail, /synthetic local admission refusal/);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
     await rm(directory, { recursive: true, force: true });
   }
 });
