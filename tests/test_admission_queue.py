@@ -324,6 +324,7 @@ class QueueTests(Fixture):
                 resource_names = tuple(p.relative_to(self.config.data / 'projects').as_posix()
                                        for p in resources)
                 resource_attempted = threading.Event()
+                retry_allowed = threading.Event()
                 resource_check_seen = False
                 original_attempt = _Queue.attempt
                 original_resources = _Queue._resources
@@ -346,23 +347,32 @@ class QueueTests(Fixture):
                         if (queue_obj.resources == resource_names and queue_obj.alive is not None
                                 and resource_check_seen):
                             resource_attempted.set()
+                            # Keep the waiter between attempts until the main
+                            # thread finishes its nonblocking leakage probes.
+                            # A signal alone does not prevent a fresh retry
+                            # from legitimately holding the partial role lock.
+                            if not retry_allowed.wait(10):
+                                raise RuntimeError('resource probe synchronization timed out')
                         raise
 
                 with lock(path, blocking=False):
-                    with patch.object(_Queue, '_resources', resources_and_mark), \
-                            patch.object(_Queue, 'attempt', attempt_and_signal):
-                        thread, stop, outcome = self.waiter(resources=resources)
-                        self.until(lambda: len(self.tickets(synchronized=True)) == 1)
-                        self.assertTrue(resource_attempted.wait(5),
-                                        'waiter did not finish its blocked resource attempt')
-                    with self.raw_slots():
-                        pass  # Sleeping writer consumes no active capacity.
-                    if blocked == 'workspace':
-                        with lock(role_lock, blocking=False):
-                            pass  # Partial acquisition also released.
-                    with admission(self.config, (self.project.root / 'locks/run-reporter.lock',), wait=True):
-                        self.assertEqual(len(self.tickets(synchronized=True)), 1)
-                    self.assertTrue(thread.is_alive())
+                    try:
+                        with patch.object(_Queue, '_resources', resources_and_mark), \
+                                patch.object(_Queue, 'attempt', attempt_and_signal):
+                            thread, stop, outcome = self.waiter(resources=resources)
+                            self.until(lambda: len(self.tickets(synchronized=True)) == 1)
+                            self.assertTrue(resource_attempted.wait(5),
+                                            'waiter did not finish its blocked resource attempt')
+                        with self.raw_slots():
+                            pass  # Sleeping writer consumes no active capacity.
+                        if blocked == 'workspace':
+                            with lock(role_lock, blocking=False):
+                                pass  # Partial acquisition also released.
+                        with admission(self.config, (self.project.root / 'locks/run-reporter.lock',), wait=True):
+                            self.assertEqual(len(self.tickets(synchronized=True)), 1)
+                        self.assertTrue(thread.is_alive())
+                    finally:
+                        retry_allowed.set()
                 thread.join(5)
                 self.assertFalse(thread.is_alive())
                 self.assertEqual(outcome, ['admitted'])
