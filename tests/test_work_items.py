@@ -215,6 +215,25 @@ class WorkItemTests(Fixture):
                 self.change(status, expected_rev=3, reason="Reopen")
         self.assertEqual(sorted(p.name for p in self.directory.iterdir()), ["2.json", "3.json"])
 
+    def test_reconstruction_rejects_completion_copy_mismatched_to_snapshot(self):
+        snapshot = self.snapshot("valid")
+        completed = self.change("done", snapshot_id=snapshot["id"])
+        path = self.directory / "2.json"
+        tampered = copy.deepcopy(completed)
+        tampered["verification"]["code_digest"] = "a" * 64
+        write_json(path, tampered)
+        with self.assertRaises(Denied):
+            self.store.get(self.item_id)
+        # The actual manifest is also revalidated on reconstruction.
+        write_json(path, completed)
+        manifest = self.project.snapshots.root / "snapshots" / f"{snapshot['id']}.json"
+        saved = json.loads(manifest.read_bytes())
+        write_json(manifest, {**saved, "summary": "tampered"})
+        with self.assertRaises(Denied):
+            self.store.get(self.item_id)
+        write_json(manifest, saved)
+        self.assertEqual(self.store.get(self.item_id), completed)
+
     def test_drop_requires_nonempty_reason_and_is_terminal(self):
         for reason in (None, "", " \n", 1):
             with self.subTest(reason=reason), self.assertRaises(Denied):
@@ -259,7 +278,7 @@ class WorkItemTests(Fixture):
         with self.assertRaises(LimitExceeded):
             self.store.get(self.item_id)
         path.unlink()
-        for name in ("3.json", "257.json", "02.json", "current.json", ".new-leftover"):
+        for name in ("3.json", "257.json", "02.json", "current.json", ".new-temp"):
             with self.subTest(name=name):
                 write_json(self.directory / name, event)
                 with self.assertRaises(Denied):
@@ -289,6 +308,37 @@ class WorkItemTests(Fixture):
             os.symlink(target, link, **kwargs)
         except (OSError, NotImplementedError):
             self.skipTest("Symlink creation unavailable")
+
+    def test_interrupted_orphan_temporary_is_removed_without_promoting_it(self):
+        self.directory.mkdir(parents=True)
+        temporary = self.directory / ".new-leftover"
+        temporary.write_bytes(b"incomplete write")
+        self.assertEqual(self.store.get(self.item_id), self.seed)
+        self.assertFalse(temporary.exists())
+        self.assertEqual(self.change()["status"], "doing")
+
+    def test_interrupted_post_link_temporary_is_removed_before_read(self):
+        committed = self.change()
+        event_path = self.directory / "2.json"
+        temporary = self.directory / ".new-leftover"
+        try:
+            os.link(event_path, temporary)
+        except (OSError, NotImplementedError):
+            self.skipTest("Hard links unavailable")
+        self.assertEqual(event_path.stat().st_nlink, 2)
+        self.assertEqual(self.store.get(self.item_id), committed)
+        self.assertFalse(temporary.exists())
+        self.assertEqual(event_path.stat().st_nlink, 1)
+
+    def test_atomic_temporary_symlink_fails_closed(self):
+        self.directory.mkdir(parents=True)
+        temporary = self.directory / ".new-leftover"
+        target = self.project.root / "saved-temporary"
+        target.write_bytes(b"outside")
+        self.symlink(target, temporary)
+        with self.assertRaises(Denied):
+            self.store.get(self.item_id)
+        self.assertTrue(target.is_file())
 
     def test_symlink_seed_fails_closed(self):
         target = self.project.root / "saved-seed.json"

@@ -79,6 +79,21 @@ class StorageAuditTests(Fixture):
         self.assertTrue((self.project.root / "snapshots" / f"{completed_snapshot['id']}.json").is_file())
         self.assertEqual(self.project.work_items.get(item_id)["status"], "done")
 
+    def test_storage_audit_flags_temp_until_locked_work_item_recovery(self):
+        proposal = self.project.insights.submit(
+            source="worker", title="Interrupted append", body="Recover the temporary", base_snapshot=None)
+        decision = self.project.insights.decide(
+            proposal["id"], "accept", "reviewed", "", "run-work-item", expected_rev=1)
+        item_id = decision["work_item"]["id"]
+        item_dir = self.project.root / "work-items" / item_id
+        item_dir.mkdir(parents=True)
+        temporary = item_dir / ".new-leftover"
+        temporary.write_bytes(b"partial")
+        self.assertGreater(audit(self.project)["work_item_events_skipped"], 0)
+        self.assertEqual(self.project.work_items.get(item_id), decision["work_item"])
+        self.assertFalse(temporary.exists())
+        self.assertEqual(audit(self.project)["work_item_events_skipped"], 0)
+
     def test_unreadable_work_item_history_blocks_snapshot_reclaim(self):
         proposal = self.project.insights.submit(
             source="worker", title="Malformed history", body="Do not discard evidence", base_snapshot=None)

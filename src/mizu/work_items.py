@@ -15,13 +15,16 @@ import stat
 from pathlib import Path
 
 from .errors import Denied, LimitExceeded
-from .fs import DIGEST, PREVIEW_BYTES, canonical, identifier, lock, now, safe_read, write_json
+from .fs import (DIGEST, PREVIEW_BYTES, canonical, identifier, lock, now, safe_read,
+                 sync_dir, write_json)
 
 MAX_REVISIONS = 256  # Includes the immutable seed at revision 1.
 ITEM_ID = re.compile(r"wi_([0-9a-f]{32})\Z")
 STATUSES = ("open", "doing", "blocked", "done", "dropped")
 SEED_FIELDS = {"id", "title", "origin", "status", "rev", "holder", "created_at", "updated_at"}
 EVENT_FIELDS = SEED_FIELDS | {"actor", "transition", "reason", "wait", "snapshot_id", "verification"}
+_TEMP_NAME = re.compile(r"\.new-[A-Za-z0-9_]{8}\Z")
+_REVISION_NAME = re.compile(r"(?:[2-9]|[1-9][0-9]{1,2})\.json\Z")
 
 
 def _timestamp(value) -> bool:
@@ -78,6 +81,62 @@ class WorkItems:
             raise Denied("Work-item seed does not match decision event")
         return seed
 
+    def _recover_temporary_writes(self, item_id: str) -> None:
+        """Remove only atomic-write leftovers while holding insights.lock.
+
+        A regular orphan temporary is uncommitted and ignored. On POSIX, a
+        crash after link() can leave a .new-* hard link beside its committed
+        revision; remove that alias only when exactly one valid revision name
+        identifies the same inode. Unknown names and unsafe links fail closed.
+        """
+        if not isinstance(item_id, str) or ITEM_ID.fullmatch(item_id) is None:
+            raise Denied("Invalid work-item ID")
+        directory = self.root / "work-items" / item_id
+        if not _directory(directory.parent) or not _directory(directory):
+            return
+        temporary_entries = []
+        revision_inodes = []
+        with os.scandir(directory) as entries:
+            for count, entry in enumerate(entries):
+                if count >= MAX_REVISIONS:
+                    raise Denied("Work-item directory exceeds recovery bound")
+                if _TEMP_NAME.fullmatch(entry.name):
+                    temporary_entries.append(entry)
+                elif _REVISION_NAME.fullmatch(entry.name):
+                    try:
+                        info = entry.stat(follow_symlinks=False)
+                    except OSError as exc:
+                        raise Denied("Unstable work-item revision entry") from exc
+                    if (int(entry.name[:-5]) <= MAX_REVISIONS
+                            and stat.S_ISREG(info.st_mode)
+                            and not getattr(info, "st_file_attributes", 0) & 0x400):
+                        revision_inodes.append((info.st_dev, info.st_ino, entry))
+        removed = False
+        for entry in temporary_entries:
+            try:
+                info = entry.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise Denied("Unsafe work-item temporary") from exc
+            if (not stat.S_ISREG(info.st_mode)
+                    or getattr(info, "st_file_attributes", 0) & 0x400):
+                raise Denied("Unsafe work-item temporary")
+            if info.st_nlink == 1:
+                pass  # An uncommitted temporary; never promote it to a revision.
+            elif info.st_nlink == 2:
+                matches = [(dev, ino, revision) for dev, ino, revision in revision_inodes
+                           if dev == info.st_dev and ino == info.st_ino]
+                if len(matches) != 1:
+                    raise Denied("Unrecognized work-item temporary hard link")
+            else:
+                raise Denied("Unrecognized work-item temporary link count")
+            try:
+                os.unlink(entry.path)
+            except FileNotFoundError:
+                continue
+            removed = True
+        if removed:
+            sync_dir(directory)
+
     def _stored_wait(self, value) -> dict:
         """Validate normalized waits without rebasing stored code-change evidence."""
         if not isinstance(value, dict):
@@ -126,6 +185,13 @@ class WorkItems:
                     or not isinstance(verification.get("code_digest"), str)
                     or not DIGEST.fullmatch(verification["code_digest"])):
                 raise Denied("Completion requires verified snapshot evidence")
+            snapshot = self.snapshots.get(sid)
+            stored_verification = snapshot.get("verification")
+            if (snapshot.get("id") != sid or not isinstance(stored_verification, dict)
+                    or stored_verification != verification
+                    or stored_verification.get("passed") is not True
+                    or stored_verification.get("code_digest") != snapshot.get("code_digest")):
+                raise Denied("Completion evidence does not match its verified snapshot")
         elif record["snapshot_id"] is not None or record["verification"] is not None:
             raise Denied("Only completed work items carry snapshot evidence")
 
@@ -160,6 +226,7 @@ class WorkItems:
         records raise Denied/LimitExceeded; local I/O/lock failures propagate.
         """
         with lock(self.root / "locks" / "insights.lock"):
+            self._recover_temporary_writes(item_id)
             return self._get(item_id)
 
     def transition(self, item_id: str, *, expected_rev, status, actor, reason=None,
@@ -175,6 +242,7 @@ class WorkItems:
         if type(expected_rev) is not int or expected_rev < 1:
             raise Denied("Expected revision must be a positive integer")
         with lock(self.root / "locks" / "insights.lock"):
+            self._recover_temporary_writes(item_id)
             current = self._get(item_id)
             if current["rev"] != expected_rev:
                 raise Denied("Work item changed; re-read before transitioning")

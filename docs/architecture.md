@@ -200,8 +200,15 @@ exclusively atomically appends the full state to
 Reconstruction requires consecutive revisions, with at most 256 revisions
 including the seed and 128 KiB per seed/event record. Unsafe links, unknown IDs,
 malformed/oversized records, gaps and exhausted bounds fail closed; a stale
-CAS writes nothing and must be re-read, not blindly retried. Lock/I/O failures
-propagate; cancellation/process death releases the kernel lock.
+CAS writes nothing and must be re-read, not blindly retried. `get()` and
+`transition()` recover under the shared lock by removing only recognized
+regular `.new-<8-char>` atomic-write leftovers; an uncommitted temporary is
+never promoted, and a post-link alias
+is removed only when it matches one revision inode. Unknown names and unsafe
+links still fail closed. Completion reads revalidate the cited manifest and
+require its stored passing verification to match the copied evidence, without
+requiring the snapshot to remain in the moving publication history. Lock/I/O
+failures propagate; cancellation/process death releases the kernel lock.
 
 Statuses are `open`, `doing`, `blocked`, `done`, `dropped`. Same-status changes
 and changes from terminal `done`/`dropped` are refused; other statuses can move
