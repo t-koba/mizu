@@ -71,11 +71,15 @@ class WorkItems:
             raise Denied("Malformed work-item record")
         return value
 
-    def _seed(self, item_id: str) -> dict:
+    def _seed(self, item_id: str, event: dict | None = None) -> dict:
+        """Validate a seed, optionally reusing its already safe-read event."""
         match = ITEM_ID.fullmatch(item_id) if isinstance(item_id, str) else None
         if match is None:
             raise Denied("Invalid work-item ID")
-        event = self._read(f"decision-history/{match[1]}.json")
+        if event is None:
+            event = self._read(f"decision-history/{match[1]}.json")
+        if not isinstance(event, dict):
+            raise Denied("Invalid work-item seed event")
         seed = event.get("work_item")
         if (event.get("action") not in ("accept", "modify")
                 or type(event.get("rev")) is not int or event["rev"] < 1
@@ -274,8 +278,8 @@ class WorkItems:
         elif record["snapshot_id"] is not None or record["verification"] is not None:
             raise Denied("Only completed work items carry snapshot evidence")
 
-    def _get(self, item_id: str) -> dict:
-        current = self._seed(item_id)  # Direct event path, never scan decision history/inbox.
+    def _get(self, item_id: str, *, seed_event: dict | None = None) -> dict:
+        current = self._seed(item_id, seed_event)  # Validate the seed; never scan history/inbox.
         directory = self.root / "work-items" / item_id
         if not _directory(directory.parent) or not _directory(directory):
             return current
@@ -308,10 +312,10 @@ class WorkItems:
             self._recover_temporary_writes(item_id)
             return self._get(item_id)
 
-    def _projection_unlocked(self, item_id: str) -> dict:
+    def _projection_unlocked(self, item_id: str, *, seed_event: dict | None = None) -> dict:
         """Build a projection while the caller holds insights.lock."""
         self._recover_temporary_writes(item_id)
-        item = self._get(item_id)
+        item = self._get(item_id, seed_event=seed_event)
         origin_id = item["origin"]["insight_id"]
         origin_rev = item["origin"]["rev"]
         current_rev = self._origin_revision(origin_id)
@@ -487,7 +491,8 @@ class WorkItems:
                         seed = event["work_item"]
                         if (not isinstance(seed, dict) or seed.get("id") != f"wi_{event_id}"):
                             raise Denied("Malformed committed work-item seed")
-                        view = self._projection_unlocked(seed["id"])
+                        # Reuse this safely read event; _seed still validates its complete contract.
+                        view = self._projection_unlocked(seed["id"], seed_event=event)
                         item = view["item"]
                         if item["status"] not in ("open", "doing", "blocked"):
                             continue

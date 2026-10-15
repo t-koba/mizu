@@ -456,6 +456,20 @@ class WorkItemTests(Fixture):
             self.change()
         self.assertEqual(list(target.iterdir()), [])
 
+    def test_page_open_reuses_scanned_seed_event_without_rereading_it(self):
+        path = f"decision-history/{self.item_id[3:]}.json"
+        read = self.store._read
+        with patch.object(self.store, "_read", wraps=read) as reads:
+            self.store.page_open()
+        self.assertEqual(sum(call.args[0] == path for call in reads.call_args_list), 1)
+
+    def test_page_open_still_validates_scanned_seed_fields(self):
+        event = json.loads(self.seed_path.read_bytes())
+        event["work_item"]["status"] = "doing"
+        write_json(self.seed_path, event)
+        with self.assertRaises(Denied):
+            self.store.page_open()
+
     def test_page_open_enumerates_deterministic_exclusive_pages(self):
         extra_ids = []
         for index in range(4):
