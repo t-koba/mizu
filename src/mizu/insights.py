@@ -514,10 +514,23 @@ replacement insight without implying rejected substance.
             prior = _effective_decision(rev, None if raw.is_symlink() else read_json(raw, {}))
             if prior is not None and prior.get("action") == "withdraw":
                 raise Denied("Insight withdrawn; revise the topic to reopen it")
+            event_id = uuid.uuid4().hex
+            stamped = now()
             record = {"id": insight_id, "action": action, "reason": reason, "revisit": revisit,
-                      "run": run, "created_at": now(), "rev": rev}
+                      "run": run, "created_at": stamped, "rev": rev}
+            if action in ("accept", "modify"):
+                record["work_item"] = {
+                    "id": f"wi_{event_id}",
+                    "title": current["title"],
+                    "origin": {"insight_id": insight_id, "rev": rev},
+                    "status": "open",
+                    "rev": 1,
+                    "holder": None,
+                    "created_at": stamped,
+                    "updated_at": stamped,
+                }
             with lock(self.root / "locks" / "decisions.lock"):
-                write_json(self.root / "decision-history" / f"{uuid.uuid4().hex}.json", record, exclusive=True)
+                write_json(self.root / "decision-history" / f"{event_id}.json", record, exclusive=True)
                 write_json(self.root / "decisions" / f"{insight_id}.json", record)
                 if registered is not None:
                     registered = {**registered, "owner": insight_id, "rev": rev,

@@ -35,7 +35,7 @@ inputs. The trusted host adapter never executes model-provided host commands.
 | `protocol.py` | Tool schemas and strict parameter validation | Tool implementation semantics |
 | `sandbox.py`, `process.py` | Bounded execution, termination, cleanup | Experiment usefulness |
 | `snapshot.py` | Content objects, immutable manifests, published pointer | Semantic correctness |
-| `insights.py` | Submission identity, revisable proposals with separate audit, decision history | Acceptance or rejection |
+| `insights.py` | Submission identity, revisable proposals with separate audit, decision history, initial work-item seeds | Acceptance or rejection |
 | `web.py` | Allowed retrieval, policy-bounded protocol observation, and external source receipts | Scientific truth |
 | `materialize.py` | Generic offline-input adapter (spec in, digest-bound content out) | Ecosystem resolution, cache policy |
 | `editor.py` | Snapshot export and read/propose MCP | Code editing |
@@ -179,7 +179,15 @@ routine context, and are durable audit like decisions (backed up, never
 pruned). Direct ID reuse with different content outside revise is rejected.
 Decisions bind to the reviewed `rev`, so a prior approval never authorizes
 changed content; deferral still requires a revisit condition and stays
-pending. Author withdrawal (`mizu insight withdraw`, submitter or operator
+pending. An `accept` or `modify` decision also places an initial durable
+`work_item` seed in that same immutable decision-history event (and the
+matching current-decision record). Its ID is `wi_<event-uuid-hex>`; it records
+the current insight title and `{insight_id, rev}` origin, starts `open` at item
+revision 1 with no holder, and uses the decision timestamp for creation and
+update. `defer` and `reject` do not create a seed. This is only an initial
+durable seed: work-item transition lifecycle, prompt/tool exposure, and
+replacement of free-text Tasks are not implemented, so writer state remains
+necessary. Author withdrawal (`mizu insight withdraw`, submitter or operator
 only) closes a pending proposal with an actor-labelled rev-bound record in
 the same decision store; it is refused over a revision-current substantive
 decision and over an unseen revision, a repeated request is a no-op, and

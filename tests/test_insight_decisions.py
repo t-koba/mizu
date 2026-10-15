@@ -1,4 +1,5 @@
 """Decisions bind to the revision actually read; stale revisions are rejected."""
+import json
 import unittest
 
 from support import Fixture
@@ -11,14 +12,70 @@ class DecisionRevisionFixture(Fixture):
         return self.project.insights.submit(source=source, title="Proposal",
                                             body="original claims", base_snapshot=snap["id"])
 
-    def revise(self, proposal):
+    def revise(self, proposal, *, title="Proposal"):
         snap = self.project.snapshots.get()
         return self.project.insights.revise(proposal["id"], source="worker",
-                                            title="Proposal", body="revised claims",
+                                            title=title, body="revised claims",
                                             base_snapshot=snap["id"], expected_rev=1)
 
     def decided(self, insight_id):
         return (self.project.root / "decisions" / f"{insight_id}.json").exists()
+
+    def history_records(self):
+        directory = self.project.root / "decision-history"
+        if not directory.exists():
+            return []
+        return [json.loads(path.read_text()) for path in directory.glob("*.json")]
+
+    def assert_work_item_seed(self, action, *, revised=False):
+        proposal = self.submit()
+        current = self.revise(proposal, title="Revised proposal") if revised else proposal
+        record = self.project.insights.decide(proposal["id"], action, "reviewed", "", "run-1",
+                                              expected_rev=current["rev"])
+        decision = json.loads((self.project.root / "decisions" / f"{proposal['id']}.json").read_text())
+        history_paths = list((self.project.root / "decision-history").glob("*.json"))
+        history = [json.loads(path.read_text()) for path in history_paths]
+        self.assertEqual(len(history), 1)
+        event = history[0]
+        item = record["work_item"]
+        self.assertEqual(decision, record)
+        self.assertEqual(event, record)
+        self.assertEqual(item, {
+            "id": f"wi_{event['work_item']['id'][3:]}",
+            "title": current["title"],
+            "origin": {"insight_id": proposal["id"], "rev": current["rev"]},
+            "status": "open",
+            "rev": 1,
+            "holder": None,
+            "created_at": record["created_at"],
+            "updated_at": record["created_at"],
+        })
+        event_id = item["id"][3:]
+        self.assertRegex(event_id, r"^[0-9a-f]{32}$")
+        self.assertEqual(event_id, history_paths[0].stem)
+        self.assertEqual(event["work_item"]["id"], f"wi_{event_id}")
+
+
+class WorkItemSeedTests(DecisionRevisionFixture):
+    def test_accept_seeds_identical_item_in_returned_current_and_history(self):
+        self.assert_work_item_seed("accept")
+
+    def test_modify_seeds_identical_item_from_current_revision(self):
+        self.assert_work_item_seed("modify", revised=True)
+
+    def test_defer_and_reject_do_not_seed_work_item(self):
+        for action in ("defer", "reject"):
+            with self.subTest(action=action):
+                proposal = self.submit()
+                record = self.project.insights.decide(
+                    proposal["id"], action, "reviewed", "revisit later" if action == "defer" else "",
+                    "run-1", expected_rev=1)
+                current = json.loads((self.project.root / "decisions" / f"{proposal['id']}.json").read_text())
+                history = [entry for entry in self.history_records() if entry["id"] == proposal["id"]]
+                self.assertNotIn("work_item", record)
+                self.assertNotIn("work_item", current)
+                self.assertEqual(len(history), 1)
+                self.assertNotIn("work_item", history[0])
 
 
 class DecisionRevisionTests(DecisionRevisionFixture):
@@ -35,6 +92,7 @@ class DecisionRevisionTests(DecisionRevisionFixture):
             self.project.insights.decide(proposal["id"], "accept", "read rev1 rationale",
                                          "", "run-1", expected_rev=1)
         self.assertFalse(self.decided(proposal["id"]))
+        self.assertEqual(self.history_records(), [])
         # The current revision stays actionable for reassessment.
         record = self.project.insights.decide(proposal["id"], "accept", "read rev2 rationale",
                                               "", "run-1", expected_rev=2)
