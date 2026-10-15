@@ -406,6 +406,13 @@ decisions. Oversized hand-edited cache objects still fail closed at the finite
 worker ceiling. `search` retains its existing 2 MiB combined worker output cap;
 this is not a universal search aggregate envelope.
 
+Web worker stdin has a separate fixed 2 MiB framing limit. It covers the 1 MiB
+configuration/include budget plus worst-case JSON escaping of a schema-valid
+32 KiB probe body, 16 bounded header pairs, and envelope/path overhead. The
+parent rejects oversized canonical requests before spawning; the child reads at
+most the limit plus one byte and rejects overflow before JSON parsing. This is
+separate from `PREVIEW_BYTES`, the raw body/response limits, and the output cap.
+
 A normally exited nonzero `search_command` or `destination_command` may include up to the final `diagnostic_bytes` bytes of stderr in its error, labelled `external-untrusted`; setting the value to `0` disables the excerpt. Timeout, output-limit, spawn, and malformed-protocol failures keep their generic handling. A valid destination response with `allow = false` remains a normal fail-closed denial and does not expose stderr. These diagnostics are model-visible, so inspect the operator adapter's output and use `0` if it can emit private data.
 
 URL fragments are stripped client-side and never sent. Redirects re-validate hostname, port, and IP. Text/HTML/XML/JSON formats are supported; binary/PDF/image formats are rejected.

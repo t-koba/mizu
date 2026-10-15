@@ -5,11 +5,16 @@ import json
 import sys
 from pathlib import Path
 
+from .config import MAX_INCLUDE_BYTES
 from .errors import Denied
-from .fs import PREVIEW_BYTES, canonical
+from .fs import canonical
 from .process import environment, run
 from .web import (PROBE_RESPONSE_HEADERS_MAX, PROBE_RESPONSE_NAME_MAX,
                   PROBE_RESPONSE_VALUE_MAX, Web)
+
+# One MiB for the bounded config/settings plus one MiB for sixfold JSON
+# escaping of the probe body/headers and fixed envelope/path overhead.
+MAX_WEB_WORKER_INPUT_BYTES = 2 * MAX_INCLUDE_BYTES
 
 
 def _output_limit(operation: str, max_bytes: int) -> int:
@@ -33,10 +38,13 @@ def bounded(config, run_dir, operation, value, cancel, role: str = ""):
                "receipts": str(run_dir / "sources"), "operation": operation, "value": value,
                "role": role}
     # Search may fetch multiple feeds, but remains bounded by the parent run deadline.
+    input_data = canonical(request)
+    if len(input_data) > MAX_WEB_WORKER_INPUT_BYTES:
+        raise Denied("Web worker request exceeds input byte limit")
     timeout = config.web["timeout_seconds"] * (len(config.web["feeds"]) + 1) if operation == "search" else config.web["timeout_seconds"] + 2
     result = run([sys.executable, "-m", "mizu.web_worker"], timeout=min(timeout, config.limits.run_seconds),
                  maximum=_output_limit(operation, config.web["max_bytes"]),
-                 cancel=cancel, input_data=canonical(request),
+                 cancel=cancel, input_data=input_data,
                  env=environment(extra={"PYTHONPATH": str(root)}))
     if result.exit_code != 0 or result.reason != "exited":
         raise Denied(f"Web operation failed ({result.reason}): {result.stderr[-2000:]}")
@@ -45,7 +53,10 @@ def bounded(config, run_dir, operation, value, cancel, role: str = ""):
 
 def main():
     try:
-        data = json.loads(sys.stdin.buffer.readline(PREVIEW_BYTES + 1))
+        input_data = sys.stdin.buffer.read(MAX_WEB_WORKER_INPUT_BYTES + 1)
+        if len(input_data) > MAX_WEB_WORKER_INPUT_BYTES:
+            raise Denied("Web worker input exceeds byte limit")
+        data = json.loads(input_data)
         web = Web(data["settings"], Path(data["cache"]), Path(data["receipts"]),
                   role=data.get("role", ""))
         if data["operation"] == "fetch":

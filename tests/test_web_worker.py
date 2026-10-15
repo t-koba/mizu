@@ -3,16 +3,22 @@
 The separate fetch-media test mocks only HTTPS transport, not worker IPC.
 """
 import dataclasses
+import subprocess
+import sys
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 from support import Fixture
 from mizu.errors import Denied
-from mizu.fs import canonical, digest, now, read_json, write_json
+from mizu.config import MAX_INCLUDE_BYTES
+from mizu.fs import PREVIEW_BYTES, canonical, digest, now, read_json, write_json
+from mizu.process import environment
+from mizu.protocol import DEFINITIONS
 from mizu.web import (FETCH_CACHE_SCHEMA_VERSION, PROBE_RESPONSE_HEADERS_MAX,
                       PROBE_RESPONSE_NAME_MAX, PROBE_RESPONSE_VALUE_MAX, RESPONSE_MEDIA_MAX, Web)
-from mizu.web_worker import _output_limit, bounded
+from mizu.web_worker import MAX_WEB_WORKER_INPUT_BYTES, _output_limit, bounded
 
 
 class WebWorkerTests(Fixture):
@@ -60,6 +66,30 @@ class WebWorkerTests(Fixture):
     def test_configured_escaped_fetch_round_trips(self):
         self.assert_fetch_round_trip("\x01", 1024 * 1024)
 
+    def test_probe_escape_heavy_body_reaches_host_policy_in_real_worker(self):
+        config = self.fetch_config()
+        config = dataclasses.replace(config, web={**config.web,
+            "probe_hosts": ["allowed.example"], "probe_methods": ["POST"]})
+        for body, exceeds_preview in (("a" * 32768, False), ("\x01" * 32768, True)):
+            value = {"url": "https://denied.example/path", "method": "POST",
+                     "headers": [], "body": body}
+            frame = canonical({"settings": config.web, "cache": str(config.data / "web-cache"),
+                               "receipts": str(self.root / "run" / "sources"), "operation": "probe",
+                               "value": value, "role": ""})
+            self.assertEqual(len(frame) > PREVIEW_BYTES, exceeds_preview)
+            with self.subTest(escaped=exceeds_preview):
+                with self.assertRaisesRegex(Denied, "Host is not allowlisted"):
+                    bounded(config, self.root / "run", "probe", value, lambda: False)
+
+    def test_parent_rejects_oversized_worker_settings_before_spawn(self):
+        config = self.fetch_config()
+        config = dataclasses.replace(config, web={**config.web,
+            "search_command": ["x" * MAX_WEB_WORKER_INPUT_BYTES]})
+        with patch("mizu.web_worker.run") as spawn:
+            with self.assertRaisesRegex(Denied, "Web worker request exceeds input byte limit"):
+                bounded(config, self.root / "run", "search", {"query": "x"}, lambda: False)
+        spawn.assert_not_called()
+
     def test_poisoned_cache_exceeding_ipc_limit_is_denied(self):
         config = self.fetch_config()
         maximum = _output_limit("fetch", config.web["max_bytes"])
@@ -72,6 +102,30 @@ class WebWorkerTests(Fixture):
 
 
 class WebWorkerLimitTests(unittest.TestCase):
+    def test_worker_input_limit_covers_schema_maximum_escaped_probe(self):
+        properties = DEFINITIONS["probe"][1]["properties"]
+        headers = properties["headers"]
+        header_properties = headers["items"]["properties"]
+        escaped_chars = (properties["body"]["maxLength"] + properties["url"]["maxLength"]
+                         + properties["method"]["maxLength"]
+                         + headers["maxItems"] * (header_properties["name"]["maxLength"]
+                                                    + header_properties["value"]["maxLength"]))
+        required = MAX_INCLUDE_BYTES + 6 * escaped_chars + 64 * 1024
+        self.assertEqual(MAX_WEB_WORKER_INPUT_BYTES, 2 * MAX_INCLUDE_BYTES)
+        self.assertLessEqual(required, MAX_WEB_WORKER_INPUT_BYTES)
+
+    def test_worker_rejects_oversized_stdin_before_json_parse(self):
+        root = Path(__file__).resolve().parents[1] / "src"
+        result = subprocess.run([sys.executable, "-m", "mizu.web_worker"],
+                                input=b" " * (MAX_WEB_WORKER_INPUT_BYTES + 1),
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                env=environment(extra={"PYTHONPATH": str(root)}),
+                                timeout=10, check=False)
+        stderr = result.stderr.decode("utf-8", "replace")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Web worker input exceeds byte limit", stderr)
+        self.assertNotIn("JSON", stderr)
+
     def test_single_response_arithmetic_and_search_floor(self):
         header_allowance = 6 * PROBE_RESPONSE_HEADERS_MAX * (
             PROBE_RESPONSE_NAME_MAX + PROBE_RESPONSE_VALUE_MAX)
