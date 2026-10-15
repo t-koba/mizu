@@ -43,7 +43,7 @@ def parser() -> argparse.ArgumentParser:
                                        "resume": "Resume an armed project",
                                        "wake": "Request another work unit",
                                        "disarm": "Disarm and pause",
-                                       "drain": "Stop new runs; active runs finish undisturbed"}[name])
+                                       "drain": "Stop new runs; persistent units wrap up at safe boundaries when enabled"}[name])
         p.add_argument("project", help="Managed project name")
     for name in ("run", "daemon", "cleanup"):
         p = sub.add_parser(name, help={"run": "Run one work unit (single JSON to stdout)",
@@ -194,7 +194,7 @@ def _cmd_pause(config, project, args):
 
 
 def _cmd_drain(config, project, args):
-    return project.set_control(draining=True, reason="Operator drained new runs; active runs finish undisturbed")
+    return project.set_control(draining=True, reason="Operator requested project drain")
 
 
 def _cmd_resume(config, project, args):

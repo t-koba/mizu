@@ -23,7 +23,7 @@ from .budget import Budget
 from .config import Config, Role, load, role_policy_bytes, role_requests_per_run, role_tools_per_run, role_run_seconds
 from .doctor import container_runtime
 from .drivers import driver_for
-from .errors import Busy, Cancelled, ConfigError, Denied, InfraExceeded, LimitExceeded, RunDeadlineExceeded, DeadlineWrapUp, MissingFinish, MizuError, ModelFailure, ProtocolError
+from .errors import Busy, Cancelled, ConfigError, Denied, InfraExceeded, LimitExceeded, RunDeadlineExceeded, DeadlineWrapUp, DrainYieldExceeded, MissingFinish, MizuError, ModelFailure, ProtocolError
 from .fs import canonical, digest, lock, mkdir, now, read_json, safe_read, write_json, PREVIEW_BYTES, page, text_preview, DIGEST
 from .project import Project
 from .protocol import DEFINITIONS, validate
@@ -187,6 +187,7 @@ class Context:
                                              self.run_seconds / (WRAP_UP_REQUESTS + 1))
                            if self.deadline is not None else None)
         self.request_deadlines: dict[tuple[int, int], float] = {}
+        self.request_failure_pending = False
         self.transport_idle_deadline = started + config.limits.model_request_seconds
         # Never hold mutex in transport polling: handle holds it while joining.
         self.joins_idle = threading.Event()
@@ -275,6 +276,27 @@ class Context:
             return True
         return False
 
+    def enter_drain_wrap_up(self):
+        # Transport polling must never wait on a dispatch/join holding mutex.
+        # Recheck under the admission mutex so a new request cannot race the
+        # safe-boundary decision. Once latched, _budget refuses ordinary work.
+        if not self.config.limits.drain_yield or self.ephemeral:
+            return
+        if not self.mutex.acquire(blocking=False):
+            return
+        try:
+            if (self.finished is not None or self.bound_hit is not None
+                    or getattr(self, "recovery_probe", False)
+                    or self.request_deadlines or self.request_failure_pending or self.operation_active.is_set()
+                    or not self.joins_idle.is_set()
+                    or not self.project.control().get("draining")):
+                return
+            from .engine_config import effective
+            if effective(self.config, self.role, self.role.profile).get("session") == "persistent":
+                self.bound_hit = "drain"
+        finally:
+            self.mutex.release()
+
     def start_request(self, sequence):
         key = (self.execution_attempt, sequence)
         self.request_deadlines.setdefault(key, time.monotonic() + self.config.limits.model_request_seconds)
@@ -309,6 +331,11 @@ class Context:
                 raise LimitExceeded("Logical model request deadline exhausted")
         elif not self.operation_active.is_set() and time.monotonic() >= self.transport_idle_deadline:
             raise LimitExceeded("Engine stalled between logical requests")
+
+        if wrap_up:
+            self.enter_drain_wrap_up()
+            if self.bound_hit == "drain" and not self.wrap_up_attempted and self.finished is None:
+                raise DeadlineWrapUp(self._bound_message())
 
     def transport_deadline(self):
         self.check_deadlines(wrap_up=True)
@@ -361,9 +388,12 @@ class Context:
             self.enter_deadline_wrap_up()
             if operation == "_request_done":
                 sequence = arguments.get("sequence")
-                if type(sequence) is not int or sequence < 1:
-                    raise Denied("Invalid completed request sequence")
+                failed = arguments.get("failed", False)
+                if type(sequence) is not int or sequence < 1 or type(failed) is not bool:
+                    raise Denied("Invalid completed request evidence")
                 self.end_request(sequence)
+                if failed:
+                    self.request_failure_pending = True
                 return {"recorded": True}
             if operation == "_hello":
                 if arguments != {}:
@@ -399,15 +429,23 @@ class Context:
                     raise LimitExceeded("Per-run tool limit exceeded")
                 return {"allowed": True}
             if operation == "_budget":
+                self.enter_drain_wrap_up()
+                if self.bound_hit == "drain" and not self.wrap_up_attempted:
+                    # Reuse the adapters' existing settled request_bound handshake;
+                    # this is not a daily-budget rejection or an admitted request.
+                    self.drain_admission_refused = True
+                    raise DeadlineWrapUp("Per-run provider request budget exhausted")
                 try:
                     sequence = arguments.get("sequence")
                     if type(sequence) is not int or sequence < 1:
                         raise Denied("Invalid request sequence")
                     sequence_key = (self.execution_attempt, sequence)
                     if sequence_key not in self.request_sequences:
-                        over = self.bound_hit == "deadline" or self.request_count >= role_requests_per_run(
+                        over = self.bound_hit in ("deadline", "drain") or self.request_count >= role_requests_per_run(
                             self.config, self.spend_role or self.role)
                         if over and self.wrap_up_requests >= WRAP_UP_REQUESTS:
+                            if self.bound_hit == "drain":
+                                raise DrainYieldExceeded("Per-run provider request budget exhausted")
                             if self.bound_hit == "deadline":
                                 raise RunDeadlineExceeded("Deadline wrap-up request allowance exhausted")
                             raise LimitExceeded("Per-run provider request budget exhausted")
@@ -446,14 +484,21 @@ class Context:
                 except MizuError as exc:
                     self.admission_error = str(exc)
                     raise
+            if self.bound_hit == "drain" and not self.wrap_up_attempted:
+                # Fence this transport after latching the boundary. Even a
+                # wrap-up tool must wait for the reduced-grant invocation;
+                # otherwise polling could reap it while that tool dispatches.
+                raise Denied(self._bound_message())
             if operation not in self.role.capabilities:
                 raise Denied(f"Role has no capability: {operation}")
             if self.bound_hit is not None and operation not in WRAP_UP_OPS:
                 raise Denied(self._bound_message())
             self.tool_count += 1
-            if self.bound_hit == "deadline" or self.tool_count > role_tools_per_run(self.config, self.spend_role or self.role):
+            if self.bound_hit in ("deadline", "drain") or self.tool_count > role_tools_per_run(self.config, self.spend_role or self.role):
                 self.bound_hit = self.bound_hit or "tools"
                 if operation not in WRAP_UP_OPS or self.wrap_up_tools >= WRAP_UP_TOOLS:
+                    if self.bound_hit == "drain" and self.wrap_up_tools >= WRAP_UP_TOOLS:
+                        raise DrainYieldExceeded("Drain wrap-up tool allowance exhausted")
                     if self.bound_hit == "deadline" and self.wrap_up_tools >= WRAP_UP_TOOLS:
                         raise RunDeadlineExceeded("Deadline wrap-up tool allowance exhausted")
                     raise LimitExceeded("Per-run tool limit exceeded")
@@ -944,7 +989,7 @@ class Context:
                 raise Denied("Completion requires passing the configured acceptance commands")
         wait = min(args.get("wait_seconds", self.config.limits.default_wait_seconds),
                    self.config.limits.maximum_wait_seconds)
-        if self.bound_hit is not None:
+        if self.bound_hit is not None and self.bound_hit != "drain":
             # A seal after a spend bound is a bounded end, never a fresh
             # verdict: the unit saved what it could and runs again.
             args = {**args, "outcome": "bounded"}
@@ -1953,11 +1998,15 @@ class Engine:
         try:
             try:
                 model_result = driver.execute(context, prompt, **kwargs)
+                if context.finished is None:
+                    context.enter_drain_wrap_up()
+                    if context.bound_hit == "drain" and not context.wrap_up_attempted:
+                        raise DeadlineWrapUp(context._bound_message())
             except DeadlineWrapUp:
                 if context.finished is not None:
                     raise
                 if context.host_cancelled():
-                    raise Cancelled("Run stopped before deadline wrap-up")
+                    raise Cancelled("Run stopped before wrap-up")
                 if context.wall_expired():
                     raise RunDeadlineExceeded("Whole-unit wall deadline exhausted")
                 context.wrap_up_attempted = True
@@ -1966,6 +2015,9 @@ class Engine:
                 authority = previous_authority or context.role
                 context.turn_authority_role = authority
                 context.turn_continuation = True
+                previous_session_capabilities = context.session_identity_capabilities
+                if context.bound_hit == "drain":
+                    context.session_identity_capabilities = authority.capabilities
                 try:
                     context.role = dataclasses.replace(authority,
                         capabilities=tuple(c for c in authority.capabilities if c in WRAP_UP_OPS),
@@ -1978,10 +2030,13 @@ class Engine:
                 finally:
                     context.turn_authority_role = previous_authority
                     context.turn_continuation = previous_continuation
+                    context.session_identity_capabilities = previous_session_capabilities
 
             if context.finished is None:
                 if context.host_cancelled():
                     raise Cancelled("Run stopped before finish")
+                if context.bound_hit == "drain" and context.request_deadlines:
+                    raise ProtocolError("Terminal drain wrap-up left an active model-request deadline")
                 # The reserved deadline transition (or an already-used wrap-up)
                 # is authoritative; a missing finish there follows its existing
                 # bounded/failure behavior, not this separate policy.
@@ -2101,7 +2156,7 @@ class Engine:
         if not control.get("armed") or control.get("paused"):
             raise Denied("Project is unarmed or paused")
         if control.get("draining"):
-            raise Busy("Project is draining; active runs finish undisturbed")
+            raise Busy("Project is draining; no new runs admitted")
         usage = Budget(self.config.data / "budget", self.config.limits.daily_requests,
                        self.config.limits.retention_days,
                        self.config.limits.shared_daily_requests, self.config.timezone).usage(project.name)
@@ -2426,7 +2481,7 @@ class Engine:
                         # error: the daily budget, an unmarked bound, an
                         # already-spent allowance still fail exactly as before.
                         # Sealed driver errors were retained by _execute.
-                        if (isinstance(exc, (InfraExceeded, RunDeadlineExceeded))
+                        if (isinstance(exc, (InfraExceeded, RunDeadlineExceeded, DrainYieldExceeded))
                                 or getattr(context, "bound_hit", None) is None
                                 or getattr(context, "wrap_up_attempted", False)
                                 or context.finished is not None):
@@ -2440,6 +2495,9 @@ class Engine:
                         authority = previous_authority or role
                         context.turn_authority_role = authority
                         context.turn_continuation = True
+                        previous_session_capabilities = context.session_identity_capabilities
+                        if context.bound_hit == "drain":
+                            context.session_identity_capabilities = authority.capabilities
                         try:
                             context.role = dataclasses.replace(
                                 authority, capabilities=tuple(c for c in WRAP_UP_OPS if c in authority.capabilities),
@@ -2456,17 +2514,22 @@ class Engine:
                                       f"Keep the published state unless this run changed it. "
                                       f"{WRAP_UP_REQUESTS - context.wrap_up_requests} requests and "
                                       f"{WRAP_UP_TOOLS - context.wrap_up_tools} wrap-up tools remain.")
+                            if context.bound_hit == "drain":
+                                notice = context._bound_message()
                             context.execution_attempt += 1
                             model_result = self._execute(context, driver, notice + "\n\n" + prompt)
                         finally:
                             context.turn_authority_role = previous_authority
                             context.turn_continuation = previous_continuation
+                            context.session_identity_capabilities = previous_session_capabilities
                     break
                 if context.host_cancelled():
                     raise Cancelled("Run stopped before publication")
                 if context.finished is None:
                     if context.bound_hit == "deadline" or context.wall_expired():
                         raise RunDeadlineExceeded("Deadline-bounded run ended without finish")
+                    if context.bound_hit == "drain" and context.wrap_up_attempted:
+                        raise DrainYieldExceeded("Drain-bounded run ended without finish")
                     raise Denied("Missing finish intent")
                 finished = context.finished
                 if role.workspace == "write":
@@ -2539,17 +2602,18 @@ class Engine:
                            {"consecutive_failures": 0, "last_run": run_id, "updated_at": now()})
                 return result
             except BaseException as exc:
-                if (isinstance(exc, RunDeadlineExceeded) and context is not None
+                if (isinstance(exc, (RunDeadlineExceeded, DrainYieldExceeded)) and context is not None
                         and context.finished is None and not context.host_cancelled()):
                     result = {"run": run_id, "role": role_name, "status": "bounded",
-                              "bound": "deadline", "finished_at": now(), "error": str(exc),
+                              "bound": "drain" if isinstance(exc, DrainYieldExceeded) else "deadline",
+                              "finished_at": now(), "error": str(exc),
                               "publication": "not_published", "snapshot": snapshot["id"],
                               "code_digest": snapshot["code_digest"],
                               "model": getattr(context, "model_evidence", {})}
                     try:
                         write_json(run_dir / "result.json", result)
                     except Exception as record_error:
-                        # A deadline is non-failing only when its bounded result
+                        # A bound is non-failing only when its bounded result
                         # is durably recorded. Preserve ordinary storage-fault
                         # handling (including health accounting) if that fails.
                         exc = record_error

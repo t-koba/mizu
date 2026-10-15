@@ -28,6 +28,7 @@ max_failures = 3
 parallel_runs = 4           # Active slot cap and derived pending FIFO cap (one waiter per slot).
 parallel_consults = 2
 busy_retry_seconds = 300      # One-shot FIFO admission deadline (0 fails fast); queue overflow defers immediately.
+drain_yield = true             # Persistent, non-ephemeral units wrap up at a safe request boundary on explicit drain.
 missing_finish_followups = 1   # Extra finish-only turns after a normal terminal return without mizu_finish (0-3).
 missing_finish_counts_as_failure = true # Exhaustion increments the failure brake by default.
 output_bytes = 262144

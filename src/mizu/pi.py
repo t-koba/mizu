@@ -10,7 +10,7 @@ from .bridge import Bridge
 from .config import Config, Role, role_policy_text
 from .engine_channel import Channel
 from .engine_config import effective, connected_servers, session_record, save_session, session_token_total, MAX_SESSION_TOKENS
-from .errors import ConfigError, ProtocolError, ModelFailure
+from .errors import ConfigError, DeadlineWrapUp, ProtocolError, ModelFailure
 from .fs import atomic_write, mkdir, write_json
 from .process import environment
 from .protocol import tool_definitions
@@ -77,13 +77,19 @@ class PiDriver:
                         message = event.get("message", {})
                         if message.get("role") == "assistant":
                             if message.get("stopReason") == "error":
+                                if (getattr(context, "drain_admission_refused", False)
+                                        and context.bound_hit == "drain" and not context.wrap_up_attempted
+                                        and not context.request_deadlines):
+                                    raise DeadlineWrapUp(context._bound_message())
                                 raise ModelFailure("pi", kind="error", message=message.get("errorMessage", "error"))
                             if message.get("stopReason") == "aborted":
                                 raise ProtocolError("Pi request aborted")
+                            context.request_failure_pending = False
                             observed.append({key: message.get(key) for key in ("provider", "api", "model", "thinkingLevel")})
                     elif kind == "agent_settled":
                         if event.get("aborted") or (isinstance(event.get("data"), dict) and event["data"].get("aborted")):
                             raise ProtocolError("Pi run aborted before settlement")
+                        context.request_failure_pending = False
                         if context.request_count == 0:
                             raise ProtocolError("No runtime request admission observed")
                         # The session record is persistent only when settings
@@ -94,7 +100,17 @@ class PiDriver:
                         # A normal settled response without a seal is returned
                         # to Engine._execute for the bounded finish-only policy.
                         break
+            except DeadlineWrapUp:
+                # The Pi runtime admits individual provider requests behind a
+                # bridge, so the host can cross the drain boundary from either
+                # that admission or transport polling. Preserve the active
+                # conversation before Engine starts its reduced-grant turn.
+                if (context.bound_hit == "drain" and not context.wrap_up_attempted
+                        and isinstance(session_file, str) and session_file):
+                    save_session(path, session_file, {"tokens": _cumulative_tokens(saved, context)})
+                raise
             finally:
+                context.request_failure_pending = False
                 context.model_evidence.update(requests=context.request_count, usage=list(context.runtime_usage.values()),
                                               usage_known=bool(context.runtime_usage), observed_models=observed+list(context.runtime_models.values()),
                                               usage_observations=[{"usage": value, "provider": context.runtime_models.get(seq, {}).get("provider"),

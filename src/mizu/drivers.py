@@ -9,7 +9,8 @@ import json
 
 from .budget import Budget
 from .config import role_requests_per_run
-from .errors import Cancelled, ConfigError, InfraExceeded, LimitExceeded, ProtocolError, RunDeadlineExceeded
+from .errors import (Cancelled, ConfigError, DeadlineWrapUp, DrainYieldExceeded, InfraExceeded,
+                     LimitExceeded, ProtocolError, RunDeadlineExceeded)
 from .fs import write_json, canonical, now
 
 #: Driver stderr tail retained per run (bounded failure evidence).
@@ -79,7 +80,10 @@ def admit_invocation(context, *, unit: str) -> dict:
         context.revalidate_admission()
     context.check_deadlines()
     context.enter_deadline_wrap_up()
-    over = context.bound_hit == "deadline" or context.request_count >= role_requests_per_run(context.config, context.spend_role or context.role)
+    context.enter_drain_wrap_up()
+    if context.bound_hit == "drain" and not context.wrap_up_attempted:
+        raise DeadlineWrapUp(context._bound_message())
+    over = context.bound_hit in ("deadline", "drain") or context.request_count >= role_requests_per_run(context.config, context.spend_role or context.role)
     if over and getattr(context, 'recovery_probe', False):
         context.bound_hit = 'requests'
         context.admission_error = 'request_ceiling'
@@ -87,6 +91,8 @@ def admit_invocation(context, *, unit: str) -> dict:
     if over:
         from .runtime import WRAP_UP_REQUESTS
         if getattr(context, "wrap_up_requests", 0) >= WRAP_UP_REQUESTS:
+            if context.bound_hit == "drain":
+                raise DrainYieldExceeded("Drain wrap-up request allowance exhausted")
             if context.bound_hit == "deadline":
                 raise RunDeadlineExceeded("Deadline wrap-up request allowance exhausted")
             raise LimitExceeded("Per-run provider request budget exhausted")

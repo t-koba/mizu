@@ -728,9 +728,10 @@ test('durable provider completion pairs admission without usage and on rejection
   };
   meterModels(fake, {
     admit:async()=>{admitted.push(++sequence);return sequence;},
-    report:async()=>{}, done:async seq=>done.push(seq),
+    report:async()=>{}, done:async (seq, failed)=>done.push([seq, failed]),
   });
   await fake.stream().result();
   await assert.rejects(fake.classify(), /provider/);
-  assert.deepEqual(done, admitted);
+  assert.deepEqual(done.map(([seq])=>seq), admitted);
+  assert.deepEqual(done.map(([, failed])=>failed), [false, true]);
 });

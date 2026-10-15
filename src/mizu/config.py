@@ -289,6 +289,8 @@ class Limits:
     #: immediately. 0 disables waiting; fail-fast callers cannot bypass the
     #: queue. Draining, paused and unarmed projects never wait.
     busy_retry_seconds: int = 300
+    #: Explicit drain yields persistent, non-ephemeral units at safe request boundaries.
+    drain_yield: bool = True
     #: Additional finish-only turns after a normal engine return without a seal.
     missing_finish_followups: int = 1
     #: Whether exhausting those turns increments the existing failure brake.
@@ -569,8 +571,8 @@ def load(file: Path) -> Config:
                      "missing_finish_followups": (0, 3),
                      "free_disk_mb": (0, 1073741824)}
     for k, v in lim.items():
-        if k == "missing_finish_counts_as_failure":
-            boolean(v, "limits.missing_finish_counts_as_failure")
+        if k in ("missing_finish_counts_as_failure", "drain_yield"):
+            boolean(v, f"limits.{k}")
             continue
         if k == "session_max_cost_usd":
             import math

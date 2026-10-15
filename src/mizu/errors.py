@@ -29,6 +29,10 @@ class DeadlineWrapUp(LimitExceeded):
     """Enter the existing wrap-up allowance before the wall expires."""
 
 
+class DrainYieldExceeded(LimitExceeded):
+    """Explicit drain wrap-up ended without a seal; bounded, not a fault."""
+
+
 class InfraExceeded(LimitExceeded):
     """Deferrable infrastructure limit: daily budget or disk reserve.
 

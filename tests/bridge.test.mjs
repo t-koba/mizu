@@ -205,4 +205,5 @@ test('runtime completion pairs admission even without usage or on provider failu
   const admitted=calls.filter(([op])=>op==='_budget').map(([,args])=>args.sequence);
   const completed=calls.filter(([op])=>op==='_request_done').map(([,args])=>args.sequence);
   assert.deepEqual(completed, admitted);
+  assert.deepEqual(calls.filter(([op])=>op==='_request_done').map(([,args])=>args.failed), [false, true]);
 });

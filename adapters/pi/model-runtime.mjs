@@ -35,8 +35,12 @@ export function meterRuntime(runtime, config, call = request) {
         return original(model, context, { ...options, [reservation]: model });
       })();
       const result = track(source.then(stream => stream.result()).then(async value => { await record(value); return value; })
-        .finally(async () => {
-          if (admittedSequence !== undefined) await call(config, '_request_done', { sequence: admittedSequence });
+        .then(async value => {
+          if (admittedSequence !== undefined) await call(config, '_request_done', { sequence: admittedSequence, failed: false });
+          return value;
+        }, async error => {
+          if (admittedSequence !== undefined) await call(config, '_request_done', { sequence: admittedSequence, failed: true });
+          throw error;
         }));
       return {
         result: () => result,
@@ -52,12 +56,14 @@ export function meterRuntime(runtime, config, call = request) {
     runtime[name] = async (model, context, options) => {
       const admittedSequence = ++sequence;
       await call(config, '_budget', { sequence: admittedSequence });
+      let failed = true;
       try {
         const result = await original(model, context, options);
         await record(result);
+        failed = false;
         return result;
       } finally {
-        await call(config, '_request_done', { sequence: admittedSequence });
+        await call(config, '_request_done', { sequence: admittedSequence, failed });
       }
     };
   }

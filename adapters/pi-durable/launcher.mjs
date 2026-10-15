@@ -263,7 +263,13 @@ export function meterModels(models, hooks) {
       const pending = source.then(stream => stream.result()).then(async value => {
         await hooks.report(value?.usage, value);
         return value;
-      }).finally(async () => { if (sequence !== undefined) await hooks.done?.(sequence); });
+      }).then(async value => {
+        if (sequence !== undefined) await hooks.done?.(sequence, false);
+        return value;
+      }, async error => {
+        if (sequence !== undefined) await hooks.done?.(sequence, true);
+        throw error;
+      });
       // The rejection stays visible to result()/iterator consumers; this
       // empty branch only stops an unconsumed stream from crashing the
       // process after the bound already tripped.
@@ -283,12 +289,14 @@ export function meterModels(models, hooks) {
     const original = models[name].bind(models);
     models[name] = async (...args) => {
       const sequence = await hooks.admit();
+      let failed = true;
       try {
         const result = await original(...args);
         await hooks.report(result?.usage, result);
+        failed = false;
         return result;
       } finally {
-        if (sequence !== undefined) await hooks.done?.(sequence);
+        if (sequence !== undefined) await hooks.done?.(sequence, failed);
       }
     };
   }
@@ -566,7 +574,7 @@ async function runOnce(cfg) {
       model: { provider: cfg.provider, model: cfg.model, thinkingLevel: cfg.thinkingLevel ?? null } });
   }
   meterModels(models, { admit, report: reportUsage,
-    done: sequence => request(bridge, '_request_done', { sequence }) });
+    done: (sequence, failed = false) => request(bridge, '_request_done', { sequence, failed }) });
 
   // Bridge tools as one durable extension. Intent commits before execute;
   // interrupted executions are never rerun (replay unsafe default), so an

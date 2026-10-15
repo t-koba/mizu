@@ -24,7 +24,7 @@ from .drivers import EVENT_RECORD_BYTES
 from .engine_config import (MAX_SESSION_TOKENS, adapter_digest, effective,
                              save_session, session_generation, session_record,
                              session_token_total)
-from .errors import Cancelled, ConfigError, LimitExceeded, ProtocolError, ModelFailure, RunDeadlineExceeded
+from .errors import Cancelled, ConfigError, LimitExceeded, ProtocolError, ModelFailure, RunDeadlineExceeded, DeadlineWrapUp, DrainYieldExceeded
 from .fs import atomic_write, canonical, digest, mkdir, write_json
 from .pi_durable_store import (BACKENDS, RESUME_MODES, complete_run, complete_turn,
                                begin_run, check_grant, grant_digest, load_run,
@@ -343,9 +343,14 @@ class PiDurableDriver:
                     on_close=context.cancel_operations) as bridge:
             env = environment(extra={"MIZU_BRIDGE_CONFIG": str(bridge.config_file)})
             env.update(_pi.credentials(self.config.file.parent / "credentials.env"))
-            result = run(self.argv(context.role, context.run_dir, profile, context.goal_digest),
-                         timeout=context.transport_deadline,
-                         maximum=RESULT_BYTES, cwd=cwd, env=env, cancel=context.host_cancelled)
+            try:
+                result = run(self.argv(context.role, context.run_dir, profile, context.goal_digest),
+                             timeout=context.transport_deadline,
+                             maximum=RESULT_BYTES, cwd=cwd, env=env, cancel=context.host_cancelled)
+            finally:
+                # Provider errors must reach their own result path before drain
+                # polling can choose a bounded transition.
+                context.request_failure_pending = False
             # Classify known transport timeouts/cancellation by their source.
             # A normal error result is not a deadline merely because its parse
             # or local cleanup finishes after the wall.
@@ -523,6 +528,11 @@ def interpret_result(reported, context, model, thinking_level) -> None:
         _record_launcher_evidence(reported, context, model, thinking_level)
         context.bound_hit = context.bound_hit or "requests"
         from .runtime import WRAP_UP_REQUESTS
+        if context.bound_hit == "drain":
+            if not context.wrap_up_attempted:
+                raise DeadlineWrapUp(context._bound_message())
+            if context.wrap_up_requests >= WRAP_UP_REQUESTS:
+                raise DrainYieldExceeded("Drain wrap-up request allowance exhausted")
         if context.bound_hit == "deadline" and context.wrap_up_requests >= WRAP_UP_REQUESTS:
             raise RunDeadlineExceeded("Deadline wrap-up request allowance exhausted")
         raise LimitExceeded("Per-run provider request budget exhausted")
