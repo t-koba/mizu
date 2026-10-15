@@ -1407,7 +1407,7 @@ MAX_CLOSE_IF_ADOPTED_CHANGED_PATHS = 2000
 TERMINAL_STATES = frozenset({"closed", "merged"})
 
 
-def close_if_adopted_via(settings: dict, pins: dict) -> dict:
+def close_if_adopted_via(settings: dict, pins: dict, *, before_invoke=None) -> dict:
     """Ask the trusted adapter to close only when its adoption predicate holds.
 
     Schema: requires ``settings.close_grant is True`` and exactly the pins
@@ -1428,6 +1428,8 @@ def close_if_adopted_via(settings: dict, pins: dict) -> dict:
     error. Evidence: returned ``adapter_receipt`` contains the complete
     response. Failure: ``Denied`` without the grant, on malformed pins,
     missing/mismatched echoes, a different predicate, or malformed response.
+    If supplied, ``before_invoke`` runs after local validation and immediately
+    before the one adapter dispatch; it can reserve this run's one-shot action.
 
     The host adapter's own ``[vcs] close_adopted`` gate is separate; this
     function neither configures nor independently verifies that policy or
@@ -1448,6 +1450,10 @@ def close_if_adopted_via(settings: dict, pins: dict) -> dict:
     check_branch(pins.get("target_ref"))
 
     request = {"op": "close_if_adopted", **pins}
+    if before_invoke is not None:
+        if not callable(before_invoke):
+            raise Denied("Invalid conditional-close dispatch guard")
+        before_invoke()
     data = invoke(settings, request)
     if not isinstance(data, dict):
         raise Denied("VCS adapter must return a conditional-close receipt")

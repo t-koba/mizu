@@ -220,6 +220,9 @@ class Context:
         self.runtime_models: dict[tuple[int, int], dict] = {}
         # Adapter pre-send identities; never supplied by model tool arguments.
         self.engine_tool_invocations: dict[tuple[int, str], str] = {}
+        # One conditional-close adapter dispatch per work unit prevents a
+        # later conditional result from replacing its retained receipt.
+        self.conditional_close_attempted = False
         self.tool_count = 0
         # Delegation spend sharing: the role whose per-run caps bind spend.
         # Delegation children count against the caller's unit, so theirs
@@ -1041,8 +1044,18 @@ class Context:
             if set(args) != expected:
                 raise Denied("Conditional close requires op and exactly the six observed pins")
             pins = {key: args[key] for key in _vcs.CLOSE_IF_ADOPTED_PINS}
+
+            def reserve_conditional_close():
+                # Called only after local grant/pin validation and immediately
+                # before adapter dispatch. Failed local input can be corrected;
+                # a dispatched attempt can never overwrite or retry its receipt.
+                if self.conditional_close_attempted:
+                    raise Denied("Conditional proposal close was already attempted in this work unit")
+                self.conditional_close_attempted = True
+
             try:
-                data = _vcs.close_if_adopted_via(self.config.vcs, pins)
+                data = _vcs.close_if_adopted_via(
+                    self.config.vcs, pins, before_invoke=reserve_conditional_close)
             except OSError as exc:
                 raise Denied(f"Conditional proposal close is unavailable: {exc}") from exc
             record = {"disposed": data["closed"], "op": data["op"],

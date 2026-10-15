@@ -379,6 +379,34 @@ class VcsCloseIfAdoptedTests(Fixture):
         config = dataclasses.replace(config, vcs=settings)
         return make_context(self, config, role)
 
+    def test_conditional_close_is_one_shot_and_preserves_first_success_receipt(self):
+        success = close_if_receipt(closed=True)
+        refusal = close_if_receipt(closed=False, reason="already-terminal")
+        ctx = self.context(close_if_code(success))
+        with patch.object(vcs, "invoke", side_effect=[success, refusal]) as invoke:
+            first = ctx.handle("vcs_dispose", close_if_args())
+            with self.assertRaisesRegex(Denied, "already attempted"):
+                ctx.handle("vcs_dispose", close_if_args())
+        invoke.assert_called_once()
+        self.assertEqual(invoke.call_args.args[0], ctx.config.vcs)
+        self.assertEqual(invoke.call_args.args[1], close_if_args())
+        self.assertTrue(first["closed"])
+        evidence = json.loads((ctx.run_dir / "vcs-dispose.json").read_text())
+        self.assertEqual(evidence, first)
+        self.assertTrue(evidence["closed"])
+
+    def test_invalid_conditional_close_pins_do_not_consume_one_shot_dispatch(self):
+        success = close_if_receipt(closed=True)
+        ctx = self.context(close_if_code(success))
+        with self.assertRaises(Denied):
+            ctx.handle("vcs_dispose", close_if_args(head_sha="invalid"))
+        with patch.object(vcs, "invoke", return_value=success) as invoke:
+            result = ctx.handle("vcs_dispose", close_if_args())
+        invoke.assert_called_once()
+        self.assertEqual(invoke.call_args.args[0], ctx.config.vcs)
+        self.assertEqual(invoke.call_args.args[1], close_if_args())
+        self.assertTrue(result["closed"])
+
     def test_conditional_close_refusal_is_returned_and_retained(self):
         payload = close_if_receipt(
             closed=False, reason="close_adopted_disabled_or_not_adopted")
