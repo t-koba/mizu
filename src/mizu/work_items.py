@@ -8,6 +8,7 @@ committed CAS requires a re-read (same-status and terminal changes are refused).
 from __future__ import annotations
 
 import datetime as dt
+import heapq
 import json
 import os
 import re
@@ -16,7 +17,7 @@ from pathlib import Path
 
 from .errors import Denied, LimitExceeded
 from .fs import (DIGEST, PREVIEW_BYTES, canonical, identifier, lock, now, safe_read,
-                 sync_dir, write_json)
+                 sync_dir, text_preview, write_json)
 
 MAX_REVISIONS = 256  # Includes the immutable seed at revision 1.
 ITEM_ID = re.compile(r"wi_([0-9a-f]{32})\Z")
@@ -24,8 +25,16 @@ STATUSES = ("open", "doing", "blocked", "done", "dropped")
 SEED_FIELDS = {"id", "title", "origin", "status", "rev", "holder", "created_at", "updated_at"}
 EVENT_FIELDS = SEED_FIELDS | {"actor", "transition", "reason", "wait", "snapshot_id", "verification"}
 MAX_PROJECTION_BYTES = PREVIEW_BYTES + 256
+MAX_OPEN_PAGE_ROWS = 100
+MAX_OPEN_ROW_BYTES = 8192
+MAX_OPEN_PAGE_BYTES = 1024 * 1024
 _TEMP_NAME = re.compile(r"\.new-[A-Za-z0-9_]{8}\Z")
 _REVISION_NAME = re.compile(r"(?:[2-9]|[1-9][0-9]{1,2})\.json\Z")
+_DECISION_EVENT_NAME = re.compile(r"[0-9a-f]{32}\.json\Z")
+
+
+def _reject_json_constant(value: str):
+    raise ValueError(f"Invalid JSON constant: {value}")
 
 
 def _timestamp(value) -> bool:
@@ -53,7 +62,8 @@ class WorkItems:
 
     def _read(self, name: str) -> dict:
         try:
-            value = json.loads(safe_read(self.root, name, PREVIEW_BYTES))
+            value = json.loads(safe_read(self.root, name, PREVIEW_BYTES),
+                               parse_constant=_reject_json_constant)
         except (ValueError, UnicodeError) as exc:
             raise Denied("Malformed work-item record") from exc
         if not isinstance(value, dict):
@@ -268,6 +278,34 @@ class WorkItems:
             self._recover_temporary_writes(item_id)
             return self._get(item_id)
 
+    def _projection_unlocked(self, item_id: str) -> dict:
+        """Build a projection while the caller holds insights.lock."""
+        self._recover_temporary_writes(item_id)
+        item = self._get(item_id)
+        origin_id = item["origin"]["insight_id"]
+        origin_rev = item["origin"]["rev"]
+        current_rev = self._origin_revision(origin_id)
+        redecision = None
+        if current_rev is None:
+            stale = True
+        elif current_rev < origin_rev:
+            raise Denied("Origin insight revision predates its work item")
+        elif current_rev == origin_rev:
+            stale = False
+        else:
+            decision = self._current_decision(origin_id)
+            if decision is not None and decision["rev"] > current_rev:
+                raise Denied("Origin decision revision is ahead of its insight")
+            redecision = (decision if decision is not None and decision["rev"] == current_rev
+                          and decision["action"] in ("accept", "modify", "defer", "reject")
+                          else None)
+            stale = redecision is None
+        view = {"item": item, "current_origin_rev": current_rev,
+                "stale": stale, "redecision": redecision}
+        if len(canonical(view)) > MAX_PROJECTION_BYTES:
+            raise LimitExceeded("Work-item projection exceeds byte bound")
+        return view
+
     def projection(self, item_id: str) -> dict:
         """Return one bounded item plus revision-derived origin staleness.
 
@@ -278,31 +316,117 @@ class WorkItems:
         read projection, not prompt/tool/CLI/status exposure.
         """
         with lock(self.root / "locks" / "insights.lock"):
-            self._recover_temporary_writes(item_id)
-            item = self._get(item_id)
-            origin_id = item["origin"]["insight_id"]
-            origin_rev = item["origin"]["rev"]
-            current_rev = self._origin_revision(origin_id)
-            redecision = None
-            if current_rev is None:
-                stale = True
-            elif current_rev < origin_rev:
-                raise Denied("Origin insight revision predates its work item")
-            elif current_rev == origin_rev:
-                stale = False
-            else:
-                decision = self._current_decision(origin_id)
-                if decision is not None and decision["rev"] > current_rev:
-                    raise Denied("Origin decision revision is ahead of its insight")
-                redecision = (decision if decision is not None and decision["rev"] == current_rev
-                              and decision["action"] in ("accept", "modify", "defer", "reject")
-                              else None)
-                stale = redecision is None
-            view = {"item": item, "current_origin_rev": current_rev,
-                    "stale": stale, "redecision": redecision}
-            if len(canonical(view)) > MAX_PROJECTION_BYTES:
-                raise LimitExceeded("Work-item projection exceeds byte bound")
-            return view
+            return self._projection_unlocked(item_id)
+
+    def page_open(self, *, cursor=None, limit=25) -> dict:
+        """Return a bounded live page of seeded, currently open work items.
+
+        Schema: item-ID ordered ``items`` with total seeded-open count, the
+        exclusive input ``cursor``, ``next_cursor`` iff another matching item
+        follows, ``truncated``, ``unseeded_decisions`` and
+        ``coverage_complete``. Limits are 1..100 (exact int); the cursor is
+        null or an ITEM_ID. Rows are at most 8192 canonical bytes, and the
+        complete response at most 1 MiB. Selection keeps O(limit) rows while
+        history is scanned. Legacy accept/modify events lacking a seed are
+        counted, never guessed as open. The page is internal and read-only
+        apart from recognized work-item atomic-write recovery under the shared
+        lock. Cursors page a live view: changes between calls can move rows.
+        Unsafe/malformed committed JSON, seeds or state fail closed; only
+        recognized regular orphan atomic-write temporaries are ignored, never
+        promoted, while unexpected names and unsafe temporaries fail closed.
+        """
+        if cursor is not None and (not isinstance(cursor, str) or ITEM_ID.fullmatch(cursor) is None):
+            raise Denied("Invalid work-item cursor")
+        if type(limit) is not int or not 1 <= limit <= MAX_OPEN_PAGE_ROWS:
+            raise Denied("Work-item page limit must be an integer in [1, 100]")
+
+        history = self.root / "decision-history"
+        with lock(self.root / "locks" / "insights.lock"):
+            selected = []
+            total = 0
+            eligible = 0
+            unseeded_decisions = 0
+            if _directory(history):
+                with os.scandir(history) as entries:
+                    for entry in entries:
+                        if _TEMP_NAME.fullmatch(entry.name):
+                            try:
+                                info = entry.stat(follow_symlinks=False)
+                            except OSError as exc:
+                                raise Denied("Unstable decision-history temporary") from exc
+                            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                                    or getattr(info, "st_file_attributes", 0) & 0x400):
+                                raise Denied("Unsafe decision-history temporary")
+                            continue  # Never promote uncommitted atomic-write leftovers.
+                        if not entry.name.endswith(".json"):
+                            raise Denied("Unknown decision-history entry")
+                        if _DECISION_EVENT_NAME.fullmatch(entry.name) is None:
+                            raise Denied("Invalid committed decision-history filename")
+                        try:
+                            info = entry.stat(follow_symlinks=False)
+                        except OSError as exc:
+                            raise Denied("Unstable decision-history entry") from exc
+                        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                                or getattr(info, "st_file_attributes", 0) & 0x400):
+                            raise Denied("Unsafe committed decision-history entry")
+                        event = self._read(f"decision-history/{entry.name}")
+                        action = event.get("action")
+                        event_id = entry.name[:-5]
+                        if action not in ("accept", "modify", "defer", "reject", "withdraw"):
+                            raise Denied("Malformed committed decision-history action")
+                        has_seed = "work_item" in event
+                        if action not in ("accept", "modify"):
+                            if has_seed:
+                                raise Denied("Non-accept decision carries a work-item seed")
+                            continue
+                        if not has_seed:
+                            # Older accepted decisions have no stored lifecycle.
+                            # Count them as unknown coverage, even when legacy
+                            # fields needed by current seeds are absent.
+                            unseeded_decisions += 1
+                            continue
+                        seed = event["work_item"]
+                        if (not isinstance(seed, dict) or seed.get("id") != f"wi_{event_id}"):
+                            raise Denied("Malformed committed work-item seed")
+                        view = self._projection_unlocked(seed["id"])
+                        item = view["item"]
+                        if item["status"] not in ("open", "doing", "blocked"):
+                            continue
+                        total += 1
+                        if cursor is not None and item["id"] <= cursor:
+                            continue
+                        eligible += 1
+                        row = {key: item[key] for key in
+                               ("id", "title", "origin", "status", "rev", "holder",
+                                "created_at", "updated_at")}
+                        row.update({key: view[key] for key in
+                                    ("current_origin_rev", "stale", "redecision")})
+                        if item["status"] == "blocked":
+                            row["wait"] = item["wait"]
+                        reason = item.get("reason")
+                        if reason is not None:
+                            preview, clipped = text_preview(reason, 1024)
+                            row["reason_preview"] = preview
+                            row["reason_truncated"] = clipped
+                        row_size = len(canonical(row))
+                        if row_size > MAX_OPEN_ROW_BYTES:
+                            raise LimitExceeded("Work-item page row exceeds byte bound")
+                        entry_key = -int(item["id"][3:], 16)
+                        candidate = (entry_key, item["id"], row)
+                        if len(selected) < limit:
+                            heapq.heappush(selected, candidate)
+                        elif entry_key > selected[0][0]:
+                            heapq.heapreplace(selected, candidate)
+
+            rows = [entry[2] for entry in sorted(selected, key=lambda value: value[1])]
+            more = eligible > len(rows)
+            result = {"items": rows, "total": total, "cursor": cursor,
+                      "next_cursor": rows[-1]["id"] if more and rows else None,
+                      "truncated": more, "unseeded_decisions": unseeded_decisions,
+                      "coverage_complete": unseeded_decisions == 0}
+            if len(canonical(result)) > MAX_OPEN_PAGE_BYTES:
+                raise LimitExceeded("Work-item page exceeds byte bound")
+            return result
 
     def transition(self, item_id: str, *, expected_rev, status, actor, reason=None,
                    wait=None, snapshot_id=None) -> dict:

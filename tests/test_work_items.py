@@ -10,7 +10,7 @@ from unittest.mock import patch
 from support import Fixture
 from mizu.errors import Denied, LimitExceeded
 from mizu.fs import PREVIEW_BYTES, canonical, write_json
-from mizu.work_items import MAX_PROJECTION_BYTES, MAX_REVISIONS, WorkItems
+from mizu.work_items import (MAX_OPEN_ROW_BYTES, MAX_PROJECTION_BYTES, MAX_REVISIONS, WorkItems)
 
 
 class WorkItemTests(Fixture):
@@ -422,6 +422,93 @@ class WorkItemTests(Fixture):
         with self.assertRaises(Denied):
             self.change()
         self.assertEqual(list(target.iterdir()), [])
+
+    def test_page_open_enumerates_deterministic_exclusive_pages(self):
+        extra_ids = []
+        for index in range(4):
+            proposal = self.project.insights.submit(
+                source="worker", title=f"Page item {index}", body="Enumerate this item", base_snapshot=None)
+            decision = self.project.insights.decide(
+                proposal["id"], "accept", "reviewed", "", f"page-{index}", expected_rev=1)
+            extra_ids.append(decision["work_item"]["id"])
+        expected = sorted([self.item_id, *extra_ids])
+        seen = []
+        cursor = None
+        while True:
+            page = self.store.page_open(cursor=cursor, limit=2)
+            self.assertEqual(page["total"], len(expected))
+            self.assertTrue(page["coverage_complete"])
+            ids = [row["id"] for row in page["items"]]
+            self.assertEqual(ids, sorted(ids))
+            seen.extend(ids)
+            if not page["truncated"]:
+                self.assertIsNone(page["next_cursor"])
+                break
+            self.assertEqual(page["next_cursor"], ids[-1])
+            cursor = page["next_cursor"]
+        self.assertEqual(seen, expected)
+        self.assertEqual(len(seen), len(set(seen)))
+
+    def test_page_open_validates_cursor_and_exact_integer_limit(self):
+        for cursor in ("", "wi_" + "A" * 32, "../anything", 1, True):
+            with self.subTest(cursor=cursor), self.assertRaises(Denied):
+                self.store.page_open(cursor=cursor)
+        for limit in (0, -1, 101, True, False, 1.0, "2", None):
+            with self.subTest(limit=limit), self.assertRaises(Denied):
+                self.store.page_open(limit=limit)
+        self.assertEqual(self.store.page_open(limit=1)["items"][0]["id"], self.item_id)
+        self.assertEqual(self.store.page_open(cursor="wi_" + "f" * 32, limit=100)["items"], [])
+
+    def test_page_open_includes_current_stale_projection(self):
+        self.project.insights.revise(self.proposal["id"], source="worker", title="Revised page title",
+                                     body="Changed claims", base_snapshot=None, expected_rev=1)
+        page = self.store.page_open()
+        row = next(row for row in page["items"] if row["id"] == self.item_id)
+        self.assertEqual(row["current_origin_rev"], 2)
+        self.assertTrue(row["stale"])
+        self.assertIsNone(row["redecision"])
+
+    def test_page_open_includes_blocked_wait_and_bounded_reason(self):
+        # Control characters expand when escaped in the canonical JSON row;
+        # the documented row bound accommodates the full byte-capped preview.
+        reason = "\x01" * 1200
+        self.change("blocked", reason=reason,
+                    wait={"kind": "deadline", "at": "2030-01-01T00:00:00+00:00"})
+        page = self.store.page_open()
+        row = next(row for row in page["items"] if row["id"] == self.item_id)
+        self.assertEqual(row["wait"], {"kind": "deadline", "at": "2030-01-01T00:00:00+00:00"})
+        self.assertEqual(len(row["reason_preview"].encode("utf-8")), 1024)
+        self.assertTrue(row["reason_truncated"])
+        self.assertLessEqual(len(canonical(row)), MAX_OPEN_ROW_BYTES)
+
+    def test_page_open_reports_legacy_unseeded_decisions_and_closed_items(self):
+        legacy = copy.deepcopy(self.decision)
+        legacy.pop("work_item")
+        legacy.pop("rev")
+        legacy.pop("created_at")
+        legacy_id = "a" * 32
+        write_json(self.project.root / "decision-history" / f"{legacy_id}.json", legacy, exclusive=True)
+        self.change("dropped", reason="No longer active")
+        page = self.store.page_open()
+        self.assertEqual(page["items"], [])
+        self.assertEqual(page["total"], 0)
+        self.assertEqual(page["unseeded_decisions"], 1)
+        self.assertFalse(page["coverage_complete"])
+
+    def test_page_open_fails_closed_on_malformed_committed_history_and_ignores_temporary(self):
+        history = self.project.root / "decision-history"
+        temporary = history / ".new-leftover"
+        temporary.write_bytes(b"uncommitted")
+        self.assertEqual([row["id"] for row in self.store.page_open()["items"]], [self.item_id])
+        unknown = history / "unexpected.data"
+        unknown.write_text("not a committed event")
+        with self.assertRaises(Denied):
+            self.store.page_open()
+        unknown.unlink()
+        bad = history / ("b" * 32 + ".json")
+        bad.write_bytes(b"{not-json")
+        with self.assertRaises(Denied):
+            self.store.page_open()
 
     def test_concurrent_same_revision_has_one_winner(self):
         barrier = threading.Barrier(2)

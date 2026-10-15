@@ -233,10 +233,32 @@ retention/expiration is not implemented, so those citations remain durable.
 origin revision is stale until that revision has an `accept`, `modify`, `defer`
 or `reject` decision; `withdraw` does not clear staleness. Missing current
 origin data is reported stale, while unsafe or malformed origin records fail
-closed. This projection does not yet gate internal transitions. Public
+closed. This projection does not yet gate internal transitions.
+
+`page_open(cursor=None, limit=25)` is an additional internal read-only page,
+not connected to runtime tools, prompts, explain, or status. Under one
+`insights.lock` section it scans committed `decision-history/*.json`, validates
+and reconstructs every seeded item (including closed states), and returns only
+`open`/`doing`/`blocked` rows in deterministic item-ID order. The cursor is an
+exclusive item-ID boundary; `total` counts all currently open seeded items,
+independent of the cursor. Accept/modify history events without a `work_item`
+seed are counted as `unseeded_decisions`; `coverage_complete` is false while
+any exist, and their current state is never inferred. Rows include current
+origin staleness/redecision, a structured wait for blocked items, and an
+optional reason preview of at most 1024 UTF-8 bytes. Limits are 1–100 rows,
+8192 canonical bytes per row, and 1 MiB for the complete response; selection
+uses O(limit) row memory. The scan is O(decision-history) and holds the shared
+lock for the enumeration; no list index is maintained. Unsafe or malformed
+committed history, seeds, or state fail closed. Only recognized regular
+`.new-<8-char>` orphan temporaries are ignored, never promoted; unexpected
+names and unsafe temporaries fail closed. Recognized per-item atomic-write
+leftovers are recovered under the lock. Paging is a live view across calls,
+not a transaction snapshot, so concurrent state changes can move rows between
+pages. No public visibility or free-text
+Tasks-retirement claim follows from this internal method. Public
 prompt/tool/CLI/status/explain visibility, policy configuration,
-backfill/reconciliation and replacement of free-text Tasks also remain
-unfinished. **Free-text Tasks in writer state are still needed.**
+backfill/reconciliation and replacement of free-text Tasks remain unfinished.
+**Free-text Tasks in writer state are still needed.**
 Author withdrawal (`mizu insight withdraw`, submitter or operator only)
 closes a pending proposal with an actor-labelled rev-bound record in
 the same decision store; it is refused over a revision-current substantive
