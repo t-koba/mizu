@@ -104,6 +104,106 @@ class SnapshotConcurrencyTests(unittest.TestCase):
         self.assertEqual((destination / "a").read_bytes(), b"new")
         self.assertFalse((destination / "gone").exists())
 
+    def test_synthetic_lane_retention_and_serial_writer_integration(self):
+        """Synthetic primitive experiment with fabricated passing provenance only.
+
+        Store reconstruction is not crash recovery; this provides no evidence of
+        runtime lane ownership, scheduling, or concurrent delegation.
+        """
+        base = self.create({"a": "old a", "b": "old b", "gone": "remove me"}, parent=None)
+        self.store.publish(base)
+        published_base = self.publication_bytes()
+        lanes = [self.root / name for name in ("lane-a", "lane-b", "lane-overlap")]
+        for lane in lanes:
+            self.store.materialize(self.store.get(base["id"]), lane)
+            self.assertEqual(self.store.capture_files(lane)["files"], base["files"])
+        (lanes[0] / "a").write_bytes(b"lane a")
+        (lanes[0] / "added-a").write_bytes(b"new a")
+        (lanes[0] / "gone").unlink()
+        (lanes[1] / "b").write_bytes(b"lane b")
+        (lanes[1] / "added-b").write_bytes(b"new b")
+        (lanes[2] / "a").write_bytes(b"overlapping edit")
+
+        def verified_record(captured, parent, run):
+            # Synthetic provenance, not an executed verifier or runtime lane.
+            return self.store.create(
+                captured, goal="goal", state="state", run=run, outcome="wait",
+                summary=run, parent=parent,
+                verification={"passed": True, "code_digest": captured["code_digest"], "run": run})
+
+        candidates = [verified_record(self.store.capture_files(lane), base["id"], run)
+                      for lane, run in zip(lanes, ("lane-a-check", "lane-b-check", "overlap-check"))]
+        self.assertEqual(self.store.get(), base)
+        self.assertEqual(self.publication_bytes(), published_base)
+        for candidate in candidates:
+            self.assertEqual(candidate["parent"], base["id"])
+            self.assertEqual(candidate["verification"], {
+                "passed": True, "code_digest": candidate["code_digest"], "run": candidate["run"]})
+        self.assertEqual(len({c["verification"]["run"] for c in candidates}), 3)
+
+        def retained_artifacts():
+            paths = [self.store.root / "snapshots" / (record["id"] + ".json")
+                     for record in (base, *candidates)]
+            paths += [path for lane in lanes for path in lane.rglob("*") if path.is_file()]
+            return {path.relative_to(self.root).as_posix(): path.read_bytes() for path in paths}
+
+        retained = retained_artifacts()
+        self.store = store_at(self.store.root)
+        self.assertEqual(self.publication_bytes(), published_base)
+        self.assertEqual(retained_artifacts(), retained)
+        for lane, candidate in zip(lanes, candidates):
+            self.assertEqual(self.store.get(candidate["id"]), candidate)
+            self.assertEqual(self.store.capture_files(lane)["files"], candidate["files"])
+            for name in candidate["files"]:
+                self.assertEqual(self.store.read(candidate, name), (lane / name).read_bytes())
+        self.assertEqual(self.store.get(base["id"]), base)
+
+        # Only the writer's root and integrated records are ever published.
+        captured_a, conflicts = self.store.merge(base["id"], candidates[0]["id"], base["id"])
+        self.assertEqual(conflicts, [])
+        self.assertEqual(captured_a["files"], candidates[0]["files"])
+        integrated_a = verified_record(captured_a, base["id"], "writer-a-check")
+        self.store.publish(integrated_a)
+        self.assertEqual([s["id"] for s in self.store.history(integrated_a["id"])],
+                         [base["id"], integrated_a["id"]])
+        captured_b, conflicts = self.store.merge(base["id"], candidates[1]["id"], integrated_a["id"])
+        self.assertEqual(conflicts, [])
+        expected = {"a": "lane a", "b": "lane b", "added-a": "new a", "added-b": "new b"}
+        self.assertEqual(captured_b, self.capture(expected))
+        final = verified_record(captured_b, integrated_a["id"], "writer-combined-check")
+        self.store.publish(final)
+        self.assertEqual(self.store.get(), final)
+        self.assertEqual([s["id"] for s in self.store.history(final["id"])],
+                         [base["id"], integrated_a["id"], final["id"]])
+        destination = self.root / "writer-combined"
+        self.store.materialize(self.store.get(), destination)
+        self.assertEqual({p.relative_to(destination).as_posix(): p.read_bytes()
+                          for p in destination.rglob("*") if p.is_file()},
+                         {name: value.encode() for name, value in expected.items()})
+        actual = self.store.capture_files(destination)
+        self.assertEqual(actual, captured_b)
+        self.assertEqual(final["verification"], {
+            "passed": True, "code_digest": actual["code_digest"], "run": "writer-combined-check"})
+        self.assertEqual(final["code_digest"], actual["code_digest"])
+        self.assertNotEqual(final["code_digest"], integrated_a["code_digest"])
+        self.assertNotEqual(final["verification"], integrated_a["verification"])
+        for candidate in candidates[:2]:
+            self.assertNotEqual(final["code_digest"], candidate["code_digest"])
+            self.assertNotEqual(final["verification"]["run"], candidate["verification"]["run"])
+
+        before_conflict = self.publication_bytes()
+        history = self.store.history(final["id"])
+        self.assertEqual(self.store.merge(base["id"], candidates[2]["id"], final["id"]),
+                         (None, ["a"]))
+        self.assertEqual(self.publication_bytes(), before_conflict)
+        self.assertEqual(self.store.get(), final)
+        self.assertEqual(self.store.history(final["id"]), history)
+        self.assertEqual(retained_artifacts(), retained)
+        for lane, candidate in zip(lanes, candidates):
+            self.assertEqual(self.store.get(candidate["id"]), candidate)
+            for name in candidate["files"]:
+                self.assertEqual(self.store.read(candidate, name), (lane / name).read_bytes())
+
     def test_identical_edits_additions_and_deletions(self):
         records = self.branches({"a": "old", "gone": "x"},
                                 {"a": ("new", True), "added": "x"},
