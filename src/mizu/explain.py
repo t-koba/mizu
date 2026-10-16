@@ -15,6 +15,7 @@ from pathlib import Path
 from .budget import Budget
 from .errors import ConfigError, Denied, LimitExceeded
 from .fs import now, safe_read
+from .snapshot import progress_disposition, progress_projection
 
 # These records are small control-plane facts, never histories or logs.
 RECORD_BYTES = 65536
@@ -169,7 +170,7 @@ def _selection(config, role) -> dict:
                 "fixed_blocks": None, "probe_blocks": None}
 
 
-def _snapshot(project) -> dict:
+def _snapshot(project, config=None, role_name: str | None = None) -> dict:
     try:
         snapshot = project.snapshots.get()
     except (Denied, OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
@@ -178,6 +179,9 @@ def _snapshot(project) -> dict:
         "id": snapshot["id"], "code_digest": snapshot["code_digest"],
         "created_at": snapshot["created_at"], "outcome": snapshot["outcome"],
         "wake_at": snapshot.get("wake_at"),
+        "progress": progress_projection(snapshot.get("progress")),
+        "progress_disposition": progress_disposition(
+            snapshot.get("progress"), snapshot["outcome"], config, role_name),
     }}
 
 
@@ -215,7 +219,7 @@ def explain(config, project, role_name: str) -> dict:
         "role": role_name,
         "project_facts": {
             "control": _control(project),
-            "snapshot": _snapshot(project),
+            "snapshot": _snapshot(project, config, role_name),
             "budget": _budget(config, project.name),
         },
         "role_facts": {

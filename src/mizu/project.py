@@ -15,7 +15,7 @@ from .errors import ConfigError, Denied, LimitExceeded
 from .fs import atomic_write, identifier, lock, mkdir, now, read_json, safe_read, sync_dir, write_json
 from .insights import Insights
 from .process import environment, run
-from .snapshot import open_store
+from .snapshot import open_store, progress_disposition, progress_projection
 from .work_items import WorkItems
 
 
@@ -100,6 +100,11 @@ class Project:
                 "code_digest": snapshot["code_digest"], "created_at": snapshot["created_at"],
                 "outcome": snapshot["outcome"], "summary": snapshot["summary"],
                 "verification": snapshot["verification"], "state": snapshot["state"],
+                "progress": {"status": "current" if snapshot.get("progress") is not None else "legacy",
+                             "record": progress_projection(snapshot.get("progress")),
+                             "disposition": progress_disposition(
+                                 snapshot.get("progress"), snapshot["outcome"], self.config,
+                                 snapshot.get("progress", {}).get("role") if snapshot.get("progress") else None)},
                 "goal_digest": snapshot.get("goal_digest"), "wake_at": snapshot.get("wake_at"),
                 "selection": project_status(self.config, self),
                 "health": {p.stem: read_json(p) for p in (self.root / "health").glob("*.json") if not p.is_symlink()},

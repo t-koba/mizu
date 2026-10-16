@@ -1,20 +1,120 @@
 """Content-addressed, coherent views; never expose a moving worktree to readers."""
 from __future__ import annotations
 
+import datetime as dt
 import difflib
-import itertools
 import fnmatch
+import itertools
 import os
+import re
 import stat
+import time
 from pathlib import Path
 
 from . import platform as _platform
 from .errors import Denied, LimitExceeded, SnapshotConflict
-from .fs import DIGEST, PREVIEW_BYTES, atomic_write, canonical, digest, lock, mkdir, now, publish_pointer, read_json, safe_read, safe_read_info, write_json, relative_parts
+from .fs import DIGEST, ID, PREVIEW_BYTES, atomic_write, canonical, digest, lock, mkdir, now, publish_pointer, read_json, safe_read, safe_read_info, write_json, relative_parts
 from .vcs import REF_PREFIX
 
 
 _CURRENT_PARENT = object()
+
+PROGRESS_SIGNALS = ("tool", "code", "state", "decision", "insight", "input")
+_PROGRESS_TIMESTAMP = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})\Z")
+
+
+def validate_progress(value: dict) -> dict:
+    """Validate the compact, immutable progress record; legacy absence is valid."""
+    fields = {"schema", "signals", "selected", "role", "has_progress",
+              "no_progress_count", "obligations_digest", "recorded_at"}
+    if not isinstance(value, dict) or set(value) != fields:
+        raise Denied("Invalid snapshot progress record")
+    if type(value["schema"]) is not int or value["schema"] != 1:
+        raise Denied("Invalid snapshot progress schema")
+    signals = value["signals"]
+    if (not isinstance(signals, dict) or set(signals) != set(PROGRESS_SIGNALS)
+            or any(type(signals[name]) is not bool for name in PROGRESS_SIGNALS)):
+        raise Denied("Invalid snapshot progress signals")
+    selected = value["selected"]
+    if (not isinstance(selected, list) or len(selected) > len(PROGRESS_SIGNALS)
+            or any(not isinstance(name, str) or name not in PROGRESS_SIGNALS for name in selected)
+            or len(selected) != len(set(selected))):
+        raise Denied("Invalid snapshot progress policy")
+    if not isinstance(value["role"], str) or not ID.fullmatch(value["role"]):
+        raise Denied("Invalid snapshot progress role")
+    has_progress = any(signals[name] for name in selected)
+    if type(value["has_progress"]) is not bool or value["has_progress"] != has_progress:
+        raise Denied("Invalid snapshot progress result")
+    count = value["no_progress_count"]
+    if (type(count) is not int or not 0 <= count <= 101
+            or has_progress and count != 0):
+        raise Denied("Invalid snapshot no-progress count")
+    obligations_digest = value["obligations_digest"]
+    if not isinstance(obligations_digest, str) or not DIGEST.fullmatch(obligations_digest):
+        raise Denied("Invalid snapshot progress obligation digest")
+    stamp = value["recorded_at"]
+    if not isinstance(stamp, str) or len(stamp) > 64 or not _PROGRESS_TIMESTAMP.fullmatch(stamp):
+        raise Denied("Invalid snapshot progress timestamp")
+    try:
+        parsed = dt.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            raise ValueError("timezone required")
+        parsed.timestamp()
+    except (ValueError, OverflowError, OSError) as exc:
+        raise Denied("Invalid snapshot progress timestamp") from exc
+    return value
+
+
+def progress_timestamp(value: dict) -> float | None:
+    """Return a validated progress timestamp, or None for malformed evidence."""
+    try:
+        validate_progress(value)
+        return dt.datetime.fromisoformat(value["recorded_at"].replace("Z", "+00:00")).timestamp()
+    except (Denied, OverflowError, OSError, ValueError, TypeError):
+        return None
+
+
+def progress_projection(value: dict | None) -> dict | None:
+    """Return only schema-bounded progress fields suitable for status output."""
+    if value is None:
+        return None
+    validate_progress(value)
+    return {"schema": 1, "signals": {name: value["signals"][name] for name in PROGRESS_SIGNALS},
+            "selected": list(value["selected"]), "role": value["role"],
+            "has_progress": value["has_progress"],
+            "no_progress_count": value["no_progress_count"],
+            "recorded_at": value["recorded_at"]}
+
+
+def progress_disposition(value: dict | None, outcome: str, config=None,
+                         role_name: str | None = None, current_time: float | None = None) -> str:
+    """Bounded explanation of whether this record self-admits continue/bounded."""
+    if value is None:
+        return "legacy_behavior"
+    try:
+        validate_progress(value)
+        limits = config.limits
+        selected = tuple(limits.progress_signals)
+        allowance = limits.no_progress_continuations
+        backoff = limits.no_progress_backoff_seconds
+        role = value["role"] if role_name is None else role_name
+        if set(value["selected"]) != set(selected) or value["role"] != role:
+            return "reevaluate"
+        if outcome not in ("continue", "bounded"):
+            return "not_applicable"
+        if value["has_progress"]:
+            return "self_admit_progress"
+        if value["no_progress_count"] <= allowance:
+            return "self_admit_allowance"
+        if backoff > 0:
+            timestamp = progress_timestamp(value)
+            current_time = time.time() if current_time is None else current_time
+            if timestamp is not None and current_time >= timestamp + backoff:
+                return "self_admit_backoff"
+        return "parked_no_progress"
+    except (AttributeError, TypeError, ValueError, Denied):
+        return "reevaluate"
 
 
 def open_store(root: Path, config, *, create_dirs: bool = True) -> "Snapshots":
@@ -152,6 +252,7 @@ class Snapshots:
     def create(self, captured: dict, *, goal: str, state: str, run: str | None,
                outcome: str, summary: str, verification: dict | None = None,
                wake_at: float | None = None, inbox_seen: str = "", wake_generation: str = "",
+               progress: dict | None = None,
                parent: str | None | object = _CURRENT_PARENT) -> dict:
         """Persist an immutable capture; publication is a separate CAS operation.
 
@@ -169,11 +270,15 @@ class Snapshots:
             if not isinstance(parent, str) or not DIGEST.fullmatch(parent):
                 raise Denied("Invalid parent snapshot ID")
             self.get(parent)
+        if progress is not None:
+            validate_progress(progress)
         record = {**captured, "created_at": now(), "goal": goal,
                   "goal_digest": digest(goal.encode()), "state": state, "run": run,
                   "outcome": outcome, "summary": summary, "verification": verification,
                   "wake_at": wake_at, "inbox_seen": inbox_seen, "wake_generation": wake_generation,
                   "parent": parent}
+        if progress is not None:
+            record["progress"] = progress
         record["id"] = digest(canonical(record))
         write_json(self.root / "snapshots" / f"{record['id']}.json", record, exclusive=True)
         return record
@@ -312,6 +417,8 @@ class Snapshots:
             raise Denied("Invalid parent snapshot ID")
         if not isinstance(record.get("files"), dict):
             raise Denied("Invalid snapshot files")
+        if "progress" in record:
+            validate_progress(record["progress"])
         if digest(canonical(record["files"])) != record.get("code_digest"):
             raise Denied("Snapshot code digest mismatch")
         if not isinstance(record.get("goal"), str) or digest(record["goal"].encode()) != record.get("goal_digest"):

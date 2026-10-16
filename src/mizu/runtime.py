@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import datetime as dt
 import json
 import os
 import re
@@ -28,6 +29,7 @@ from .errors import Busy, Cancelled, ConfigError, Denied, InfraExceeded, LimitEx
 from .fs import (canonical, digest, lock, mkdir, now, read_json, safe_read, write_json,
                  PREVIEW_BYTES, READ_PAGE_CHARS, page, text_preview, DIGEST)
 from .project import Project
+from .snapshot import PROGRESS_SIGNALS, progress_disposition, validate_progress
 from .protocol import DEFINITIONS, validate
 from .report import previous as _previous_report, publish
 from .sandbox import Sandbox, cleanup
@@ -233,6 +235,10 @@ class Context:
         # later conditional result from replacing its retained receipt.
         self.conditional_close_attempted = False
         self.tool_count = 0
+        self.progress_tool = False
+        self.progress_decision = False
+        self.progress_insight = False
+        self.progress_input = False
         # Delegation spend sharing: the role whose per-run caps bind spend.
         # Delegation children count against the caller's unit, so theirs
         # points at the caller; everyone else spends their own role.
@@ -540,6 +546,7 @@ class Context:
                     self.bound_hit = self.bound_hit or "tools"
                     raise LimitExceeded("Per-run tool limit exceeded")
                 self.engine_tool_invocations[key] = name
+                self.progress_tool = True
                 return {"allowed": True}
             if operation == "_budget":
                 self.enter_drain_wrap_up()
@@ -635,7 +642,14 @@ class Context:
             self._activity_change(lambda: setattr(self, "_activity_operation", operation),
                                   count="tool_call:" + operation)
             try:
-                return self.dispatch(operation, arguments)
+                result = self.dispatch(operation, arguments)
+                if operation != "finish":
+                    self.progress_tool = True
+                if operation == "decide":
+                    self.progress_decision = True
+                if operation in {"submit_insight", "revise_insight", "withdraw_insight", "attach_evidence"}:
+                    self.progress_insight = True
+                return result
             finally:
                 # Completion of actual admitted work is not a heartbeat and
                 # never resets an active request (Claude query / Codex turn).
@@ -2598,7 +2612,25 @@ class Engine:
             if event_trigger and not substantive_events and not wait_events and not ci_failures:
                 return {"skipped": "no-event", "snapshot": snapshot["id"],
                         "code_digest": snapshot["code_digest"]}
-            if code_unchanged and not substantive_events and not wait_events and not ci_failures:
+            # Writable roles consume these generations in their next snapshot.
+            # Read-only on-change roles keep their code/event cursor semantics;
+            # they cannot acknowledge snapshot-wide input by publishing.
+            goal_changed = digest(project.goal.encode()) != snapshot["goal_digest"]
+            inbox_changed = project.insights.generation() != snapshot.get("inbox_seen", "")
+            operator_woke = project.control().get("wake_generation", "") != snapshot.get("wake_generation", "")
+            prior_wait_expired = (snapshot.get("outcome") == "wait"
+                                  and snapshot.get("wake_at") is not None
+                                  and time.time() >= snapshot["wake_at"])
+            explicit_wake = role.workspace == "write" and (
+                goal_changed or operator_woke or inbox_changed or prior_wait_expired)
+            progress_self_admits = False
+            if (role.workspace == "write" and snapshot.get("outcome") in ("continue", "bounded")
+                    and snapshot.get("progress") is not None):
+                disposition = progress_disposition(snapshot["progress"], snapshot["outcome"],
+                                                   self.config, role_name)
+                progress_self_admits = disposition != "parked_no_progress"
+            if (code_unchanged and not substantive_events and not wait_events and not ci_failures
+                    and not explicit_wake and not progress_self_admits):
                 return {"skipped": "unchanged", "snapshot": snapshot["id"],
                         "code_digest": snapshot["code_digest"]}
             # Pre-execution selection probe: evaluate before allocating a run
@@ -2760,6 +2792,17 @@ class Engine:
                 context.decision_events = decision_events
                 context.wait_events = wait_events
                 context.obligations = obligations
+                context.progress_obligations_digest = _progress_obligations_digest(obligations)
+                previous_progress = snapshot.get("progress")
+                previous_obligations_digest = None
+                if (isinstance(previous_progress, dict) and previous_progress.get("role") == role_name):
+                    previous_obligations_digest = previous_progress.get("obligations_digest")
+                new_obligation = bool(obligations) and previous_obligations_digest != context.progress_obligations_digest
+                context.progress_input = (
+                    context.inbox_seen != snapshot.get("inbox_seen", "")
+                    or context.wake_generation != snapshot.get("wake_generation", "")
+                    or bool(decision_events or wait_events or ci_failures)
+                    or new_obligation or prior_wait_expired)
                 prompt, prompt_mode, session_key, rotation, session_dir = session_prompt(context, role, run_dir)
                 decoded = json.loads(prompt)
                 write_json(run_dir / "prompt_projection.json",
@@ -2915,12 +2958,25 @@ class Engine:
                         verification = {**verification, "passed": False, "invalidated": "code changed or final snapshot is unrepresentable"}
                     if finished["outcome"] == "done" and not (verification and verification["passed"]):
                         raise Denied("Code changed after verification; completion refused")
+                    selected_progress = tuple(self.config.limits.progress_signals)
+                    observed_progress = {
+                        "tool": context.progress_tool,
+                        "code": captured["code_digest"] != context.snapshot["code_digest"],
+                        "state": finished["state"] != context.snapshot["state"],
+                        "decision": context.progress_decision,
+                        "insight": context.progress_insight,
+                        "input": context.progress_input,
+                    }
+                    progress = _progress_record(context.snapshot, role_name, selected_progress,
+                                               observed_progress, finished["outcome"],
+                                               obligations_digest=context.progress_obligations_digest)
                     snapshot = project.snapshots.create(
                         captured, goal=context.goal, state=finished["state"], run=run_id,
                         outcome=finished["outcome"], summary=finished["summary"], verification=verification,
                         wake_at=time.time() + finished["wait_seconds"] if finished["outcome"] == "wait" else None,
                         inbox_seen=context.inbox_seen,
-                        wake_generation=context.wake_generation, parent=context.snapshot["id"])
+                        wake_generation=context.wake_generation, progress=progress,
+                        parent=context.snapshot["id"])
                 if decision:
                     from .selection import State
                     State(self.config).result(decision, run=run_id, attempt=selection_attempt)
@@ -3375,19 +3431,58 @@ def _role_events_due(project: Project, snapshot: dict, role_name=None) -> bool:
     return False
 
 
+def _progress_obligations_digest(obligations) -> str:
+    """Digest only stable identity fields for the bounded pending-obligation view."""
+    rows = []
+    for item in obligations or ():
+        if not isinstance(item, dict):
+            continue
+        rows.append({key: item.get(key) for key in ("insight", "rev", "registered_at", "requires")})
+    rows.sort(key=lambda item: (str(item.get("registered_at") or ""),
+                                str(item.get("insight") or ""),
+                                int(item.get("rev") or 0)))
+    return digest(canonical(rows))
+
+
+def _progress_record(snapshot: dict, role_name: str, selected: tuple[str, ...],
+                    signals: dict[str, bool], outcome: str, *, obligations_digest: str | None = None) -> dict:
+    """Build compact unit evidence and its bounded consecutive no-progress count."""
+    has_progress = any(signals[name] for name in selected)
+    previous = snapshot.get("progress")
+    previous_count = 0
+    if isinstance(previous, dict):
+        try:
+            validate_progress(previous)
+            if previous["role"] == role_name and set(previous["selected"]) == set(selected):
+                previous_count = previous["no_progress_count"]
+        except Denied:
+            # Snapshot loading validates persisted records; direct callers with
+            # malformed records rebase rather than trusting their counter.
+            previous_count = 0
+    count = previous_count
+    if has_progress:
+        count = 0
+    elif outcome in ("continue", "bounded"):
+        # 101 is one above the largest allowed continuation policy and is
+        # sufficient to preserve the parked disposition without unbounded growth.
+        count = min(101, previous_count + 1)
+    obligations_digest = obligations_digest or _progress_obligations_digest(())
+    record = {"schema": 1, "signals": {name: bool(signals.get(name, False))
+                                        for name in PROGRESS_SIGNALS},
+              "selected": list(selected), "role": role_name,
+              "has_progress": has_progress, "no_progress_count": count,
+              "obligations_digest": obligations_digest,
+              "recorded_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="microseconds")}
+    return validate_progress(record)
+
+
 def should_run(project: Project, snapshot: dict, current_time: float | None = None,
                role_name: str | None = None, config=None) -> bool:
-    """Fixed single-writer publication contract (mechanism, not operator policy).
+    """Apply explicit wakes, then the configured no-progress self-admission guard.
 
-    `done` needs an explicit wake or changed goal; `continue` always runs;
-    `wait`/`blocked` resume on wake, new proposals, elapsed wait, or a cached
-    current CI failure on the operator-selected ``[vcs] ci_branch`` (polled
-    red, independent of insight decisions, until a later poll sees green or
-    a new revision; empty disables the wake) for roles with ``ci_wake``
-    (writable roles by default; a parked role wakes only on a changed red --
-    new failing sha/check, moved head, or elapsed ``ci_rewake_seconds``).
-    Goal and
-    wake-generation changes always resume. See docs/architecture.md.
+    Legacy snapshots without progress retain their former behavior. A current
+    matching record parks continue/bounded only after configured no-progress
+    continuation allowance; external wakes remain authoritative.
     """
     current_time = time.time() if current_time is None else current_time
     control = project.control()
@@ -3400,8 +3495,6 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
     outcome = snapshot["outcome"]
     if outcome == "done":
         return False  # A completed objective needs an explicit wake or changed goal.
-    if outcome in ("continue", "bounded"):
-        return True
     if project.insights.generation() != snapshot.get("inbox_seen", ""):
         return True
     if _role_events_due(project, snapshot, role_name):
@@ -3418,7 +3511,22 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
             return True
     except Exception:
         pass
-    return outcome == "wait" and snapshot.get("wake_at") is not None and current_time >= snapshot["wake_at"]
+    if outcome == "wait" and snapshot.get("wake_at") is not None and current_time >= snapshot["wake_at"]:
+        return True
+    if outcome not in ("continue", "bounded"):
+        return False
+    if "progress" not in snapshot or role_name is None:
+        return True
+    progress = snapshot["progress"]
+    try:
+        validate_progress(progress)
+    except Denied:
+        # Snapshots.get rejects malformed persisted records; fail closed for
+        # direct projections rather than treating corrupt evidence as legacy.
+        return False
+    effective = config if config is not None else getattr(project, "config", None)
+    disposition = progress_disposition(progress, outcome, effective, role_name, current_time)
+    return disposition != "parked_no_progress"
 
 
 def _wall(value):

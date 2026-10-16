@@ -283,6 +283,9 @@ class Limits:
     command_seconds: int = 300
     idle_seconds: int = 15
     cooldown_seconds: int = 5
+    progress_signals: tuple[str, ...] = ("tool", "code", "state", "decision", "insight", "input")
+    no_progress_continuations: int = 0
+    no_progress_backoff_seconds: int = 0
     default_wait_seconds: int = 1800
     maximum_wait_seconds: int = 86400
     max_failures: int = 3
@@ -574,9 +577,18 @@ def load(file: Path) -> Config:
                      "maximum_wait_seconds": (1, MAX_WAIT_SECONDS),
                      "daily_requests": (0, 100000), "shared_daily_requests": (0, 100000), "max_failures": (0, 1073741824),
                      "busy_retry_seconds": (0, 86400),
+                     "no_progress_continuations": (0, 100),
+                     "no_progress_backoff_seconds": (0, 86400),
                      "missing_finish_followups": (0, 3),
                      "free_disk_mb": (0, 1073741824)}
+    allowed_progress_signals = {"tool", "code", "state", "decision", "insight", "input"}
     for k, v in lim.items():
+        if k == "progress_signals":
+            values = strings(v, "limits.progress_signals")
+            if len(values) != len(set(values)) or any(value not in allowed_progress_signals for value in values):
+                raise ConfigError("limits.progress_signals must contain unique supported signal names")
+            lim[k] = values
+            continue
         if k in ("missing_finish_counts_as_failure", "drain_yield"):
             boolean(v, f"limits.{k}")
             continue

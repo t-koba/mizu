@@ -152,6 +152,35 @@ information. `done` is not reopened by news alone; an explicit wake or changed
 goal can reopen it. Other scheduled roles are independent until the project is
 paused/disarmed.
 
+Writable `continue` and `bounded` snapshots also carry a compact, digest-bound
+progress record. `[limits] progress_signals` selects which observed signals
+qualify; any selected true signal is progress. The default selects successful
+non-finish Mizu operations or new native engine-tool authorizations (not
+idempotent replays), changed code/state, successful decisions and insight
+actions, and fresh/due one-shot input. Input means a changed inbox or operator
+wake generation, consumed decision/wait events, CI failures due for this
+snapshot, or an expired prior wait. Persistent pending obligations and cached
+red CI presence do not count repeatedly: pending obligations are fingerprinted
+by stable identity, so a newly offered obligation counts once while unchanged
+visibility does not reset the streak. Finish alone is
+not progress. The default `no_progress_continuations = 0` therefore parks after
+the first unchanged, finish-only continuation. Operators may allow 0–100
+consecutive no-progress continuations; selected progress or a role/policy change
+resets the streak. `no_progress_backoff_seconds = 0` disables a timer wake; a
+positive value permits a parked continuation to wake after that delay measured
+from its recorded progress timestamp. Goal and
+operator wakes, new inbox generations, due decision/wait/CI events, and wait
+expiry are checked before this self-admission gate. Writable on-change roles
+honor these explicit wakes even with unchanged code; event-triggered dispatch
+still requires a subscribed substantive decision event, due wait, or due CI. Legacy snapshots without progress keep
+their previous admission behavior. Schema 1 records the six observed booleans,
+the selected signal names, role ID, aggregate progress boolean, saturated
+no-progress count (0–101), and a timezone-aware timestamp. The snapshot digest
+binds the record. A malformed progress object makes the snapshot unavailable
+rather than authorizing an admission; `mizu status` and `mizu explain` expose
+only its bounded signal/count/timestamp projection and a finite disposition,
+not a scheduler prediction.
+
 ## Insight handoff
 
 The submitting route assigns the source identity. A record contains ID, source
