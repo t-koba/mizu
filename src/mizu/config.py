@@ -27,6 +27,9 @@ RESERVED_ROLE_NAMES = frozenset({"operator", "vcs", "editor"})
 MAX_RESOURCES = 64
 #: Protocol wait bound mirrored in protocol.finish.wait_seconds; keep both at 86400.
 MAX_WAIT_SECONDS = 86400
+#: Free-text state changes are supported as an explicit progress signal but
+#: do not qualify by default because paraphrasing alone is not substantive work.
+DEFAULT_PROGRESS_SIGNALS = ("tool", "code", "decision", "insight", "input")
 #: Shared-fragment `include` bounds (fixed mechanism, not knobs per ADR-006).
 MAX_INCLUDE_DEPTH = 8
 MAX_INCLUDE_FILES = 32
@@ -283,7 +286,7 @@ class Limits:
     command_seconds: int = 300
     idle_seconds: int = 15
     cooldown_seconds: int = 5
-    progress_signals: tuple[str, ...] = ("tool", "code", "state", "decision", "insight", "input")
+    progress_signals: tuple[str, ...] = DEFAULT_PROGRESS_SIGNALS
     no_progress_continuations: int = 0
     no_progress_backoff_seconds: int = 0
     default_wait_seconds: int = 1800

@@ -5,7 +5,7 @@ import time
 from unittest.mock import patch
 
 from support import Fixture, ScriptDriver
-from mizu.config import load
+from mizu.config import DEFAULT_PROGRESS_SIGNALS, load
 from mizu.errors import ConfigError, Denied
 from mizu.explain import explain
 from mizu.fs import canonical, digest, now, write_json
@@ -17,7 +17,7 @@ from mizu.snapshot import PROGRESS_SIGNALS, progress_disposition, validate_progr
 class ProgressConfigTests(Fixture):
     def test_defaults_and_config_validation(self):
         limits = self.config.limits
-        self.assertEqual(limits.progress_signals, PROGRESS_SIGNALS)
+        self.assertEqual(limits.progress_signals, DEFAULT_PROGRESS_SIGNALS)
         self.assertEqual(limits.no_progress_continuations, 0)
         self.assertEqual(limits.no_progress_backoff_seconds, 0)
 
@@ -30,9 +30,9 @@ class ProgressConfigTests(Fixture):
                 ("no_progress_backoff_seconds", "86401"),
                 ("no_progress_backoff_seconds", "-1")):
             candidate = raw.replace(
-                'progress_signals = ["tool", "code", "state", "decision", "insight", "input"] # Any selected true signal admits another continue/bounded unit. Empty disables progress qualification.',
+                'progress_signals = ["tool", "code", "decision", "insight", "input"] # Any selected true signal admits another continue/bounded unit. Empty disables progress qualification.',
                 f"progress_signals = {invalid}" if setting == "progress_signals" else
-                'progress_signals = ["tool", "code", "state", "decision", "insight", "input"]')
+                'progress_signals = ["tool", "code", "decision", "insight", "input"]')
             if setting == "no_progress_continuations":
                 candidate = candidate.replace("no_progress_continuations = 0", f"no_progress_continuations = {invalid}")
             elif setting == "no_progress_backoff_seconds":
@@ -41,7 +41,7 @@ class ProgressConfigTests(Fixture):
             with self.assertRaises(ConfigError):
                 load(self.file)
         self.file.write_text(raw)
-        self.assertEqual(load(self.file).limits.progress_signals, PROGRESS_SIGNALS)
+        self.assertEqual(load(self.file).limits.progress_signals, DEFAULT_PROGRESS_SIGNALS)
         boundary = raw.replace("no_progress_continuations = 0", "no_progress_continuations = 100")
         boundary = boundary.replace("no_progress_backoff_seconds = 0", "no_progress_backoff_seconds = 86400")
         self.file.write_text(boundary)
@@ -51,10 +51,15 @@ class ProgressConfigTests(Fixture):
                          (100, 86400))
 
         empty = raw.replace(
-            'progress_signals = ["tool", "code", "state", "decision", "insight", "input"] # Any selected true signal admits another continue/bounded unit. Empty disables progress qualification.',
+            'progress_signals = ["tool", "code", "decision", "insight", "input"] # Any selected true signal admits another continue/bounded unit. Empty disables progress qualification.',
             "progress_signals = []")
         self.file.write_text(empty)
         self.assertEqual(load(self.file).limits.progress_signals, ())
+        state_opt_in = raw.replace(
+            'progress_signals = ["tool", "code", "decision", "insight", "input"] # Any selected true signal admits another continue/bounded unit. Empty disables progress qualification.',
+            'progress_signals = ["state"]')
+        self.file.write_text(state_opt_in)
+        self.assertEqual(load(self.file).limits.progress_signals, ("state",))
 
 
 class ProgressAdmissionTests(Fixture):
@@ -125,13 +130,13 @@ class ProgressAdmissionTests(Fixture):
     def test_finish_only_unchanged_run_is_recorded_as_no_progress_and_parked(self):
         snapshot = self._recorded_run()
         self.assertEqual(snapshot["outcome"], "continue")
-        self.assertEqual(snapshot["progress"]["selected"], list(PROGRESS_SIGNALS))
+        self.assertEqual(snapshot["progress"]["selected"], list(DEFAULT_PROGRESS_SIGNALS))
         self.assertEqual(snapshot["progress"]["signals"], {name: False for name in PROGRESS_SIGNALS})
         self.assertFalse(snapshot["progress"]["has_progress"])
         self.assertEqual(snapshot["progress"]["no_progress_count"], 1)
         self.assertFalse(should_run(self.project, snapshot, role_name="worker"))
 
-    def test_observations_do_not_progress_but_code_state_and_action_signals_do(self):
+    def test_default_progress_ignores_observations_and_free_text_state(self):
         def repeated_read(ctx, base):
             for _ in range(3):
                 ctx.handle("files", {})
@@ -156,11 +161,25 @@ class ProgressAdmissionTests(Fixture):
         code = self._recorded_run(change_code)
         self.assertTrue(code["progress"]["signals"]["code"])
 
-        def change_state(ctx, base):
-            ctx.handle("finish", {"outcome": "continue", "summary": "State changed",
-                                   "state": "Now: a distinct recorded state."})
-        state = self._recorded_run(change_state)
+        def finish_with_state(ctx, base, value):
+            ctx.handle("finish", {"outcome": "continue", "summary": "State was reworded",
+                                   "state": value})
+        state = self._recorded_run(
+            lambda ctx, base: finish_with_state(ctx, base, "Now: a distinct recorded state."))
         self.assertTrue(state["progress"]["signals"]["state"])
+        self.assertNotIn("state", state["progress"]["selected"])
+        self.assertFalse(state["progress"]["has_progress"])
+        self.assertEqual(state["progress"]["no_progress_count"], 1)
+        self.assertFalse(should_run(self.project, state, role_name="worker"))
+
+        opted_in_limits = dataclasses.replace(
+            self.config.limits, progress_signals=DEFAULT_PROGRESS_SIGNALS + ("state",))
+        opted_in_config = dataclasses.replace(self.config, limits=opted_in_limits)
+        opted_in = self._recorded_run(
+            lambda ctx, base: finish_with_state(ctx, base, "Now: another paraphrase."),
+            custom_config=opted_in_config)
+        self.assertIn("state", opted_in["progress"]["selected"])
+        self.assertTrue(opted_in["progress"]["has_progress"])
 
         enabled = dataclasses.replace(self.config.roles["worker"], capabilities=tuple(
             dict.fromkeys((*self.config.roles["worker"].capabilities, "submit_insight"))))
