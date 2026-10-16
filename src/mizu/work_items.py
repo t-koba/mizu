@@ -1,6 +1,6 @@
 """Append-audited work-item store with bounded runtime reads; no scheduling.
 
-Seeds are immutable accept/modify decision events. Reads and transitions share
+Seeds are immutable accept/modify decision events or hash-bound legacy sidecars. Reads and transitions share
 insights.lock; each successful CAS appends one full state, never a pointer.
 Unknown/unsafe records, incomplete chains and bounds fail closed. Retrying a
 committed CAS requires a re-read (same-status and terminal changes are refused).
@@ -8,6 +8,7 @@ committed CAS requires a re-read (same-status and terminal changes are refused).
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import heapq
 import json
 import os
@@ -130,7 +131,194 @@ class WorkItems:
             raise Denied("Malformed work-item record")
         return value
 
-    def _seed(self, item_id: str, event: dict | None = None) -> dict:
+    @staticmethod
+    def _legacy_source(event: dict) -> dict:
+        """Only valid origin fields are exposed; incomplete legacy events may drop."""
+        source = {"insight_id": None, "rev": None, "created_at": None}
+        try:
+            source["insight_id"] = identifier(event.get("id"))
+        except Denied:
+            pass
+        rev = event.get("rev")
+        if type(rev) is int and rev >= 1:
+            source["rev"] = rev
+        if _timestamp(event.get("created_at")):
+            source["created_at"] = event["created_at"]
+        return source
+
+    @staticmethod
+    def _legacy_seed(event_id: str, event: dict, title) -> dict:
+        source = WorkItems._legacy_source(event)
+        if (any(value is None for value in source.values())
+                or not isinstance(title, str) or not 1 <= len(title) <= 200):
+            raise Denied("Opening legacy work requires valid origin and a 1-200 character title")
+        return {"id": f"wi_{event_id}", "title": title,
+                "origin": {"insight_id": source["insight_id"], "rev": source["rev"]},
+                "status": "open", "rev": 1, "holder": None,
+                "created_at": source["created_at"], "updated_at": source["created_at"]}
+
+    def _legacy_resolution(self, event_id: str, event: dict, *, recover=False,
+                           history_revisions=_HISTORY_UNSET) -> dict | None:
+        """Validate the immutable sidecar against the exact canonical source."""
+        item_id = f"wi_{event_id}"
+        if recover:
+            revisions = self._recover_temporary_writes(item_id)
+        else:
+            revisions = history_revisions
+        directory = self.root / "work-items" / item_id
+        if revisions is None:
+            return None
+        if revisions is _HISTORY_UNSET:
+            if not _directory(directory.parent) or not _directory(directory):
+                return None
+        path = directory / "legacy.json"
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            if revisions is not _HISTORY_UNSET and revisions and "work_item" not in event:
+                raise Denied("Unresolved legacy event carries active history")
+            return None
+        record = self._read(f"work-items/{item_id}/legacy.json")
+        fields = {"event_id", "event_sha256", "action", "revision", "outcome",
+                  "actor", "reason", "created_at"}
+        if record.get("outcome") == "open":
+            fields.add("work_item")
+        if (set(record) != fields or record.get("event_id") != event_id
+                or record.get("event_sha256") != hashlib.sha256(canonical(event)).hexdigest()
+                or event.get("action") not in ("accept", "modify") or "work_item" in event
+                or record.get("action") != event["action"]
+                or record.get("revision") != self._legacy_source(event)["rev"]
+                or (record.get("revision") is not None and type(record["revision"]) is not int)
+                or record.get("outcome") not in ("open", "drop")
+                or not isinstance(record.get("reason"), str) or not record["reason"].strip()
+                or len(record["reason"]) > 4000 or not _timestamp(record.get("created_at"))):
+            raise Denied("Invalid legacy reconciliation binding or fields")
+        identifier(record["actor"])
+        if record["outcome"] == "open":
+            seed = record["work_item"]
+            if (not isinstance(seed, dict)
+                    or seed != self._legacy_seed(event_id, event, seed.get("title"))
+                    or type(seed.get("rev")) is not int
+                    or type(seed.get("origin", {}).get("rev")) is not int):
+                raise Denied("Invalid legacy reconciliation seed")
+        elif revisions is not _HISTORY_UNSET and revisions:
+            raise Denied("Dropped legacy resolution carries active history")
+        return record
+
+    def reconcile(self, event_id, *, expected_action, outcome, reason, actor,
+                  expected_rev=None, title=None) -> dict:
+        """Resolve exactly one unseeded event, exclusively and retry-idempotently."""
+        if (not isinstance(event_id, str) or len(event_id) != 32
+                or _DECISION_EVENT_NAME.fullmatch(event_id + ".json") is None):
+            raise Denied("Invalid legacy event ID")
+        if (expected_action not in ("accept", "modify") or outcome not in ("open", "drop")
+                or (expected_rev is not None and (type(expected_rev) is not int or expected_rev < 1))
+                or not isinstance(reason, str) or not reason.strip() or len(reason) > 4000
+                or (outcome == "drop" and title is not None)):
+            raise Denied("Invalid legacy reconciliation request")
+        identifier(actor)
+        with lock(self.root / "locks" / "insights.lock"):
+            self._recover_decision_history_temporaries(self.root / "decision-history")
+            event = self._read(f"decision-history/{event_id}.json")
+            if (event.get("action") != expected_action or "work_item" in event
+                    or (expected_rev is not None
+                        and (type(event.get("rev")) is not int or event["rev"] != expected_rev))):
+                raise Denied("Legacy decision changed or already seeded")
+            existing = self._legacy_resolution(event_id, event, recover=True)
+            record = {"event_id": event_id,
+                      "event_sha256": hashlib.sha256(canonical(event)).hexdigest(),
+                      "action": expected_action, "revision": self._legacy_source(event)["rev"],
+                      "outcome": outcome, "actor": actor, "reason": reason,
+                      "created_at": existing["created_at"] if existing else now()}
+            if outcome == "open":
+                record["work_item"] = self._legacy_seed(event_id, event, title)
+            if existing is not None:
+                if record != existing:
+                    raise Denied("Conflicting legacy reconciliation retry")
+                return {"record": existing, "created": False}
+            if len(canonical(record)) > PREVIEW_BYTES:
+                raise LimitExceeded("Legacy reconciliation exceeds byte bound")
+            write_json(self.root / "work-items" / f"wi_{event_id}" / "legacy.json",
+                       record, exclusive=True)
+            return {"record": record, "created": True}
+
+    def page_legacy(self, *, cursor=None, limit=25) -> dict:
+        """Live audit inventory, ordered by exclusive event ID, O(limit) rows.
+
+        No proposal bodies. Both unresolved and reconciled events are included.
+        Recognized atomic-write leftovers may be recovered under insights.lock.
+        """
+        if (cursor is not None and (not isinstance(cursor, str) or len(cursor) > MAX_OPEN_CURSOR_CHARS
+                or re.fullmatch(r"wl1\|[0-9a-f]{32}", cursor) is None)):
+            raise Denied("Invalid legacy cursor")
+        if type(limit) is not int or not 1 <= limit <= MAX_OPEN_PAGE_ROWS:
+            raise Denied("Legacy page limit must be an integer in [1, 100]")
+        after = cursor[4:] if cursor else None
+        with lock(self.root / "locks" / "insights.lock"):
+            selected, total, eligible, unresolved = [], 0, 0, 0
+            for event_id, event in self._decision_events():
+                if event["action"] not in ("accept", "modify") or "work_item" in event:
+                    self._legacy_resolution(event_id, event, recover=True)
+                    if "work_item" in event:
+                        self._seed(f"wi_{event_id}", event)
+                    continue
+                resolution = self._legacy_resolution(event_id, event, recover=True)
+                total += 1
+                unresolved += resolution is None
+                if after is not None and event_id <= after:
+                    continue
+                eligible += 1
+                # Bound row selection before constructing previews.
+                if len(selected) >= limit and event_id >= selected[0][1]:
+                    continue
+                source = self._legacy_source(event)
+                reason = event.get("reason")
+                preview, clipped = text_preview(reason if isinstance(reason, str) else "", 1024)
+                row = {"event_id": event_id, "action": event["action"], **source,
+                       "reason_preview": preview, "reason_truncated": clipped,
+                       "openable": resolution is None and all(value is not None for value in source.values()),
+                       "resolution": None}
+                if resolution is not None:
+                    preview, clipped = text_preview(resolution["reason"], 1024)
+                    row["resolution"] = {key: resolution[key] for key in
+                                         ("outcome", "actor", "created_at", "event_sha256")}
+                    row["resolution"].update(reason_preview=preview, reason_truncated=clipped)
+                    if resolution["outcome"] == "open":
+                        row["resolution"]["work_item_id"] = f"wi_{event_id}"
+                if len(canonical(row)) > MAX_OPEN_ROW_BYTES:
+                    raise LimitExceeded("Legacy page row exceeds byte bound")
+                candidate = (_ReverseKey(event_id), event_id, row)
+                if len(selected) < limit:
+                    heapq.heappush(selected, candidate)
+                else:
+                    heapq.heapreplace(selected, candidate)
+            rows = [entry[2] for entry in sorted(selected, key=lambda value: value[1])]
+            overflow = max(0, eligible - len(rows))
+            result = {"items": rows, "total": total, "cursor": cursor,
+                      "next_cursor": f"wl1|{rows[-1]['event_id']}" if overflow and rows else None,
+                      "overflow_count": overflow, "truncated": overflow > 0,
+                      "unseeded_decisions": unresolved, "coverage_complete": unresolved == 0}
+            if len(canonical(result)) > MAX_OPEN_PAGE_BYTES:
+                raise LimitExceeded("Legacy page exceeds byte bound")
+            return result
+
+    def _decision_events(self):
+        history = self.root / "decision-history"
+        if not self._recover_decision_history_temporaries(history):
+            return
+        with os.scandir(history) as entries:
+            for entry in entries:
+                if _DECISION_EVENT_NAME.fullmatch(entry.name) is None:
+                    raise Denied("Invalid committed decision-history filename")
+                event = self._read(f"decision-history/{entry.name}")
+                if event.get("action") not in ("accept", "modify", "defer", "reject", "withdraw"):
+                    raise Denied("Malformed committed decision-history action")
+                if event["action"] not in ("accept", "modify") and "work_item" in event:
+                    raise Denied("Non-accept decision carries a work-item seed")
+                yield entry.name[:-5], event
+
+    def _seed(self, item_id: str, event: dict | None = None, *,
+              history_revisions=_HISTORY_UNSET) -> dict:
         """Validate a seed, optionally reusing its already safe-read event."""
         match = ITEM_ID.fullmatch(item_id) if isinstance(item_id, str) else None
         if match is None:
@@ -139,6 +327,11 @@ class WorkItems:
             event = self._read(f"decision-history/{match[1]}.json")
         if not isinstance(event, dict):
             raise Denied("Invalid work-item seed event")
+        resolution = self._legacy_resolution(match[1], event, history_revisions=history_revisions)
+        if "work_item" not in event:
+            if resolution is None or resolution["outcome"] != "open":
+                raise Denied("Work item has no open legacy resolution")
+            event = {**event, "work_item": resolution["work_item"]}
         seed = event.get("work_item")
         if (event.get("action") not in ("accept", "modify")
                 or type(event.get("rev")) is not int or event["rev"] < 1
@@ -191,7 +384,8 @@ class WorkItems:
         action = decision.get("action")
         fields = {"id", "action", "reason", "revisit", "run", "created_at", "rev"}
         if action in ("accept", "modify"):
-            fields.add("work_item")
+            if "work_item" in decision:
+                fields.add("work_item")
         elif action == "withdraw":
             fields.add("actor")
         elif action not in ("defer", "reject"):
@@ -211,7 +405,7 @@ class WorkItems:
             raise Denied("Malformed current work-item origin decision")
         if action == "withdraw":
             identifier(decision["actor"])
-        elif action in ("accept", "modify"):
+        elif action in ("accept", "modify") and "work_item" in decision:
             seed = decision["work_item"]
             if (not isinstance(seed, dict) or not isinstance(seed.get("id"), str)
                     or ITEM_ID.fullmatch(seed["id"]) is None):
@@ -221,6 +415,19 @@ class WorkItems:
             if event != decision:
                 raise Denied("Current work-item origin decision differs from its immutable event")
             self._seed(seed_id)  # Validate the immutable seed's complete field/value contract.
+        elif action in ("accept", "modify"):
+            # Legacy current-decision files have no event ID. Resolve the exact
+            # old-schema record against one immutable history event rather than
+            # trusting a well-shaped mutable pointer by itself.
+            match = None
+            for event_id, event in self._decision_events():
+                if event == decision:
+                    if match is not None:
+                        raise Denied("Ambiguous current legacy decision history")
+                    match = (event_id, event)
+            if match is None:
+                raise Denied("Current legacy decision has no immutable history event")
+            self._legacy_resolution(*match, recover=True)
         return {"rev": revision, "action": action}
 
     def _recover_temporary_writes(self, item_id: str) -> set[int] | None:
@@ -241,10 +448,17 @@ class WorkItems:
         revisions = set()
         with os.scandir(directory) as entries:
             for count, entry in enumerate(entries):
-                if count >= MAX_REVISIONS:
+                if count >= MAX_REVISIONS + 1:
                     raise Denied("Work-item directory exceeds recovery bound")
                 if _TEMP_NAME.fullmatch(entry.name):
                     temporary_entries.append(entry)
+                    continue
+                if entry.name == "legacy.json":
+                    info = _entry_stat(entry)
+                    if (not stat.S_ISREG(info.st_mode)
+                            or getattr(info, "st_file_attributes", 0) & 0x400):
+                        raise Denied("Unsafe legacy reconciliation")
+                    revision_inodes.append((info.st_dev, info.st_ino, entry))
                     continue
                 if len(revisions) >= MAX_REVISIONS - 1:
                     raise Denied("Work-item history exceeds revision bound")
@@ -348,7 +562,7 @@ class WorkItems:
 
     def _get(self, item_id: str, *, seed_event: dict | None = None,
              history_revisions=_HISTORY_UNSET) -> dict:
-        current = self._seed(item_id, seed_event)  # Validate the immutable seed before replaying revisions.
+        current = self._seed(item_id, seed_event, history_revisions=history_revisions)
         # The storage auditor calls this read-only without recovery. Keep its
         # bounded fail-closed scan; locked readers pass the recovery scan result.
         if history_revisions is _HISTORY_UNSET:
@@ -358,6 +572,8 @@ class WorkItems:
             revisions = set()
             with os.scandir(directory) as entries:
                 for entry in entries:
+                    if entry.name == "legacy.json":
+                        continue
                     if len(revisions) >= MAX_REVISIONS - 1:
                         raise Denied("Work-item history exceeds revision bound")
                     if _REVISION_NAME.fullmatch(entry.name) is None:
@@ -506,9 +722,9 @@ class WorkItems:
         Limits are 1..100 (exact int); the opaque cursor carries the last row's
         status, UTC creation-order key and ID. Rows are at most 8192 canonical
         bytes and the complete response at most 1 MiB. Selection keeps O(limit)
-        rows while scanning history. Legacy accept/modify events lacking a seed are
-        counted, never guessed as open. The page serves the runtime prompt
-        projection and the explicitly granted ``work_items_read`` operation.
+        rows while scanning history. Unresolved legacy accept/modify events are
+        counted, never guessed as open; hash-bound sidecars explicitly resolve them.
+        The page serves the runtime prompt projection and the explicitly granted ``work_items_read`` operation.
         It does not transition items; it may remove recognized decision-history
         and per-item atomic-write leftovers during recovery under the shared
         lock. Recovery removes recognized regular orphan temporaries without
@@ -523,86 +739,61 @@ class WorkItems:
         if type(limit) is not int or not 1 <= limit <= MAX_OPEN_PAGE_ROWS:
             raise Denied("Work-item page limit must be an integer in [1, 100]")
 
-        history = self.root / "decision-history"
         with lock(self.root / "locks" / "insights.lock"):
             selected = []
             total = 0
             eligible = 0
             unseeded_decisions = 0
-            if self._recover_decision_history_temporaries(history):
-                with os.scandir(history) as entries:
-                    for entry in entries:
-                        if _TEMP_NAME.fullmatch(entry.name):
-                            try:
-                                info = _entry_stat(entry)
-                            except OSError as exc:
-                                raise Denied("Unstable decision-history temporary") from exc
-                            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
-                                    or getattr(info, "st_file_attributes", 0) & 0x400):
-                                raise Denied("Unsafe decision-history temporary")
-                            continue  # Never promote uncommitted atomic-write leftovers.
-                        if not entry.name.endswith(".json"):
-                            raise Denied("Unknown decision-history entry")
-                        if _DECISION_EVENT_NAME.fullmatch(entry.name) is None:
-                            raise Denied("Invalid committed decision-history filename")
-                        try:
-                            info = _entry_stat(entry)
-                        except OSError as exc:
-                            raise Denied("Unstable decision-history entry") from exc
-                        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
-                                or getattr(info, "st_file_attributes", 0) & 0x400):
-                            raise Denied("Unsafe committed decision-history entry")
-                        event = self._read(f"decision-history/{entry.name}")
-                        action = event.get("action")
-                        event_id = entry.name[:-5]
-                        if action not in ("accept", "modify", "defer", "reject", "withdraw"):
-                            raise Denied("Malformed committed decision-history action")
-                        has_seed = "work_item" in event
-                        if action not in ("accept", "modify"):
-                            if has_seed:
-                                raise Denied("Non-accept decision carries a work-item seed")
-                            continue
-                        if not has_seed:
-                            # Older accepted decisions have no stored lifecycle.
-                            # Count them as unknown coverage, even when legacy
-                            # fields needed by current seeds are absent.
-                            unseeded_decisions += 1
-                            continue
-                        seed = event["work_item"]
-                        if (not isinstance(seed, dict) or seed.get("id") != f"wi_{event_id}"):
-                            raise Denied("Malformed committed work-item seed")
-                        # Reuse this safely read event; _seed still validates its complete contract.
-                        view = self._projection_unlocked(seed["id"], seed_event=event)
-                        item = view["item"]
-                        if item["status"] not in ("open", "doing", "blocked"):
-                            continue
-                        total += 1
-                        sort_key = (OPEN_STATUS_ORDER[item["status"]],
-                                    _timestamp_order(item["created_at"]),
-                                    int(item["id"][3:], 16))
-                        if cursor_key is not None and sort_key <= cursor_key:
-                            continue
-                        eligible += 1
-                        row = {key: item[key] for key in
-                               ("id", "title", "origin", "status", "rev", "holder",
-                                "created_at", "updated_at")}
-                        row.update({key: view[key] for key in
-                                    ("current_origin_rev", "stale", "redecision")})
-                        if item["status"] == "blocked":
-                            row["wait"] = item["wait"]
-                        reason = item.get("reason")
-                        if reason is not None:
-                            preview, clipped = text_preview(reason, 1024)
-                            row["reason_preview"] = preview
-                            row["reason_truncated"] = clipped
-                        row_size = len(canonical(row))
-                        if row_size > MAX_OPEN_ROW_BYTES:
-                            raise LimitExceeded("Work-item page row exceeds byte bound")
-                        candidate = (_ReverseKey(sort_key), sort_key, row)
-                        if len(selected) < limit:
-                            heapq.heappush(selected, candidate)
-                        elif sort_key < selected[0][1]:
-                            heapq.heapreplace(selected, candidate)
+            for event_id, event in self._decision_events():
+                action = event["action"]
+                has_seed = "work_item" in event
+                if action not in ("accept", "modify"):
+                    self._legacy_resolution(event_id, event, recover=True)
+                    continue
+                if not has_seed:
+                    resolution = self._legacy_resolution(event_id, event, recover=True)
+                    if resolution is None:
+                        unseeded_decisions += 1
+                        continue
+                    if resolution["outcome"] == "drop":
+                        continue
+                    seed = resolution["work_item"]
+                else:
+                    seed = event["work_item"]
+                if (not isinstance(seed, dict) or seed.get("id") != f"wi_{event_id}"):
+                    raise Denied("Malformed committed work-item seed")
+                # Reuse this safely read event; _seed still validates its complete contract.
+                view = self._projection_unlocked(seed["id"], seed_event=event)
+                item = view["item"]
+                if item["status"] not in ("open", "doing", "blocked"):
+                    continue
+                total += 1
+                sort_key = (OPEN_STATUS_ORDER[item["status"]],
+                            _timestamp_order(item["created_at"]),
+                            int(item["id"][3:], 16))
+                if cursor_key is not None and sort_key <= cursor_key:
+                    continue
+                eligible += 1
+                row = {key: item[key] for key in
+                       ("id", "title", "origin", "status", "rev", "holder",
+                        "created_at", "updated_at")}
+                row.update({key: view[key] for key in
+                            ("current_origin_rev", "stale", "redecision")})
+                if item["status"] == "blocked":
+                    row["wait"] = item["wait"]
+                reason = item.get("reason")
+                if reason is not None:
+                    preview, clipped = text_preview(reason, 1024)
+                    row["reason_preview"] = preview
+                    row["reason_truncated"] = clipped
+                row_size = len(canonical(row))
+                if row_size > MAX_OPEN_ROW_BYTES:
+                    raise LimitExceeded("Work-item page row exceeds byte bound")
+                candidate = (_ReverseKey(sort_key), sort_key, row)
+                if len(selected) < limit:
+                    heapq.heappush(selected, candidate)
+                elif sort_key < selected[0][1]:
+                    heapq.heapreplace(selected, candidate)
 
             rows = [entry[2] for entry in sorted(selected, key=lambda value: value[1])]
             overflow_count = max(0, eligible - len(rows))

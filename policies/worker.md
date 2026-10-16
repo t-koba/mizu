@@ -72,8 +72,19 @@ and the next unit unparks the item.
 The bounded `open_work_items` prompt projection is not necessarily complete: if
 it is truncated, use the explicitly granted `mizu_work_items_read` tool with its
 `next_cursor` to continue. If `coverage_complete` is false, do not treat the
-projection as an exhaustive inventory. Keep free-text `Tasks` until the accepted
-legacy-reconciliation step is complete.
+projection as an exhaustive inventory. When authorized to reconcile the managed
+project's legacy work, page `mizu_work_items_legacy_read` using `next_cursor` to
+audit each exact accept/modify event, including prior resolutions. Use
+`mizu_work_items_reconcile` with its event ID and read action/revision: explicitly
+open actionable work with a concise title, or drop it with a reasoned audit
+explanation. Missing/invalid legacy origins can be dropped but cannot be opened.
+Never infer coverage from an insights action count or alter decision history.
+Exact reconciliation retries are safe but return `created: false` and do not
+count as progress; on conflict, re-read rather than changing the request to
+overwrite a resolution. Both tools bind to explicit grants; the
+runtime supplies your actor identity. Keep free-text `Tasks` until an authorized
+per-event pass proves `coverage_complete`; the availability of the mechanism is
+not evidence of production reconciliation.
 
 For a seeded item, use the explicitly granted `mizu_work_items_read` projection
 to re-read its current revision, then call `mizu_work_items_transition` with that

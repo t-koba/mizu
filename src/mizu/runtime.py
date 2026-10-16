@@ -87,7 +87,7 @@ WRAP_UP_OPS = frozenset({"finish", "research", "submit_insight", "attach_evidenc
 #: Reads of existing state are useful observation, not harness-observable progress.
 OBSERVATIONAL_OPS = frozenset({
     "files", "read", "diff", "insights", "research_read", "vcs_read",
-    "command_evidence_read", "experiment_evidence_read", "work_items_read",
+    "command_evidence_read", "experiment_evidence_read", "work_items_read", "work_items_legacy_read",
 })
 REPLAYABLE_READ_ARGUMENTS = {"fetch": "receipt_id", "probe": "receipt_id", "search": "result_id"}
 
@@ -153,7 +153,7 @@ def is_deferred(exc: BaseException, context=None) -> bool:
 CONSULT_FORBIDDEN = frozenset({"exec", "experiment", "verify", "decide",
                                "submit_insight", "revise_insight", "withdraw_insight", "withdraw_decided", "attach_evidence", "consult", "report", "sync",
                                "vcs_publish", "vcs_retire", "vcs_dispose",
-                               "research", "materialize", "work_items_transition"})
+                               "research", "materialize", "work_items_transition", "work_items_reconcile"})
 
 
 #: Capabilities a delegation child must never hold. The child works in the
@@ -166,7 +166,7 @@ CONSULT_FORBIDDEN = frozenset({"exec", "experiment", "verify", "decide",
 DELEGATE_FORBIDDEN = frozenset({"decide", "submit_insight", "revise_insight",
                                 "withdraw_insight", "withdraw_decided", "attach_evidence", "delegate",
                                 "vcs_publish", "vcs_retire", "vcs_dispose",
-                                "work_items_transition"})
+                                "work_items_transition", "work_items_reconcile"})
 
 
 def check_delegate_role(role_name: str, role) -> None:
@@ -658,7 +658,11 @@ class Context:
                                   count="tool_call:" + operation)
             try:
                 result = self.dispatch(operation, arguments)
-                if operation != "finish" and not _is_observational_operation(operation, arguments):
+                idempotent_replay = (operation == "work_items_reconcile"
+                                     and isinstance(result, dict)
+                                     and result.get("created") is False)
+                if (operation != "finish" and not _is_observational_operation(operation, arguments)
+                        and not idempotent_replay):
                     self.progress_tool = True
                 if operation == "decide":
                     self.progress_decision = True
@@ -915,6 +919,16 @@ class Context:
     def _op_work_items_read(self, args: dict) -> dict:
         return self.project.work_items.page_open(cursor=args.get("cursor"),
                                                  limit=args.get("limit", 25))
+
+    def _op_work_items_legacy_read(self, args: dict) -> dict:
+        return self.project.work_items.page_legacy(cursor=args.get("cursor"),
+                                                   limit=args.get("limit", 25))
+
+    def _op_work_items_reconcile(self, args: dict) -> dict:
+        return self.project.work_items.reconcile(
+            args["event_id"], expected_action=args["expected_action"],
+            expected_rev=args.get("expected_rev"), outcome=args["outcome"],
+            reason=args["reason"], title=args.get("title"), actor=self.role.name)
 
     def _op_work_items_transition(self, args: dict) -> dict:
         return self.project.work_items.transition(
@@ -1319,6 +1333,8 @@ class Context:
         "exec": _op_exec, "experiment": _op_experiment, "verify": _op_verify,
         "fetch": _op_fetch, "probe": _op_probe, "search": _op_search, "insights": _op_insights,
         "work_items_read": _op_work_items_read,
+        "work_items_legacy_read": _op_work_items_legacy_read,
+        "work_items_reconcile": _op_work_items_reconcile,
         "work_items_transition": _op_work_items_transition,
         "decide": _op_decide, "submit_insight": _op_submit_insight,
         "revise_insight": _op_revise_insight, "withdraw_insight": _op_withdraw_insight,

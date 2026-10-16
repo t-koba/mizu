@@ -241,7 +241,7 @@ CAS writes nothing and must be re-read, not blindly retried. `get()` and
 `transition()` recover under the shared lock by removing only recognized
 regular `.new-<8-char>` atomic-write leftovers; an uncommitted temporary is
 never promoted, and a post-link alias
-is removed only when it matches one revision inode. Unknown names and unsafe
+is removed only when it matches one committed revision or legacy sidecar inode. Unknown names and unsafe
 links still fail closed. Completion reads revalidate the cited manifest and
 require its stored passing verification to match the copied evidence, without
 requiring the snapshot to remain in the moving publication history. Lock/I/O
@@ -317,8 +317,9 @@ exclusive sort key; `total` counts all currently open seeded items,
 independent of the cursor. `overflow_count` counts matching open rows remaining
 after the input cursor and beyond this page; `truncated` is exactly whether that
 count is positive. Accept/modify history events without a `work_item` seed are
-counted as `unseeded_decisions`; `coverage_complete` is false while any exist,
-and their current state is never inferred. The prompt carries this count,
+counted as `unseeded_decisions` only while unresolved. `coverage_complete` is
+true only when every such event has a valid reconciliation sidecar; malformed
+sidecars fail closed rather than claiming coverage. No legacy state is inferred. The prompt carries this count,
 truncation, and coverage state; an incomplete projection is not an exhaustive
 inventory. Rows include current origin staleness/redecision, a structured wait
 for blocked items, and an optional reason preview of at most 1024 UTF-8 bytes. Limits are 1–100 rows,
@@ -347,6 +348,73 @@ reader preserves existing store error classifications and fails closed on
 malformed/unsafe records.
 **Free-text Tasks in writer state are still needed until legacy reconciliation
 is complete.**
+
+The separate `work_items_legacy_read` grant exposes
+`page_legacy(cursor=None, limit=25)`: a live read-only audit inventory of **all**
+legacy accept/modify history events without an embedded `work_item`, both
+unresolved and reconciled. It returns `items`, `total`, `cursor`, `next_cursor`,
+`overflow_count`, `truncated`, `unseeded_decisions`, and `coverage_complete`.
+Rows contain `event_id`, `action`, valid source `insight_id`/`rev`/`created_at`
+(or null for invalid/missing fields), a decision `reason_preview` (1024 UTF-8
+bytes) with `reason_truncated`, `openable`, and `resolution`. `openable` means
+unresolved with all origin fields needed for opening; it does not imply a
+model-supplied title has been validated. Resolution is null or contains
+`outcome`, runtime `actor`, reconciliation `created_at`, `event_sha256`, a
+bounded reason preview/truncation flag, and `work_item_id` for open. Proposal
+bodies are never copied. The same 1–100 row, 8192-byte row, 1-MiB response and
+128-character cursor bounds apply. An opaque versioned last-event-ID cursor
+orders events lexicographically, exclusively; selection retains O(limit) rows
+while scanning all committed history. Resolution does not remove audit rows.
+Each page validates committed records even beyond its cursor, under
+`insights.lock`, with the same recognized temporary recovery and fail-closed
+behavior as `page_open`. Pages are live, not frozen multi-page snapshots.
+
+`work_items_reconcile` explicitly resolves **one exact event**. Required
+arguments are its 32-character lowercase hex `event_id`, `expected_action`
+(`accept` or `modify`), `outcome` (`open` or `drop`), and nonblank `reason`
+(1–4000 characters). Optional positive integer `expected_rev` must match the
+source if supplied. `open` requires a 1–200 character `title` and valid source
+insight ID, positive exact integer revision, and timezone-aware decision
+timestamp. `drop` requires no title and works even with missing/invalid legacy
+origin fields. It creates no active item or seed. Seeded and non-accept/modify
+events are refused. The runtime binds actor to the role and rejects a
+model-supplied actor; only the example worker holds either legacy grant.
+Consultation and delegation children cannot hold reconciliation authority.
+Legacy reads are observational; reconciliation is not. Neither grant widens
+writer admission or receives a wrap-up/tool-budget exception.
+
+Under the shared insights lock, reconciliation exclusively atomically creates
+`work-items/wi_<event-id>/legacy.json`. Its immutable fields are `event_id`,
+`event_sha256` (SHA-256 of the **canonical JSON** source event), `action`,
+`revision` (valid source revision or null), `outcome`, `actor`, `reason`, and
+`created_at` (reconciliation timestamp). An open sidecar additionally contains
+`work_item`: the normal initial seed with ID `wi_<event-id>`, supplied title,
+origin `{insight_id, rev}`, status `open`, rev 1, holder null, and both timestamps
+from the original decision. No current or historical decision is rewritten.
+An exact retry returns `{record, created: false}`, preserving the original
+sidecar timestamp and not counting as progress; the first write returns
+`created: true`. A conflicting reason/title/outcome/actor or stale expectation
+is denied.
+After interruption, re-read/retry the same event: uncommitted temporaries are
+never promoted, and post-link aliases are removed only with one matching
+committed sidecar/revision inode. Recovery scans have the same fixed per-item
+bound (256 revisions including the seed, plus one sidecar and bounded temporary
+space); unsafe links, paths, unexpected entries, corrupted sidecars, and source
+hash mismatches fail closed. Store Denied/LimitExceeded and local I/O/lock errors
+retain their classifications. Cancellation releases the lock; no automatic retry
+or scheduling is added.
+
+`page_open`, `get`, and CAS transitions resolve open legacy seeds through that
+validated sidecar without changing decision history. Open resolutions replay
+normal revision history; drop resolutions count as covered but are never open
+items. Current legacy accept/modify records without a seed retain strict
+legacy-field validation and must match exactly one immutable history event for
+redecision projection; embedded seeds, when present, still require the full
+immutable seeded-event contract. Coverage is a locked
+history scan result, not a claim that deployed data has been reconciled. Keep
+free-text Tasks until an authorized per-event pass proves coverage. These APIs
+do not perform automatic migration, retire Tasks, or change scheduling.
+
 Author withdrawal (`mizu insight withdraw`, submitter or operator only)
 closes a pending proposal with an actor-labelled rev-bound record in
 the same decision store. A revision-current `accept` or `modify` blocks
