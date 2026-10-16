@@ -13,8 +13,8 @@ jobs:
     # Portable development plane: offline unit/contract checks on all three OSes.
     # Native service operation, live inference and OCI isolation are never asserted here.
     runs-on: ${{ matrix.os }}
-    # The 1450-second Windows unittest child needs setup and post-suite headroom.
-    timeout-minutes: ${{ matrix.os == 'windows-latest' && 35 || 20 }}
+    # Cover setup, the 1450-second Windows child, and one bounded post-suite timeout path.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 40 || 20 }}
     strategy:
       fail-fast: false
       matrix:

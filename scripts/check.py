@@ -61,8 +61,12 @@ def _allow_list(value: str) -> frozenset:
     return frozenset(part.strip() for part in value.split(',') if part.strip())
 
 
+DEFAULT_CHECK_TIMEOUT_SECONDS = 600
+PROCESS_CLEANUP_TIMEOUT_SECONDS = 30
+
+
 def _unittest_timeout_seconds(platform: str | None = None) -> int:
-    """Give the Windows suite a 1450-second child cap under the 35-minute job cap."""
+    """Give the Windows suite a 1450-second child cap under the 40-minute job cap."""
     return 1450 if (os.name if platform is None else platform) == 'nt' else 1000
 
 
@@ -165,14 +169,16 @@ def main():
     checks = []
     counts = {}
     env = {**os.environ, 'PYTHONDONTWRITEBYTECODE': '1', 'PYTHONFAULTHANDLER': '1'}
-    # The offline suite is process-spawn heavy. The Windows-only child cap is
-    # paired with the workflow's 35-minute job cap; the nominal 650 s difference
-    # covers pre-child setup and post-suite checks/receipt together. Step output
+    # The offline suite is process-spawn heavy. The 40-minute Windows job cap
+    # starts before setup; budget for a 60 s setup, the 1450 s child, one 600 s
+    # later check, bounded process cleanup, and a 120 s suffix/receipt reserve.
+    # A contract test keeps the full budget relationship explicit. Step output
     # streams live (merged in order) so a hung step leaves
     # the last-running test visible, and a step timeout
     # is recorded as a structured failure with the partial output counted
     # instead of crashing the gate before the receipt is written.
-    def execute(name, command, *, count=None, failure_summary=None, timeout=600):
+    def execute(name, command, *, count=None, failure_summary=None,
+                timeout=DEFAULT_CHECK_TIMEOUT_SECONDS):
         started = time.monotonic()
         print(f'== {name} ==', flush=True)
         chunks: list[str] = []
@@ -198,7 +204,7 @@ def main():
                 exit_code = process.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 process.kill()
-                exit_code = process.wait(timeout=30)
+                exit_code = process.wait(timeout=PROCESS_CLEANUP_TIMEOUT_SECONDS)
                 status = 'fail'
                 # Unittest diagnostics come only from structured metadata,
                 # even on timeout. Other steps retain their raw output tail;
@@ -207,7 +213,7 @@ def main():
                 if failure_summary is None:
                     tail = ''.join(chunks)[-1500:]
                     details += f'; output tail: {tail.strip()}'
-            reader.join(timeout=30)
+            reader.join(timeout=PROCESS_CLEANUP_TIMEOUT_SECONDS)
         text = ''.join(chunks)
         if exit_code != 0:
             status = 'fail'
@@ -247,10 +253,9 @@ def main():
     # unfinished test as the last timestamped line in the live log.
     # Windows/Python 3.14 was still progressing through test_runtime.EngineTests
     # when the 1150 s child cap killed a CI run; the same SHA passed on another
-    # Windows runner. Keep the child cap at 1450 s. The workflow's 35-minute
-    # limit begins before checkout/setup and gives 650 s nominal headroom for
-    # setup, child shutdown, post-suite checks and receipt writing; a contract
-    # test keeps that headroom at least 600 s. POSIX retains 1000 s.
+    # Windows runner. Keep the child cap at 1450 s. The workflow's 40-minute
+    # limit begins before checkout/setup and covers one full later check timeout
+    # plus bounded shutdown and a receipt/suffix reserve; POSIX retains 1000 s.
     # The child owns structured exception metadata. Its new sidecar is private
     # and deleted even on timeout; no failure/timeout details parse raw output.
     with tempfile.TemporaryDirectory(prefix='mizu-unittest-') as temporary:

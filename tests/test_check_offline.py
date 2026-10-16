@@ -36,15 +36,18 @@ def write_adapter(base: Path, deps, installed: dict):
 
 
 class CheckTimeoutTests(unittest.TestCase):
-    def test_windows_unit_suite_has_headroom_for_job_setup_and_wrapup(self):
+    def test_windows_budget_covers_setup_child_timeout_and_receipt_path(self):
         child_timeout = CHECK._unittest_timeout_seconds('nt')
         self.assertEqual(child_timeout, 1450)
         self.assertEqual(CHECK._unittest_timeout_seconds('posix'), 1000)
+        self.assertEqual(CHECK.DEFAULT_CHECK_TIMEOUT_SECONDS, 600)
         workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
-        self.assertIn("timeout-minutes: ${{ matrix.os == 'windows-latest' && 35 || 20 }}", workflow)
-        # The job clock starts before checkout/setup, so reserve at least ten
-        # minutes beyond the child cap for setup, shutdown, and remaining checks.
-        self.assertGreaterEqual(35 * 60 - child_timeout, 600)
+        self.assertIn("timeout-minutes: ${{ matrix.os == 'windows-latest' && 40 || 20 }}", workflow)
+        # Exercise the reviewer's 60-second setup case, one later execute timeout,
+        # both bounded cleanup waits, and time for remaining checks/receipt.
+        required = (60 + child_timeout + CHECK.DEFAULT_CHECK_TIMEOUT_SECONDS
+                    + 2 * CHECK.PROCESS_CLEANUP_TIMEOUT_SECONDS + 120)
+        self.assertGreaterEqual(40 * 60, required)
 
 
 class DurableDepsProbeTests(unittest.TestCase):
