@@ -127,12 +127,42 @@ class ChildSlotTests(Fixture):
                     self.assertEqual(result["status"], "completed")
                     threads[0].join(10)
                     self.assertFalse(threads[0].is_alive())
+                    self.assertEqual(len(outcome), 1)
+                    # Do not mask a thread failure with a subscript TypeError:
+                    # CI records the original exception class and source frame.
+                    if isinstance(outcome[0], BaseException):
+                        raise outcome[0]
                     self.assertEqual(outcome[0]["status"], "completed")
                     self.assertEqual(read_json(config.data / "slots/queue.json")["tickets"], [])
                 finally:
                     stop.set()
                     for thread in threads:
                         thread.join(5)
+
+    def test_queued_outsider_error_preserves_its_original_type_and_traceback(self):
+        original_run = Engine.run
+
+        def run(engine, project, role_name, **kwargs):
+            result = original_run(engine, project, role_name, **kwargs)
+            if role_name == "reporter":
+                raise OSError("offline outsider failure")
+            return result
+
+        # Exercise the actual threaded test, injecting a fault only after the
+        # outsider has queued and acquired admission normally. A fresh case
+        # keeps its subtest errors separate from this regression's assertions.
+        case = ChildSlotTests(
+            "test_children_keep_the_single_caller_slot_while_an_outsider_is_queued")
+        result = unittest.TestResult()
+        with patch.object(Engine, "run", run):
+            case.run(result)
+        self.assertEqual(result.testsRun, 1)
+        self.assertEqual(result.failures, [])
+        self.assertEqual(len(result.errors), 2)  # consult and delegate both fail
+        for _, traceback in result.errors:
+            self.assertIn('raise OSError', traceback)
+            self.assertIn('OSError: offline outsider failure', traceback)
+            self.assertNotIn('TypeError', traceback)
 
     def test_unadmitted_calls_fail_before_capture_or_inference_even_with_free_slots(self):
         for parallel_runs in (1, 4):
