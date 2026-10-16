@@ -36,7 +36,7 @@ inputs. The trusted host adapter never executes model-provided host commands.
 | `sandbox.py`, `process.py` | Bounded execution, termination, cleanup | Experiment usefulness |
 | `snapshot.py` | Content objects, immutable manifests, published pointer | Semantic correctness |
 | `insights.py` | Submission identity, revisable proposals with separate audit, decision history, initial work-item seeds | Acceptance or rejection |
-| `work_items.py` | Internal append-audited work-item CAS and completion evidence | Public visibility, prioritization and policy |
+| `work_items.py` | Append-audited records, CAS lifecycle and bounded open-item pages | Work-item scheduling and policy |
 | `web.py` | Allowed retrieval, policy-bounded protocol observation, and external source receipts | Scientific truth |
 | `materialize.py` | Generic offline-input adapter (spec in, digest-bound content out) | Ecosystem resolution, cache policy |
 | `editor.py` | Snapshot export and read/propose MCP | Code editing |
