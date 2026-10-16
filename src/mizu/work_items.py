@@ -27,13 +27,16 @@ SEED_FIELDS = {"id", "title", "origin", "status", "rev", "holder", "created_at",
 EVENT_FIELDS = SEED_FIELDS | {"actor", "transition", "reason", "wait", "snapshot_id", "verification"}
 MAX_PROJECTION_BYTES = PREVIEW_BYTES + 256
 MAX_OPEN_PAGE_ROWS = 100
+MAX_OPEN_CURSOR_CHARS = 128
 MAX_OPEN_ROW_BYTES = 8192
+OPEN_STATUS_ORDER = {"doing": 0, "blocked": 1, "open": 2}
 MAX_OPEN_PAGE_BYTES = 1024 * 1024
 MAX_HISTORY_TEMPORARIES = 64
 _TEMP_NAME = re.compile(r"\.new-[A-Za-z0-9_]{8}\Z")
 _REVISION_NAME = re.compile(r"(?:[2-9]|[1-9][0-9]{1,2})\.json\Z")
 _DECISION_EVENT_NAME = re.compile(r"[0-9a-f]{32}\.json\Z")
 _HISTORY_UNSET = object()
+_OPEN_CURSOR_TIME = re.compile(r"-?(?:0|[1-9][0-9]{0,17})\Z")
 
 
 def _reject_json_constant(value: str):
@@ -45,6 +48,52 @@ def _timestamp(value) -> bool:
         return isinstance(value, str) and dt.datetime.fromisoformat(value).tzinfo is not None
     except ValueError:
         return False
+
+
+def _timestamp_order(value: str) -> int:
+    """Convert a timezone-aware timestamp to exact UTC microseconds."""
+    try:
+        parsed = dt.datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            raise ValueError("naive timestamp")
+        delta = parsed - dt.datetime(1, 1, 1, tzinfo=dt.timezone.utc)
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise Denied("Invalid work-item cursor timestamp") from exc
+    return ((delta.days * 86400 + delta.seconds) * 1_000_000) + delta.microseconds
+
+
+def _open_cursor_key(cursor: str | None):
+    if cursor is None:
+        return None
+    if not isinstance(cursor, str) or len(cursor) > MAX_OPEN_CURSOR_CHARS:
+        raise Denied("Invalid work-item cursor")
+    parts = cursor.split("|")
+    if (len(parts) != 4 or parts[0] != "wi1" or parts[1] not in OPEN_STATUS_ORDER
+            or _OPEN_CURSOR_TIME.fullmatch(parts[2]) is None or ITEM_ID.fullmatch(parts[3]) is None):
+        raise Denied("Invalid work-item cursor")
+    return (OPEN_STATUS_ORDER[parts[1]], int(parts[2]), int(parts[3][3:], 16))
+
+
+def _open_cursor_token(row: dict) -> str:
+    created = _timestamp_order(row["created_at"])
+    token = f"wi1|{row['status']}|{created}|{row['id']}"
+    if len(token) > MAX_OPEN_CURSOR_CHARS:
+        raise LimitExceeded("Work-item cursor exceeds character bound")
+    return token
+
+
+class _ReverseKey:
+    """Heap wrapper that keeps the worst (largest) natural key at the root."""
+    __slots__ = ("value",)
+
+    def __init__(self, value):
+        self.value = value
+
+    def __lt__(self, other):
+        return self.value > other.value
+
+    def __eq__(self, other):
+        return isinstance(other, _ReverseKey) and self.value == other.value
 
 
 def _entry_stat(entry):
@@ -448,13 +497,14 @@ class WorkItems:
     def page_open(self, *, cursor=None, limit=25) -> dict:
         """Return a bounded live page of seeded, currently open work items.
 
-        Schema: item-ID ordered ``items`` with total seeded-open count, the
-        exclusive input ``cursor``, ``next_cursor`` iff another matching item
-        follows, ``truncated``, ``unseeded_decisions`` and
-        ``coverage_complete``. Limits are 1..100 (exact int); the cursor is
-        null or an ITEM_ID. Rows are at most 8192 canonical bytes, and the
-        complete response at most 1 MiB. Selection keeps O(limit) rows while
-        history is scanned. Legacy accept/modify events lacking a seed are
+        Schema: items ordered by status (doing, blocked, open), then oldest
+        ``created_at`` and ID; includes total seeded-open count, the exclusive
+        input ``cursor``, ``next_cursor`` iff another matching item follows,
+        ``truncated``, ``unseeded_decisions`` and ``coverage_complete``.
+        Limits are 1..100 (exact int); the opaque cursor carries the last row's
+        status, UTC creation-order key and ID. Rows are at most 8192 canonical
+        bytes and the complete response at most 1 MiB. Selection keeps O(limit)
+        rows while scanning history. Legacy accept/modify events lacking a seed are
         counted, never guessed as open. The page is internal and read-only
         apart from recognized decision-history and per-item atomic-write
         recovery under the shared lock. Recovery removes recognized regular
@@ -465,8 +515,7 @@ class WorkItems:
         membership. Unsafe/malformed committed JSON, seeds or state fail closed;
         unmatched/unsafe temporaries and unexpected names fail closed.
         """
-        if cursor is not None and (not isinstance(cursor, str) or ITEM_ID.fullmatch(cursor) is None):
-            raise Denied("Invalid work-item cursor")
+        cursor_key = _open_cursor_key(cursor)
         if type(limit) is not int or not 1 <= limit <= MAX_OPEN_PAGE_ROWS:
             raise Denied("Work-item page limit must be an integer in [1, 100]")
 
@@ -524,7 +573,10 @@ class WorkItems:
                         if item["status"] not in ("open", "doing", "blocked"):
                             continue
                         total += 1
-                        if cursor is not None and item["id"] <= cursor:
+                        sort_key = (OPEN_STATUS_ORDER[item["status"]],
+                                    _timestamp_order(item["created_at"]),
+                                    int(item["id"][3:], 16))
+                        if cursor_key is not None and sort_key <= cursor_key:
                             continue
                         eligible += 1
                         row = {key: item[key] for key in
@@ -542,17 +594,16 @@ class WorkItems:
                         row_size = len(canonical(row))
                         if row_size > MAX_OPEN_ROW_BYTES:
                             raise LimitExceeded("Work-item page row exceeds byte bound")
-                        entry_key = -int(item["id"][3:], 16)
-                        candidate = (entry_key, item["id"], row)
+                        candidate = (_ReverseKey(sort_key), sort_key, row)
                         if len(selected) < limit:
                             heapq.heappush(selected, candidate)
-                        elif entry_key > selected[0][0]:
+                        elif sort_key < selected[0][1]:
                             heapq.heapreplace(selected, candidate)
 
             rows = [entry[2] for entry in sorted(selected, key=lambda value: value[1])]
             more = eligible > len(rows)
             result = {"items": rows, "total": total, "cursor": cursor,
-                      "next_cursor": rows[-1]["id"] if more and rows else None,
+                      "next_cursor": _open_cursor_token(rows[-1]) if more and rows else None,
                       "truncated": more, "unseeded_decisions": unseeded_decisions,
                       "coverage_complete": unseeded_decisions == 0}
             if len(canonical(result)) > MAX_OPEN_PAGE_BYTES:

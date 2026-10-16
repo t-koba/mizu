@@ -272,8 +272,9 @@ closed. This projection does not yet gate internal transitions.
 not connected to runtime tools, prompts, explain, or status. Under one
 `insights.lock` section it scans committed `decision-history/*.json`, validates
 and reconstructs every seeded item (including closed states), and returns only
-`open`/`doing`/`blocked` rows in deterministic item-ID order. The cursor is an
-exclusive item-ID boundary; `total` counts all currently open seeded items,
+`open`/`doing`/`blocked` rows ordered by status (`doing`, `blocked`, `open`),
+oldest creation timestamp, then ID. Its bounded opaque cursor carries that full
+exclusive sort key; `total` counts all currently open seeded items,
 independent of the cursor. Accept/modify history events without a `work_item`
 seed are counted as `unseeded_decisions`; `coverage_complete` is false while
 any exist, and their current state is never inferred. Rows include current

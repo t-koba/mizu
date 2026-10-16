@@ -1,6 +1,7 @@
 """Internal work-item seeds, append-only CAS, evidence and fail-closed reads."""
 import concurrent.futures
 import copy
+import datetime as dt
 import json
 import os
 import threading
@@ -10,8 +11,10 @@ from unittest.mock import Mock, patch
 from support import Fixture
 from mizu.errors import Denied, LimitExceeded
 from mizu.fs import PREVIEW_BYTES, canonical, write_json
-from mizu.work_items import (MAX_OPEN_ROW_BYTES, MAX_PROJECTION_BYTES, MAX_REVISIONS, WorkItems,
-                             _entry_stat)
+from mizu.work_items import (
+    MAX_OPEN_CURSOR_CHARS, MAX_OPEN_ROW_BYTES, MAX_PROJECTION_BYTES, MAX_REVISIONS,
+    WorkItems, _entry_stat, _timestamp_order,
+)
 
 
 class WorkItemTests(Fixture):
@@ -497,6 +500,48 @@ class WorkItemTests(Fixture):
         with self.assertRaises(Denied):
             self.store.page_open()
 
+    def test_page_open_orders_status_then_oldest_timestamp_and_id(self):
+        self.change("doing")
+
+        def create(title, created_at):
+            with patch("mizu.insights.now", return_value=created_at):
+                proposal = self.project.insights.submit(
+                    source="worker", title=title, body="Check stable ordering", base_snapshot=None)
+                decision = self.project.insights.decide(
+                    proposal["id"], "accept", "reviewed", "", title, expected_rev=1)
+            return decision["work_item"]["id"]
+
+        older_doing = create("Older doing", "2030-01-01T00:00:00+00:00")
+        self.store.transition(older_doing, expected_rev=1, status="doing", actor="worker")
+        newer_doing = create("Newer doing", "2030-01-02T00:00:00+00:00")
+        self.store.transition(newer_doing, expected_rev=1, status="doing", actor="worker")
+        blocked = create("Blocked", "2030-02-01T00:00:00+00:00")
+        self.store.transition(blocked, expected_rev=1, status="blocked", actor="worker",
+                              wait={"kind": "deadline", "at": "2030-04-01T00:00:00+00:00"})
+        tied_a = create("Tied A", "2030-03-01T00:00:00+00:00")
+        tied_b = create("Tied B", "2030-03-01T01:00:00+01:00")
+
+        item_ids = [self.item_id, older_doing, newer_doing, blocked, tied_a, tied_b]
+        status_order = {"doing": 0, "blocked": 1, "open": 2}
+        expected_rows = sorted((self.store.get(item_id) for item_id in item_ids),
+                               key=lambda item: (status_order[item["status"]],
+                                                 dt.datetime.fromisoformat(item["created_at"]), item["id"]))
+        expected = [item["id"] for item in expected_rows]
+        seen, cursor = [], None
+        while True:
+            page = self.store.page_open(cursor=cursor, limit=2)
+            ids = [row["id"] for row in page["items"]]
+            self.assertEqual(ids, expected[len(seen):len(seen) + 2])
+            seen.extend(ids)
+            if not page["truncated"]:
+                self.assertIsNone(page["next_cursor"])
+                break
+            last = page["items"][-1]
+            self.assertEqual(page["next_cursor"],
+                             f"wi1|{last['status']}|{_timestamp_order(last['created_at'])}|{last['id']}")
+            cursor = page["next_cursor"]
+        self.assertEqual(seen, expected)
+
     def test_page_open_enumerates_deterministic_exclusive_pages(self):
         extra_ids = []
         for index in range(4):
@@ -505,7 +550,11 @@ class WorkItemTests(Fixture):
             decision = self.project.insights.decide(
                 proposal["id"], "accept", "reviewed", "", f"page-{index}", expected_rev=1)
             extra_ids.append(decision["work_item"]["id"])
-        expected = sorted([self.item_id, *extra_ids])
+        status_order = {"doing": 0, "blocked": 1, "open": 2}
+        expected_rows = sorted((self.store.get(item_id) for item_id in [self.item_id, *extra_ids]),
+                               key=lambda item: (status_order[item["status"]],
+                                                 dt.datetime.fromisoformat(item["created_at"]), item["id"]))
+        expected = [item["id"] for item in expected_rows]
         seen = []
         cursor = None
         while True:
@@ -513,12 +562,14 @@ class WorkItemTests(Fixture):
             self.assertEqual(page["total"], len(expected))
             self.assertTrue(page["coverage_complete"])
             ids = [row["id"] for row in page["items"]]
-            self.assertEqual(ids, sorted(ids))
+            self.assertEqual(ids, expected[len(seen):len(seen) + 2])
             seen.extend(ids)
             if not page["truncated"]:
                 self.assertIsNone(page["next_cursor"])
                 break
-            self.assertEqual(page["next_cursor"], ids[-1])
+            last = page["items"][-1]
+            self.assertEqual(page["next_cursor"],
+                             f"wi1|{last['status']}|{_timestamp_order(last['created_at'])}|{last['id']}")
             cursor = page["next_cursor"]
         self.assertEqual(seen, expected)
         self.assertEqual(len(seen), len(set(seen)))
@@ -531,10 +582,16 @@ class WorkItemTests(Fixture):
             decision = self.project.insights.decide(
                 proposal["id"], "accept", "reviewed", "", f"live-page-{index}", expected_rev=1)
             extra_ids.append(decision["work_item"]["id"])
-        expected = sorted([self.item_id, *extra_ids])
+        status_order = {"doing": 0, "blocked": 1, "open": 2}
+        expected_rows = sorted((self.store.get(item_id) for item_id in [self.item_id, *extra_ids]),
+                               key=lambda item: (status_order[item["status"]],
+                                                 dt.datetime.fromisoformat(item["created_at"]), item["id"]))
+        expected = [item["id"] for item in expected_rows]
         first = self.store.page_open(limit=2)
         self.assertEqual([row["id"] for row in first["items"]], expected[:2])
-        self.assertEqual(first["next_cursor"], expected[1])
+        last = first["items"][-1]
+        self.assertEqual(first["next_cursor"],
+                         f"wi1|{last['status']}|{_timestamp_order(last['created_at'])}|{last['id']}")
         self.store.transition(expected[0], expected_rev=1, status="dropped", actor="worker",
                               reason="Closed after first live page")
         second = self.store.page_open(cursor=first["next_cursor"], limit=2)
@@ -543,14 +600,17 @@ class WorkItemTests(Fixture):
         self.assertFalse(second["truncated"])
 
     def test_page_open_validates_cursor_and_exact_integer_limit(self):
-        for cursor in ("", "wi_" + "A" * 32, "../anything", 1, True):
+        for cursor in ("", "wi_" + "A" * 32, "../anything", 1, True,
+                       "wi1|finished|2030-01-01T00:00:00+00:00|wi_" + "f" * 32,
+                       "x" * (MAX_OPEN_CURSOR_CHARS + 1)):
             with self.subTest(cursor=cursor), self.assertRaises(Denied):
                 self.store.page_open(cursor=cursor)
         for limit in (0, -1, 101, True, False, 1.0, "2", None):
             with self.subTest(limit=limit), self.assertRaises(Denied):
                 self.store.page_open(limit=limit)
         self.assertEqual(self.store.page_open(limit=1)["items"][0]["id"], self.item_id)
-        self.assertEqual(self.store.page_open(cursor="wi_" + "f" * 32, limit=100)["items"], [])
+        future = f"wi1|open|{_timestamp_order('9999-12-31T23:59:59+00:00')}|wi_" + "f" * 32
+        self.assertEqual(self.store.page_open(cursor=future, limit=100)["items"], [])
 
     def test_page_open_includes_current_stale_projection(self):
         self.project.insights.revise(self.proposal["id"], source="worker", title="Revised page title",
