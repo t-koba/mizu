@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from support import Fixture
-from mizu.errors import Denied, LimitExceeded
+from mizu.errors import Denied, LimitExceeded, SnapshotConflict
 from mizu.fs import PREVIEW_BYTES, canonical, write_json
 from mizu.work_items import (
     MAX_HISTORY_PAGE_BYTES, MAX_OPEN_CURSOR_CHARS, MAX_OPEN_ROW_BYTES,
@@ -372,6 +372,49 @@ class WorkItemTests(Fixture):
         with self.assertRaises(Denied):
             self.change("done", snapshot_id=old["id"])
         self.assertFalse(self.directory.exists())
+
+    def test_sibling_snapshot_conflict_preserves_winner_and_done_evidence(self):
+        snapshots = self.project.snapshots
+        base = snapshots.get()
+        self.change("doing", reason="Start the work item")
+        captured = snapshots.capture_files(self.project.workspace)
+
+        def candidate(goal, state, outcome, summary, run):
+            verification = {"passed": True, "code_digest": captured["code_digest"], "run": run}
+            return snapshots.create(
+                captured, goal=goal, state=state, run=run, outcome=outcome,
+                summary=summary, verification=verification, parent=base["id"])
+
+        winner = candidate("Winning goal", "Winning state", "continue", "Winning summary", "winner-run")
+        loser = candidate("Losing goal", "Losing state", "wait", "Losing summary", "loser-run")
+        self.assertEqual(winner["parent"], base["id"])
+        self.assertEqual(loser["parent"], base["id"])
+        self.assertNotEqual(winner["id"], loser["id"])
+        self.assertEqual(winner["verification"], {
+            "passed": True, "code_digest": winner["code_digest"], "run": "winner-run"})
+        self.assertEqual(loser["verification"], {
+            "passed": True, "code_digest": loser["code_digest"], "run": "loser-run"})
+        self.assertNotEqual(winner["verification"], loser["verification"])
+
+        snapshots.publish(winner)
+        winner_history = snapshots._history_ids()
+        self.assertEqual(snapshots.get(), winner)
+        with self.assertRaises(SnapshotConflict):
+            snapshots.publish(loser)
+        current = snapshots.get()
+        self.assertEqual(current, winner)
+        self.assertEqual(snapshots._history_ids(), winner_history)
+        self.assertEqual(
+            {key: current[key] for key in ("goal", "state", "outcome", "summary", "verification")},
+            {key: winner[key] for key in ("goal", "state", "outcome", "summary", "verification")})
+
+        with self.assertRaises(Denied):
+            self.change("done", expected_rev=2, snapshot_id=loser["id"])
+        self.assertEqual(self.store.get(self.item_id)["status"], "doing")
+        completed = self.change("done", expected_rev=2, snapshot_id=winner["id"])
+        self.assertEqual(completed["snapshot_id"], winner["id"])
+        self.assertEqual(completed["verification"], winner["verification"])
+        self.assertNotEqual(completed["verification"], loser["verification"])
 
     def test_done_validates_manifest_and_copies_stored_verification(self):
         bad = self.snapshot("valid")
@@ -762,8 +805,10 @@ class WorkItemTests(Fixture):
             self.skipTest("Hard links unavailable")
         page = self.store.page_open(limit=10)
         self.assertEqual(page["total"], 2)
-        self.assertEqual([row["id"] for row in page["items"]],
-                         sorted((self.item_id, decision["work_item"]["id"])))
+        # This test checks recovery and membership; the ordering contract is
+        # tested separately and depends on created_at across different runs.
+        self.assertCountEqual([row["id"] for row in page["items"]],
+                              (self.item_id, decision["work_item"]["id"]))
         self.assertFalse(temporary.exists())
         self.assertEqual(event_path.stat().st_nlink, 1)
 
