@@ -251,6 +251,7 @@ class ContextTests(Fixture):
         schema = DEFINITIONS["work_items_transition"][1]
         item_id = "wi_" + "a" * 32
         validate({"id": item_id, "expected_rev": 1, "status": "doing"}, schema)
+        validate({"id": item_id, "expected_rev": 1, "status": "blocked"}, schema)
         validate({"id": item_id, "expected_rev": 2, "status": "blocked",
                   "wait": {"kind": "code_change"}}, schema)
         self.assertIs(schema["properties"]["wait"], DEFINITIONS["decide"][1]["properties"]["wait"])
@@ -286,6 +287,18 @@ class ContextTests(Fixture):
                                                        "status": "doing"})
         self.assertEqual((result["rev"], result["status"], result["actor"]), (2, "doing", "worker"))
         self.assertEqual(self.project.work_items.get(item["id"]), result)
+
+    def test_work_items_transition_accepts_blocked_without_wait(self):
+        item = self._accepted_work_item()
+        ctx = self.context("worker")
+        result = ctx.handle("work_items_transition", {"id": item["id"],
+                                                       "expected_rev": item["rev"],
+                                                       "status": "blocked"})
+        self.assertEqual(result["status"], "blocked")
+        self.assertIsNone(result["wait"])
+        self.assertEqual(result["actor"], "worker")
+        self.assertEqual(self.project.work_items.get(item["id"]), result)
+        self.assertFalse((self.project.root / "waits").exists())
 
     def test_work_items_transition_stale_cas_refuses_without_write(self):
         item = self._accepted_work_item()

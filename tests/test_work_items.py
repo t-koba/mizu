@@ -239,21 +239,27 @@ class WorkItemTests(Fixture):
             self.store.get(self.item_id)
         self.assertFalse(self.directory.exists())
 
-    def test_blocked_requires_and_normalizes_wait_without_scheduler_registration(self):
-        for wait in (None, "later", {}, {"kind": "unknown"}, {"kind": "deadline", "at": "2030-01-01"}):
+    def test_blocked_wait_is_optional_and_normalizes_without_scheduler_registration(self):
+        for wait in ("later", {}, {"kind": "unknown"}, {"kind": "deadline", "at": "2030-01-01"}):
             with self.subTest(wait=wait), self.assertRaises(Denied):
                 self.change("blocked", wait=wait)
         self.assertFalse(self.directory.exists())
-        blocked = self.change("blocked", actor="reviewer",
-                              wait={"kind": "deadline", "at": "2030-01-01T00:00:00.123+09:00"})
-        self.assertEqual(blocked["wait"], {"kind": "deadline", "at": "2030-01-01T00:00:00+09:00"})
-        self.assertEqual(blocked["holder"], "reviewer")
+        blocked = self.change("blocked")
+        self.assertIsNone(blocked["wait"])
+        self.assertEqual(blocked["holder"], "worker")
         self.assertEqual(self.store.get(self.item_id), blocked)
         self.assertFalse((self.project.root / "waits").exists())
         doing = self.change("doing", expected_rev=2)
         self.assertEqual(doing["holder"], "worker")
         self.assertIsNone(doing["wait"])
         blocked = self.change("blocked", expected_rev=3, actor="reviewer",
+                              wait={"kind": "deadline", "at": "2030-01-01T00:00:00.123+09:00"})
+        self.assertEqual(blocked["wait"], {"kind": "deadline", "at": "2030-01-01T00:00:00+09:00"})
+        self.assertEqual(blocked["holder"], "worker")
+        self.assertEqual(self.store.get(self.item_id), blocked)
+        doing = self.change("doing", expected_rev=4)
+        self.assertEqual(doing["holder"], "worker")
+        blocked = self.change("blocked", expected_rev=5, actor="reviewer",
                               wait={"kind": "insight_decided", "insight": self.proposal["id"]})
         self.assertEqual(blocked["holder"], "worker")
         self.assertEqual(blocked["wait"], {"kind": "insight_decided", "target": self.proposal["id"]})

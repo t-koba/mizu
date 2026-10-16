@@ -540,7 +540,8 @@ class WorkItems:
         if status == "dropped" and reason is None:
             raise Denied("Dropping a work item requires a reason")
         if status == "blocked":
-            self._stored_wait(record["wait"])
+            if record["wait"] is not None:
+                self._stored_wait(record["wait"])
         elif record["wait"] is not None:
             raise Denied("Only blocked work items carry waits")
         if status == "done":
