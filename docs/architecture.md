@@ -505,9 +505,18 @@ revision-current) proposals older than
 `decisions/` and `decision-history/`, so inbox scans stay bounded. Decided
 work stays retrievable within retention: the `insights` tool lists decided
 proposals by action and reads by full id or unique prefix, so accepted work
-never depends on the model's memory across compaction. Tracking
-implementation completion ("done") stays with the writer's published state;
-the mechanism records decisions, never per-item done-ness. The prompt
+never depends on the model's memory across compaction. On an ID read only, the
+runtime adds an optional compact `work_item_status` for the original submitter
+when the current decision is accept/modify and its seeded item (including a
+validated open legacy reconciliation) exists. The projection includes item ID,
+status, revision, holder, update time and current-origin staleness, plus only
+small relevant status details. It reuses WorkItems decision, sidecar and chain
+validation; pending, other decisions, drop-only/unresolved legacy records,
+other roles and all list paths keep their existing response shape. This is
+observational only: no reconciliation, transition, progress accounting,
+scheduling or wakeup, and it adds no insights/work-item grant. A work-item
+`done` status is an audited work record only; code completion remains determined
+by the writer's published state. The prompt
 offer keeps the newest `limits.pending_insights` proposals so recent evidence
 is never hidden behind the bound. Worker discretion applies to proposals,
 not to the operator's goal or prohibitions.

@@ -945,7 +945,16 @@ class Context:
 
     def _op_insights(self, args: dict) -> dict:
         if args.get("id"):
-            return self.project.insights.read(args["id"])
+            record = self.project.insights.read(args["id"])
+            # The original submitter may follow an accepted proposal into its
+            # current item without receiving a separate work-item capability.
+            # This is a read-only projection; all item validation remains in
+            # WorkItems, and list paths/non-owners keep their existing shape.
+            if record.get("source") == self.role.name:
+                status = self.project.work_items.submitter_status(record["id"])
+                if status is not None:
+                    record["work_item_status"] = status
+            return record
         # Prompt selection stays at pending_insights; explicit retrieval pages
         # a stable offset-independent selection capped at INSIGHT_RETRIEVAL_LIMIT,
         # so overflow items remain discoverable and small pages enumerate each

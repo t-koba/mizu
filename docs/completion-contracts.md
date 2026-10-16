@@ -65,6 +65,8 @@ readは[limits]file_bytes以下のファイルを最大8192文字ずつ返しま
 
 insights/searchの一覧はoffset/limit（filesと同じ型・上限）を受理し、既存呼出しは省略できます。insightsは未決定の保留一覧をページングし、総件数とselection_truncatedも返します。action指定では決定済みを行動別（accept/modify/defer/reject）に列挙し、id指定では全IDまたは一意な接頭辞で1件を読みます（曖昧・不存在は拒否）。プロンプトに載る選択は[limits]pending_insights件に収まりますが、明示的取得の選択はそれと分離し、INSIGHT_RETRIEVAL_LIMIT（1000）件上限のオフセット非依存の安定選択をページングします。searchは応答行をtitle 300、URL 4096、summary 1500のUTF-8バイトプレビューと各truncatedにし、完全な結果をsources/search-<SHA256>.jsonへ記録します。ページは128KiB以下の項目集合、offset/next_offset/truncatedを持ちます。source_truncatedは検索元の切り詰めと区別します。fetchはoffset（0..2147483647文字）とlimit（1..8192文字、省略8192）で本文をページングし、全文は取得receiptに残す本文から再現できます。fetch/probeはreceipt_id、searchはresult_idとoffset/limitだけで同一run内の不変な初回結果を継続取得できます（元のURL/method/queryとの併用は拒否）。継続では通信・probe・検索を再実行せず、不正・破損・別runのIDは明示的に失敗します。実バイトを保持したfetch receiptだけをexperimentのsource_receiptに指定でき、長さとSHA-256を検証して/work/input/bodyへ読み取り専用で渡します。詳細はconfiguration.mdのImmutable Web continuation and experiment inputを参照してください。これらは既存のread/fetch/search/insights権限内であり、新しいホスト読取権限を与えません。通信失敗や部分書込みを再送しません。
 
+`insights`のID読取では、保存された`source`が呼出元roleと一致する元の投稿者に限り、現在のaccept/modify決定と検証済みWorkItemsがあれば、小さな`work_item_status`を追加します。item ID、status、rev、holder、updated_at、current_origin_rev、staleと、必要な状態詳細の短いプレビューだけを含みます。open legacy sidecarも検証し、drop-only／未解決legacyや別role、非accept/modify決定、一覧応答には追加しません。これは読取投影であり、権限追加、状態遷移、reconcile、scheduler/wakeupを行いません。
+
 ## 現行エンジンの接続契約
 
 `engine_channel.Channel` は起動、有限 JSONL の送信、イベント受信、停止、証跡保存を

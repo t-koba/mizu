@@ -412,7 +412,7 @@ class WorkItems:
             raise Denied("Invalid current work-item origin insight")
         return revision
 
-    def _current_decision(self, insight_id: str) -> dict | None:
+    def _current_decision(self, insight_id: str, *, include_work_item: bool = False) -> dict | None:
         decision = self._optional_record(f"decisions/{insight_id}.json")
         if decision is None:
             return None
@@ -438,6 +438,7 @@ class WorkItems:
                     and (not isinstance(decision.get("run"), str) or not decision["run"]))
                 or not _timestamp(decision.get("created_at"))):
             raise Denied("Malformed current work-item origin decision")
+        work_item_id = None
         if action == "withdraw":
             identifier(decision["actor"])
         elif action in ("accept", "modify") and "work_item" in decision:
@@ -450,6 +451,7 @@ class WorkItems:
             if event != decision:
                 raise Denied("Current work-item origin decision differs from its immutable event")
             self._seed(seed_id)  # Validate the immutable seed's complete field/value contract.
+            work_item_id = seed_id
         elif action in ("accept", "modify"):
             # Legacy current-decision files have no event ID. Resolve the exact
             # old-schema record against one immutable history event rather than
@@ -462,8 +464,13 @@ class WorkItems:
                     match = (event_id, event)
             if match is None:
                 raise Denied("Current legacy decision has no immutable history event")
-            self._legacy_resolution(*match, recover=True)
-        return {"rev": revision, "action": action}
+            resolution = self._legacy_resolution(*match, recover=True)
+            if resolution is not None and resolution["outcome"] == "open":
+                work_item_id = f"wi_{match[0]}"
+        result = {"rev": revision, "action": action}
+        if include_work_item:
+            result["work_item_id"] = work_item_id
+        return result
 
     def _recover_temporary_writes(self, item_id: str) -> set[int] | None:
         """Recover atomic-write leftovers and return validated revision names.
@@ -655,7 +662,7 @@ class WorkItems:
             history_revisions = self._recover_temporary_writes(item_id)
             return self._get(item_id, history_revisions=history_revisions)
 
-    def _origin_projection(self, item: dict) -> dict:
+    def _origin_projection(self, item: dict, *, current_decision=_HISTORY_UNSET) -> dict:
         """Project current origin staleness from the immutable item's origin."""
         origin_id = item["origin"]["insight_id"]
         origin_rev = item["origin"]["rev"]
@@ -668,7 +675,8 @@ class WorkItems:
         elif current_rev == origin_rev:
             stale = False
         else:
-            decision = self._current_decision(origin_id)
+            decision = (self._current_decision(origin_id)
+                        if current_decision is _HISTORY_UNSET else current_decision)
             if decision is not None and decision["rev"] > current_rev:
                 raise Denied("Origin decision revision is ahead of its insight")
             redecision = (decision if decision is not None and decision["rev"] == current_rev
@@ -739,6 +747,41 @@ class WorkItems:
             if len(canonical(result)) > MAX_HISTORY_PAGE_BYTES:
                 raise LimitExceeded("Work-item history response exceeds byte bound")
             return result
+
+    def submitter_status(self, insight_id: str) -> dict | None:
+        """Return one compact status for an insight's current accepted work.
+
+        This is a read projection, not a transition. Current decisions and
+        legacy resolutions use the same fail-closed validation as origin
+        projections; seeded item state replays its bounded immutable chain.
+        Unresolved and drop-only legacy decisions have no item status.
+        """
+        with lock(self.root / "locks" / "insights.lock"):
+            decision = self._current_decision(insight_id, include_work_item=True)
+            if (decision is None or decision["action"] not in ("accept", "modify")
+                    or decision["work_item_id"] is None):
+                return None
+            item_id = decision["work_item_id"]
+            history_revisions = self._recover_temporary_writes(item_id)
+            item = self._get(item_id, history_revisions=history_revisions)
+            origin_decision = {"rev": decision["rev"], "action": decision["action"]}
+            origin = self._origin_projection(item, current_decision=origin_decision)
+            status = {"id": item["id"], "status": item["status"], "rev": item["rev"],
+                      "holder": item["holder"], "updated_at": item["updated_at"],
+                      "current_origin_rev": origin["current_origin_rev"],
+                      "stale": origin["stale"]}
+            reason = item.get("reason")
+            if reason is not None:
+                preview, clipped = text_preview(reason, 512)
+                status["reason_preview"] = preview
+                status["reason_truncated"] = clipped
+            if item["status"] == "blocked":
+                status["wait"] = item["wait"]
+            elif item["status"] == "done":
+                status["snapshot_id"] = item["snapshot_id"]
+            if len(canonical(status)) > 4096:
+                raise LimitExceeded("Submitter work-item status exceeds byte bound")
+            return status
 
     def projection(self, item_id: str) -> dict:
         """Return one bounded item plus revision-derived origin staleness.
