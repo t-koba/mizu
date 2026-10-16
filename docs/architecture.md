@@ -215,12 +215,32 @@ routine context, and are durable audit like decisions (backed up, never
 pruned). Direct ID reuse with different content outside revise is rejected.
 Decisions bind to the reviewed `rev`, so a prior approval never authorizes
 changed content; deferral still requires a revisit condition and stays
-pending. An `accept` or `modify` decision also places an initial durable
+pending. A substantive accept/modify/reject prevents conflicting further
+decisions on that revision; an exact keyed replay is a no-op returning the
+original event, and a meaningful revision reopens it. Accept/modify store the resolved
+`work_item_intent` (`create`/`none`), from an explicit override or configured
+trusted-source default (global fallback `create`; see configuration.md).
+`none` durably records no work with no seed. `create` places an initial durable
 `work_item` seed in that same immutable decision-history event (and the
-matching current-decision record). Its ID is `wi_<event-uuid-hex>`; it records
+matching current-decision record). Its ID is `wi_<event-id>`; it records
 the current insight title and `{insight_id, rev}` origin, starts `open` at item
 revision 1 with no holder, and uses the decision timestamp for creation and
 update. `defer` and `reject` do not create a seed.
+
+New decisions carry a `decision_key`: the first 32 lowercase hex characters of
+SHA-256 over canonical JSON `["insight-substantive-decision", insight_id, rev]`.
+Accept/modify/reject use that key as their immutable event filename; defer keeps
+a random 32-hex event filename. First decisions and keyed defers use one keyed
+lookup, not a history scan. Key collisions (including old random-ID events at
+that filename) fail closed. If the event committed but its current pointer write
+failed, an exact retry (action, reason, revisit, and an explicit intent if
+supplied) restores the pointer and returns the original record/seed; omitted
+intent reuses the recorded value and a retry run does not replace original run
+provenance. Conflicts are refused; a completed current substantive decision
+still requires revision to reopen.
+Only a revision-current legacy defer lacking `decision_key`, with no keyed
+substantive event, requires scanning old random-ID history to detect a hidden
+substantive decision. Old events are never rewritten.
 
 `Project.work_items` provides internal `get(item_id)` and the locked readers
 `page_open(cursor=None, limit=25)`, `projection(item_id)`, and
@@ -277,7 +297,8 @@ retention/expiration is not implemented, so those citations remain durable.
 origin revision is stale until that revision has an `accept`, `modify`, `defer`
 or `reject` decision; `withdraw` does not clear staleness. Re-decisions must
 match the action-specific decision schema; an accept/modify must also match its
-immutable decision-history event and pass seed validation. Missing current
+immutable decision-history event and pass seed validation (or the explicit
+no-work contract with no seed). Missing current
 origin data is reported stale, while unsafe or malformed origin records fail
 closed. This projection does not yet gate internal transitions.
 
@@ -345,8 +366,10 @@ exclusive sort key; `total` counts all currently open seeded items,
 independent of the cursor. `overflow_count` counts matching open rows remaining
 after the input cursor and beyond this page; `truncated` is exactly whether that
 count is positive. Accept/modify history events without a `work_item` seed are
-counted as `unseeded_decisions` only while unresolved. `coverage_complete` is
-true only when every such event has a valid reconciliation sidecar; malformed
+counted as `unseeded_decisions` only while unresolved. An explicit
+`work_item_intent: "none"` resolves coverage without a sidecar or seed.
+`coverage_complete` is true only when every such event has an explicit no-work
+marker or a valid reconciliation sidecar; malformed
 sidecars fail closed rather than claiming coverage. No legacy state is inferred. The prompt carries this count,
 truncation, and coverage state; an incomplete projection is not an exhaustive
 inventory. Rows include current origin staleness/redecision, a structured wait
@@ -379,14 +402,16 @@ is complete.**
 
 The separate `work_items_legacy_read` grant exposes
 `page_legacy(cursor=None, limit=25)`: a live read-only audit inventory of **all**
-legacy accept/modify history events without an embedded `work_item`, both
-unresolved and reconciled. It returns `items`, `total`, `cursor`, `next_cursor`,
+accept/modify history events without an embedded `work_item`: legacy
+unresolved/reconciled events and new explicit no-work dispositions. It returns `items`, `total`, `cursor`, `next_cursor`,
 `overflow_count`, `truncated`, `unseeded_decisions`, and `coverage_complete`.
 Rows contain `event_id`, `action`, valid source `insight_id`/`rev`/`created_at`
 (or null for invalid/missing fields), a decision `reason_preview` (1024 UTF-8
 bytes) with `reason_truncated`, `openable`, and `resolution`. `openable` means
 unresolved with all origin fields needed for opening; it does not imply a
-model-supplied title has been validated. Resolution is null or contains
+model-supplied title has been validated. Explicit no-work rows have
+`work_item_intent: "none"`, `openable: false`, and
+`resolution: {outcome: "none"}`. For legacy rows, resolution is null or contains
 `outcome`, runtime `actor`, reconciliation `created_at`, `event_sha256`, a
 bounded reason preview/truncation flag, and `work_item_id` for open. Proposal
 bodies are never copied. The same 1–100 row, 8192-byte row, 1-MiB response and
@@ -405,7 +430,7 @@ source if supplied. `open` requires a 1–200 character `title` and valid source
 insight ID, positive exact integer revision, and timezone-aware decision
 timestamp. `drop` requires no title and works even with missing/invalid legacy
 origin fields. It creates no active item or seed. Seeded and non-accept/modify
-events are refused. The runtime binds actor to the role and rejects a
+events, and events with explicit work-item intent, are refused. The runtime binds actor to the role and rejects a
 model-supplied actor; only the example worker holds either legacy grant.
 Consultation and delegation children cannot hold reconciliation authority.
 Legacy reads are observational; reconciliation is not. Neither grant widens

@@ -19,6 +19,7 @@ from pathlib import Path
 from .errors import Denied, LimitExceeded
 from .fs import (DIGEST, PREVIEW_BYTES, canonical, identifier, lock, now, safe_read,
                  sync_dir, text_preview, write_json)
+from .insights import _decision_key
 from .platform import IS_WINDOWS
 
 MAX_REVISIONS = 256  # Includes the immutable seed at revision 1.
@@ -161,6 +162,14 @@ class WorkItems:
     def _legacy_resolution(self, event_id: str, event: dict, *, recover=False,
                            history_revisions=_HISTORY_UNSET) -> dict | None:
         """Validate the immutable sidecar against the exact canonical source."""
+        intent = event.get("work_item_intent")
+        if "work_item_intent" in event and (
+                event.get("action") not in ("accept", "modify")
+                or intent not in ("create", "none")
+                or (intent == "create") != ("work_item" in event)):
+            raise Denied("Invalid decision work-item intent or seed")
+        if intent == "none" and any(value is None for value in self._legacy_source(event).values()):
+            raise Denied("Explicit no-work decision requires valid origin binding")
         item_id = f"wi_{event_id}"
         if recover:
             revisions = self._recover_temporary_writes(item_id)
@@ -179,6 +188,8 @@ class WorkItems:
             if revisions is not _HISTORY_UNSET and revisions and "work_item" not in event:
                 raise Denied("Unresolved legacy event carries active history")
             return None
+        if intent == "none":
+            raise Denied("Explicit no-work decision cannot carry legacy reconciliation")
         record = self._read(f"work-items/{item_id}/legacy.json")
         fields = {"event_id", "event_sha256", "action", "revision", "outcome",
                   "actor", "reason", "created_at"}
@@ -256,9 +267,10 @@ class WorkItems:
             self._recover_decision_history_temporaries(self.root / "decision-history")
             event = self._read(f"decision-history/{event_id}.json")
             if (event.get("action") != expected_action or "work_item" in event
+                    or "work_item_intent" in event
                     or (expected_rev is not None
                         and (type(event.get("rev")) is not int or event["rev"] != expected_rev))):
-                raise Denied("Legacy decision changed or already seeded")
+                raise Denied("Legacy decision changed, already seeded, or has explicit work-item intent")
             existing = self._legacy_resolution(event_id, event, recover=True)
             record = {"event_id": event_id,
                       "event_sha256": hashlib.sha256(canonical(event)).hexdigest(),
@@ -280,7 +292,7 @@ class WorkItems:
     def page_legacy(self, *, cursor=None, limit=25) -> dict:
         """Live audit inventory, ordered by exclusive event ID, O(limit) rows.
 
-        No proposal bodies. Both unresolved and reconciled events are included.
+        No proposal bodies. Unresolved, reconciled and explicit no-work events are included.
         Recognized atomic-write leftovers may be recovered under insights.lock.
         """
         if (cursor is not None and (not isinstance(cursor, str) or len(cursor) > MAX_OPEN_CURSOR_CHARS
@@ -299,7 +311,8 @@ class WorkItems:
                     continue
                 resolution = self._legacy_resolution(event_id, event, recover=True)
                 total += 1
-                unresolved += resolution is None
+                no_work = event.get("work_item_intent") == "none"
+                unresolved += resolution is None and not no_work
                 if after is not None and event_id <= after:
                     continue
                 eligible += 1
@@ -311,8 +324,10 @@ class WorkItems:
                 preview, clipped = text_preview(reason if isinstance(reason, str) else "", 1024)
                 row = {"event_id": event_id, "action": event["action"], **source,
                        "reason_preview": preview, "reason_truncated": clipped,
-                       "openable": resolution is None and all(value is not None for value in source.values()),
-                       "resolution": None}
+                       "openable": resolution is None and not no_work and all(value is not None for value in source.values()),
+                       "resolution": {"outcome": "none"} if no_work else None}
+                if no_work:
+                    row["work_item_intent"] = "none"
                 if resolution is not None:
                     preview, clipped = text_preview(resolution["reason"], 1024)
                     row["resolution"] = {key: resolution[key] for key in
@@ -363,6 +378,8 @@ class WorkItems:
         if not isinstance(event, dict):
             raise Denied("Invalid work-item seed event")
         resolution = self._legacy_resolution(match[1], event, history_revisions=history_revisions)
+        if event.get("work_item_intent") == "none":
+            raise Denied("Explicit no-work decision has no work item")
         if "work_item" not in event:
             if resolution is None or resolution["outcome"] != "open":
                 raise Denied("Work item has no open legacy resolution")
@@ -419,6 +436,8 @@ class WorkItems:
         action = decision.get("action")
         fields = {"id", "action", "reason", "revisit", "run", "created_at", "rev"}
         if action in ("accept", "modify"):
+            if "work_item_intent" in decision:
+                fields.add("work_item_intent")
             if "work_item" in decision:
                 fields.add("work_item")
         elif action == "withdraw":
@@ -426,6 +445,10 @@ class WorkItems:
         elif action not in ("defer", "reject"):
             raise Denied("Invalid current work-item origin decision")
         revision = decision.get("rev")
+        if "decision_key" in decision:
+            fields.add("decision_key")
+            if action == "withdraw" or decision["decision_key"] != _decision_key(insight_id, revision):
+                raise Denied("Invalid current decision key")
         if (set(decision) != fields or decision.get("id") != insight_id
                 or type(revision) is not int or revision < 1
                 or not isinstance(decision.get("reason"), str) or not decision["reason"].strip()
@@ -903,6 +926,8 @@ class WorkItems:
                     continue
                 if not has_seed:
                     resolution = self._legacy_resolution(event_id, event, recover=True)
+                    if event.get("work_item_intent") == "none":
+                        continue
                     if resolution is None:
                         unseeded_decisions += 1
                         continue

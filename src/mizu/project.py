@@ -41,7 +41,9 @@ class Project:
         if not self.roles or any(r not in config.roles for r in self.roles):
             raise ConfigError("Project roles must refer to configured roles")
         self.snapshots = open_store(self.root, config, create_dirs=not read_only)
-        self.insights = Insights(self.root, retention_days=config.limits.retention_days)
+        self.insights = Insights(self.root, retention_days=config.limits.retention_days,
+                                 work_item_intent_default=config.insight_decisions["work_item_intent_default"],
+                                 work_item_intent_by_source=config.insight_decisions["work_item_intent_by_source"])
         self.insights.snapshots = self.snapshots
         self.work_items = WorkItems(self.root, self.snapshots, self.insights)
         from .role_state import RoleStateStore

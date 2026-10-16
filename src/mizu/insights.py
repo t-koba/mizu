@@ -58,6 +58,58 @@ def _rev_of(record: dict) -> int:
     return rev if rev >= 1 else 1
 
 
+def _decision_key(insight_id: str, rev: int) -> str:
+    """Stable 128-bit event name, independent of action/intent and writer run."""
+    return digest(canonical(["insight-substantive-decision", insight_id, rev]))[:32]
+
+
+def _validate_keyed_substantive_event(event, insight_id: str, rev: int, key: str,
+                                       title: str) -> dict:
+    """Validate an immutable keyed event before an idempotent pointer repair."""
+    if not isinstance(event, dict):
+        raise Denied("Malformed keyed decision event")
+    if (event.get("id") != insight_id or type(event.get("rev")) is not int
+            or event.get("rev") != rev or event.get("decision_key") != key):
+        raise Denied("Decision event ID collision")
+    action = event.get("action")
+    fields = {"id", "action", "reason", "revisit", "run", "created_at", "rev", "decision_key"}
+    if action in ("accept", "modify"):
+        fields.add("work_item_intent")
+        intent = event.get("work_item_intent")
+        if intent not in ("create", "none"):
+            raise Denied("Malformed keyed work-item intent")
+        if intent == "create":
+            fields.add("work_item")
+    elif action != "reject":
+        raise Denied("Decision event ID collision")
+    stamp = event.get("created_at")
+    try:
+        parsed_stamp = dt.datetime.fromisoformat(stamp) if isinstance(stamp, str) else None
+    except ValueError:
+        parsed_stamp = None
+    if (set(event) != fields or event.get("id") != insight_id or type(event.get("rev")) is not int
+            or event["rev"] != rev or event.get("decision_key") != key
+            or not isinstance(event.get("reason"), str) or not event["reason"].strip()
+            or not isinstance(event.get("revisit"), str)
+            or not isinstance(event.get("run"), str) or not event["run"]
+            or parsed_stamp is None or parsed_stamp.tzinfo is None
+            or len(canonical(event)) > PREVIEW_BYTES):
+        raise Denied("Malformed keyed decision event")
+    if action in ("accept", "modify") and event["work_item_intent"] == "create":
+        seed = event.get("work_item")
+        seed_fields = {"id", "title", "origin", "status", "rev", "holder", "created_at", "updated_at"}
+        if (not isinstance(seed, dict) or set(seed) != seed_fields
+                or seed.get("id") != f"wi_{key}"
+                or seed.get("title") != title or not isinstance(seed.get("title"), str)
+                or not 1 <= len(seed["title"]) <= 200
+                or seed.get("origin") != {"insight_id": insight_id, "rev": rev}
+                or seed.get("status") != "open" or type(seed.get("rev")) is not int or seed["rev"] != 1
+                or seed.get("holder") is not None
+                or seed.get("created_at") != stamp or seed.get("updated_at") != stamp):
+            raise Denied("Malformed keyed work-item seed")
+    return event
+
+
 def _content_sha(record: dict) -> str:
     payload = {k: record.get(k) for k in ("id", "source", "title", "body", "base_snapshot")}
     payload["rev"] = _rev_of(record)
@@ -130,9 +182,12 @@ MAX_EVIDENCE_CHARS = 8192
 
 
 class Insights:
-    def __init__(self, root: Path, maximum: int = PREVIEW_BYTES, retention_days: int = 31):
+    def __init__(self, root: Path, maximum: int = PREVIEW_BYTES, retention_days: int = 31, *,
+                 work_item_intent_default: str = "create", work_item_intent_by_source: dict | None = None):
         self.root, self.maximum = root, maximum
         self.retention_days = retention_days
+        self.work_item_intent_default = work_item_intent_default
+        self.work_item_intent_by_source = dict(work_item_intent_by_source or {})
         #: Snapshot store for wait baselines; wired by Project, else None.
         self.snapshots = None
 
@@ -497,7 +552,11 @@ replacement insight without implying rejected substance.
         return digest(canonical(sorted(parts)))
 
     def decide(self, insight_id: str, action: str, reason: str, revisit: str, run: str, wait=None,
-               expected_rev: int | None = None) -> dict:
+               expected_rev: int | None = None, work_item_intent: str | None = None) -> dict:
+        if work_item_intent is not None and (work_item_intent not in ("create", "none")
+                                               or action not in ("accept", "modify")):
+            raise Denied("work_item_intent must be create or none, only for accept/modify")
+        intent_override = work_item_intent
         if action not in ("accept", "modify", "defer", "reject") or not reason.strip():
             raise Denied("Decision requires a supported action and a reason")
         if action == "defer" and not revisit.strip():
@@ -513,14 +572,55 @@ replacement insight without implying rejected substance.
             if expected_rev is not None and expected_rev != rev:
                 raise Denied(f"Insight revised since read (now rev {rev}); re-read before deciding")
             raw = self.root / "decisions" / f"{insight_id}.json"
-            prior = _effective_decision(rev, None if raw.is_symlink() else read_json(raw, {}))
+            current_decision = None if raw.is_symlink() else read_json(raw, {})
+            prior = _effective_decision(rev, current_decision)
             if prior is not None and prior.get("action") == "withdraw":
                 raise Denied("Insight withdrawn; revise the topic to reopen it")
-            event_id = uuid.uuid4().hex
+            key = _decision_key(insight_id, rev)
+            event_path = self.root / "decision-history" / f"{key}.json"
+            if event_path.exists() or event_path.is_symlink():
+                existing = json.loads(safe_read(self.root, f"decision-history/{key}.json", PREVIEW_BYTES))
+                existing = _validate_keyed_substantive_event(existing, insight_id, rev, key,
+                                                              current["title"])
+                if (existing["action"] != action or existing["reason"] != reason
+                        or existing["revisit"] != revisit
+                        or (intent_override is not None and action in ("accept", "modify")
+                            and existing["work_item_intent"] != intent_override)):
+                    raise Denied("Insight already decided at this revision; revise the topic to reopen it")
+                if (prior is not None and prior.get("action") in ("accept", "modify", "reject")
+                        and prior != existing):
+                    raise Denied("Conflicting substantive decision at this revision")
+                # History committed but its current pointer may not have. Return the
+                # original event (including its run) and repair only a stale pointer.
+                if current_decision != existing:
+                    with lock(self.root / "locks" / "decisions.lock"):
+                        write_json(raw, existing)
+                return existing
+            if prior is not None and prior.get("action") in ("accept", "modify", "reject"):
+                raise Denied("Insight already decided at this revision; revise the topic to reopen it")
+            if action in ("accept", "modify"):
+                work_item_intent = (intent_override if intent_override is not None else
+                                    self.work_item_intent_by_source.get(current["source"],
+                                                                      self.work_item_intent_default))
+                if work_item_intent not in ("create", "none"):
+                    raise Denied("Invalid configured work-item intent")
+            # Only pre-key writers could hide a random-ID substantive event behind
+            # a defer. Scan this legacy edge, not fresh decisions or keyed defers.
+            if prior is not None and prior.get("action") == "defer" and "decision_key" not in prior:
+                for path in (self.root / "decision-history").glob("*.json"):
+                    event = json.loads(safe_read(self.root, f"decision-history/{path.name}", PREVIEW_BYTES))
+                    if not isinstance(event, dict):
+                        raise Denied("Malformed decision history")
+                    if (event.get("id") == insight_id and _effective_decision(rev, event) is not None
+                            and event.get("action") in ("accept", "modify", "reject")):
+                        raise Denied("Insight already decided at this revision; revise the topic to reopen it")
+            event_id = key if action in ("accept", "modify", "reject") else uuid.uuid4().hex
             stamped = now()
             record = {"id": insight_id, "action": action, "reason": reason, "revisit": revisit,
-                      "run": run, "created_at": stamped, "rev": rev}
+                      "run": run, "created_at": stamped, "rev": rev, "decision_key": key}
             if action in ("accept", "modify"):
+                record["work_item_intent"] = work_item_intent
+            if work_item_intent == "create":
                 record["work_item"] = {
                     "id": f"wi_{event_id}",
                     "title": current["title"],
@@ -531,8 +631,8 @@ replacement insight without implying rejected substance.
                     "created_at": stamped,
                     "updated_at": stamped,
                 }
-                if len(canonical(record)) > PREVIEW_BYTES:
-                    raise LimitExceeded("Decision event with work-item seed exceeds byte bound")
+            if action in ("accept", "modify") and len(canonical(record)) > PREVIEW_BYTES:
+                raise LimitExceeded("Decision event with work-item intent exceeds byte bound")
             with lock(self.root / "locks" / "decisions.lock"):
                 write_json(self.root / "decision-history" / f"{event_id}.json", record, exclusive=True)
                 write_json(self.root / "decisions" / f"{insight_id}.json", record)

@@ -89,6 +89,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--id", help="Proposal ID for read/submit/decide/withdraw")
     p.add_argument("--title", help="Proposal title for submit")
     p.add_argument("--body", type=Path, help="Read Markdown body from this file; '-' reads stdin")
+    p.add_argument("--work-item-intent", choices=("create", "none"), help="Work disposition for accept/modify; omitted uses source policy")
     p.add_argument("--decision", help="Decision action for decide (accept/modify/defer/reject)")
     p.add_argument("--reason", default="", help="Decision reason for decide, withdrawal reason for withdraw")
     p.add_argument("--revisit", default="", help="Revisit condition for defer")
@@ -273,6 +274,8 @@ def _parse_wait(spec):
 
 
 def _cmd_insight(config, project, args):
+    if args.work_item_intent is not None and args.action != "decide":
+        raise ConfigError("--work-item-intent applies only to accept/modify decisions")
     if args.action == "list":
         return project.insights.list(pending=False, limit=1000)
     if args.action == "read":
@@ -304,7 +307,7 @@ def _cmd_insight(config, project, args):
             raise ConfigError("Insight decide requires --id and --decision")
         return project.insights.decide(args.id, args.decision, args.reason or "", args.revisit or "", "operator",
                                                  wait=_parse_wait(args.wait),
-                                                 expected_rev=args.expected_rev)
+                                                 expected_rev=args.expected_rev, work_item_intent=args.work_item_intent)
     if args.action == "withdraw":
         if not args.id or not args.reason.strip():
             raise ConfigError("Insight withdraw requires --id and --reason")

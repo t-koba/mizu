@@ -12,6 +12,15 @@ timezone = "UTC"
 consult_role = "consult"
 exclude = [".git", ".pi", ".env", ".env.*", ".venv", "node_modules", "__pycache__", "*.pyc", "*.pyo", ".pytest_cache"]
 
+# Decision-to-work policy: the mechanism defaults to create for every source.
+# These example source defaults avoid tasks for operator/VCS dispositions;
+# each accept/modify may override them with work_item_intent = "create".
+[insight_decisions]
+work_item_intent_default = "create"
+[insight_decisions.work_item_intent_by_source]
+operator = "none"
+vcs = "none"
+
 [limits]
 daily_requests = 0                 # Fail closed. Set a deliberate positive limit.
 shared_daily_requests = 0          # Optional shared total across projects sharing data_dir (0 disables, max 100,000).

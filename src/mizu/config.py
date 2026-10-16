@@ -251,7 +251,7 @@ def _load_merged(top: Path) -> dict:
         # Unknown root keys still fail here per fragment so the error names
         # the fragment, then the final merged load re-checks the whole.
         allowed = {"data_dir", "engines", "timezone", "limits", "sandbox", "profiles",
-                   "roles", "consult_role", "delegate_role", "web", "vcs", "materialize", "exclude", "selectors", "include"}
+                   "roles", "consult_role", "delegate_role", "web", "vcs", "materialize", "exclude", "selectors", "include", "insight_decisions"}
         unknown = set(data) - allowed
         if unknown:
             raise ConfigError(f"Unknown keys in {resolved}: {', '.join(sorted(unknown))}")
@@ -514,6 +514,8 @@ class Config:
     exclude: tuple[str, ...]
     selectors: dict = dataclasses.field(default_factory=dict)
     tzinfo: dt.tzinfo | None = None
+    insight_decisions: dict = dataclasses.field(default_factory=lambda: {
+        "work_item_intent_default": "create", "work_item_intent_by_source": {}})
 
     def __post_init__(self):
         object.__setattr__(self, "tzinfo", resolve_timezone(self.timezone))
@@ -554,8 +556,19 @@ def load(file: Path) -> Config:
     file = file.expanduser().resolve()
     data = _load_merged(file)
     keys(data, {"data_dir", "engines", "timezone", "limits", "sandbox", "profiles",
-                "roles", "consult_role", "delegate_role", "web", "vcs", "materialize", "exclude", "selectors", "include"}, "root")
+                "roles", "consult_role", "delegate_role", "web", "vcs", "materialize", "exclude", "selectors", "include", "insight_decisions"}, "root")
     data.pop("include", None)
+    decisions = data.get("insight_decisions", {})
+    keys(decisions, {"work_item_intent_default", "work_item_intent_by_source"}, "insight_decisions")
+    decisions = {"work_item_intent_default": "create", "work_item_intent_by_source": {}, **decisions}
+    if decisions["work_item_intent_default"] not in ("create", "none"):
+        raise ConfigError("insight_decisions.work_item_intent_default must be create or none")
+    sources = decisions["work_item_intent_by_source"]
+    if not isinstance(sources, dict):
+        raise ConfigError("insight_decisions.work_item_intent_by_source must be a table")
+    for source, intent in sources.items():
+        if not ID.fullmatch(source) or intent not in ("create", "none"):
+            raise ConfigError("Insight decision source policies require source identifiers and create or none")
     engines = data.get("engines", {})
     keys(engines, set(ENGINES), "engines")
     environments = {}
@@ -986,4 +999,4 @@ def load(file: Path) -> Config:
     return Config(file, path_value(string(data.get("data_dir", "~/.local/state/mizu"), "data_dir"), file.parent),
                   environments, limits, sandbox, profiles, roles, consult_role, delegate_role, timezone, web, vcs, mat,
                   strings(data.get("exclude", [".git", ".pi", ".env", ".env.*", ".venv",
-                                                "node_modules", "__pycache__", "*.pyc", "*.pyo", ".pytest_cache"]), "exclude"), selectors)
+                                                "node_modules", "__pycache__", "*.pyc", "*.pyo", ".pytest_cache"]), "exclude"), selectors, insight_decisions=decisions)

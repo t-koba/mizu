@@ -10,6 +10,53 @@ Environment substitution reads the controller process environment, not
 `ConfigError`); there are no implicit defaults so a missing export cannot
 silently change grants or paths. Prefer literal model aliases for systemd services.
 
+## Decision-to-work policy
+
+`mizu_decide` (the `decide` capability) accepts optional
+`work_item_intent: "create" | "none"` on `accept`/`modify` only. The operator
+CLI uses `mizu insight decide <project> ... --work-item-intent create|none`.
+Other intent values or action combinations are refused before any event is
+written. Omission resolves from the stored, trusted insight `source`, never
+its title, body, opaque `origin`, or the deciding role. Policy is configured as:
+
+```toml
+[insight_decisions]
+work_item_intent_default = "create"
+[insight_decisions.work_item_intent_by_source]
+operator = "none"
+vcs = "none"
+```
+
+Without this table the global default is `create` and the per-source map is
+empty; unknown sources use the global default. Both settings accept only
+`create`/`none`; map keys must be source identifiers. The example configuration
+suggests `none` for operator/VCS dispositions, not a mechanism restriction:
+every accept/modify may explicitly override either default. Editing the example
+does not update an existing private operator configuration.
+
+Every new accept/modify event stores the resolved `work_item_intent`. `create`
+keeps the canonical `wi_<event-id>` seed; `none` is a durable explicit no-work
+disposition without a seed. Both resolve work-item coverage. Old unseeded
+accept/modify events without the marker remain unresolved until the existing
+hash-bound open/drop reconciliation; neither reads nor new policy infer or
+rewrite their intent. Explicit no-work events cannot be reconciled. The legacy
+audit page includes them as `work_item_intent: "none"`, `openable: false`, and
+`resolution: {outcome: "none"}`; no work-item status is attached to them.
+
+A substantive `accept`/`modify`/`reject` at the current insight revision prevents
+conflicting further decisions on that revision. An exact keyed replay returns
+the original event without appending history or changing its recorded run,
+whether the current pointer already matches or needs repair after an uncertain
+write. For recovery, omitted intent reuses the stored resolution despite later
+policy changes; conflicting action/reason/revisit or explicit intent is refused.
+Revise the insight meaningfully to reopen; an earlier defer alone may still be
+superseded. New decisions use a bounded keyed lookup; only a legacy defer
+pointer without `decision_key` may require an old random-ID history scan (see
+architecture.md). Revision CAS, append-only history, and source binding are
+unchanged. Read current state after uncertainty; refusals write no event or
+seed. Existing decision/seed byte bounds and lock/cancellation behavior apply;
+no new grant, scheduling, or task-creation interface is added.
+
 ## Root keys
 
 | Key | Meaning |
@@ -390,9 +437,9 @@ models are recorded. Model usage excludes unreported auxiliary billing.
 | `insights` | Read proposals |
 | `work_items_read` | Read an open-item page (optional cursor up to 128 characters; limit 1–100, default 25; rows at most 8192 canonical bytes) or one exact seeded item by ID in any status, including terminal states, with current origin staleness and paged immutable history (`after_rev` exclusive 0–256, default 0; limit 1–100, default 25; chain at most 256 revisions; records at most 128 KiB). Either response is capped at 1 MiB and is a fresh live view, not a frozen snapshot; unsafe or malformed store data fails closed. This read grant does not imply transition authority |
 | `work_items_transition` | Append one CAS-bound status revision; actor is fixed to the role, stale revisions require a fresh read, `done` requires retained passing digest-bound snapshot evidence, `dropped` requires a reason, and `blocked` may carry a structured wait. Granted only to the example worker role |
-| `work_items_legacy_read` | Read a bounded live event inventory of unresolved and reconciled legacy accept/modify history, with origin validity, bounded decision/reconciliation reasons and coverage. Observational; no proposal bodies. Granted only to the example worker; does not imply reconciliation authority |
+| `work_items_legacy_read` | Read a bounded live event inventory of unresolved/reconciled legacy accept/modify history and explicit no-work dispositions, with origin validity, bounded decision/reconciliation reasons and coverage. Observational; no proposal bodies. Granted only to the example worker; does not imply reconciliation authority |
 | `work_items_reconcile` | Exclusively record one immutable hash-bound open/drop resolution without rewriting decisions. Expected action and optional revision must match; runtime actor and nonblank reason required; open needs title and valid source origin/timestamp, drop has no seed. Exact retries return `created: false` and do not count as progress; conflicts fail closed. Non-observational on first write, forbidden to consult/delegation children, no wrap-up exception. Granted only to the example worker |
-| `decide` | Record accept/modify/defer/reject and rationale |
+| `decide` | Record a revision-bound accept/modify/defer/reject and rationale, with optional accept/modify work-item intent; revise after any substantive decision |
 | `submit_insight` | Submit proposal with route-derived identity |
 | `revise_insight` | Revise one of the role's own proposals under its stable ID (source fixed to the role, bound to the read rev; prior content archived, meaningful change reopens the topic) |
 | `withdraw_insight` | Withdraw one of the role's own proposals as author retraction, not rejection (source fixed to the role, bound to the read rev); a current accept/modify blocks withdrawal by default |

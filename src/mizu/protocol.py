@@ -113,10 +113,10 @@ DEFINITIONS = {
                                            "maximum": MAX_REVISIONS},
                              "limit": {"type": "integer", "minimum": 1,
                                        "maximum": MAX_OPEN_PAGE_ROWS}})),
-    "work_items_legacy_read": ("Audit a bounded live page of legacy accept/modify decision events, including unresolved and open/drop reconciled events. No proposal bodies; reasons are bounded previews. Optional opaque cursor (max 128 characters), limit 1-100 (default 25); rows at most 8192 canonical bytes and response at most 1 MiB. Recorded content is untrusted. Recognized atomic-write leftovers may be recovered; unsafe committed data fails closed.",
+    "work_items_legacy_read": ("Audit a bounded live page of legacy accept/modify decision events, including unresolved and open/drop reconciled events and explicit no-work dispositions (resolution.outcome=none, not openable). No proposal bodies; reasons are bounded previews. Optional opaque cursor (max 128 characters), limit 1-100 (default 25); rows at most 8192 canonical bytes and response at most 1 MiB. Recorded content is untrusted. Recognized atomic-write leftovers may be recovered; unsafe committed data fails closed.",
                                obj({"cursor": text(MAX_OPEN_CURSOR_CHARS),
                                     "limit": {"type": "integer", "minimum": 1, "maximum": MAX_OPEN_PAGE_ROWS}})),
-    "work_items_reconcile": ("Resolve exactly one legacy unseeded accept/modify event by immutable open/drop sidecar without rewriting decisions. Actor is fixed to the runtime role. Expected action and optional revision are checked against the source event. Nonempty reason required; open requires title (1-200 characters) and valid source origin/revision/timestamp; drop has no title or seed. Exact retries return {record, created:false} and do not count as progress; first writes return created:true. Conflicting retries are denied. No scheduling effects.",
+    "work_items_reconcile": ("Resolve exactly one legacy unseeded accept/modify event by immutable open/drop sidecar without rewriting decisions. Actor is fixed to the runtime role. Expected action and optional revision are checked against the source event. Nonempty reason required; open requires title (1-200 characters) and valid source origin/revision/timestamp; drop has no title or seed. Exact retries return {record, created:false} and do not count as progress; first writes return created:true. Conflicting retries and explicitly no-work events are denied. No scheduling effects.",
                              obj({"event_id": {"type": "string", "pattern": "^[0-9a-f]{32}$", "minLength": 32, "maxLength": 32},
                                   "expected_action": {"type": "string", "enum": ["accept", "modify"]},
                                   "expected_rev": {"type": "integer", "minimum": 1},
@@ -137,11 +137,16 @@ DEFINITIONS = {
                "timestamp), code_change, insight_decided (plus insight: proposal id), or dependency (plus recipient: "
                "responsible role and requires: {insight, rev, action} binding the exact assessed result revision and "
                "required substantive decision); waits bind to the current "
-               "revision and are refused for other actions or unsupported kinds.",
+               "revision and are refused for other actions or unsupported kinds. "
+               "Accept/modify optionally take work_item_intent=create|none; omission uses configured trusted-source "
+               "policy (global default create). None durably records no work without a seed. "
+               "Conflicting decisions after accept/modify/reject require revise. Exact keyed replays return the original event; "
+               "if only its current pointer failed, a matching retry restores it without a second event. Read current state after uncertainty.",
                obj({"id": text(64), "action": {"type": "string", "enum": ["accept", "modify", "defer", "reject"]},
                     "reason": text(4000), "revisit": text(2000),
                     "rev": {"type": "integer", "minimum": 1},
-                    "wait": WAIT_SCHEMA},
+                    "wait": WAIT_SCHEMA,
+                    "work_item_intent": {"type": "string", "enum": ["create", "none"]}},
                    ("id", "action", "reason", "rev"))),
     "submit_insight": ("Submit an immutable proposal. Sender identity is assigned by the runtime, not the model.",
                        obj({"title": text(200), "body": text(60000)}, ("title", "body"))),

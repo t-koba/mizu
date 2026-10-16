@@ -235,16 +235,28 @@ class WorkItemTests(Fixture):
         proposal = self.project.insights.submit(
             source="worker", title="Oversized decision", body="Check event bound", base_snapshot=None)
         history = set((self.project.root / "decision-history").glob("*.json"))
-        with self.assertRaises(LimitExceeded):
-            self.project.insights.decide(
-                proposal["id"], "accept", "x" * PREVIEW_BYTES, "", "run-oversized", expected_rev=1)
+        for intent in ("create", "none"):
+            with self.subTest(intent=intent), self.assertRaises(LimitExceeded):
+                self.project.insights.decide(
+                    proposal["id"], "accept", "x" * PREVIEW_BYTES, "", "run-oversized",
+                    expected_rev=1, work_item_intent=intent)
         self.assertEqual(set((self.project.root / "decision-history").glob("*.json")), history)
         self.assertFalse((self.project.root / "decisions" / f"{proposal['id']}.json").exists())
         self.assertFalse((self.project.root / "work-items").exists())
 
+    def test_pre_intent_seed_schema_remains_readable(self):
+        old_event = {key: value for key, value in self.decision.items() if key != "work_item_intent"}
+        write_json(self.seed_path, old_event)
+        write_json(self.project.root / "decisions" / f"{self.proposal['id']}.json", old_event)
+        self.assertEqual(self.store.get(self.item_id), self.seed)
+        self.assertTrue(self.store.page_open()["coverage_complete"])
+        self.assertEqual(self.store.submitter_status(self.proposal["id"])["id"], self.item_id)
+
     def test_modify_seed_works(self):
+        self.project.insights.revise(self.proposal["id"], source="worker", title="Smaller scope",
+                                     body="Revised scope", base_snapshot=None, expected_rev=1)
         modified = self.project.insights.decide(self.proposal["id"], "modify", "smaller scope", "",
-                                                "run-2", expected_rev=1)
+                                                "run-2", expected_rev=2)
         self.assertEqual(self.store.get(modified["work_item"]["id"]), modified["work_item"])
 
     def test_full_state_events_preserve_seed_and_reconstruct_without_pointer(self):
@@ -767,6 +779,7 @@ class WorkItemTests(Fixture):
     def test_page_open_reports_legacy_unseeded_decisions_and_closed_items(self):
         legacy = copy.deepcopy(self.decision)
         legacy.pop("work_item")
+        legacy.pop("work_item_intent")
         legacy.pop("rev")
         legacy.pop("created_at")
         legacy_id = "a" * 32
