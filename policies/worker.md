@@ -87,11 +87,16 @@ per-event pass proves `coverage_complete`; the availability of the mechanism is
 not evidence of production reconciliation.
 
 For a seeded item, use the explicitly granted `mizu_work_items_read` projection
-to re-read its current revision, then call `mizu_work_items_transition` with that
-`expected_rev`; on a stale-CAS refusal, re-read instead of retrying the old
-revision. The runtime supplies your actor identity. Only transition to `done`
-after passing verification and when you can cite a retained published snapshot
-whose digest-bound verification matches the code being completed (a same-unit
-verification without a published snapshot ID is not completion evidence).
-Include a reason when dropping an item. A blocked item's optional structured
-wait is recorded on the item and has no scheduler or wakeup effect.
+to re-read its current revision; use the exact `id` to inspect status, origin
+staleness, and full immutable history for open or terminal items. History starts
+with seed revision 1; continue a truncated history page with `after_rev` set to
+its `next_cursor`. The returned records preserve reasons, waits, and snapshot
+verification evidence. Re-read immediately before transition and call
+`mizu_work_items_transition` with the current `expected_rev`; on a stale-CAS
+refusal, re-read instead of retrying the old revision. The runtime supplies your
+actor identity. Only transition to `done` after passing verification and when
+you can cite a retained published snapshot whose digest-bound verification
+matches the code being completed (a same-unit verification without a published
+snapshot ID is not completion evidence). Include a reason when dropping an
+item. A blocked item's optional structured wait is recorded on the item and has
+no scheduler or wakeup effect.

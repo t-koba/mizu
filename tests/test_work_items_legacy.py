@@ -77,6 +77,17 @@ class LegacyWorkItemTests(Fixture):
         with self.assertRaises(Denied):
             self.store.get(f"wi_{dropped}")
 
+    def test_by_id_history_reads_open_reconciliation_sidecar_seed(self):
+        event_id, _, _ = self.legacy()
+        resolution = self.resolve(event_id)
+
+        view = self.store.explain(f"wi_{event_id}")
+
+        self.assertEqual(view["item"], resolution["work_item"])
+        self.assertEqual(view["history"], [resolution["work_item"]])
+        self.assertEqual(view["history_total"], 1)
+        self.assertTrue(view["stale"])
+
     def test_current_decision_bytes_unchanged_and_seeded_events_refused(self):
         proposal = self.project.insights.submit(source="worker", title="Seeded", body="Synthetic", base_snapshot=None)
         decision = self.project.insights.decide(proposal["id"], "accept", "Assessed", "", "run", expected_rev=1)

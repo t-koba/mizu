@@ -32,6 +32,7 @@ MAX_OPEN_CURSOR_CHARS = 128
 MAX_OPEN_ROW_BYTES = 8192
 OPEN_STATUS_ORDER = {"doing": 0, "blocked": 1, "open": 2}
 MAX_OPEN_PAGE_BYTES = 1024 * 1024
+MAX_HISTORY_PAGE_BYTES = MAX_OPEN_PAGE_BYTES
 MAX_HISTORY_TEMPORARIES = 64
 _TEMP_NAME = re.compile(r"\.new-[A-Za-z0-9_]{8}\Z")
 _REVISION_NAME = re.compile(r"(?:[2-9]|[1-9][0-9]{1,2})\.json\Z")
@@ -595,15 +596,22 @@ class WorkItems:
         elif record["snapshot_id"] is not None or record["verification"] is not None:
             raise Denied("Only completed work items carry snapshot evidence")
 
-    def _get(self, item_id: str, *, seed_event: dict | None = None,
-             history_revisions=_HISTORY_UNSET) -> dict:
+    def _iter_chain(self, item_id: str, *, seed_event: dict | None = None,
+                    history_revisions=_HISTORY_UNSET):
+        """Replay and validate one append-only chain, yielding one record at a time.
+
+        The seed and each revision are immutable full-state records. Callers may
+        retain only the current record or a bounded page; replay itself never
+        materializes the complete history.
+        """
         current = self._seed(item_id, seed_event, history_revisions=history_revisions)
+        yield current
         # The storage auditor calls this read-only without recovery. Keep its
         # bounded fail-closed scan; locked readers pass the recovery scan result.
         if history_revisions is _HISTORY_UNSET:
             directory = self.root / "work-items" / item_id
             if not _directory(directory.parent) or not _directory(directory):
-                return current
+                return
             revisions = set()
             with os.scandir(directory) as entries:
                 for entry in entries:
@@ -618,7 +626,7 @@ class WorkItems:
                         raise Denied("Work-item history exceeds revision bound")
                     revisions.add(revision)
         elif history_revisions is None:
-            return current
+            return
         else:
             revisions = history_revisions
         if revisions != set(range(2, len(revisions) + 2)):
@@ -627,6 +635,14 @@ class WorkItems:
             record = self._read(f"work-items/{item_id}/{revision}.json")
             self._validate_transition(current, record)
             current = record
+            yield current
+
+    def _get(self, item_id: str, *, seed_event: dict | None = None,
+             history_revisions=_HISTORY_UNSET) -> dict:
+        current = None
+        for current in self._iter_chain(item_id, seed_event=seed_event,
+                                        history_revisions=history_revisions):
+            pass
         return current
 
     def get(self, item_id: str) -> dict:
@@ -639,10 +655,8 @@ class WorkItems:
             history_revisions = self._recover_temporary_writes(item_id)
             return self._get(item_id, history_revisions=history_revisions)
 
-    def _projection_unlocked(self, item_id: str, *, seed_event: dict | None = None) -> dict:
-        """Build a projection while the caller holds insights.lock."""
-        history_revisions = self._recover_temporary_writes(item_id)
-        item = self._get(item_id, seed_event=seed_event, history_revisions=history_revisions)
+    def _origin_projection(self, item: dict) -> dict:
+        """Project current origin staleness from the immutable item's origin."""
         origin_id = item["origin"]["insight_id"]
         origin_rev = item["origin"]["rev"]
         current_rev = self._origin_revision(origin_id)
@@ -661,11 +675,70 @@ class WorkItems:
                           and decision["action"] in ("accept", "modify", "defer", "reject")
                           else None)
             stale = redecision is None
-        view = {"item": item, "current_origin_rev": current_rev,
-                "stale": stale, "redecision": redecision}
+        return {"current_origin_rev": current_rev, "stale": stale,
+                "redecision": redecision}
+
+    def _projection_unlocked(self, item_id: str, *, seed_event: dict | None = None) -> dict:
+        """Build a projection while the caller holds insights.lock."""
+        history_revisions = self._recover_temporary_writes(item_id)
+        item = self._get(item_id, seed_event=seed_event, history_revisions=history_revisions)
+        view = {"item": item, **self._origin_projection(item)}
         if len(canonical(view)) > MAX_PROJECTION_BYTES:
             raise LimitExceeded("Work-item projection exceeds byte bound")
         return view
+
+    def explain(self, item_id: str, *, after_rev=0, limit=25) -> dict:
+        """Return current status/origin plus a byte-bounded ascending history page.
+
+        ``after_rev`` is an exclusive revision cursor (0..MAX_REVISIONS); the
+        immutable seed is revision 1. The full chain is replayed and validated
+        even after the page fills or its response byte budget is reached.
+        """
+        if not isinstance(item_id, str) or ITEM_ID.fullmatch(item_id) is None:
+            raise Denied("Invalid work-item ID")
+        if type(after_rev) is not int or not 0 <= after_rev <= MAX_REVISIONS:
+            raise Denied(f"Work-item history cursor must be an integer in [0, {MAX_REVISIONS}]")
+        if type(limit) is not int or not 1 <= limit <= MAX_OPEN_PAGE_ROWS:
+            raise Denied("Work-item history limit must be an integer in [1, 100]")
+
+        with lock(self.root / "locks" / "insights.lock"):
+            history_revisions = self._recover_temporary_writes(item_id)
+            history = []
+            history_bytes = 0
+            stopped_for_bytes = False
+            # Reserve the maximum independently bounded current projection and
+            # ample fixed envelope space before admitting immutable history rows.
+            row_budget = MAX_HISTORY_PAGE_BYTES - MAX_PROJECTION_BYTES - 1024
+            current = None
+            for record in self._iter_chain(item_id, history_revisions=history_revisions):
+                current = record
+                revision = record["rev"]
+                if revision <= after_rev or len(history) >= limit or stopped_for_bytes:
+                    continue
+                row_size = len(canonical(record))
+                added = row_size + (1 if history else 0)
+                if history_bytes + added > row_budget:
+                    # Keep replaying to validate the entire chain and find the
+                    # live current item; later rows cannot form a contiguous page.
+                    stopped_for_bytes = True
+                    continue
+                history.append(record)
+                history_bytes += added
+
+            if after_rev > current["rev"]:
+                raise Denied("Work-item history cursor is ahead of current revision")
+            projection = {"item": current, **self._origin_projection(current)}
+            if len(canonical(projection)) > MAX_PROJECTION_BYTES:
+                raise LimitExceeded("Work-item projection exceeds byte bound")
+            history_total = current["rev"]
+            last_returned = history[-1]["rev"] if history else after_rev
+            more = last_returned < history_total
+            result = {**projection, "history": history, "history_total": history_total,
+                      "cursor": after_rev, "next_cursor": last_returned if more else None,
+                      "truncated": more}
+            if len(canonical(result)) > MAX_HISTORY_PAGE_BYTES:
+                raise LimitExceeded("Work-item history response exceeds byte bound")
+            return result
 
     def projection(self, item_id: str) -> dict:
         """Return one bounded item plus revision-derived origin staleness.

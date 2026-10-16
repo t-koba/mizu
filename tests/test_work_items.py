@@ -12,7 +12,8 @@ from support import Fixture
 from mizu.errors import Denied, LimitExceeded
 from mizu.fs import PREVIEW_BYTES, canonical, write_json
 from mizu.work_items import (
-    MAX_OPEN_CURSOR_CHARS, MAX_OPEN_ROW_BYTES, MAX_PROJECTION_BYTES, MAX_REVISIONS,
+    MAX_HISTORY_PAGE_BYTES, MAX_OPEN_CURSOR_CHARS, MAX_OPEN_ROW_BYTES,
+    MAX_PROJECTION_BYTES, MAX_REVISIONS,
     WorkItems, _entry_stat, _timestamp_order,
 )
 
@@ -70,6 +71,76 @@ class WorkItemTests(Fixture):
         reads.assert_called_once_with(f"decision-history/{self.item_id[3:]}.json")
         self.assertFalse(self.directory.exists())
 
+    def test_explain_pages_seed_and_terminal_done_evidence(self):
+        self.change("doing", reason="Started")
+        snapshot = self.snapshot("valid")
+        self.change("done", expected_rev=2, reason="Verified", snapshot_id=snapshot["id"])
+
+        first = self.store.explain(self.item_id, limit=2)
+        self.assertEqual(first["item"]["status"], "done")
+        self.assertEqual(first["item"]["rev"], 3)
+        self.assertEqual(first["history_total"], 3)
+        self.assertEqual(first["cursor"], 0)
+        self.assertEqual([record["rev"] for record in first["history"]], [1, 2])
+        self.assertEqual(first["next_cursor"], 2)
+        self.assertTrue(first["truncated"])
+        second = self.store.explain(self.item_id, after_rev=first["next_cursor"], limit=2)
+        self.assertEqual([record["rev"] for record in second["history"]], [3])
+        self.assertIsNone(second["next_cursor"])
+        self.assertFalse(second["truncated"])
+        self.assertEqual(second["history"][0]["reason"], "Verified")
+        self.assertEqual(second["history"][0]["snapshot_id"], snapshot["id"])
+        self.assertEqual(second["history"][0]["verification"], snapshot["verification"])
+
+    def test_explain_preserves_structured_wait_record(self):
+        self.change("blocked", wait={"kind": "insight_decided", "insight": self.proposal["id"]})
+        view = self.store.explain(self.item_id)
+        self.assertEqual(view["item"]["status"], "blocked")
+        self.assertEqual(view["history"][1]["wait"],
+                         {"kind": "insight_decided", "target": self.proposal["id"]})
+
+    def test_explain_reads_dropped_terminal_item_and_preserves_reason(self):
+        dropped = self.change("dropped", reason="No longer needed")
+        view = self.store.explain(self.item_id)
+        self.assertEqual(view["item"]["status"], "dropped")
+        self.assertEqual(view["item"]["rev"], 2)
+        self.assertEqual([row["rev"] for row in view["history"]], [1, 2])
+        self.assertEqual(view["history"][1], dropped)
+        self.assertEqual(view["history"][1]["reason"], "No longer needed")
+        self.assertIsNone(view["next_cursor"])
+
+    def test_explain_rejects_bad_id_cursor_and_limit(self):
+        for item_id, after_rev, limit in (("wi_bad", 0, 25), (self.item_id, -1, 25),
+                                          (self.item_id, True, 25), (self.item_id, 2, 25),
+                                          (self.item_id, 257, 25), (self.item_id, 0, 0),
+                                          (self.item_id, 0, 101)):
+            with self.assertRaises(Denied):
+                self.store.explain(item_id, after_rev=after_rev, limit=limit)
+
+    def test_explain_byte_bound_still_replays_unreturned_chain(self):
+        current = self.seed
+        for index in range(10):
+            target = "doing" if current["status"] != "doing" else "open"
+            current = self.store.transition(
+                self.item_id, expected_rev=current["rev"], status=target, actor="worker",
+                reason=f"revision-{index}-" + "r" * 100000)
+        page = self.store.explain(self.item_id, limit=100)
+        self.assertEqual(page["item"]["rev"], 11)
+        self.assertTrue(page["truncated"])
+        self.assertIsNotNone(page["next_cursor"])
+        self.assertEqual([row["rev"] for row in page["history"]],
+                         list(range(1, page["next_cursor"] + 1)))
+        self.assertLessEqual(len(canonical(page)), MAX_HISTORY_PAGE_BYTES)
+
+        # This final revision lies beyond the retained page. A by-ID read must
+        # still replay it and reject the broken chain rather than return a page.
+        final_path = self.directory / "11.json"
+        final_record = json.loads(final_path.read_text())
+        final_record["actor"] = "invalid actor"
+        write_json(final_path, final_record)
+        with self.assertRaises(Denied):
+            self.store.explain(self.item_id, limit=100)
+
     def test_projection_marks_revision_stale_until_current_decision(self):
         view = self.store.projection(self.item_id)
         self.assertEqual(view["item"], self.seed)
@@ -82,6 +153,10 @@ class WorkItemTests(Fixture):
         self.assertEqual(pending["current_origin_rev"], 2)
         self.assertTrue(pending["stale"])
         self.assertIsNone(pending["redecision"])
+        detail = self.store.explain(self.item_id)
+        self.assertEqual(detail["current_origin_rev"], pending["current_origin_rev"])
+        self.assertEqual(detail["stale"], pending["stale"])
+        self.assertEqual(detail["redecision"], pending["redecision"])
         decision = self.project.insights.decide(
             self.proposal["id"], "defer", "Reassess after new evidence", "revisit the revised scope",
             "run-redecision", expected_rev=2)

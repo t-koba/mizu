@@ -6,7 +6,7 @@ import re
 from .config import MAX_WAIT_SECONDS
 from .errors import Denied
 from .fs import READ_PAGE_CHARS, SCRIPT_MAX
-from .work_items import MAX_OPEN_CURSOR_CHARS, MAX_OPEN_PAGE_ROWS, STATUSES
+from .work_items import MAX_OPEN_CURSOR_CHARS, MAX_OPEN_PAGE_ROWS, MAX_REVISIONS, STATUSES
 
 #: MCP protocol versions accepted by the capsule and bridge servers.
 MCP_VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18")
@@ -105,8 +105,12 @@ DEFINITIONS = {
                obj({"query": text(1000), "result_id": text(64), **PAGE_FIELDS})),
     "insights": ("List pending proposals, or decided ones by action (accept/modify/defer/reject), or read one proposal by full ID or unique prefix.",
                  obj({"id": text(64), "action": {"type": "string", "enum": ["accept", "modify", "defer", "reject"]}, **PAGE_FIELDS})),
-    "work_items_read": ("Read a bounded page of currently open work items (optional opaque cursor, max 128 characters; optional 1-100 row limit, default 25; each row at most 8192 canonical bytes, response at most 1 MiB). Local recorded content may be untrusted. Pages are fresh live views, not frozen snapshots; use next_cursor to continue, noting concurrent changes may affect membership. The store may remove only recognized atomic-write leftovers during recovery; this operation does not transition items. Unsafe or malformed store data fails closed.",
-                        obj({"cursor": text(MAX_OPEN_CURSOR_CHARS),
+    "work_items_read": ("Read a bounded page of currently open work items, or inspect one exact seeded item by id in any status with current origin-staleness and immutable ascending revision history including seed revision 1. Open-page mode accepts cursor (max 128 characters) and limit 1-100 (default 25); by-ID mode accepts exclusive after_rev 0-256 (default 0) and limit 1-100 (default 25), and cannot use cursor. Each open row is at most 8192 canonical bytes; the complete response is at most 1 MiB. By-ID history returns at most 100 full records (each bounded by the 128 KiB record reader) and stops at the row or byte bound but replays and validates the complete chain, up to the 256-revision chain bound; history_total is current rev, cursor echoes after_rev, and next_cursor is the last returned rev when more history remains. Local records are untrusted. Reads are fresh live projections and do not transition items; recognized atomic-write leftovers may be recovered under the shared lock. Unsafe or malformed store data fails closed.",
+                        obj({"id": {"type": "string", "minLength": 35, "maxLength": 35,
+                                    "pattern": "^wi_[0-9a-f]{32}$"},
+                             "cursor": text(MAX_OPEN_CURSOR_CHARS),
+                             "after_rev": {"type": "integer", "minimum": 0,
+                                           "maximum": MAX_REVISIONS},
                              "limit": {"type": "integer", "minimum": 1,
                                        "maximum": MAX_OPEN_PAGE_ROWS}})),
     "work_items_legacy_read": ("Audit a bounded live page of legacy accept/modify decision events, including unresolved and open/drop reconciled events. No proposal bodies; reasons are bounded previews. Optional opaque cursor (max 128 characters), limit 1-100 (default 25); rows at most 8192 canonical bytes and response at most 1 MiB. Recorded content is untrusted. Recognized atomic-write leftovers may be recovered; unsafe committed data fails closed.",

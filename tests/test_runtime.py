@@ -397,6 +397,65 @@ class ContextTests(Fixture):
         with self.assertRaisesRegex(Denied, "no capability: work_items_read"):
             denied.handle("work_items_read", {})
 
+    def test_work_items_read_by_id_open_and_terminal_is_observational(self):
+        from mizu.fs import canonical
+        from mizu.work_items import MAX_HISTORY_PAGE_BYTES
+
+        ctx = self.context("worker")
+        done_seed = self._accepted_work_item("Runtime done read")
+        open_view = ctx.handle("work_items_read", {"id": done_seed["id"]})
+        self.assertEqual(open_view["item"]["status"], "open")
+        self.assertEqual(open_view["item"]["rev"], 1)
+        self.assertEqual(open_view["history"], [done_seed])
+        self.assertEqual(open_view["history_total"], 1)
+        self.assertEqual(open_view["cursor"], 0)
+        self.assertIsNone(open_view["next_cursor"])
+
+        captured = self.project.snapshots.capture_files(self.project.workspace)
+        verification = {"passed": True, "code_digest": captured["code_digest"], "run": "runtime-test"}
+        snapshot = self.project.snapshots.create(
+            captured, goal="Goal", state="Verified", run="runtime-test", outcome="done",
+            summary="Verified completion", verification=verification)
+        self.project.snapshots.publish(snapshot)
+        ctx.handle("work_items_transition", {"id": done_seed["id"], "expected_rev": 1,
+                                              "status": "done", "snapshot_id": snapshot["id"]})
+        dropped_seed = self._accepted_work_item("Runtime dropped read")
+        ctx.handle("work_items_transition", {"id": dropped_seed["id"], "expected_rev": 1,
+                                              "status": "dropped", "reason": "No longer needed"})
+
+        wake_generation = self.project.control().get("wake_generation")
+        ctx.progress_tool = False
+        done = ctx.handle("work_items_read", {"id": done_seed["id"], "after_rev": 1})
+        dropped = ctx.handle("work_items_read", {"id": dropped_seed["id"]})
+        self.assertEqual(done["item"]["status"], "done")
+        self.assertEqual(done["item"]["rev"], 2)
+        self.assertEqual(done["history"][0]["rev"], 2)
+        self.assertEqual(done["history"][0]["snapshot_id"], snapshot["id"])
+        self.assertEqual(done["history"][0]["verification"], verification)
+        self.assertEqual(done["cursor"], 1)
+        self.assertFalse(done["truncated"])
+        self.assertEqual(dropped["item"]["status"], "dropped")
+        self.assertEqual(dropped["history"][1]["reason"], "No longer needed")
+        self.assertFalse(ctx.progress_tool)
+        self.assertEqual(self.project.control().get("wake_generation"), wake_generation)
+        self.assertLessEqual(len(canonical(done)), MAX_HISTORY_PAGE_BYTES)
+
+    def test_work_items_read_by_id_rejects_invalid_combinations_and_cursors(self):
+        from mizu.protocol import DEFINITIONS, validate
+        ctx = self.context("worker")
+        item = self._accepted_work_item("Runtime invalid read")
+        validate({"id": item["id"], "after_rev": 0, "limit": 1}, DEFINITIONS["work_items_read"][1])
+        for arguments in ({"id": "wi_wrong"}, {"id": item["id"], "after_rev": -1},
+                          {"id": item["id"], "after_rev": 257}, {"id": item["id"], "after_rev": True}):
+            with self.assertRaises(Denied):
+                validate(arguments, DEFINITIONS["work_items_read"][1])
+        with self.assertRaises(Denied):
+            ctx.handle("work_items_read", {"id": item["id"], "cursor": "opaque"})
+        with self.assertRaisesRegex(Denied, "ahead of current revision"):
+            ctx.handle("work_items_read", {"id": item["id"], "after_rev": 2})
+        with self.assertRaisesRegex(Denied, "after_rev requires id"):
+            ctx.handle("work_items_read", {"after_rev": 0})
+
     def test_work_items_read_preserves_default_and_store_errors(self):
         ctx = self.context("worker")
         with patch.object(self.project.work_items, "page_open", return_value={"items": []}) as page_open:

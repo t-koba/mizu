@@ -917,6 +917,13 @@ class Context:
         return response
 
     def _op_work_items_read(self, args: dict) -> dict:
+        if "id" in args:
+            if "cursor" in args:
+                raise Denied("Work-item by-ID history cannot be combined with open-page cursor")
+            return self.project.work_items.explain(
+                args["id"], after_rev=args.get("after_rev", 0), limit=args.get("limit", 25))
+        if "after_rev" in args:
+            raise Denied("Work-item after_rev requires id")
         return self.project.work_items.page_open(cursor=args.get("cursor"),
                                                  limit=args.get("limit", 25))
 

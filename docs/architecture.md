@@ -36,7 +36,7 @@ inputs. The trusted host adapter never executes model-provided host commands.
 | `sandbox.py`, `process.py` | Bounded execution, termination, cleanup | Experiment usefulness |
 | `snapshot.py` | Content objects, immutable manifests, published pointer | Semantic correctness |
 | `insights.py` | Submission identity, revisable proposals with separate audit, decision history, initial work-item seeds | Acceptance or rejection |
-| `work_items.py` | Append-audited records, CAS lifecycle and bounded open-item pages | Work-item scheduling and policy |
+| `work_items.py` | Append-audited records, CAS lifecycle, bounded open pages and by-ID history | Work-item scheduling and policy |
 | `web.py` | Allowed retrieval, policy-bounded protocol observation, and external source receipts | Scientific truth |
 | `materialize.py` | Generic offline-input adapter (spec in, digest-bound content out) | Ecosystem resolution, cache policy |
 | `editor.py` | Snapshot export and read/propose MCP | Code editing |
@@ -222,14 +222,20 @@ the current insight title and `{insight_id, rev}` origin, starts `open` at item
 revision 1 with no holder, and uses the decision timestamp for creation and
 update. `defer` and `reject` do not create a seed.
 
-`Project.work_items` provides internal store methods `get(item_id)` and
+`Project.work_items` provides internal `get(item_id)` and the locked readers
+`page_open(cursor=None, limit=25)`, `projection(item_id)`, and
+`explain(item_id, *, after_rev=0, limit=25)`, plus
 `transition(item_id, *, expected_rev, status, actor, reason=None, wait=None,
-snapshot_id=None)`. `get()` remains internal-only; the runtime exposes the
-transition method only through the separately granted operation described below.
-It resolves the seed directly from
-`decision-history/<event-hex>.json`, validating the accept/modify event and
-nested seed without scanning the inbox or decision history. The event's title
-is the immutable title authority, not the subsequently revisable insight.
+snapshot_id=None)`. `get()` remains internal-only; the runtime exposes the two
+page modes through the existing `work_items_read` grant and exposes transition
+only through its separately granted operation described below. `get()` and
+the chain replay used by `projection()`, `explain()`, and transition resolve an
+item seed directly from `decision-history/<event-hex>.json`, validating the
+accept/modify event and nested seed without scanning the inbox or wider decision
+history. Origin staleness separately checks current origin records and any
+legacy decision binding; `page_open()` enumerates decision history to build its
+inventory. The event's title is the immutable title authority, not the
+subsequently revisable insight.
 Reads and mutations share `locks/insights.lock` with insight revisions and
 seed creation. A positive non-bool expected revision must match; each change
 exclusively atomically appends the full state to
@@ -290,6 +296,27 @@ shared-lock page reader: its only store writes are the recognized local
 atomic-write recovery cleanup described below, not work-item transitions.
 Failure and cancellation retain the existing store lock/read behavior; the tool
 adds no retry or cancellation handling.
+
+The same explicitly granted `work_items_read` operation also accepts an exact
+seeded `id` to read an item in any current status, including terminal `done` and
+`dropped`. This mode cannot be combined with open-page `cursor`; `after_rev`
+is exclusive and requires `id` (exact integer 0–256, default 0), while `limit`
+is 1–100 (default 25). It returns the live immutable current item plus the
+same current-origin staleness projection described above, and an ascending page
+of the existing full-state records, starting with seed revision 1. Thus each
+record retains its actual reason, structured wait, or completion snapshot and
+verification evidence; the reader does not synthesize a narrative. `history_total`
+is the current revision, `cursor` echoes `after_rev`, and `next_cursor` is the
+last returned revision only when more records remain. History is append-only,
+but each call replays the complete chain and reports a live current projection,
+not a frozen snapshot. The complete response is at most 1 MiB and the page is
+bounded by 100 rows (each full row uses the existing 128 KiB bounded record
+reader). On reaching the byte bound the reader stops retaining contiguous page
+rows but continues replaying and validating the chain/current status. It retains
+only the current record and bounded page under the existing maximum of 256
+revisions. This read uses recognized temporary recovery under
+`insights.lock`, preserves fail-closed seed/chain validation, and remains
+observational: it does not account progress or affect scheduling/wakeup.
 
 The separately granted `work_items_transition` operation exposes only
 `Project.work_items.transition`: required `id`, positive `expected_rev`, and
