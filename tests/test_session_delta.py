@@ -3,8 +3,10 @@ import json
 import os
 import time
 import unittest
+from unittest.mock import patch
 
 from support import Fixture, ScriptDriver
+from mizu.errors import Denied
 from mizu.engine_config import effective, session_record, save_session
 from mizu.fs import read_json
 from mizu.project import Project
@@ -43,6 +45,17 @@ class SessionDeltaTests(Fixture):
         record = projection(self, result["run"])
         self.assertEqual(record["prompt_mode"], "full")
         self.assertTrue(record["session_key"])
+
+    def test_delta_does_not_swallow_work_item_store_errors(self):
+        from mizu.runtime import session_prompt
+        ctx = self.context("worker")
+        save_worker_session(self, {"tokens": 0})
+        with patch.object(self.project.work_items, "page_open",
+                          side_effect=Denied("work-item page failed closed")) as page_open:
+            with self.assertRaisesRegex(Denied, "work-item page failed closed"):
+                session_prompt(ctx, ctx.role, ctx.run_dir)
+            # Both the delta attempt and generic full fallback fail closed.
+            self.assertEqual(page_open.call_count, 2)
 
     def test_resumed_session_receives_bounded_delta(self):
         first = Capture()

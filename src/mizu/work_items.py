@@ -1,4 +1,4 @@
-"""Internal append-audited work-item CAS; no scheduling or public interface.
+"""Append-audited work-item store with bounded runtime reads; no scheduling.
 
 Seeds are immutable accept/modify decision events. Reads and transitions share
 insights.lock; each successful CAS appends one full state, never a pointer.
@@ -500,15 +500,19 @@ class WorkItems:
         Schema: items ordered by status (doing, blocked, open), then oldest
         ``created_at`` and ID; includes total seeded-open count, the exclusive
         input ``cursor``, ``next_cursor`` iff another matching item follows,
-        ``truncated``, ``unseeded_decisions`` and ``coverage_complete``.
+        ``overflow_count`` (matching rows after the cursor beyond this page),
+        ``truncated`` (exactly ``overflow_count > 0``), ``unseeded_decisions``
+        and ``coverage_complete``.
         Limits are 1..100 (exact int); the opaque cursor carries the last row's
         status, UTC creation-order key and ID. Rows are at most 8192 canonical
         bytes and the complete response at most 1 MiB. Selection keeps O(limit)
         rows while scanning history. Legacy accept/modify events lacking a seed are
-        counted, never guessed as open. The page is internal and read-only
-        apart from recognized decision-history and per-item atomic-write
-        recovery under the shared lock. Recovery removes recognized regular
-        orphan temporaries without promotion; post-link aliases require exactly
+        counted, never guessed as open. The page serves the runtime prompt
+        projection and the explicitly granted ``work_items_read`` operation.
+        It does not transition items; it may remove recognized decision-history
+        and per-item atomic-write leftovers during recovery under the shared
+        lock. Recovery removes recognized regular orphan temporaries without
+        promotion; post-link aliases require exactly
         one matching event inode.
         Cursors page a live view: changes between calls can move rows; a last-key
         cursor avoids offset shifts on earlier closes but does not freeze
@@ -601,10 +605,12 @@ class WorkItems:
                             heapq.heapreplace(selected, candidate)
 
             rows = [entry[2] for entry in sorted(selected, key=lambda value: value[1])]
-            more = eligible > len(rows)
+            overflow_count = max(0, eligible - len(rows))
+            more = overflow_count > 0
             result = {"items": rows, "total": total, "cursor": cursor,
                       "next_cursor": _open_cursor_token(rows[-1]) if more and rows else None,
-                      "truncated": more, "unseeded_decisions": unseeded_decisions,
+                      "overflow_count": overflow_count, "truncated": more,
+                      "unseeded_decisions": unseeded_decisions,
                       "coverage_complete": unseeded_decisions == 0}
             if len(canonical(result)) > MAX_OPEN_PAGE_BYTES:
                 raise LimitExceeded("Work-item page exceeds byte bound")

@@ -532,6 +532,9 @@ class WorkItemTests(Fixture):
             page = self.store.page_open(cursor=cursor, limit=2)
             ids = [row["id"] for row in page["items"]]
             self.assertEqual(ids, expected[len(seen):len(seen) + 2])
+            expected_overflow = max(0, len(expected) - len(seen) - len(ids))
+            self.assertEqual(page["overflow_count"], expected_overflow)
+            self.assertEqual(page["truncated"], expected_overflow > 0)
             seen.extend(ids)
             if not page["truncated"]:
                 self.assertIsNone(page["next_cursor"])
@@ -563,6 +566,9 @@ class WorkItemTests(Fixture):
             self.assertTrue(page["coverage_complete"])
             ids = [row["id"] for row in page["items"]]
             self.assertEqual(ids, expected[len(seen):len(seen) + 2])
+            expected_overflow = max(0, len(expected) - len(seen) - len(ids))
+            self.assertEqual(page["overflow_count"], expected_overflow)
+            self.assertEqual(page["truncated"], expected_overflow > 0)
             seen.extend(ids)
             if not page["truncated"]:
                 self.assertIsNone(page["next_cursor"])

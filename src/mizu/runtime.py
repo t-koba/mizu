@@ -87,7 +87,7 @@ WRAP_UP_OPS = frozenset({"finish", "research", "submit_insight", "attach_evidenc
 #: Reads of existing state are useful observation, not harness-observable progress.
 OBSERVATIONAL_OPS = frozenset({
     "files", "read", "diff", "insights", "research_read", "vcs_read",
-    "command_evidence_read", "experiment_evidence_read",
+    "command_evidence_read", "experiment_evidence_read", "work_items_read",
 })
 REPLAYABLE_READ_ARGUMENTS = {"fetch": "receipt_id", "probe": "receipt_id", "search": "result_id"}
 
@@ -911,6 +911,10 @@ class Context:
         response['source_truncated']=record.get('truncated',False)
         return response
 
+    def _op_work_items_read(self, args: dict) -> dict:
+        return self.project.work_items.page_open(cursor=args.get("cursor"),
+                                                 limit=args.get("limit", 25))
+
     def _op_insights(self, args: dict) -> dict:
         if args.get("id"):
             return self.project.insights.read(args["id"])
@@ -1302,6 +1306,7 @@ class Context:
         "experiment_evidence_read": _op_experiment_evidence_read,
         "exec": _op_exec, "experiment": _op_experiment, "verify": _op_verify,
         "fetch": _op_fetch, "probe": _op_probe, "search": _op_search, "insights": _op_insights,
+        "work_items_read": _op_work_items_read,
         "decide": _op_decide, "submit_insight": _op_submit_insight,
         "revise_insight": _op_revise_insight, "withdraw_insight": _op_withdraw_insight,
         "attach_evidence": _op_attach_evidence,
@@ -2209,8 +2214,9 @@ def _open_backlog(context: Context, caps: set) -> dict:
 
 def prompt_for(context: Context) -> str:
     caps = set(context.role.capabilities)
-    # Mechanism enforces grants, not policy choice: only capability-gated,
-    # already-recorded context is offered. `pending_insights` count follows the
+    # Mechanism enforces grants, not policy choice: capability-gated context
+    # is offered where appropriate, alongside the always-present, bounded
+    # project-wide work-item page. `pending_insights` count follows the
     # operator-selected `[limits] pending_insights` bound (newest kept), and
     # `open_insights` states the same bounded backlog with explicit total;
     # `recent_snapshots` follows `[limits] prompt_snapshots`. Exact snapshot
@@ -2218,6 +2224,8 @@ def prompt_for(context: Context) -> str:
     # transitions below are the fixed single-writer contract, not policy.
     pending = context.project.insights.list(limit=context.config.limits.pending_insights) \
         if ("insights" in caps or "decide" in caps) else []
+    open_work_items = context.project.work_items.page_open(
+        limit=context.config.limits.work_items_prompt)
     acceptance = list(context.project.verify) if "verify" in caps else []
     ci_branch = context.config.vcs.get("ci_branch") or None
     if "vcs_read" not in caps:
@@ -2235,6 +2243,7 @@ def prompt_for(context: Context) -> str:
                        "workspace": "/workspace", "workspace_mode": context.role.workspace,
                        "pending_insights": pending,
                        "open_insights": _open_backlog(context, caps),
+                       "open_work_items": open_work_items,
                        "decision_events": list(getattr(context, "decision_events", []) or []),
                        "decision_task": _decision_task(context),
                        "wait_events": list(getattr(context, "wait_events", []) or []),
@@ -2256,23 +2265,28 @@ def prompt_delta_for(context: Context, pending: list) -> str:
     small ``snapshot_delta`` (previous/current ids), then only the pending
     proposals not yet offered, an ``open_insights`` statement of the still
     undecided backlog (ids plus total, so an already-offered insight never
-    reads as done), workspace markers, capability-gated acceptance
-    commands, and a capability-gated ``previous_report`` preview for roles
+    reads as done), the always-present bounded ``open_work_items`` page,
+    workspace markers, capability-gated acceptance commands, and a
+    capability-gated ``previous_report`` preview for roles
     holding ``report``. The full goal text and ``recent_snapshots`` history
     are never repeated: the provider session already holds them. Key order is
     fixed (pins first) so the stable prefix keeps working caches warm.
-    Bounds: pending and the open backlog both follow
+    Bounds: pending and the open insight backlog both follow
     ``[limits] pending_insights`` (newest kept; ``truncated`` says so
-    explicitly); the delta carries no workspace file contents and no history
+    explicitly); the work-item page follows ``[limits] work_items_prompt`` and
+    includes its overflow count, cursor, truncation, and legacy coverage status;
+    the delta carries no workspace file contents and no history
     array, so resumed-unit bytes stay flat as history grows apart from the
     fixed previous-report preview (at most ``report.PREVIOUS_REPORT_BYTES``).
-    Trust: local recorded state only, never model input. Retry/cancellation:
-    bounded local reads only (artifact pointer plus one file prefix);
-    ``previous()`` never raises, so an unreadable artifact reads as no
+    Trust: local recorded state, which may be untrusted model input.
+    Retry/cancellation: local bounded reads; the work-item page scan preserves
+    the store's fail-closed errors. ``previous()`` never raises, so an
+    unreadable artifact reads as no
     previous edition. Evidence: the dispatching run records
     ``prompt_mode=delta`` and ``prompt_bytes`` in ``prompt_projection.json``.
-    Failure: never raises for missing state (callers fall back to the full
-    prompt).
+    Failure: missing non-work-item state follows its existing fallback; the
+    fail-closed work-item page reader propagates store errors rather than
+    synthesizing an empty inventory.
     """
     caps = set(context.role.capabilities)
     acceptance = list(context.project.verify) if "verify" in caps else []
@@ -2281,6 +2295,8 @@ def prompt_delta_for(context: Context, pending: list) -> str:
     except Exception:
         ci_failures = None
     open_backlog = _open_backlog(context, caps)
+    open_work_items = context.project.work_items.page_open(
+        limit=context.config.limits.work_items_prompt)
     return json.dumps({"goal_digest": context.goal_digest,
                        "published_snapshot": {k: context.snapshot[k] for k in (
                            "id", "code_digest", "created_at", "state", "summary", "verification")},
@@ -2288,6 +2304,7 @@ def prompt_delta_for(context: Context, pending: list) -> str:
                                           "code_digest": context.snapshot["code_digest"]},
                        "pending_insights": pending,
                        "open_insights": open_backlog,
+                       "open_work_items": open_work_items,
                        "decision_events": list(getattr(context, "decision_events", []) or []),
                        "decision_task": _decision_task(context),
                        "wait_events": list(getattr(context, "wait_events", []) or []),
@@ -2819,11 +2836,18 @@ class Engine:
                     or new_obligation or prior_wait_expired)
                 prompt, prompt_mode, session_key, rotation, session_dir = session_prompt(context, role, run_dir)
                 decoded = json.loads(prompt)
+                work_items_page = decoded["open_work_items"]
                 write_json(run_dir / "prompt_projection.json",
                            {"run": run_id, "role": role_name, "snapshot": snapshot["id"],
                             "recent_snapshots": len(decoded.get("recent_snapshots", [])),
                             "pending_insights": len(decoded.get("pending_insights", [])),
                             "open_insights": (decoded.get("open_insights") or {}).get("total", 0),
+                            "open_work_items": {
+                                "shown": len(work_items_page["items"]),
+                                "total": work_items_page["total"],
+                                "overflow_count": work_items_page["overflow_count"],
+                                "unseeded_decisions": work_items_page["unseeded_decisions"],
+                                "coverage_complete": work_items_page["coverage_complete"]},
                             "decision_events": len(decoded.get("decision_events", [])),
                             "wait_events": len(decoded.get("wait_events", [])),
                             "acceptance_commands": len(decoded.get("acceptance_commands", [])),

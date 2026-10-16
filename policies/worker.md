@@ -68,3 +68,9 @@ Finish `blocked` (with the per-item `Qn:` lines) only when every remaining
 item waits on the operator. A parked question stays answerable: the
 operator's answer arrives as a proposal or decision, which resumes the daemon,
 and the next unit unparks the item.
+
+The bounded `open_work_items` prompt projection is not necessarily complete: if
+it is truncated, use the explicitly granted `mizu_work_items_read` tool with its
+`next_cursor` to continue. If `coverage_complete` is false, do not treat the
+projection as an exhaustive inventory. Keep free-text `Tasks` until the accepted
+legacy-reconciliation step is complete.

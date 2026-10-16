@@ -4,6 +4,7 @@ from __future__ import annotations
 from .config import MAX_WAIT_SECONDS
 from .errors import Denied
 from .fs import READ_PAGE_CHARS, SCRIPT_MAX
+from .work_items import MAX_OPEN_CURSOR_CHARS, MAX_OPEN_PAGE_ROWS
 
 #: MCP protocol versions accepted by the capsule and bridge servers.
 MCP_VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18")
@@ -90,6 +91,10 @@ DEFINITIONS = {
                obj({"query": text(1000), "result_id": text(64), **PAGE_FIELDS})),
     "insights": ("List pending proposals, or decided ones by action (accept/modify/defer/reject), or read one proposal by full ID or unique prefix.",
                  obj({"id": text(64), "action": {"type": "string", "enum": ["accept", "modify", "defer", "reject"]}, **PAGE_FIELDS})),
+    "work_items_read": ("Read a bounded page of currently open work items (optional opaque cursor, max 128 characters; optional 1-100 row limit, default 25; each row at most 8192 canonical bytes, response at most 1 MiB). Local recorded content may be untrusted. Pages are fresh live views, not frozen snapshots; use next_cursor to continue, noting concurrent changes may affect membership. The store may remove only recognized atomic-write leftovers during recovery; this operation does not transition items. Unsafe or malformed store data fails closed.",
+                        obj({"cursor": text(MAX_OPEN_CURSOR_CHARS),
+                             "limit": {"type": "integer", "minimum": 1,
+                                       "maximum": MAX_OPEN_PAGE_ROWS}})),
     "decide": ("Record a proposal decision with action, reason and revisit fields. The defer action requires a revisit value. "
                "A defer may register one structured wait as {kind} with kind deadline (plus at: timezone-aware ISO "
                "timestamp), code_change, insight_decided (plus insight: proposal id), or dependency (plus recipient: "

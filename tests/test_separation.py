@@ -265,13 +265,31 @@ class InsightRetentionTests(Fixture):
         self.assertTrue((tmp / f"{forty}.json").exists())
         self.assertEqual(Budget(tmp, 100, retention_days=31).gc(), 1)
 
+    def test_work_items_prompt_limit_default_and_range(self):
+        from mizu.config import load
+        self.assertEqual(self.config.limits.work_items_prompt, 20)
+        template = self.file.read_text()
+        for value in (1, 100):
+            path = self.root / f"config/work-items-{value}.toml"
+            path.write_text(template.replace("work_items_prompt = 20",
+                                            f"work_items_prompt = {value}"))
+            self.assertEqual(load(path).limits.work_items_prompt, value)
+        for value in (0, 101):
+            path = self.root / f"config/work-items-invalid-{value}.toml"
+            path.write_text(template.replace("work_items_prompt = 20",
+                                            f"work_items_prompt = {value}"))
+            with self.assertRaises(ConfigError):
+                load(path)
+
     def test_config_accepts_new_knobs(self):
         from mizu.config import load
         text = self.file.read_text() + "\n"
         path = self.root / "config/knobs.toml"
         path.write_text(self.file.read_text().replace("pending_insights = 30", "pending_insights = 5")
-                        .replace("retention_days = 31", "retention_days = 60"))
+                        .replace("retention_days = 31", "retention_days = 60")
+                        .replace("work_items_prompt = 20", "work_items_prompt = 7"))
         config = load(path)
+        self.assertEqual(config.limits.work_items_prompt, 7)
         self.assertEqual(config.limits.pending_insights, 5)
         self.assertEqual(config.limits.retention_days, 60)
 

@@ -143,6 +143,51 @@ class SnapshotTests(Fixture):
 
 
 class ContextTests(Fixture):
+    def test_work_items_read_protocol_grant_paging_and_observation(self):
+        from mizu.config import CAPABILITIES
+        from mizu.protocol import DEFINITIONS, validate
+        from mizu.runtime import _is_observational_operation
+        self.assertIn("work_items_read", CAPABILITIES)
+        self.assertIn("work_items_read", DEFINITIONS)
+        validate({}, DEFINITIONS["work_items_read"][1])
+        validate({"cursor": "opaque", "limit": 1}, DEFINITIONS["work_items_read"][1])
+        for arguments in ({"limit": 0}, {"limit": 101}, {"cursor": "x" * 129}):
+            with self.assertRaises(Denied):
+                validate(arguments, DEFINITIONS["work_items_read"][1])
+
+        for index in range(3):
+            proposal = self.project.insights.submit(
+                source="worker", title=f"Readable item {index}", body="Open", base_snapshot=None)
+            self.project.insights.decide(proposal["id"], "accept", "reviewed", "",
+                                         f"read-{index}", expected_rev=1)
+        ctx = self.context("worker")
+        self.assertIn("work_items_read", ctx.role.capabilities)
+        first = ctx.handle("work_items_read", {"limit": 2})
+        self.assertEqual(len(first["items"]), 2)
+        self.assertEqual(first["overflow_count"], 1)
+        self.assertTrue(first["truncated"])
+        second = ctx.handle("work_items_read", {"cursor": first["next_cursor"], "limit": 2})
+        self.assertEqual(len(second["items"]), 1)
+        self.assertEqual(second["overflow_count"], 0)
+        self.assertFalse(second["truncated"])
+        self.assertTrue(_is_observational_operation("work_items_read", {}))
+        self.assertFalse(ctx.progress_tool)
+
+        denied = self.context("consult")
+        denied.role = dataclasses.replace(denied.role, capabilities=tuple(
+            capability for capability in denied.role.capabilities if capability != "work_items_read"))
+        with self.assertRaisesRegex(Denied, "no capability: work_items_read"):
+            denied.handle("work_items_read", {})
+
+    def test_work_items_read_preserves_default_and_store_errors(self):
+        ctx = self.context("worker")
+        with patch.object(self.project.work_items, "page_open", return_value={"items": []}) as page_open:
+            self.assertEqual(ctx.handle("work_items_read", {}), {"items": []})
+            page_open.assert_called_once_with(cursor=None, limit=25)
+        with patch.object(self.project.work_items, "page_open", side_effect=Denied("store rejected cursor")):
+            with self.assertRaisesRegex(Denied, "store rejected cursor"):
+                ctx.handle("work_items_read", {})
+
     def test_capability_refusal(self):
         ctx = self.context("searcher")
         with self.assertRaises(Denied):
@@ -426,6 +471,51 @@ class EngineTests(Fixture):
 
 
 class PromptProjectionTests(Fixture):
+    def test_open_work_items_projection_is_shared_bounded_and_fail_closed(self):
+        import dataclasses
+        import json
+        from mizu.runtime import prompt_for, prompt_delta_for
+        from mizu.fs import write_json
+        for index in range(3):
+            proposal = self.project.insights.submit(
+                source="worker", title=f"Prompt item {index}", body="Open", base_snapshot=None)
+            self.project.insights.decide(proposal["id"], "accept", "reviewed", "",
+                                         f"prompt-{index}", expected_rev=1)
+        legacy = {"action": "accept"}
+        write_json(self.project.root / "decision-history" / ("b" * 32 + ".json"), legacy, exclusive=True)
+        small = dataclasses.replace(self.config, limits=dataclasses.replace(
+            self.config.limits, work_items_prompt=2))
+        ctx = self.context("consult")
+        ctx.config = small
+        # No capability is needed for the project-wide prompt projection.
+        ctx.role = dataclasses.replace(ctx.role, capabilities=tuple(
+            capability for capability in ctx.role.capabilities if capability != "work_items_read"))
+        self.assertNotIn("work_items_read", ctx.role.capabilities)
+        full = json.loads(prompt_for(ctx))
+        delta = json.loads(prompt_delta_for(ctx, []))
+        page = full["open_work_items"]
+        self.assertEqual(delta["open_work_items"], page)
+        self.assertEqual(len(page["items"]), 2)
+        self.assertEqual(page["total"], 3)
+        self.assertEqual(page["overflow_count"], 1)
+        self.assertTrue(page["truncated"])
+        self.assertIsNotNone(page["next_cursor"])
+        self.assertEqual(page["unseeded_decisions"], 1)
+        self.assertFalse(page["coverage_complete"])
+        with patch.object(self.project.work_items, "page_open", side_effect=Denied("unsafe store")):
+            with self.assertRaisesRegex(Denied, "unsafe store"):
+                prompt_for(ctx)
+
+    def test_open_work_items_projection_is_always_present(self):
+        import json
+        from mizu.runtime import prompt_for, prompt_delta_for
+        self.assertEqual(self.config.limits.work_items_prompt, 20)
+        for role in ("worker", "searcher", "reviewer", "reporter", "consult"):
+            context = self.context(role)
+            for prompt in (prompt_for(context), prompt_delta_for(context, [])):
+                self.assertIn("open_work_items", json.loads(prompt))
+                self.assertEqual(json.loads(prompt)["open_work_items"]["overflow_count"], 0)
+
     def test_pending_and_acceptance_are_capability_gated(self):
         import json
         from mizu.runtime import prompt_for
@@ -460,15 +550,27 @@ class PromptProjectionTests(Fixture):
             self.assertIn("code_digest", entry)
 
     def test_run_records_prompt_projection_evidence(self):
-        import json
-        from mizu.fs import read_json
+        import dataclasses
+        from mizu.fs import read_json, write_json
+        for index in range(3):
+            proposal = self.project.insights.submit(
+                source="worker", title=f"Audit item {index}", body="Open", base_snapshot=None)
+            self.project.insights.decide(proposal["id"], "accept", "reviewed", "",
+                                         f"audit-{index}", expected_rev=1)
+        write_json(self.project.root / "decision-history" / ("b" * 32 + ".json"),
+                   {"action": "accept"}, exclusive=True)
+        config = dataclasses.replace(self.config, limits=dataclasses.replace(
+            self.config.limits, work_items_prompt=2))
         before = self.project.snapshots.get()["id"]
-        result = Engine(self.config, driver=ScriptDriver()).run(self.project, "worker")
+        result = Engine(config, driver=ScriptDriver()).run(self.project, "worker")
         projection = read_json(self.project.root / "runs" / result["run"] / "prompt_projection.json")
         self.assertEqual(projection["run"], result["run"])
         self.assertEqual(projection["snapshot"], before)
         self.assertGreaterEqual(projection["prompt_bytes"], 100)
         self.assertGreaterEqual(projection["recent_snapshots"], 1)
+        self.assertEqual(projection["open_work_items"], {
+            "shown": 2, "total": 3, "overflow_count": 1,
+            "unseeded_decisions": 1, "coverage_complete": False})
 
 class PromptClockTests(Fixture):
     def test_prompt_carries_current_time_and_zone_last(self):
@@ -971,7 +1073,7 @@ class PromptOrderTests(Fixture):
         self.assertEqual(list(json.loads(prompt_for(ctx)).keys()),
                          ["goal", "published_snapshot", "recent_snapshots",
                           "workspace", "workspace_mode", "pending_insights",
-                          "open_insights",
+                          "open_insights", "open_work_items",
                           "decision_events", "decision_task", "wait_events", "obligations",
                           "acceptance_commands", "research_state",
                           "ci_branch", "ci_failures", "previous_report", "now",
@@ -979,7 +1081,7 @@ class PromptOrderTests(Fixture):
         self.assertEqual(
             list(json.loads(prompt_delta_for(ctx, [])).keys()),
             ["goal_digest", "published_snapshot", "snapshot_delta",
-             "pending_insights", "open_insights", "decision_events", "decision_task", "wait_events", "obligations",
+             "pending_insights", "open_insights", "open_work_items", "decision_events", "decision_task", "wait_events", "obligations",
              "research_state", "workspace", "workspace_mode",
              "acceptance_commands", "ci_branch", "ci_failures", "previous_report",
              "now", "timezone"])

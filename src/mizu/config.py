@@ -17,7 +17,8 @@ CAPABILITIES = frozenset({"diff", "files", "read", "exec", "experiment", "verify
                           "search", "insights", "decide", "submit_insight", "revise_insight", "withdraw_insight", "attach_evidence", "consult", "delegate",
                           "report", "finish", "sync", "vcs_read", "vcs_publish",
                           "vcs_retire", "vcs_dispose", "research_read", "research",
-                          "materialize", "command_evidence_read", "experiment_evidence_read"})
+                          "materialize", "command_evidence_read", "experiment_evidence_read",
+                          "work_items_read"})
 ENGINES = ("pi", "pi-durable", "codex", "claude")
 #: Role names that collide with insight sources owned by the host/operator
 #: channel (operator CLI, vcs CI helper, editor outbox). Model
@@ -341,6 +342,8 @@ class Limits:
     #: Raw inbox/decisions stay on disk; the operator
     #: review path (`mizu insight list`) uses a separate 1000-item bound.
     pending_insights: int = 30
+    #: Maximum open work-item rows offered in each full or delta prompt.
+    work_items_prompt: int = 20
     #: Operator-selected decision-event ride-along window per dispatch
     #: (1-100; default 10). The 100-event cap stays fixed mechanism;
     #: the value is policy: with rotation, a role with many deferrals sees
@@ -570,7 +573,7 @@ def load(file: Path) -> Config:
                      "delegate_wrap_up_requests": (0, 2),
                      "delegate_wrap_up_tools": (0, 4),
                      "retention_days": (0, 3650), "pending_insights": (1, 1000),
-                     "decision_events_limit": (1, 100),
+                     "work_items_prompt": (1, 100), "decision_events_limit": (1, 100),
                      "event_log_compress_days": (0, 3650), "event_log_retention_days": (0, 3650),
                      "event_stream_bytes": (1048576, 268435456),
                      "role_state_bytes": (1024, 65536),

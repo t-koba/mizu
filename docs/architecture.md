@@ -269,18 +269,36 @@ immutable decision-history event and pass seed validation. Missing current
 origin data is reported stale, while unsafe or malformed origin records fail
 closed. This projection does not yet gate internal transitions.
 
-`page_open(cursor=None, limit=25)` is an additional internal read-only page,
-not connected to runtime tools, prompts, explain, or status. Under one
-`insights.lock` section it scans committed `decision-history/*.json`, validates
-and reconstructs every seeded item (including closed states), and returns only
+`page_open(cursor=None, limit=25)` is the bounded page reader used by the
+explicitly granted `work_items_read` operation and by the project-wide
+`open_work_items` prompt projection. Every full and delta prompt includes the
+same projection regardless of role grants, capped by `limits.work_items_prompt`
+(default 20, range 1–100); the runtime calls the fail-closed reader directly,
+so store errors are not converted into empty inventory. The explicitly granted
+read-only tool defaults to 25 rows and accepts an optional opaque cursor (at
+most 128 characters) and limit (1–100). Local recorded content may be
+untrusted. Repeat reads are fresh live views, not frozen snapshots; a
+continuation uses `next_cursor`, and concurrent changes can affect membership.
+The operation is recorded in normal per-run tool evidence. It delegates to the
+shared-lock page reader: its only store writes are the recognized local
+atomic-write recovery cleanup described below, not work-item transitions.
+Failure and cancellation retain the existing store lock/read behavior; the tool
+adds no retry or cancellation handling.
+
+Under one `insights.lock` section, the reader scans committed
+`decision-history/*.json`, validates and reconstructs every seeded item
+(including closed states), and returns only
 `open`/`doing`/`blocked` rows ordered by status (`doing`, `blocked`, `open`),
 oldest creation timestamp, then ID. Its bounded opaque cursor carries that full
 exclusive sort key; `total` counts all currently open seeded items,
-independent of the cursor. Accept/modify history events without a `work_item`
-seed are counted as `unseeded_decisions`; `coverage_complete` is false while
-any exist, and their current state is never inferred. Rows include current
-origin staleness/redecision, a structured wait for blocked items, and an
-optional reason preview of at most 1024 UTF-8 bytes. Limits are 1–100 rows,
+independent of the cursor. `overflow_count` counts matching open rows remaining
+after the input cursor and beyond this page; `truncated` is exactly whether that
+count is positive. Accept/modify history events without a `work_item` seed are
+counted as `unseeded_decisions`; `coverage_complete` is false while any exist,
+and their current state is never inferred. The prompt carries this count,
+truncation, and coverage state; an incomplete projection is not an exhaustive
+inventory. Rows include current origin staleness/redecision, a structured wait
+for blocked items, and an optional reason preview of at most 1024 UTF-8 bytes. Limits are 1–100 rows,
 8192 canonical bytes per row, and 1 MiB for the complete response; selection
 uses O(limit) row memory plus bounded temporary/alias metadata (at most 64 of
 each). A bounded temporary-name pass precedes the O(decision-history) enumeration
@@ -292,18 +310,20 @@ regular `.new-<8-char>` orphan temporaries are removed, never promoted. A
 post-link hard-link alias is removed only when exactly one regular committed
 event filename has the same inode; unmatched aliases, unexpected names, and
 unsafe temporaries fail closed. Recognized per-item atomic-write leftovers are
-also recovered under the lock. Paging is a live view across calls, not a transaction snapshot. The exclusive
-last-key cursor avoids offset shifts when an earlier row closes, but new IDs
-that sort at or before the cursor may be absent from that continuation; an
+also recovered under the lock. Paging is a live view across calls, not a
+transaction snapshot. The exclusive last-key cursor avoids offset shifts when
+an earlier row closes, but new IDs that sort at or before the cursor may be
+absent from that continuation; an
 empty page after a cursor does not mean the collection is empty. `total` and
 `coverage_complete` describe only each call's locked scan. A fresh traversal
 starts with a null cursor and checks `total`, `truncated` and
 `coverage_complete` on each page, but still receives no transaction-consistent
-multi-page snapshot. No public visibility or free-text Tasks-retirement claim
-follows from this internal method. Public
-prompt/tool/CLI/status/explain visibility, policy configuration,
-backfill/reconciliation and replacement of free-text Tasks remain unfinished.
-**Free-text Tasks in writer state are still needed.**
+multi-page snapshot. The prompt and tool are observations only: they add no
+transition, scheduling, reconciliation, or Tasks-retirement behavior. The page
+reader preserves existing store error classifications and fails closed on
+malformed/unsafe records.
+**Free-text Tasks in writer state are still needed until legacy reconciliation
+is complete.**
 Author withdrawal (`mizu insight withdraw`, submitter or operator only)
 closes a pending proposal with an actor-labelled rev-bound record in
 the same decision store; it is refused over a revision-current substantive
@@ -500,14 +520,16 @@ previous failure evidence before further action. It does not resend the last
 command blindly, run `git reset --hard`, or manufacture a successful observation.
 
 The runtime prompt carries only protocol framing (goal, anchored snapshot
-references, capability-gated pending insights and acceptance commands, plus the
-current wall-clock time and configured zone as trailing `now`/`timezone` fields
+references, capability-gated pending insights and acceptance commands, the
+always-present bounded `open_work_items` page, plus the current wall-clock time
+and configured zone as trailing `now`/`timezone` fields
 so the stable prefix keeps working caches warm); sealing
 is directed by the `finish` tool contract. Each run
 records `prompt_projection.json` with the sent counts (`recent_snapshots`,
 `pending_insights`, `acceptance_commands`) and `prompt_bytes` as evidence for
-reliability review. All work
-judgment lives in the role policies under `policies/`. Likewise the `report`
+reliability review. Its `open_work_items` metadata records only `shown`, `total`,
+`overflow_count`, `unseeded_decisions`, and `coverage_complete`, never item text.
+All work judgment lives in the role policies under `policies/`. Likewise the `report`
 fallback document (used by `mizu report` with no LLM) and the smoke probe goal
 are labeled mechanism/test vectors, not policy.
 
