@@ -811,8 +811,6 @@ class Context:
     def _op_exec_experiment(self, op: str, args: dict) -> dict:
         if self.role.workspace == "none":
             raise Denied("This role has no workspace")
-        if op == "exec" and self.role.workspace == "write":
-            self.verification = None
         source = {"source_receipt": args["source_receipt"]} if "source_receipt" in args else {}
         result = self.sandbox.execute(self.workspace, args["script"],
                                       writable=self.role.workspace == "write", experiment=op == "experiment", **source)

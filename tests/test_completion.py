@@ -22,6 +22,46 @@ from mizu.process import run
 
 
 class CompletionTests(Fixture):
+    def _verified_exec_driver(self, script):
+        def work(ctx, *_):
+            def execute(workspace, command, *, writable, experiment=False, **kwargs):
+                if command == "change-code":
+                    (workspace / "app.py").write_bytes(b"VALUE = 3\n")
+                operation = f"test-command-{len(executions)}"
+                record = {"id": operation, "kind": "command", "role": ctx.role.name,
+                          "script": command, "exit_code": 0, "reason": "exited",
+                          "seconds": 0.0, "writable": writable, "stdout": "", "stderr": ""}
+                executions.append(record)
+                write_json(ctx.run_dir / "commands" / f"{operation}.json", record)
+                return record
+
+            executions = []
+            ctx.sandbox.execute = execute
+            verification = ctx.handle("verify", {})
+            self.assertTrue(verification["passed"])
+            ctx.handle("exec", {"script": script})
+            # Exec itself is not a verification boundary: only the final code
+            # digest and representability decide whether this remains usable.
+            self.assertTrue(ctx.verification["passed"])
+            ctx.handle("finish", {"outcome": "done", "summary": "verified", "state": "done"})
+
+        return ScriptDriver(work)
+
+    def test_nonmutating_exec_preserves_verification_for_done_snapshot(self):
+        before = self.project.snapshots.get()["id"]
+        Engine(self.config, driver=self._verified_exec_driver("true")).run(self.project, "worker")
+        snapshot = self.project.snapshots.get()
+        self.assertNotEqual(snapshot["id"], before)
+        self.assertEqual(snapshot["outcome"], "done")
+        self.assertTrue(snapshot["verification"]["passed"])
+        self.assertEqual(snapshot["verification"]["code_digest"], snapshot["code_digest"])
+
+    def test_code_mutating_exec_cannot_finish_done_with_old_verification(self):
+        before = self.project.snapshots.get()["id"]
+        with self.assertRaisesRegex(Denied, "Code changed after verification"):
+            Engine(self.config, driver=self._verified_exec_driver("change-code")).run(self.project, "worker")
+        self.assertEqual(self.project.snapshots.get()["id"], before)
+
     def test_final_unrepresentable_snapshot_refuses_done(self):
         before = self.project.snapshots.get()["id"]
         def work(ctx, *_):
