@@ -74,3 +74,13 @@ it is truncated, use the explicitly granted `mizu_work_items_read` tool with its
 `next_cursor` to continue. If `coverage_complete` is false, do not treat the
 projection as an exhaustive inventory. Keep free-text `Tasks` until the accepted
 legacy-reconciliation step is complete.
+
+For a seeded item, use the explicitly granted `mizu_work_items_read` projection
+to re-read its current revision, then call `mizu_work_items_transition` with that
+`expected_rev`; on a stale-CAS refusal, re-read instead of retrying the old
+revision. The runtime supplies your actor identity. Only transition to `done`
+after passing verification and when you can cite a retained published snapshot
+whose digest-bound verification matches the code being completed (a same-unit
+verification without a published snapshot ID is not completion evidence).
+Include a reason when dropping an item. A blocked item's optional structured
+wait is recorded on the item and has no scheduler or wakeup effect.

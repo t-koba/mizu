@@ -1,10 +1,12 @@
 """Small JSON-schema subset shared by broker tools and the Pi adapter."""
 from __future__ import annotations
 
+import re
+
 from .config import MAX_WAIT_SECONDS
 from .errors import Denied
 from .fs import READ_PAGE_CHARS, SCRIPT_MAX
-from .work_items import MAX_OPEN_CURSOR_CHARS, MAX_OPEN_PAGE_ROWS
+from .work_items import MAX_OPEN_CURSOR_CHARS, MAX_OPEN_PAGE_ROWS, STATUSES
 
 #: MCP protocol versions accepted by the capsule and bridge servers.
 MCP_VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18")
@@ -49,7 +51,9 @@ def validate(value, schema: dict, path: str = "arguments") -> None:
             value.encode("utf-8")
         except UnicodeEncodeError as exc:
             raise Denied(f"Invalid UTF-8 string at {path}") from exc
-        if "\x00" in value or len(value) > schema.get("maxLength", 32768):
+        if ("\x00" in value or len(value) < schema.get("minLength", 0)
+                or len(value) > schema.get("maxLength", 32768)
+                or ("pattern" in schema and re.fullmatch(schema["pattern"], value) is None)):
             raise Denied(f"Invalid or oversized string at {path}")
     elif kind == "integer":
         if not schema.get("minimum", -2147483648) <= value <= schema.get("maximum", 2147483647):
@@ -62,6 +66,16 @@ PAGE_FIELDS = {"offset": {"type": "integer", "minimum": 0, "maximum": 2147483647
 EVIDENCE_READ_FIELDS = {"run": text(32), "evidence_id": text(32),
                         "content_id": text(64), "offset": PAGE_FIELDS["offset"],
                         "limit": {"type": "integer", "minimum": 1, "maximum": READ_PAGE_CHARS}}
+
+# Shared schema for the structured waits accepted by `decide` and blocked
+# work-item transitions. Store-side normalization supplies their semantics.
+WAIT_SCHEMA = obj({"kind": {"type": "string", "enum": ["deadline", "code_change", "insight_decided",
+                                                               "dependency"]},
+                    "at": text(64), "insight": text(64), "recipient": text(64),
+                    "requires": obj({"insight": text(64),
+                                     "rev": {"type": "integer", "minimum": 1},
+                                     "action": {"type": "string", "enum": ["accept", "modify", "reject"]}},
+                                    ("insight", "rev", "action"))}, ("kind",))
 
 DEFINITIONS = {
     "diff": ("Read the bounded difference between this published snapshot and the preceding distinct code snapshot.", obj()),
@@ -95,6 +109,14 @@ DEFINITIONS = {
                         obj({"cursor": text(MAX_OPEN_CURSOR_CHARS),
                              "limit": {"type": "integer", "minimum": 1,
                                        "maximum": MAX_OPEN_PAGE_ROWS}})),
+    "work_items_transition": ("Append one work-item state transition using the required expected_rev CAS. Re-read the current work-item projection/revision after a stale-CAS refusal; retries are not automatic. Actor is bound to the runtime role, never supplied by the caller. Done requires snapshot_id for retained published history with passing digest-bound verification; dropped requires a nonempty reason; blocked may register one structured wait using decide's wait semantics. This operation has no scheduler or wakeup effects.",
+                               obj({"id": text(64), "expected_rev": {"type": "integer", "minimum": 1},
+                                    "status": {"type": "string", "enum": list(STATUSES)},
+                                    "reason": {"type": "string", "minLength": 1, "maxLength": 4000},
+                                    "wait": WAIT_SCHEMA,
+                                    "snapshot_id": {"type": "string", "minLength": 64, "maxLength": 64,
+                                                    "pattern": "^[0-9a-f]{64}$"}},
+                                   ("id", "expected_rev", "status"))),
     "decide": ("Record a proposal decision with action, reason and revisit fields. The defer action requires a revisit value. "
                "A defer may register one structured wait as {kind} with kind deadline (plus at: timezone-aware ISO "
                "timestamp), code_change, insight_decided (plus insight: proposal id), or dependency (plus recipient: "
@@ -104,13 +126,7 @@ DEFINITIONS = {
                obj({"id": text(64), "action": {"type": "string", "enum": ["accept", "modify", "defer", "reject"]},
                     "reason": text(4000), "revisit": text(2000),
                     "rev": {"type": "integer", "minimum": 1},
-                    "wait": obj({"kind": {"type": "string", "enum": ["deadline", "code_change", "insight_decided",
-                                                                            "dependency"]},
-                                 "at": text(64), "insight": text(64), "recipient": text(64),
-                                 "requires": obj({"insight": text(64),
-                                                  "rev": {"type": "integer", "minimum": 1},
-                                                  "action": {"type": "string", "enum": ["accept", "modify", "reject"]}},
-                                                 ("insight", "rev", "action"))}, ("kind",))},
+                    "wait": WAIT_SCHEMA},
                    ("id", "action", "reason", "rev"))),
     "submit_insight": ("Submit an immutable proposal. Sender identity is assigned by the runtime, not the model.",
                        obj({"title": text(200), "body": text(60000)}, ("title", "body"))),

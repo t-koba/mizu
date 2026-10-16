@@ -213,7 +213,7 @@ profile = "primary"
 # At most 16 files, each at most 64 KiB, 256 KiB total; missing/oversize fails.
 policy = "policies/worker.md"
 workspace = "write"
-capabilities = ["files", "read", "diff", "exec", "experiment", "verify", "fetch", "search", "insights", "decide", "consult", "work_items_read", "finish"]
+capabilities = ["files", "read", "diff", "exec", "experiment", "verify", "fetch", "search", "insights", "decide", "consult", "work_items_read", "work_items_transition", "finish"]
 daemon = true
 # Per-role per-run spend override (optional, same range as [limits]; unset keeps the project value).
 # requests_per_run = 24

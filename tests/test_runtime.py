@@ -143,6 +143,123 @@ class SnapshotTests(Fixture):
 
 
 class ContextTests(Fixture):
+    def _accepted_work_item(self, title="Runtime transition"):
+        proposal = self.project.insights.submit(source="worker", title=title,
+                                                body="Test the runtime operation", base_snapshot=None)
+        return self.project.insights.decide(proposal["id"], "accept", "reviewed", "",
+                                            "runtime-test", expected_rev=1)["work_item"]
+
+    def test_work_items_transition_protocol_schema_and_configured_grant(self):
+        from mizu.config import CAPABILITIES
+        from mizu.protocol import DEFINITIONS, validate
+        from mizu.runtime import _is_observational_operation
+
+        self.assertIn("work_items_transition", CAPABILITIES)
+        self.assertIn("work_items_transition", DEFINITIONS)
+        self.assertIn("work_items_transition", self.config.roles["worker"].capabilities)
+        for name, role in self.config.roles.items():
+            if name != "worker":
+                self.assertNotIn("work_items_transition", role.capabilities, name)
+        schema = DEFINITIONS["work_items_transition"][1]
+        item_id = "wi_" + "a" * 32
+        validate({"id": item_id, "expected_rev": 1, "status": "doing"}, schema)
+        validate({"id": item_id, "expected_rev": 2, "status": "blocked",
+                  "wait": {"kind": "code_change"}}, schema)
+        self.assertIs(schema["properties"]["wait"], DEFINITIONS["decide"][1]["properties"]["wait"])
+        bad_arguments = (
+            {},
+            {"id": item_id, "status": "doing"},
+            {"id": item_id, "expected_rev": 0, "status": "doing"},
+            {"id": item_id, "expected_rev": True, "status": "doing"},
+            {"id": item_id, "expected_rev": 1, "status": "unknown"},
+            {"id": item_id, "expected_rev": 1, "status": "doing", "reason": ""},
+            {"id": item_id, "expected_rev": 1, "status": "doing", "reason": "r" * 4001},
+            {"id": item_id, "expected_rev": 1, "status": "doing", "snapshot_id": "g" * 64},
+            {"id": item_id, "expected_rev": 1, "status": "doing", "snapshot_id": "a" * 63},
+            {"id": item_id, "expected_rev": 1, "status": "doing", "actor": "model"},
+            {"id": item_id, "expected_rev": 1, "status": "blocked",
+             "wait": {"kind": "code_change", "extra": 1}},
+        )
+        for arguments in bad_arguments:
+            with self.subTest(arguments=arguments), self.assertRaises(Denied):
+                validate(arguments, schema)
+        self.assertFalse(_is_observational_operation("work_items_transition", {}))
+
+    def test_work_items_transition_uses_read_revision_and_binds_actor(self):
+        item = self._accepted_work_item()
+        ctx = self.context("worker")
+        projection = ctx.handle("work_items_read", {})
+        current = next(row for row in projection["items"] if row["id"] == item["id"])
+        with self.assertRaises(Denied):
+            ctx.handle("work_items_transition", {"id": item["id"], "expected_rev": current["rev"],
+                                                  "status": "doing", "actor": "model-supplied"})
+        result = ctx.handle("work_items_transition", {"id": item["id"],
+                                                       "expected_rev": current["rev"],
+                                                       "status": "doing"})
+        self.assertEqual((result["rev"], result["status"], result["actor"]), (2, "doing", "worker"))
+        self.assertEqual(self.project.work_items.get(item["id"]), result)
+
+    def test_work_items_transition_stale_cas_refuses_without_write(self):
+        item = self._accepted_work_item()
+        self.project.work_items.transition(item["id"], expected_rev=1, status="doing", actor="other")
+        ctx = self.context("worker")
+        with self.assertRaisesRegex(Denied, "re-read"):
+            ctx.handle("work_items_transition", {"id": item["id"], "expected_rev": 1,
+                                                  "status": "blocked"})
+        directory = self.project.root / "work-items" / item["id"]
+        self.assertEqual(sorted(path.name for path in directory.iterdir()), ["2.json"])
+        self.assertEqual(self.project.work_items.get(item["id"])["rev"], 2)
+
+    def test_work_items_transition_denial_and_consult_delegate_exclusion(self):
+        import dataclasses
+        from mizu.runtime import (CONSULT_FORBIDDEN, DELEGATE_FORBIDDEN,
+                                  check_consult_role, check_delegate_role)
+        item = self._accepted_work_item()
+        ctx = self.context("worker")
+        ctx.role = dataclasses.replace(
+            ctx.role, capabilities=tuple(cap for cap in ctx.role.capabilities
+                                         if cap != "work_items_transition"))
+        with self.assertRaisesRegex(Denied, "no capability: work_items_transition"):
+            ctx.handle("work_items_transition", {"id": item["id"], "expected_rev": 1,
+                                                  "status": "doing"})
+        self.assertFalse((self.project.root / "work-items" / item["id"]).exists())
+        self.assertIn("work_items_transition", CONSULT_FORBIDDEN)
+        self.assertIn("work_items_transition", DELEGATE_FORBIDDEN)
+        consult = self.config.roles["consult"]
+        with self.assertRaises(ConfigError):
+            check_consult_role("consult", dataclasses.replace(
+                consult, capabilities=(*consult.capabilities, "work_items_transition")))
+        delegate = self.config.roles["searcher"]
+        with self.assertRaises(ConfigError):
+            check_delegate_role("helper", dataclasses.replace(
+                delegate, capabilities=(*delegate.capabilities, "work_items_transition")))
+
+    def test_work_items_transition_preserves_store_wait_and_completion_checks(self):
+        item = self._accepted_work_item()
+        ctx = self.context("worker")
+        blocked = ctx.handle("work_items_transition", {"id": item["id"], "expected_rev": 1,
+                                                        "status": "blocked",
+                                                        "wait": {"kind": "deadline",
+                                                                 "at": "2030-01-01T00:00:00+00:00"}})
+        self.assertEqual(blocked["wait"], {"kind": "deadline", "at": "2030-01-01T00:00:00+00:00"})
+        self.assertFalse((self.project.root / "waits" / f"{item['id']}.json").exists())
+        with self.assertRaisesRegex(Denied, "snapshot"):
+            ctx.handle("work_items_transition", {"id": item["id"], "expected_rev": 2,
+                                                  "status": "done"})
+        self.assertEqual(self.project.work_items.get(item["id"])["rev"], 2)
+
+        captured = self.project.snapshots.capture_files(self.project.workspace)
+        verification = {"passed": True, "code_digest": captured["code_digest"], "run": "runtime-test"}
+        snapshot = self.project.snapshots.create(
+            captured, goal="Goal", state="Verified", run="runtime-test", outcome="done",
+            summary="Verified completion", verification=verification)
+        self.project.snapshots.publish(snapshot)
+        completed = ctx.handle("work_items_transition", {"id": item["id"], "expected_rev": 2,
+                                                          "status": "done",
+                                                          "snapshot_id": snapshot["id"]})
+        self.assertEqual(completed["snapshot_id"], snapshot["id"])
+        self.assertEqual(completed["verification"], verification)
+
     def test_work_items_read_protocol_grant_paging_and_observation(self):
         from mizu.config import CAPABILITIES
         from mizu.protocol import DEFINITIONS, validate

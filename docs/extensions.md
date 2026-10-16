@@ -86,7 +86,8 @@ PDF extractor only with an explicit grant and tested resource bounds.
 ## New tools
 
 The schema subset lives in `protocol.py`: object, string, integer, boolean, array
-and enum with bounds. Additional fields are denied. Add the capability to strict
+and enum with bounds, plus string `minLength` and full-match `pattern`
+constraints. Additional fields are denied. Add the capability to strict
 config validation, its tool definition, a dispatch branch in `Context.handle`,
 and tests proving unauthorized and post-finish calls are denied. Add a fake-RPC
 contract test and a real integration test where the new boundary needs one.

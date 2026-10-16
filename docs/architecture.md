@@ -222,9 +222,11 @@ the current insight title and `{insight_id, rev}` origin, starts `open` at item
 revision 1 with no holder, and uses the decision timestamp for creation and
 update. `defer` and `reject` do not create a seed.
 
-`Project.work_items` provides an **internal-only** `get(item_id)` and
+`Project.work_items` provides internal store methods `get(item_id)` and
 `transition(item_id, *, expected_rev, status, actor, reason=None, wait=None,
-snapshot_id=None)` layer. It resolves the seed directly from
+snapshot_id=None)`. `get()` remains internal-only; the runtime exposes the
+transition method only through the separately granted operation described below.
+It resolves the seed directly from
 `decision-history/<event-hex>.json`, validating the accept/modify event and
 nested seed without scanning the inbox or decision history. The event's title
 is the immutable title authority, not the subsequently revisable insight.
@@ -287,6 +289,24 @@ shared-lock page reader: its only store writes are the recognized local
 atomic-write recovery cleanup described below, not work-item transitions.
 Failure and cancellation retain the existing store lock/read behavior; the tool
 adds no retry or cancellation handling.
+
+The separately granted `work_items_transition` operation exposes only
+`Project.work_items.transition`: required `id`, positive `expected_rev`, and
+status (`open`, `doing`, `blocked`, `done`, `dropped`), with optional nonempty
+reason (1–4000 characters), structured wait, and 64-character lowercase digest
+`snapshot_id`. The configured worker example role alone holds this grant;
+`work_items_read` does not imply it, and consultation/delegation roles are
+explicitly forbidden from holding it. The runtime binds `actor` to the role
+name and accepts no model-supplied actor. It returns the store's bounded record
+and preserves store errors. A stale CAS refuses without writing: re-read the
+fresh work-item projection and use its revision before retrying. `done` is
+accepted only for retained published snapshot history with passing verification
+bound to that snapshot's code digest; use a snapshot ID carrying that evidence.
+`dropped` requires a reason, and a `blocked` transition may include the same
+structured wait schema and normalization semantics as `decide`. These waits are
+stored on the item only: transitions do not register scheduler waits, wake a
+role, or create scheduling effects. This mutating operation is not observational
+and receives no exception to the existing per-run or wrap-up spend bounds.
 
 Under one `insights.lock` section, the reader scans committed
 `decision-history/*.json`, validates and reconstructs every seeded item

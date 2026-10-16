@@ -388,6 +388,8 @@ models are recorded. Model usage excludes unreported auxiliary billing.
 | `fetch`, `search` | Allowlisted retrieval / trusted discovery adapter |
 | `probe` | One policy-bounded HTTPS request to `probe_hosts` with an allowlisted method and bounded headers/body; observes status, headers and bounded body with a receipt (no redirects, no credentials) |
 | `insights` | Read proposals |
+| `work_items_read` | Read a bounded live page of currently open work items; pages are not frozen snapshots and failures in the store fail closed. This read grant does not imply transition authority |
+| `work_items_transition` | Append one CAS-bound status revision; actor is fixed to the role, stale revisions require a fresh read, `done` requires retained passing digest-bound snapshot evidence, `dropped` requires a reason, and `blocked` may carry a structured wait. Granted only to the example worker role |
 | `decide` | Record accept/modify/defer/reject and rationale |
 | `submit_insight` | Submit proposal with route-derived identity |
 | `revise_insight` | Revise one of the role's own proposals under its stable ID (source fixed to the role, bound to the read rev; prior content archived, meaningful change reopens the topic) |
