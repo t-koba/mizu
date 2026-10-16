@@ -677,6 +677,11 @@ def _audit_collect(project: Project) -> dict:
                             work_item_events_skipped += 1
                             continue
                         try:
+                            # A drop-only legacy sidecar is covered evidence,
+                            # not a seeded item. Validate it read-only; open
+                            # sidecars continue through normal reconstruction.
+                            if project.work_items._audit_drop_only(item_entry.name):
+                                continue
                             # Immutable append events make the internal read
                             # stable without taking the writer lock; reclaim
                             # calls this again under project quiescence.

@@ -205,6 +205,40 @@ class WorkItems:
             raise Denied("Dropped legacy resolution carries active history")
         return record
 
+    def _audit_drop_only(self, item_id: str) -> bool:
+        """Recognize a valid legacy drop sidecar without recovery or writes.
+
+        Only a directory containing exactly one ordinary ``legacy.json`` can
+        be covered here. The shared resolution validator binds that bounded,
+        non-hardlinked sidecar to its immutable decision event. Open records
+        deliberately fall through to the regular seed/history reader.
+        """
+        match = ITEM_ID.fullmatch(item_id) if isinstance(item_id, str) else None
+        if match is None:
+            return False
+        directory = self.root / "work-items" / item_id
+        if not _directory(directory.parent) or not _directory(directory):
+            return False
+        try:
+            (directory / "legacy.json").lstat()
+        except FileNotFoundError:
+            return False
+        with os.scandir(directory) as entries:
+            first = next(entries, None)
+            if first is None or first.name != "legacy.json":
+                return False
+            info = _entry_stat(first)
+            if (not stat.S_ISREG(info.st_mode) or first.is_symlink()
+                    or getattr(info, "st_file_attributes", 0) & 0x400):
+                return False
+            if next(entries, None) is not None:
+                return False
+
+        event_id = match[1]
+        event = self._read(f"decision-history/{event_id}.json")
+        resolution = self._legacy_resolution(event_id, event, history_revisions=[])
+        return resolution is not None and resolution["outcome"] == "drop"
+
     def reconcile(self, event_id, *, expected_action, outcome, reason, actor,
                   expected_rev=None, title=None) -> dict:
         """Resolve exactly one unseeded event, exclusively and retry-idempotently."""

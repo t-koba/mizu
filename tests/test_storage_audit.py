@@ -3,6 +3,7 @@ import json
 import unittest
 from support import Fixture
 from mizu.errors import Denied
+from mizu.fs import write_json
 from mizu.storage import audit, reclaim
 
 
@@ -44,6 +45,97 @@ class StorageAuditTests(Fixture):
         self.assertTrue((self.project.root / "objects" / orphan).exists())
         self.assertTrue((self.project.root / "snapshots" / f"{snap['id']}.json").exists())
 
+
+    def synthetic_drop(self, serial):
+        """Create a synthetic legacy decision and its valid drop sidecar."""
+        event_id = f"{serial:032x}"
+        event = {"id": "synthetic-insight", "action": "accept", "rev": 1,
+                 "reason": "Synthetic storage-audit coverage", "revisit": "",
+                 "run": "synthetic-run", "created_at": "2024-01-01T00:00:00+00:00"}
+        history = self.project.root / "decision-history" / f"{event_id}.json"
+        history.parent.mkdir(parents=True, exist_ok=True)
+        write_json(history, event)
+        record = self.project.work_items.reconcile(
+            event_id, expected_action="accept", outcome="drop",
+            reason="Synthetic drop for audit coverage", actor="worker")["record"]
+        return self.project.root / "work-items" / f"wi_{event_id}", record
+
+    def unreferenced_snapshot(self):
+        captured = self.project.snapshots.capture_files(self.project.workspace)
+        return self.project.snapshots.create(
+            captured, goal=self.project.goal, state="Synthetic storage audit",
+            run=None, outcome="wait", summary="Synthetic unreferenced snapshot")
+
+    def test_synthetic_drop_sidecar_is_covered_by_audit_and_reclaim(self):
+        item_dir, _record = self.synthetic_drop(1)
+        snapshot = self.unreferenced_snapshot()
+
+        report = audit(self.project)
+        self.assertEqual(report["work_item_events_skipped"], 0)
+        self.assertIn(snapshot["id"], report["snapshots"]["unreferenced_sample"])
+        self.assertEqual(report["references"]["work_item_snapshots"], 0)
+
+        self.project.set_control(paused=True)
+        result = reclaim(self.project, apply=True)
+        self.assertEqual(result["work_item_events_skipped"], 0)
+        self.assertIn(f"snapshots/{snapshot['id']}.json", result["snapshots"])
+        self.assertFalse((self.project.root / "snapshots" / f"{snapshot['id']}.json").exists())
+        self.assertTrue((item_dir / "legacy.json").is_file())
+
+    def test_synthetic_open_legacy_sidecar_uses_item_reconstruction(self):
+        event_id = f"{5:032x}"
+        event = {"id": "synthetic-insight", "action": "accept", "rev": 1,
+                 "reason": "Synthetic open-item coverage", "revisit": "",
+                 "run": "synthetic-run", "created_at": "2024-01-01T00:00:00+00:00"}
+        history = self.project.root / "decision-history" / f"{event_id}.json"
+        history.parent.mkdir(parents=True, exist_ok=True)
+        write_json(history, event)
+        opened = self.project.work_items.reconcile(
+            event_id, expected_action="accept", outcome="open",
+            reason="Synthetic open item", actor="worker",
+            title="Synthetic audited item")["record"]["work_item"]
+
+        captured = self.project.snapshots.capture_files(self.project.workspace)
+        verification = {"passed": True, "code_digest": captured["code_digest"],
+                        "run": "synthetic-run"}
+        snapshot = self.project.snapshots.create(
+            captured, goal=self.project.goal, state="Synthetic completion",
+            run="synthetic-run", outcome="done", summary="Synthetic completion evidence",
+            verification=verification)
+        self.project.snapshots.publish(snapshot)
+        self.project.work_items.transition(
+            opened["id"], expected_rev=1, status="done", actor="worker",
+            snapshot_id=snapshot["id"])
+
+        report = audit(self.project)
+        self.assertEqual(report["work_item_events_skipped"], 0)
+        self.assertGreaterEqual(report["references"]["work_item_snapshots"], 1)
+        self.assertNotIn(snapshot["id"], report["snapshots"]["unreferenced_sample"])
+
+    def test_synthetic_malformed_incomplete_and_unexpected_drop_records_fail_closed(self):
+        malformed_dir, _ = self.synthetic_drop(2)
+        (malformed_dir / "legacy.json").write_bytes(b"{not-json")
+
+        incomplete_dir, record = self.synthetic_drop(3)
+        incomplete = dict(record)
+        incomplete.pop("reason")
+        write_json(incomplete_dir / "legacy.json", incomplete)
+
+        unexpected_dir, _ = self.synthetic_drop(4)
+        temporary = unexpected_dir / ".new-abcdefgh"
+        temporary.write_bytes(b"synthetic interrupted append")
+        (unexpected_dir / "2.json").write_bytes(b"{}")
+
+        snapshot = self.unreferenced_snapshot()
+        self.project.set_control(paused=True)
+        report = audit(self.project)
+        self.assertGreaterEqual(report["work_item_events_skipped"], 3)
+        with self.assertRaises(Denied):
+            reclaim(self.project, apply=True)
+        self.assertTrue((self.project.root / "snapshots" / f"{snapshot['id']}.json").exists())
+        # Audit is read-only: unexpected history and its temporary remain.
+        self.assertTrue(temporary.exists())
+        self.assertTrue((unexpected_dir / "2.json").exists())
 
     def completed_work_item(self):
         proposal = self.project.insights.submit(

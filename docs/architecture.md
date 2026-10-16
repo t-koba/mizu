@@ -254,8 +254,9 @@ records its revision, update time, caller-supplied actor, from/to transition,
 and explicit reason/wait/snapshot/verification fields (null when absent).
 Actor is trusted internal attribution, not a new authorization grant. `doing`
 assigns the actor as holder, `blocked` preserves the holder or assigns the
-actor, and other statuses clear it. Blocking requires a wait normalized by
-the existing Insights validator, but registers **no scheduler wait or wake**.
+actor, and other statuses clear it. A blocked transition may include a wait
+normalized by the existing Insights validator, but registers **no scheduler
+wait or wake**.
 Dropping requires a nonempty reason. Completion requires `Snapshots.get()`
 validation and membership in retained published history. The stored
 verification must have `passed is True` and a code digest matching the
