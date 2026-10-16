@@ -13,7 +13,7 @@ jobs:
     # Portable development plane: offline unit/contract checks on all three OSes.
     # Native service operation, live inference and OCI isolation are never asserted here.
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 25 || 20 }}
     strategy:
       fail-fast: false
       matrix:

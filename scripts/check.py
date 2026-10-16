@@ -62,8 +62,8 @@ def _allow_list(value: str) -> frozenset:
 
 
 def _unittest_timeout_seconds(platform: str | None = None) -> int:
-    """Keep the slow Windows suite below the workflow's 20-minute job cap."""
-    return 1150 if (os.name if platform is None else platform) == 'nt' else 1000
+    """Keep the slow Windows suite below the workflow's 25-minute job cap."""
+    return 1450 if (os.name if platform is None else platform) == 'nt' else 1000
 
 
 def unittest_failure_summary(sidecar: Path) -> str:
@@ -165,10 +165,10 @@ def main():
     checks = []
     counts = {}
     env = {**os.environ, 'PYTHONDONTWRITEBYTECODE': '1', 'PYTHONFAULTHANDLER': '1'}
-    # The offline suite is process-spawn heavy (~75 s on Linux); Windows
-    # runners need substantially more headroom than 300 s, well within the
-    # 20-minute CI job budget. Step output streams live (merged in order) so
-    # a hung step leaves the last-running test visible, and a step timeout
+    # The offline suite is process-spawn heavy. The Windows-only child cap is
+    # paired with the workflow's 25-minute job cap, leaving 50 s for post-suite
+    # checks. Step output streams live (merged in order) so a hung step leaves
+    # the last-running test visible, and a step timeout
     # is recorded as a structured failure with the partial output counted
     # instead of crashing the gate before the receipt is written.
     def execute(name, command, *, count=None, failure_summary=None, timeout=600):
@@ -244,11 +244,10 @@ def main():
                 'skipped': int(re.search(r'^# skipped (\d+)', output, re.M).group(1)) if re.search(r'^# skipped (\d+)', output, re.M) else 0}
     # Timestamped verbose progress: on a timeout the killed step leaves the
     # unfinished test as the last timestamped line in the live log.
-    # Windows/Python 3.13 CI was still making steady unittest progress
-    # in test_single_id when the 1000 s child cap killed it. Use a
-    # 1150 s Windows-only cap within the 1200 s job timeout; other platforms
-    # retain 1000 s. Timestamped progress still distinguishes a slow suite from
-    # a stalled test, and the job retains time for post-suite checks.
+    # Windows/Python 3.14 was still progressing through test_runtime.EngineTests
+    # when the 1150 s child cap killed a CI run; the same SHA passed on another
+    # Windows runner. Give this variable platform five more minutes while keeping
+    # 50 s before the job cap for post-suite checks. POSIX retains 1000 s.
     # The child owns structured exception metadata. Its new sidecar is private
     # and deleted even on timeout; no failure/timeout details parse raw output.
     with tempfile.TemporaryDirectory(prefix='mizu-unittest-') as temporary:

@@ -37,8 +37,10 @@ def write_adapter(base: Path, deps, installed: dict):
 
 class CheckTimeoutTests(unittest.TestCase):
     def test_windows_unit_suite_has_extra_headroom_only(self):
-        self.assertEqual(CHECK._unittest_timeout_seconds('nt'), 1150)
+        self.assertEqual(CHECK._unittest_timeout_seconds('nt'), 1450)
         self.assertEqual(CHECK._unittest_timeout_seconds('posix'), 1000)
+        workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
+        self.assertIn("timeout-minutes: ${{ matrix.os == 'windows-latest' && 25 || 20 }}", workflow)
 
 
 class DurableDepsProbeTests(unittest.TestCase):
