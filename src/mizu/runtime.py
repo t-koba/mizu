@@ -84,6 +84,20 @@ WRAP_UP_TOOLS = 5
 #: Operations admitted during wrap-up (plus bridge bookkeeping). Everything
 #: else is refused once a per-run bound is reached.
 WRAP_UP_OPS = frozenset({"finish", "research", "submit_insight", "attach_evidence", "decide"})
+#: Reads of existing state are useful observation, not harness-observable progress.
+OBSERVATIONAL_OPS = frozenset({
+    "files", "read", "diff", "insights", "research_read", "vcs_read",
+    "command_evidence_read", "experiment_evidence_read",
+})
+REPLAYABLE_READ_ARGUMENTS = {"fetch": "receipt_id", "probe": "receipt_id", "search": "result_id"}
+
+
+def _is_observational_operation(operation: str, arguments: dict) -> bool:
+    """Identify pure reads of existing data, which do not reset progress."""
+    if operation in OBSERVATIONAL_OPS:
+        return True
+    replay_argument = REPLAYABLE_READ_ARGUMENTS.get(operation)
+    return replay_argument is not None and replay_argument in arguments
 
 
 def is_infra_wait(exc: BaseException) -> bool:
@@ -643,7 +657,7 @@ class Context:
                                   count="tool_call:" + operation)
             try:
                 result = self.dispatch(operation, arguments)
-                if operation != "finish":
+                if operation != "finish" and not _is_observational_operation(operation, arguments):
                     self.progress_tool = True
                 if operation == "decide":
                     self.progress_decision = True

@@ -9,7 +9,8 @@ from mizu.config import load
 from mizu.errors import ConfigError, Denied
 from mizu.explain import explain
 from mizu.fs import canonical, digest, now, write_json
-from mizu.runtime import Engine, _progress_obligations_digest, _progress_record, should_run
+from mizu.runtime import (Engine, _is_observational_operation, _progress_obligations_digest,
+                          _progress_record, should_run)
 from mizu.snapshot import PROGRESS_SIGNALS, progress_disposition, validate_progress
 
 
@@ -110,6 +111,17 @@ class ProgressAdmissionTests(Fixture):
         Engine(config, driver=ScriptDriver(run)).run(self.project, "worker")
         return self.project.snapshots.get()
 
+    def test_existing_state_reads_and_receipt_replays_are_observational(self):
+        for operation in ("files", "read", "diff", "insights", "research_read", "vcs_read",
+                          "command_evidence_read", "experiment_evidence_read"):
+            self.assertTrue(_is_observational_operation(operation, {}), operation)
+        cases = (("fetch", "receipt_id", {"url": "https://example.test/"}),
+                 ("probe", "receipt_id", {"url": "https://example.test/", "method": "GET"}),
+                 ("search", "result_id", {"query": "new work"}))
+        for operation, argument, request in cases:
+            self.assertTrue(_is_observational_operation(operation, {argument: "recorded-id"}), operation)
+            self.assertFalse(_is_observational_operation(operation, request), operation)
+
     def test_finish_only_unchanged_run_is_recorded_as_no_progress_and_parked(self):
         snapshot = self._recorded_run()
         self.assertEqual(snapshot["outcome"], "continue")
@@ -119,11 +131,15 @@ class ProgressAdmissionTests(Fixture):
         self.assertEqual(snapshot["progress"]["no_progress_count"], 1)
         self.assertFalse(should_run(self.project, snapshot, role_name="worker"))
 
-    def test_successful_tool_code_state_and_action_signals_are_recorded(self):
-        tool = self._recorded_run(lambda ctx, base: ctx.handle("files", {}))
-        self.assertTrue(tool["progress"]["signals"]["tool"])
-        self.assertTrue(tool["progress"]["has_progress"])
-        self.assertEqual(tool["progress"]["no_progress_count"], 0)
+    def test_observations_do_not_progress_but_code_state_and_action_signals_do(self):
+        def repeated_read(ctx, base):
+            for _ in range(3):
+                ctx.handle("files", {})
+        observation = self._recorded_run(repeated_read)
+        self.assertFalse(observation["progress"]["signals"]["tool"])
+        self.assertFalse(observation["progress"]["has_progress"])
+        self.assertEqual(observation["progress"]["no_progress_count"], 1)
+        self.assertFalse(should_run(self.project, observation, role_name="worker"))
 
         def failed_tool(ctx, base):
             with self.assertRaises(Denied):

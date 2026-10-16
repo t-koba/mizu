@@ -155,9 +155,11 @@ paused/disarmed.
 Writable `continue` and `bounded` snapshots also carry a compact, digest-bound
 progress record. `[limits] progress_signals` selects which observed signals
 qualify; any selected true signal is progress. The default selects successful
-non-finish Mizu operations or new native engine-tool authorizations (not
-idempotent replays), changed code/state, successful decisions and insight
-actions, and fresh/due one-shot input. Input means a changed inbox or operator
+non-finish Mizu operations except pure reads of existing workspace, proposal,
+research, VCS or retained command/experiment evidence and exact web-receipt
+replays; new native engine-tool authorizations (not idempotent replays), changed
+code/state, successful decisions and insight actions, and fresh/due one-shot
+input also qualify. Input means a changed inbox or operator
 wake generation, consumed decision/wait events, CI failures due for this
 snapshot, or an expired prior wait. Persistent pending obligations and cached
 red CI presence do not count repeatedly: pending obligations are fingerprinted
