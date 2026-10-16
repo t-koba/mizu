@@ -62,7 +62,7 @@ def _allow_list(value: str) -> frozenset:
 
 
 def _unittest_timeout_seconds(platform: str | None = None) -> int:
-    """Keep the slow Windows suite below the workflow's 25-minute job cap."""
+    """Give the Windows suite a 1450-second child cap under the 35-minute job cap."""
     return 1450 if (os.name if platform is None else platform) == 'nt' else 1000
 
 
@@ -166,8 +166,9 @@ def main():
     counts = {}
     env = {**os.environ, 'PYTHONDONTWRITEBYTECODE': '1', 'PYTHONFAULTHANDLER': '1'}
     # The offline suite is process-spawn heavy. The Windows-only child cap is
-    # paired with the workflow's 25-minute job cap, leaving 50 s for post-suite
-    # checks. Step output streams live (merged in order) so a hung step leaves
+    # paired with the workflow's 35-minute job cap; the nominal 650 s difference
+    # covers pre-child setup and post-suite checks/receipt together. Step output
+    # streams live (merged in order) so a hung step leaves
     # the last-running test visible, and a step timeout
     # is recorded as a structured failure with the partial output counted
     # instead of crashing the gate before the receipt is written.
@@ -246,8 +247,10 @@ def main():
     # unfinished test as the last timestamped line in the live log.
     # Windows/Python 3.14 was still progressing through test_runtime.EngineTests
     # when the 1150 s child cap killed a CI run; the same SHA passed on another
-    # Windows runner. Give this variable platform five more minutes while keeping
-    # 50 s before the job cap for post-suite checks. POSIX retains 1000 s.
+    # Windows runner. Keep the child cap at 1450 s. The workflow's 35-minute
+    # limit begins before checkout/setup and gives 650 s nominal headroom for
+    # setup, child shutdown, post-suite checks and receipt writing; a contract
+    # test keeps that headroom at least 600 s. POSIX retains 1000 s.
     # The child owns structured exception metadata. Its new sidecar is private
     # and deleted even on timeout; no failure/timeout details parse raw output.
     with tempfile.TemporaryDirectory(prefix='mizu-unittest-') as temporary:
