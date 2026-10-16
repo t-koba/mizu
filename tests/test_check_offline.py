@@ -4,9 +4,13 @@ import importlib.util
 import io
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
+import textwrap
+import threading
+import time
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -44,10 +48,136 @@ class CheckTimeoutTests(unittest.TestCase):
         workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
         self.assertIn("timeout-minutes: ${{ matrix.os == 'windows-latest' && 40 || 20 }}", workflow)
         # Exercise the reviewer's 60-second setup case, one later execute timeout,
-        # both bounded cleanup waits, and time for remaining checks/receipt.
+        # both bounded cleanup waits, process-group termination (1 s grace + 5 s
+        # reap), and the suffix/receipt reserve.
         required = (60 + child_timeout + CHECK.DEFAULT_CHECK_TIMEOUT_SECONDS
-                    + 2 * CHECK.PROCESS_CLEANUP_TIMEOUT_SECONDS + 120)
+                    + 2 * CHECK.PROCESS_CLEANUP_TIMEOUT_SECONDS + 6 + 120)
         self.assertGreaterEqual(40 * 60, required)
+
+    def test_gate_cleans_up_descendant_after_parent_exit(self):
+        self._gate_with_inherited_stdout(timed_out=False)
+
+    def test_gate_cleans_up_descendant_after_timeout(self):
+        self._gate_with_inherited_stdout(timed_out=True)
+
+    def _gate_with_inherited_stdout(self, *, timed_out):
+        """Run main's real execute/pump and real process-tree helpers.
+
+        Only the suite command and unrelated preflights are replaced. The
+        descendant confirms startup by opening a listener before the parent
+        exits/sleeps, and inherits the gate's stdout pipe for its whole life.
+        """
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ready = root / 'ready.json'
+            report = root / 'report.json'
+            descendant = root / 'descendant.py'
+            descendant.write_text(textwrap.dedent('''\
+                import json, os, socket, sys, time
+                from pathlib import Path
+                with socket.socket() as listener:
+                    listener.bind(('127.0.0.1', 0))
+                    listener.listen()
+                    Path(sys.argv[1]).write_text(json.dumps({
+                        'pid': os.getpid(), 'port': listener.getsockname()[1]
+                    }), encoding='utf-8')
+                    time.sleep(90)
+                '''), encoding='utf-8')
+            parent = root / 'parent.py'
+            parent.write_text(textwrap.dedent('''\
+                import subprocess, sys, time
+                from pathlib import Path
+                child = subprocess.Popen([sys.executable, sys.argv[1], sys.argv[2]])
+                deadline = time.monotonic() + 20
+                while not Path(sys.argv[2]).exists():
+                    if child.poll() is not None or time.monotonic() > deadline:
+                        raise RuntimeError('descendant failed to start')
+                    time.sleep(.01)
+                print('descendant confirmed', flush=True)
+                print('Ran 1 test in 0.1s', flush=True)
+                if sys.argv[3] == 'timeout':
+                    time.sleep(90)
+                '''), encoding='utf-8')
+            processes, results, errors = [], [], []
+            progress = threading.Event()
+
+            class LiveOutput(io.StringIO):
+                def write(self, text):
+                    result = super().write(text)
+                    if '[+' in text and 'descendant confirmed' in text:
+                        progress.set()
+                    return result
+
+            output = LiveOutput()
+            real_spawn = CHECK.spawn
+
+            def launch(command, **kwargs):
+                self.assertIn('check_unittest.py', command[-2])
+                process = real_spawn([sys.executable, '-u', str(parent), str(descendant),
+                                      str(ready), 'timeout' if timed_out else 'exit'], **kwargs)
+                processes.append(process)
+                return process
+
+            def run_gate():
+                try:
+                    results.append(CHECK.main())
+                except BaseException as exc:
+                    errors.append(exc)
+
+            # A separate thread lets the test enforce a wall-clock bound and
+            # still kill/reap the captured tree in finally if cleanup regresses.
+            gate = threading.Thread(target=run_gate, daemon=True)
+            with mock.patch.object(CHECK, 'ROOT', root), \
+                    mock.patch.object(CHECK.sys, 'argv', ['check.py', '--report', str(report)]), \
+                    mock.patch.object(CHECK.sys, 'stdout', output), \
+                    mock.patch.object(CHECK, 'spawn', side_effect=launch), \
+                    mock.patch.object(CHECK, '_unittest_timeout_seconds', return_value=10), \
+                    mock.patch.object(CHECK, 'PROCESS_CLEANUP_TIMEOUT_SECONDS', 1), \
+                    mock.patch.object(CHECK.shutil, 'which', return_value=None), \
+                    mock.patch.object(CHECK, 'bash_available', return_value=False):
+                started = time.monotonic()
+                gate.start()
+                try:
+                    self.assertTrue(progress.wait(8), 'confirmed descendant progress must stream live')
+                    if timed_out:
+                        self.assertTrue(gate.is_alive(), 'progress must arrive before the timeout')
+                    gate.join(timeout=17)
+                    elapsed = time.monotonic() - started
+                    self.assertFalse(gate.is_alive(), 'gate blocked on inherited stdout')
+                    self.assertLess(elapsed, 25, '10 s child cap plus conservative cleanup/startup margin')
+                    self.assertFalse(errors, errors)
+                    self.assertEqual(results, [1])  # node is deliberately unavailable
+                    self.assertEqual(len(processes), 1)
+                    self.assertIsNotNone(processes[0].returncode, 'direct child must be reaped')
+                    self.assertTrue(processes[0].stdout.closed, 'reader must reach EOF and close its stream')
+                    receipt = json.loads(report.read_text(encoding='utf-8'))
+                    entry = next(c for c in receipt['checks'] if c['name'] == 'python-unit-and-contract-tests')
+                    self.assertEqual(entry['tests'], {'run': 1, 'failed': 0, 'skipped': 0})
+                    self.assertEqual(entry['status'], 'fail' if timed_out else 'pass')
+                    if timed_out:
+                        self.assertNotEqual(entry['exit_code'], 0)
+                        self.assertIn('timed out after 10 s', entry['details'])
+                        self.assertIn('unittest failure details unavailable', entry['details'])
+                    else:
+                        self.assertEqual(entry['exit_code'], 0)
+                        self.assertNotIn('details', entry)
+                    # Grandchildren aren't waitpid-able by this process on POSIX (and
+                    # may briefly be zombies). A closed listener verifies portably that
+                    # the confirmed descendant no longer runs holding its resources.
+                    port = json.loads(ready.read_text(encoding='utf-8'))['port']
+                    deadline = time.monotonic() + 3
+                    while True:
+                        with socket.socket() as probe:
+                            probe.settimeout(.2)
+                            stopped = probe.connect_ex(('127.0.0.1', port)) != 0
+                        if stopped or time.monotonic() >= deadline:
+                            break
+                        time.sleep(.02)
+                    self.assertTrue(stopped, 'descendant must not survive gate completion')
+                finally:
+                    for process in processes:
+                        CHECK.terminate_process(process)
+                    gate.join(timeout=5)
 
 
 class DurableDepsProbeTests(unittest.TestCase):
@@ -357,12 +487,6 @@ class UnittestFailureSummaryTests(unittest.TestCase):
                                 'type': 'RuntimeError', 'path': 'tests/test_check_offline.py', 'line': 42,
                             }) + '\n', encoding='utf-8')
 
-                    def __enter__(self):
-                        return self
-
-                    def __exit__(self, *args):
-                        return False
-
                     def wait(self, timeout):
                         budgets.append(timeout)
                         if timed_out and not self.killed:
@@ -374,7 +498,9 @@ class UnittestFailureSummaryTests(unittest.TestCase):
 
                 output = io.StringIO()
                 with mock.patch.object(CHECK.sys, 'argv', ['check.py', '--report', str(report)]), \
-                        mock.patch.object(CHECK.subprocess, 'Popen', FakeProcess), \
+                        mock.patch.object(CHECK, 'spawn', FakeProcess), \
+                        mock.patch.object(CHECK, 'popen_kwargs', return_value={}), \
+                        mock.patch.object(CHECK, 'terminate_process', side_effect=lambda p: p.kill() if timed_out else None) as terminate, \
                         mock.patch.object(CHECK.shutil, 'which', return_value=None), \
                         mock.patch.object(CHECK, 'bash_available', return_value=False), \
                         mock.patch.object(CHECK.sys, 'stdout', output):
@@ -383,6 +509,8 @@ class UnittestFailureSummaryTests(unittest.TestCase):
                 entry = next(c for c in receipt['checks'] if c['name'] == 'python-unit-and-contract-tests')
                 details = entry['details']
                 self.assertEqual(entry['status'], 'fail')
+                terminate.assert_called_once()
+                self.assertEqual(budgets[-1], CHECK.PROCESS_CLEANUP_TIMEOUT_SECONDS)
                 timeout = CHECK._unittest_timeout_seconds()
                 self.assertEqual(budgets[0], timeout)
                 self.assertEqual(entry['tests'], {'run': 3, 'failed': 3, 'skipped': 1})

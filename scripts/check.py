@@ -18,6 +18,7 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'src'))
 from mizu import __version__
+from mizu.platform import popen_kwargs, spawn, terminate_process
 
 
 def bash_available() -> bool:
@@ -189,22 +190,24 @@ def main():
             # whether progress was steady until the budget ran out or one
             # line went quiet (a genuine stall). Chunks stay unprefixed so
             # counts and receipts parse the raw child output.
-            for line in stream:
-                elapsed = time.monotonic() - started
-                sys.stdout.write(f'[+{elapsed:8.1f}s] {line}')
+            # Only the reader closes its stream: closing a buffered stream
+            # from another thread can block on that thread's pending read.
+            with stream:
+                for line in stream:
+                    elapsed = time.monotonic() - started
+                    sys.stdout.write(f'[+{elapsed:8.1f}s] {line}')
+                    sys.stdout.flush()
+                    chunks.append(line)
                 sys.stdout.flush()
-                chunks.append(line)
-            sys.stdout.flush()
         status, exit_code, details = 'pass', 0, ''
-        with subprocess.Popen(command, cwd=ROOT, env=env, stdout=subprocess.PIPE,
-                              stderr=subprocess.STDOUT, text=True, bufsize=1) as process:
-            reader = threading.Thread(target=pump, args=(process.stdout,), daemon=True)
+        process = spawn(command, cwd=ROOT, env=env, stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT, text=True, bufsize=1, **popen_kwargs())
+        reader = threading.Thread(target=pump, args=(process.stdout,), daemon=True)
+        try:
             reader.start()
             try:
                 exit_code = process.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
-                process.kill()
-                exit_code = process.wait(timeout=PROCESS_CLEANUP_TIMEOUT_SECONDS)
                 status = 'fail'
                 # Unittest diagnostics come only from structured metadata,
                 # even on timeout. Other steps retain their raw output tail;
@@ -213,7 +216,16 @@ def main():
                 if failure_summary is None:
                     tail = ''.join(chunks)[-1500:]
                     details += f'; output tail: {tail.strip()}'
+        finally:
+            # A successful direct child may still leave descendants holding
+            # stdout. End the whole group/job before waiting for EOF, without
+            # Popen.__exit__ closing a buffered stream under a blocked reader.
+            terminate_process(process)
+            exit_code = process.wait(timeout=PROCESS_CLEANUP_TIMEOUT_SECONDS)
             reader.join(timeout=PROCESS_CLEANUP_TIMEOUT_SECONDS)
+        if reader.is_alive():
+            status = 'fail'
+            details = f'{details}; output reader did not stop'.lstrip('; ')
         text = ''.join(chunks)
         if exit_code != 0:
             status = 'fail'
