@@ -244,6 +244,30 @@ class WorkItemTests(Fixture):
         self.assertFalse((self.project.root / "decisions" / f"{proposal['id']}.json").exists())
         self.assertFalse((self.project.root / "work-items").exists())
 
+    def test_page_open_rejects_mismatched_key_on_seeded_history(self):
+        event = json.loads(self.seed_path.read_text())
+        event["decision_key"] = "0" * 32
+        write_json(self.seed_path, event)
+        with self.assertRaisesRegex(Denied, "decision key"):
+            self.store.page_open()
+
+    def test_page_open_rejects_keyed_substantive_event_at_wrong_filename(self):
+        event = json.loads(self.seed_path.read_text())
+        wrong_id = "f" * 32 if self.seed_path.stem != "f" * 32 else "e" * 32
+        write_json(self.seed_path.parent / f"{wrong_id}.json", event, exclusive=True)
+        with self.assertRaisesRegex(Denied, "decision key"):
+            self.store.page_open()
+
+    def test_keyed_defer_uses_random_event_filename_but_validates_key(self):
+        proposal = self.project.insights.submit(
+            source="worker", title="Deferred proposal", body="Wait for evidence", base_snapshot=None)
+        record = self.project.insights.decide(proposal["id"], "defer", "Need evidence", "when ready",
+                                              "run-1", expected_rev=1)
+        path = next(path for path in (self.project.root / "decision-history").glob("*.json")
+                    if json.loads(path.read_text()).get("id") == proposal["id"])
+        self.assertNotEqual(path.stem, record["decision_key"])
+        self.assertEqual(self.store.page_open()["total"], 1)
+
     def test_pre_intent_seed_schema_remains_readable(self):
         old_event = {key: value for key, value in self.decision.items() if key != "work_item_intent"}
         write_json(self.seed_path, old_event)
@@ -780,6 +804,7 @@ class WorkItemTests(Fixture):
         legacy = copy.deepcopy(self.decision)
         legacy.pop("work_item")
         legacy.pop("work_item_intent")
+        legacy.pop("decision_key")
         legacy.pop("rev")
         legacy.pop("created_at")
         legacy_id = "a" * 32

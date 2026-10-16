@@ -149,6 +149,27 @@ class WorkItems:
         return source
 
     @staticmethod
+    def _validate_decision_key(event_id: str | None, event: dict) -> None:
+        """Validate new keyed decisions; legacy events without a key remain readable."""
+        if "decision_key" not in event:
+            if "work_item_intent" in event:
+                raise Denied("Explicit work-item intent lacks a decision key")
+            return
+        action = event.get("action")
+        try:
+            insight_id = identifier(event.get("id"))
+        except Denied as exc:
+            raise Denied("Invalid decision key binding") from exc
+        rev = event.get("rev")
+        key = event.get("decision_key")
+        if (action not in ("accept", "modify", "defer", "reject")
+                or type(rev) is not int or rev < 1
+                or key != _decision_key(insight_id, rev)
+                or (event_id is not None and action in ("accept", "modify", "reject")
+                    and event_id != key)):
+            raise Denied("Invalid decision key binding")
+
+    @staticmethod
     def _legacy_seed(event_id: str, event: dict, title) -> dict:
         source = WorkItems._legacy_source(event)
         if (any(value is None for value in source.values())
@@ -162,6 +183,7 @@ class WorkItems:
     def _legacy_resolution(self, event_id: str, event: dict, *, recover=False,
                            history_revisions=_HISTORY_UNSET) -> dict | None:
         """Validate the immutable sidecar against the exact canonical source."""
+        self._validate_decision_key(event_id, event)
         intent = event.get("work_item_intent")
         if "work_item_intent" in event and (
                 event.get("action") not in ("accept", "modify")
@@ -365,6 +387,7 @@ class WorkItems:
                     raise Denied("Malformed committed decision-history action")
                 if event["action"] not in ("accept", "modify") and "work_item" in event:
                     raise Denied("Non-accept decision carries a work-item seed")
+                self._validate_decision_key(entry.name[:-5], event)
                 yield entry.name[:-5], event
 
     def _seed(self, item_id: str, event: dict | None = None, *,
@@ -445,10 +468,9 @@ class WorkItems:
         elif action not in ("defer", "reject"):
             raise Denied("Invalid current work-item origin decision")
         revision = decision.get("rev")
+        self._validate_decision_key(None, decision)
         if "decision_key" in decision:
             fields.add("decision_key")
-            if action == "withdraw" or decision["decision_key"] != _decision_key(insight_id, revision):
-                raise Denied("Invalid current decision key")
         if (set(decision) != fields or decision.get("id") != insight_id
                 or type(revision) is not int or revision < 1
                 or not isinstance(decision.get("reason"), str) or not decision["reason"].strip()

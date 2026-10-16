@@ -232,7 +232,11 @@ SHA-256 over canonical JSON `["insight-substantive-decision", insight_id, rev]`.
 Accept/modify/reject use that key as their immutable event filename; defer keeps
 a random 32-hex event filename. First decisions and keyed defers use one keyed
 lookup, not a history scan. Key collisions (including old random-ID events at
-that filename) fail closed. If the event committed but its current pointer write
+that filename) fail closed. Work-item history readers validate every present
+key against the event's insight/revision and require the keyed filename for
+accept/modify/reject; legacy records without a key and without an explicit
+work-item intent marker remain readable. If the event
+committed but its current pointer write
 failed, an exact retry (action, reason, revisit, and an explicit intent if
 supplied) restores the pointer and returns the original record/seed; omitted
 intent reuses the recorded value and a retry run does not replace original run

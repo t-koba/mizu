@@ -223,7 +223,8 @@ class WorkItemIntentTests(DecisionRevisionFixture):
             store.get(f"wi_{event_id}")
         # Missing old markers remain unresolved; no inference from rationale/source.
         from mizu.fs import write_json
-        legacy = {key: value for key, value in decision.items() if key != "work_item_intent"}
+        legacy = {key: value for key, value in decision.items()
+                  if key not in ("work_item_intent", "decision_key")}
         write_json(self.project.root / "decision-history" / f"{'a' * 32}.json", legacy, exclusive=True)
         self.assertEqual(store.page_open()["unseeded_decisions"], 1)
         self.assertFalse(store.page_legacy()["coverage_complete"])
@@ -454,14 +455,30 @@ class WorkItemIntentTests(DecisionRevisionFixture):
         self.decide(self.submit(), work_item_intent="none")
         path = next((self.project.root / "decision-history").glob("*.json"))
         event = json.loads(path.read_text())
-        for changes in ({"rev": None}, {"work_item_intent": "bad"}, {"work_item": {}}, {"action": "reject"}):
+        for changes in ({"rev": None}, {"work_item_intent": "bad"}, {"work_item": {}},
+                        {"action": "reject"}, {"decision_key": "0" * 32},
+                        {"decision_key": None}):
             write_json(path, {**event, **changes})
             with self.subTest(changes=changes), self.assertRaises(Denied):
                 self.project.work_items.page_open()
+        without_key = {key: value for key, value in event.items() if key != "decision_key"}
+        write_json(path, without_key)
+        with self.assertRaises(Denied):
+            self.project.work_items.page_open()
         write_json(path, event)
         self.assertTrue(self.project.work_items.page_legacy()["coverage_complete"])
         write_json(self.project.root / "work-items" / f"wi_{path.stem}" / "legacy.json", {})
         with self.assertRaises(Denied):
+            self.project.work_items.page_legacy()
+
+    def test_no_work_audit_rejects_mismatched_decision_key(self):
+        self.decide(self.submit(), work_item_intent="none")
+        path = next((self.project.root / "decision-history").glob("*.json"))
+        event = json.loads(path.read_text())
+        event["decision_key"] = "0" * 32
+        from mizu.fs import write_json
+        write_json(path, event)
+        with self.assertRaisesRegex(Denied, "decision key"):
             self.project.work_items.page_legacy()
 
     def test_new_revision_no_work_does_not_drop_previous_work(self):
