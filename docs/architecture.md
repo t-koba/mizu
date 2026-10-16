@@ -202,7 +202,10 @@ revise converges on retry: an orphan archive for the still-current rev is
 overwritten, and a same-content retry preserves the stored `run` (revision
 provenance recorded only on meaningful change). The transport exposes revise/history/withdraw to the operator (`mizu insight revise/history/withdraw`);
 each runtime role holding `revise_insight`/`withdraw_insight` may revise/withdraw its own insights
-via the runtime, which fixes source to the role name and binds to the read rev. History stays a read path. Decisions carry the same binding:
+via the runtime, which fixes source to the role name and binds to the read rev. A current
+`accept`/`modify` blocks withdrawal unless that role also has `withdraw_decided`; no role
+receives that supplemental grant by default. The direct operator CLI remains deny-by-default
+for a current `accept`/`modify`. History stays a read path. Decisions carry the same binding:
 the decide interface accepts the `rev` from the read, and a decision naming
 a superseded revision is rejected without writing anything, so a prior
 rationale never authorizes changed content while the current revision stays
@@ -326,9 +329,14 @@ malformed/unsafe records.
 is complete.**
 Author withdrawal (`mizu insight withdraw`, submitter or operator only)
 closes a pending proposal with an actor-labelled rev-bound record in
-the same decision store; it is refused over a revision-current substantive
-decision and over an unseen revision, a repeated request is a no-op, and
-`reject` keeps meaning substantive rejection. A role with configured
+the same decision store. A revision-current `accept` or `modify` blocks
+withdrawal by default, including on the direct operator CLI; only a runtime
+role already holding `withdraw_insight` can opt in with supplemental
+`withdraw_decided`. Pending, deferred and rejected proposals remain
+withdrawable. Stale expected revisions are refused, repeated withdrawal is
+a no-op, and `reject` keeps meaning substantive rejection. A permitted
+post-decision withdrawal appends its own history record and never removes the
+original decision-history entry. A role with configured
 `decision_events` is additionally admitted by unacknowledged decisions routed
 to it (insight source equals role name in `own` mode, any source when
 `decision_sources = "any"`): the dispatch delivers the current

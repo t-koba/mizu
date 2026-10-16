@@ -14,7 +14,7 @@ from .errors import ConfigError
 from .fs import ID
 from .process import ADAPTER_DIAGNOSTIC_BYTES_DEFAULT, ADAPTER_DIAGNOSTIC_BYTES_MAX
 CAPABILITIES = frozenset({"diff", "files", "read", "exec", "experiment", "verify", "fetch", "probe",
-                          "search", "insights", "decide", "submit_insight", "revise_insight", "withdraw_insight", "attach_evidence", "consult", "delegate",
+                          "search", "insights", "decide", "submit_insight", "revise_insight", "withdraw_insight", "withdraw_decided", "attach_evidence", "consult", "delegate",
                           "report", "finish", "sync", "vcs_read", "vcs_publish",
                           "vcs_retire", "vcs_dispose", "research_read", "research",
                           "materialize", "command_evidence_read", "experiment_evidence_read",
@@ -793,6 +793,8 @@ def load(file: Path) -> Config:
         caps = strings(role.get("capabilities", []), "capabilities")
         if set(caps) - CAPABILITIES or len(set(caps)) != len(caps):
             raise ConfigError(f"Invalid or duplicate capability in role {name}")
+        if "withdraw_decided" in caps and "withdraw_insight" not in caps:
+            raise ConfigError(f"Role {name}: withdraw_decided requires withdraw_insight")
         engine_tools = strings(role.get("engine_tools", []), "engine_tools")
         if len(engine_tools) > 128 or len(set(engine_tools)) != len(engine_tools) or any(not tool or len(tool) > 256 for tool in engine_tools):
             raise ConfigError("engine_tools must contain at most 128 unique bounded names")

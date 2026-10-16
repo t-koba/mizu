@@ -151,7 +151,7 @@ def is_deferred(exc: BaseException, context=None) -> bool:
 #: none of these. Read-only grants (files/read/diff/insights/fetch/probe/search)
 #: stay operator choice, plus the required finish.
 CONSULT_FORBIDDEN = frozenset({"exec", "experiment", "verify", "decide",
-                               "submit_insight", "revise_insight", "withdraw_insight", "attach_evidence", "consult", "report", "sync",
+                               "submit_insight", "revise_insight", "withdraw_insight", "withdraw_decided", "attach_evidence", "consult", "report", "sync",
                                "vcs_publish", "vcs_retire", "vcs_dispose",
                                "research", "materialize"})
 
@@ -164,7 +164,7 @@ CONSULT_FORBIDDEN = frozenset({"exec", "experiment", "verify", "decide",
 #: stays allowed: every configured role carries it so the child can seal,
 #: and delegation ensures it (idempotent when already present).
 DELEGATE_FORBIDDEN = frozenset({"decide", "submit_insight", "revise_insight",
-                                "withdraw_insight", "attach_evidence", "delegate",
+                                "withdraw_insight", "withdraw_decided", "attach_evidence", "delegate",
                                 "vcs_publish", "vcs_retire", "vcs_dispose"})
 
 
@@ -960,10 +960,15 @@ class Context:
 
     def _op_withdraw_insight(self, args: dict) -> dict:
         # Owner-only withdrawal: source is fixed to the caller's role and the
-        # mechanism (insights.withdraw) enforces submitter-or-operator plus
-        # compare-and-swap on the read rev. Operator withdrawal stays on the CLI.
+        # mechanism enforces source match plus compare-and-swap on the read rev.
+        # Hiding a current accept/modify additionally needs the supplemental
+        # withdraw_decided grant; the operator CLI passes no such permission.
+        capabilities = set(self.role.capabilities)
+        allow_decided = ("withdraw_insight" in capabilities
+                         and "withdraw_decided" in capabilities)
         return self.project.insights.withdraw(args["id"], source=self.role.name, reason=args["reason"],
-                                               expected_rev=args["rev"], run=self.run_dir.name)
+                                               expected_rev=args["rev"], run=self.run_dir.name,
+                                               allow_decided=allow_decided)
 
     def _op_attach_evidence(self, args: dict) -> dict:
         # Attributed annotation of another insight: source is fixed to the

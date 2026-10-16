@@ -117,7 +117,7 @@ DEFINITIONS = {
     "revise_insight": ("Revise one of this role's own proposals under its stable ID; prior content is archived. Sender identity is assigned by the runtime; recorded only for the original submitter, bound to the read rev.",
                        obj({"id": text(64), "title": text(200), "body": text(60000),
                             "rev": {"type": "integer", "minimum": 1}}, ("id", "title", "body", "rev"))),
-    "withdraw_insight": ("Withdraw one of this role's own pending proposals as author retraction. Sender identity is assigned by the runtime; recorded only for the original submitter, bound to the read rev.",
+    "withdraw_insight": ("Withdraw one of this role's own proposals as author retraction. A current accept/modify blocks withdrawal unless the role also has withdraw_decided. Sender identity is assigned by the runtime and the action is bound to the read rev.",
                        obj({"id": text(64), "reason": text(4000),
                             "rev": {"type": "integer", "minimum": 1}}, ("id", "reason", "rev"))),
     "attach_evidence": ("Add an attributed evidence note to another insight without changing its title or body.",

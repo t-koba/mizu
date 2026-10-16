@@ -724,17 +724,17 @@ class InsightWithdrawalTests(Fixture):
         self.assertEqual(second, first)
         self.assertEqual(len(list((self.project.root / "decision-history").glob("*.json"))), before)
 
-    def test_withdraw_overlays_decided_and_blocks_reanimation_until_revise(self):
+    def test_withdraw_refuses_current_accept_but_other_dispositions_withdraw(self):
         from mizu.fs import read_json
         item = self.project.insights.submit(source="operator", title="T", body="v1", base_snapshot=None)
-        self.project.insights.decide(item["id"], "accept", "good", "", "test", expected_rev=1)
-        record = self.project.insights.withdraw(item["id"], source="operator", reason="retract approval")
-        self.assertEqual(record["action"], "withdraw")
-        actions = sorted(r["action"] for r in
-                         (read_json(p) for p in (self.project.root / "decision-history").glob("*.json")))
-        self.assertEqual(actions, ["accept", "withdraw"])
-        with self.assertRaises(Denied):
-            self.project.insights.decide(item["id"], "reject", "second thoughts", "", "test", expected_rev=1)
+        accepted = self.project.insights.decide(item["id"], "accept", "good", "", "test", expected_rev=1)
+        with self.assertRaisesRegex(Denied, "current accept"):
+            self.project.insights.withdraw(item["id"], source="operator", reason="retract approval")
+        current = read_json(self.project.root / "decisions" / f"{item['id']}.json")
+        self.assertEqual(current, accepted)
+        actions = sorted(r["action"] for
+                         r in (read_json(p) for p in (self.project.root / "decision-history").glob("*.json")))
+        self.assertEqual(actions, ["accept"])
         other = self.project.insights.submit(source="operator", title="U", body="v1", base_snapshot=None)
         self.project.insights.decide(other["id"], "defer", "later", "condition", "test", expected_rev=1)
         self.project.insights.withdraw(other["id"], source="operator", reason="moot")

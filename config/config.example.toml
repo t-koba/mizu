@@ -223,6 +223,7 @@ daemon = true
 profile = "alternate"
 policy = "policies/searcher.md"
 workspace = "read"
+# Add "withdraw_decided" here only to allow retracting proposals with a current accept/modify disposition.
 capabilities = ["files", "read", "search", "fetch", "experiment", "submit_insight", "revise_insight", "withdraw_insight", "work_items_read", "finish"]
 interval_seconds = 1800
 
