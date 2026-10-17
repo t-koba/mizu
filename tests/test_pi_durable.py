@@ -54,6 +54,11 @@ class PolicyTests(Fixture):
                            ("durable_compaction_background_tokens", 1000)):
             changed = pi_durable.grant_for({"options": {key: value}}, role, model)
             self.assertNotEqual(base, changed, key)
+        # Reasoning effort is a per-turn live key, not authority: an
+        # effort-only retune keeps the grant so resume is not refused.
+        for value in ("off", "low", "high"):
+            same = pi_durable.grant_for({"options": {"thinkingLevel": value}}, role, model)
+            self.assertEqual(base, same, value)
 
     def test_removed_turn_bound_is_refused(self):
         with self.assertRaises(ConfigError):
@@ -1065,6 +1070,36 @@ class SessionIsolationTests(Fixture):
         try:
             self.assertIsNotNone(load_run(conn, context.run_dir.name))
             self.assertIsNone(load_run(conn, context.run_dir.name + "-a1"))
+        finally:
+            conn.close()
+
+    def test_effort_only_change_resumes_without_grant_refusal(self):
+        profile = self._durable_profile()
+        self.config.profiles[profile]["session"] = "persistent"
+        driver = pi_durable.PiDurableDriver(self.config)
+        context = self.context()
+        seen = []
+
+        def interrupted(*args, **kwargs):
+            seen.append((args[5], args[6]))
+            raise ModelFailure("pi-durable", kind="error", message="uncertain")
+
+        driver._run_once = interrupted
+        with self.assertRaises(ModelFailure):
+            driver.execute(context, "retry same candidate", profile=profile)
+        # Effort-only retune keeps the conversation and its authority.
+        self.config.profiles[profile]["options"] = {
+            **self.config.profiles[profile]["options"], "thinkingLevel": "high"}
+        self._succeed(driver)
+        out = driver.execute(context, "retry same candidate", profile=profile)
+        self.assertTrue(out["durable"]["resumed"])
+        self.assertEqual([item[0] for item in seen], [context.run_dir.name])
+        # The interrupted run row resumes in place; no second run is born.
+        conn = open_store(seen[0][1])
+        try:
+            rows = conn.execute("SELECT run_key, status FROM durable_runs").fetchall()
+            self.assertEqual([(row[0], row[1]) for row in rows],
+                             [(context.run_dir.name, "completed")])
         finally:
             conn.close()
 

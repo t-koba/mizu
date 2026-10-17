@@ -171,12 +171,14 @@ def local_settings_digest(config, engine):
 
 #: Keys applied live to a resumed conversation instead of forking it. A
 #: profile switch that changes only these keys continues the role's
-#: conversation with the current settings; any other effective, grant,
-#: policy, model, engine, or content change still starts a fresh bounded
-#: session. Names stay native per engine; Mizu imposes no common effort
+#: conversation with the current settings, and the durable resume grant
+#: excludes them as well, so an effort-only retune resumes instead of
+#: refusing. Any other effective, policy, model, engine, grant-option, or
+#: content change still starts a fresh bounded session or refuses resume.
+#: Names stay native per engine; Mizu imposes no common effort
 #: enum. Durable compaction thresholds ride along because the Harness reads
 #: its policy at every resolution: bounding live context must not throw the
-#: conversation away, while the per-run grant still binds the values.
+#: conversation away, while the per-run grant still binds those values.
 CONVERSATION_LIVE_OPTIONS = {
     'pi': frozenset({'thinkingLevel', 'cacheRetention'}),
     'codex': frozenset({'model_reasoning_effort'}),

@@ -100,14 +100,26 @@ def durable_auth_path(config) -> Path:
     return agent_dir / "auth.json"
 
 
+#: Options bound into the durable resume grant. Reasoning effort is
+#: excluded: like the session-identity live keys in
+#: CONVERSATION_LIVE_OPTIONS, it is applied per turn to the ongoing
+#: conversation, so an effort-only retune resumes instead of refusing.
+#: Every other listed option still binds; unlisted keys stay out.
+GRANT_BOUND_OPTIONS = frozenset((
+    "cacheRetention",
+    "durable_backend",
+    "durable_resume",
+    "durable_retention_days",
+    "durable_compaction_reserve_tokens",
+    "durable_compaction_keep_recent_tokens",
+    "durable_compaction_background_tokens",
+))
+
+
 def grant_for(settings: dict, role, model: dict) -> str:
     policy = role_policy_text(role)
     options_digest = digest(canonical({k: v for k, v in settings.get("options", {}).items()
-                                       if k in ("thinkingLevel", "cacheRetention", "durable_backend", "durable_resume",
-                                                "durable_retention_days",
-                                                "durable_compaction_reserve_tokens",
-                                                "durable_compaction_keep_recent_tokens",
-                                                "durable_compaction_background_tokens")}))
+                                       if k in GRANT_BOUND_OPTIONS}))
     return grant_digest(policy_text=policy, capabilities=tuple(role.capabilities),
                         model=model, adapter_digest_value=adapter_digest(ENGINE),
                         options_digest=options_digest)
