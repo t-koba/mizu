@@ -51,9 +51,76 @@ class FinishSealTests(Fixture):
         self.assertFalse(ctx.admission_wait)
         self.assertFalse(ctx.hello.is_set())
         driver = ScriptDriver()
-        with self.assertRaises(Denied):
-            Engine(self.config)._execute(ctx, driver, "late")
-        self.assertEqual(driver.calls, [])
+        settled = Engine(self.config)._execute(ctx, driver, "late")
+        self.assertEqual(driver.calls, [])  # Short-circuits before any inference.
+        self.assertFalse(settled["settled"])
+        self.assertEqual(settled["settlement"]["status"], "failed")
+        self.assertEqual(settled["settlement"]["error_type"], "Denied")
+        self.assertEqual(read_json(ctx.run_dir / "adapter-settlement.json"), settled["settlement"])
+
+    def test_request_after_finish_keeps_sealed_outcome(self):
+        config = dataclasses.replace(self.config, limits=dataclasses.replace(
+            self.config.limits, max_failures=1))
+        probe = {}
+
+        class LateDriver:
+            requires_sandbox = False
+
+            def __init__(self):
+                self.calls = []
+
+            def execute(self, context, prompt, *, profile=None):
+                self.calls.append(prompt)
+                return {}
+
+        late = LateDriver()
+
+        class SealingDriver:
+            requires_sandbox = False
+
+            def __init__(self):
+                self.calls = []
+
+            def execute(self, context, prompt, *, profile=None):
+                self.calls.append(prompt)
+                context.handle("_hello", {})
+                context.handle("_budget", {"sequence": 1})
+                context.handle("finish", FINISH)
+                probe["sealed"] = read_json(context.run_dir / "finish-intent.json")
+                # A further model request attempted anyway must short-circuit
+                # without inference and settle with the sealed outcome.
+                try:
+                    probe["settled"] = Engine(config)._execute(context, late, "late after seal")
+                except Exception as exc:  # Old fail-closed guard raised; record for the assertion below.
+                    probe["error"] = exc
+                    raise
+                context.handle("_request_done", {"sequence": 1})
+                return probe["settled"]
+
+        driver = SealingDriver()
+        result = Engine(config, driver=driver).run(self.project, "worker")
+        run_id = result["run"]
+        run_dir = self.project.root / "runs" / run_id
+        # Defensive settle: no second inference, failed settlement evidence.
+        self.assertNotIn("error", probe)
+        self.assertEqual(late.calls, [])
+        self.assertFalse(probe["settled"]["settled"])
+        self.assertEqual(probe["settled"]["settlement"]["status"], "failed")
+        self.assertEqual(probe["settled"]["settlement"]["error_type"], "Denied")
+        self.assertEqual(read_json(run_dir / "adapter-settlement.json"),
+                         probe["settled"]["settlement"])
+        # The run still settles with the sealed outcome, not a failure.
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["finish"], probe["sealed"])
+        self.assertEqual(result["model"], probe["settled"])
+        self.assertEqual(read_json(run_dir / "result.json"), result)
+        self.assertFalse((run_dir / "error.json").exists())
+        snapshot = self.project.snapshots.get()
+        self.assertEqual(snapshot["id"], result["snapshot"])
+        for key in ("summary", "state", "outcome"):
+            self.assertEqual(snapshot[key], probe["sealed"][key])
+        self.assertEqual(read_json(self.project.root / "health/worker.json")["consecutive_failures"], 0)
+        self.assertFalse(self.project.control()["paused"])
 
     def test_request_done_only_retires_admitted_timer_after_finish(self):
         ctx = self.context()

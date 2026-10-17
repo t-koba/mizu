@@ -187,7 +187,7 @@ allowance records a bounded run result with `publication="not_published"`, never
 creates or publishes a snapshot and never increments `max_failures`.
 The reserved wrap-up transition precedes a later request/idle deadline, but
 never renews an absolute request timer. After a finish seal, `_request_done` may
-retire only an already-admitted timer; it cannot admit inference or tools. Earlier
+retire only an already-admitted timer; it cannot admit inference or tools. A model request attempted after the seal short-circuits without inference and settles with the sealed outcome: the run still publishes the seal, with no failure-brake increment and no pause. Earlier
 request timeouts and unrelated pre-seal protocol, storage, configuration, or
 provider errors still follow the
 existing failure rules, even if the wall expires too. A seal accepted before

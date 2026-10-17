@@ -2645,12 +2645,15 @@ class Engine:
         explicit cancellation keep their existing paths. Deadline wrap-up remains
         separate and bounded.
         Final record, integrity, and publication failures still fail closed.
+        A request attempted after the seal short-circuits without calling
+        the driver and settles with the sealed outcome (failed settlement
+        evidence; the run still publishes the seal).
         """
-        if context.finished is not None:
-            raise Denied("No inference after the work unit is sealed")
-        context.clear_request_deadlines()
-        context.transport_idle_deadline = time.monotonic() + context.config.limits.model_request_seconds
         try:
+            if context.finished is not None:
+                raise Denied("No inference after the work unit is sealed")
+            context.clear_request_deadlines()
+            context.transport_idle_deadline = time.monotonic() + context.config.limits.model_request_seconds
             try:
                 model_result = driver.execute(context, prompt, **kwargs)
                 if context.finished is None:
