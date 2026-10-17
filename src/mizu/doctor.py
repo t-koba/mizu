@@ -69,6 +69,8 @@ def check(config: Config, *, sandbox: bool = False) -> dict:
         except (MizuError, OSError, ValueError, TypeError, KeyError) as exc:
             checks.append({"name": name, "status": "fail", "details": str(exc)})
     checked("platform", lambda: platform())
+    git_status, git_details = git_presence()
+    checks.append({"name": "git", "status": git_status, "details": git_details})
     checked("model profiles", lambda: [config.model(p) for p in sorted(config.profiles)])
     checked("credential permissions", lambda: {"keys": sorted(credentials(config.file.parent / "credentials.env"))})
     checked("timezone", lambda: {"timezone": str(resolve_timezone(config.timezone))})
@@ -227,9 +229,23 @@ RESOURCE
 def platform() -> dict:
     if sys.version_info < (3, 11):
         raise ConfigError("Python >=3.11 is required")
-    if not shutil.which("git"):
-        raise ConfigError("Git is required")
     return {"system": _platform.SYSTEM, "python": ".".join(map(str, sys.version_info[:3]))}
+
+
+def git_presence() -> tuple:
+    """Report git availability without failing the check.
+
+    Git is required only by git-tree project import (which fails with a
+    reason before running git when it is missing). Nothing else in the
+    product shells out to git, so a missing git is not applicable rather
+    than a failure here.
+    """
+    found = shutil.which("git")
+    if found:
+        return "pass", {"git": found}
+    return ("not_run",
+            "Git is not on PATH; no selected operation needs it "
+            "(git-tree project import requires it and fails with a reason when missing)")
 
 
 def free_disk(config: Config) -> dict:

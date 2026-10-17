@@ -219,6 +219,8 @@ def config_managed_repo(workspace: Path, env: dict[str, str]) -> None:
 
 def _import_git_tree(source: Path, workspace: Path, env: dict[str, str]) -> None:
     """Clone a clean git tree without history leakage. Loud failure only."""
+    if not shutil.which("git"):
+        raise Denied("Git is required for git-tree import; make a separate plain-directory export first")
     status = run(["git", "-c", "safe.bareRepository=explicit", "-c", "core.fsmonitor=false",
                   "-c", f"core.hooksPath={os.devnull}",
                   "-C", str(source), "status", "--porcelain", "--untracked-files=all"],

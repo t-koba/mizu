@@ -128,6 +128,45 @@ class PortablePrimitiveTests(unittest.TestCase):
         from mizu.project import git_env
         self.assertEqual(git_env()["GIT_CONFIG_GLOBAL"], os.devnull)
 
+    def test_git_is_operation_specific_not_platform(self):
+        import shutil
+        from unittest.mock import patch
+        from mizu.doctor import git_presence, platform as check_platform
+        with patch.object(shutil, "which", return_value=None):
+            info = check_platform()
+            self.assertEqual(info["system"], _platform.SYSTEM)
+            status, details = git_presence()
+            self.assertEqual(status, "not_run")
+            self.assertIn("git-tree", details)
+        with patch.object(shutil, "which", return_value="/usr/bin/git"):
+            status, details = git_presence()
+            self.assertEqual(status, "pass")
+
+    def test_git_tree_import_fails_before_running_git(self):
+        import shutil
+        from unittest.mock import patch
+        from support import Fixture
+        from mizu.errors import Denied
+        from mizu.project import initialize
+
+        class T(Fixture):
+            def runTest(self):
+                pass
+
+        case = T()
+        case.setUp()
+        try:
+            source = case.root / "gitsource"
+            source.mkdir()
+            (source / ".git").mkdir()
+            (source / "app.py").write_bytes(b"VALUE = 2\n")
+            with patch.object(shutil, "which", return_value=None):
+                with self.assertRaisesRegex(Denied, "Git is required for git-tree import"):
+                    initialize(case.config, "gitless", source, case.goal,
+                               ["worker"], ["python3 -m unittest"])
+        finally:
+            case.tearDown()
+
     def test_doctor_platform_is_portable(self):
         from mizu.doctor import platform as check_platform
         info = check_platform()

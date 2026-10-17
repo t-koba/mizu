@@ -4,7 +4,7 @@
 
 Mizu は Linux / macOS / Windows で動作します。共通の前提要件は以下のとおりです:
 - **Python**: 3.11 以上（標準ライブラリのみ使用）
-- **Git**
+- **Git**: git ツリーからのプロジェクト取り込み（`mizu init` のソースに `.git` がある場合）にのみ必要
 - **Node.js**: 22.23.3 以上および npm
 - **OCI コンテナランタイム**: Podman または Docker（コンテナ内部は常に Linux 環境で実行）
 
