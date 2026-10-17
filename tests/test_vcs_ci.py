@@ -72,6 +72,7 @@ class CiStatusTests(Fixture):
         self.assertTrue(first["ok"])
         self.assertEqual(first["event"], "ci_poll")
         self.assertEqual(first["failures"], 1)
+        self.assertFalse(first["ci_failures_may_be_truncated"])
         self.assertEqual(len(first["recorded"]), 1)
         # Not due: no second adapter call.
         calls = []
@@ -702,3 +703,151 @@ class CiRunIdentityTests(Fixture):
                        for row in json.loads(prompt_for(ctx))["ci_failures"]}
         self.assertEqual(prompt_rows["unit"]["run"], "run-1")
         self.assertNotIn("run", prompt_rows["lint"])
+
+
+class CiFailureProjectionTests(Fixture):
+    def _cache(self, failures):
+        from mizu.fs import write_json
+        write_json(self.project.root / "vcs-poll.json",
+                   {"last_poll": 1.0, "failures": failures})
+
+    @staticmethod
+    def _rows(count):
+        return [{"sha": SHA_A, "check": f"check-{i:02d}"} for i in range(count)]
+
+    def _prompt_context(self, with_vcs_read=True):
+        import dataclasses
+        from mizu.fs import mkdir
+        from mizu.runtime import Context
+        cfg = dataclasses.replace(
+            self.config, vcs={**self.config.vcs, "ci_branch": "main"})
+        roles = dict(cfg.roles)
+        reporter = roles["reporter"]
+        capabilities = list(reporter.capabilities)
+        if with_vcs_read and "vcs_read" not in capabilities:
+            capabilities.append("vcs_read")
+        if not with_vcs_read:
+            capabilities = [cap for cap in capabilities if cap != "vcs_read"]
+        roles["reporter"] = dataclasses.replace(
+            reporter, capabilities=tuple(capabilities))
+        cfg = dataclasses.replace(cfg, roles=roles)
+        self.project.config = cfg
+        run = self.project.root / "runs" / "ci-failure-projection"
+        mkdir(run)
+        return Context(cfg, self.project, cfg.roles["reporter"], run,
+                       self.project.snapshots.get(), self.project.workspace)
+
+    def test_below_caps_legacy_rows_and_wake_are_unchanged(self):
+        from mizu.runtime import (ci_failures_projection, current_ci_failures,
+                                  wake_ci_failures)
+        self._cache({"main": [{"sha": SHA_A, "check": "unit"}]})
+        rows, may_be_truncated = ci_failures_projection(self.project)
+        expected = [{"branch": "main", "sha": SHA_A, "check": "unit"}]
+        self.assertEqual(rows, expected)
+        self.assertFalse(may_be_truncated)
+        # Old caches without run identity keep their exact list shape and
+        # the projection marker does not alter writer wake selection.
+        self.assertEqual(current_ci_failures(self.project), expected)
+        import dataclasses
+        wake_config = dataclasses.replace(
+            self.config, vcs={**self.config.vcs, "ci_branch": "main"})
+        self.assertEqual(wake_ci_failures(self.project, wake_config), expected)
+
+    def test_per_branch_cap_is_conservatively_marked(self):
+        from mizu.runtime import ci_failures_projection
+        self._cache({"main": self._rows(17)})
+        rows, may_be_truncated = ci_failures_projection(self.project)
+        self.assertEqual(len(rows), 16)
+        self.assertTrue(may_be_truncated)
+
+    def test_stored_branch_cap_is_conservatively_marked(self):
+        from mizu.runtime import ci_failures_projection
+        failures = {
+            f"branch-{i:03d}": self._rows(1) if i < 31 else []
+            for i in range(128)
+        }
+        self._cache(failures)
+        rows, may_be_truncated = ci_failures_projection(self.project)
+        self.assertEqual(len(rows), 31)
+        self.assertTrue(may_be_truncated)
+
+    def test_flattened_prompt_cap_is_marked_in_full_and_delta(self):
+        import json
+        from mizu.runtime import (ci_failures_projection, prompt_delta_for,
+                                  prompt_for)
+        self._cache({"branch-a": self._rows(11),
+                     "branch-b": self._rows(11),
+                     "branch-c": self._rows(11)})
+        rows, may_be_truncated = ci_failures_projection(self.project)
+        self.assertEqual(len(rows), 32)
+        self.assertTrue(may_be_truncated)
+        context = self._prompt_context()
+        full = json.loads(prompt_for(context))
+        delta = json.loads(prompt_delta_for(context, []))
+        for projection in (full, delta):
+            self.assertEqual(len(projection["ci_failures"]), 32)
+            self.assertIs(projection["ci_failures_may_be_truncated"], True)
+
+    def test_prompt_marker_is_null_without_capability_or_readable_cache(self):
+        import json
+        from unittest import mock
+        from mizu.runtime import prompt_for
+        no_capability = json.loads(prompt_for(self._prompt_context(with_vcs_read=False)))
+        self.assertIsNone(no_capability["ci_failures"])
+        self.assertIsNone(no_capability["ci_failures_may_be_truncated"])
+        context = self._prompt_context()
+        with mock.patch("mizu.runtime.read_json", side_effect=OSError("unreadable")):
+            unreadable = json.loads(prompt_for(context))
+        self.assertEqual(unreadable["ci_failures"], [])
+        self.assertIsNone(unreadable["ci_failures_may_be_truncated"])
+
+    def test_pruning_deleted_branch_is_not_reported_as_truncation(self):
+        import dataclasses
+        from mizu import vcs
+        config = dataclasses.replace(self.config, vcs=adapter_settings(
+            status_code({"checks": []})))
+        vcs.inject_refs(self.project.root, {"main": SHA_A})
+        state = {"failures": {"deleted-branch": [{"sha": SHA_A, "check": "unit"}]}}
+        event = poll_ci(config, self.project, state, now=1.0, interval=15.0,
+                        reader=lambda *_args: {"checks": [], "trust": "external-untrusted"})
+        self.assertTrue(event["ok"])
+        self.assertFalse(event["ci_failures_may_be_truncated"])
+        self.assertEqual(state["failures"], {})
+
+    def test_poll_event_marks_dropped_check_rows_and_pruned_branches(self):
+        import dataclasses
+        from mizu.runtime import MAX_CI_FAILURE_BRANCHES
+        rows = [{"check": f"check-{i:02d}", "state": "failure", "sha": SHA_A}
+                for i in range(17)]
+        config = dataclasses.replace(self.config, vcs=adapter_settings(
+            status_code({"checks": rows})))
+        state = {}
+        dropped = poll_ci(config, self.project, state, now=1.0, interval=15.0,
+                          branches=["main"])
+        self.assertTrue(dropped["ci_failures_may_be_truncated"])
+        self.assertEqual(len(state["failures"]["main"]), 16)
+
+        # A valid old-cache shape plus one new failure exceeds the branch
+        # store cap, causing this poll to prune a branch.
+        old_failures = {
+            f"branch-{i:03d}": [{"sha": SHA_A, "check": "unit"}]
+            for i in range(MAX_CI_FAILURE_BRANCHES)
+        }
+        config2 = dataclasses.replace(self.config, vcs=adapter_settings(
+            status_code({"checks": [{"check": "unit", "state": "failure",
+                                     "sha": SHA_A}]})))
+        state2 = {"failures": old_failures}
+        pruned = poll_ci(config2, self.project, state2, now=2.0, interval=15.0,
+                         branches=["new-branch"])
+        self.assertTrue(pruned["ci_failures_may_be_truncated"])
+        self.assertEqual(len(state2["failures"]), MAX_CI_FAILURE_BRANCHES)
+
+        # Cleaning an oversized pre-existing branch cache is also a row drop
+        # performed during this tick, even when the fresh poll is green.
+        config3 = dataclasses.replace(self.config, vcs=adapter_settings(
+            status_code({"checks": []})))
+        state3 = {"failures": {"old-branch": self._rows(17)}}
+        cleaned = poll_ci(config3, self.project, state3, now=3.0, interval=15.0,
+                          branches=["main"])
+        self.assertTrue(cleaned["ci_failures_may_be_truncated"])
+        self.assertEqual(len(state3["failures"]["old-branch"]), 16)

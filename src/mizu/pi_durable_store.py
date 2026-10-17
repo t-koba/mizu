@@ -23,7 +23,6 @@ from .fs import canonical, digest, mkdir
 
 BACKENDS = ("sqlite",)
 RESUME_MODES = ("compatible", "fresh")
-MAX_TURNS = 1024
 MAX_PAYLOAD_BYTES = 262144
 
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")

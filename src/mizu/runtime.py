@@ -1494,14 +1494,16 @@ def vcs_poll_proposals_enabled(config) -> bool:
 POLL_STATE_FILE = "vcs-poll.json"
 POLL_LOCK_NAME = "vcs-poll.lock"
 
-#: Bound for the shared current-CI-failure fact (branches x checks). The
-#: prompt carries at most this many flattened rows so resumed-session
-#: deltas stay flat; the poll store itself is pruned to valid shapes.
+#: Fixed bound for the shared current-CI-failure fact (branches x checks).
+#: Prompt projections conservatively report possible truncation whenever this
+#: cap is reached; a prior cache may already have been sliced.
 MAX_CI_FAILURES = 32
-#: Bound for stored per-branch check rows (keeps one tick short and the
-#: shared file small).
+#: Fixed bound for stored per-branch check rows (keeps one tick short and the
+#: shared file small). Prompt projections flag a reached cap as possibly
+#: truncated because cached history cannot distinguish exact-fit from slicing.
 MAX_CI_CHECKS_PER_BRANCH = 16
-#: Bound for stored branches with failures (rotation prunes absent refs).
+#: Fixed bound for stored branches with failures (rotation prunes absent refs).
+#: Prompt projections likewise flag a reached cap conservatively.
 MAX_CI_FAILURE_BRANCHES = 128
 #: Opaque adapter pagination tokens are persisted for resumption, but never
 #: rendered into events or prompts. The VCS schema fixes this bound.
@@ -1578,25 +1580,39 @@ def _clean_ci_failures(value) -> dict:
     return out
 
 
-def current_ci_failures(project, *, limit: int = MAX_CI_FAILURES) -> list:
-    """Return cached current CI failures as ``[{branch, sha, check, run?}]`` (never raises).
+def ci_failures_projection(project, *, limit: int = MAX_CI_FAILURES) -> tuple[list, bool | None]:
+    """Return bounded cached CI rows and whether a fixed bound may have sliced them.
 
-    Schema: best-effort read of the shared ``vcs-poll.json`` ``failures``
-    mapping written by :func:`poll_ci`; flattened branch-major, sorted,
-    capped at ``limit``. Empty means no observed red (poll disabled,
-    never polled, unreadable, or last ticks green). Trust: host-side
-    poll cache, adapter facts stay external-untrusted; insight decisions
-    are deliberately ignored so a deferred failure stays current until
-    green or superseded. Failure: never raises (unreadable reads as none).
+    Schema: ``(rows, may_be_truncated)`` for the shared
+    ``vcs-poll.json`` cache. It accounts for the 16 checks per branch, 128
+    stored branches, and the requested flattened-row limit (32 by default).
+    Reaching a cap is conservatively marked because a cache may already have
+    been sliced and the exact omitted count is unknowable. Trust: host-side
+    poll cache; adapter facts remain external-untrusted. Failure: an
+    unreadable or malformed top-level cache returns ``([], None)``; the
+    boolean is ``None`` when truncation cannot be determined.
     """
     try:
         raw = read_json(project.root / POLL_STATE_FILE, {})
     except Exception:
-        return []
+        return [], None
     try:
         if not isinstance(raw, dict):
-            return []
-        cleaned = _clean_ci_failures(raw.get("failures"))
+            return [], None
+        stored = raw.get("failures")
+        if stored is not None and not isinstance(stored, dict):
+            return [], None
+        may_be_truncated = False
+        if isinstance(stored, dict):
+            # `_clean_ci_failures` takes the first 128 input branches, and at
+            # most 16 rows from each. At a reached cap the original full size
+            # cannot be recovered from an old or already-cleaned cache.
+            may_be_truncated = len(stored) >= MAX_CI_FAILURE_BRANCHES
+            if not may_be_truncated:
+                may_be_truncated = any(
+                    isinstance(rows, list) and len(rows) >= MAX_CI_CHECKS_PER_BRANCH
+                    for rows in stored.values())
+        cleaned = _clean_ci_failures(stored)
         flat = []
         for branch in sorted(cleaned):
             for entry in cleaned[branch]:
@@ -1605,9 +1621,28 @@ def current_ci_failures(project, *, limit: int = MAX_CI_FAILURES) -> list:
                 if kept_run is not None:
                     row["run"] = kept_run
                 flat.append(row)
-        return flat[:max(0, int(limit))]
+        row_limit = max(0, int(limit))
+        if row_limit:
+            may_be_truncated = may_be_truncated or len(flat) >= row_limit
+        elif flat:
+            may_be_truncated = True
+        return flat[:row_limit], may_be_truncated
     except Exception:
-        return []
+        return [], None
+
+
+def current_ci_failures(project, *, limit: int = MAX_CI_FAILURES) -> list:
+    """Return cached current CI failures as ``[{branch, sha, check, run?}]`` (never raises).
+
+    Schema: best-effort read of the shared ``vcs-poll.json`` ``failures``
+    mapping written by :func:`poll_ci`; flattened branch-major, sorted,
+    capped at ``limit``. Empty means no observed red (poll disabled,
+    never polled, unreadable, or last ticks green). Trust: host-side poll
+    cache, adapter facts stay external-untrusted; insight decisions
+    are deliberately ignored so a deferred failure stays current until
+    green or superseded. Failure: never raises (unreadable reads as none).
+    """
+    return ci_failures_projection(project, limit=limit)[0]
 
 
 def wake_ci_failures(project, config=None, *, limit: int = MAX_CI_FAILURES) -> list:
@@ -1999,6 +2034,10 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
             branches_total = len(targets)
         recorded: list[dict] = []
         failures = 0
+        check_rows_dropped = False
+        failure_branches_pruned = (
+            isinstance(state.get("failures"), dict)
+            and len(state["failures"]) > MAX_CI_FAILURE_BRANCHES)
         tick: dict = {}
         for branch in targets:
             data = do_read(config.vcs, "status", {"branch": branch})
@@ -2022,8 +2061,16 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
                 if receipt.get("recorded"):
                     recorded.append({"id": receipt["id"], "branch": branch,
                                      "check": entry["check"]})
+            if len(rows) > MAX_CI_CHECKS_PER_BRANCH:
+                check_rows_dropped = True
             tick[branch] = rows[:MAX_CI_CHECKS_PER_BRANCH]
-        failures_map = _clean_ci_failures(state.get("failures"))
+        previous_failures = state.get("failures")
+        failures_map = _clean_ci_failures(previous_failures)
+        if isinstance(previous_failures, dict):
+            check_rows_dropped = check_rows_dropped or any(
+                isinstance(previous_failures.get(branch), list)
+                and len(previous_failures[branch]) > MAX_CI_CHECKS_PER_BRANCH
+                for branch in failures_map)
         for branch, rows in tick.items():
             failures_map[branch] = rows
         if branches is None:
@@ -2034,23 +2081,28 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
             if live is not None:
                 if len(live) <= max_branches:
                     live.add("main")
-                for stale in [b for b in failures_map if b not in live]:
+                stale_branches = [b for b in failures_map if b not in live]
+                for stale in stale_branches:
                     failures_map.pop(stale, None)
         for empty in [b for b, rows in failures_map.items() if not rows]:
             failures_map.pop(empty, None)
         while len(failures_map) > MAX_CI_FAILURE_BRANCHES:
             failures_map.pop(sorted(failures_map)[0], None)
+            failure_branches_pruned = True
         state["failures"] = failures_map
         state["last_error"] = ""
         state["last_ok"] = now
         return {"event": "ci_poll", "ok": True, "branches": list(targets),
                 "branches_total": branches_total,
                 "failures": failures, "recorded": recorded,
+                "ci_failures_may_be_truncated": bool(
+                    check_rows_dropped or failure_branches_pruned),
                 "trust": "external-untrusted", "time": now_iso()}
     except (Denied, OSError, ValueError) as exc:
         state["last_error"] = str(exc)
         return {"event": "ci_poll", "ok": False,
-                "error": str(exc), "time": now_iso()}
+                "error": str(exc), "ci_failures_may_be_truncated": False,
+                "time": now_iso()}
 
 
 def poll_proposals(config, project, state: dict, *, now: float,
@@ -2273,10 +2325,9 @@ def prompt_for(context: Context) -> str:
     ci_branch = context.config.vcs.get("ci_branch") or None
     if "vcs_read" not in caps:
         ci_branch = None
-    try:
-        ci_failures = current_ci_failures(context.project) if "vcs_read" in caps else None
-    except Exception:
-        ci_failures = None
+    ci_failures = ci_failures_may_be_truncated = None
+    if "vcs_read" in caps:
+        ci_failures, ci_failures_may_be_truncated = ci_failures_projection(context.project)
     return json.dumps({"goal": context.goal,
                        "published_snapshot": {k: context.snapshot[k] for k in (
                            "id", "code_digest", "created_at", "state", "summary", "verification")},
@@ -2295,6 +2346,7 @@ def prompt_for(context: Context) -> str:
                        "research_state": _prompt_research_state(context),
                        "ci_branch": ci_branch,
                        "ci_failures": ci_failures,
+                       "ci_failures_may_be_truncated": ci_failures_may_be_truncated,
                        "previous_report": (_previous_report(context.project)
                                           if "report" in caps else None),
                        **_prompt_clock(context)},
@@ -2333,10 +2385,9 @@ def prompt_delta_for(context: Context, pending: list) -> str:
     """
     caps = set(context.role.capabilities)
     acceptance = list(context.project.verify) if "verify" in caps else []
-    try:
-        ci_failures = current_ci_failures(context.project) if "vcs_read" in caps else None
-    except Exception:
-        ci_failures = None
+    ci_failures = ci_failures_may_be_truncated = None
+    if "vcs_read" in caps:
+        ci_failures, ci_failures_may_be_truncated = ci_failures_projection(context.project)
     open_backlog = _open_backlog(context, caps)
     open_work_items = context.project.work_items.page_open(
         limit=context.config.limits.work_items_prompt)
@@ -2358,6 +2409,7 @@ def prompt_delta_for(context: Context, pending: list) -> str:
                        "ci_branch": ((context.config.vcs.get("ci_branch") or None)
                                      if "vcs_read" in caps else None),
                        "ci_failures": ci_failures,
+                       "ci_failures_may_be_truncated": ci_failures_may_be_truncated,
                        "previous_report": (_previous_report(context.project)
                                           if "report" in caps else None),
                        **_prompt_clock(context)},

@@ -1353,12 +1353,14 @@ class PromptOrderTests(Fixture):
                           "open_insights", "open_work_items",
                           "decision_events", "decision_task", "wait_events", "obligations",
                           "acceptance_commands", "research_state",
-                          "ci_branch", "ci_failures", "previous_report", "now",
+                          "ci_branch", "ci_failures", "ci_failures_may_be_truncated",
+                          "previous_report", "now",
                           "timezone"])
         self.assertEqual(
             list(json.loads(prompt_delta_for(ctx, [])).keys()),
             ["goal_digest", "published_snapshot", "snapshot_delta",
              "pending_insights", "open_insights", "open_work_items", "decision_events", "decision_task", "wait_events", "obligations",
              "research_state", "workspace", "workspace_mode",
-             "acceptance_commands", "ci_branch", "ci_failures", "previous_report",
+             "acceptance_commands", "ci_branch", "ci_failures",
+             "ci_failures_may_be_truncated", "previous_report",
              "now", "timezone"])
