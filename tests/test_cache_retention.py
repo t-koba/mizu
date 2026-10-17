@@ -126,10 +126,13 @@ class CacheRetentionTests(Fixture):
         spec.loader.exec_module(module)
         # Environment-coupled like the durable contract suite: without the
         # pinned SDK the launcher fails on missing imports before reaching
-        # validation, so skip instead of failing the gate for provisioning.
+        # validation, so skip for absent provisioning only. A version mismatch
+        # is a contract violation and must fail like any other.
         state, details = module.durable_deps_status(root / 'adapters/pi-durable')
-        if state != "ready":
+        if state == "absent":
             self.skipTest(f"pinned SDK not provisioned here: {details}")
+        if state != "ready":
+            self.fail(f"pinned SDK version mismatch is a contract violation: {details}")
         launcher = root / "adapters" / "pi-durable" / "launcher.mjs"
         with tempfile.TemporaryDirectory() as td:
             cfg = {"provider": "p", "model": "m", "instructions": "i",
