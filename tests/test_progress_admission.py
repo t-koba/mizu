@@ -465,7 +465,40 @@ class ProgressAdmissionTests(Fixture):
         self.assertFalse(should_run(self.project, parked, role_name="worker"))
         status = self.project.status()
         self.assertEqual(status["progress"]["recovery"], {
-            "status": "due", "pending_work": True, "no_progress_count": 2, "after": 2})
+            "status": "due", "threshold_due": True, "pending_work": True,
+            "session_scope": "persistent", "no_progress_count": 2, "after": 2})
+
+    def test_ephemeral_recovery_status_separates_threshold_from_rotation(self):
+        from mizu.project import Project
+        self._parked_snapshot(count=2)
+        role = self.config.roles["worker"]
+        profiles = dict(self.config.profiles)
+        profiles[role.profile] = {**profiles[role.profile], "session": "ephemeral"}
+        config = dataclasses.replace(self.config, profiles=profiles)
+        status = Project(config, self.project.name).status()
+        self.assertEqual(status["progress"]["recovery"], {
+            "status": "not_applicable", "threshold_due": True, "pending_work": True,
+            "session_scope": "ephemeral", "no_progress_count": 2, "after": 2})
+
+    def test_selector_recovery_scope_is_conditional_when_profiles_mixed(self):
+        from mizu.project import Project, session_persistence_scope
+        role = self.config.roles["worker"]
+        profiles = dict(self.config.profiles)
+        alternate = next(name for name in profiles if name != role.profile)
+        profiles[role.profile] = {**profiles[role.profile], "session": "persistent"}
+        profiles[alternate] = {**profiles[alternate], "session": "ephemeral"}
+        selector = {"rules": [{"candidates": [{"profile": role.profile},
+                                                {"profile": alternate}]}]}
+        roles = dict(self.config.roles)
+        roles["worker"] = dataclasses.replace(role, profile="", selector="mixed")
+        config = dataclasses.replace(self.config, profiles=profiles, roles=roles,
+                                     selectors={**self.config.selectors, "mixed": selector})
+        self.assertEqual(session_persistence_scope(config, "worker"), "conditional")
+        self.assertEqual(session_persistence_scope(config, "missing"), "unknown")
+        self._parked_snapshot(count=2)
+        status = Project(config, self.project.name).status()
+        self.assertEqual(status["progress"]["recovery"]["status"], "conditional")
+        self.assertTrue(status["progress"]["recovery"]["threshold_due"])
 
     def test_malformed_progress_fails_closed_and_visibility_is_bounded(self):
         parked = self._parked_snapshot(count=1)

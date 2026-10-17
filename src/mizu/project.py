@@ -20,6 +20,40 @@ from .snapshot import (no_progress_recovery_due, open_store,
 from .work_items import WorkItems
 
 
+def session_persistence_scope(config: Config, role_name: str | None) -> str:
+    """Classify whether every, some, or no role profile can retain a session.
+
+    Selector profiles are considered statically; mixed choices remain
+    conditional rather than presenting a rotation as certainly actionable.
+    """
+    role = config.roles.get(role_name) if isinstance(role_name, str) else None
+    if role is None:
+        return "unknown"
+    if role.selector:
+        spec = config.selectors.get(role.selector)
+        if not isinstance(spec, dict):
+            return "unknown"
+        profiles = {candidate.get("profile")
+                    for rule in spec.get("rules", ()) if isinstance(rule, dict)
+                    for candidate in rule.get("candidates", ()) if isinstance(candidate, dict)}
+    else:
+        profiles = {role.profile}
+    if not profiles:
+        return "unknown"
+    sessions = set()
+    for profile in profiles:
+        raw = config.profiles.get(profile) if isinstance(profile, str) else None
+        session = raw.get("session") if isinstance(raw, dict) else None
+        if session not in ("ephemeral", "persistent"):
+            return "unknown"
+        sessions.add(session)
+    if sessions == {"persistent"}:
+        return "persistent"
+    if sessions == {"ephemeral"}:
+        return "ephemeral"
+    return "conditional"
+
+
 class Project:
     def __init__(self, config: Config, name: str, *, read_only: bool = False):
         self.config, self.name = config, identifier(name)
@@ -102,8 +136,13 @@ class Project:
         progress = snapshot.get("progress")
         progress_count = progress.get("no_progress_count", 0) if isinstance(progress, dict) else 0
         progress_role = progress.get("role") if isinstance(progress, dict) else None
-        recovery_due = no_progress_recovery_due(
+        recovery_threshold_due = no_progress_recovery_due(
             progress, snapshot["outcome"], self.config, progress_role)
+        session_scope = session_persistence_scope(self.config, progress_role)
+        recovery_status = ("not_due" if not recovery_threshold_due else
+                           "due" if session_scope == "persistent" else
+                           "not_applicable" if session_scope == "ephemeral" else
+                           "conditional" if session_scope == "conditional" else "unknown")
         progress_disposition_value = progress_disposition(
             progress, snapshot["outcome"], self.config, progress_role)
         return {"project": self.name, "control": self.control(), "snapshot": snapshot["id"],
@@ -113,8 +152,10 @@ class Project:
                 "progress": {"status": "current" if progress is not None else "legacy",
                              "record": progress_projection(progress),
                              "disposition": progress_disposition_value,
-                             "recovery": {"status": "due" if recovery_due else "not_due",
-                                          "pending_work": recovery_due,
+                             "recovery": {"status": recovery_status,
+                                          "threshold_due": recovery_threshold_due,
+                                          "pending_work": recovery_threshold_due,
+                                          "session_scope": session_scope,
                                           "no_progress_count": progress_count,
                                           "after": self.config.limits.no_progress_recovery_after}},
                 "goal_digest": snapshot.get("goal_digest"), "wake_at": snapshot.get("wake_at"),
