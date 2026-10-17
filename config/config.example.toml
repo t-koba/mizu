@@ -221,7 +221,7 @@ diagnostic_bytes = 2048      # Failed adapter stderr tail sent to the model; 0 d
 profile = "primary"
 # Composed policy: string or list in order, e.g. ["policies/shared.md", "policies/worker.md"].
 # At most 16 files, each at most 64 KiB, 256 KiB total; missing/oversize fails.
-policy = "policies/worker.md"
+policy = ["policies/shared.md", "policies/worker.md"]
 workspace = "write"
 capabilities = ["files", "read", "diff", "exec", "experiment", "verify", "fetch", "search", "insights", "decide", "consult", "work_items_read", "work_items_transition", "work_items_legacy_read", "work_items_reconcile", "finish"]
 daemon = true
@@ -231,7 +231,7 @@ daemon = true
 
 [roles.searcher]
 profile = "alternate"
-policy = "policies/searcher.md"
+policy = ["policies/shared.md", "policies/searcher.md"]
 workspace = "read"
 # Add "withdraw_decided" here only to allow retracting proposals with a current accept/modify disposition.
 capabilities = ["files", "read", "search", "fetch", "experiment", "submit_insight", "revise_insight", "withdraw_insight", "work_items_read", "finish"]
@@ -239,7 +239,7 @@ interval_seconds = 1800
 
 [roles.reviewer]
 profile = "alternate"
-policy = "policies/reviewer.md"
+policy = ["policies/shared.md", "policies/reviewer.md"]
 workspace = "read"
 capabilities = ["files", "read", "diff", "exec", "experiment", "submit_insight", "revise_insight", "withdraw_insight", "work_items_read", "finish"]
 # on_change only skips unchanged snapshots; it combines with interval_seconds.
@@ -255,28 +255,28 @@ interval_seconds = 900
 
 [roles.reporter]
 profile = "primary"
-policy = "policies/reporter.md"
+policy = ["policies/shared.md", "policies/reporter.md"]
 workspace = "read"
 capabilities = ["files", "read", "diff", "insights", "report", "work_items_read", "finish"]
 calendar = ["07:00", "19:00"]
 
 [roles.consult]
 profile = "alternate"
-policy = "policies/consult.md"
+policy = ["policies/shared.md", "policies/consult.md"]
 workspace = "read"
 capabilities = ["files", "read", "work_items_read", "finish"]
 
 # Enable these two on a separate candidate project, not on the deployed release.
 [roles.maintainer]
 profile = "primary"
-policy = "policies/maintainer.md"
+policy = ["policies/shared.md", "policies/maintainer.md"]
 workspace = "write"
 capabilities = ["files", "read", "diff", "exec", "experiment", "verify", "insights", "decide", "consult", "work_items_read", "finish"]
 interval_seconds = 21600
 
 [roles.maintainer-searcher]
 profile = "alternate"
-policy = "policies/maintainer-searcher.md"
+policy = ["policies/shared.md", "policies/maintainer-searcher.md"]
 workspace = "read"
 capabilities = ["files", "read", "search", "fetch", "experiment", "submit_insight", "revise_insight", "withdraw_insight", "work_items_read", "finish"]
 interval_seconds = 21600
@@ -294,7 +294,7 @@ interval_seconds = 21600
 # work by other roles followed by verification.
 # [roles.publisher]
 # profile = "primary"
-# policy = "policies/publisher.md"
+# policy = ["policies/shared.md", "policies/publisher.md"]
 # workspace = "write"
 # capabilities = ["files", "read", "diff", "verify", "sync", "vcs_read", "vcs_publish", "insights", "finish"]
 
@@ -329,7 +329,7 @@ interval_seconds = 21600
 # seconds = 300
 # [selectors.adaptive.classifier]
 # profile = "alternate"
-# policy = "policies/classifier.md"
+# policy = ["policies/shared.md", "policies/classifier.md"]
 # on_failure = "continue"
 # retry_seconds = 120
 # [selectors.adaptive.classifier.attributes.difficulty]

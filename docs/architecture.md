@@ -579,9 +579,8 @@ resolver runs on each new deferral instead of on a clock. Own-source deferrals
 keep ride-along rotation and never admit alone. The operator configures which
 role subscribes, to which actions, and its schedule/model/policy; the submitter
 owns its topic and takes it back at its next scheduled run when nothing resolved
-it. The scheduled-resolver experiment (qpx 15 deferrals waiting on an
-already-green fact, most deferrals without structured waits) justified this
-opt-in admission over shortening the clock (Less-is-more).
+it. Keeping scheduled resolution opt-in avoids routine polling when explicit
+decision events can admit focused work.
 
 Editor uploads are first atomically claimed into a private ingest directory;
 they are not parsed while still mutable in the Editor outbox. Malformed records

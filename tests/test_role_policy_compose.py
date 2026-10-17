@@ -21,7 +21,8 @@ class ComposedPolicyTests(Fixture):
         self.file.write_text("".join(lines))
 
     def test_string_policy_still_loads(self):
-        role = self.config.roles["worker"]
+        self._rewrite_policy('"policies/worker.md"')
+        role = load(self.file).roles["worker"]
         self.assertEqual(len(role.policy), 1)
         self.assertTrue(role_policy_text(role).strip())
 
@@ -37,7 +38,7 @@ class ComposedPolicyTests(Fixture):
         self.assertLess(text.index("Shared"), text.index("Worker"))
 
     def test_missing_part_fails_closed(self):
-        self._rewrite_policy('["policies/shared.md", "policies/worker.md"]')
+        self._rewrite_policy('["policies/absent.md", "policies/worker.md"]')
         with self.assertRaises(ConfigError):
             load(self.file)
 
