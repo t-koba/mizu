@@ -332,6 +332,8 @@ interval_seconds = 21600
 # when = {path = "error.code", op = "eq", value = "OPERATOR_CHOSEN_CODE"}
 # scope = "profile"
 # seconds = 300
+# action = "fallback" # or "retry": same candidate up to `retries` attempts, then fallback.
+# retries = 2         # same-candidate retry attempts for action = "retry" (0-64).
 # [selectors.adaptive.classifier]
 # profile = "alternate"
 # policy = ["policies/shared.md", "policies/classifier.md"]

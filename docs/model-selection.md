@@ -73,6 +73,26 @@ existing brake and its configured auto-pause threshold. A successful fallback
 still completes normally and clears the consecutive count. Unmatched errors and
 rules without a usable future deadline keep the existing generic failure behavior.
 
+A fixed (non-probe) `on_error` entry may set `action = "fallback" | "retry"`
+(default `"fallback"`) and `retries` (integer `0..64`, default `2`). `fallback`
+keeps today's behavior exactly: block the rule's scope and use the next eligible
+candidate. `retry` keeps the SAME candidate: wait until the rule's deadline
+(`seconds` after the failure, or `error.retry_at` for `until` rules), try it
+again, and repeat up to `retries` same-candidate attempts; when retries run out
+the rule continues as `fallback`. Probe rules reject `action`/`retries`; `until`
+rules accept them with the wait measured to `error.retry_at`.
+
+The retry wait is a bounded wait that holds NO execution slot and spends
+nothing: dispatch admission is released for the wait, the wait polls at
+`[limits] idle_seconds` with stop wake, authority and the daily budget are
+revalidated without consuming anything, and fail-fast re-admission is required
+before the retry. Waiting never renews deadlines. Budget, stop, wall/deadline
+or re-admission failure abandons the retry and the unit drops through the
+existing path for the raised error (the original failure deferred, or the
+infra/authority/bound error itself). The wait between runs for the earliest
+unblock is unchanged: a deferred run exits and the next evaluation at
+`next_evaluation_at` holds no slot either.
+
 
 ### Optional paid recovery probes
 

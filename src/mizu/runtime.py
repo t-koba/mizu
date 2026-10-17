@@ -2848,6 +2848,36 @@ class Engine:
         return stack.enter_context(admission(self.config, resources, wait=wait, stop=self.stop,
                                              check=lambda: self._check_admission(project)))
 
+    def _selection_retry_wait(self, context: Context, project: Project, stack: contextlib.ExitStack,
+                              selection_role: Role, role_name: str, wait_seconds: float) -> None:
+        """Bounded retry wait holding no execution slot and spending nothing.
+
+        Mechanism: releases dispatch admission (slot plus role/workspace
+        locks), polls at idle_seconds with stop wake, revalidates
+        authority/budget without consuming anything, then fail-fast
+        re-admits. Waiting never renews deadlines, consumes budget or
+        requests, or holds a slot. Budget, stop, wall/deadline or
+        re-admission failure abandons the retry; the caller then drops the
+        unit through the existing path for the raised error (original
+        failure deferred, or the infra/authority/bound error itself).
+        """
+        stack.close()
+        context._slot_lease = False
+        deadline = time.monotonic() + max(0.0, wait_seconds)
+        idle = self.config.limits.idle_seconds
+        while True:
+            if self.stop.is_set() or context.host_cancelled():
+                raise Cancelled("Run stopped before selection retry")
+            if context.wall_expired():
+                raise RunDeadlineExceeded("Whole-unit wall deadline exhausted before selection retry")
+            self._check_admission(project)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            self.stop.wait(min(idle, remaining))
+        self._admit(project, role_name, selection_role, stack, wait=False)
+        context._slot_lease = True
+
     def run(self, project: Project, role_name: str, *, attributes=None, retry_busy: bool = False,
                 event_trigger: bool = False) -> dict:
         if role_name not in project.roles:
@@ -3104,8 +3134,21 @@ class Engine:
                             "prompt_mode": prompt_mode, "session_key": session_key,
                             "rotation": (rotation or {}).get("reason", "")})
                 fallback_attempt = 0
+                retry_budgets: dict = {}
+                selection_dispatches = 0
+                from .selection import DEFAULT_ON_ERROR_RETRIES as _default_retries
+                from .selection import MAX_ON_ERROR_RETRIES as _max_retries
+                _max_rule_retries = _default_retries
+                if selection_role is not None:
+                    for _rule in self.config.selectors.get(selection_role.selector, {}).get('on_error', []):
+                        if 'probe_seconds' not in _rule:
+                            _candidate = _rule.get('retries', _default_retries)
+                            if type(_candidate) is int and _default_retries <= _candidate <= _max_retries:
+                                _max_rule_retries = max(_max_rule_retries, _candidate)
+                max_selection_dispatches = max_selection_attempts * (_max_rule_retries + 1)
                 while True:
                     context.execution_attempt += 1
+                    selection_dispatches += 1
                     try:
                         model_result = self._execute(context, driver, prompt)
                     except ModelFailure as exc:
@@ -3133,6 +3176,43 @@ class Engine:
                             }
                         if not matched:
                             raise
+                        if selection_dispatches >= max_selection_dispatches:
+                            raise
+                        retry_action = matched.get("action", "fallback") if isinstance(matched, dict) else "fallback"
+                        retry_allowance = (matched.get("retries", _default_retries)
+                                           if isinstance(matched, dict) else _default_retries)
+                        if retry_action not in ("fallback", "retry"):
+                            raise ConfigError("Invalid selector on_error retry policy")
+                        if (type(retry_allowance) is not int
+                                or not 0 <= retry_allowance <= _max_retries):
+                            raise ConfigError("Invalid selector on_error retry policy")
+                        if (retry_action == "retry" and "probe_seconds" not in matched):
+                            retry_key = (decision.get("profile"), matched.get("rule"))
+                            retry_left = retry_budgets.get(retry_key, retry_allowance)
+                            if retry_left > 0:
+                                retry_budgets[retry_key] = retry_left - 1
+                                if (self.stop.is_set() or not project.control().get("armed")
+                                        or project.control().get("paused")):
+                                    raise Cancelled("Run stopped before selection retry")
+                                retry_wait = max(0.0, (matched.get("until") or 0) - time.time())
+                                if retry_wait > 0:
+                                    # Bounded wait holding no slot and spending
+                                    # nothing; abandonment propagates its own
+                                    # error and drops the unit as today.
+                                    context._slot_lease = False
+                                    self._selection_retry_wait(context, project, stack, selection_role,
+                                                               role_name, retry_wait)
+                                selection_retries.append({"profile": decision["profile"],
+                                                          "error": str(exc)})
+                                context.operations_stopped.clear()
+                                context.verification = None
+                                context.commentary = None
+                                driver = self.resolve(role.profile)
+                                if getattr(driver, "requires_sandbox", True) and any(
+                                        c in role.capabilities for c in ("exec", "experiment", "verify")):
+                                    container_runtime(self.config)
+                                    cleanup(self.config, project.root, role_name)
+                                continue
                         fallback_attempt += 1
                         if fallback_attempt >= max_selection_attempts:
                             raise

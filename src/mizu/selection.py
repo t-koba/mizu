@@ -15,6 +15,10 @@ MAX_TERMINAL_CONTRIBUTIONS = 256
 MAX_PROBE_EVENTS = 8
 INTENT_RESERVE_BYTES = 512
 INTENT_TERMINAL_RESERVE_BYTES = 128
+#: Default per-rule retry attempts for on_error action="retry" (policy).
+DEFAULT_ON_ERROR_RETRIES = 2
+#: Mechanism bound for per-rule on_error retries (no unbounded loops).
+MAX_ON_ERROR_RETRIES = 64
 UNKNOWN = object()
 
 #: Default bounds for classifier work inputs (operator policy may override
@@ -197,7 +201,7 @@ def validate_selectors(value, profiles, base):
             attributes(rule.get('attributes'))
         for rule in items(spec.get('on_error', []), 'on_error'):
             table(rule, {'when', 'scope', 'seconds', 'until', 'probe_seconds',
-                         'counts_as_failure'}, 'error rule')
+                         'counts_as_failure', 'action', 'retries'}, 'error rule')
             validate_condition(rule.get('when', {}))
             counts_as_failure = rule.get('counts_as_failure', False)
             if type(counts_as_failure) is not bool:
@@ -206,12 +210,22 @@ def validate_selectors(value, profiles, base):
             if rule.get('scope') not in ('profile', 'group'):
                 raise ConfigError('Error scope must be profile or group')
             if 'probe_seconds' in rule:
+                if 'action' in rule or 'retries' in rule:
+                    raise ConfigError('Probe rules cannot use action/retries')
                 seconds(rule['probe_seconds'])
                 if 'until' in rule:
                     raise ConfigError('Probe rules cannot use until')
                 if 'seconds' in rule:
                     seconds(rule['seconds'])
                 continue
+            action = rule.get('action', 'fallback')
+            if action not in ('fallback', 'retry'):
+                raise ConfigError('on_error action must be fallback or retry')
+            rule['action'] = action
+            retries = rule.get('retries', DEFAULT_ON_ERROR_RETRIES)
+            if type(retries) is not int or not 0 <= retries <= MAX_ON_ERROR_RETRIES:
+                raise ConfigError('on_error retries must be an integer in 0..64')
+            rule['retries'] = retries
             if ('seconds' in rule) == ('until' in rule):
                 raise ConfigError('Error rule needs seconds or until')
             if 'seconds' in rule:
@@ -462,8 +476,15 @@ class State:
                         until = at + rule['seconds'] if 'seconds' in rule else error.evidence.get('retry_at')
                         if type(until) not in (int, float) or until <= at:
                             continue
+                        action = rule.get('action', 'fallback')
+                        retries = rule.get('retries', DEFAULT_ON_ERROR_RETRIES)
+                        if (action not in ('fallback', 'retry')
+                                or type(retries) is not int
+                                or not 0 <= retries <= MAX_ON_ERROR_RETRIES):
+                            raise ConfigError('Invalid selector on_error retry policy')
                         matched = {'rule': index, 'until': until, 'scope': rule['scope'],
-                                   'counts_as_failure': counts_as_failure}
+                                   'counts_as_failure': counts_as_failure,
+                                   'action': action, 'retries': retries}
                     break
             previous = state['history'].get(profile, {})
             if previous.get('at', 0) <= at:

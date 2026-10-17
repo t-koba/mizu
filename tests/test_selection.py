@@ -87,6 +87,146 @@ class SelectionTests(SelectionFixture):
             with self.subTest(value=invalid), self.assertRaises(ConfigError):
                 validate_selectors({'dynamic': malformed}, self.config.profiles, self.file.parent)
 
+    def test_on_error_retry_policy_defaults_and_rejects(self):
+        defaulted = specification()
+        validate_selectors({'dynamic': defaulted}, self.config.profiles, self.file.parent)
+        self.assertEqual(defaulted['on_error'][0]['action'], 'fallback')
+        self.assertEqual(defaulted['on_error'][0]['retries'], 2)
+        explicit = specification()
+        explicit['on_error'][0]['action'] = 'retry'
+        explicit['on_error'][0]['retries'] = 0
+        validate_selectors({'dynamic': explicit}, self.config.profiles, self.file.parent)
+        self.assertEqual(explicit['on_error'][0]['action'], 'retry')
+        self.assertEqual(explicit['on_error'][0]['retries'], 0)
+        capped = specification()
+        capped['on_error'][0]['action'] = 'retry'
+        capped['on_error'][0]['retries'] = 64
+        validate_selectors({'dynamic': capped}, self.config.profiles, self.file.parent)
+        for bad_action in ('retries', 'RETRY', '', None, 0):
+            malformed = specification()
+            malformed['on_error'][0]['action'] = bad_action
+            with self.subTest(action=bad_action), self.assertRaises(ConfigError):
+                validate_selectors({'dynamic': malformed}, self.config.profiles, self.file.parent)
+        for bad_retries in (-1, 65, '2', 2.0, None, True):
+            malformed = specification()
+            malformed['on_error'][0]['retries'] = bad_retries
+            with self.subTest(retries=bad_retries), self.assertRaises(ConfigError):
+                validate_selectors({'dynamic': malformed}, self.config.profiles, self.file.parent)
+        for extra in ({'action': 'retry'}, {'retries': 1}):
+            probed = specification()
+            probed['on_error'] = [{'when': cond('error.code', 'eq', 'synthetic-exhausted'),
+                                   'scope': 'group', 'probe_seconds': 60, **extra}]
+            with self.subTest(extra=extra), self.assertRaises(ConfigError):
+                validate_selectors({'dynamic': probed}, self.config.profiles, self.file.parent)
+
+    def test_on_error_retry_until_rule_waits_on_provider_time(self):
+        spec = specification()
+        spec['on_error'] = [{'when': cond('error.code', 'eq', 'synthetic-exhausted'),
+                             'scope': 'profile', 'until': 'error.retry_at',
+                             'action': 'retry', 'retries': 1}]
+        role, _ = self.setup_selection(spec)
+        first = self.decision(role)
+        action = State(self.config).result(
+            first, run='retry-until', at=1000,
+            error=ModelFailure('synthetic', code='synthetic-exhausted', retry_at=1060))
+        self.assertEqual(action['action'], 'retry')
+        self.assertEqual(action['retries'], 1)
+        self.assertEqual(action['until'], 1060)
+
+    def test_retry_same_candidate_then_fallback_to_next_candidate(self):
+        spec = specification()
+        spec['on_error'][0]['action'] = 'retry'
+        spec['on_error'][0]['retries'] = 2
+        spec['on_error'][0]['seconds'] = 60
+        role, _ = self.setup_selection(spec)
+        attempted = []
+
+        def callback(ctx, prompt, profile):
+            attempted.append(ctx.role.profile)
+            if ctx.role.profile == 'primary':
+                raise ModelFailure('custom', code='synthetic-exhausted')
+
+        driver = ScriptDriver(callback)
+        waits = []
+        leases_during_wait = []
+
+        def spy(self, context, project, stack, selection_role, role_name, wait_seconds):
+            leases_during_wait.append(context._slot_lease)
+            waits.append(wait_seconds)
+            context._slot_lease = True
+            return None
+
+        with patch.object(Engine, '_selection_retry_wait', spy):
+            result = Engine(self.config, driver=driver).run(self.project, role.name)
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(result['selection']['profile'], 'alternate')
+        self.assertEqual(attempted, ['primary', 'primary', 'primary', 'alternate'])
+        self.assertEqual(len(driver.calls), 4)
+        self.assertEqual(len(waits), 2)
+        self.assertTrue(all(wait > 0 for wait in waits))
+        self.assertEqual(leases_during_wait, [False, False])
+
+    def test_retry_exhaustion_falls_back_then_defers_bounded(self):
+        spec = specification()
+        spec['on_error'][0]['action'] = 'retry'
+        spec['on_error'][0]['retries'] = 1
+        spec['on_error'][0]['seconds'] = 60
+        role, _ = self.setup_selection(spec)
+
+        def callback(ctx, prompt, profile):
+            raise ModelFailure('custom', code='synthetic-exhausted')
+
+        attempted = []
+        original_callback = callback
+
+        def recording_callback(ctx, prompt, profile):
+            attempted.append(ctx.role.profile)
+            return original_callback(ctx, prompt, profile)
+
+        driver = ScriptDriver(recording_callback)
+        with patch.object(Engine, '_selection_retry_wait', lambda *args, **kwargs: None):
+            failed = Engine(self.config, driver=driver).run(self.project, role.name)
+        self.assertEqual(failed['status'], 'deferred')
+        # One retry per candidate, then fallback, then no eligible candidate:
+        # primary twice, alternate twice, bounded with no unbounded loop.
+        self.assertEqual(attempted, ['primary', 'primary', 'alternate', 'alternate'])
+        self.assertEqual(len(driver.calls), 4)
+        self.assertEqual([retry['profile'] for retry in failed['selection_retries']],
+                         ['primary', 'primary', 'alternate', 'alternate'])
+        failure = read_json(self.project.root / 'runs' / failed['run'] / 'error.json')
+        self.assertEqual([retry['profile'] for retry in failure['selection_retries']],
+                         ['primary', 'primary', 'alternate', 'alternate'])
+
+    def test_retry_wait_holds_no_slot_and_spends_nothing(self):
+        import contextlib
+        role, _ = self.setup_selection()
+        engine = Engine(self.config, driver=ScriptDriver())
+        budget = Budget(self.config.data / 'budget', self.config.limits.daily_requests,
+                        self.config.limits.retention_days, self.config.limits.shared_daily_requests,
+                        self.config.timezone)
+        with contextlib.ExitStack() as stack:
+            engine._admit(self.project, role.name, role, stack, wait=False)
+            ctx = self.context()
+            ctx._slot_lease = True
+            deadline_before = ctx.deadline
+            requests_before = ctx.request_count
+            used_before = budget.usage(self.project.name)['used']
+            leases = []
+            real_wait = engine.stop.wait
+
+            def spy_wait(timeout=None):
+                leases.append(ctx._slot_lease)
+                return real_wait(timeout)
+
+            with patch.object(engine.stop, 'wait', spy_wait):
+                engine._selection_retry_wait(ctx, self.project, stack, role, role.name, 0.2)
+            self.assertTrue(leases)
+            self.assertTrue(all(lease is False for lease in leases))
+            self.assertTrue(ctx._slot_lease)
+            self.assertEqual(ctx.deadline, deadline_before)
+            self.assertEqual(ctx.request_count, requests_before)
+            self.assertEqual(budget.usage(self.project.name)['used'], used_before)
+
     def test_matched_terminal_error_does_not_advance_brake_by_default(self):
         spec = specification()
         spec['rules'][0]['candidates'] = spec['rules'][0]['candidates'][:1]
