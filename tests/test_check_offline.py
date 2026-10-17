@@ -492,7 +492,8 @@ class UnittestFailureSummaryTests(unittest.TestCase):
                         budgets.append(timeout)
                         if timed_out and not self.killed:
                             raise subprocess.TimeoutExpired(self.command, timeout)
-                        return -9 if self.killed else 1
+                        # Job Object cleanup may report zero despite timeout.
+                        return 0 if self.killed and timed_out else 1
 
                     def kill(self):
                         self.killed = True

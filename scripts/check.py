@@ -229,9 +229,12 @@ def main():
         text = ''.join(chunks)
         if exit_code != 0:
             status = 'fail'
-            if failure_summary is not None:
-                summary = failure_summary()
-                details = f'{details}; {summary}' if details else summary
+        # A timed-out child remains a failure even if Windows Job Object
+        # cleanup reports exit code 0; include structured unittest evidence
+        # based on the recorded status, not that platform-dependent code.
+        if status == 'fail' and failure_summary is not None:
+            summary = failure_summary()
+            details = f'{details}; {summary}' if details else summary
         entry = {'name': name, 'status': status,
                  'seconds': round(time.monotonic() - started, 3), 'exit_code': exit_code}
         if details:
