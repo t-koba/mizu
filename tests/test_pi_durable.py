@@ -143,7 +143,7 @@ class PolicyTests(Fixture):
         self.assertNotIn("remaining", seen)
         self.assertTrue(seen.get("called", True))
 
-    def _normal_launcher(self, context, dispatches, *, seal_on=2):
+    def _normal_launcher(self, context, dispatches, *, seal_on=2, tool_on_first=False):
         """Fake only the child process; exercise the real driver, bridge and SQLite."""
         import json
         from pathlib import Path
@@ -180,12 +180,19 @@ class PolicyTests(Fixture):
 
             self.assertTrue(call("_hello", {})["ok"])
             self.assertTrue(call("_budget", {"sequence": 1})["ok"])
+            if tool_on_first and len(dispatches) == 1:
+                self.assertTrue(call("files", {})["ok"])
             if len(dispatches) > 1:
-                self.assertEqual([t["operation"] for t in cfg["tools"]], ["finish"])
-                self.assertEqual([t["operation"] for t in bridge["tools"]], ["finish"])
-                self.assertFalse(call("files", {})["ok"])
-                with self.assertRaisesRegex(Denied, "no capability"):
-                    context.handle("files", {})
+                did_tool_work = bool(context.tool_count or context.engine_tool_invocations)
+                if did_tool_work:
+                    self.assertEqual([t["operation"] for t in cfg["tools"]], ["finish"])
+                    self.assertEqual([t["operation"] for t in bridge["tools"]], ["finish"])
+                    self.assertFalse(call("files", {})["ok"])
+                    with self.assertRaisesRegex(Denied, "no capability"):
+                        context.handle("files", {})
+                else:
+                    self.assertIn("files", [t["operation"] for t in cfg["tools"]])
+                    self.assertIn("files", [t["operation"] for t in bridge["tools"]])
             sealed = len(dispatches) == seal_on
             if sealed:
                 self.assertTrue(call("finish", {"outcome": "wait", "summary": "sealed",
@@ -211,7 +218,8 @@ class PolicyTests(Fixture):
                     context.attempt_ordinal = 2  # Already-selected candidate; follow-up must not advance it.
                     driver = pi_durable.PiDurableDriver(config)
                     dispatches = []
-                    with mock.patch("mizu.pi_durable.run", self._normal_launcher(context, dispatches)):
+                    with mock.patch("mizu.pi_durable.run", self._normal_launcher(
+                            context, dispatches, tool_on_first=True)):
                         model = Engine(config, driver=driver)._execute(context, driver, "synthetic durable work")
                     self.assertEqual(context.finished["summary"], "sealed")
                     self.assertEqual(len(dispatches), 2)

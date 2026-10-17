@@ -117,6 +117,28 @@ def progress_disposition(value: dict | None, outcome: str, config=None,
         return "reevaluate"
 
 
+def no_progress_recovery_due(value: dict | None, outcome: str, config,
+                             role_name: str | None = None) -> bool:
+    """Whether a matching empty continuation requires a fresh session next time.
+
+    This is an admission-independent signal: it never schedules a run. A
+    persistent session rotates only when another trigger already admits a
+    unit, so recovery cannot create a no-progress spin.
+    """
+    if value is None or outcome not in ("continue", "bounded"):
+        return False
+    try:
+        validate_progress(value)
+        limits = config.limits
+        role = value["role"] if role_name is None else role_name
+        return (value["role"] == role
+                and set(value["selected"]) == set(limits.progress_signals)
+                and not value["has_progress"]
+                and value["no_progress_count"] >= limits.no_progress_recovery_after)
+    except (AttributeError, TypeError, ValueError, Denied):
+        return False
+
+
 def open_store(root: Path, config, *, create_dirs: bool = True) -> "Snapshots":
     """Build a Snapshots view with the operator's limits. Single construction site."""
     limits = config.limits

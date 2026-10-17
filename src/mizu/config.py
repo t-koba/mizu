@@ -289,6 +289,7 @@ class Limits:
     cooldown_seconds: int = 5
     progress_signals: tuple[str, ...] = DEFAULT_PROGRESS_SIGNALS
     no_progress_continuations: int = 0
+    no_progress_recovery_after: int = 2
     no_progress_backoff_seconds: int = 0
     default_wait_seconds: int = 1800
     maximum_wait_seconds: int = 86400
@@ -302,7 +303,8 @@ class Limits:
     busy_retry_seconds: int = 300
     #: Explicit drain yields persistent, non-ephemeral units at safe request boundaries.
     drain_yield: bool = True
-    #: Additional finish-only turns after a normal engine return without a seal.
+    #: Bounded continuations after a normal engine return without a seal; full
+    #: work grant only until the first tool call, then finish-only.
     missing_finish_followups: int = 1
     #: Whether exhausting those turns increments the existing failure brake.
     missing_finish_counts_as_failure: bool = True
@@ -597,6 +599,7 @@ def load(file: Path) -> Config:
                      "daily_requests": (0, 100000), "shared_daily_requests": (0, 100000), "max_failures": (0, 1073741824),
                      "busy_retry_seconds": (0, 86400),
                      "no_progress_continuations": (0, 100),
+                     "no_progress_recovery_after": (1, 100),
                      "no_progress_backoff_seconds": (0, 86400),
                      "missing_finish_followups": (0, 3),
                      "free_disk_mb": (0, 1073741824)}

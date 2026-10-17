@@ -80,23 +80,20 @@ class FinishSealTests(Fixture):
         self.assertIsNone(ctx.admission_error)
 
 
-    def test_normal_terminal_turn_gets_one_finish_only_followup(self):
-        test_case = self
+    def test_no_tool_return_gets_a_work_capable_followup(self):
         class FollowupDriver:
             requires_sandbox = False
             def __init__(self):
                 self.calls = []
                 self.grants = []
+                self.read_result = None
             def execute(self, context, prompt, *, profile=None):
                 self.calls.append(prompt)
                 self.grants.append(context.role.capabilities)
                 context.handle("_hello", {})
                 context.handle("_budget", {"sequence": 1})
                 if len(self.calls) == 2:
-                    with test_case.assertRaises(Denied):
-                        context.handle("read", {"path": "app.py"})
-                    with test_case.assertRaises(Denied):
-                        context.handle("_engine_tool", {"name": "native", "invocation_id": "sdk-native"})
+                    self.read_result = context.handle("read", {"path": "app.py"})
                     context.handle("finish", FINISH)
                 context.handle("_request_done", {"sequence": 1})
                 return {"requests": context.request_count}
@@ -107,15 +104,49 @@ class FinishSealTests(Fixture):
         self.assertIsNotNone(ctx.finished)
         self.assertEqual(len(driver.calls), 2)
         self.assertIn("prior turn returned normally", driver.calls[1])
-        self.assertNotIn("Do the work", driver.calls[1])
+        self.assertIn("work unit has not started", driver.calls[1])
         self.assertEqual(driver.grants[0], self.config.roles["worker"].capabilities)
-        self.assertEqual(driver.grants[1], ("finish",))
+        self.assertEqual(driver.grants[1], self.config.roles["worker"].capabilities)
+        self.assertIn("VALUE = 2", driver.read_result["text"])
         self.assertEqual(ctx.request_count, 2)
         self.assertEqual(Budget(self.config.data / "budget", 100).usage(self.project.name)["used"], 2)
         self.assertEqual(model["missing_finish"], {
             "configured_followups": 1, "used_followups": 1, "exhausted": False,
             "sealed": True, "counts_as_failure": True})
         self.assertEqual(ctx.request_deadlines, {})
+
+    def test_tool_using_turn_keeps_the_followup_finish_only(self):
+        class FollowupDriver:
+            requires_sandbox = False
+            def __init__(self):
+                self.calls = []
+                self.grants = []
+            def execute(self, context, prompt, *, profile=None):
+                self.calls.append(prompt)
+                self.grants.append(context.role.capabilities)
+                context.handle("_hello", {})
+                context.handle("_budget", {"sequence": 1})
+                if len(self.calls) == 1:
+                    context.handle("read", {"path": "app.py"})
+                else:
+                    with self_case.assertRaises(Denied):
+                        context.handle("read", {"path": "app.py"})
+                    with self_case.assertRaises(Denied):
+                        context.handle("_engine_tool", {"name": "native", "invocation_id": "sdk-native"})
+                    context.handle("finish", FINISH)
+                context.handle("_request_done", {"sequence": 1})
+                return {"requests": context.request_count}
+
+        self_case = self
+        ctx = self.context()
+        driver = FollowupDriver()
+        Engine(self.config)._execute(ctx, driver, "Do the work")
+        self.assertIsNotNone(ctx.finished)
+        self.assertEqual(len(driver.calls), 2)
+        self.assertIn("Do not repeat the work", driver.calls[1])
+        self.assertNotIn("work unit has not started", driver.calls[1])
+        self.assertEqual(driver.grants[0], self.config.roles["worker"].capabilities)
+        self.assertEqual(driver.grants[1], ("finish",))
 
     def test_followup_admission_still_obeys_daily_budget(self):
         config = dataclasses.replace(self.config, limits=dataclasses.replace(

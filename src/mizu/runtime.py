@@ -29,7 +29,8 @@ from .errors import Busy, Cancelled, ConfigError, Denied, InfraExceeded, LimitEx
 from .fs import (canonical, digest, lock, mkdir, now, read_json, safe_read, write_json,
                  PREVIEW_BYTES, READ_PAGE_CHARS, page, text_preview, DIGEST)
 from .project import Project
-from .snapshot import PROGRESS_SIGNALS, progress_disposition, validate_progress
+from .snapshot import (PROGRESS_SIGNALS, no_progress_recovery_due,
+                       progress_disposition, validate_progress)
 from .protocol import DEFINITIONS, validate
 from .report import previous as _previous_report, publish
 from .sandbox import Sandbox, cleanup
@@ -2427,14 +2428,14 @@ def session_prompt(context: Context, role, run_dir: Path) -> tuple:
     session state only. Retry/cancellation: peeking never raises (any failure
     falls back to the full prompt and empty identity), except an enforcing
     due rotation, which propagates so the unit fails before model dispatch
-    instead of admitting the old conversation. Evidence: rotations write
-    ``rotation.json``; dispatches record the mode in
-    ``prompt_projection.json``; a failed due rotation is recorded in the run
-    ``error.json`` by the Engine caller. Failure: a due rotation removes
+    instead of admitting the old conversation. No-progress recovery also
+    rotates a due persistent session before dispatch, even if its session
+    record is missing. Evidence: rotations write ``rotation.json``; dispatches
+    record the mode in ``prompt_projection.json``; failed rotations are stored
+    in the run ``error.json`` by the Engine caller. Failure: a due rotation removes
     ``session.json`` so the next dispatch mints a fresh provider session
     while the published snapshot and composed policy reload unchanged; a
-    missing or invalid record (new, compacted-away or rotated session) takes
-    the full prompt.
+    missing record otherwise takes the full prompt.
     """
     from .engine_config import (effective, read_prompt_state, rotate_session,
                                 rotation_due, session_record)
@@ -2452,7 +2453,16 @@ def session_prompt(context: Context, role, run_dir: Path) -> tuple:
         return prompt_for(context), "full", "", None, None
     session_dir = path.parent
     key = session_dir.name
+    progress = context.snapshot.get("progress")
+    recovery_due = no_progress_recovery_due(
+        progress, context.snapshot.get("outcome", ""), context.config, context.role.name)
+    recovery_reason = (
+        f"no-progress units {progress['no_progress_count']} "
+        f">={context.config.limits.no_progress_recovery_after}") if recovery_due else None
     if saved is None:
+        if recovery_due:
+            record = rotate_session(path, run_dir, recovery_reason)
+            return prompt_for(context), "full", key, record, session_dir
         return prompt_for(context), "full", key, None, session_dir
     try:
         due, reason = rotation_due(context.config.limits, path, saved,
@@ -2464,6 +2474,9 @@ def session_prompt(context: Context, role, run_dir: Path) -> tuple:
         # the work unit before model dispatch (Engine records error.json),
         # never substitute a full prompt and admit the old conversation.
         record = rotate_session(path, run_dir, reason)
+        return prompt_for(context), "full", key, record, session_dir
+    if recovery_due:
+        record = rotate_session(path, run_dir, recovery_reason)
         return prompt_for(context), "full", key, record, session_dir
     caps = set(context.role.capabilities)
     try:
@@ -2501,9 +2514,11 @@ class Engine:
     def _execute(self, context: Context, driver, prompt: str, **kwargs) -> dict:
         """Preserve a durable host seal and recover only normal unsealed returns.
 
-        A normally settled turn without a seal gets the configured, finish-only
-        follow-up allowance. Provider/protocol faults and explicit cancellation
-        keep their existing paths. Deadline wrap-up remains separate and bounded.
+        A normally settled turn without a seal gets the configured continuation
+        allowance. With no prior tool calls it retains the work grant; after
+        tool activity, follow-ups are finish-only. Provider/protocol faults and
+        explicit cancellation keep their existing paths. Deadline wrap-up remains
+        separate and bounded.
         Final record, integrity, and publication failures still fail closed.
         """
         if context.finished is not None:
@@ -2570,10 +2585,6 @@ class Engine:
                 used = 0
                 base_role = context.role
                 authority = context.turn_authority_role or base_role
-                followup_prompt = (
-                    "The prior turn returned normally without calling mizu_finish. "
-                    "This work unit remains open. Do not repeat the work or call any other tool; "
-                    "call mizu_finish now with an accurate outcome and summary. No action may follow the seal.")
                 while context.finished is None and used < configured:
                     if context.host_cancelled():
                         raise Cancelled("Run stopped before missing-finish follow-up")
@@ -2587,6 +2598,21 @@ class Engine:
                         raise ProtocolError("Terminal turn left an active model-request deadline")
                     context.check_deadlines()
                     used += 1
+                    did_tool_work = bool(context.tool_count or context.engine_tool_invocations)
+                    if did_tool_work:
+                        followup_prompt = (
+                            "The prior turn returned normally without calling mizu_finish. "
+                            "This work unit remains open. Do not repeat the work or call any other tool; "
+                            "call mizu_finish now with an accurate outcome and summary. No action may follow the seal.")
+                        followup_role = dataclasses.replace(base_role, capabilities=("finish",),
+                                                            engine_tools=(), selector="")
+                    else:
+                        followup_prompt = (
+                            "The prior turn returned normally without calling mizu_finish or any tool. "
+                            "This work unit has not started. Begin the requested work using the original "
+                            "goal and state in this session, use your granted tools as needed, and then "
+                            "call mizu_finish with an accurate outcome and summary. No action may follow the seal.")
+                        followup_role = base_role
                     context.missing_finish_evidence = {
                         "configured_followups": configured, "used_followups": used,
                         "exhausted": False, "sealed": False,
@@ -2596,8 +2622,7 @@ class Engine:
                     previous_continuation = context.turn_continuation
                     context.turn_authority_role = authority
                     context.turn_continuation = True
-                    context.role = dataclasses.replace(base_role, capabilities=("finish",),
-                                                       engine_tools=(), selector="")
+                    context.role = followup_role
                     previous_session_capabilities = context.session_identity_capabilities
                     context.session_identity_capabilities = base_role.capabilities
                     context.operations_stopped.clear()

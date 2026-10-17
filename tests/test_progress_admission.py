@@ -19,6 +19,7 @@ class ProgressConfigTests(Fixture):
         limits = self.config.limits
         self.assertEqual(limits.progress_signals, DEFAULT_PROGRESS_SIGNALS)
         self.assertEqual(limits.no_progress_continuations, 0)
+        self.assertEqual(limits.no_progress_recovery_after, 2)
         self.assertEqual(limits.no_progress_backoff_seconds, 0)
 
         raw = self.file.read_text()
@@ -27,6 +28,8 @@ class ProgressConfigTests(Fixture):
                 ("progress_signals", '["tool", "tool"]'),
                 ("no_progress_continuations", "101"),
                 ("no_progress_continuations", "-1"),
+                ("no_progress_recovery_after", "0"),
+                ("no_progress_recovery_after", "101"),
                 ("no_progress_backoff_seconds", "86401"),
                 ("no_progress_backoff_seconds", "-1")):
             candidate = raw.replace(
@@ -35,6 +38,8 @@ class ProgressConfigTests(Fixture):
                 'progress_signals = ["tool", "code", "decision", "insight", "input"]')
             if setting == "no_progress_continuations":
                 candidate = candidate.replace("no_progress_continuations = 0", f"no_progress_continuations = {invalid}")
+            elif setting == "no_progress_recovery_after":
+                candidate = candidate.replace("no_progress_recovery_after = 2", f"no_progress_recovery_after = {invalid}")
             elif setting == "no_progress_backoff_seconds":
                 candidate = candidate.replace("no_progress_backoff_seconds = 0", f"no_progress_backoff_seconds = {invalid}")
             self.file.write_text(candidate)
@@ -44,11 +49,12 @@ class ProgressConfigTests(Fixture):
         self.assertEqual(load(self.file).limits.progress_signals, DEFAULT_PROGRESS_SIGNALS)
         boundary = raw.replace("no_progress_continuations = 0", "no_progress_continuations = 100")
         boundary = boundary.replace("no_progress_backoff_seconds = 0", "no_progress_backoff_seconds = 86400")
+        boundary = boundary.replace("no_progress_recovery_after = 2", "no_progress_recovery_after = 100")
         self.file.write_text(boundary)
         limits = load(self.file).limits
         self.file.write_text(raw)
-        self.assertEqual((limits.no_progress_continuations, limits.no_progress_backoff_seconds),
-                         (100, 86400))
+        self.assertEqual((limits.no_progress_continuations, limits.no_progress_backoff_seconds,
+                          limits.no_progress_recovery_after), (100, 86400, 100))
 
         empty = raw.replace(
             'progress_signals = ["tool", "code", "decision", "insight", "input"] # Any selected true signal admits another continue/bounded unit. Empty disables progress qualification.',
@@ -453,6 +459,13 @@ class ProgressAdmissionTests(Fixture):
 
         wait = self._parked_snapshot(count=1, outcome="wait", wake_at=100)
         self.assertTrue(should_run(self.project, wait, current_time=101, role_name="worker"))
+
+    def test_no_progress_recovery_warning_is_visible_without_self_admitting(self):
+        parked = self._parked_snapshot(count=2)
+        self.assertFalse(should_run(self.project, parked, role_name="worker"))
+        status = self.project.status()
+        self.assertEqual(status["progress"]["recovery"], {
+            "status": "due", "pending_work": True, "no_progress_count": 2, "after": 2})
 
     def test_malformed_progress_fails_closed_and_visibility_is_bounded(self):
         parked = self._parked_snapshot(count=1)

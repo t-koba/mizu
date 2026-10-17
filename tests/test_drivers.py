@@ -162,7 +162,7 @@ class SyntheticEngineTests(Fixture):
             self.assertEqual(result['request_unit'],unit)
             self.assertEqual(missing.request_deadlines, {})
 
-    def test_claude_and_codex_resume_one_finish_only_followup(self):
+    def test_claude_and_codex_resume_a_work_capable_no_tool_followup(self):
         from mizu.runtime import Engine
         for engine in ('claude', 'codex'):
             for session in ('persistent', 'ephemeral'):
@@ -186,16 +186,17 @@ class SyntheticEngineTests(Fixture):
                             self.grants.append(context.role.capabilities)
                             return inner.execute(context,prompt,profile=profile)
                     driver=RecordingDriver()
+                    original_grant = ctx.role.capabilities
                     with unittest.mock.patch.dict(os.environ,{'CODEX_AUTH_FILE':str(self.root/'absent')}):
                         model=Engine(config,driver=driver)._execute(ctx,driver,'Synthetic work')
                     self.assertIsNotNone(ctx.finished)
                     self.assertEqual(driver.calls,2)
-                    self.assertEqual(driver.grants[1],('finish',))
+                    self.assertEqual(driver.grants[1], original_grant)
                     self.assertEqual(ctx.request_count,2)
                     self.assertEqual(ctx.request_deadlines,{})
                     self.assertEqual(model['missing_finish']['used_followups'],1)
 
-    def test_pi_resumes_a_normal_unsealed_turn_for_one_finish_only_followup(self):
+    def test_pi_resumes_a_normal_unsealed_turn_with_work_capable_followup(self):
         from mizu.runtime import Engine
         for session in ('persistent', 'ephemeral'):
             with self.subTest(session=session):
@@ -219,10 +220,11 @@ class SyntheticEngineTests(Fixture):
                         self.grants.append(context.role.capabilities)
                         return inner.execute(context,prompt,profile=profile)
                 driver=RecordingDriver()
+                original_grant = ctx.role.capabilities
                 model=Engine(config,driver=driver)._execute(ctx,driver,'Synthetic work')
                 self.assertIsNotNone(ctx.finished)
                 self.assertEqual(driver.calls,2)
-                self.assertEqual(driver.grants[1],('finish',))
+                self.assertEqual(driver.grants[1], original_grant)
                 self.assertEqual(ctx.request_count,2)
                 self.assertEqual(ctx.request_deadlines,{})
                 self.assertEqual(model['missing_finish']['used_followups'],1)

@@ -167,11 +167,18 @@ red CI presence do not count repeatedly: pending obligations are fingerprinted
 by stable identity, so a newly offered obligation counts once while unchanged
 visibility does not reset the streak. Finish alone is
 not progress. The default `no_progress_continuations = 0` therefore parks after
-the first unchanged, finish-only continuation. Operators may allow 0–100
+the first `continue`/`bounded` unit without a selected progress signal. A
+missing-finish continuation may still use the full work grant when no tool was
+called; otherwise it remains finish-only. Operators may allow 0–100
 consecutive no-progress continuations; selected progress or a role/policy change
 resets the streak. `no_progress_backoff_seconds = 0` disables a timer wake; a
 positive value permits a parked continuation to wake after that delay measured
-from its recorded progress timestamp. Goal and
+from its recorded progress timestamp. `no_progress_recovery_after = 2` rotates a
+persistent conversation to a fresh generation on the next independently
+admitted dispatch after two empty `continue`/`bounded` units; it does not admit
+or schedule a run. `mizu status` exposes whether that recovery threshold is due
+and the count, so parked empty work is visible while awaiting its next trigger.
+Goal and
 operator wakes, new inbox generations, due decision/wait/CI events, and wait
 expiry are checked before this self-admission gate. Writable on-change roles
 honor these explicit wakes even with unchanged code; event-triggered dispatch

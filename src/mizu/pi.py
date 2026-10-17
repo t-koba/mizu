@@ -94,11 +94,11 @@ class PiDriver:
                             raise ProtocolError("No runtime request admission observed")
                         # The session record is persistent only when settings
                         # select that policy; otherwise session_record() places
-                        # it under this run, where a finish-only follow-up can
-                        # resume without carrying it into another work unit.
+                        # it under this run, where a missing-finish continuation
+                        # can resume within its bounded allowance.
                         save_session(path, session_file, {"tokens": _cumulative_tokens(saved, context)})
                         # A normal settled response without a seal is returned
-                        # to Engine._execute for the bounded finish-only policy.
+                        # to Engine._execute for the bounded missing-finish policy.
                         break
             except DeadlineWrapUp:
                 # The Pi runtime admits individual provider requests behind a

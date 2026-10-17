@@ -8,9 +8,10 @@ from unittest.mock import patch
 from support import Fixture, ScriptDriver
 from mizu.errors import Denied
 from mizu.engine_config import effective, session_record, save_session
-from mizu.fs import read_json
+from mizu.fs import now, read_json
 from mizu.project import Project
-from mizu.runtime import Engine
+from mizu.runtime import Engine, _progress_obligations_digest
+from mizu.snapshot import PROGRESS_SIGNALS, validate_progress
 
 
 class Capture(ScriptDriver):
@@ -138,6 +139,58 @@ class SessionDeltaTests(Fixture):
         self.assertGreater(fresh, old)
         self.assertAlmostEqual(fresh, time.time(), delta=10.0)
         self.assertIsNotNone(session_age_seconds(path, read_json(path)))
+
+    def test_repeated_no_progress_rotates_on_next_admitted_dispatch(self):
+        from mizu.runtime import session_prompt
+        from mizu.engine_config import session_generation
+        config = dataclasses.replace(
+            self.config, limits=dataclasses.replace(
+                self.config.limits, no_progress_recovery_after=2))
+        ctx = self.context("worker")
+        ctx.config = config
+        path = save_worker_session(self, {"tokens": 0})
+        signals = {name: False for name in PROGRESS_SIGNALS}
+        progress = validate_progress({
+            "schema": 1, "signals": signals,
+            "selected": list(config.limits.progress_signals), "role": "worker",
+            "has_progress": False, "no_progress_count": 1,
+            "obligations_digest": _progress_obligations_digest(()), "recorded_at": now(),
+        })
+        ctx.snapshot = {**ctx.snapshot, "outcome": "continue", "progress": progress}
+        _, mode, _, rotation, _ = session_prompt(ctx, ctx.role, ctx.run_dir)
+        self.assertEqual(mode, "delta")
+        self.assertIsNone(rotation)
+        self.assertTrue(path.is_file())
+        progress["no_progress_count"] = 2
+        ctx.snapshot = {**ctx.snapshot, "progress": validate_progress(progress)}
+        prompt, mode, _, rotation, _ = session_prompt(ctx, ctx.role, ctx.run_dir)
+        self.assertEqual(mode, "full")
+        self.assertIn("goal", json.loads(prompt))
+        self.assertIn("no-progress units 2 >=2", rotation["reason"])
+        self.assertEqual(session_generation(path.parent), 1)
+        self.assertFalse(path.exists())
+
+    def test_no_progress_recovery_rotates_even_without_saved_session_id(self):
+        from mizu.runtime import session_prompt
+        from mizu.engine_config import session_generation
+        ctx = self.context("worker")
+        settings = effective(ctx.config, ctx.role, ctx.role.profile)
+        path, saved = session_record(ctx, ctx.role.profile, settings)
+        self.assertIsNone(saved)
+        self.assertFalse(path.exists())
+        signals = {name: False for name in PROGRESS_SIGNALS}
+        progress = validate_progress({
+            "schema": 1, "signals": signals,
+            "selected": list(ctx.config.limits.progress_signals), "role": "worker",
+            "has_progress": False, "no_progress_count": 2,
+            "obligations_digest": _progress_obligations_digest(()), "recorded_at": now(),
+        })
+        ctx.snapshot = {**ctx.snapshot, "outcome": "continue", "progress": progress}
+        _, mode, _, rotation, _ = session_prompt(ctx, ctx.role, ctx.run_dir)
+        self.assertEqual(mode, "full")
+        self.assertIn("no-progress units 2", rotation["reason"])
+        self.assertEqual(session_generation(path.parent), 1)
+        self.assertFalse(path.exists())
 
     def test_token_bound_rotates_to_a_fresh_full_prompt(self):
         config = dataclasses.replace(

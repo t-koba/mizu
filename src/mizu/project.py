@@ -15,7 +15,8 @@ from .errors import ConfigError, Denied, LimitExceeded
 from .fs import atomic_write, identifier, lock, mkdir, now, read_json, safe_read, sync_dir, write_json
 from .insights import Insights
 from .process import environment, run
-from .snapshot import open_store, progress_disposition, progress_projection
+from .snapshot import (no_progress_recovery_due, open_store,
+                       progress_disposition, progress_projection)
 from .work_items import WorkItems
 
 
@@ -98,15 +99,24 @@ class Project:
         budget = Budget(self.config.data / "budget", self.config.limits.daily_requests,
                         self.config.limits.retention_days,
                         self.config.limits.shared_daily_requests, self.config.timezone).usage(self.name)
+        progress = snapshot.get("progress")
+        progress_count = progress.get("no_progress_count", 0) if isinstance(progress, dict) else 0
+        progress_role = progress.get("role") if isinstance(progress, dict) else None
+        recovery_due = no_progress_recovery_due(
+            progress, snapshot["outcome"], self.config, progress_role)
+        progress_disposition_value = progress_disposition(
+            progress, snapshot["outcome"], self.config, progress_role)
         return {"project": self.name, "control": self.control(), "snapshot": snapshot["id"],
                 "code_digest": snapshot["code_digest"], "created_at": snapshot["created_at"],
                 "outcome": snapshot["outcome"], "summary": snapshot["summary"],
                 "verification": snapshot["verification"], "state": snapshot["state"],
-                "progress": {"status": "current" if snapshot.get("progress") is not None else "legacy",
-                             "record": progress_projection(snapshot.get("progress")),
-                             "disposition": progress_disposition(
-                                 snapshot.get("progress"), snapshot["outcome"], self.config,
-                                 snapshot.get("progress", {}).get("role") if snapshot.get("progress") else None)},
+                "progress": {"status": "current" if progress is not None else "legacy",
+                             "record": progress_projection(progress),
+                             "disposition": progress_disposition_value,
+                             "recovery": {"status": "due" if recovery_due else "not_due",
+                                          "pending_work": recovery_due,
+                                          "no_progress_count": progress_count,
+                                          "after": self.config.limits.no_progress_recovery_after}},
                 "goal_digest": snapshot.get("goal_digest"), "wake_at": snapshot.get("wake_at"),
                 "selection": project_status(self.config, self),
                 "health": {p.stem: read_json(p) for p in (self.root / "health").glob("*.json") if not p.is_symlink()},
