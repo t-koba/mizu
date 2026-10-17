@@ -158,6 +158,24 @@ class VcsRefInjectionTests(Fixture):
         result = worker.handle("read", {"path": "refs/remotes/upstream/main"})
         self.assertEqual(result["text"], SHA_A)
 
+    def test_read_refuses_workspace_collision_for_nonregular_entries(self):
+        from mizu import vcs as _vcs
+        _vcs.inject_refs(self.project.root, {"main": SHA_A})
+        worker = self.context("worker")
+        collision = self.project.workspace / "refs/remotes/upstream/main"
+        collision.parent.mkdir(parents=True)
+        (self.project.workspace / "app.py").write_bytes(b"VALUE = 2\n")
+        collision.symlink_to(self.project.workspace / "app.py")
+        with self.assertRaisesRegex(Denied, "collides with the reserved virtual"):
+            worker.handle("read", {"path": "refs/remotes/upstream/main"})
+        collision.unlink()
+        collision.mkdir()
+        with self.assertRaisesRegex(Denied, "collides with the reserved virtual"):
+            worker.handle("read", {"path": "refs/remotes/upstream/main"})
+        collision.rmdir()
+        result = worker.handle("read", {"path": "refs/remotes/upstream/main"})
+        self.assertEqual(result["text"], SHA_A)
+
     def test_excluded_even_with_empty_operator_excludes(self):
         probe = Snapshots(self.root / "probe-store", excludes=(), max_file=1024,
                            max_bytes=65536, max_files=100)

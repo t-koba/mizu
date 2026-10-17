@@ -29,8 +29,9 @@ from .config import (MAX_CI_WAKE_EXTRA_BRANCHES, Config, Role, load,
 from .doctor import container_runtime
 from .drivers import driver_for
 from .errors import Busy, Cancelled, ConfigError, Denied, InfraExceeded, LimitExceeded, RunDeadlineExceeded, DeadlineWrapUp, DrainYieldExceeded, MissingFinish, MizuError, ModelFailure, ProtocolError
-from .fs import (canonical, digest, lock, mkdir, now, read_json, safe_read, write_json,
-                 PREVIEW_BYTES, READ_PAGE_CHARS, page, text_preview, DIGEST)
+from .fs import (canonical, digest, lock, mkdir, now, read_json, relative_parts,
+                   safe_read, write_json, PREVIEW_BYTES, READ_PAGE_CHARS, page,
+                   text_preview, DIGEST)
 from .project import Project
 from .snapshot import (PROGRESS_SIGNALS, no_progress_recovery_due,
                        progress_disposition, validate_progress)
@@ -763,13 +764,26 @@ class Context:
         if ref is not None:
             if self.role.workspace == "none":
                 raise Denied("Path is not exposed to this role")
+            # Existence probe, not a read: any workspace entry at the
+            # virtual path collides, even a symlink, directory, special
+            # file or hardlink that safe_read would refuse. Only a
+            # missing path falls through to the virtual ref. Unreadable
+            # states fail closed toward refusal.
             try:
-                safe_read(self.workspace, path, 1)
-                collision = True
-            except LimitExceeded:
-                collision = True  # present, larger than the 1-byte probe
-            except (OSError, Denied):
+                target = self.workspace.joinpath(*relative_parts(path))
+            except (ValueError, Denied, OSError):
                 collision = False
+            else:
+                try:
+                    os.lstat(target)
+                except FileNotFoundError:
+                    collision = False
+                except NotADirectoryError:
+                    collision = False
+                except OSError:
+                    collision = True
+                else:
+                    collision = True
             if collision:
                 raise Denied("Path collides with the reserved virtual upstream-ref prefix; "
                              "relocate genuine files out of refs/remotes/upstream/")
