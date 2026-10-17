@@ -38,7 +38,6 @@ from __future__ import annotations
 
 import contextlib
 import hmac
-import json
 import secrets
 import socket
 import socketserver
@@ -49,7 +48,7 @@ from typing import Callable
 
 from . import platform as _platform
 from .errors import Denied, MizuError
-from .fs import MAX_FRAME, canonical, write_json
+from .fs import MAX_FRAME, canonical, loads_finite, write_json
 
 #: Loopback hosts a TCP bridge may bind or dial. Anything else is refused so
 #: a tampered bridge file cannot redirect tool calls off the host.
@@ -160,7 +159,7 @@ class Bridge:
                     raw = self.rfile.readline(MAX_FRAME + 1)
                     if len(raw) > MAX_FRAME or not raw.endswith(b"\n"):
                         raise ValueError("Invalid bridge frame")
-                    request = json.loads(raw, parse_constant=lambda v: (_ for _ in ()).throw(ValueError("Non-finite JSON")))
+                    request = loads_finite(raw)
                     if not isinstance(request, dict) or not isinstance(request.get("token"), str):
                         raise ValueError("Unauthenticated request")
                     if not hmac.compare_digest(request["token"], outer.token):

@@ -222,6 +222,20 @@ class PiProtocolTests(Fixture):
                 result = json.loads(sock.makefile("rb").readline())
                 self.assertFalse(result["ok"])
 
+    def test_bridge_rejects_overflow_exponent(self):
+        with Bridge(lambda op, args: {"accepted": True}, [], timeout=2) as bridge:
+            config = read_json(bridge.config_file)
+            with bridge_connect(config) as sock:
+                stream = sock.makefile("rb")
+                sock.sendall(b'{"token":' + json.dumps(config["token"]).encode() +
+                            b',"operation":"finish","arguments":{"value":1e9999}}\n')
+                result = json.loads(stream.readline())
+                self.assertFalse(result["ok"])
+            with bridge_connect(config) as sock:
+                sock.sendall(canonical({"token": config["token"], "operation": "finish",
+                                        "arguments": {}}))
+                self.assertTrue(json.loads(sock.makefile("rb").readline())["ok"])
+
     def test_bridge_tcp_loopback_round_trip_and_auth(self):
         with Bridge(lambda op, args: {"accepted": True}, [], timeout=2, transport="tcp") as bridge:
             config = read_json(bridge.config_file)

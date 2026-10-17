@@ -11,7 +11,7 @@ import sys
 from collections.abc import Callable
 
 from .errors import Denied, MizuError
-from .fs import MAX_FRAME, canonical
+from .fs import MAX_FRAME, canonical, loads_finite
 from .protocol import MCP_VERSIONS
 
 
@@ -38,8 +38,8 @@ def serve_stdio(*, input_stream=None, output_stream=None, server_name: str,
         notification = False
         try:
             try:
-                request = json.loads(raw, parse_constant=lambda value: (_ for _ in ()).throw(ValueError("Non-finite JSON value")))
-            except (ValueError, UnicodeError):
+                request = loads_finite(raw)
+            except (ValueError, UnicodeError, RecursionError):
                 sink.write(canonical({"jsonrpc": "2.0", "id": None,
                                       "error": {"code": -32700, "message": "Parse error"}}))
                 sink.flush()
@@ -88,7 +88,7 @@ def serve_stdio(*, input_stream=None, output_stream=None, server_name: str,
                     sink.flush()
                 continue
             response = {"jsonrpc": "2.0", "id": request_id, "result": result}
-        except (ValueError, UnicodeError, MizuError, TypeError) as exc:
+        except (ValueError, UnicodeError, MizuError, TypeError, RecursionError) as exc:
             response = {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32600, "message": str(exc)}}
         if not notification:
             wire = canonical(response)

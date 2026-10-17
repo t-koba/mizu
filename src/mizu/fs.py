@@ -28,6 +28,29 @@ READ_PAGE_CHARS = 8192
 #: MCP/socket LF framing bound shared by the bridge, the MCP proxy and the
 #: Editor capsule server (each rejects anything above it).
 MAX_FRAME = 1024 * 1024
+
+
+def _reject_nonfinite_constant(value: str) -> object:
+    raise ValueError("Non-finite JSON value")
+
+
+def _reject_nonfinite_number(text: str) -> float:
+    value = float(text)
+    if not value == value or value in (float("inf"), float("-inf")):
+        raise ValueError("Non-finite JSON number")
+    return value
+
+
+def loads_finite(raw: bytes | str) -> Any:
+    """Parse one JSON document, refusing non-finite numbers.
+
+    ``parse_constant`` rejects NaN/Infinity literals; ``parse_float``
+    rejects valid-syntax numbers (for example ``1e9999``) that overflow
+    to infinity. Finite numbers, including large integers within the
+    decoder bound, keep working.
+    """
+    return json.loads(raw, parse_constant=_reject_nonfinite_constant,
+                      parse_float=_reject_nonfinite_number)
 #: Shell-input bound shared by the tool contract and the sandbox executor.
 SCRIPT_MAX = 65536
 

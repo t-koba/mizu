@@ -273,6 +273,38 @@ class BoundaryTests(Fixture):
         self.assertEqual(calls,[])
         self.assertEqual(len(output.getvalue().splitlines()),1)
 
+    def test_mcp_nonfinite_numbers_rejected(self):
+        from mizu.fs import loads_finite
+        from mizu.mcp_loop import serve_stdio
+        for bad in ("NaN", "1e9999", "-1e9999"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                loads_finite(b'{"value":%s}' % bad.encode())
+        self.assertEqual(loads_finite(b'{"a":1.5,"b":100,"c":1e308}'),
+                         {"a": 1.5, "b": 100, "c": 1e308})
+        frames = [b'{"jsonrpc":"2.0","id":1,"method":"ping","params":{"value":NaN}}\n',
+                  b'{"jsonrpc":"2.0","id":2,"method":"ping","params":{"value":1e9999}}\n',
+                  b'{"jsonrpc":"2.0","id":3,"method":"ping","params":{}}\n']
+        output = io.BytesIO()
+        serve_stdio(input_stream=io.BytesIO(b"".join(frames)), output_stream=output,
+                    server_name="test", list_tools=lambda: [], call_tool=lambda *args: {})
+        lines = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual([line.get("error", {}).get("code") for line in lines[:2]], [-32700, -32700])
+        self.assertEqual(lines[2], {"jsonrpc": "2.0", "id": 3, "result": {}})
+
+    def test_mcp_recursion_failure_continues_loop(self):
+        from mizu.mcp_loop import serve_stdio
+        deep = b"[" * 20000 + b"]" * 20000
+        frames = [b'{"jsonrpc":"2.0","id":1,"method":"ping","params":{"deep":' + deep + b'}}\n',
+                  b'{"jsonrpc":"2.0","id":2,"method":"ping","params":{}}\n']
+        self.assertLess(max(map(len, frames)), MAX_FRAME)
+        output = io.BytesIO()
+        serve_stdio(input_stream=io.BytesIO(b"".join(frames)), output_stream=output,
+                    server_name="test", list_tools=lambda: [], call_tool=lambda *args: {})
+        lines = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(lines[0].get("error", {}).get("code"), -32700)
+        self.assertEqual(lines[1], {"jsonrpc": "2.0", "id": 2, "result": {}})
+
     def test_mcp_response_bound_includes_json_escaping(self):
         from mizu.mcp_loop import serve_stdio
         messages=[{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}},{"jsonrpc":"2.0","id":2,"method":"tools/list"}]
