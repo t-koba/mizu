@@ -480,10 +480,32 @@ class Context:
         request = min(requests) if requests else self.transport_idle_deadline
         return self.wall_expired() or time.monotonic() >= request
 
+    def _delegated_wrap_up_limits(self) -> tuple[int, int]:
+        """Effective wrap-up allowance for a delegated child (clamped shares).
+
+        The child share never exceeds the spend role's effective total minus
+        one, so a small configured total cannot starve the caller's own seal:
+        the caller always retains at least one wrap-up request and tool.
+        """
+        role = self.spend_role or self.role
+        total_requests = role_wrap_up_requests(self.config, role)
+        total_tools = role_wrap_up_tools(self.config, role)
+        return (max(0, min(self.config.limits.delegate_wrap_up_requests, total_requests - 1)),
+                max(0, min(self.config.limits.delegate_wrap_up_tools, total_tools - 1)))
+
+    def _wrap_up_request_used_limit(self) -> tuple[int, int]:
+        """Effective (used, limit) for wrap-up model requests on this context."""
+        if self.delegated_child:
+            return (self.delegated_wrap_up_requests, self._delegated_wrap_up_limits()[0])
+        role = self.spend_role or self.role
+        return (self.wrap_up_requests + self.delegated_wrap_up_requests,
+                role_wrap_up_requests(self.config, role))
+
     def _wrap_up_remaining(self) -> tuple[int, int]:
         if self.delegated_child:
-            return (self.config.limits.delegate_wrap_up_requests - self.delegated_wrap_up_requests,
-                    self.config.limits.delegate_wrap_up_tools - self.delegated_wrap_up_tools)
+            child_requests, child_tools = self._delegated_wrap_up_limits()
+            return (child_requests - self.delegated_wrap_up_requests,
+                    child_tools - self.delegated_wrap_up_tools)
         role = self.spend_role or self.role
         return (role_wrap_up_requests(self.config, role) - self.wrap_up_requests - self.delegated_wrap_up_requests,
                 role_wrap_up_tools(self.config, role) - self.wrap_up_tools - self.delegated_wrap_up_tools)
@@ -585,10 +607,7 @@ class Context:
                     if sequence_key not in self.request_sequences:
                         over = self.bound_hit in ("deadline", "drain") or self.request_count >= role_requests_per_run(
                             self.config, self.spend_role or self.role)
-                        requests_used = (self.delegated_wrap_up_requests if self.delegated_child else
-                                         self.wrap_up_requests + self.delegated_wrap_up_requests)
-                        requests_limit = (self.config.limits.delegate_wrap_up_requests if self.delegated_child
-                                          else role_wrap_up_requests(self.config, self.spend_role or self.role))
+                        requests_used, requests_limit = self._wrap_up_request_used_limit()
                         if over and requests_used >= requests_limit:
                             if self.bound_hit == "drain":
                                 raise DrainYieldExceeded("Per-run provider request budget exhausted")
@@ -645,10 +664,12 @@ class Context:
             self.tool_count += 1
             if self.bound_hit in ("deadline", "drain") or self.tool_count > role_tools_per_run(self.config, self.spend_role or self.role):
                 self.bound_hit = self.bound_hit or "tools"
-                tools_used = (self.delegated_wrap_up_tools if self.delegated_child else
-                              self.wrap_up_tools + self.delegated_wrap_up_tools)
-                tools_limit = (self.config.limits.delegate_wrap_up_tools if self.delegated_child
-                               else role_wrap_up_tools(self.config, self.spend_role or self.role))
+                if self.delegated_child:
+                    tools_used = self.delegated_wrap_up_tools
+                    tools_limit = self._delegated_wrap_up_limits()[1]
+                else:
+                    tools_used = self.wrap_up_tools + self.delegated_wrap_up_tools
+                    tools_limit = role_wrap_up_tools(self.config, self.spend_role or self.role)
                 if operation not in WRAP_UP_OPS or tools_used >= tools_limit:
                     if self.bound_hit == "drain" and tools_used >= tools_limit:
                         raise DrainYieldExceeded("Drain wrap-up tool allowance exhausted")

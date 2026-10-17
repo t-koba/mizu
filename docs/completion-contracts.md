@@ -178,8 +178,9 @@ model request; Claude/Codex bound the enclosing query/turn, not each opaque HTTP
 subcall. Progress/heartbeats never renew these absolute monotonic deadlines.
 
 Finite runs enter wrap-up before wall exhaustion, reserving
-`min(model_request_seconds, run_seconds / (3 + 1))` seconds inside the wall.
-The existing 3-request/5-tool allowance is not extended; only `finish`,
+`min(model_request_seconds, run_seconds / (wrap_up_requests + 1))` seconds inside the wall
+(`wrap_up_requests` is the configured total, project default with per-role override).
+The configured wrap-up allowance is not extended; only `finish`,
 `research`, `submit_insight`, `attach_evidence`, and `decide` remain available.
 A finish in this mode stores outcome `bounded`. Wall exhaustion, normal return
 from deadline wrap-up without a finish, or exhaustion of its request/tool

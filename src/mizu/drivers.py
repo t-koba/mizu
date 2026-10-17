@@ -89,8 +89,8 @@ def admit_invocation(context, *, unit: str) -> dict:
         context.admission_error = 'request_ceiling'
         raise LimitExceeded('Recovery request ceiling reached')
     if over:
-        from .runtime import WRAP_UP_REQUESTS
-        if getattr(context, "wrap_up_requests", 0) >= WRAP_UP_REQUESTS:
+        requests_used, requests_limit = context._wrap_up_request_used_limit()
+        if requests_used >= requests_limit:
             if context.bound_hit == "drain":
                 raise DrainYieldExceeded("Drain wrap-up request allowance exhausted")
             if context.bound_hit == "deadline":

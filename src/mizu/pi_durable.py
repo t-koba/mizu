@@ -539,13 +539,13 @@ def interpret_result(reported, context, model, thinking_level) -> None:
     if reported.get("status") == "request_bound":
         _record_launcher_evidence(reported, context, model, thinking_level)
         context.bound_hit = context.bound_hit or "requests"
-        from .runtime import WRAP_UP_REQUESTS
+        requests_used, requests_limit = context._wrap_up_request_used_limit()
         if context.bound_hit == "drain":
             if not context.wrap_up_attempted:
                 raise DeadlineWrapUp(context._bound_message())
-            if context.wrap_up_requests >= WRAP_UP_REQUESTS:
+            if requests_used >= requests_limit:
                 raise DrainYieldExceeded("Drain wrap-up request allowance exhausted")
-        if context.bound_hit == "deadline" and context.wrap_up_requests >= WRAP_UP_REQUESTS:
+        if context.bound_hit == "deadline" and requests_used >= requests_limit:
             raise RunDeadlineExceeded("Deadline wrap-up request allowance exhausted")
         raise LimitExceeded("Per-run provider request budget exhausted")
     if reported.get("status") == "unanswered":

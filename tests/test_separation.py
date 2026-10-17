@@ -634,6 +634,94 @@ class PerRoleSpendTests(Fixture):
         with self.assertRaises(LimitExceeded):
             ctx2.handle("_budget", {"sequence": 5})
 
+    def test_delegated_child_share_clamped_to_total_minus_one(self):
+        from mizu.config import load
+        cases = (
+            # (project_total, role_total, share, expected_child_limit)
+            (None, None, None, 2),   # defaults: total 3, share 2
+            (None, None, 0, 0),      # share 0 grants children nothing
+            (None, None, 1, 1),      # share below total-minus-one applies
+            (7, None, None, 2),      # larger total keeps the default share
+            (1, None, None, 0),      # total 1 reserves the seal: child gets 0
+            (2, None, None, 1),      # total 2 leaves one for the caller
+            (None, 1, None, 0),      # per-role total binds the project share
+            (None, 9, None, 2),      # per-role total above the share is fine
+        )
+        original = self.file.read_text()
+        for project_total, role_total, share, expected in cases:
+            with self.subTest(project=project_total, role=role_total, share=share):
+                text = original
+                if project_total is not None:
+                    text = text.replace("wrap_up_requests = 3",
+                                        f"wrap_up_requests = {project_total}")
+                if share is not None:
+                    text = text.replace("delegate_wrap_up_requests = 2",
+                                        f"delegate_wrap_up_requests = {share}")
+                if role_total is not None:
+                    text = text.replace('[roles.worker]\nprofile = "primary"',
+                                        '[roles.worker]\nprofile = "primary"\n'
+                                        f"wrap_up_requests = {role_total}")
+                self.file.write_text(text)
+                config = load(self.file)
+                ctx = self.context("worker")
+                ctx.config = config
+                ctx.role = config.roles["worker"]
+                ctx.delegated_child = True
+                ctx.spend_role = config.roles["worker"]
+                self.assertEqual(ctx._delegated_wrap_up_limits()[0], expected)
+                self.assertEqual(ctx._wrap_up_remaining()[0], expected)
+                self.assertEqual(ctx._wrap_up_request_used_limit(),
+                                 (0, expected))
+
+    def test_driver_admission_honors_configured_wrap_up_total(self):
+        from mizu.config import load
+        from mizu.drivers import admit_invocation
+        from mizu.errors import LimitExceeded
+        original = self.file.read_text()
+        for total, allowed_extra in ((1, 0), (2, 1), (7, 6)):
+            with self.subTest(total=total):
+                text = original
+                text = text.replace("wrap_up_requests = 3",
+                                    f"wrap_up_requests = {total}")
+                text = text.replace("requests_per_run = 24", "requests_per_run = 1")
+                self.file.write_text(text)
+                config = load(self.file)
+                ctx = self.context("worker")
+                ctx.config = config
+                ctx.role = config.roles["worker"]
+                ctx.request_count = 1  # over the per-run bound of 1
+                for used in range(allowed_extra + 1):
+                    ctx.wrap_up_requests = used
+                    ctx.execution_attempt = used
+                    admit_invocation(ctx, unit="query")
+                ctx.wrap_up_requests = allowed_extra + 1
+                ctx.execution_attempt = allowed_extra + 1
+                with self.assertRaises(LimitExceeded):
+                    admit_invocation(ctx, unit="query")
+
+    def test_pi_durable_request_bound_honors_configured_wrap_up_total(self):
+        from mizu.config import load
+        from mizu.errors import LimitExceeded
+        from mizu.pi_durable import interpret_result
+        from mizu.errors import RunDeadlineExceeded
+        text = self.file.read_text()
+        text = text.replace("wrap_up_requests = 3", "wrap_up_requests = 2")
+        self.file.write_text(text)
+        config = load(self.file)
+        reported = {"durable_result": True, "status": "request_bound"}
+        ctx = self.context("worker")
+        ctx.config = config
+        ctx.role = config.roles["worker"]
+        ctx.bound_hit = "deadline"
+        ctx.wrap_up_attempted = True
+        ctx.model_evidence = {}
+        ctx.wrap_up_requests = 1
+        with self.assertRaises(LimitExceeded):
+            interpret_result(reported, ctx, {}, None)
+        ctx.wrap_up_requests = 2
+        with self.assertRaises(RunDeadlineExceeded):
+            interpret_result(reported, ctx, {}, None)
+
 
 class WebTransportFloorTests(unittest.TestCase):
     def test_https_443_no_credentials_floor(self):
