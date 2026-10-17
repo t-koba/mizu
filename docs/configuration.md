@@ -279,8 +279,9 @@ injected, so a `plan` profile that sets nothing keeps the provider default while
 mechanism value). Larger `reserveTokens` (or `backgroundTokens`)
 bounds live context tighter without rotating the session away: retuning only these
 three keys (or `thinkingLevel` or `cacheRetention`) continues the same durable store with the new
-thresholds on the next run; the per-run grant still binds the values, so retrying the same run
-under changed thresholds is refused. Retuning `cacheRetention` likewise keeps the store on both pi (continuing the conversation like `thinkingLevel`) and pi-durable (the Harness reads `settings.stream` live). More broadly, a pi-durable session covers only
+thresholds on the next run. The per-run grant still binds `cacheRetention` and the compaction
+thresholds, so retrying the same run under those changed values is refused; an effort-only
+`thinkingLevel` retune is excluded from the grant and resumes the same run. Retuning `cacheRetention` likewise keeps the store on both pi (continuing the conversation like `thinkingLevel`) and pi-durable (the Harness reads `settings.stream` live). More broadly, a pi-durable session covers only
 what makes a conversation incompatible (engine, backend, the adapter-declared store
 format): policy text, capabilities and tools, goal, model, and settings ride the live
 conversation (applied per submission, keeping prompt caches warm), and adapter upgrades
@@ -291,7 +292,8 @@ and durable stores (refused while the role has an active run); usage and age rot
 bounds still apply to every engine.
 
 For a durable work unit, the persisted grant must exactly equal the current
-configured authority even when the host narrows a continuation's turn role.
+configured authority (minus effort-only live keys, which ride the live conversation)
+even when the host narrows a continuation's turn role.
 Only the effective turn's tools are exposed and authorized: a missing-finish
 follow-up exposes only `finish`. A normal unsealed return is stored as terminal
 `completed` with `sealed: false`; this is not a host finish seal. If the configured
