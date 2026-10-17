@@ -753,6 +753,25 @@ class CiFailureProjectionTests(Fixture):
             self.config, vcs={**self.config.vcs, "ci_branch": "main"})
         self.assertEqual(wake_ci_failures(self.project, wake_config), expected)
 
+    def test_wake_filters_configured_branch_before_global_row_cap(self):
+        import dataclasses
+        from mizu.runtime import (ci_failures_projection, current_ci_failures,
+                                  wake_ci_failures)
+        self._cache({"a-one": self._rows(16),
+                     "b-two": self._rows(16),
+                     "z-main": [{"sha": SHA_A, "check": "configured"}]})
+        rows, may_be_truncated = ci_failures_projection(self.project)
+        self.assertEqual(len(rows), 32)
+        self.assertTrue(may_be_truncated)
+        self.assertNotIn("z-main", {row["branch"] for row in rows})
+        self.assertEqual(len(current_ci_failures(self.project)), 32)
+
+        config = dataclasses.replace(
+            self.config, vcs={**self.config.vcs, "ci_branch": "z-main"})
+        self.assertEqual(wake_ci_failures(self.project, config),
+                         [{"branch": "z-main", "sha": SHA_A,
+                           "check": "configured"}])
+
     def test_per_branch_cap_is_conservatively_marked(self):
         from mizu.runtime import ci_failures_projection
         self._cache({"main": self._rows(17)})

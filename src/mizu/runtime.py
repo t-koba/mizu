@@ -1581,17 +1581,20 @@ def _clean_ci_failures(value) -> dict:
     return out
 
 
-def ci_failures_projection(project, *, limit: int = MAX_CI_FAILURES) -> tuple[list, bool | None]:
+def ci_failures_projection(project, *, limit: int = MAX_CI_FAILURES,
+                           branch: str | None = None) -> tuple[list, bool | None]:
     """Return bounded cached CI rows and whether a fixed bound may have sliced them.
 
     Schema: ``(rows, may_be_truncated)`` for the shared
-    ``vcs-poll.json`` cache. It accounts for the 16 checks per branch, 128
-    stored branches, and the requested flattened-row limit (32 by default).
-    Reaching a cap is conservatively marked because a cache may already have
-    been sliced and the exact omitted count is unknowable. Trust: host-side
-    poll cache; adapter facts remain external-untrusted. Failure: an
-    unreadable or malformed top-level cache returns ``([], None)``; the
-    boolean is ``None`` when truncation cannot be determined.
+    ``vcs-poll.json`` cache. An optional branch filter is applied before the
+    128-branch, 16-checks-per-branch, and flattened-row bounds; prompt
+    projections omit it to preserve visibility of unrelated refs, while CI
+    wake selection uses the configured branch. Reaching a cap is
+    conservatively marked because a cache may already have been sliced and
+    the exact omitted count is unknowable. Trust: host-side poll cache;
+    adapter facts remain external-untrusted. Failure: an unreadable or
+    malformed top-level cache returns ``([], None)``; the boolean is ``None``
+    when truncation cannot be determined.
     """
     try:
         raw = read_json(project.root / POLL_STATE_FILE, {})
@@ -1603,6 +1606,11 @@ def ci_failures_projection(project, *, limit: int = MAX_CI_FAILURES) -> tuple[li
         stored = raw.get("failures")
         if stored is not None and not isinstance(stored, dict):
             return [], None
+        if branch is not None:
+            from .vcs import check_branch as _check_branch
+            branch = _check_branch(branch)
+            stored = ({branch: stored[branch]}
+                      if isinstance(stored, dict) and branch in stored else {})
         may_be_truncated = False
         if isinstance(stored, dict):
             # `_clean_ci_failures` takes the first 128 input branches, and at
@@ -1649,13 +1657,13 @@ def current_ci_failures(project, *, limit: int = MAX_CI_FAILURES) -> list:
 def wake_ci_failures(project, config=None, *, limit: int = MAX_CI_FAILURES) -> list:
     """Cached CI failures that may wake a parked writer (never raises).
 
-    Schema: filters :func:`current_ci_failures` to the operator-selected
-    ``[vcs] ci_branch``; an empty branch disables the wake (fail closed).
-    Other branches stay visible in ``ci_failures`` prompts but never admit
-    a run, so red on unrelated refs cannot spend the writer budget.
-    Bounds: same cap as ``current_ci_failures``. Trust: host-side poll
-    cache plus operator configuration. Failure: never raises (unknown
-    configuration reads as no wake).
+    Schema: projects the operator-selected ``[vcs] ci_branch`` from the
+    cache before applying the row limit; an empty branch disables the wake
+    (fail closed). Other branches stay visible in ``ci_failures`` prompts
+    but never admit a run, so unrelated refs cannot hide the selected red or
+    spend the writer budget. Bounds: same cap as ``current_ci_failures``.
+    Trust: host-side poll cache plus operator configuration. Failure: never
+    raises (unknown configuration reads as no wake).
     """
     try:
         settings = config.vcs if config is not None else getattr(project, "config", {}).vcs if hasattr(getattr(project, "config", {}), "vcs") else {}
@@ -1666,8 +1674,7 @@ def wake_ci_failures(project, config=None, *, limit: int = MAX_CI_FAILURES) -> l
             branch = None
         if not branch or not isinstance(branch, str):
             return []
-        return [entry for entry in current_ci_failures(project, limit=limit)
-                if entry.get("branch") == branch][:max(0, int(limit))]
+        return ci_failures_projection(project, limit=limit, branch=branch)[0]
     except Exception:
         return []
 
