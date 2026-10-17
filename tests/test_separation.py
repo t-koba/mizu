@@ -699,6 +699,34 @@ class PerRoleSpendTests(Fixture):
                 with self.assertRaises(LimitExceeded):
                     admit_invocation(ctx, unit="query")
 
+    def test_delegated_child_driver_spends_clamped_share(self):
+        from mizu.config import load
+        from mizu.drivers import admit_invocation
+        from mizu.errors import LimitExceeded
+        text = self.file.read_text()
+        text = text.replace("wrap_up_requests = 3", "wrap_up_requests = 7")
+        text = text.replace("requests_per_run = 24", "requests_per_run = 1")
+        self.file.write_text(text)
+        config = load(self.file)
+        self.assertEqual(config.limits.delegate_wrap_up_requests, 2)
+        ctx = self.context("worker")
+        ctx.config = config
+        ctx.role = config.roles["worker"]
+        ctx.spend_role = config.roles["worker"]
+        ctx.delegated_child = True
+        ctx.request_count = 1  # over the per-run bound of 1
+        for used in range(2):
+            ctx.execution_attempt = used
+            admit_invocation(ctx, unit="query")
+            self.assertEqual(ctx.delegated_wrap_up_requests, used + 1)
+            self.assertEqual(ctx.wrap_up_requests, 0)
+        ctx.execution_attempt = 2
+        with self.assertRaises(LimitExceeded):
+            admit_invocation(ctx, unit="query")
+        # The counted spend is the join-propagated counter.
+        self.assertEqual(ctx.delegated_wrap_up_requests, 2)
+        self.assertEqual(ctx.wrap_up_requests, 0)
+
     def test_pi_durable_request_bound_honors_configured_wrap_up_total(self):
         from mizu.config import load
         from mizu.errors import LimitExceeded

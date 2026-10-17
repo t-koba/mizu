@@ -119,9 +119,15 @@ def admit_invocation(context, *, unit: str) -> dict:
             context.model_evidence.update(requests_known=False,admission_status='unconfirmed')
         raise
     if over:
-        # Wrap state records only after daily admission succeeds.
+        # Wrap state records only after daily admission succeeds. Delegated
+        # children spend their clamped share (checked above); anything else
+        # would bypass the share and be lost on join, which copies only
+        # delegated_* back to the caller.
         context.bound_hit = context.bound_hit or "requests"
-        context.wrap_up_requests = getattr(context, "wrap_up_requests", 0) + 1
+        if getattr(context, "delegated_child", False):
+            context.delegated_wrap_up_requests = getattr(context, "delegated_wrap_up_requests", 0) + 1
+        else:
+            context.wrap_up_requests = getattr(context, "wrap_up_requests", 0) + 1
     context.request_count += 1
     context.request_sequences.add((context.execution_attempt, 0))
     context.start_request(0)  # One enclosing Claude query / Codex turn.
