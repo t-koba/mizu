@@ -55,6 +55,32 @@ class CiBranchTests(Fixture):
             with self.assertRaises(ConfigError):
                 load(self.file)
 
+    def _with_extra_branches_line(self, line):
+        lines = [ln for ln in self.file.read_text().splitlines(keepends=True)
+                 if "ci_wake_extra_branches" not in ln]
+        at = next(i for i, ln in enumerate(lines) if ln.strip() == "[vcs]") + 1
+        lines.insert(at, line + "\n")
+        self.file.write_text("".join(lines))
+
+    def test_extra_wake_branches_default_and_validation(self):
+        self.assertEqual(self.config.vcs["ci_wake_extra_branches"], ())
+        original = self.file.read_text()
+        self.file.write_text("".join(
+            line for line in original.splitlines(keepends=True)
+            if "ci_wake_extra_branches" not in line))
+        self.assertEqual(load(self.file).vcs["ci_wake_extra_branches"], ())
+        self.file.write_text(original)
+        self._with_extra_branches_line('ci_wake_extra_branches = ["release/next", "mizu"]')
+        self.assertEqual(load(self.file).vcs["ci_wake_extra_branches"],
+                         ("release/next", "mizu"))
+        for bad in ('ci_wake_extra_branches = "release"',
+                    'ci_wake_extra_branches = ["bad branch"]',
+                    'ci_wake_extra_branches = ["../escape"]',
+                    'ci_wake_extra_branches = [' + ", ".join('"b%s"' % i for i in range(65)) + ']'):
+            self._with_extra_branches_line(bad)
+            with self.assertRaises(ConfigError, msg=bad):
+                load(self.file)
+
 
 RED_SHA = "a" * 40
 

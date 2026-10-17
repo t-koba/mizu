@@ -365,7 +365,7 @@ class CiRewakeTests(Fixture):
                                    role_name="worker", config=config))
         present = wake_ci_failures(self.project, config)
         self.assertEqual(len(present), 1)
-        write_ci_wake(self.project, "worker", "mizu", present, snap["id"], base)
+        write_ci_wake(self.project, "worker", ("mizu",), present, snap["id"], base)
         self.assertFalse(should_run(self.project, snap, current_time=base + 10,
                                     role_name="worker", config=config))
         self.assertEqual(
@@ -378,7 +378,7 @@ class CiRewakeTests(Fixture):
         from mizu.runtime import should_run, wake_ci_failures, write_ci_wake
         config, snap = self._red(sha=SHA_A)
         base = 2000.0
-        write_ci_wake(self.project, "worker", "mizu",
+        write_ci_wake(self.project, "worker", ("mizu",),
                       wake_ci_failures(self.project, config), snap["id"], base)
         self.assertFalse(should_run(self.project, snap, current_time=base + 10,
                                     role_name="worker", config=config))
@@ -393,7 +393,7 @@ class CiRewakeTests(Fixture):
         from mizu.runtime import should_run, wake_ci_failures, write_ci_wake
         config, snap = self._red(check="unit")
         base = 2000.0
-        write_ci_wake(self.project, "worker", "mizu",
+        write_ci_wake(self.project, "worker", ("mizu",),
                       wake_ci_failures(self.project, config), snap["id"], base)
         write_json(self.project.root / "vcs-poll.json",
                    {"last_poll": 2001.0,
@@ -405,7 +405,7 @@ class CiRewakeTests(Fixture):
         from mizu.runtime import should_run, wake_ci_failures, write_ci_wake
         config, snap = self._red()
         base = 2000.0
-        write_ci_wake(self.project, "worker", "mizu",
+        write_ci_wake(self.project, "worker", ("mizu",),
                       wake_ci_failures(self.project, config), snap["id"], base)
         self.assertFalse(should_run(self.project, snap, current_time=base + 1799,
                                     role_name="worker", config=config))
@@ -416,7 +416,7 @@ class CiRewakeTests(Fixture):
         from mizu.runtime import should_run, wake_ci_failures, write_ci_wake
         config, snap = self._red()
         base = 2000.0
-        write_ci_wake(self.project, "worker", "mizu",
+        write_ci_wake(self.project, "worker", ("mizu",),
                       wake_ci_failures(self.project, config), snap["id"], base)
         self.assertFalse(should_run(self.project, snap, current_time=base + 10,
                                     role_name="worker", config=config))
@@ -430,7 +430,7 @@ class CiRewakeTests(Fixture):
         from mizu.runtime import should_run, wake_ci_failures, write_ci_wake
         config, snap = self._red()
         base = 2000.0
-        write_ci_wake(self.project, "worker", "mizu",
+        write_ci_wake(self.project, "worker", ("mizu",),
                       wake_ci_failures(self.project, config), snap["id"], base)
         self.assertFalse(should_run(self.project, snap, current_time=base + 10,
                                     role_name="worker", config=config))
@@ -632,7 +632,7 @@ class CiRunIdentityTests(Fixture):
                                            "run": "run-1"}]}})
         self.assertTrue(should_run(self.project, snap, current_time=base,
                                    role_name="worker", config=config))
-        write_ci_wake(self.project, "worker", "mizu",
+        write_ci_wake(self.project, "worker", ("mizu",),
                       wake_ci_failures(self.project, config), snap["id"], base)
         # Identical fact including the same run parks.
         self.assertFalse(should_run(self.project, snap, current_time=base + 10,
@@ -644,7 +644,7 @@ class CiRunIdentityTests(Fixture):
                                            "run": "run-2"}]}})
         self.assertTrue(should_run(self.project, snap, current_time=base + 11,
                                    role_name="worker", config=config))
-        write_ci_wake(self.project, "worker", "mizu",
+        write_ci_wake(self.project, "worker", ("mizu",),
                       wake_ci_failures(self.project, config), snap["id"], base + 11)
         self.assertFalse(should_run(self.project, snap, current_time=base + 12,
                                     role_name="worker", config=config))
@@ -661,7 +661,7 @@ class CiRunIdentityTests(Fixture):
         write_json(self.project.root / "vcs-poll.json",
                    {"last_poll": base,
                     "failures": {"mizu": [{"sha": SHA_A, "check": "unit"}]}})
-        write_ci_wake(self.project, "worker", "mizu",
+        write_ci_wake(self.project, "worker", ("mizu",),
                       wake_ci_failures(self.project, config), snap["id"], base)
         # Re-polled without identity: identical sha-keyed fact parks.
         self.assertFalse(should_run(self.project, snap, current_time=base + 10,
@@ -870,3 +870,200 @@ class CiFailureProjectionTests(Fixture):
                           branches=["main"])
         self.assertTrue(cleaned["ci_failures_may_be_truncated"])
         self.assertEqual(len(state3["failures"]["old-branch"]), 16)
+
+class CiWakeExtraBranchTests(Fixture):
+    def _cache(self, failures):
+        from mizu.fs import write_json
+        write_json(self.project.root / "vcs-poll.json", {"failures": failures})
+
+    def test_extra_branch_wakes_and_selected_set_red_parks(self):
+        from mizu.runtime import (effective_ci_wake_branches, _ci_due_for,
+                                  wake_ci_failures, write_ci_wake)
+        config = dataclasses.replace(
+            self.config, vcs={**self.config.vcs, "ci_branch": "primary",
+                              "ci_wake_extra_branches": ("extra", "extra")})
+        failures = {"primary": [{"sha": SHA_A, "check": "unit"}],
+                    "extra": [{"sha": SHA_B, "check": "lint"}],
+                    "unselected": [{"sha": SHA_A, "check": "other"}]}
+        self._cache(failures)
+        present = wake_ci_failures(self.project, config)
+        self.assertEqual(effective_ci_wake_branches(config), ("extra", "primary"))
+        self.assertEqual({row["branch"] for row in present}, {"primary", "extra"})
+        write_ci_wake(self.project, "worker", effective_ci_wake_branches(config),
+                      present, "published-head", 100.0)
+        self.assertEqual(_ci_due_for(self.project, config, "worker",
+                                     "published-head", 110.0), [])
+        # Only the extra branch fact changes; the primary red is unchanged.
+        failures["extra"] = [{"sha": "c" * 40, "check": "lint"}]
+        self._cache(failures)
+        due = _ci_due_for(self.project, config, "worker", "published-head", 111.0)
+        self.assertEqual({row["branch"] for row in due}, {"primary", "extra"})
+
+    def test_empty_primary_still_fails_closed_unless_extra_is_listed(self):
+        from mizu.runtime import wake_ci_failures
+        self._cache({"extra": [{"sha": SHA_A, "check": "unit"}]})
+        self.assertEqual(wake_ci_failures(self.project, self.config), [])
+        configured = dataclasses.replace(
+            self.config, vcs={**self.config.vcs, "ci_branch": "",
+                              "ci_wake_extra_branches": ("extra",)})
+        self.assertEqual(wake_ci_failures(self.project, configured),
+                         [{"branch": "extra", "sha": SHA_A, "check": "unit"}])
+
+    def test_runtime_malformed_or_oversized_wake_sets_fail_closed(self):
+        from mizu.runtime import effective_ci_wake_branches, wake_ci_failures
+        self._cache({"primary": [{"sha": SHA_A, "check": "unit"}]})
+        for extras in (("bad branch",), tuple(f"branch-{i:02d}" for i in range(65)), "not-an-array"):
+            config = dataclasses.replace(
+                self.config, vcs={**self.config.vcs, "ci_branch": "primary",
+                                  "ci_wake_extra_branches": extras})
+            self.assertEqual(effective_ci_wake_branches(config), ())
+            self.assertEqual(wake_ci_failures(self.project, config), [])
+
+    def test_wake_filters_raw_cache_before_branch_cap_and_prompt_stays_unfiltered(self):
+        from mizu.runtime import current_ci_failures, wake_ci_failures
+        failures = {"other-%03d" % i: [{"sha": SHA_A, "check": "unit"}]
+                    for i in range(128)}
+        failures["selected"] = [{"sha": SHA_B, "check": "lint"}]
+        self._cache(failures)
+        config = dataclasses.replace(
+            self.config, vcs={**self.config.vcs, "ci_branch": "selected"})
+        self.assertEqual(wake_ci_failures(self.project, config),
+                         [{"branch": "selected", "sha": SHA_B, "check": "lint"}])
+        self.assertTrue(any(row["branch"] != "selected"
+                            for row in current_ci_failures(self.project)))
+
+    def test_full_selected_fact_set_beyond_prompt_cap_drives_wake_digest(self):
+        from mizu.runtime import (effective_ci_wake_branches, _ci_due_for,
+                                  wake_ci_failures, write_ci_wake)
+        branches = ("primary", "extra-a", "extra-b")
+        config = dataclasses.replace(
+            self.config, vcs={**self.config.vcs, "ci_branch": "primary",
+                              "ci_wake_extra_branches": branches[1:]})
+        failures = {
+            branch: [{"sha": SHA_A, "check": f"check-{index:02d}"}
+                     for index in range(16)]
+            for branch in branches
+        }
+        self._cache(failures)
+        present = wake_ci_failures(self.project, config)
+        self.assertEqual(len(present), 48)  # More than the 32-row prompt projection.
+        selected = effective_ci_wake_branches(config)
+        write_ci_wake(self.project, "worker", selected, present,
+                      "published-head", 100.0)
+        self.assertEqual(_ci_due_for(self.project, config, "worker",
+                                     "published-head", 110.0), [])
+        failures["extra-b"][15] = {"sha": SHA_B, "check": "check-15"}
+        self._cache(failures)
+        self.assertTrue(_ci_due_for(self.project, config, "worker",
+                                    "published-head", 111.0))
+
+    def test_old_wake_record_is_due_once_then_parks(self):
+        from mizu.fs import write_json
+        from mizu.runtime import _ci_due_for, wake_ci_failures, write_ci_wake
+        config = dataclasses.replace(
+            self.config, vcs={**self.config.vcs, "ci_branch": "primary"})
+        self._cache({"primary": [{"sha": SHA_A, "check": "unit"}]})
+        present = wake_ci_failures(self.project, config)
+        write_json(self.project.root / "vcs-ci-wake-worker.json",
+                   {"version": 1, "branch": "primary",
+                    "fact": [{"sha": SHA_A, "check": "unit"}],
+                    "snapshot": "published-head", "at": 100.0})
+        self.assertTrue(_ci_due_for(self.project, config, "worker",
+                                    "published-head", 101.0))
+        write_ci_wake(self.project, "worker", ("primary",), present,
+                      "published-head", 101.0)
+        self.assertEqual(_ci_due_for(self.project, config, "worker",
+                                     "published-head", 102.0), [])
+
+
+class CiNondeterminismTests(Fixture):
+    def _adapter_config(self, status_by_branch):
+        payload = json.dumps(status_by_branch)
+        code = ("import json,sys; req=json.load(sys.stdin); status=" + repr(payload) +
+                "; print(json.dumps({'checks': json.loads(status)[req['branch']]}))")
+        return dataclasses.replace(
+            self.config, vcs={**adapter_settings(code), "poll_enabled": True})
+
+    def _poll_project(self, config, state, current, interval=15.0):
+        from unittest.mock import patch
+        from mizu.runtime import poll_project_vcs
+        with patch("mizu.runtime.poll_upstream", return_value=None):
+            return poll_project_vcs(config, self.project, state,
+                                    now=current, interval=interval)
+
+    def test_poll_cache_caps_preserve_configured_wake_branch_evidence(self):
+        from mizu.runtime import poll_ci
+        base_config = self._adapter_config({})
+        config = dataclasses.replace(
+            base_config, vcs={**base_config.vcs, "ci_branch": "selected"})
+        state = {
+            "failures": {
+                f"z-{index:03d}": [{"sha": SHA_A, "check": "old"}]
+                for index in range(128)
+            },
+            "successes": {
+                f"z-{index:03d}": [{"sha": SHA_B, "check": "old"}]
+                for index in range(128)
+            },
+        }
+        result = poll_ci(
+            config, self.project, state, now=0.0, interval=15.0,
+            branches=["selected"],
+            reader=lambda *_args: {"checks": [
+                {"check": "unit", "state": "failure", "sha": SHA_A},
+                {"check": "lint", "state": "success", "sha": SHA_B},
+            ]})
+        self.assertTrue(result["ok"])
+        self.assertIn("selected", state["failures"])
+        self.assertIn("selected", state["successes"])
+        self.assertEqual(len(state["failures"]), 128)
+        self.assertEqual(len(state["successes"]), 128)
+
+    def test_same_tick_cross_branch_annotation_keeps_red_visible(self):
+        from mizu import vcs
+        from mizu.runtime import current_ci_failures, wake_ci_failures
+        vcs.inject_refs(self.project.root, {"passed": SHA_A, "failed": SHA_B})
+        config = self._adapter_config({
+            "passed": [{"check": "unit", "state": "success", "sha": SHA_A}],
+            "failed": [{"check": "unit", "state": "failure", "sha": SHA_A}],
+        })
+        config = dataclasses.replace(
+            config, vcs={**config.vcs, "ci_branch": "failed"})
+        events = self._poll_project(config, {}, 0.0)
+        poll = next(event for event in events if event["event"] == "ci_poll")
+        self.assertTrue(poll["ok"])
+        self.assertEqual(poll["failures"], 1)
+        self.assertEqual(len(poll["recorded"]), 1)  # Passes create no insight.
+        row, = current_ci_failures(self.project)
+        self.assertEqual(row, {"branch": "failed", "sha": SHA_A, "check": "unit",
+                               "nondeterministic": True, "passed_on": "passed"})
+        self.assertEqual(wake_ci_failures(self.project, config), [row])
+        self.assertEqual(self.project.insights.list(pending=True, limit=1000)[0]["source"], "vcs")
+
+    def test_cross_poll_success_survives_refresh_and_project_persistence(self):
+        from mizu import vcs
+        from mizu.fs import read_json
+        from mizu.runtime import current_ci_failures
+        vcs.inject_refs(self.project.root, {"passed": SHA_A, "failed": SHA_B})
+        first_config = self._adapter_config({
+            "passed": [{"check": "unit", "state": "success", "sha": SHA_A}],
+            "failed": [],
+        })
+        first_state = {}
+        self._poll_project(first_config, first_state, 0.0)
+        stored = read_json(self.project.root / "vcs-poll.json", {})
+        self.assertEqual(stored["successes"], {"passed": [{"sha": SHA_A, "check": "unit"}]})
+
+        second_config = self._adapter_config({
+            "passed": [],
+            "failed": [{"check": "unit", "state": "failure", "sha": SHA_A}],
+        })
+        second_events = self._poll_project(second_config, {}, 15.0)
+        poll = next(event for event in second_events if event["event"] == "ci_poll")
+        self.assertEqual(poll["failures"], 1)
+        stored = read_json(self.project.root / "vcs-poll.json", {})
+        self.assertEqual(stored["successes"]["passed"][0]["sha"], SHA_A)
+        row, = current_ci_failures(self.project)
+        self.assertEqual(row["nondeterministic"], True)
+        self.assertEqual(row["passed_on"], "passed")
+        self.assertEqual(row["branch"], "failed")

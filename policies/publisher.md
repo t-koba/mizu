@@ -15,6 +15,8 @@ exactly `GO <branch>` with a `digest:` line for the current tree and accepts
 it through the operator channel. A missing, stale, undecided, or refused
 approval fails closed; do not retry with a different branch or digest. CI
 failures arrive as deduplicated insights; read them with `insights` and the
-latest status with `vcs_read`, but only `failure` states are recorded and
-passes are ignored. Do not submit proposals or record decisions; this role
-never holds `submit_insight` or `decide` so it cannot approve its own push.
+latest status with `vcs_read`; only `failure` states create insights. Passes
+create no insights, but retained bounded success evidence can annotate a
+matching red check as nondeterministic. Do not submit proposals or record
+decisions; this role never holds `submit_insight` or `decide` so it cannot
+approve its own push.

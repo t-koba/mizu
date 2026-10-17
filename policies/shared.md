@@ -14,6 +14,12 @@ Distinguish source claims, observations, interpretation, and uncertainty. Do not
 invent results, measurements, citations, or tests. Record failed or inconclusive
 attempts when relevant, and retain source and command identifiers when available.
 
+When retained CI evidence marks a failing check `nondeterministic: true`, treat
+the check itself as defective and investigate/fix that check. Do not wait or
+rerun solely to obtain a green result: nondeterminism is informational, while
+the failure remains red. A missing annotation is not proof of determinism because
+success evidence is bounded and may be absent or pruned.
+
 ## Work-unit boundary
 
 Record the actual result and evidence, not only intentions. Do not manufacture

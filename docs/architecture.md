@@ -147,10 +147,18 @@ counting toward `max_failures`. Unrelated pre-seal faults still fail even if the
 wall also expires.
 `wait` sleeps until its deadline,
 new information, a changed goal, a human wake, or a cached current CI failure
-on the operator-selected `ci_branch` (polled red, independent of insight decisions, until green or superseded; empty disables the wake) for roles with `ci_wake` (writable roles by default; an unchanged red re-wakes only on a new failing sha/check, a moved head, or every `ci_rewake_seconds`). `blocked` needs a wake or new
-information. `done` is not reopened by news alone; an explicit wake or changed
-goal can reopen it. Other scheduled roles are independent until the project is
-paused/disarmed.
+on the effective configured wake set (`ci_branch` plus deduplicated
+`ci_wake_extra_branches`; an empty set disables the wake) for roles with
+`ci_wake` (writable roles by default; an unchanged red re-wakes only on a new
+branch/SHA/check/run fact, a moved head, or every `ci_rewake_seconds`). Failures
+remain visible independently of insight decisions until green or superseded.
+`blocked` needs a wake or new information. `done` is not reopened by news
+alone; an explicit wake or changed goal can reopen it. Other scheduled roles
+are independent until the project is paused/disarmed. Projected red CI checks
+may carry `nondeterministic: true` and one validated `passed_on` branch when
+bounded success evidence matches the same SHA/check. This is informational: the failure
+stays red and affects no gates or retries; missing annotation is not proof of
+determinism because evidence is bounded.
 
 Writable `continue` and `bounded` snapshots also carry a compact, digest-bound
 progress record. `[limits] progress_signals` selects which observed signals

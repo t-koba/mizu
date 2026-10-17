@@ -22,7 +22,9 @@ from pathlib import Path
 from . import platform as _platform
 from .admission import admission
 from .budget import Budget
-from .config import Config, Role, load, role_policy_bytes, role_requests_per_run, role_tools_per_run, role_run_seconds
+from .config import (MAX_CI_WAKE_EXTRA_BRANCHES, Config, Role, load,
+                     role_policy_bytes, role_requests_per_run,
+                     role_tools_per_run, role_run_seconds)
 from .doctor import container_runtime
 from .drivers import driver_for
 from .errors import Busy, Cancelled, ConfigError, Denied, InfraExceeded, LimitExceeded, RunDeadlineExceeded, DeadlineWrapUp, DrainYieldExceeded, MissingFinish, MizuError, ModelFailure, ProtocolError
@@ -1491,7 +1493,7 @@ def vcs_poll_proposals_enabled(config) -> bool:
         return False
 
 
-#: Shared per-project poll state (persisted timestamps) and lock name.
+#: Shared per-project poll state (timestamps, cursors, bounded CI facts) and lock name.
 POLL_STATE_FILE = "vcs-poll.json"
 POLL_LOCK_NAME = "vcs-poll.lock"
 
@@ -1503,9 +1505,14 @@ MAX_CI_FAILURES = 32
 #: shared file small). Prompt projections flag a reached cap as possibly
 #: truncated because cached history cannot distinguish exact-fit from slicing.
 MAX_CI_CHECKS_PER_BRANCH = 16
-#: Fixed bound for stored branches with failures (rotation prunes absent refs).
-#: Prompt projections likewise flag a reached cap conservatively.
+#: Fixed bound for stored branches with failures/success evidence
+#: (rotation prunes absent refs). Prompt projections conservatively flag
+#: failure caps as possibly truncated.
 MAX_CI_FAILURE_BRANCHES = 128
+#: Maximum selected wake branches: ci_branch plus 64 configured extras.
+MAX_CI_WAKE_BRANCHES = MAX_CI_WAKE_EXTRA_BRANCHES + 1
+#: A selected branch contributes at most the stored per-branch check cap.
+MAX_CI_WAKE_ROWS = MAX_CI_WAKE_BRANCHES * MAX_CI_CHECKS_PER_BRANCH
 #: Opaque adapter pagination tokens are persisted for resumption, but never
 #: rendered into events or prompts. The VCS schema fixes this bound.
 MAX_PROPOSAL_CURSOR = 256
@@ -1581,15 +1588,72 @@ def _clean_ci_failures(value) -> dict:
     return out
 
 
+def _clean_ci_successes(value) -> dict:
+    """Normalize bounded persisted success evidence (same schema as failures)."""
+    return _clean_ci_failures(value)
+
+
+def _merge_ci_success_rows(existing, incoming) -> list:
+    """Keep the newest same-branch evidence first, unique by sha/check."""
+    out = []
+    seen = set()
+    for rows in (incoming, existing):
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            identity = (row.get("sha"), row.get("check"))
+            if identity in seen:
+                continue
+            seen.add(identity)
+            out.append({"sha": identity[0], "check": identity[1]})
+            if len(out) >= MAX_CI_CHECKS_PER_BRANCH:
+                return out
+    return out
+
+
+def _merge_ci_success_maps(existing, incoming) -> dict:
+    """Merge bounded success evidence by branch, favoring newer rows."""
+    merged = _clean_ci_successes(existing)
+    for branch, rows in _clean_ci_successes(incoming).items():
+        combined = _merge_ci_success_rows(merged.get(branch), rows)
+        if combined:
+            merged[branch] = combined
+        else:
+            merged.pop(branch, None)
+    for branch in [name for name, rows in merged.items() if not rows]:
+        merged.pop(branch, None)
+    while len(merged) > MAX_CI_FAILURE_BRANCHES:
+        merged.pop(sorted(merged)[0], None)
+    return merged
+
+
+def _prune_ci_branch_map(mapping: dict, protected_branches) -> bool:
+    """Trim to the fixed branch cap without dropping configured wake branches."""
+    protected = set(protected_branches)
+    pruned = False
+    while len(mapping) > MAX_CI_FAILURE_BRANCHES:
+        removable = sorted(branch for branch in mapping if branch not in protected)
+        if not removable:
+            break
+        mapping.pop(removable[0], None)
+        pruned = True
+    return pruned
+
+
 def ci_failures_projection(project, *, limit: int = MAX_CI_FAILURES,
-                           branch: str | None = None) -> tuple[list, bool | None]:
+                           branches: tuple[str, ...] | None = None) -> tuple[list, bool | None]:
     """Return bounded cached CI rows and whether a fixed bound may have sliced them.
 
     Schema: ``(rows, may_be_truncated)`` for the shared
-    ``vcs-poll.json`` cache. An optional branch filter is applied before the
-    128-branch, 16-checks-per-branch, and flattened-row bounds; prompt
-    projections omit it to preserve visibility of unrelated refs, while CI
-    wake selection uses the configured branch. Reaching a cap is
+    ``vcs-poll.json`` cache. An optional selected-branch filter is applied
+    to raw cache keys before the 128-branch, 16-checks-per-branch, and
+    flattened-row bounds; prompt projections omit it to preserve visibility
+    of unrelated refs, while CI wake selection uses configured branches.
+    Retained same-SHA/check success evidence annotates a failure with one
+    validated ``passed_on`` branch; a missing annotation does not prove
+    determinism because success history is bounded. Reaching a failure cap is
     conservatively marked because a cache may already have been sliced and
     the exact omitted count is unknowable. Trust: host-side poll cache;
     adapter facts remain external-untrusted. Failure: an unreadable or
@@ -1606,11 +1670,18 @@ def ci_failures_projection(project, *, limit: int = MAX_CI_FAILURES,
         stored = raw.get("failures")
         if stored is not None and not isinstance(stored, dict):
             return [], None
-        if branch is not None:
+        if branches is not None:
+            if not isinstance(branches, tuple) or len(branches) > MAX_CI_WAKE_BRANCHES:
+                return [], None
             from .vcs import check_branch as _check_branch
-            branch = _check_branch(branch)
-            stored = ({branch: stored[branch]}
-                      if isinstance(stored, dict) and branch in stored else {})
+            try:
+                wanted = {_check_branch(item) for item in branches}
+            except Exception:
+                return [], None
+            # Probe only the configured keys; unrelated raw rows cannot consume
+            # the branch or flattened-row bounds for wake selection.
+            stored = ({name: stored[name] for name in wanted if name in stored}
+                      if isinstance(stored, dict) else {})
         may_be_truncated = False
         if isinstance(stored, dict):
             # `_clean_ci_failures` takes the first 128 input branches, and at
@@ -1622,13 +1693,32 @@ def ci_failures_projection(project, *, limit: int = MAX_CI_FAILURES,
                     isinstance(rows, list) and len(rows) >= MAX_CI_CHECKS_PER_BRANCH
                     for rows in stored.values())
         cleaned = _clean_ci_failures(stored)
+        raw_successes = raw.get("successes")
+        successes = _clean_ci_successes(raw_successes)
+        passed_on = {}
+        for success_branch in sorted(successes):
+            # _clean_ci_successes has already checked the citation syntax;
+            # revalidate at projection boundary before rendering it.
+            try:
+                from .vcs import check_branch as _check_branch
+                citation = _check_branch(success_branch)
+                if any(character.isspace() for character in citation):
+                    continue
+            except Exception:
+                continue
+            for success in successes[success_branch]:
+                passed_on.setdefault((success["sha"], success["check"]), citation)
         flat = []
-        for branch in sorted(cleaned):
-            for entry in cleaned[branch]:
-                row = {"branch": branch, "sha": entry["sha"], "check": entry["check"]}
+        for failure_branch in sorted(cleaned):
+            for entry in cleaned[failure_branch]:
+                row = {"branch": failure_branch, "sha": entry["sha"], "check": entry["check"]}
                 kept_run = _valid_ci_run(entry.get("run"))
                 if kept_run is not None:
                     row["run"] = kept_run
+                citation = passed_on.get((entry["sha"], entry["check"]))
+                if citation is not None:
+                    row["nondeterministic"] = True
+                    row["passed_on"] = citation
                 flat.append(row)
         row_limit = max(0, int(limit))
         if row_limit:
@@ -1645,7 +1735,8 @@ def current_ci_failures(project, *, limit: int = MAX_CI_FAILURES) -> list:
 
     Schema: best-effort read of the shared ``vcs-poll.json`` ``failures``
     mapping written by :func:`poll_ci`; flattened branch-major, sorted,
-    capped at ``limit``. Empty means no observed red (poll disabled,
+    capped at ``limit`` and optionally annotated from retained successes.
+    Empty means no observed red (poll disabled,
     never polled, unreadable, or last ticks green). Trust: host-side poll
     cache, adapter facts stay external-untrusted; insight decisions
     are deliberately ignored so a deferred failure stays current until
@@ -1654,27 +1745,52 @@ def current_ci_failures(project, *, limit: int = MAX_CI_FAILURES) -> list:
     return ci_failures_projection(project, limit=limit)[0]
 
 
-def wake_ci_failures(project, config=None, *, limit: int = MAX_CI_FAILURES) -> list:
-    """Cached CI failures that may wake a parked writer (never raises).
+def effective_ci_wake_branches(project_config) -> tuple[str, ...]:
+    """Deduplicated configured CI wake branches, fail-closed on bad runtime values."""
+    try:
+        settings = getattr(project_config, "vcs", None)
+        if settings is None and isinstance(project_config, dict):
+            settings = project_config
+        if not isinstance(settings, dict):
+            return ()
+        from .vcs import check_branch as _check_branch
+        primary = settings.get("ci_branch", "")
+        extras = settings.get("ci_wake_extra_branches", ())
+        if (not isinstance(primary, str)
+                or not isinstance(extras, (list, tuple))
+                or len(extras) > MAX_CI_WAKE_EXTRA_BRANCHES):
+            return ()
+        candidates = ([primary] if primary else []) + list(extras)
+        result = set()
+        for candidate in candidates:
+            try:
+                valid = _check_branch(candidate)
+                if any(character.isspace() for character in valid):
+                    return ()
+            except Exception:
+                return ()
+            result.add(valid)
+        return tuple(sorted(result))
+    except Exception:
+        return ()
 
-    Schema: projects the operator-selected ``[vcs] ci_branch`` from the
-    cache before applying the row limit; an empty branch disables the wake
-    (fail closed). Other branches stay visible in ``ci_failures`` prompts
-    but never admit a run, so unrelated refs cannot hide the selected red or
-    spend the writer budget. Bounds: same cap as ``current_ci_failures``.
-    Trust: host-side poll cache plus operator configuration. Failure: never
-    raises (unknown configuration reads as no wake).
+
+def wake_ci_failures(project, config=None) -> list:
+    """Cached failures on configured wake branches (never raises).
+
+    The deduplicated ``ci_branch`` plus up to 64 explicit extra branches are
+    filtered from raw cache keys before row caps. Other branches remain in
+    the unfiltered prompt projection and never wake a role. The projection
+    carries every retained row on the selected set (at most 65 x 16).
     """
     try:
-        settings = config.vcs if config is not None else getattr(project, "config", {}).vcs if hasattr(getattr(project, "config", {}), "vcs") else {}
-        # Config.vcs is a dict; project without config reads as no wake.
-        try:
-            branch = settings.get("ci_branch") if isinstance(settings, dict) else None
-        except Exception:
-            branch = None
-        if not branch or not isinstance(branch, str):
+        if config is None:
+            config = getattr(project, "config", None)
+        branches = effective_ci_wake_branches(config)
+        if not branches:
             return []
-        return ci_failures_projection(project, limit=limit, branch=branch)[0]
+        return ci_failures_projection(
+            project, limit=MAX_CI_WAKE_ROWS, branches=branches)[0]
     except Exception:
         return []
 
@@ -1683,7 +1799,7 @@ def wake_ci_failures(project, config=None, *, limit: int = MAX_CI_FAILURES) -> l
 #: red must still re-wake eventually so it can never park a writer forever.
 DEFAULT_CI_REWAKE_SECONDS = 1800
 #: Version of the per-role CI wake record.
-CI_WAKE_VERSION = 1
+CI_WAKE_VERSION = 2
 
 
 def _ci_rewake_seconds(project_config) -> float:
@@ -1726,11 +1842,11 @@ def _ci_wake_path(project, role_name):
 
 
 def read_ci_wake(project, role_name):
-    """Last CI wake record for one role (never raises).
+    """Last bounded CI wake record for one role (never raises).
 
-    Schema: ``{'version': 1, 'branch': str, 'fact': [{'sha', 'check'}],
-    'snapshot': str, 'at': float}``. Missing or malformed reads as None;
-    wake suppression must never break dispatch.
+    Schema: version 2 stores selected ``branches``, a SHA-256 digest of all
+    branch-specific failure facts, published ``snapshot`` and timestamp
+    ``at``. Version-1 records deliberately read as-is and cause one due wake.
     """
     try:
         path = _ci_wake_path(project, role_name)
@@ -1744,23 +1860,62 @@ def read_ci_wake(project, role_name):
         return None
 
 
-def write_ci_wake(project, role_name, branch, present, snapshot_id, now=None) -> None:
-    """Record that one role observed the current red (never raises).
+def _normalize_ci_wake_branches(branches) -> tuple[str, ...]:
+    """Validate and sort the bounded configured wake-branch set."""
+    try:
+        if (not isinstance(branches, (tuple, list)) or not branches
+                or len(branches) > MAX_CI_WAKE_BRANCHES):
+            return ()
+        from .vcs import check_branch as _check_branch
+        result = set()
+        for value in branches:
+            branch = _check_branch(value)
+            if any(character.isspace() for character in branch):
+                return ()
+            result.add(branch)
+        return tuple(sorted(result))
+    except Exception:
+        return ()
 
-    Schema: ``branch`` is the ``ci_branch`` string, ``present`` is the
-    presence list (``[{branch, sha, check, run?}]``), ``snapshot_id`` is the
-    published head observed, ``now`` is epoch seconds. Malformed inputs
-    write nothing; wake suppression must never break dispatch. The fact
-    carries ``run`` when the entry has a valid identity and omits it
-    otherwise (prompts likewise include ``run`` only when sent).
+
+def _ci_wake_fact_digest(present, branches) -> str | None:
+    """Hash complete bounded branch/SHA/check/run facts without storing a list."""
+    try:
+        import hashlib
+        allowed = set(branches)
+        facts = []
+        if not isinstance(present, list):
+            return None
+        for entry in present:
+            if not isinstance(entry, dict) or entry.get("branch") not in allowed:
+                continue
+            sha, check = entry.get("sha"), entry.get("check")
+            if not isinstance(sha, str) or not isinstance(check, str):
+                return None
+            fact = [entry["branch"], sha, check, _valid_ci_run(entry.get("run")) or ""]
+            facts.append(fact)
+        facts.sort()
+        payload = json.dumps([list(branches), facts], ensure_ascii=False,
+                             separators=(",", ":")).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+    except Exception:
+        return None
+
+
+def write_ci_wake(project, role_name, branches, present, snapshot_id, now=None) -> None:
+    """Record a role's whole selected-set red using a bounded digest.
+
+    Schema: branches are the selected wake set, ``present`` carries its
+    bounded ``[{branch, sha, check, run?}]`` rows, ``snapshot_id`` is the
+    published head and ``now`` epoch seconds. Malformed inputs write nothing;
+    failures in wake suppression never break dispatch.
     """
     try:
         path = _ci_wake_path(project, role_name)
-        if path is None:
+        if path is None or not isinstance(snapshot_id, str) or not snapshot_id:
             return
-        if not isinstance(branch, str) or not branch:
-            return
-        if not isinstance(snapshot_id, str) or not snapshot_id:
+        selected = _normalize_ci_wake_branches(branches)
+        if not selected:
             return
         try:
             at = time.time() if now is None else float(now)
@@ -1769,102 +1924,36 @@ def write_ci_wake(project, role_name, branch, present, snapshot_id, now=None) ->
         import math as _math
         if not _math.isfinite(at):
             return
-        fact = []
-        try:
-            for entry in present or []:
-                if not isinstance(entry, dict):
-                    continue
-                sha = entry.get("sha")
-                check = entry.get("check")
-                if not isinstance(sha, str) or not isinstance(check, str):
-                    continue
-                row = {"sha": sha, "check": check}
-                kept_run = _valid_ci_run(entry.get("run"))
-                if kept_run is not None:
-                    row["run"] = kept_run
-                fact.append(row)
-        except Exception:
+        fact_digest = _ci_wake_fact_digest(present, selected)
+        if fact_digest is None:
             return
-        # Graceful upgrade without a version bump: old records without
-        # ``run`` keys mismatch new facts with ``run`` keys exactly once
-        # (due -> wake -> rewrite), then stay parked until the run changes.
-        fact.sort(key=lambda item: (item["sha"], item["check"], item.get("run", "")))
-        write_json(path, {"version": CI_WAKE_VERSION, "branch": branch,
-                          "fact": fact, "snapshot": snapshot_id, "at": at})
+        write_json(path, {"version": CI_WAKE_VERSION, "branches": list(selected),
+                          "fact_sha256": fact_digest, "snapshot": snapshot_id, "at": at})
     except Exception:
         return
 
 
-def _ci_due(present, record, snapshot_id, now, rewake_seconds) -> bool:
-    """True when a present red is due to wake (fail open, never raises).
+def _ci_due(present, record, snapshot_id, now, rewake_seconds, branches) -> bool:
+    """True when selected CI facts are due to wake (fail open, never raises).
 
-    Schema: ``present`` is the ``wake_ci_failures`` list, ``record`` is the
-    last :func:`read_ci_wake` dict (or None), ``snapshot_id`` is the current
-    published head, ``now`` is epoch seconds. Due on first sighting (no
-    record), a changed branch/fact (new failing sha, check, or run identity,
-    including a branch switch), a moved head, or an elapsed ``rewake_seconds``
-    interval.
-    An empty presence is never due; a malformed record/at reads as due so a
-    red is never silently deferred.
+    Due on first sighting, any selected-set/fact digest change, a moved
+    published head, or an elapsed interval. Old-version/malformed records
+    are due once; an empty presence is never due.
     """
     try:
         if not present:
             return False
         if not isinstance(record, dict):
             return True
-        try:
-            current_branch = present[0].get("branch") if isinstance(present[0], dict) else None
-        except Exception:
-            return True
-        record_branch = record.get("branch")
-        if not isinstance(current_branch, str) or not isinstance(record_branch, str):
-            return True
-        if record_branch != current_branch:
+        selected = _normalize_ci_wake_branches(branches)
+        if not selected:
             return True
         if record.get("version") != CI_WAKE_VERSION:
             return True
-        try:
-            current_rows = []
-            for entry in present:
-                if (not isinstance(entry, dict)
-                        or not isinstance(entry.get("sha"), str)
-                        or not isinstance(entry.get("check"), str)):
-                    continue
-                row = {"sha": entry["sha"], "check": entry["check"]}
-                kept_run = _valid_ci_run(entry.get("run"))
-                if kept_run is not None:
-                    row["run"] = kept_run
-                current_rows.append(row)
-            current_fact = sorted(
-                current_rows,
-                key=lambda item: (item["sha"], item["check"], item.get("run", "")))
-        except Exception:
+        if record.get("branches") != list(selected):
             return True
-        raw_fact = record.get("fact")
-        if not isinstance(raw_fact, list):
-            return True
-        try:
-            record_fact = []
-            for entry in raw_fact:
-                if not isinstance(entry, dict):
-                    return True
-                sha = entry.get("sha")
-                check = entry.get("check")
-                if not isinstance(sha, str) or not isinstance(check, str):
-                    return True
-                row = {"sha": sha, "check": check}
-                if "run" in entry:
-                    kept_run = _valid_ci_run(entry.get("run"))
-                    if kept_run is None:
-                        return True
-                    row["run"] = kept_run
-                record_fact.append(row)
-            # Old records without ``run`` mismatch new facts with ``run``
-            # exactly once (graceful upgrade, no version bump).
-            record_fact.sort(key=lambda item: (item["sha"], item["check"], item.get("run", "")))
-        except Exception:
-            return True
-        if record_fact != current_fact:
+        current_digest = _ci_wake_fact_digest(present, selected)
+        if not isinstance(current_digest, str) or record.get("fact_sha256") != current_digest:
             return True
         record_snapshot = record.get("snapshot")
         if not isinstance(record_snapshot, str) or not isinstance(snapshot_id, str):
@@ -1893,8 +1982,9 @@ def _ci_due(present, record, snapshot_id, now, rewake_seconds) -> bool:
 def _ci_due_for(project, project_config, role, snapshot_id=None, now=None) -> list:
     """Cached CI failures that may admit one role (never raises).
 
-    A red ``ci_branch`` wakes only roles with ``ci_wake`` (writable roles by
-    default): event-triggered or unchanged-code dispatch for any other role
+    A red on the configured CI wake set wakes only roles with ``ci_wake``
+    (writable roles by default): event-triggered or unchanged-code dispatch
+    for any other role
     exits cheaply instead of spending a run on CI it never subscribed to.
     The red stays visible via ``current_ci_failures`` prompts, but it wakes
     only on change: a new failing sha/check, a moved published head, or an
@@ -1917,6 +2007,9 @@ def _ci_due_for(project, project_config, role, snapshot_id=None, now=None) -> li
                     return []
             except Exception:
                 return []
+        branches = effective_ci_wake_branches(project_config)
+        if not branches:
+            return []
         try:
             present = wake_ci_failures(project, project_config)
         except Exception:
@@ -1936,7 +2029,7 @@ def _ci_due_for(project, project_config, role, snapshot_id=None, now=None) -> li
         except Exception:
             return present
         try:
-            if _ci_due(present, record, snapshot_id, now, rewake):
+            if _ci_due(present, record, snapshot_id, now, rewake, branches):
                 return present
             return []
         except Exception:
@@ -2000,8 +2093,9 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
     event dict or ``None`` when skipped (disabled or not due). Bounds: one
     adapter call per branch per due poll under the adapter timeout; status
     checks capped at 1024 rows each. Trust: host side only; adapter facts
-    stay external-untrusted and only ``failure`` states are recorded via
-    ``vcs.record_ci_result`` (stable dedup IDs, passes ignored).
+    stay external-untrusted, ``failure`` states are recorded via
+    ``vcs.record_ci_result`` (stable dedup IDs), and bounded ``success``
+    evidence is cached without creating insights.
     Retry/cancellation: no retry; ``last_poll`` and the rotation cursor
     advance even on failure so one bad adapter cannot busy-loop or pin the
     window. Evidence: the event names ok/recorded branches/counts/total or
@@ -2014,6 +2108,7 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
         return None
     state["last_poll"] = now
     max_branches = vcs_poll_max_branches(config)
+    wake_branches = set(effective_ci_wake_branches(config))
     def _default_reader(settings, op, params):
         return _vcs.read_via(capped_vcs_settings(settings, vcs_poll_status_timeout(config)),
                              op, params)
@@ -2043,6 +2138,7 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
         recorded: list[dict] = []
         failures = 0
         check_rows_dropped = False
+        success_tick: dict = {}
         failure_branches_pruned = (
             isinstance(state.get("failures"), dict)
             and len(state["failures"]) > MAX_CI_FAILURE_BRANCHES)
@@ -2053,7 +2149,13 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
             if not isinstance(checks, list):
                 raise Denied("VCS status must carry a checks array")
             rows = []
+            passed_rows = []
             for entry in checks:
+                if entry.get("state") == "success":
+                    # The nondeterminism identity is exactly this SHA/check;
+                    # run IDs add no evidence and are not retained for passes.
+                    passed_rows.append({"sha": entry["sha"], "check": entry["check"]})
+                    continue
                 if entry.get("state") != "failure":
                     continue
                 receipt = _vcs.record_ci_result(
@@ -2072,6 +2174,7 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
             if len(rows) > MAX_CI_CHECKS_PER_BRANCH:
                 check_rows_dropped = True
             tick[branch] = rows[:MAX_CI_CHECKS_PER_BRANCH]
+            success_tick[branch] = passed_rows[:MAX_CI_CHECKS_PER_BRANCH]
         previous_failures = state.get("failures")
         failures_map = _clean_ci_failures(previous_failures)
         for branch, rows in tick.items():
@@ -2097,10 +2200,22 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
                 and isinstance(previous_failures.get(branch), list)
                 and len(previous_failures[branch]) > MAX_CI_CHECKS_PER_BRANCH
                 for branch in failures_map)
-        while len(failures_map) > MAX_CI_FAILURE_BRANCHES:
-            failures_map.pop(sorted(failures_map)[0], None)
-            failure_branches_pruned = True
+        failure_branches_pruned = (
+            _prune_ci_branch_map(failures_map, wake_branches)
+            or failure_branches_pruned)
         state["failures"] = failures_map
+        successes_map = _merge_ci_success_maps(state.get("successes"), {})
+        for branch, rows in success_tick.items():
+            combined = _merge_ci_success_rows(successes_map.get(branch), rows)
+            if combined:
+                successes_map[branch] = combined
+            else:
+                successes_map.pop(branch, None)
+        if branches is None and live is not None:
+            for stale in [name for name in successes_map if name not in live]:
+                successes_map.pop(stale, None)
+        _prune_ci_branch_map(successes_map, wake_branches)
+        state["successes"] = successes_map
         state["last_error"] = ""
         state["last_ok"] = now
         return {"event": "ci_poll", "ok": True, "branches": list(targets),
@@ -2854,14 +2969,11 @@ class Engine:
                     admission = "change"
                 else:
                     admission = "schedule"
-                try:
-                    _ci_branch = self.config.vcs.get("ci_branch") if isinstance(getattr(self.config, "vcs", None), dict) else None
-                except Exception:
-                    _ci_branch = None
+                _ci_wake_branches = effective_ci_wake_branches(self.config)
                 if ci_present:
                     try:
                         _ci_head = snapshot["id"] if isinstance(snapshot, dict) else None
-                        write_ci_wake(project, role_name, _ci_branch, ci_present, _ci_head, time.time())
+                        write_ci_wake(project, role_name, _ci_wake_branches, ci_present, _ci_head, time.time())
                     except Exception:
                         pass
                 write_json(run_dir / "started.json", {"run": run_id, "role": role_name,
@@ -3160,7 +3272,7 @@ class Engine:
                     # re-wake itself; a new sha/check or a later head still wakes.
                     try:
                         _refresh_present = ci_present
-                        _refresh_branch = _ci_branch
+                        _refresh_branch = _ci_wake_branches
                     except Exception:
                         _refresh_present = []
                         _refresh_branch = None
@@ -3741,6 +3853,8 @@ def refresh_poll_state(state: dict, shared: dict) -> dict:
         for branch, rows in _clean_ci_failures(shared.get("failures")).items():
             merged[branch] = rows
         ci_state["failures"] = merged
+    ci_state["successes"] = _merge_ci_success_maps(
+        ci_state.get("successes"), shared.get("successes"))
     return ci_state
 
 
@@ -3779,7 +3893,8 @@ def poll_project_vcs(config, project, state: dict, *, now: float, interval: floa
                             "last_poll": ci_state.get("last_poll"),
                             "last_proposal_poll": state.get("last_proposal_poll"),
                             "proposal_cursor": state.get("proposal_cursor"),
-                            "failures": _clean_ci_failures(ci_state.get("failures"))})
+                            "failures": _clean_ci_failures(ci_state.get("failures")),
+                            "successes": _clean_ci_successes(ci_state.get("successes"))})
             except (OSError, ValueError, TypeError) as exc:
                 # Do not report a proposal page as successful when its cursor
                 # and tick timestamp could not be durably resumed. Other VCS

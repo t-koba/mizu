@@ -26,6 +26,8 @@ ENGINES = ("pi", "pi-durable", "codex", "claude")
 #: at config load to keep the operator channel unforgeable.
 RESERVED_ROLE_NAMES = frozenset({"operator", "vcs", "editor"})
 MAX_RESOURCES = 64
+#: Fixed bound for explicitly added CI wake branches beyond `ci_branch`.
+MAX_CI_WAKE_EXTRA_BRANCHES = 64
 #: Protocol wait bound mirrored in protocol.finish.wait_seconds; keep both at 86400.
 MAX_WAIT_SECONDS = 86400
 #: Free-text state changes are supported as an explicit progress signal but
@@ -948,7 +950,7 @@ def load(file: Path) -> Config:
     number(web["diagnostic_bytes"], "web.diagnostic_bytes", 0, ADAPTER_DIAGNOSTIC_BYTES_MAX)
     web["intranet"] = boolean(web["intranet"], "web.intranet")
     vcs = data.get("vcs", {})
-    keys(vcs, {"command", "timeout_seconds", "max_bytes", "diagnostic_bytes", "ci_branch", "ci_rewake_seconds",
+    keys(vcs, {"command", "timeout_seconds", "max_bytes", "diagnostic_bytes", "ci_branch", "ci_wake_extra_branches", "ci_rewake_seconds",
                "poll_enabled", "poll_proposals_enabled",
                "poll_interval_seconds", "poll_max_branches",
                "poll_fetch_timeout_seconds", "poll_status_timeout_seconds",
@@ -956,7 +958,7 @@ def load(file: Path) -> Config:
                "close_grant", "merge_grant"}, "vcs")
     vcs = {"command": [], "timeout_seconds": 20,
            "max_bytes": 524288, "diagnostic_bytes": ADAPTER_DIAGNOSTIC_BYTES_DEFAULT,
-           "ci_branch": "", "ci_rewake_seconds": 1800,
+           "ci_branch": "", "ci_wake_extra_branches": [], "ci_rewake_seconds": 1800,
            "poll_enabled": False, "poll_proposals_enabled": False,
            "poll_interval_seconds": 300, "poll_max_branches": 4,
            "poll_fetch_timeout_seconds": 30,
@@ -972,6 +974,19 @@ def load(file: Path) -> Config:
     vcs["ci_branch"] = string(vcs["ci_branch"], "vcs.ci_branch")
     if vcs["ci_branch"] and (len(vcs["ci_branch"]) > 256 or any(c.isspace() for c in vcs["ci_branch"])):
         raise ConfigError("vcs.ci_branch must be empty or a branch name without whitespace (at most 256 chars)")
+    vcs["ci_wake_extra_branches"] = strings(
+        vcs["ci_wake_extra_branches"], "vcs.ci_wake_extra_branches")
+    if len(vcs["ci_wake_extra_branches"]) > MAX_CI_WAKE_EXTRA_BRANCHES:
+        raise ConfigError("vcs.ci_wake_extra_branches must contain at most 64 branch names")
+    from .vcs import check_branch as _check_vcs_branch
+    for branch in vcs["ci_wake_extra_branches"]:
+        try:
+            _check_vcs_branch(branch)
+            if any(character.isspace() for character in branch):
+                raise ValueError("whitespace in branch name")
+        except Exception as exc:
+            raise ConfigError(
+                "vcs.ci_wake_extra_branches must contain valid branch names") from exc
     vcs["retire_grant"] = boolean(vcs["retire_grant"], "vcs.retire_grant")
     vcs["close_grant"] = boolean(vcs["close_grant"], "vcs.close_grant")
     vcs["merge_grant"] = boolean(vcs["merge_grant"], "vcs.merge_grant")
