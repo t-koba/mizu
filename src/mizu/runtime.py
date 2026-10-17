@@ -3216,6 +3216,13 @@ class Engine:
                                         or project.control().get("paused")):
                                     raise Cancelled("Run stopped before selection retry")
                                 retry_wait = max(0.0, (matched.get("until") or 0) - time.time())
+                                # Provider timestamps are external-untrusted: bound any
+                                # retry wait (seconds or provider until) at the
+                                # operator-configured maximum wait. The verbatim
+                                # provider value stays in the action evidence;
+                                # only the wait is capped, then the retry fires.
+                                retry_wait = min(retry_wait,
+                                                 float(self.config.limits.maximum_wait_seconds))
                                 if retry_wait > 0:
                                     # Bounded wait holding no slot and spending
                                     # nothing; abandonment propagates its own

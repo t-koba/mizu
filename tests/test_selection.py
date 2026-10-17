@@ -166,6 +166,44 @@ class SelectionTests(SelectionFixture):
         self.assertTrue(all(wait > 0 for wait in waits))
         self.assertEqual(leases_during_wait, [False, False])
 
+    def test_provider_until_retry_wait_capped_at_maximum_wait(self):
+        import time
+        from mizu.config import load
+        text = self.file.read_text()
+        text = text.replace("maximum_wait_seconds = 86400", "maximum_wait_seconds = 60")
+        text = text.replace("default_wait_seconds = 1800", "default_wait_seconds = 60")
+        self.file.write_text(text)
+        config = load(self.file)
+        self.config = config
+        spec = specification()
+        spec['on_error'] = [{'when': cond('error.code', 'eq', 'synthetic-exhausted'),
+                             'scope': 'profile', 'until': 'error.retry_at',
+                             'action': 'retry', 'retries': 1}]
+        role, _ = self.setup_selection(spec)
+        attempted = []
+
+        def callback(ctx, prompt, profile):
+            attempted.append(ctx.role.profile)
+            if ctx.role.profile == 'primary':
+                raise ModelFailure('custom', code='synthetic-exhausted',
+                                   retry_at=time.time() + 3600)
+
+        driver = ScriptDriver(callback)
+        waits = []
+
+        def spy(self, context, project, stack, selection_role, role_name, wait_seconds):
+            waits.append(wait_seconds)
+            context._slot_lease = True
+            return None
+
+        with patch.object(Engine, '_selection_retry_wait', spy):
+            result = Engine(self.config, driver=driver).run(self.project, role.name)
+        # Far-future provider timestamp records verbatim but the wait is capped.
+        self.assertEqual(waits, [60.0])
+        self.assertEqual(attempted, ['primary', 'primary', 'alternate'])
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(result['selection']['profile'], 'alternate')
+
     def test_retry_exhaustion_falls_back_then_defers_bounded(self):
         spec = specification()
         spec['on_error'][0]['action'] = 'retry'

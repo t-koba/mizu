@@ -81,6 +81,9 @@ candidate. `retry` keeps the SAME candidate: wait until the rule's deadline
 again, and repeat up to `retries` same-candidate attempts; when retries run out
 the rule continues as `fallback`. Probe rules reject `action`/`retries`; `until`
 rules accept them with the wait measured to `error.retry_at`.
+Provider timestamps are external-untrusted, so every retry wait is additionally bounded
+at `[limits] maximum_wait_seconds` (default 86400): a farther deadline still records
+verbatim in the action evidence, but the wait is capped and then the retry fires.
 
 The retry wait is a bounded wait that holds NO execution slot and spends
 nothing: dispatch admission is released for the wait, the wait polls at
