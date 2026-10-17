@@ -807,7 +807,7 @@ class CiFailureProjectionTests(Fixture):
         config = dataclasses.replace(self.config, vcs=adapter_settings(
             status_code({"checks": []})))
         vcs.inject_refs(self.project.root, {"main": SHA_A})
-        state = {"failures": {"deleted-branch": [{"sha": SHA_A, "check": "unit"}]}}
+        state = {"failures": {"deleted-branch": self._rows(17)}}
         event = poll_ci(config, self.project, state, now=1.0, interval=15.0,
                         reader=lambda *_args: {"checks": [], "trust": "external-untrusted"})
         self.assertTrue(event["ok"])

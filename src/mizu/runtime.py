@@ -2067,11 +2067,6 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
             tick[branch] = rows[:MAX_CI_CHECKS_PER_BRANCH]
         previous_failures = state.get("failures")
         failures_map = _clean_ci_failures(previous_failures)
-        if isinstance(previous_failures, dict):
-            check_rows_dropped = check_rows_dropped or any(
-                isinstance(previous_failures.get(branch), list)
-                and len(previous_failures[branch]) > MAX_CI_CHECKS_PER_BRANCH
-                for branch in failures_map)
         for branch, rows in tick.items():
             failures_map[branch] = rows
         if branches is None:
@@ -2087,6 +2082,14 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
                     failures_map.pop(stale, None)
         for empty in [b for b, rows in failures_map.items() if not rows]:
             failures_map.pop(empty, None)
+        # Old rows can only hide current failures while an unrefreshed branch
+        # remains in the cache after live-ref pruning.
+        if isinstance(previous_failures, dict):
+            check_rows_dropped = check_rows_dropped or any(
+                branch not in tick
+                and isinstance(previous_failures.get(branch), list)
+                and len(previous_failures[branch]) > MAX_CI_CHECKS_PER_BRANCH
+                for branch in failures_map)
         while len(failures_map) > MAX_CI_FAILURE_BRANCHES:
             failures_map.pop(sorted(failures_map)[0], None)
             failure_branches_pruned = True
