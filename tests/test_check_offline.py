@@ -155,7 +155,8 @@ class CheckTimeoutTests(unittest.TestCase):
                     self.assertEqual(entry['tests'], {'run': 1, 'failed': 0, 'skipped': 0})
                     self.assertEqual(entry['status'], 'fail' if timed_out else 'pass')
                     if timed_out:
-                        self.assertNotEqual(entry['exit_code'], 0)
+                        # Windows Job Object termination can report process exit
+                        # status 0; the gate records timeout in status/details.
                         self.assertIn('timed out after 10 s', entry['details'])
                         self.assertIn('unittest failure details unavailable', entry['details'])
                     else:
