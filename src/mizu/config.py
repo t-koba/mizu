@@ -280,7 +280,12 @@ class Limits:
     shared_daily_requests: int = 0
     requests_per_run: int = 24
     tools_per_run: int = 64
-    # Aggregate share of the fixed run wrap-up allowance usable by delegated
+    #: Total wrap-up allowance granted when a per-run spend bound is hit
+    #: (extra model requests / wrap-up tool calls to seal a clean `bounded`
+    #: end). Project defaults; a role may override per role.
+    wrap_up_requests: int = 3
+    wrap_up_tools: int = 5
+    # Aggregate share of the run wrap-up allowance usable by delegated
     # children; the root retains at least one request and one wrap-up tool.
     delegate_wrap_up_requests: int = 2
     delegate_wrap_up_tools: int = 4
@@ -428,6 +433,11 @@ class Role:
     #: transport, budgets, slots and rotation stay project/host policy.
     requests_per_run: int | None = None
     tools_per_run: int | None = None
+    #: Per-role wrap-up allowance overrides. None keeps the project `[limits]`
+    #: value as default; a set value must lie in the same range as the
+    #: project bound.
+    wrap_up_requests: int | None = None
+    wrap_up_tools: int | None = None
     #: None inherits the project wall deadline; 0 disables only this wall.
     run_seconds: int | None = None
 
@@ -457,6 +467,28 @@ def role_tools_per_run(config: "Config", role: "Role") -> int:
     if type(value) is int and value >= 1:
         return value
     return config.limits.tools_per_run
+
+
+def role_wrap_up_requests(config: "Config", role: "Role") -> int:
+    """Effective wrap-up request allowance for one role (project default)."""
+    try:
+        value = getattr(role, "wrap_up_requests", None)
+    except Exception:
+        value = None
+    if type(value) is int and value >= 1:
+        return value
+    return config.limits.wrap_up_requests
+
+
+def role_wrap_up_tools(config: "Config", role: "Role") -> int:
+    """Effective wrap-up tool allowance for one role (project default)."""
+    try:
+        value = getattr(role, "wrap_up_tools", None)
+    except Exception:
+        value = None
+    if type(value) is int and value >= 1:
+        return value
+    return config.limits.wrap_up_tools
 
 
 def role_run_seconds(config: "Config", role: "Role") -> int:
@@ -797,7 +829,7 @@ def load(file: Path) -> Config:
             raise ConfigError(f"Role name '{name}' is reserved for the operator channel")
         keys(role, {"profile", "policy", "workspace", "capabilities", "engine_tools", "on_change",
                     "interval_seconds", "calendar", "daemon", "selector", "attributes",
-                    "decision_events", "decision_sources", "ci_wake", "requests_per_run", "tools_per_run", "run_seconds"}, f"roles.{name}")
+                    "decision_events", "decision_sources", "ci_wake", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds"}, f"roles.{name}")
         profile = string(role.get("profile", ""), f"roles.{name}.profile")
         selector = string(role.get("selector", ""), f"roles.{name}.selector")
         if ("profile" in role) == ("selector" in role):
@@ -905,6 +937,12 @@ def load(file: Path) -> Config:
         role_tools = role.get("tools_per_run")
         if role_tools is not None:
             number(role_tools, f"roles.{name}.tools_per_run", 1, 1073741824)
+        role_wrap_requests = role.get("wrap_up_requests")
+        if role_wrap_requests is not None:
+            number(role_wrap_requests, f"roles.{name}.wrap_up_requests", 1, 1073741824)
+        role_wrap_tools = role.get("wrap_up_tools")
+        if role_wrap_tools is not None:
+            number(role_wrap_tools, f"roles.{name}.wrap_up_tools", 1, 1073741824)
         role_seconds = role.get("run_seconds")
         if role_seconds is not None:
             number(role_seconds, f"roles.{name}.run_seconds", 0, 1073741824)
@@ -912,7 +950,9 @@ def load(file: Path) -> Config:
                            strings(role.get("engine_tools", []), "engine_tools"),
                            boolean(role.get("on_change", False), "on_change"), interval, calendar, daemon, selector, attrs,
                            decision_events=events, decision_sources=raw_sources, ci_wake=ci_wake,
-                           requests_per_run=role_requests, tools_per_run=role_tools, run_seconds=role_seconds)
+                           requests_per_run=role_requests, tools_per_run=role_tools,
+                           wrap_up_requests=role_wrap_requests, wrap_up_tools=role_wrap_tools,
+                           run_seconds=role_seconds)
     if not roles:
         raise ConfigError("At least one role is required")
     consult_role = string(data.get("consult_role", ""), "consult_role")

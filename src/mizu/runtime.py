@@ -24,7 +24,8 @@ from .admission import admission
 from .budget import Budget
 from .config import (MAX_CI_WAKE_EXTRA_BRANCHES, Config, Role, load,
                      role_policy_bytes, role_requests_per_run,
-                     role_tools_per_run, role_run_seconds)
+                     role_tools_per_run, role_run_seconds,
+                     role_wrap_up_requests, role_wrap_up_tools)
 from .doctor import container_runtime
 from .drivers import driver_for
 from .errors import Busy, Cancelled, ConfigError, Denied, InfraExceeded, LimitExceeded, RunDeadlineExceeded, DeadlineWrapUp, DrainYieldExceeded, MissingFinish, MizuError, ModelFailure, ProtocolError
@@ -78,10 +79,12 @@ MAX_STARTED_EVIDENCE_BYTES = 65536
 def _reject_nonfinite_json(value: str):
     raise ValueError("Non-finite JSON value")
 
-#: Wrap-up allowance granted when a per-run spend bound is reached: extra
-#: model requests and extra wrap-up tool calls the unit may still spend to
-#: seal a clean `bounded` end instead of failing. Fixed and documented; the
-#: daily budget still applies to every admitted request.
+#: Default wrap-up allowance granted when a per-run spend bound is reached:
+#: extra model requests and extra wrap-up tool calls the unit may still spend
+#: to seal a clean `bounded` end instead of failing. Policy defaults kept here
+#: for compatibility; the effective values come from `[limits] wrap_up_requests`
+#: / `wrap_up_tools` with optional per-role overrides. The daily budget still
+#: applies to every admitted request.
 WRAP_UP_REQUESTS = 3
 WRAP_UP_TOOLS = 5
 #: Operations admitted during wrap-up (plus bridge bookkeeping). Everything
@@ -216,9 +219,9 @@ class Context:
         started = time.monotonic()
         self.deadline = started + self.run_seconds if self.run_seconds else None
         # Reserve a final logical-request window, capped to one of the
-        # ordinary + three wrap-up windows so short runs still do useful work.
+        # ordinary + wrap-up windows so short runs still do useful work.
         self.wrap_up_at = (self.deadline - min(config.limits.model_request_seconds,
-                                             self.run_seconds / (WRAP_UP_REQUESTS + 1))
+                                             self.run_seconds / (role_wrap_up_requests(config, role) + 1))
                            if self.deadline is not None else None)
         self.request_deadlines: dict[tuple[int, int], float] = {}
         # Bounded aggregate activity evidence: these buckets are exclusive,
@@ -267,7 +270,7 @@ class Context:
         self.bound_hit: str | None = None
         self.wrap_up_requests = 0
         self.wrap_up_tools = 0
-        # Delegated children use an aggregate share of these same fixed
+        # Delegated children use an aggregate share of these same wrap-up
         # allowances; the top-level context retains all unused capacity.
         self.delegated_child = False
         self.delegated_wrap_up_requests = 0
@@ -481,8 +484,9 @@ class Context:
         if self.delegated_child:
             return (self.config.limits.delegate_wrap_up_requests - self.delegated_wrap_up_requests,
                     self.config.limits.delegate_wrap_up_tools - self.delegated_wrap_up_tools)
-        return (WRAP_UP_REQUESTS - self.wrap_up_requests - self.delegated_wrap_up_requests,
-                WRAP_UP_TOOLS - self.wrap_up_tools - self.delegated_wrap_up_tools)
+        role = self.spend_role or self.role
+        return (role_wrap_up_requests(self.config, role) - self.wrap_up_requests - self.delegated_wrap_up_requests,
+                role_wrap_up_tools(self.config, role) - self.wrap_up_tools - self.delegated_wrap_up_tools)
 
     def _bound_message(self) -> str:
         requests_left, tools_left = self._wrap_up_remaining()
@@ -584,7 +588,7 @@ class Context:
                         requests_used = (self.delegated_wrap_up_requests if self.delegated_child else
                                          self.wrap_up_requests + self.delegated_wrap_up_requests)
                         requests_limit = (self.config.limits.delegate_wrap_up_requests if self.delegated_child
-                                          else WRAP_UP_REQUESTS)
+                                          else role_wrap_up_requests(self.config, self.spend_role or self.role))
                         if over and requests_used >= requests_limit:
                             if self.bound_hit == "drain":
                                 raise DrainYieldExceeded("Per-run provider request budget exhausted")
@@ -644,7 +648,7 @@ class Context:
                 tools_used = (self.delegated_wrap_up_tools if self.delegated_child else
                               self.wrap_up_tools + self.delegated_wrap_up_tools)
                 tools_limit = (self.config.limits.delegate_wrap_up_tools if self.delegated_child
-                               else WRAP_UP_TOOLS)
+                               else role_wrap_up_tools(self.config, self.spend_role or self.role))
                 if operation not in WRAP_UP_OPS or tools_used >= tools_limit:
                     if self.bound_hit == "drain" and tools_used >= tools_limit:
                         raise DrainYieldExceeded("Drain wrap-up tool allowance exhausted")
@@ -1806,28 +1810,28 @@ def _ci_rewake_seconds(project_config) -> float:
     """Configured ``[vcs] ci_rewake_seconds`` (never raises).
 
     Schema: operator config. Trust: configuration. Failure: never raises;
-    missing or garbage reads as the 1800 default since tests build vcs
-    dicts by hand.
+    missing or garbage reads as the DEFAULT_CI_REWAKE_SECONDS default since
+    tests build vcs dicts by hand.
     """
     try:
         settings = getattr(project_config, "vcs", None)
         if settings is None and isinstance(project_config, dict):
             settings = project_config
-        raw = settings.get("ci_rewake_seconds", 1800) if isinstance(settings, dict) else 1800
+        raw = settings.get("ci_rewake_seconds", DEFAULT_CI_REWAKE_SECONDS) if isinstance(settings, dict) else DEFAULT_CI_REWAKE_SECONDS
     except Exception:
-        return 1800.0
+        return float(DEFAULT_CI_REWAKE_SECONDS)
     try:
         if type(raw) is bool:
-            return 1800.0
+            return float(DEFAULT_CI_REWAKE_SECONDS)
         value = float(raw) if isinstance(raw, (int, float)) else None
         if value is None:
-            return 1800.0
+            return float(DEFAULT_CI_REWAKE_SECONDS)
         import math as _math
         if not _math.isfinite(value) or not 60 <= value <= 86400:
-            return 1800.0
+            return float(DEFAULT_CI_REWAKE_SECONDS)
         return value
     except Exception:
-        return 1800.0
+        return float(DEFAULT_CI_REWAKE_SECONDS)
 
 
 def _ci_wake_path(project, role_name):
@@ -2023,7 +2027,7 @@ def _ci_due_for(project, project_config, role, snapshot_id=None, now=None) -> li
         try:
             rewake = _ci_rewake_seconds(project_config)
         except Exception:
-            rewake = 1800.0
+            rewake = float(DEFAULT_CI_REWAKE_SECONDS)
         try:
             record = read_ci_wake(project, role_name)
         except Exception:

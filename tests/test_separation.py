@@ -516,6 +516,91 @@ class PerRoleSpendTests(Fixture):
         with self.assertRaises(Exception):
             load(self.file)
 
+    def test_wrap_up_allowance_defaults_to_project(self):
+        from mizu.config import role_wrap_up_requests, role_wrap_up_tools
+        role = self.config.roles["worker"]
+        self.assertEqual(self.config.limits.wrap_up_requests, 3)
+        self.assertEqual(self.config.limits.wrap_up_tools, 5)
+        self.assertEqual(role_wrap_up_requests(self.config, role), 3)
+        self.assertEqual(role_wrap_up_tools(self.config, role), 5)
+
+    def test_wrap_up_override_applies_per_role(self):
+        from mizu.config import load, role_wrap_up_requests, role_wrap_up_tools
+        text = self.file.read_text()
+        text = text.replace('[roles.worker]\nprofile = "primary"',
+                            '[roles.worker]\nprofile = "primary"\nwrap_up_requests = 7\nwrap_up_tools = 9')
+        self.file.write_text(text)
+        config = load(self.file)
+        self.assertEqual(role_wrap_up_requests(config, config.roles["worker"]), 7)
+        self.assertEqual(role_wrap_up_tools(config, config.roles["worker"]), 9)
+        # Other roles keep the project default.
+        self.assertEqual(role_wrap_up_requests(config, config.roles["searcher"]),
+                         config.limits.wrap_up_requests)
+        self.assertEqual(role_wrap_up_tools(config, config.roles["searcher"]),
+                         config.limits.wrap_up_tools)
+
+    def test_wrap_up_override_refuses_bad_values(self):
+        from mizu.config import load
+        cases = (("wrap_up_requests", "0"), ("wrap_up_tools", "0"),
+                 ("wrap_up_requests", '"3"'), ("wrap_up_tools", "-1"))
+        for bad_key, bad_literal in cases:
+            with self.subTest(key=bad_key, value=bad_literal):
+                text = self.file.read_text()
+                text = text.replace('[roles.worker]\nprofile = "primary"',
+                                    '[roles.worker]\nprofile = "primary"\n'
+                                    f"{bad_key} = {bad_literal}")
+                self.file.write_text(text)
+                with self.assertRaises(Exception):
+                    load(self.file)
+
+    def test_wrap_up_limits_reject_bad_project_values(self):
+        from mizu.config import load
+        text = self.file.read_text()
+        text = text.replace("requests_per_run = 24", "wrap_up_requests = 0\nrequests_per_run = 24")
+        self.file.write_text(text)
+        with self.assertRaises(Exception):
+            load(self.file)
+
+    def test_role_wrap_up_override_changes_request_allowance(self):
+        from mizu.config import load
+        from mizu.errors import LimitExceeded
+        text = self.file.read_text()
+        text = text.replace('[roles.worker]\nprofile = "primary"',
+                            '[roles.worker]\nprofile = "primary"\nrequests_per_run = 1\nwrap_up_requests = 1')
+        self.file.write_text(text)
+        config = load(self.file)
+        ctx = self.context("worker")
+        ctx.config = config
+        ctx.role = config.roles["worker"]
+        ctx.handle("_hello", {})
+        ctx.handle("_budget", {"sequence": 1})
+        # One wrap-up request fits the per-role override (1); the next refuses.
+        ctx.handle("_budget", {"sequence": 2})
+        self.assertEqual(ctx.bound_hit, "requests")
+        self.assertEqual(ctx._wrap_up_remaining(), (0, 5))
+        with self.assertRaises(LimitExceeded):
+            ctx.handle("_budget", {"sequence": 3})
+
+    def test_role_wrap_up_override_changes_tool_allowance(self):
+        from mizu.config import load
+        from mizu.errors import LimitExceeded
+        text = self.file.read_text()
+        text = text.replace('[roles.worker]\nprofile = "primary"',
+                            '[roles.worker]\nprofile = "primary"\ntools_per_run = 1\nwrap_up_tools = 1')
+        self.file.write_text(text)
+        config = load(self.file)
+        ctx = self.context("worker")
+        ctx.config = config
+        ctx.role = config.roles["worker"]
+        ctx.handle("_hello", {})
+        ctx.handle("files", {"offset": 0, "limit": 1})
+        with self.assertRaises(LimitExceeded):
+            ctx.handle("files", {"offset": 0, "limit": 1})
+        self.assertEqual(ctx.bound_hit, "tools")
+        # One wrap-up tool fits the per-role override (1); the next refuses.
+        ctx.handle("finish", {"outcome": "wait", "summary": "s", "state": "n"})
+        self.assertEqual(ctx._wrap_up_remaining(), (3, 0))
+
     def test_budget_and_tool_gates_use_role_effective(self):
         from mizu.config import load
         text = self.file.read_text()

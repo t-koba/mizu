@@ -26,7 +26,9 @@ daily_requests = 0                 # Fail closed. Set a deliberate positive limi
 shared_daily_requests = 0          # Optional shared total across projects sharing data_dir (0 disables, max 100,000).
 requests_per_run = 24
 tools_per_run = 64
-delegate_wrap_up_requests = 2 # Aggregate child share of the fixed per-run wrap-up allowance (0-2).
+wrap_up_requests = 3          # Total wrap-up requests after a per-run bound is hit (1-1073741824); roles may override per role.
+wrap_up_tools = 5             # Total wrap-up tool calls after a per-run bound is hit (1-1073741824); roles may override per role.
+delegate_wrap_up_requests = 2 # Aggregate child share of the per-run wrap-up allowance (0-2).
 delegate_wrap_up_tools = 4    # Aggregate child share of wrap-up tools (0-4); caller retains at least one.
 run_seconds = 1200
 model_request_seconds = 1200     # Positive logical-request/query/turn deadline.
@@ -229,6 +231,8 @@ daemon = true
 # Per-role per-run spend override (optional, same range as [limits]; unset keeps the project value).
 # requests_per_run = 24
 # tools_per_run = 64
+# wrap_up_requests = 3
+# wrap_up_tools = 5
 
 [roles.searcher]
 profile = "alternate"
