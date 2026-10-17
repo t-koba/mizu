@@ -58,7 +58,7 @@ class SnapshotConcurrencyTests(unittest.TestCase):
             atomic_write(self.store.root / "objects" / sha, data, exclusive=True)
             files[path] = {"sha256": sha, "bytes": len(data), "executable": executable}
         return {"files": files, "code_digest": digest(canonical(files)),
-                "bytes": sum(e["bytes"] for e in files.values()), "skipped": []}
+                "bytes": sum(e["bytes"] for e in files.values()), "skipped": [], "reserved": []}
 
     def create(self, contents, **kwargs):
         self.serial += 1

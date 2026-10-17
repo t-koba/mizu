@@ -115,6 +115,49 @@ class VcsRefInjectionTests(Fixture):
         self.assertEqual(before["code_digest"], after["code_digest"])
         self.assertEqual(vcs.read_ref(self.project.root, "main"), SHA_A)
 
+    def test_reserved_prefix_reported_without_moving_digest(self):
+        legacy = self.project.workspace / "refs/remotes/upstream"
+        legacy.mkdir(parents=True)
+        (legacy / "main").write_bytes((SHA_A + "\n").encode())
+        genuine = self.project.workspace / "refs/remotes/upstream/notes.txt"
+        genuine.write_text("genuine notes\n")
+        captured = self.project.snapshots.capture_files(self.project.workspace)
+        self.assertNotIn("refs/remotes/upstream/main", captured["files"])
+        self.assertNotIn("refs/remotes/upstream/notes.txt", captured["files"])
+        self.assertEqual(sorted(captured["reserved"]),
+                         ["refs/remotes/upstream/main", "refs/remotes/upstream/notes.txt"])
+        self.assertEqual(captured["skipped"], [])
+        # The reservation never moves the digest: same tree minus the
+        # reserved subtree captures identically.
+        (legacy / "main").unlink()
+        genuine.unlink()
+        plain = self.project.snapshots.capture_files(self.project.workspace)
+        self.assertEqual(plain["reserved"], [])
+        self.assertEqual(captured["code_digest"], plain["code_digest"])
+
+    def test_plain_import_refuses_reserved_prefix(self):
+        from mizu.project import initialize
+        source = self.root / "reservedsource"
+        (source / "refs/remotes/upstream").mkdir(parents=True)
+        (source / "refs/remotes/upstream/main").write_bytes((SHA_A + "\n").encode())
+        (source / "app.py").write_bytes(b"VALUE = 2\n")
+        with self.assertRaisesRegex(Denied, "reserved virtual-ref prefix"):
+            initialize(self.config, "reserved", source, self.goal,
+                       ["worker"], ["python3 -m unittest"])
+
+    def test_read_refuses_workspace_collision(self):
+        from mizu import vcs as _vcs
+        _vcs.inject_refs(self.project.root, {"main": SHA_A})
+        worker = self.context("worker")
+        collision = self.project.workspace / "refs/remotes/upstream/main"
+        collision.parent.mkdir(parents=True)
+        collision.write_bytes(b"genuine file, not a ref\n")
+        with self.assertRaisesRegex(Denied, "collides with the reserved virtual"):
+            worker.handle("read", {"path": "refs/remotes/upstream/main"})
+        collision.unlink()
+        result = worker.handle("read", {"path": "refs/remotes/upstream/main"})
+        self.assertEqual(result["text"], SHA_A)
+
     def test_excluded_even_with_empty_operator_excludes(self):
         probe = Snapshots(self.root / "probe-store", excludes=(), max_file=1024,
                            max_bytes=65536, max_files=100)

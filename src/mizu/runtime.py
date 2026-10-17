@@ -764,6 +764,16 @@ class Context:
             if self.role.workspace == "none":
                 raise Denied("Path is not exposed to this role")
             try:
+                safe_read(self.workspace, path, 1)
+                collision = True
+            except LimitExceeded:
+                collision = True  # present, larger than the 1-byte probe
+            except (OSError, Denied):
+                collision = False
+            if collision:
+                raise Denied("Path collides with the reserved virtual upstream-ref prefix; "
+                             "relocate genuine files out of refs/remotes/upstream/")
+            try:
                 text = _vcs.read_ref(self.project.root, ref)
             except OSError as exc:
                 raise Denied(f"Upstream refs are unavailable: {exc}") from exc

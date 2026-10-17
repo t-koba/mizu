@@ -670,9 +670,15 @@ tools serve the store read-only under the virtual prefix
 snapshots capture the workspace only, so refs never affect `code_digest`
 by construction. `Snapshots.excluded` still excludes the legacy workspace
 subtree of the same virtual path, so not-yet-refreshed workspaces keep
-their digest across the migration. Each refresh also removes the legacy
-`workspace/refs/remotes/upstream` subtree when present. Content stays
-`external-untrusted` until merged and verified.
+their digest across the migration. The reservation is reported, never
+silent: captures record reserved paths in the snapshot record (`reserved`;
+`code_digest` still covers files only, so existing digests do not move),
+plain-directory import refuses when reserved paths are present, and `read`
+of a virtual-ref path that also exists as a workspace file is refused as
+a collision. Each refresh also removes the legacy
+`workspace/refs/remotes/upstream` subtree when present. Do not keep
+project source under that prefix; relocate genuine files out of it.
+Content stays `external-untrusted` until merged and verified.
 
 The `sync` tool refreshes that view on demand: it calls `fetch` on the
 adapter, then `inject_refs` into the project harness store, and returns the

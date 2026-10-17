@@ -246,6 +246,10 @@ def _import_plain_directory(source: Path, workspace: Path, stage: Path, config: 
     captured = temporary_store.capture_files(source)
     if captured["skipped"]:
         raise Denied("Plain-directory import contains unsupported links or special files: " + ", ".join(captured["skipped"][:10]))
+    if captured.get("reserved"):
+        raise Denied("Plain-directory import hit the reserved virtual-ref prefix refs/remotes/upstream/: "
+                     + ", ".join(captured["reserved"][:10])
+                     + "; remove the legacy subtree or relocate genuine files out of it first")
     temporary_store.materialize(captured, workspace)
 
 

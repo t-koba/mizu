@@ -159,6 +159,20 @@ class Snapshots:
             mkdir(root / "objects")
             mkdir(root / "snapshots")
 
+    @staticmethod
+    def _reserved_prefix(name: str) -> bool:
+        """Whether a workspace path falls under the reserved virtual-ref prefix.
+
+        The ``refs/remotes/upstream/**`` subtree is reserved for virtual
+        upstream refs served from the harness store, plus the legacy
+        in-workspace subtree that the migration still excludes. Unlike
+        operator excludes (chosen policy, silent by design), a reservation
+        hit is reported in the capture record, refused at plain-directory
+        import, and refused on colliding reads.
+        """
+        parts = name.split("/")
+        return len(parts) >= len(REF_PREFIX) and tuple(parts[:len(REF_PREFIX)]) == REF_PREFIX
+
     def excluded(self, name: str) -> bool:
         # Legacy in-workspace upstream-ref subtree (pre-move): the store now
         # lives outside the working tree, so this only guards workspaces
@@ -174,18 +188,25 @@ class Snapshots:
     def capture_files(self, workspace: Path) -> dict:
         files: dict[str, dict] = {}
         skipped: list[str] = []
+        reserved: list[str] = []
         total = 0
         if _platform.HAS_OPENAT and _platform.HAS_DIR_FD:
-            return self._capture_openat(workspace, files, skipped, total)
-        return self._capture_portable(workspace, files, skipped, total)
+            return self._capture_openat(workspace, files, skipped, reserved, total)
+        return self._capture_portable(workspace, files, skipped, reserved, total)
 
-    def _capture_openat(self, workspace: Path, files: dict, skipped: list, total: int) -> dict:
+    def _capture_openat(self, workspace: Path, files: dict, skipped: list, reserved: list, total: int) -> dict:
         # fwalk does not traverse symlink directories; safe_read pins each component.
         for directory, dirs, names, directory_fd in os.fwalk(workspace, follow_symlinks=False):
             relative = Path(directory).relative_to(workspace)
             visible_dirs = []
             for d in sorted(dirs):
                 rel = (relative / d).as_posix()
+                if self._reserved_prefix(rel):
+                    if stat.S_ISLNK(os.stat(d, dir_fd=directory_fd, follow_symlinks=False).st_mode):
+                        reserved.append(rel)
+                    else:
+                        visible_dirs.append(d)
+                    continue
                 if self.excluded(rel):
                     continue
                 if stat.S_ISLNK(os.stat(d, dir_fd=directory_fd, follow_symlinks=False).st_mode):
@@ -195,6 +216,9 @@ class Snapshots:
             dirs[:] = visible_dirs
             for name in sorted(names):
                 path = (relative / name).as_posix()
+                if self._reserved_prefix(path):
+                    reserved.append(path)
+                    continue
                 if self.excluded(path):
                     continue
                 info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
@@ -203,9 +227,9 @@ class Snapshots:
                     continue
                 total = self._capture_file(workspace, path, files, total)
         return {"files": files, "code_digest": digest(canonical(files)), "skipped": skipped,
-                "bytes": total}
+                "reserved": reserved, "bytes": total}
 
-    def _capture_portable(self, workspace: Path, files: dict, skipped: list, total: int) -> dict:
+    def _capture_portable(self, workspace: Path, files: dict, skipped: list, reserved: list, total: int) -> dict:
         # Fallback where openat/dir_fd is unavailable: walk without following
         # links, refuse any symlink, and read through the same safe_read path.
         for directory, dirs, names in os.walk(workspace, followlinks=False):
@@ -214,6 +238,12 @@ class Snapshots:
             for d in sorted(dirs):
                 rel = (relative / d).as_posix()
                 full = Path(directory) / d
+                if self._reserved_prefix(rel):
+                    if full.is_symlink() or bool(getattr(full.lstat(), "st_file_attributes", 0) & 0x400):
+                        reserved.append(rel)
+                    else:
+                        visible_dirs.append(d)
+                    continue
                 if self.excluded(rel):
                     continue
                 if full.is_symlink() or bool(getattr(full.lstat(), "st_file_attributes", 0) & 0x400):
@@ -223,6 +253,9 @@ class Snapshots:
             dirs[:] = visible_dirs
             for name in sorted(names):
                 rel = (relative / name).as_posix()
+                if self._reserved_prefix(rel):
+                    reserved.append(rel)
+                    continue
                 if self.excluded(rel):
                     continue
                 full = Path(directory) / name
@@ -239,7 +272,7 @@ class Snapshots:
                     continue
                 total = self._capture_file(workspace, rel, files, total)
         return {"files": files, "code_digest": digest(canonical(files)), "skipped": skipped,
-                "bytes": total}
+                "reserved": reserved, "bytes": total}
 
     def _capture_file(self, workspace: Path, name: str, files: dict, total: int) -> int:
         if len(files) >= self.max_files:
@@ -407,7 +440,7 @@ class Snapshots:
         self.validate_paths(files)
         total = self._manifest_bounds(files)
         return {"files": files, "code_digest": digest(canonical(files)),
-                "skipped": [], "bytes": total}, []
+                "skipped": [], "reserved": [], "bytes": total}, []
 
     def _manifest_bounds(self, files: dict) -> int:
         if len(files) > self.max_files:

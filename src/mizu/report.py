@@ -65,6 +65,7 @@ def publish(project, snapshot: dict, document: dict | None = None, *, run_id: st
     evidence = {"snapshot": snapshot["id"], "code_digest": snapshot["code_digest"],
                 "source_run": snapshot["run"], "run": run_id,
                 "verification": snapshot.get("verification"), "skipped_paths": snapshot["skipped"],
+                "reserved_paths": snapshot.get("reserved", []),
                 "published_at": now()}
     markdown = render(snapshot, document)
     artifact_id = digest(canonical({"snapshot": snapshot["id"], "document": document, "run": run_id}))
