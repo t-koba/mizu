@@ -347,6 +347,11 @@ class Limits:
     #: stage. Result/error/selection records are never candidates.
     event_log_compress_days: int = 7
     event_log_retention_days: int = 31
+    #: Operator-selected retention (days) for smoke-probe validation
+    #: evidence (``validation/smoke-*.json`` plus ``validation/smoke-*.project/``).
+    #: Entries at or beyond ``validation_retention_days`` old are dropped by
+    #: ``mizu prune``; 0 disables. The probe policy file is never a candidate.
+    validation_retention_days: int = 31
     #: Operator-selected aggregate retention (bytes) for one run's engine
     #: event stream (``*-events.jsonl``). Bytes past this budget are dropped
     #: from the retained file with an explicit ``*-events-truncated.json``
@@ -631,6 +636,7 @@ def load(file: Path) -> Config:
                      "retention_days": (0, 3650), "pending_insights": (1, 1000),
                      "work_items_prompt": (1, 100), "decision_events_limit": (1, 100),
                      "event_log_compress_days": (0, 3650), "event_log_retention_days": (0, 3650),
+                     "validation_retention_days": (0, 3650),
                      "event_stream_bytes": (1048576, 268435456),
                      "role_state_bytes": (1024, 65536),
                      "role_state_prompt_bytes": (1, 65536),

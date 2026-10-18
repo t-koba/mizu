@@ -359,10 +359,11 @@ def prune(project: Project, *, apply: bool = False, keep_artifacts: int = DEFAUL
     from ``retrieved_epoch`` age (entries without a usable epoch fall back to mtime).
     Age is file mtime vs now unless noted; the compressed copy keeps the raw
     mtime so the drop clock does not restart.
-    Only top-level run-dir logs and expired
-    web-cache entries are candidates; result/error/consultation/
+    Only top-level run-dir logs, expired validation smoke evidence, and
+    expired web-cache entries are candidates; result/error/consultation/
     started/selection/admission/usage records, snapshots, objects, sessions,
-    decisions, proposals, and work-item histories are never candidates.
+    decisions, proposals, work-item histories, and the smoke probe policy
+    file are never candidates.
     Trust: operator-invoked maintenance under quiescence (paused + locks);
     paths are local recorded state, never model input. The web cache is
     shared under ``data_dir``; the invoking project's TTL decides expiry and
@@ -376,12 +377,14 @@ def prune(project: Project, *, apply: bool = False, keep_artifacts: int = DEFAUL
     limits = getattr(project.config, "limits", None)
     compress_days = getattr(limits, "event_log_compress_days", 7)
     retention_days = getattr(limits, "event_log_retention_days", 31)
+    validation_days = getattr(limits, "validation_retention_days", 31)
     try:
         compress_days = int(compress_days)
         retention_days = int(retention_days)
+        validation_days = int(validation_days)
     except (TypeError, ValueError) as exc:
         raise Denied(f"Invalid event-log retention: {exc}") from exc
-    if compress_days < 0 or retention_days < 0:
+    if compress_days < 0 or retention_days < 0 or validation_days < 0:
         raise Denied("Event-log retention must not be negative")
     candidates = []
     victims: list[Path] = []
@@ -419,14 +422,29 @@ def prune(project: Project, *, apply: bool = False, keep_artifacts: int = DEFAUL
         to_compress = [path for path in to_compress if str(path) not in drop_set]
         to_compress.sort()
         to_drop.sort()
+        validation_victims: list[Path] = []
+        data_base = project.config.data
+        validation_base = data_base / "validation"
+        if validation_days and validation_base.is_dir() and not validation_base.is_symlink():
+            for path in sorted(validation_base.glob("smoke-*")):
+                if path.is_symlink():
+                    raise Denied("Refusing a symlink during prune")
+                if path.name == "smoke-probe-policy.md":
+                    continue
+                if not ((path.suffix == ".json" and path.is_file())
+                        or (path.suffix == ".project" and path.is_dir())):
+                    continue
+                if _file_age_days(path) >= validation_days:
+                    validation_victims.append(path)
+        validation_victims.sort()
         if keep_artifacts:
             victims = artifact_candidates(project, keep_artifacts)
         web_victims, _web_accounting = _web_cache_candidates(project)
-        data_base = project.config.data
         removed = {"reproducible_inputs": [p.relative_to(project.root).as_posix() for p in candidates],
                    "artifacts": [p.relative_to(project.root).as_posix() for p in victims],
                    "event_logs_compressed": [p.relative_to(project.root).as_posix() for p in to_compress],
                    "event_logs_removed": [p.relative_to(project.root).as_posix() for p in to_drop],
+                   "validation_evidence": [p.relative_to(data_base).as_posix() for p in validation_victims],
                    "web_cache": [p.relative_to(data_base).as_posix() for p in web_victims]}
         if apply:
             for candidate in candidates:
@@ -449,11 +467,18 @@ def prune(project: Project, *, apply: bool = False, keep_artifacts: int = DEFAUL
                     raise Denied("Refusing a symlink during prune")
                 candidate.unlink()
                 dropped_names.append(candidate.relative_to(project.root).as_posix())
+            for candidate in validation_victims:
+                if candidate.is_symlink():
+                    raise Denied("Refusing a symlink during prune")
+                if candidate.is_dir():
+                    shutil.rmtree(candidate)
+                else:
+                    candidate.unlink()
             for candidate in web_victims:
                 if candidate.is_symlink():
                     raise Denied("Refusing a symlink during prune")
                 candidate.unlink()
-            for parent in {c.parent for c in (*candidates, *victims, *to_compress, *to_drop, *web_victims)}:
+            for parent in {c.parent for c in (*candidates, *victims, *to_compress, *to_drop, *validation_victims, *web_victims)}:
                 try:
                     sync_dir(parent)
                 except OSError:
@@ -464,6 +489,7 @@ def prune(project: Project, *, apply: bool = False, keep_artifacts: int = DEFAUL
             write_json(audit, {"applied_at": now(), "keep_artifacts": keep_artifacts,
                                "event_log_compress_days": compress_days,
                                "event_log_retention_days": retention_days,
+                               "validation_retention_days": validation_days,
                                "cache_seconds": cache_seconds, **removed})
             sync_dir(audit.parent)
             removed["audit"] = audit.relative_to(project.root).as_posix()
@@ -471,7 +497,8 @@ def prune(project: Project, *, apply: bool = False, keep_artifacts: int = DEFAUL
             "retained": "All result/error/consultation/started/selection/usage records, snapshots, "
                         "content objects, sessions, decisions, proposals, insight revisions, and work-item histories. "
                         "Artifact documents beyond the kept count, "
-                        "bulky engine logs beyond operator retention, and "
+                        "bulky engine logs beyond operator retention, "
+                        "smoke-probe validation evidence beyond operator retention, and "
                         "web-cache entries expired past cache_seconds are disposable projections; "
                         "their evidence remains in snapshots and run records. "
                         "Sessions are durable audit evidence and are accounted, never reclaimed."}
