@@ -727,9 +727,9 @@ command blindly, run `git reset --hard`, or manufacture a successful observation
 
 The runtime prompt carries only protocol framing (goal, anchored snapshot
 references, capability-gated pending insights and acceptance commands, the
-always-present bounded `open_work_items` page, plus the current wall-clock time
-and configured zone as trailing `now`/`timezone` fields
-so the stable prefix keeps working caches warm); sealing
+always-present bounded `open_work_items` page, then trailing volatile `run`,
+`now`, and `timezone` fields so repeated stable content forms a longer cacheable
+prefix); sealing
 is directed by the `finish` tool contract. Each run
 records `prompt_projection.json` with the sent counts (`recent_snapshots`,
 `pending_insights`, `acceptance_commands`) and `prompt_bytes` as evidence for

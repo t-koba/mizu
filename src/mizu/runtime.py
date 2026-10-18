@@ -2669,7 +2669,6 @@ def prompt_for(context: Context) -> str:
     if "vcs_read" in caps:
         ci_failures, ci_failures_may_be_truncated = ci_failures_projection(context.project)
     return json.dumps({"unit": UNIT_BEGINS_STATEMENT,
-                       "run": _prompt_run_identity(context),
                        "goal": context.goal,
                        "published_snapshot": {k: context.snapshot[k] for k in (
                            "id", "code_digest", "created_at", "state", "summary", "verification")},
@@ -2691,6 +2690,7 @@ def prompt_for(context: Context) -> str:
                        "ci_failures_may_be_truncated": ci_failures_may_be_truncated,
                        "previous_report": (_previous_report(context.project)
                                           if "report" in caps else None),
+                       "run": _prompt_run_identity(context),
                        **_prompt_clock(context)},
                       ensure_ascii=False)
 
@@ -2698,9 +2698,9 @@ def prompt_for(context: Context) -> str:
 def prompt_delta_for(context: Context, pending: list) -> str:
     """Append-only delta for a resumed persistent session.
 
-    Schema: the constant ``unit`` opening (a new work unit has begun, with
-    its run identity), then the ``goal_digest`` pin, the pinned ``published_snapshot`` and a small
-    ``snapshot_delta`` (previous/current ids), then only the pending
+    Schema: the constant ``unit`` opening, then the ``goal_digest`` pin, the
+    pinned ``published_snapshot`` and a small ``snapshot_delta``
+    (previous/current ids), then only the pending
     proposals not yet offered, an ``open_insights`` statement of the still
     undecided backlog (ids plus total, so an already-offered insight never
     reads as done), the always-present bounded ``open_work_items`` page,
@@ -2708,7 +2708,8 @@ def prompt_delta_for(context: Context, pending: list) -> str:
     capability-gated ``previous_report`` preview for roles
     holding ``report``. The full goal text and ``recent_snapshots`` history
     are never repeated: the provider session already holds them. Key order is
-    fixed (pins first) so the stable prefix keeps working caches warm.
+    fixed (stable context first, volatile run identity and clock last) so
+    repeated prompts preserve as much identical prefix as possible.
     Bounds: pending and the open insight backlog both follow
     ``[limits] pending_insights`` (newest kept; ``truncated`` says so
     explicitly); the work-item page follows ``[limits] work_items_prompt`` and
@@ -2735,7 +2736,6 @@ def prompt_delta_for(context: Context, pending: list) -> str:
     open_work_items = context.project.work_items.page_open(
         limit=context.config.limits.work_items_prompt)
     return json.dumps({"unit": UNIT_BEGINS_STATEMENT,
-                       "run": _prompt_run_identity(context),
                        "goal_digest": context.goal_digest,
                        "published_snapshot": {k: context.snapshot[k] for k in (
                            "id", "code_digest", "created_at", "state", "summary", "verification")},
@@ -2757,6 +2757,7 @@ def prompt_delta_for(context: Context, pending: list) -> str:
                        "ci_failures_may_be_truncated": ci_failures_may_be_truncated,
                        "previous_report": (_previous_report(context.project)
                                           if "report" in caps else None),
+                       "run": _prompt_run_identity(context),
                        **_prompt_clock(context)},
                       ensure_ascii=False)
 

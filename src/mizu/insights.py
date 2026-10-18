@@ -178,6 +178,8 @@ def _archive_summary(item: dict) -> dict:
     counts/timestamps are projected; ``body`` and full ``evidence`` text
     stay behind ``read``.
     """
+    if item.get("body_unavailable") is True:
+        return {k: item[k] for k in ("id", "rev", "created_at", "body_unavailable") if k in item}
     record = {k: item[k] for k in ("id", "source", "origin", "title", "created_at", "base_snapshot") if k in item}
     if "origin" not in record:
         record["origin"] = None
@@ -534,7 +536,9 @@ replacement insight without implying rejected substance.
         decision. Archive items use the same bounded summary shape (no body or
         evidence text), plus their original archival decision, ordered by
         monotonically increasing seq. All archive revisions are enumerated,
-        not just each ID's latest row. Use read for the exact full body.
+        not just each ID's latest row, plus migrated identity-only tombstones
+        marked body_unavailable (no invented title/decision/revision).
+        Use read for an available exact full body.
         No cursor is authorization; project access is the caller's responsibility.
         """
         if scope not in ("live", "archive"):
@@ -616,33 +620,46 @@ replacement insight without implying rejected substance.
                 return _normalize(record)
         return insight_archive.read(self.root, insight_id)
 
+    def _legacy_identity(self, insight_id: str) -> bool:
+        """Validate a retained identity whose body was removed by old GC."""
+        return insight_archive.identity(self.root, insight_id) is not None
+
     def read(self, insight_id: str) -> dict:
         """Read current content, including archive; hex prefixes must be unique.
 
         Exact IDs win over prefixes. Prefix ambiguity spans live and archived
-        IDs (deduplicating crash leftovers). Lists remain live-only.
+        IDs (deduplicating crash leftovers). A retained identity without a body
+        is reported explicitly; it is not confused with an unknown ID. Archive
+        pages include migrated legacy tombstones; default lists stay live-only.
         """
         key = identifier(insight_id)
         record = self._read_exact(key)
         if record is not None:
             return record
         prefix = key.lower()
-        if len(prefix) >= 32 or any(c not in "0123456789abcdef" for c in prefix):
-            raise Denied("Insight not found")
-        matches = set(insight_archive.prefixes(self.root, prefix))
-        for candidate in (self.root / "inbox").glob("*.json"):
-            if not candidate.is_symlink() and candidate.stem.lower().startswith(prefix):
-                matches.add(candidate.stem)
-                if len(matches) > 1:
-                    break
+        matches = set()
+        if len(prefix) < 32 and all(c in "0123456789abcdef" for c in prefix):
+            matches.update(insight_archive.prefixes(self.root, prefix))
+            for directory in (self.root / "inbox", self.root / "insight-ids"):
+                for candidate in directory.glob("*.json"):
+                    if (not candidate.is_symlink() and candidate.is_file()
+                            and candidate.stem.lower().startswith(prefix)):
+                        matches.add(candidate.stem)
+                        if len(matches) > 1:
+                            break
         if not matches:
+            if self._legacy_identity(key):
+                raise Denied("Insight body unavailable; legacy retention removed it before archival")
             raise Denied("Insight not found")
         if len(matches) > 1:
             raise Denied("Ambiguous insight prefix; use the full id")
-        record = self._read_exact(matches.pop())
-        if record is None:
-            raise Denied("Insight not found")
-        return record
+        matched = matches.pop()
+        record = self._read_exact(matched)
+        if record is not None:
+            return record
+        if self._legacy_identity(matched):
+            raise Denied("Insight body unavailable; legacy retention removed it before archival")
+        raise Denied("Insight not found")
 
     def scan_source(self, source: str) -> list[dict]:
         """Return every inbox record carrying the given source.

@@ -149,6 +149,20 @@ class InsightArchiveTests(Fixture):
         with self.assertRaises(Denied):
             self.project.insights.read("ffff")
 
+    def test_legacy_gc_body_is_distinct_from_unknown_and_prefix_ambiguity(self):
+        first = self.proposal("a" * 32)
+        (self.project.root / "inbox" / f"{first['id']}.json").unlink()
+        with self.assertRaisesRegex(Denied, "body unavailable"):
+            self.project.insights.read(first["id"])
+        with self.assertRaisesRegex(Denied, "body unavailable"):
+            self.project.insights.read("aaaa")
+        with self.assertRaisesRegex(Denied, "not found"):
+            self.project.insights.read("bbbb")
+        second = self.proposal("a" * 31 + "b")
+        (self.project.root / "inbox" / f"{second['id']}.json").unlink()
+        with self.assertRaisesRegex(Denied, "Ambiguous"):
+            self.project.insights.read("aaaa")
+
     def test_archived_submit_retry_and_revise_owner_cas_reopen(self):
         item = self.proposal(origin="caller", run="original")
         self.gc()

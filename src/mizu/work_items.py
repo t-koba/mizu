@@ -447,9 +447,12 @@ class WorkItems:
     def _origin_revision(self, insight_id: str) -> int | None:
         current = self._optional_record(f"inbox/{insight_id}.json")
         if current is None:
-            current = insight_archive.read(self.root, insight_id)
+            current = insight_archive.read(self.root, insight_id, include_unavailable=True)
         if current is None:
             return None
+        if current.get("body_unavailable") is True:
+            revision = current.get("rev")
+            return revision if type(revision) is int and revision >= 1 else None
         revision = current.get("rev", 1)
         if (current.get("id") != insight_id or type(revision) is not int or revision < 1):
             raise Denied("Invalid current work-item origin insight")

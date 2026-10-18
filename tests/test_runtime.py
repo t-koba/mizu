@@ -790,7 +790,7 @@ class PromptProjectionTests(Fixture):
         worker = self.context("worker")
         for prompt in (prompt_for(worker), prompt_delta_for(worker, [])):
             decoded = json.loads(prompt)
-            self.assertEqual(list(decoded)[:2], ["unit", "run"])
+            self.assertEqual(list(decoded)[0], "unit")
             self.assertEqual(decoded["unit"], UNIT_BEGINS_STATEMENT)
             self.assertEqual(decoded["run"], {"id": worker.run_dir.name})
         worker_dir = worker.run_dir
@@ -1418,26 +1418,25 @@ class WrapUpTests(Fixture):
 
 class PromptOrderTests(Fixture):
     def test_prompt_key_order_is_fixed(self):
-        # Stable key order keeps provider working caches warm: pins
-        # first, capability-gated sections in one place, clock last.
+        # Stable key order keeps provider working caches warm: stable content
+        # first, volatile run identity and clock last.
         # Any reordering must update this test deliberately.
         import json
         from mizu.runtime import prompt_for, prompt_delta_for
         ctx = self.context("worker")
         self.assertEqual(list(json.loads(prompt_for(ctx)).keys()),
-                         ["unit", "run", "goal", "published_snapshot", "recent_snapshots",
+                         ["unit", "goal", "published_snapshot", "recent_snapshots",
                           "workspace", "workspace_mode", "pending_insights",
                           "open_insights", "open_work_items",
                           "decision_events", "decision_task", "wait_events", "obligations",
                           "acceptance_commands", "research_state",
                           "ci_branch", "ci_failures", "ci_failures_may_be_truncated",
-                          "previous_report", "now",
-                          "timezone"])
+                          "previous_report", "run", "now", "timezone"])
         self.assertEqual(
             list(json.loads(prompt_delta_for(ctx, [])).keys()),
-            ["unit", "run", "goal_digest", "published_snapshot", "snapshot_delta",
+            ["unit", "goal_digest", "published_snapshot", "snapshot_delta",
              "pending_insights", "open_insights", "open_work_items", "decision_events", "decision_task", "wait_events", "obligations",
              "research_state", "workspace", "workspace_mode",
              "acceptance_commands", "ci_branch", "ci_failures",
              "ci_failures_may_be_truncated", "previous_report",
-             "now", "timezone"])
+             "run", "now", "timezone"])

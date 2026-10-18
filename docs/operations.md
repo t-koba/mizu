@@ -196,7 +196,7 @@ mizu prune demo                                # 削除対象のプレビュー�
 mizu prune demo --apply --keep-artifacts 30   # 最新30件を残して古い成果物・再現可能入力を削除
 ```
 
-`--keep-artifacts N` は最新の成果物を含め N 件を保持します。`[web] cache_seconds` を過ぎた共有 web-cache（`data_dir/web-cache/*.json`）の期限切れエントリも候補となり、次回 fetch で再取得されるため削除は安全に再試行できます。`validation_retention_days`（デフォルト31日、0で無効）を過ぎた smoke 検証証跡（`data_dir/validation/smoke-*.json` と `data_dir/validation/smoke-*.project/`）も候補となり、プローブポリシーファイルは対象外です。セッション（`sessions/`）は監査証跡として保持され、削除対象になりません（`mizu storage` で件数・バイト数を報告）。削除ログは `maintenance/prune-*.json` に記録され、バックアップ対象となります。
+`--keep-artifacts N` は最新の成果物を含め N 件を保持します。`[web] cache_seconds` を過ぎた共有 web-cache（`data_dir/web-cache/*.json`）の期限切れエントリも候補となり、次回 fetch で再取得されるため削除は安全に再試行できます。セッション（`sessions/`）は監査証跡として保持され、削除対象になりません（`mizu storage` で件数・バイト数を報告）。削除ログは `maintenance/prune-*.json` に記録され、バックアップ対象となります。
 
 ```sh
 mizu storage demo                             # スナップショット/オブジェクトの参照別集計（読み取り専用プレビュー、削除なし）
@@ -246,7 +246,8 @@ return the same JSON envelope:
   retries do not invalidate it. Pages hold the insight lock during projection;
   live work depends on inbox size, never archive size.
 - Archive pages enumerate every immutable archived `(id, rev)` row, including
-  older archived revisions of a subsequently revised insight. Items are bounded
+  older archived revisions of a subsequently revised insight, plus explicit
+  identity-only legacy tombstones (described below). Body items are bounded
   summaries with the same shape as `insight list` (id, rev, source, title,
   timestamps, `decision`, evidence count/timestamp); they carry no `body` or
   full evidence text. Use `insight read` for the exact full body. `decision`
@@ -278,10 +279,56 @@ return the same JSON envelope:
   page failures do not unlink inbox records. The database remains a single-file
   DELETE-journal archive at quiescence, covered by normal backup/restore.
 
-The archive is **permanent in this phase**: neither cursor expiry nor
-`retention_days` deletes archived bodies. There is no archive-expiry policy yet.
-Closed bodies deleted by retention before archive storage was introduced cannot
-be reconstructed; pagination cannot recover those missing records.
+The archive retention policy is **permanent**, for both bodies and tombstones.
+`retention_days` governs decided insight live-inbox residence, and cursor TTL
+only governs continuation validity. Neither deletes archive rows; there is no
+archive expiry/deletion setting or API.
+
+Closed bodies deleted by old retention before archive storage was introduced
+cannot be reconstructed. On the first archive page, a **one-time identity
+migration** runs under `insights.lock`, before capturing the page high-water:
+
+- It streams `insight-ids/` once. Each filename must be a valid insight ID plus
+  `.json`; each identity must be a regular, non-hardlinked, non-symlink file of
+  at most 4,096 bytes. Pinned reads reject unsafe path components. JSON must be
+  an object without duplicate keys or non-finite values, with matching `id`, a
+  SHA-256 `sha256`, a timezone-aware `created_at`, and (if present) a positive
+  integer `rev` within SQLite's signed 64-bit range. Unknown fields are not
+  projected into tombstone summaries.
+- An identity produces a tombstone only when its ID has neither a live inbox
+  body nor any archived row. Existing live candidates are read safely (at most
+  1 MiB, allowing full attached evidence) and checked as bodies; existing
+  archived candidates are also checked. Unsafe directories/files, malformed
+  identities/bodies, unexpected identity-directory entries, disappearing
+  candidates and enumeration/I/O failures fail the page explicitly, rather
+  than silently dropping a candidate. Missing identity/inbox directories are
+  empty sets, as for a project that has never received an insight.
+- All tombstones and the completion marker commit in one FULL-synchronous
+  SQLite transaction. Cancellation, a killed writer or a failure before commit
+  rolls back the import. Repair malformed/unsafe local state, then retry the
+  page without a cursor. A failure after commit is also safe to retry: existing
+  rows are never replaced, and the durable marker prevents rescanning. The
+  schema migration above can already have completed independently; its rows
+  remain intact even if identity migration fails.
+- Tombstones append to the existing sequence; their import order is not
+  chronological. They participate in the same indexed keyset/high-water
+  pagination as bodies. After migration, pages do not scan identity files.
+  Pre-migration cursors retain their old high-water and exclude imported rows;
+  start a fresh traversal to include them. The database, tombstones and marker
+  travel together through normal backup/restore.
+
+A tombstone summary contains `id`, `body_unavailable: true`, validated
+`created_at`, and `rev` **only if explicitly recorded in the identity** (no
+assumed revision 1). It has no invented title, body, source, origin, evidence,
+decision, snapshot or work-item reference. Existing decisions/revision files
+are not used to reconstruct these fields. Exact ID/prefix reads keep reporting
+`Denied: Insight body unavailable` (not `not found`), even if the original
+identity file is later absent; ambiguous prefixes still fail. A tombstone does
+not authorize submit/revise/evidence/decision/withdraw mutations. Existing
+work-item origin projections use only a revision explicitly present in the
+identity; otherwise the current origin revision is unknown and the item is
+reported stale, not treated as a missing-work-item error. Default `insight list`,
+live pages and routine model context remain live-only.
 
 ## バックアップと復元
 
