@@ -26,6 +26,8 @@ def _identity(item):
 
 def _origin_source(store, origin):
     """Resolve submitter, never the transition actor (including legacy holes)."""
+    if origin is None or "work_item_id" in origin:
+        return None
     insight_id = origin["insight_id"]
     record = store._optional_record(f"inbox/{insight_id}.json")
     if record is None:
@@ -97,7 +99,7 @@ def pending(store, role, actions, *, sources="own", limit=10):
     acknowledged_heap = []
     acknowledged = eligible = unseeded = unknown = 0
     if actions:
-        for event_id, event in store._iter_decision_events(recover=False):
+        for event_id, event in store._iter_item_events(recover=False):
             kind, seed = store._seed_for_event(event_id, event, readonly=True)
             if kind == "unseeded":
                 unseeded += 1

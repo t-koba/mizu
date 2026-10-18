@@ -50,12 +50,39 @@ whether the current pointer already matches or needs repair after an uncertain
 write. For recovery, omitted intent reuses the stored resolution despite later
 policy changes; conflicting action/reason/revisit or explicit intent is refused.
 Revise the insight meaningfully to reopen; an earlier defer alone may still be
-superseded. New decisions use a bounded keyed lookup; only a legacy defer
-pointer without `decision_key` may require an old random-ID history scan (see
-architecture.md). Revision CAS, append-only history, and source binding are
+superseded. New decisions use a bounded keyed content lookup; only a legacy
+defer pointer without `decision_key` may require scanning old random-ID event
+contents. The shared safety scanner checks decision-history directory metadata
+and atomic-write temporaries before all new event writes (see architecture.md).
+Seed retries also validate storage and the transition chain before success or
+pointer repair. Revision CAS, append-only history, and source binding are
 unchanged. Read current state after uncertainty; refusals write no event or
 seed. Existing decision/seed byte bounds and lock/cancellation behavior apply;
-no new grant, scheduling, or task-creation interface is added.
+the decision-to-work policy adds no grant or scheduling. Independent task
+creation uses the separate grant below.
+
+## Direct work-item creation grant
+
+`work_items_create` is a separate mutating capability, denied without an explicit
+role grant. The example grants it only to `worker`; it is explicitly forbidden
+for consultation and delegation children, even when their configured role has
+it. `work_items_read` does not imply create. The runtime binds actor to the role;
+there is no model-supplied actor or implicit assignment.
+
+Supply a stable `idempotency_key` (1–128 characters) and `title` (1–200), optionally
+`origin` with exactly one `insight_id` or `work_item_id` plus a positive integer
+`rev`. The origin's current revision must match at first commit. Keys are scoped
+to the runtime role: retain the exact key/title/origin after an uncertain response.
+Exact retries return the original creation record with `created: false`, even
+after valid transitions or origin revision changes; they validate stored history
+without rechecking the live origin. Changed requests with the same key are denied,
+and retries do not count as tool progress. First commits share decision seeding's
+preflight and refuse nonempty or unsafe item slots, including orphan temporaries;
+no existing record is overwritten.
+Null and parent origins never acquire an inferred submitter for terminal routing.
+See [the runtime and persistence contract](architecture.md) for validation,
+projection, history, event delivery, cancellation and backup behavior. This grant
+does not retire or change `Tasks:`/`Blocking:` policy/state semantics.
 
 ## Root keys
 
@@ -126,7 +153,7 @@ required). Operator tooling that concatenates configs
 | `work_items_prompt` | Maximum open work-item rows included in each full and delta prompt (1–100; default 20). Overflow and legacy-unseeded coverage are reported explicitly; the tool page limit is separately available through `work_items_read` |
 | `idle_seconds`, `cooldown_seconds` | Daemon sleep between poll iterations and pause between work units |
 | `default_wait_seconds`, `maximum_wait_seconds` | Default and maximum model-selected wait times (1–86,400s) |
-| `progress_signals` | Signals qualifying a writable `continue`/`bounded` unit as progress. Default `tool`, `code`, `decision`, `insight`, `input`; any selected true signal qualifies. `state` is supported but opt-in because a free-text rewording alone is not substantive progress. Names must be unique supported signals; `[]` means no unit can qualify. `tool` is a successfully completed non-finish Mizu operation except pure reads of existing state (`files`, `read`, `diff`, `insights`, `research_read`, `vcs_read`, `work_items_read`, `work_items_legacy_read`, retained-evidence reads, exact `work_items_reconcile` replays (`created: false`), and replay of an existing fetch/probe/search receipt), or a new native engine-tool authorization (not an idempotent replay), `decision` a successful `decide`, `insight` a successful submit/revise/withdraw/evidence attachment, `code` a changed final code digest, `state` an explicitly selected changed finish state (including paraphrases), and `input` a changed inbox/operator wake generation, consumed decision/terminal-work-item/wait events, CI failures due for this snapshot, or an expired prior wait. Persistent obligations and non-due cached red CI are not repeated input progress; a bounded identity digest distinguishes newly offered obligations from unchanged pending visibility. |
+| `progress_signals` | Signals qualifying a writable `continue`/`bounded` unit as progress. Default `tool`, `code`, `decision`, `insight`, `input`; any selected true signal qualifies. `state` is supported but opt-in because a free-text rewording alone is not substantive progress. Names must be unique supported signals; `[]` means no unit can qualify. `tool` is a successfully completed non-finish Mizu operation except pure reads of existing state (`files`, `read`, `diff`, `insights`, `research_read`, `vcs_read`, `work_items_read`, `work_items_legacy_read`, retained-evidence reads, exact `work_items_create`/`work_items_reconcile` replays (`created: false`), and replay of an existing fetch/probe/search receipt), or a new native engine-tool authorization (not an idempotent replay), `decision` a successful `decide`, `insight` a successful submit/revise/withdraw/evidence attachment, `code` a changed final code digest, `state` an explicitly selected changed finish state (including paraphrases), and `input` a changed inbox/operator wake generation, consumed decision/terminal-work-item/wait events, CI failures due for this snapshot, or an expired prior wait. Persistent obligations and non-due cached red CI are not repeated input progress; a bounded identity digest distinguishes newly offered obligations from unchanged pending visibility. |
 | `no_progress_continuations` | Number of consecutive no-progress `continue`/`bounded` snapshots the same role may self-admit before parking (0–100; default 0 parks after its first no-progress finish). Selected progress, role change, or signal-policy change resets the streak. |
 | `no_progress_recovery_after` | Consecutive no-progress `continue`/`bounded` units before a persistent session is rotated to a fresh conversation on its next already-admitted dispatch (1–100; default 2). It never schedules a run; `mizu status` separates a due no-progress threshold (`pending_work: true`) from actionable rotation (`due` only for persistent profiles, `not_applicable` for ephemeral ones, and `conditional` for mixed selector choices). |
 | `no_progress_backoff_seconds` | Timer wake delay for a parked no-progress `continue`/`bounded` snapshot (0–86,400; default 0 means no timer wake). Explicit goal/operator/input/CI/wait wakes remain available. |

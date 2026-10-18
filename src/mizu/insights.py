@@ -50,6 +50,7 @@ from pathlib import Path
 
 from . import insight_archive
 from .errors import Denied, LimitExceeded
+from .work_item_seed import make_seed, validate_seed
 from .fs import PREVIEW_BYTES, canonical, digest, identifier, lock, now, read_json, safe_read, write_json, mkdir, DIGEST
 
 
@@ -100,15 +101,8 @@ def _validate_keyed_substantive_event(event, insight_id: str, rev: int, key: str
         raise Denied("Malformed keyed decision event")
     if action in ("accept", "modify") and event["work_item_intent"] == "create":
         seed = event.get("work_item")
-        seed_fields = {"id", "title", "origin", "status", "rev", "holder", "created_at", "updated_at"}
-        if (not isinstance(seed, dict) or set(seed) != seed_fields
-                or seed.get("id") != f"wi_{key}"
-                or seed.get("title") != title or not isinstance(seed.get("title"), str)
-                or not 1 <= len(seed["title"]) <= 200
-                or seed.get("origin") != {"insight_id": insight_id, "rev": rev}
-                or seed.get("status") != "open" or type(seed.get("rev")) is not int or seed["rev"] != 1
-                or seed.get("holder") is not None
-                or seed.get("created_at") != stamp or seed.get("updated_at") != stamp):
+        validate_seed(seed)
+        if seed != make_seed(f"wi_{key}", title, {"insight_id": insight_id, "rev": rev}, stamp):
             raise Denied("Malformed keyed work-item seed")
     return event
 
@@ -224,6 +218,16 @@ class Insights:
         self.work_item_intent_by_source = dict(work_item_intent_by_source or {})
         #: Snapshot store for wait baselines; wired by Project, else None.
         self.snapshots = None
+        #: Shared seed preflight/storage service, wired by Project.
+        self.work_items = None
+
+    def _work_item_store(self):
+        # Standalone Insights readers need no ledger; mutation gets the same
+        # service without a module-level import cycle or a second lock.
+        if self.work_items is None:
+            from .work_items import WorkItems
+            self.work_items = WorkItems(self.root, self.snapshots, self)
+        return self.work_items
 
     def submit(self, *, source: str, title: str, body: str, base_snapshot: str | None,
                run: str | None = None, insight_id: str | None = None,
@@ -710,6 +714,8 @@ replacement insight without implying rejected substance.
             raise Denied("Decision revision must be a positive revision number")
         registered = self._normalize_wait(wait, action)
         with lock(self.root / "locks" / "insights.lock"):
+            work_items = self._work_item_store()
+            work_items.prepare_decision_write(need_wait=False)
             current = self.read(insight_id)
             rev = _rev_of(current)
             if expected_rev is not None and expected_rev != rev:
@@ -733,9 +739,12 @@ replacement insight without implying rejected substance.
                 if (prior is not None and prior.get("action") in ("accept", "modify", "reject")
                         and prior != existing):
                     raise Denied("Conflicting substantive decision at this revision")
+                if "work_item" in existing:
+                    work_items.validate_seed_replay(existing["work_item"], seed_event=existing)
                 # History committed but its current pointer may not have. Return the
                 # original event (including its run) and repair only a stale pointer.
                 if current_decision != existing:
+                    work_items.prepare_decision_write(need_wait=False)
                     with lock(self.root / "locks" / "decisions.lock"):
                         write_json(raw, existing)
                 return existing
@@ -764,18 +773,12 @@ replacement insight without implying rejected substance.
             if action in ("accept", "modify"):
                 record["work_item_intent"] = work_item_intent
             if work_item_intent == "create":
-                record["work_item"] = {
-                    "id": f"wi_{event_id}",
-                    "title": current["title"],
-                    "origin": {"insight_id": insight_id, "rev": rev},
-                    "status": "open",
-                    "rev": 1,
-                    "holder": None,
-                    "created_at": stamped,
-                    "updated_at": stamped,
-                }
+                record["work_item"] = work_items.create_seed(
+                    f"wi_{event_id}", current["title"], {"insight_id": insight_id, "rev": rev},
+                    stamped, decision_key=key)
             if action in ("accept", "modify") and len(canonical(record)) > PREVIEW_BYTES:
                 raise LimitExceeded("Decision event with work-item intent exceeds byte bound")
+            work_items.prepare_decision_write(need_wait=(registered is not None))
             with lock(self.root / "locks" / "decisions.lock"):
                 write_json(self.root / "decision-history" / f"{event_id}.json", record, exclusive=True)
                 write_json(self.root / "decisions" / f"{insight_id}.json", record)
@@ -1180,6 +1183,7 @@ replacement insight without implying rejected substance.
             record = {"id": insight_id, "action": "withdraw", "actor": source,
                       "reason": reason, "revisit": "", "run": run,
                       "created_at": now(), "rev": rev}
+            self._work_item_store().prepare_decision_write(need_wait=False)
             with lock(self.root / "locks" / "decisions.lock"):
                 write_json(self.root / "decision-history" / f"{uuid.uuid4().hex}.json", record, exclusive=True)
                 write_json(self.root / "decisions" / f"{insight_id}.json", record)

@@ -1,7 +1,7 @@
 """Append-audited work-item store with bounded runtime reads; no scheduling.
 
-Seeds are immutable accept/modify decision events or hash-bound legacy sidecars. Reads and transitions share
-insights.lock; each successful CAS appends one full state, never a pointer.
+Seeds are immutable direct creation records, accept/modify decision events or
+hash-bound legacy sidecars. Reads and transitions share insights.lock; each successful CAS appends one full state, never a pointer.
 Read-only views (`page_open_readonly`, `page_closed_readonly`) never acquire
 insights.lock and never recover or delete temporary files; they validate the
 same committed records and fail closed on unsafe or malformed state.
@@ -26,11 +26,10 @@ from .fs import (DIGEST, PREVIEW_BYTES, canonical, identifier, lock, now, safe_r
                  sync_dir, text_preview, write_json)
 from .insights import _decision_key
 from .platform import IS_WINDOWS
+from .work_item_seed import ITEM_ID, SEED_FIELDS, make_seed, validate_origin, validate_seed
 
 MAX_REVISIONS = 256  # Includes the immutable seed at revision 1.
-ITEM_ID = re.compile(r"wi_([0-9a-f]{32})\Z")
 STATUSES = ("open", "doing", "blocked", "done", "dropped")
-SEED_FIELDS = {"id", "title", "origin", "status", "rev", "holder", "created_at", "updated_at"}
 EVENT_FIELDS = SEED_FIELDS | {"actor", "transition", "reason", "wait", "snapshot_id", "verification"}
 MAX_PROJECTION_BYTES = PREVIEW_BYTES + 256
 MAX_OPEN_PAGE_ROWS = 100
@@ -142,6 +141,185 @@ class WorkItems:
         return value
 
     @staticmethod
+    def _create_id(actor: str, key: str) -> str:
+        identifier(actor)
+        if not isinstance(key, str) or not 1 <= len(key) <= 128:
+            raise Denied("Work-item idempotency key must be 1-128 characters")
+        return "wi_" + hashlib.sha256(canonical(["direct-work-item", actor, key])).hexdigest()[:32]
+
+    def _direct_record(self, item_id: str) -> dict | None:
+        directory = self.root / "work-items" / item_id
+        if not _directory(directory.parent) or not _directory(directory):
+            return None
+        try:
+            (directory / "create.json").lstat()
+        except FileNotFoundError:
+            return None
+        try:
+            (directory / "legacy.json").lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            raise Denied("Direct work item carries legacy reconciliation")
+        record = self._read(f"work-items/{item_id}/create.json")
+        if set(record) != {"kind", "actor", "idempotency_key", "work_item"} or record["kind"] != "direct":
+            raise Denied("Invalid direct work-item creation record")
+        seed = validate_seed(record["work_item"])
+        if (self._create_id(record["actor"], record["idempotency_key"]) != item_id
+                or seed["id"] != item_id
+                or seed["origin"] is not None and seed["origin"].get("work_item_id") == item_id):
+            raise Denied("Invalid direct work-item binding")
+        # Direct seeds and immutable decision events must never share an ID.
+        path = self.root / "decision-history" / f"{item_id[3:]}.json"
+        if _directory(path.parent):
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                raise Denied("Direct work-item ID collides with a decision event")
+        return record
+
+    def create_seed(self, item_id: str, title: str, origin, stamp: str, *,
+                    actor=None, idempotency_key=None, decision_key=None) -> dict:
+        """Preflight a new immutable seed while the caller holds insights.lock.
+
+        Validate the source's ID binding, an empty safe storage slot, and the
+        exact live origin revision. Recognized regular orphan temporaries are
+        recovered (removed without promotion) before the emptiness check; any
+        numeric revision history, direct/legacy record, unknown entry, or
+        unsafe/ambiguous temporary still fails closed. This does not commit:
+        direct callers commit create.json; decisions embed the seed in their
+        atomic event. Existing commits must use validate_seed_replay instead.
+        """
+        seed = make_seed(item_id, title, origin, stamp)
+        if decision_key is not None:
+            if (actor is not None or idempotency_key is not None
+                    or origin is None or "insight_id" not in origin
+                    or decision_key != _decision_key(origin["insight_id"], origin["rev"])
+                    or item_id != f"wi_{decision_key}"):
+                raise Denied("Invalid decision work-item binding")
+        elif item_id != self._create_id(actor, idempotency_key):
+            raise Denied("Invalid direct work-item binding")
+        directory = self.root / "work-items" / item_id
+        if _directory(directory.parent) and _directory(directory):
+            revisions = self._history_revisions(item_id, recover=True)
+            if revisions:
+                raise Denied("Work-item creation has pre-existing history")
+            for name in ("create.json", "legacy.json"):
+                try:
+                    (directory / name).lstat()
+                except FileNotFoundError:
+                    continue
+                else:
+                    raise Denied("Work-item creation has pre-existing history")
+            # _history_revisions already rejected unknown names and
+            # unsafe/ambiguous temporaries; a recovered orphan leaves an empty
+            # slot that may proceed to commit.
+        decision = self.root / "decision-history" / f"{item_id[3:]}.json"
+        if _directory(decision.parent):
+            try:
+                decision.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                raise Denied("Work-item ID collides with a decision event")
+        if origin is not None:
+            if "insight_id" in origin:
+                revision = self._origin_revision(origin["insight_id"])
+            else:
+                parent_id = origin["work_item_id"]
+                if parent_id == item_id:
+                    raise Denied("Work item cannot be its own parent")
+                try:
+                    revision = self._get(parent_id, history_revisions=
+                                         self._recover_temporary_writes(parent_id))["rev"]
+                except FileNotFoundError:
+                    raise Denied("Parent work item is missing") from None
+            if revision != origin["rev"]:
+                raise Denied("Work-item origin revision is missing or changed")
+        return seed
+
+    def validate_seed_replay(self, seed: dict, *, seed_event: dict) -> None:
+        """Validate committed seed/storage/chain under insights.lock, not live origin.
+
+        Recognized atomic-write leftovers may be recovered as on normal reads.
+        Valid transitions never alter the immutable creation result.
+        """
+        validate_seed(seed)
+        item_id = seed["id"]
+        revisions = self._recover_temporary_writes(item_id)
+        # An embedded decision seed must not hide a colliding direct record.
+        self._direct_record(item_id)
+        for index, record in enumerate(self._iter_chain(
+                item_id, seed_event=seed_event, history_revisions=revisions)):
+            if index == 0 and record != seed:
+                raise Denied("Conflicting work-item seed replay")
+
+    def create(self, *, idempotency_key, title, actor, origin=None) -> dict:
+        """Commit one immutable seed; exact retries return the original record.
+
+        Keys are actor-scoped, 1-128 characters. Reference revisions must be
+        current at first commit; retries compare the immutable request before
+        consulting live references. Caller holds no lock; runtime binds actor.
+        """
+        item_id = self._create_id(actor, idempotency_key)
+        validate_origin(origin)
+        with lock(self.root / "locks" / "insights.lock"):
+            directory = self.root / "work-items" / item_id
+            existing = None
+            if _directory(directory.parent) and _directory(directory):
+                try:
+                    (directory / "create.json").lstat()
+                except FileNotFoundError:
+                    pass
+                else:
+                    # Recover post-link aliases only for an already committed seed.
+                    self._recover_temporary_writes(item_id)
+                    existing = self._direct_record(item_id)
+            if existing is not None:
+                seed = make_seed(item_id, title, origin, existing["work_item"]["created_at"])
+                record = {"kind": "direct", "actor": actor, "idempotency_key": idempotency_key,
+                          "work_item": seed}
+                if existing != record:
+                    raise Denied("Conflicting work-item creation retry")
+                self.validate_seed_replay(seed, seed_event=existing)
+                return {"record": existing, "created": False}
+            seed = self.create_seed(item_id, title, origin, now(), actor=actor,
+                                    idempotency_key=idempotency_key)
+            record = {"kind": "direct", "actor": actor, "idempotency_key": idempotency_key,
+                      "work_item": seed}
+            directory.mkdir(parents=True, exist_ok=True)
+            write_json(directory / "create.json", record, exclusive=True)
+            return {"record": record, "created": True}
+
+    def _iter_item_events(self, *, recover: bool):
+        yield from self._iter_decision_events(recover=recover)
+        directory = self.root / "work-items"
+        if not _directory(directory):
+            return
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if ITEM_ID.fullmatch(entry.name) is None or not _directory(directory / entry.name):
+                    raise Denied("Invalid work-item directory entry")
+                try:
+                    (directory / entry.name / "create.json").lstat()
+                except FileNotFoundError:
+                    # A failed first create can leave only a temporary or empty
+                    # directory. Validate/recover it, but never invent a seed.
+                    decision = self.root / "decision-history" / f"{entry.name[3:]}.json"
+                    try:
+                        decision.lstat()
+                    except FileNotFoundError:
+                        revisions = self._history_revisions(entry.name, recover=recover)
+                        if revisions or (directory / entry.name / "legacy.json").exists():
+                            raise Denied("Work-item history has no immutable seed")
+                    continue
+                self._history_revisions(entry.name, recover=recover)
+                record = self._direct_record(entry.name)
+                yield entry.name[3:], record
+
+    @staticmethod
     def _legacy_source(event: dict) -> dict:
         """Only valid origin fields are exposed; incomplete legacy events may drop."""
         source = {"insight_id": None, "rev": None, "created_at": None}
@@ -183,10 +361,8 @@ class WorkItems:
         if (any(value is None for value in source.values())
                 or not isinstance(title, str) or not 1 <= len(title) <= 200):
             raise Denied("Opening legacy work requires valid origin and a 1-200 character title")
-        return {"id": f"wi_{event_id}", "title": title,
-                "origin": {"insight_id": source["insight_id"], "rev": source["rev"]},
-                "status": "open", "rev": 1, "holder": None,
-                "created_at": source["created_at"], "updated_at": source["created_at"]}
+        return make_seed(f"wi_{event_id}", title,
+                         {"insight_id": source["insight_id"], "rev": source["rev"]}, source["created_at"])
 
     def _legacy_resolution(self, event_id: str, event: dict, *, recover=False,
                            history_revisions=_HISTORY_UNSET) -> dict | None:
@@ -421,6 +597,14 @@ class WorkItems:
         match = ITEM_ID.fullmatch(item_id) if isinstance(item_id, str) else None
         if match is None:
             raise Denied("Invalid work-item ID")
+        if event is not None and not isinstance(event, dict):
+            raise Denied("Invalid work-item seed event")
+        direct = (self._direct_record(item_id)
+                  if event is None or event.get("kind") == "direct" else None)
+        if direct is not None:
+            if event is not None and event != direct:
+                raise Denied("Conflicting work-item seed sources")
+            return direct["work_item"]
         if event is None:
             event = self._read(f"decision-history/{match[1]}.json")
         if not isinstance(event, dict):
@@ -439,13 +623,9 @@ class WorkItems:
                 or not isinstance(seed, dict) or set(seed) != SEED_FIELDS):
             raise Denied("Invalid work-item seed event")
         identifier(event.get("id"))
-        if (seed["id"] != item_id
-                or not isinstance(seed["title"], str) or not 1 <= len(seed["title"]) <= 200
-                or seed["origin"] != {"insight_id": event["id"], "rev": event["rev"]}
-                or not isinstance(seed["origin"], dict) or type(seed["origin"].get("rev")) is not int
-                or type(seed["rev"]) is not int or seed["rev"] != 1
-                or seed["status"] != "open" or seed["holder"] is not None
-                or seed["created_at"] != event["created_at"] or seed["updated_at"] != event["created_at"]):
+        validate_seed(seed)
+        if seed != make_seed(item_id, seed["title"], {"insight_id": event["id"], "rev": event["rev"]},
+                             event["created_at"]):
             raise Denied("Work-item seed does not match decision event")
         return seed
 
@@ -606,7 +786,7 @@ class WorkItems:
                 if _TEMP_NAME.fullmatch(entry.name):
                     temporary_entries.append(entry)
                     continue
-                if entry.name == "legacy.json":
+                if entry.name in ("legacy.json", "create.json"):
                     info = _entry_stat(entry)
                     if (not stat.S_ISREG(info.st_mode)
                             or getattr(info, "st_file_attributes", 0) & 0x400):
@@ -688,13 +868,13 @@ class WorkItems:
         if set(record) != EVENT_FIELDS:
             raise Denied("Invalid work-item transition fields")
         actor = identifier(record["actor"])
+        validate_origin(record["origin"])
         status = record["status"]
         if (status not in STATUSES or previous["status"] in ("done", "dropped")
                 or status == previous["status"]):
             raise Denied("Invalid work-item status transition")
         holder = actor if status == "doing" else (previous["holder"] or actor) if status == "blocked" else None
         if (any(record[key] != previous[key] for key in ("id", "title", "origin", "created_at"))
-                or not isinstance(record["origin"], dict) or type(record["origin"].get("rev")) is not int
                 or type(record["rev"]) is not int or record["rev"] != previous["rev"] + 1
                 or record["rev"] > MAX_REVISIONS or record["holder"] != holder
                 or not _timestamp(record["updated_at"])
@@ -746,7 +926,7 @@ class WorkItems:
             revisions = set()
             with os.scandir(directory) as entries:
                 for entry in entries:
-                    if entry.name == "legacy.json":
+                    if entry.name in ("legacy.json", "create.json"):
                         continue
                     if len(revisions) >= MAX_REVISIONS - 1:
                         raise Denied("Work-item history exceeds revision bound")
@@ -788,6 +968,8 @@ class WorkItems:
 
     def _origin_projection_impl(self, item: dict, *, readonly: bool, current_decision=_HISTORY_UNSET) -> dict:
         """Project origin staleness with an explicit decision-recovery mode."""
+        if item["origin"] is None or "work_item_id" in item["origin"]:
+            return {"current_origin_rev": None, "stale": False, "redecision": None}
         origin_id = item["origin"]["insight_id"]
         origin_rev = item["origin"]["rev"]
         current_rev = self._origin_revision(origin_id, readonly=readonly)
@@ -1002,6 +1184,26 @@ class WorkItems:
             sync_dir(history)
         return True
 
+    def prepare_decision_history(self) -> bool:
+        """Screen the event directory before writes, with insights.lock held."""
+        return self._recover_decision_history_temporaries(self.root / "decision-history")
+
+    def prepare_decision_write(self, *, need_wait: bool = False) -> bool:
+        """Screen every decision-transaction parent before any write, lock held.
+
+        Validates decision-history with the existing scanner/recovery, then the
+        decisions directory (always) and the waits directory when a registered
+        wait will be written. A symlinked or otherwise unsafe parent raises
+        Denied and is never followed; an absent directory is safe to create.
+        Call under insights.lock immediately before each event/pointer/wait
+        write (new events, exact-replay pointer repair, withdraw).
+        """
+        present = self._recover_decision_history_temporaries(self.root / "decision-history")
+        _directory(self.root / "decisions")
+        if need_wait:
+            _directory(self.root / "waits")
+        return present
+
     def _recover_decision_history_temporaries(self, history: Path) -> bool:
         """Remove safe atomic-write leftovers while insights.lock is held.
 
@@ -1050,6 +1252,8 @@ class WorkItems:
         shared :meth:`_legacy_resolution`, recovered when locked and read
         from the read-only scan otherwise. Malformed seeds fail closed.
         """
+        if event.get("kind") == "direct":
+            return ("seed", validate_seed(event["work_item"]))
         action = event["action"]
         has_seed = "work_item" in event
         if action not in ("accept", "modify"):
@@ -1136,7 +1340,7 @@ class WorkItems:
         cursor_key = _open_cursor_key(cursor)
         if type(limit) is not int or not 1 <= limit <= MAX_OPEN_PAGE_ROWS:
             raise Denied("Work-item page limit must be an integer in [1, 100]")
-        events = self._iter_decision_events(recover=not readonly)
+        events = self._iter_item_events(recover=not readonly)
         selected = []
         total = 0
         eligible = 0
@@ -1179,7 +1383,7 @@ class WorkItems:
         """Collect the newest seeded terminal items with an explicit mode."""
         if type(limit) is not int or not 0 <= limit <= MAX_CLOSED_PAGE_ROWS:
             raise Denied("Closed work-item page limit must be an integer in [0, 100]")
-        events = self._iter_decision_events(recover=not readonly)
+        events = self._iter_item_events(recover=not readonly)
         selected = []
         total = 0
         for event_id, event in events:

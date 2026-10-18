@@ -241,7 +241,7 @@ def is_deferred(exc: BaseException, context=None) -> bool:
 CONSULT_FORBIDDEN = frozenset({"exec", "experiment", "verify", "decide",
                                "submit_insight", "revise_insight", "withdraw_insight", "withdraw_decided", "attach_evidence", "consult", "report", "sync",
                                "vcs_publish", "vcs_retire", "vcs_dispose",
-                               "research", "materialize", "work_items_transition", "work_items_reconcile"})
+                               "research", "materialize", "work_items_create", "work_items_transition", "work_items_reconcile"})
 
 
 #: Capabilities a delegation child must never hold. The child works in the
@@ -254,7 +254,7 @@ CONSULT_FORBIDDEN = frozenset({"exec", "experiment", "verify", "decide",
 DELEGATE_FORBIDDEN = frozenset({"decide", "submit_insight", "revise_insight",
                                 "withdraw_insight", "withdraw_decided", "attach_evidence", "delegate",
                                 "vcs_publish", "vcs_retire", "vcs_dispose",
-                                "work_items_transition", "work_items_reconcile"})
+                                "work_items_create", "work_items_transition", "work_items_reconcile"})
 
 
 def check_delegate_role(role_name: str, role) -> None:
@@ -800,7 +800,7 @@ class Context:
                                   count="tool_call:" + operation)
             try:
                 result = self.dispatch(operation, arguments)
-                idempotent_replay = (operation == "work_items_reconcile"
+                idempotent_replay = (operation in ("work_items_create", "work_items_reconcile")
                                      and isinstance(result, dict)
                                      and result.get("created") is False)
                 if (operation != "finish" and not _is_observational_operation(operation, arguments)
@@ -1114,6 +1114,11 @@ class Context:
             args["event_id"], expected_action=args["expected_action"],
             expected_rev=args.get("expected_rev"), outcome=args["outcome"],
             reason=args["reason"], title=args.get("title"), actor=self.role.name)
+
+    def _op_work_items_create(self, args: dict) -> dict:
+        return self.project.work_items.create(
+            idempotency_key=args["idempotency_key"], title=args["title"],
+            origin=args.get("origin"), actor=self.role.name)
 
     def _op_work_items_transition(self, args: dict) -> dict:
         return self.project.work_items.transition(
@@ -1590,6 +1595,7 @@ class Context:
         "work_items_read": _op_work_items_read,
         "work_items_legacy_read": _op_work_items_legacy_read,
         "work_items_reconcile": _op_work_items_reconcile,
+        "work_items_create": _op_work_items_create,
         "work_items_transition": _op_work_items_transition,
         "decide": _op_decide, "submit_insight": _op_submit_insight,
         "revise_insight": _op_revise_insight, "withdraw_insight": _op_withdraw_insight,

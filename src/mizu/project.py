@@ -82,6 +82,7 @@ class Project:
                                  work_item_intent_by_source=config.insight_decisions["work_item_intent_by_source"])
         self.insights.snapshots = self.snapshots
         self.work_items = WorkItems(self.root, self.snapshots, self.insights)
+        self.insights.work_items = self.work_items
         from .role_state import RoleStateStore
         self.role_state = RoleStateStore(self.root / "role-state",
                                          max_bytes=config.limits.role_state_bytes)

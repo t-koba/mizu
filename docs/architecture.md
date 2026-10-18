@@ -253,7 +253,12 @@ New decisions carry a `decision_key`: the first 32 lowercase hex characters of
 SHA-256 over canonical JSON `["insight-substantive-decision", insight_id, rev]`.
 Accept/modify/reject use that key as their immutable event filename; defer keeps
 a random 32-hex event filename. First decisions and keyed defers use one keyed
-lookup, not a history scan. Key collisions (including old random-ID events at
+content lookup, not a scan of historical event contents. Before any event write
+(including reject, defer and withdraw), the shared preflight validates/recovers
+recognized atomic-write temporaries in decision-history and refuses a symlinked
+or otherwise unsafe decision-history, decisions (always), or waits (when a
+registered wait will be written) parent without following it; it enumerates
+metadata, not historical event contents. Key collisions (including old random-ID events at
 that filename) fail closed. Work-item history readers validate every present
 key against the event's insight/revision and require the keyed filename for
 accept/modify/reject; legacy records without a key and without an explicit
@@ -262,8 +267,10 @@ committed but its current pointer write
 failed, an exact retry (action, reason, revisit, and an explicit intent if
 supplied) restores the pointer and returns the original record/seed; omitted
 intent reuses the recorded value and a retry run does not replace original run
-provenance. Conflicts are refused; a completed current substantive decision
-still requires revision to reopen.
+provenance. Seed replays first validate the item storage and complete transition
+chain; corrupt history cannot succeed or repair a pointer. Valid transitions
+leave the returned creation event unchanged. Conflicts are refused; a completed
+current substantive decision still requires revision to reopen.
 Only a revision-current legacy defer lacking `decision_key`, with no keyed
 substantive event, requires scanning old random-ID history to detect a hidden
 substantive decision. Old events are never rewritten.
@@ -276,12 +283,24 @@ snapshot_id=None)`. `get()` remains internal-only; the runtime exposes the two
 page modes through the existing `work_items_read` grant and exposes transition
 only through its separately granted operation described below. `get()` and
 the chain replay used by `projection()`, `explain()`, and transition resolve an
-item seed directly from `decision-history/<event-hex>.json`, validating the
-accept/modify event and nested seed without scanning the inbox or wider decision
-history. Origin staleness separately checks current origin records and any
-legacy decision binding; `page_open()` enumerates decision history to build its
-inventory. The event's title is the immutable title authority, not the
+item seed directly from `decision-history/<event-hex>.json` or
+`work-items/<item-id>/create.json`, validating the immutable seed without scanning
+the inbox or wider decision history. Origin staleness separately checks current origin records and any
+legacy decision binding; `page_open()` enumerates decision history and direct
+creation directories to build its inventory with O(limit) retained rows. The event's title is the immutable title authority, not the
 subsequently revisable insight.
+Both direct creation and decision seeding call the same lock-held
+`WorkItems.create_seed` preflight: title and typed origin validation, source/ID
+binding, safe empty item slot, and exact current origin revision. New seeds
+recover a recognized regular orphan temporary (removed without promotion) and
+then refuse any pre-existing direct record, legacy sidecar, numeric history,
+unknown entry, or unsafe/ambiguous temporary. Preflight writes no
+seed: direct creation commits `create.json`, while decision seeding commits only
+the embedded seed in its immutable decision event (never a two-file seed/event
+transaction). Committed retries use a shared storage/chain validator without
+rechecking the live origin. Project wires this service to Insights; standalone
+Insights readers do not instantiate it.
+
 Reads and mutations share `locks/insights.lock` with insight revisions and
 seed creation. A positive non-bool expected revision must match; each change
 exclusively atomically appends the full state to
@@ -293,11 +312,58 @@ CAS writes nothing and must be re-read, not blindly retried. `get()` and
 `transition()` recover under the shared lock by removing only recognized
 regular `.new-<8-char>` atomic-write leftovers; an uncommitted temporary is
 never promoted, and a post-link alias
-is removed only when it matches one committed revision or legacy sidecar inode. Unknown names and unsafe
+is removed only when it matches one committed revision, direct creation record,
+or legacy sidecar inode. Unknown names and unsafe
 links still fail closed. Completion reads revalidate the cited manifest and
 require its stored passing verification to match the copied evidence, without
 requiring the snapshot to remain in the moving publication history. Lock/I/O
 failures propagate; cancellation/process death releases the kernel lock.
+
+The separately granted `work_items_create` operation calls
+`Project.work_items.create(*, idempotency_key, title, actor, origin=None)` for
+self-directed work and splits. The runtime binds `actor` to the role, never a
+model argument. The example grants it only to `worker`; consultation and
+delegation children explicitly forbid it. It has no scheduling, assignment,
+insight-decision or publication effects. `Tasks:`/`Blocking:` policy and state
+semantics are unchanged by this capability.
+
+Required arguments are `idempotency_key` (1–128 characters) and `title` (1–200).
+Optional `origin` is exactly `{"insight_id": <id>, "rev": <positive int>}` or
+`{"work_item_id": <wi_id>, "rev": <positive int>}`. Omission stores null.
+The referenced insight (live or archived) or parent item's **current** revision
+must match at first creation under the shared lock. Missing/unsafe references,
+bool revisions, unknown fields and self-parent references are denied; local
+I/O errors propagate. This is provenance, not decision coverage: direct work
+never resolves an unseeded accept/modify decision. Insight staleness retains
+its existing semantics. Null/parent origins project `current_origin_rev: null`,
+`stale: false`, `redecision: null`; parent provenance is an immutable split
+reference, not a dependency or a staleness subscription.
+
+The actor-scoped ID is `wi_` plus the first 32 hex characters of SHA-256 over
+canonical JSON `["direct-work-item", actor, idempotency_key]`. The immutable
+`work-items/<id>/create.json` contains exactly `kind: "direct"`, `actor`,
+`idempotency_key`, and `work_item` (the revision-1 seed). Direct creation and
+`Insights.decide(..., work_item_intent="create")` share the same seed constructor
+and shape validator; old decision IDs, keys, intent fields and stored seeds
+are not rewritten. Direct seeds never live in decision history. A direct ID
+colliding with a decision event fails closed.
+
+First writes return `{record, created: true}`. Exact retries return the original
+creation `{record, created: false}`, not the current transitioned item; a changed
+title or origin with the same actor/key is denied. Retry comparison precedes
+live reference checks so advancing an insight/parent cannot break replay.
+Callers must retain the key and exact request across cancellation or uncertain
+responses; there is no automatic retry. Atomic exclusive writes commit the seed
+before returning; a pre-commit temporary is never promoted. Replays validate
+the committed chain and do not count as tool progress. Direct items use the
+same open/closed pages, full/delta prompt inventory, by-ID reads, CAS/history,
+256-revision and record/page byte bounds, done-verification gates, event receipts
+and backup/restore tree as decision items.
+
+Terminal routing resolves only an explicit insight origin's submitter.
+Null/parent provenance remains unknown routing (including for `sources="any"`
+subscriptions); it never falls back to the creator, holder, parent actor or
+transition actor. Exact receipts still identify each terminal item/revision.
 
 Statuses are `open`, `doing`, `blocked`, `done`, `dropped`. Same-status changes
 and changes from terminal `done`/`dropped` are refused; other statuses can move
