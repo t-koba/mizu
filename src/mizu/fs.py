@@ -142,12 +142,12 @@ def _move_with_retry(temporary: Path, path: Path, *, exclusive: bool) -> None:
     """Atomically publish a staged file, tolerating transient locks.
 
     Concurrent readers (Windows mandatory locking, antivirus scanners) can
-    briefly hold the destination; retry a bounded window before failing.
+    briefly hold the destination; retry for at most two seconds before failing.
     FileExistsError still fails fast for the immutable-conflict path above,
     as do the create-only link attempts.
     """
     move = os.rename if exclusive and _platform.IS_WINDOWS else os.replace
-    deadline = time.monotonic() + 0.5
+    deadline = time.monotonic() + 2.0
     while True:
         try:
             move(temporary, path)

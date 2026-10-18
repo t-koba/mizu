@@ -67,6 +67,36 @@ class FileTests(unittest.TestCase):
         self.assertLess(calls[-1] - calls[0], 5.0)
         self.assertFalse(list(path.parent.glob(".new-*")))
 
+    def test_replace_retries_transient_windows_lock_beyond_half_second(self):
+        from types import SimpleNamespace
+
+        path = self.root / "a/b.txt"
+        atomic_write(path, b"one")
+        real_replace = os.replace
+        calls = []
+        clock = [0.0]
+
+        def monotonic():
+            return clock[0]
+
+        def sleep(seconds):
+            clock[0] += seconds
+
+        def flaky(temporary, target):
+            calls.append(temporary)
+            if len(calls) < 75:  # 0.74 s of transient sharing violations
+                raise PermissionError("transient Windows sharing violation")
+            return real_replace(temporary, target)
+
+        with patch("mizu.fs.time", SimpleNamespace(monotonic=monotonic, sleep=sleep)), \
+                patch("os.replace", flaky):
+            atomic_write(path, b"two")
+
+        self.assertEqual(len(calls), 75)
+        self.assertAlmostEqual(clock[0], 0.74)
+        self.assertEqual(path.read_bytes(), b"two")
+        self.assertFalse(list(path.parent.glob(".new-*")))
+
     def test_replace_gives_up_after_bounded_window(self):
         path = self.root / "a/b.txt"
         atomic_write(path, b"one")
