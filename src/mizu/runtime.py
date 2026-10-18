@@ -1453,9 +1453,10 @@ class Context:
         # Generic offline-input materialization, one of two exclusive forms
         # sharing the single `materialize` grant (no new capability):
         # `{spec}` invokes the trusted host adapter (warms pre-mounted
-        # read-only caches and/or returns digest-bound content), while
-        # `{apply: {run, evidence_id}}` writes one retained receipt
-        # byte-exactly to the output path named inside its own JSON spec.
+        # read-only caches and/or returns digest-bound content plus the
+        # policy-checked output), while `{apply: {run, evidence_id}}` writes
+        # one retained receipt byte-exactly only when the retained adapter
+        # `result.output` equals the retained JSON spec `output` exactly.
         # Invoke needs a visible workspace; apply needs a writable one.
         # The mechanism never mounts adapter paths and never grants network
         # to the sandbox. Fail closed without configuration or grant.

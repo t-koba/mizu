@@ -10,8 +10,8 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .errors import ConfigError, Denied
-from .fs import ID, relative_parts
+from .errors import ConfigError
+from .fs import ID
 from .process import ADAPTER_DIAGNOSTIC_BYTES_DEFAULT, ADAPTER_DIAGNOSTIC_BYTES_MAX
 CAPABILITIES = frozenset({"diff", "files", "read", "exec", "experiment", "verify", "fetch", "probe",
                           "search", "insights", "decide", "submit_insight", "revise_insight", "withdraw_insight", "withdraw_decided", "attach_evidence", "consult", "delegate",
@@ -1061,34 +1061,16 @@ def load(file: Path) -> Config:
     number(vcs["poll_fetch_timeout_seconds"], "vcs.poll_fetch_timeout_seconds", 1, 300)
     number(vcs["poll_status_timeout_seconds"], "vcs.poll_status_timeout_seconds", 1, 300)
     mat = data.get("materialize", {})
-    keys(mat, {"command", "timeout_seconds", "max_bytes", "diagnostic_bytes",
-               "output_allowed"}, "materialize")
+    keys(mat, {"command", "timeout_seconds", "max_bytes", "diagnostic_bytes"},
+         "materialize")
     mat = {"command": [], "timeout_seconds": 20, "max_bytes": 524288,
-           "diagnostic_bytes": ADAPTER_DIAGNOSTIC_BYTES_DEFAULT,
-           "output_allowed": [], **mat}
+           "diagnostic_bytes": ADAPTER_DIAGNOSTIC_BYTES_DEFAULT, **mat}
     strings(mat["command"], "materialize.command")
     if mat["command"] and any(not s or "\n" in s for s in mat["command"]):
         raise ConfigError("materialize.command must be a nonempty argv array without newlines")
     for k in ("timeout_seconds", "max_bytes"):
         number(mat[k], f"materialize.{k}", 1, 16777216)
     number(mat["diagnostic_bytes"], "materialize.diagnostic_bytes", 0, ADAPTER_DIAGNOSTIC_BYTES_MAX)
-    allowed = mat["output_allowed"]
-    if not isinstance(allowed, list) or len(allowed) > 64:
-        raise ConfigError("materialize.output_allowed must be an array of at most 64 paths")
-    seen_allowed: set[str] = set()
-    for entry in allowed:
-        if not isinstance(entry, str) or not entry or len(entry) > 4096:
-            raise ConfigError("materialize.output_allowed entries must be nonempty paths of at most 4096 chars")
-        if "\x00" in entry or "\n" in entry:
-            raise ConfigError("materialize.output_allowed entries must not contain NUL or newlines")
-        if entry in seen_allowed:
-            raise ConfigError("materialize.output_allowed entries must be unique")
-        seen_allowed.add(entry)
-        try:
-            relative_parts(entry)
-        except Denied as exc:
-            raise ConfigError(f"materialize.output_allowed entries must be relative without traversal: {entry}") from exc
-    mat["output_allowed"] = tuple(allowed)
     return Config(file, path_value(string(data.get("data_dir", "~/.local/state/mizu"), "data_dir"), file.parent),
                   environments, limits, sandbox, profiles, roles, consult_role, delegate_role, timezone, web, vcs, mat,
                   strings(data.get("exclude", [".git", ".pi", ".env", ".env.*", ".venv",

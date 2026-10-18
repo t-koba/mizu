@@ -1,10 +1,13 @@
 """Generic offline-input materialization via a trusted host adapter.
 
 Apply mode (same grant): a retained `spec` receipt whose JSON spec carries
-a top-level string `output` may be applied byte-exactly to one exact path
-listed in `[materialize].output_allowed` (default empty, fail closed). The
-caller supplies no path or content; the destination comes only from the
-retained spec, the bytes only from the retained digest-bound content. Writes
+a top-level string `output` may be applied byte-exactly to that exact path
+only when the retained adapter `result` carries the same policy-checked
+`output`. Output authorization lives in the host adapter and its ops.toml
+`[materialize] output_allowed` policy, never in Mizu configuration; the
+adapter returns the checked path in its result. The caller supplies no path
+or content; the destination comes only from the retained spec/result pair,
+the bytes only from the retained digest-bound content. Writes
 are atomic via `fs.safe_write` (POSIX openat/O_NOFOLLOW, portable
 resolve-and-check fallback), never create parents, and refuse excluded,
 symlinked, hardlinked or special destinations. Failed validation never
@@ -15,7 +18,7 @@ Schema: operator-owned `[materialize] command` argv receives one JSON object
 on stdin (`{"spec": ...}`) and must print one JSON object on stdout.
 Bounds: spec at most 8192 chars; canonical request and adapter stdout each
 capped at `max_bytes`; UTF-8 content at most `max_bytes` bytes; cache identifier
-at most 256 chars. Trust: operator-owned host program only; never
+at most 256 chars; output path at most 4096 chars. Trust: operator-owned host program only; never
 model-provided argv, never run in the sandbox. Results stay
 external-untrusted until applied as workspace edits and verified.
 Retry/cancellation: single invocation under `timeout_seconds`; no shell retry.
@@ -58,9 +61,13 @@ def invoke(settings: dict, spec: str, *, cancel=lambda: False) -> dict:
 
     Schema: `spec` is a nonempty declarative description (opaque to the
     product, interpreted by the operator adapter). Response
-    `{"content": str, "digest": 64 hex, "cache": str optional}` where
-    `digest` must equal sha256 over `fs.canonical(content)` recomputed
-    locally. `cache` names the warmed location for audit only. On a normal
+    `{"content": str, "digest": 64 hex, "cache": str optional,
+    "output": str optional}` where `digest` must equal sha256 over
+    `fs.canonical(content)` recomputed locally. `cache` names the warmed
+    location for audit only. `output` is the adapter policy-checked exact
+    workspace-relative destination; it is preserved verbatim in the receipt.
+    Cache-only/older responses may omit `output` and still invoke
+    successfully, but apply then fails closed. On a normal
     nonzero exit, the configured stderr tail is model-visible and untrusted.
     """
     command = settings.get("command", [])
@@ -111,8 +118,19 @@ def invoke(settings: dict, spec: str, *, cancel=lambda: False) -> dict:
     if "\x00" in cache or "\n" in cache:
         raise Denied("Invalid materialize cache identifier")
     _utf8_size(cache)
+    output = data.get("output", "")
+    if output is None:
+        output = ""
+    if not isinstance(output, str):
+        raise Denied("Materialize adapter must return a valid output path")
+    if output:
+        if len(output) > _OUTPUT_MAX:
+            raise Denied("Materialize adapter must return a valid output path")
+        if "\x00" in output or "\n" in output:
+            raise Denied("Materialize adapter must return a valid output path")
+        _utf8_size(output)
     return {"content": content, "digest": echoed, "cache": cache,
-            "trust": "external-untrusted"}
+            "output": output, "trust": "external-untrusted"}
 
 #: Retained-evidence locator: full lowercase 32-hex run/evidence UUIDs only.
 _EVIDENCE_UUID = re.compile(r"[0-9a-f]{32}\Z")
@@ -197,11 +215,12 @@ def load_source(settings: dict, project_root: Path, run: str, evidence_id: str,
     recomputes over `fs.canonical(result.content)` and matches both the
     top-level and result digests. Old receipts without top-level
     run/role/kind stay valid through their started.json binding; new
-    receipts must bind when those fields are present. The JSON spec must
-    carry a top-level string `output` with exact membership in
-    `output_allowed`. Returns `{output, content, digest, cache,
-    source_run, source_evidence}`; the bytes written are
-    `content.encode("utf-8")`.
+    receipts must bind when those fields are present. The retained adapter
+    `result` must carry a policy-checked `output` that equals the top-level
+    string `output` in the same retained JSON spec exactly; absent, empty,
+    mismatched, or path-unsafe outputs fail closed. Returns `{output,
+    content, digest, cache, source_run, source_evidence}`; the bytes written
+    are `content.encode("utf-8")`.
     """
     if (not isinstance(run, str) or not isinstance(evidence_id, str)
             or not _EVIDENCE_UUID.fullmatch(run)
@@ -210,7 +229,6 @@ def load_source(settings: dict, project_root: Path, run: str, evidence_id: str,
     if not isinstance(role_name, str) or not role_name:
         raise Denied("Materialize apply requires a role binding")
     maximum = settings.get("max_bytes", 524288)
-    allowed = settings.get("output_allowed", ())
     if type(file_bytes) is not int or file_bytes <= 0:
         raise Denied("Materialize apply is unavailable")
     try:
@@ -259,12 +277,26 @@ def load_source(settings: dict, project_root: Path, run: str, evidence_id: str,
         raise Denied("Materialize evidence digest mismatch")
     if result.get("trust", "external-untrusted") != "external-untrusted":
         raise Denied("Materialize evidence trust mismatch")
+    result_output = result.get("output", "")
+    if result_output is None:
+        result_output = ""
+    if not isinstance(result_output, str) or not result_output:
+        raise Denied("Materialize receipt carries no adapter output")
+    if len(result_output) > _OUTPUT_MAX:
+        raise Denied("Materialize output path is not allowed")
+    if "\x00" in result_output or "\n" in result_output:
+        raise Denied("Materialize output path is not allowed")
+    _utf8_size(result_output)
+    try:
+        relative_parts(result_output)
+    except Denied as exc:
+        raise Denied("Materialize output path is not allowed") from exc
     spec = record.get("spec")
     if not isinstance(spec, str):
         raise Denied("Materialize spec carries no allowed output path")
     output = parse_output(spec)
-    if not isinstance(allowed, (list, tuple)) or output not in list(allowed):
-        raise Denied("Materialize output path is not allowed")
+    if result_output != output:
+        raise Denied("Materialize output mismatch")
     cache = result.get("cache", record.get("cache", ""))
     if cache is None:
         cache = ""

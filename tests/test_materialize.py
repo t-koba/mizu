@@ -17,8 +17,19 @@ def settings(command, timeout=5, maximum=524288):
     return {"command": command, "timeout_seconds": timeout, "max_bytes": maximum}
 
 
-def good_adapter_code(content="lockfile-content", cache="warm-cache-1"):
+def good_adapter_code(content="lockfile-content", cache="warm-cache-1", output="locks/app.lock"):
     # Adapter computes digest locally like a correct implementation would.
+    # output=None omits the key to simulate a cache-only/older adapter.
+    if output is None:
+        return (
+            "import sys,json,hashlib;"
+            "json.load(sys.stdin);"
+            f"content={content!r};"
+            "from pathlib import Path;"
+            "import sys; sys.path.insert(0, 'src');"
+            "from mizu.fs import canonical, digest;"
+            f"print(json.dumps({{'content': content, 'digest': digest(canonical(content)), 'cache': {cache!r}}}))"
+        )
     return (
         "import sys,json,hashlib;"
         "json.load(sys.stdin);"
@@ -26,7 +37,7 @@ def good_adapter_code(content="lockfile-content", cache="warm-cache-1"):
         "from pathlib import Path;"
         "import sys; sys.path.insert(0, 'src');"
         "from mizu.fs import canonical, digest;"
-        f"print(json.dumps({{'content': content, 'digest': digest(canonical(content)), 'cache': {cache!r}}}))"
+        f"print(json.dumps({{'content': content, 'digest': digest(canonical(content)), 'cache': {cache!r}, 'output': {output!r}}}))"
     )
 
 
@@ -37,7 +48,37 @@ class MaterializeAdapterTests(Fixture):
         self.assertEqual(out["content"], "lockfile-content")
         self.assertEqual(out["digest"], digest(canonical("lockfile-content")))
         self.assertEqual(out["cache"], "warm-cache-1")
+        self.assertEqual(out["output"], "locks/app.lock")
         self.assertEqual(out["trust"], "external-untrusted")
+
+    def test_invoke_preserves_adapter_output(self):
+        out = materialize.invoke(
+            settings([sys.executable, "-c", good_adapter_code(output="a/b.txt")]), "need deps")
+        self.assertEqual(out["output"], "a/b.txt")
+
+    def test_invoke_without_output_still_succeeds_but_apply_fails_closed(self):
+        out = materialize.invoke(
+            settings([sys.executable, "-c", good_adapter_code(output=None)]), "need cache only")
+        self.assertEqual(out["output"], "")
+        self.assertEqual(out["trust"], "external-untrusted")
+
+    def test_invoke_invalid_output_refused(self):
+        for bad in (123, ["a.txt"], {"p": 1}):
+            stdout = json.dumps({"content": "c", "digest": digest(canonical("c")),
+                                 "cache": "", "output": bad})
+            result = SimpleNamespace(stdout=stdout, reason="exited", exit_code=0)
+            with self.subTest(output=repr(bad)):
+                with patch("mizu.materialize.run", return_value=result):
+                    with self.assertRaises(Denied):
+                        materialize.invoke(settings(["adapter"]), "deps")
+        for bad in ("bad\x00path", "bad\npath", "x" * 4097):
+            stdout = json.dumps({"content": "c", "digest": digest(canonical("c")),
+                                 "cache": "", "output": bad})
+            result = SimpleNamespace(stdout=stdout, reason="exited", exit_code=0)
+            with self.subTest(output=repr(bad)):
+                with patch("mizu.materialize.run", return_value=result):
+                    with self.assertRaises(Denied):
+                        materialize.invoke(settings(["adapter"]), "deps")
 
     def test_unconfigured_refused(self):
         with self.assertRaises(Denied):
@@ -94,22 +135,14 @@ class MaterializeAdapterTests(Fixture):
         with self.assertRaises(ConfigError):
             check_consult_role("consult", role)
 
-    def test_config_output_allowed_default_empty(self):
-        self.assertEqual(tuple(self.config.materialize.get("output_allowed", ())), ())
-
-    def test_config_output_allowed_rejects_bad_entries(self):
-        text = self.file.read_text()
-        self.assertIn("[materialize]", text)
-        # Reuse the fixture-owned config; Fixture cleans up even on failure.
+    def test_config_output_allowed_is_not_a_mizu_key(self):
+        # Output authorization lives in the host adapter (ops.toml), never here.
+        self.assertNotIn("output_allowed", self.config.materialize)
         base = self.file.read_text()
-        bad_values = [["/abs"], ["../escape"], ["a", "a"], [""], ["a\\b"],
-                      ["nul\x00"], ["new\nline"], [123], "a", ["x"] * 65]
-        for bad in bad_values:
-            with self.subTest(output_allowed=bad):
-                line = "output_allowed = " + json.dumps(bad)
-                self.file.write_text(base.replace("[materialize]", "[materialize]\n" + line, 1))
-                with self.assertRaises(ConfigError):
-                    load(self.file)
+        self.assertIn("[materialize]", base)
+        self.file.write_text(base.replace("[materialize]", "[materialize]\noutput_allowed = []", 1))
+        with self.assertRaisesRegex(ConfigError, "Unknown keys"):
+            load(self.file)
 
     def test_invoke_invalid_unicode_and_byte_limit_fail_closed(self):
         adapter = settings(["adapter"], maximum=32)
@@ -137,7 +170,7 @@ class MaterializeAdapterTests(Fixture):
         ctx.role = dataclasses.replace(ctx.role, capabilities=(*ctx.role.capabilities, "materialize"))
         content = "x" * 10000
         data = {"content": content, "digest": digest(canonical(content)),
-                "cache": "", "trust": "external-untrusted"}
+                "cache": "", "output": "prior.txt", "trust": "external-untrusted"}
         with patch("mizu.materialize.invoke", return_value=data):
             out = ctx.handle("materialize", {"spec": "deps"})
         keys = list(out)
@@ -158,7 +191,8 @@ class MaterializeApplyTests(Fixture):
         return ctx
 
     def _seed(self, ctx, spec_obj_or_str, content, *, old_style=False, evidence_id=None,
-              run_id=None, role_name=None, cache="", kind_present=True):
+              run_id=None, role_name=None, cache="", kind_present=True,
+              output="__mirror__", result_output_present=True):
         import uuid
         from mizu.fs import canonical, digest, write_json
         run = run_id or ctx.run_dir.name
@@ -166,11 +200,23 @@ class MaterializeApplyTests(Fixture):
         eid = evidence_id or uuid.uuid4().hex
         spec = spec_obj_or_str if isinstance(spec_obj_or_str, str) else json.dumps(spec_obj_or_str)
         dg = digest(canonical(content))
+        if output == "__mirror__":
+            try:
+                parsed = json.loads(spec) if isinstance(spec, str) else None
+            except ValueError:
+                parsed = None
+            if isinstance(parsed, dict) and isinstance(parsed.get("output"), str):
+                output = parsed["output"]
+            else:
+                output = ""
+        result = {"content": content, "digest": dg, "cache": cache,
+                  "trust": "external-untrusted"}
+        if result_output_present:
+            result["output"] = output
         record = {"spec": spec, "digest": dg, "cache": cache,
                   "trust": "external-untrusted", "evidence_id": eid,
                   "evidence": f"materialize/{eid}.json",
-                  "result": {"content": content, "digest": dg, "cache": cache,
-                               "trust": "external-untrusted"}}
+                  "result": result}
         if not old_style:
             record["run"] = run
             record["role"] = role
@@ -185,14 +231,8 @@ class MaterializeApplyTests(Fixture):
         write_json(target_run_dir / "materialize" / f"{eid}.json", record)
         return run, eid, dg, spec
 
-    def _allow(self, ctx, *paths):
-        ctx.config.materialize["output_allowed"] = tuple(paths)
-        # Config stores tuple after load; runtime/load_source accept list or tuple.
-        return ctx
-
     def test_apply_success_exact_bytes_and_audit(self):
         ctx = self._grant(self.context("worker"))
-        self._allow(ctx, "locks/app.lock")
         content = "line1\nline2 \u00e9\n"
         run, eid, dg, _ = self._seed(ctx, {"output": "locks/app.lock", "other": 1}, content)
         # Parent must already exist; no parent creation.
@@ -216,7 +256,6 @@ class MaterializeApplyTests(Fixture):
 
     def test_apply_accepts_old_receipt_without_run_role(self):
         ctx = self._grant(self.context("worker"))
-        self._allow(ctx, "old.txt")
         run, eid, dg, _ = self._seed(ctx, {"output": "old.txt"}, "old-bytes", old_style=True)
         out = ctx.handle("materialize", {"apply": {"run": run, "evidence_id": eid}})
         self.assertEqual(out["path"], "old.txt")
@@ -225,7 +264,6 @@ class MaterializeApplyTests(Fixture):
     def test_apply_reads_retained_receipt_from_prior_same_role_run(self):
         import uuid
         ctx = self._grant(self.context("worker"))
-        self._allow(ctx, "prior.txt")
         previous_run = uuid.uuid4().hex
         run, eid, _, _ = self._seed(
             ctx, {"output": "prior.txt"}, "from-prior-run", run_id=previous_run)
@@ -237,7 +275,6 @@ class MaterializeApplyTests(Fixture):
     def test_apply_missing_receipt_refused(self):
         import uuid
         ctx = self._grant(self.context("worker"))
-        self._allow(ctx, "a.txt")
         from mizu.fs import write_json
         write_json(ctx.run_dir / "started.json", {"run": ctx.run_dir.name, "role": ctx.role.name})
         with self.assertRaises(Denied):
@@ -246,7 +283,6 @@ class MaterializeApplyTests(Fixture):
     def test_apply_wrong_run_or_role_refused(self):
         import uuid
         ctx = self._grant(self.context("worker"))
-        self._allow(ctx, "a.txt")
         run, eid, _, _ = self._seed(ctx, {"output": "a.txt"}, "x")
         other = uuid.uuid4().hex
         with self.assertRaises(Denied):
@@ -259,7 +295,8 @@ class MaterializeApplyTests(Fixture):
         rec = {"spec": json.dumps({"output": "a.txt"}), "digest": dg, "cache": "",
                "trust": "external-untrusted", "evidence_id": eid2,
                "evidence": f"materialize/{eid2}.json",
-               "result": {"content": "y", "digest": dg, "trust": "external-untrusted"},
+               "result": {"content": "y", "digest": dg, "output": "a.txt",
+                          "trust": "external-untrusted"},
                "run": run2, "role": "searcher", "kind": "materialize"}
         write_json(ctx.run_dir / f"materialize/{eid2}.json", rec)
         with self.assertRaises(Denied):
@@ -268,7 +305,6 @@ class MaterializeApplyTests(Fixture):
     def test_apply_corrupt_receipt_refused(self):
         import uuid
         ctx = self._grant(self.context("worker"))
-        self._allow(ctx, "a.txt")
         from mizu.fs import write_json
         run = ctx.run_dir.name
         write_json(ctx.run_dir / "started.json", {"run": run, "role": ctx.role.name})
@@ -280,7 +316,6 @@ class MaterializeApplyTests(Fixture):
 
     def test_apply_utf8_byte_limit_refused_and_leaves_file(self):
         ctx = self._grant(self.context("worker"))
-        self._allow(ctx, "keep.txt")
         target = ctx.workspace / "keep.txt"
         target.write_bytes(b"original")
         ctx.config.materialize["max_bytes"] = 32
@@ -292,7 +327,6 @@ class MaterializeApplyTests(Fixture):
 
     def test_apply_strict_json_and_unicode_refused_without_writes(self):
         ctx = self._grant(self.context("worker"))
-        self._allow(ctx, "keep.txt")
         target = ctx.workspace / "keep.txt"
         target.write_bytes(b"original")
         # Valid bindings/content plus malformed extra fields must still fail.
@@ -339,7 +373,6 @@ class MaterializeApplyTests(Fixture):
 
     def test_apply_cache_controls_refused(self):
         ctx = self._grant(self.context("worker"))
-        self._allow(ctx, "keep.txt")
         for cache in ("nul\x00", "new\nline"):
             with self.subTest(cache=cache):
                 run, eid, _, _ = self._seed(ctx, {"output": "keep.txt"}, "new", cache=cache)
@@ -359,7 +392,6 @@ class MaterializeApplyTests(Fixture):
 
     def test_apply_digest_mismatch_refused_and_leaves_file(self):
         ctx = self._grant(self.context("worker"))
-        self._allow(ctx, "keep.txt")
         (ctx.workspace / "keep.txt").write_bytes(b"original")
         run, eid, _, _ = self._seed(ctx, {"output": "keep.txt"}, "new-content")
         # Tamper retained content without updating digests.
@@ -371,28 +403,56 @@ class MaterializeApplyTests(Fixture):
             ctx.handle("materialize", {"apply": {"run": run, "evidence_id": eid}})
         self.assertEqual((ctx.workspace / "keep.txt").read_bytes(), b"original")
 
-    def test_apply_malformed_and_disallowed_output_refused(self):
+    def test_apply_malformed_and_invalid_output_refused(self):
         ctx = self._grant(self.context("worker"))
-        self._allow(ctx, "allowed.txt")
         (ctx.workspace / "allowed.txt").write_bytes(b"stay")
         cases = ["not-json", '[1,2]', json.dumps({"nope": 1}),
                  json.dumps({"output": 123}), json.dumps({"output": "/abs"}),
                  json.dumps({"output": "../escape"}), '{"a":1,"a":2}',
-                 json.dumps({"output": "other.txt"})]
+                 json.dumps({"output": "a\\b"})]
         for i, spec in enumerate(cases):
-            run, eid, _, _ = self._seed(ctx, spec, "c%d" % i)
+            run, eid, _, _ = self._seed(ctx, spec, "c%d" % i, output="allowed.txt")
             with self.assertRaises(Denied, msg=spec):
                 ctx.handle("materialize", {"apply": {"run": run, "evidence_id": eid}})
         self.assertEqual((ctx.workspace / "allowed.txt").read_bytes(), b"stay")
         self.assertFalse((ctx.workspace / "other.txt").exists())
 
-    def test_apply_empty_allowlist_refused(self):
+    def test_apply_missing_adapter_output_refused_including_old_receipts(self):
         ctx = self._grant(self.context("worker"))
-        # Default empty: no output allowed.
-        ctx.config.materialize["output_allowed"] = ()
-        run, eid, _, _ = self._seed(ctx, {"output": "a.txt"}, "x")
+        # New receipt with no adapter output.
+        run, eid, _, _ = self._seed(ctx, {"output": "a.txt"}, "x",
+                                    result_output_present=False)
         with self.assertRaises(Denied):
             ctx.handle("materialize", {"apply": {"run": run, "evidence_id": eid}})
+        self.assertFalse((ctx.workspace / "a.txt").exists())
+        # Explicit empty adapter output.
+        run, eid, _, _ = self._seed(ctx, {"output": "a.txt"}, "x", output="")
+        with self.assertRaises(Denied):
+            ctx.handle("materialize", {"apply": {"run": run, "evidence_id": eid}})
+        # Legacy receipt predating result.output (no run/role/kind either).
+        run, eid, _, _ = self._seed(ctx, {"output": "a.txt"}, "x", old_style=True,
+                                    result_output_present=False)
+        with self.assertRaises(Denied):
+            ctx.handle("materialize", {"apply": {"run": run, "evidence_id": eid}})
+        self.assertFalse((ctx.workspace / "a.txt").exists())
+
+    def test_apply_output_mismatch_refused_and_leaves_file(self):
+        ctx = self._grant(self.context("worker"))
+        (ctx.workspace / "kept.txt").write_bytes(b"original")
+        run, eid, _, _ = self._seed(ctx, {"output": "kept.txt"}, "new",
+                                    output="other.txt")
+        with self.assertRaises(Denied):
+            ctx.handle("materialize", {"apply": {"run": run, "evidence_id": eid}})
+        self.assertEqual((ctx.workspace / "kept.txt").read_bytes(), b"original")
+        self.assertFalse((ctx.workspace / "other.txt").exists())
+
+    def test_apply_invalid_adapter_output_refused(self):
+        ctx = self._grant(self.context("worker"))
+        for bad in ("/abs", "../escape", "a\\b", "x" * 4097):
+            with self.subTest(output=repr(bad)):
+                run, eid, _, _ = self._seed(ctx, {"output": bad}, "x", output=bad)
+                with self.assertRaises(Denied):
+                    ctx.handle("materialize", {"apply": {"run": run, "evidence_id": eid}})
 
     def test_apply_exclusive_shape(self):
         ctx = self._grant(self.context("worker"))
@@ -408,7 +468,6 @@ class MaterializeApplyTests(Fixture):
         ctx = self.context("searcher")
         import dataclasses
         ctx.role = dataclasses.replace(ctx.role, capabilities=tuple(ctx.role.capabilities) + ("materialize",))
-        ctx.config.materialize["output_allowed"] = ("a.txt",)
         import uuid
         with self.assertRaises(Denied):
             ctx.handle("materialize", {"apply": {"run": uuid.uuid4().hex, "evidence_id": uuid.uuid4().hex}})
@@ -416,7 +475,6 @@ class MaterializeApplyTests(Fixture):
     def test_apply_symlink_targets_and_parents_refused(self):
         import os
         ctx = self._grant(self.context("worker"))
-        self._allow(ctx, "link.txt", "linked/keep.txt")
         target = ctx.workspace / "real.txt"
         target.write_bytes(b"real")
         parent = ctx.workspace / "real-dir"
@@ -443,7 +501,6 @@ class MaterializeApplyTests(Fixture):
     def test_apply_hardlink_refused(self):
         import os
         ctx = self._grant(self.context("worker"))
-        self._allow(ctx, "hard.txt")
         # Hardlink: existing destination with nlink > 1.
         hard = ctx.workspace / "hard.txt"
         hard.write_bytes(b"hard-original")
@@ -463,7 +520,6 @@ class MaterializeApplyTests(Fixture):
 
     def test_apply_no_parent_creation_and_excluded_refused(self):
         ctx = self._grant(self.context("worker"))
-        self._allow(ctx, "missing/dir/file.txt", ".git/kept.txt")
         run, eid, _, _ = self._seed(ctx, {"output": "missing/dir/file.txt"}, "x")
         with self.assertRaises(Denied):
             ctx.handle("materialize", {"apply": {"run": run, "evidence_id": eid}})
