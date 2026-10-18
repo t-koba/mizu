@@ -697,6 +697,34 @@ class RecoveryProbeTests(SelectionFixture):
                 run.assert_not_called()
                 self.store.path.unlink()
 
+    def test_oneshot_run_services_due_probe_without_daemon(self):
+        from support import ScriptDriver
+        action = self.setup_probe()
+        self.assertEqual(self.contribution(action)['role'], 'worker')
+        probe_driver = ProbeDriver()
+        def main(context, prompt, profile):
+            context.handle('finish', {'outcome': 'wait', 'summary': 'one-shot work',
+                                      'state': 'Next step is explicit.'})
+        # No daemon exists for the project in this test. The one-shot worker
+        # run must still service the worker-sponsored due contribution using
+        # the stored authorization and locks.
+        with patch('mizu.probes.driver_for', return_value=probe_driver):
+            result = Engine(self.config, driver=ScriptDriver(main)).run(self.project, 'worker')
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(len(probe_driver.calls), 1)
+        self.assertEqual(self.contribution(action)['status'], 'recovered')
+
+    def test_oneshot_run_settles_expired_probe_upper_bound(self):
+        from support import ScriptDriver
+        action = self.setup_probe(upper=60)
+        def main(context, prompt, profile):
+            context.handle('finish', {'outcome': 'wait', 'summary': 'one-shot work',
+                                      'state': 'Next step is explicit.'})
+        # The expired upper bound settles without launching any driver.
+        result = Engine(self.config, driver=ScriptDriver(main)).run(self.project, 'worker')
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(self.contribution(action)['status'], 'expired')
+
     def test_only_finish_and_hard_request_tool_bounds(self):
         action = self.setup_probe()
         def bounds(context):

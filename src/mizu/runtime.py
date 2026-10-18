@@ -3101,6 +3101,18 @@ class Engine:
         if role_name not in project.roles:
             raise Denied("Role is not enabled for this project")
         role = self.config.roles[role_name]
+        # Any top-level run services due recovery probes first — daemon,
+        # one-shot, or smoke — so block recovery never depends on a resident
+        # daemon for the sponsoring role or that role's execution mode. The
+        # daemon loop calls the same function before its readiness gate, so
+        # a ready daemon iteration may service twice; the second call is a
+        # no-op scan. Best-effort: probe failures never fail the run's own
+        # work, exactly like a skipped daemon iteration.
+        try:
+            from .probes import service_due as _service_due_probes
+            _service_due_probes(self.config, project.name, self.stop)
+        except (MizuError, OSError, ValueError):
+            pass
         with contextlib.ExitStack() as stack:
             admission_elapsed = self._admit(project, role_name, role, stack, wait=retry_busy)
             project.insights.ingest_editor(keep_days=project.config.limits.retention_days)
