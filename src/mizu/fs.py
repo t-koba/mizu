@@ -378,6 +378,165 @@ def _safe_read_portable(root: Path, name: str, parts: tuple[str, ...], maximum: 
         raise Denied(f"Unsafe or unavailable path: {name}") from exc
 
 
+def safe_write(root: Path, name: str, data: bytes) -> None:
+    """Atomically create-or-replace one regular file without creating parents.
+
+    The destination must be an exact relative path under ``root`` (see
+    :func:`relative_parts`): absolute paths, traversal, backslashes and
+    ``.``/``..`` components are refused. Parent directories must already
+    exist and no parent is created. Symlinked parents or targets,
+    hardlinked or special existing destinations, and hardlinked results
+    are refused. The write stages a temporary sibling and renames it, so
+    a failed validation or write never partially replaces the destination;
+    only complete bytes are published, followed by a directory fsync.
+
+    On POSIX the parent chain is pinned with ``openat``/``O_NOFOLLOW`` so
+    a swapped component fails instead of following it. Where the OS lacks
+    ``openat``/``dir_fd`` (Windows) a resolve-and-check fallback keeps the
+    same Denied contract without claiming TOCTOU pinning.
+    """
+    if not isinstance(data, (bytes, bytearray)):
+        raise Denied("Only bytes are writable")
+    parts = relative_parts(name)
+    if _platform.HAS_OPENAT and _platform.HAS_DIR_FD:
+        return _safe_write_openat(root, name, parts, bytes(data))
+    return _safe_write_portable(root, name, parts, bytes(data))
+
+
+def _safe_write_openat(root: Path, name: str, parts: tuple[str, ...], data: bytes) -> None:
+    import uuid as _uuid
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        for part in parts[:-1]:
+            try:
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC |
+                                os.O_NOFOLLOW, dir_fd=fd)
+            except OSError as exc:
+                raise Denied(f"Unsafe or unavailable path: {name}") from exc
+            os.close(fd)
+            fd = child
+        try:
+            existing = os.lstat(parts[-1], dir_fd=fd)
+        except FileNotFoundError:
+            existing = None
+        except OSError as exc:
+            raise Denied(f"Unsafe or unavailable path: {name}") from exc
+        if existing is not None:
+            if stat.S_ISLNK(existing.st_mode):
+                raise Denied(f"Unsafe or unavailable path: {name}")
+            if not stat.S_ISREG(existing.st_mode) or existing.st_nlink != 1:
+                raise Denied("Only regular, non-hardlinked files are writable")
+        temporary = None
+        temp_fd = None
+        try:
+            for _ in range(8):
+                candidate = f".new-{_uuid.uuid4().hex}"
+                try:
+                    temp_fd = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                                     os.O_CLOEXEC | os.O_NOFOLLOW, 0o600, dir_fd=fd)
+                except FileExistsError:
+                    continue
+                except OSError as exc:
+                    raise Denied(f"Unsafe or unavailable path: {name}") from exc
+                temporary = candidate
+                break
+            if temporary is None or temp_fd is None:
+                raise Denied(f"Unsafe or unavailable path: {name}")
+            try:
+                view = memoryview(data)
+                while view:
+                    written = os.write(temp_fd, view)
+                    if written == 0:
+                        raise Denied("Unable to write complete file")
+                    view = view[written:]
+                os.fsync(temp_fd)
+                info = os.fstat(temp_fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                    raise Denied("Only regular, non-hardlinked files are writable")
+            finally:
+                os.close(temp_fd)
+                temp_fd = None
+            try:
+                os.rename(temporary, parts[-1], src_dir_fd=fd, dst_dir_fd=fd)
+            except OSError as exc:
+                raise Denied(f"Unsafe or unavailable path: {name}") from exc
+            try:
+                os.fsync(fd)
+            except OSError as exc:
+                if exc.errno not in (errno.EINVAL, errno.ENOTSUP, errno.ENOSYS):
+                    raise
+            # The rename consumed the temporary name; do not unlink it.
+            temporary = None
+        finally:
+            if temporary is not None:
+                with contextlib.suppress(OSError):
+                    os.unlink(temporary, dir_fd=fd)
+    except (Denied, LimitExceeded):
+        raise
+    except OSError as exc:
+        raise Denied(f"Unsafe or unavailable path: {name}") from exc
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+
+
+def _safe_write_portable(root: Path, name: str, parts: tuple[str, ...], data: bytes) -> None:
+    target = root.joinpath(*parts)
+    parent = target.parent
+    try:
+        def check_components() -> None:
+            current = root
+            for part in ("", *parts):
+                current = current / part
+                try:
+                    info = current.lstat()
+                except FileNotFoundError:
+                    # Only the final destination may be absent; every parent
+                    # must already exist (no parent creation).
+                    if current != target:
+                        raise Denied(f"Unsafe or unavailable path: {name}")
+                    continue
+                if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+                    raise Denied(f"Unsafe or unavailable path: {name}")
+            try:
+                if not target.resolve().is_relative_to(root.resolve()):
+                    raise Denied(f"Unsafe or unavailable path: {name}")
+            except OSError as exc:
+                raise Denied(f"Unsafe or unavailable path: {name}") from exc
+        check_components()
+        try:
+            existing = target.lstat()
+        except FileNotFoundError:
+            existing = None
+        if existing is not None:
+            if stat.S_ISLNK(existing.st_mode):
+                raise Denied(f"Unsafe or unavailable path: {name}")
+            if not stat.S_ISREG(existing.st_mode):
+                raise Denied("Only regular, non-hardlinked files are writable")
+            if getattr(existing, "st_nlink", 1) != 1:
+                raise Denied("Only regular, non-hardlinked files are writable")
+        if not parent.is_dir() or parent.is_symlink():
+            raise Denied(f"Unsafe or unavailable path: {name}")
+        fd, temporary = tempfile.mkstemp(prefix=".new-", dir=parent)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            check_components()
+            os.replace(temporary, target)
+            temporary = None
+            sync_dir(parent)
+        finally:
+            if temporary is not None:
+                with contextlib.suppress(FileNotFoundError, OSError):
+                    os.unlink(temporary)
+    except (Denied, LimitExceeded):
+        raise
+    except OSError as exc:
+        raise Denied(f"Unsafe or unavailable path: {name}") from exc
+
+
 def page(items, offset: int = 0, limit: int = 1000, *, maximum: int = PREVIEW_BYTES) -> dict:
     """Deterministic bounded list projection, offset is an index in sorted input.
 

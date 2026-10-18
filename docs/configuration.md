@@ -825,28 +825,59 @@ For existing `close`/`merge`/`retire` recovery, re-observe after a failed mutati
 ## Materialize (offline-input adapter: generic host-side warming, no ecosystem logic)
 
 Configures the operator-owned offline-input adapter. `src/mizu/materialize.py`
-(`invoke`) implements the single-invocation contract; `src/mizu/runtime.py`
-(`Context._op_materialize`) implements the grant-gated `materialize` tool.
+(`invoke`, `parse_output`, `load_source`) implements the adapter contract and
+the retained-receipt validation; `src/mizu/fs.py` (`safe_write`) implements
+the atomic relative writer; `src/mizu/runtime.py` (`Context._op_materialize`)
+implements the grant-gated `materialize` tool.
 
 | Key | Default | Description |
 |---|---|---|
 | `command` | `[]` | Trusted argv executable; JSON stdin/stdout, never a shell string. Empty disables |
 | `timeout_seconds` | `20` | Per-invocation deadline (1-16,777,216) |
 | `max_bytes` | `524288` | Maximum adapter request/response payload, 512 KiB (1-16,777,216) |
+| `output_allowed` | `[]` | Exact workspace-relative paths apply may write (at most 64, each at most 4096 chars, relative without traversal); empty disables apply |
 
 Adapter contract: stdin is `{"spec": "..."}` (nonempty declarative description,
 at most 8192 chars, opaque to the product); stdout must be
 `{"content": str, "digest": 64 hex, "cache"?: str}` with `digest` equal to
 sha256 over `fs.canonical(content)` recomputed locally (a mismatch is `Denied`).
+Content must be valid UTF-8 and at most `max_bytes` encoded bytes.
 `cache` (at most 256 chars, no NUL/newlines) names the warmed location for audit
 only. Invocation uses `process.run` with timeout, no shell, `maximum=max_bytes`.
 Trust: operator-owned host program only; never model-provided, never run in the
 sandbox. Results stay `external-untrusted` until applied as ordinary workspace
 edits and verified. Retry/cancellation: single invocation per call under the
 configured timeout; no shell retry. Evidence: per-invocation `materialize/<uuid>.json` receipt named in the response `evidence` path, plus
-the returned digest. Failure: `Denied` on unconfigured adapter, bad spec,
+the returned digest; new invoke receipts also bind `run`/`role`/`kind`. Failure: `Denied` on unconfigured adapter, bad spec,
 timeout, oversize response, nonzero exit, malformed JSON, or digest mismatch.
-Defaults apply when `[materialize]` is absent so existing configs keep loading.
+Defaults apply when `[materialize]` is absent so existing configs keep loading (absent `output_allowed` means empty, apply disabled).
+
+Apply mode shares the same `materialize` grant (no new capability): the tool
+accepts exactly one of `{spec}` or `{apply: {run, evidence_id}}`, validated
+exclusively at runtime. Apply is writable-workspace only and takes no
+caller path or content: the destination comes only from the top-level string
+`output` in the retained receipt's JSON spec, and the bytes only from the
+retained digest-bound `result.content` (exact UTF-8 bytes). The spec is
+otherwise opaque; malformed JSON, duplicate keys, non-finite numbers, or a
+missing/non-string output is `Denied`. Started records, receipts and specs
+all reject duplicate keys and non-finite numbers (including numeric overflow).
+Validation reads `runs/<run>/started.json` (capped at
+64 KiB) and `runs/<run>/materialize/<uuid>.json` (capped at `file_bytes`)
+with the existing safe bounded reads under the current project, requires the
+same project and role, the exact evidence id/path/kind/trust, and a digest
+that recomputes over `fs.canonical(content)` and matches both top-level and
+result digests. Old receipts without top-level `run`/`role` stay valid
+through their `started.json` binding. The output path must match
+`output_allowed` exactly, must not be excluded, must already have its parent
+directory (no parent creation), and is written atomically via
+`fs.safe_write` (POSIX `openat`/`O_NOFOLLOW` pinning, portable
+resolve-and-check fallback): symlinked parents/targets, hardlinks, and
+special files are refused, and failed validation never partially replaces
+the destination. The apply response is a small summary plus a retained
+`materialize/<uuid>.json` audit record (`kind: materialize-apply` with source
+run/evidence, path, digest, bytes, trust), never the content. Apply never
+verifies, commits, or publishes; normal verification and publication gates
+still decide. `output_allowed` defaults to an empty exact allowlist (fail closed).
 
 First use: the adapter warms host caches already mounted read-only via static
 `[sandbox] mounts` (e.g. a cargo/npm cache directory) and/or returns

@@ -38,7 +38,7 @@ inputs. The trusted host adapter never executes model-provided host commands.
 | `insights.py` | Submission identity, revisable proposals with separate audit, decision history, initial work-item seeds | Acceptance or rejection |
 | `work_items.py` | Append-audited records, CAS lifecycle, bounded open pages and by-ID history | Work-item scheduling and policy |
 | `web.py` | Allowed retrieval, policy-bounded protocol observation, and external source receipts | Scientific truth |
-| `materialize.py` | Generic offline-input adapter (spec in, digest-bound content out) | Ecosystem resolution, cache policy |
+| `materialize.py` | Generic offline-input adapter (spec in, digest-bound content out) plus retained-receipt apply validation (output path, digest, allowlist) | Ecosystem resolution, cache policy |
 | `editor.py` | Snapshot export and read/propose MCP | Code editing |
 | `report.py` | Escaped static artifact (Markdown + evidence) with atomic latest pointer | Presentation, retention policy |
 | `services.py` | Render OS service definitions (systemd / launchd / Task Scheduler) | Implicitly start or arm |

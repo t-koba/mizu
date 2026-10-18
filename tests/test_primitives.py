@@ -14,7 +14,7 @@ from support import Fixture, ROOT
 from mizu.budget import Budget
 from mizu.config import load
 from mizu.errors import Busy, ConfigError, Denied, LimitExceeded
-from mizu.fs import atomic_write, canonical, digest, lock, relative_parts, safe_read
+from mizu.fs import atomic_write, canonical, digest, lock, relative_parts, safe_read, safe_write
 from mizu.pi import credentials
 from mizu.process import environment, run
 
@@ -33,6 +33,19 @@ class FileTests(unittest.TestCase):
         if os.name != "nt":
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
         self.assertFalse(list(path.parent.glob(".new-*")))
+
+    def test_safe_write_zero_write_preserves_destination(self):
+        from mizu import platform
+        if not (platform.HAS_OPENAT and platform.HAS_DIR_FD):
+            self.skipTest("openat writer is unavailable")
+        target = self.root / "keep.txt"
+        target.write_bytes(b"original")
+        with patch("mizu.fs.os.write", return_value=0) as write:
+            with self.assertRaises(Denied):
+                safe_write(self.root, "keep.txt", b"new")
+            write.assert_called_once()
+        self.assertEqual(target.read_bytes(), b"original")
+        self.assertFalse(list(self.root.glob(".new-*")))
 
     def test_replace_retries_transient_permission_error(self):
         path = self.root / "a/b.txt"

@@ -220,6 +220,7 @@ command = []                 # Trusted argv executable for offline-input materia
 timeout_seconds = 20         # Per-invocation deadline for the adapter.
 max_bytes = 524288           # Maximum adapter request/response payload (512 KiB).
 diagnostic_bytes = 2048      # Failed adapter stderr tail sent to the model; 0 disables, maximum 8192.
+output_allowed = []          # Exact workspace-relative paths apply may write (at most 64); empty disables apply.
 
 [roles.worker]
 profile = "primary"
