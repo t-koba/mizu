@@ -205,7 +205,9 @@ def explain(config, project, role_name: str) -> dict:
     role = config.roles[role_name]
     health = _role_record(project, role_name, "health",
                           ("consecutive_failures", "last_run", "updated_at"))
-    active = _role_record(project, role_name, "active", ("run", "role", "started_at"))
+    active = _role_record(project, role_name, "active",
+                            ("run", "role", "started_at", "activity",
+                             "activity_since", "activity_seconds", "activity_total_seconds"))
     triggers = {"configured_profile": role.profile, "selector": role.selector,
                 "daemon": role.daemon, "interval_seconds": role.interval_seconds,
                 "calendar": list(role.calendar), "on_change": role.on_change,

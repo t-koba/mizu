@@ -312,6 +312,7 @@ class Context:
         self._activity_current = "other"
         self._activity_seconds: dict[str, float] = {}
         self._activity_counts: dict[str, int] = {}
+        self._activity_published: str | None = None
         self._activity_operation: str | None = None
         self._activity_join: str | None = None
         self._activity_max_requests = 0
@@ -463,8 +464,38 @@ class Context:
             change()
         finally:
             self._activity_current = self._activity_bucket()
+        if self._activity_current != self._activity_published:
+            self._publish_activity()
         if count is not None:
             self._activity_counts[count] = self._activity_counts.get(count, 0) + 1
+
+    def _publish_activity(self) -> None:
+        """Best-effort live activity gauge in the run's active record.
+
+        Writes ``active/<role>.json`` with the current activity bucket, its
+        start time, and cumulative per-bucket seconds whenever the bucket
+        changes. Never raises: unreadable state or a superseded record
+        (another run owns the slot) skips the write. The file stays small
+        and bounded; full cumulative totals remain in the run record.
+        """
+        try:
+            from .fs import read_json as _read, write_json as _write
+            path = self.project.root / "active" / f"{self.role.name}.json"
+            record = _read(path, {})
+            if not isinstance(record, dict) or record.get("run") != self.run_dir.name:
+                return
+            seconds = dict(self._activity_seconds)
+            total = sum(seconds.values())
+            seconds[self._activity_current] = seconds.get(self._activity_current, 0.0)
+            record = {**record,
+                      "activity": self._activity_current,
+                      "activity_since": now(),
+                      "activity_seconds": {key: round(value, 3) for key, value in sorted(seconds.items())},
+                      "activity_total_seconds": round(total, 3)}
+            _write(path, record)
+            self._activity_published = self._activity_current
+        except Exception:
+            return
 
     def activity_summary(self) -> dict:
         """Return bounded exclusive wall-time totals for this Context only."""

@@ -113,8 +113,15 @@ interrupted request remains unclosed); it does not measure or attribute
 provider-side wait. Tool spans cover Mizu bridge operations; the three
 `local_exec:*` spans cover Mizu exec, experiment, and verification handlers.
 Opaque provider work and native tools are not timed. The aggregate is persisted
-at run boundaries, not live-active telemetry, and does not report global
-concurrency.
+at run boundaries and does not report global concurrency. A live gauge of the
+same buckets is published alongside: whenever the current bucket changes, the
+runtime best-effort rewrites `active/<role>.json` with `activity` (the current
+bucket), `activity_since` (when the bucket started), and cumulative
+`activity_seconds` plus `activity_total_seconds`. The gauge preserves the
+admission fields (`run`, `role`, `started_at`) and never overwrites a record
+whose run id no longer matches, so a superseded write cannot clobber a newer
+run. Explain surfaces the gauge read-only in the `active` block; `yieldability`
+remains `unknown` because the gauge is an observation, not a scheduler verdict.
 
 ## State and history
 

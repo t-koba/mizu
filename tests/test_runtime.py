@@ -822,6 +822,54 @@ class PromptProjectionTests(Fixture):
                 self.assertIn("open_work_items", json.loads(prompt))
                 self.assertEqual(json.loads(prompt)["open_work_items"]["overflow_count"], 0)
 
+    def test_active_record_reports_current_activity(self):
+        import json
+        from mizu.fs import read_json, write_json
+        ctx = self.context("worker")
+        active = ctx.project.root / "active" / "worker.json"
+        write_json(active, {"run": ctx.run_dir.name, "role": "worker",
+                            "started_at": "2026-10-18T00:00:00+00:00"})
+        ctx.handle("read", {"path": "app.py"})
+        record = read_json(active)
+        self.assertEqual(record["run"], ctx.run_dir.name)
+        self.assertEqual(record["role"], "worker")
+        self.assertIn("tool:read", record["activity_seconds"])
+        # The active file is a live gauge, not a stable contract: only the
+        # current bucket is asserted for presence, not an exact value.
+        self.assertIn(record["activity"], {"tool:read", "other"})
+        self.assertIn("activity_since", record)
+
+    def test_active_record_ignores_superseded_run_and_explain_tolerates_legacy(self):
+        from mizu.fs import read_json, write_json
+        from mizu.explain import explain
+        ctx = self.context("worker")
+        active = ctx.project.root / "active" / "worker.json"
+        write_json(active, {"run": "not-this-run", "role": "worker",
+                            "started_at": "2026-10-18T00:00:00+00:00"})
+        ctx._activity_change(lambda: setattr(ctx, "_activity_operation", "read"))
+        # A superseded run id is never overwritten by a stale context.
+        self.assertEqual(read_json(active)["run"], "not-this-run")
+        # A legacy record without activity keys still explains as current.
+        write_json(active, {"run": ctx.run_dir.name, "role": "worker",
+                            "started_at": "2026-10-18T00:00:00+00:00"})
+        reported = explain(self.config, ctx.project, "worker")["role_facts"]["active"]
+        self.assertEqual(reported["status"], "current")
+        self.assertNotIn("activity", reported["record"])
+
+    def test_explain_reports_live_activity(self):
+        from mizu.fs import read_json, write_json
+        from mizu.explain import explain
+        ctx = self.context("worker")
+        active = ctx.project.root / "active" / "worker.json"
+        write_json(active, {"run": ctx.run_dir.name, "role": "worker",
+                            "started_at": "2026-10-18T00:00:00+00:00"})
+        ctx._activity_change(lambda: setattr(ctx, "_activity_operation", "read"))
+        reported = explain(self.config, ctx.project, "worker")["role_facts"]["active"]
+        self.assertEqual(reported["status"], "current")
+        self.assertEqual(reported["record"]["activity"], "tool:read")
+        self.assertIn("tool:read", reported["record"]["activity_seconds"])
+        self.assertIn("activity_since", reported["record"])
+
     def test_pending_and_acceptance_are_capability_gated(self):
         import json
         from mizu.runtime import prompt_for
