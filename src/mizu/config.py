@@ -315,6 +315,13 @@ class Limits:
     missing_finish_followups: int = 1
     #: Whether exhausting those turns increments the existing failure brake.
     missing_finish_counts_as_failure: bool = True
+    #: Consecutive missing-finish failures before a persistent session is
+    #: rotated to a fresh conversation on its next already-admitted dispatch
+    #: with unblocked open work (1-100; default 2, strictly below the default
+    #: failure-brake threshold). It never schedules a run; a fully
+    #: blocked/empty queue never rotates. A sealed or otherwise
+    #: non-missing-finish unit resets the streak.
+    missing_finish_recovery_after: int = 2
     output_bytes: int = 262144
     file_bytes: int = 8388608
     snapshot_bytes: int = 268435456
@@ -636,6 +643,7 @@ def load(file: Path) -> Config:
                      "no_progress_recovery_after": (1, 100),
                      "no_progress_backoff_seconds": (0, 86400),
                      "missing_finish_followups": (0, 3),
+                     "missing_finish_recovery_after": (1, 100),
                      "free_disk_mb": (0, 1073741824)}
     allowed_progress_signals = {"tool", "code", "state", "decision", "insight", "input"}
     for k, v in lim.items():

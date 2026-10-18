@@ -33,7 +33,8 @@ from .fs import (canonical, digest, lock, mkdir, now, read_json, relative_parts,
                    safe_read, write_json, PREVIEW_BYTES, READ_PAGE_CHARS, page,
                    text_preview, DIGEST)
 from .project import Project
-from .snapshot import (PROGRESS_SIGNALS, no_progress_recovery_due,
+from .snapshot import (MAX_MISSING_FINISH_STREAK, PROGRESS_SIGNALS, missing_finish_recovery_due,
+                       missing_finish_streak, no_progress_recovery_due,
                        progress_disposition, validate_progress)
 from .protocol import DEFINITIONS, validate
 from .report import previous as _previous_report, publish
@@ -120,15 +121,91 @@ def is_infra_wait(exc: BaseException) -> bool:
 
 
 def _record_health_failure(project, role_name, run_id, exc, maximum):
-    """Advance the existing role failure brake once for a terminal failure."""
+    """Advance the existing role failure brake once for a terminal failure.
+
+    The consecutive-failure brake semantics are unchanged. A terminal
+    missing-finish increments the dedicated consecutive-missing-finish
+    streak; any other counted failure resets it to zero. The streak lives
+    in the same health record (``consecutive_missing_finish``) and is
+    bounded by ``MAX_MISSING_FINISH_STREAK``.
+    """
     with contextlib.suppress(OSError, ValueError, TypeError):
         health = read_json(project.root / "health" / f"{role_name}.json", {})
         failures = health.get("consecutive_failures", 0) + 1
+        if isinstance(exc, MissingFinish):
+            streak = missing_finish_streak(health) + 1
+            streak = min(streak, MAX_MISSING_FINISH_STREAK)
+        else:
+            streak = 0
         write_json(project.root / "health" / f"{role_name}.json",
-                   {"consecutive_failures": failures, "last_run": run_id,
-                    "error": str(exc), "updated_at": now()})
+                   {"consecutive_failures": failures, "consecutive_missing_finish": streak,
+                    "last_run": run_id, "error": str(exc), "updated_at": now()})
         if maximum > 0 and failures >= maximum and not isinstance(exc, Cancelled):
             project.set_control(paused=True, reason="Repeated failures; inspect health and run records")
+
+
+def _record_missing_finish_only(project, role_name, run_id, exc):
+    """Count a suppressed missing-finish toward the rotation streak only.
+
+    A missing-finish with ``missing_finish_counts_as_failure`` disabled never
+    touches the consecutive-failure brake or the pause control; it only
+    advances the dedicated consecutive-missing-finish streak so a stuck
+    session still rotates. Failure: never raises.
+    """
+    with contextlib.suppress(OSError, ValueError, TypeError):
+        health = read_json(project.root / "health" / f"{role_name}.json", {})
+        if not isinstance(health, dict):
+            health = {}
+        streak = min(missing_finish_streak(health) + 1, MAX_MISSING_FINISH_STREAK)
+        failures = health.get("consecutive_failures", 0)
+        if type(failures) is not int or failures < 0:
+            failures = 0
+        write_json(project.root / "health" / f"{role_name}.json",
+                   {"consecutive_failures": failures, "consecutive_missing_finish": streak,
+                    "last_run": run_id, "error": str(exc), "updated_at": now()})
+
+
+def _clear_missing_finish_streak(project, role_name):
+    """Reset the missing-finish streak after a non-missing-finish unit.
+
+    Best-effort and byte-preserving when there is nothing to reset: a
+    health record without the streak field (or already zero) is left
+    untouched so bounded/deferred paths stay exactly as before.
+    Failure: never raises.
+    """
+    with contextlib.suppress(OSError, ValueError, TypeError):
+        path = project.root / "health" / f"{role_name}.json"
+        health = read_json(path, {})
+        if not isinstance(health, dict):
+            return
+        if health.get("consecutive_missing_finish", 0) == 0 and "consecutive_missing_finish" not in health:
+            return
+        if missing_finish_streak(health) == 0 and health.get("consecutive_missing_finish") == 0:
+            return
+        health = {**health, "consecutive_missing_finish": 0, "updated_at": now()}
+        write_json(path, health)
+
+
+def _has_unblocked_open_work(project, config) -> bool:
+    """Whether the bounded open-work page shows actionable (open/doing) work.
+
+    Only ``open``/``doing`` rows count; a fully blocked/empty queue (or an
+    unreadable page) never rotates. The check reads one bounded page
+    (``[limits] work_items_prompt``); overflow beyond the page conservatively
+    reads as no rotation. Failure: never raises (False on any error).
+    """
+    try:
+        page = project.work_items.page_open(limit=config.limits.work_items_prompt)
+    except Exception:
+        return False
+    try:
+        items = page.get("items", [])
+        if not isinstance(items, list):
+            return False
+        return any(isinstance(row, dict) and row.get("status") in ("open", "doing")
+                   for row in items)
+    except Exception:
+        return False
 
 
 def is_deferred(exc: BaseException, context=None) -> bool:
@@ -2645,7 +2722,11 @@ def session_prompt(context: Context, role, run_dir: Path) -> tuple:
     due rotation, which propagates so the unit fails before model dispatch
     instead of admitting the old conversation. No-progress recovery also
     rotates a due persistent session before dispatch, even if its session
-    record is missing. Evidence: rotations write ``rotation.json``; dispatches
+    record is missing. Missing-finish recovery likewise rotates a persistent
+    session whose consecutive-missing-finish streak reached
+    ``[limits] missing_finish_recovery_after`` when the bounded open-work
+    page still shows actionable (open/doing) work; a fully blocked/empty
+    queue never rotates. Evidence: rotations write ``rotation.json``; dispatches
     record the mode in ``prompt_projection.json``; failed rotations are stored
     in the run ``error.json`` by the Engine caller. Failure: a due rotation removes
     ``session.json`` so the next dispatch mints a fresh provider session
@@ -2674,9 +2755,26 @@ def session_prompt(context: Context, role, run_dir: Path) -> tuple:
     recovery_reason = (
         f"no-progress units {progress['no_progress_count']} "
         f">={context.config.limits.no_progress_recovery_after}") if recovery_due else None
+    missing_recovery_due = False
+    missing_reason = None
+    try:
+        health_record = read_json(context.project.root / "health" / f"{context.role.name}.json", {})
+        if isinstance(health_record, dict) and missing_finish_recovery_due(health_record, context.config):
+            streak = missing_finish_streak(health_record)
+            if _has_unblocked_open_work(context.project, context.config):
+                missing_recovery_due = True
+                missing_reason = (
+                    f"missing-finish units {streak} "
+                    f">={context.config.limits.missing_finish_recovery_after}")
+    except Exception:
+        missing_recovery_due = False
+        missing_reason = None
     if saved is None:
         if recovery_due:
             record = rotate_session(path, run_dir, recovery_reason)
+            return prompt_for(context), "full", key, record, session_dir
+        if missing_recovery_due:
+            record = rotate_session(path, run_dir, missing_reason)
             return prompt_for(context), "full", key, record, session_dir
         return prompt_for(context), "full", key, None, session_dir
     try:
@@ -2692,6 +2790,9 @@ def session_prompt(context: Context, role, run_dir: Path) -> tuple:
         return prompt_for(context), "full", key, record, session_dir
     if recovery_due:
         record = rotate_session(path, run_dir, recovery_reason)
+        return prompt_for(context), "full", key, record, session_dir
+    if missing_recovery_due:
+        record = rotate_session(path, run_dir, missing_reason)
         return prompt_for(context), "full", key, record, session_dir
     caps = set(context.role.capabilities)
     try:
@@ -3492,7 +3593,8 @@ class Engine:
                     with contextlib.suppress(OSError, ValueError, TypeError, AttributeError, Denied):
                         project.insights.consume_waits(role_name, context.wait_events)
                 write_json(project.root / "health" / f"{role_name}.json",
-                           {"consecutive_failures": 0, "last_run": run_id, "updated_at": now()})
+                           {"consecutive_failures": 0, "consecutive_missing_finish": 0,
+                            "last_run": run_id, "updated_at": now()})
                 return result
             except BaseException as exc:
                 if (isinstance(exc, (RunDeadlineExceeded, DrainYieldExceeded, AuthorityGrantMismatch))
@@ -3515,6 +3617,7 @@ class Engine:
                         # handling (including health accounting) if that fails.
                         exc = record_error
                     else:
+                        _clear_missing_finish_streak(project, role_name)
                         return result
                 if isinstance(exc, ModelFailure) and context is not None and context.admission_error:
                     if getattr(context, "admission_wait", False):
@@ -3574,13 +3677,19 @@ class Engine:
                     if counts_as_failure:
                         _record_health_failure(project, role_name, run_id, exc,
                                                self.config.limits.max_failures)
+                    else:
+                        _clear_missing_finish_streak(project, role_name)
                     return {"run": run_id, "role": role_name, "status": "deferred",
                             "error": str(exc), "selection": decision, "selection_action": handled,
                             **({"selection_retries": selection_retries} if selection_retries else {}),
                             "next_evaluation_at": time.time() + self.config.limits.cooldown_seconds}
                 suppress_missing_finish_brake = (isinstance(exc, MissingFinish)
                                                  and not self.config.limits.missing_finish_counts_as_failure)
-                if not is_deferred(exc, context) and not suppress_missing_finish_brake:
+                if is_deferred(exc, context):
+                    _clear_missing_finish_streak(project, role_name)
+                elif suppress_missing_finish_brake:
+                    _record_missing_finish_only(project, role_name, run_id, exc)
+                else:
                     _record_health_failure(project, role_name, run_id, exc,
                                            self.config.limits.max_failures)
                 raise exc

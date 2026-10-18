@@ -139,6 +139,46 @@ def no_progress_recovery_due(value: dict | None, outcome: str, config,
         return False
 
 
+#: Bounds for the persisted consecutive-missing-finish streak (fail-closed read).
+MAX_MISSING_FINISH_STREAK = 1073741824
+
+
+def missing_finish_streak(health: dict | None) -> int:
+    """Validated consecutive-missing-finish streak, or 0 for absent/invalid."""
+    try:
+        if not isinstance(health, dict):
+            return 0
+        streak = health.get("consecutive_missing_finish", 0)
+        if type(streak) is not int or not 0 <= streak <= MAX_MISSING_FINISH_STREAK:
+            return 0
+        return streak
+    except Exception:
+        return 0
+
+
+def missing_finish_recovery_due(health: dict | None, config) -> bool:
+    """Whether consecutive missing-finish failures require a fresh session.
+
+    This is an admission-independent signal: it never schedules a run. A
+    persistent session rotates only when another trigger already admits a
+    unit with unblocked open work, so recovery cannot create a
+    missing-finish spin. A fully blocked/empty queue never rotates (checked
+    at dispatch, not here).
+    """
+    if not isinstance(health, dict):
+        return False
+    try:
+        streak = health.get("consecutive_missing_finish", 0)
+        if type(streak) is not int or not 0 <= streak <= MAX_MISSING_FINISH_STREAK:
+            return False
+        threshold = config.limits.missing_finish_recovery_after
+        if type(threshold) is not int:
+            return False
+        return streak >= threshold
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
 def open_store(root: Path, config, *, create_dirs: bool = True) -> "Snapshots":
     """Build a Snapshots view with the operator's limits. Single construction site."""
     limits = config.limits

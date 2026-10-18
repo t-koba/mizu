@@ -101,6 +101,9 @@ class Project:
     def reset_health(self) -> dict:
         """Reset per-role consecutive failure counters (resume rebase).
 
+        Both the failure brake and the consecutive-missing-finish rotation
+        streak reset to zero.
+
         Schema: returns ``{role: 0}`` for each reset record. Bounds: health
         dir only, ``*.json`` regular files. Trust: local operator state.
         Retry: best-effort per file, never raises. Evidence: rewritten health
@@ -120,6 +123,7 @@ class Project:
                 if not isinstance(record, dict):
                     continue
                 record = {**record, "consecutive_failures": 0,
+                          "consecutive_missing_finish": 0,
                           "updated_at": now(), "resumed": True}
                 write_json(path, record)
                 reset[path.stem] = 0
