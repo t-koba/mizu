@@ -1081,7 +1081,7 @@ class Context:
         if self.role.workspace != "write":
             raise Denied("Sync requires a writable workspace")
         try:
-            fetched = _vcs.fetch_refs(self.config.vcs)
+            fetched = _vcs.fetch_refs(self.config.vcs, cancel=self.tools_cancelled)
         except OSError as exc:
             raise Denied(f"Upstream sync is unavailable: {exc}") from exc
         try:
@@ -1158,7 +1158,8 @@ class Context:
         if "artifact" in args:
             params["artifact"] = args["artifact"]
         try:
-            data = _vcs.read_via(self.config.vcs, args["op"], params)
+            data = _vcs.read_via(self.config.vcs, args["op"], params,
+                             cancel=self.tools_cancelled)
         except OSError as exc:
             raise Denied(f"VCS read is unavailable: {exc}") from exc
         record = {"op": args["op"], "branch": args.get("branch"), "trust": "external-untrusted",
@@ -1179,7 +1180,8 @@ class Context:
         code_digest = captured["code_digest"]
         approval = _vcs.require_go_approval(self.project, args["branch"], code_digest)
         try:
-            data = _vcs.publish_via(self.config.vcs, args["op"], {"branch": args["branch"], "code_digest": code_digest})
+            data = _vcs.publish_via(self.config.vcs, args["op"], {"branch": args["branch"], "code_digest": code_digest},
+                                    cancel=self.tools_cancelled)
         except OSError as exc:
             raise Denied(f"VCS publication is unavailable: {exc}") from exc
         record = {"published": True, "op": args["op"], "branch": args["branch"],
@@ -1216,7 +1218,7 @@ class Context:
                          "retiring")
         try:
             data = _vcs.retire_via(self.config.vcs, args.get("branch"),
-                                   args.get("expected_sha"))
+                                   args.get("expected_sha"), cancel=self.tools_cancelled)
         except OSError as exc:
             raise Denied(f"Branch retirement is unavailable: {exc}") from exc
         record = {"retired": True, "branch": data["branch"], "sha": data["sha"],
@@ -1268,7 +1270,8 @@ class Context:
 
             try:
                 data = _vcs.close_if_adopted_via(
-                    self.config.vcs, pins, before_invoke=reserve_conditional_close)
+                    self.config.vcs, pins, cancel=self.tools_cancelled,
+                    before_invoke=reserve_conditional_close)
             except OSError as exc:
                 raise Denied(f"Conditional proposal close is unavailable: {exc}") from exc
             record = {"disposed": data["closed"], "op": data["op"],
@@ -1298,7 +1301,7 @@ class Context:
         try:
             data = _vcs.dispose_via(self.config.vcs, args["op"], args.get("id"),
                                     args.get("sha"), args.get("base"),
-                                    args.get("target"))
+                                    args.get("target"), cancel=self.tools_cancelled)
         except OSError as exc:
             raise Denied(f"Proposal disposition is unavailable: {exc}") from exc
         record = {"disposed": True, "op": args["op"], "id": data["id"],
@@ -1323,7 +1326,8 @@ class Context:
         if self.role.workspace == "none":
             raise Denied("This role has no workspace")
         try:
-            data = _materialize.invoke(self.config.materialize, args["spec"])
+            data = _materialize.invoke(self.config.materialize, args["spec"],
+                                       cancel=self.tools_cancelled)
         except OSError as exc:
             raise Denied(f"Materialization is unavailable: {exc}") from exc
         record = {"spec": args["spec"], "digest": data["digest"],

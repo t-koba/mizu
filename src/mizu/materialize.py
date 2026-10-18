@@ -40,7 +40,7 @@ SPEC_MAX = 8192
 CACHE_ID_MAX = 256
 
 
-def invoke(settings: dict, spec: str) -> dict:
+def invoke(settings: dict, spec: str, *, cancel=lambda: False) -> dict:
     """Invoke the configured adapter once and return its validated receipt.
 
     Schema: `spec` is a nonempty declarative description (opaque to the
@@ -66,7 +66,7 @@ def invoke(settings: dict, spec: str) -> dict:
     if len(payload) > maximum:
         raise Denied("Materialize request exceeds byte limit")
     result = run(list(command), timeout=timeout, maximum=maximum,
-                 input_data=payload + b"\n")
+                 input_data=payload + b"\n", cancel=cancel)
     if result.reason == "timeout":
         raise Denied("Configured materialize program timed out")
     if result.reason == "output_limit":

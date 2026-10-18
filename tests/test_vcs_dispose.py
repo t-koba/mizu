@@ -4,7 +4,7 @@ import json
 import sys
 import unittest
 import uuid
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 from support import Fixture
 from mizu import vcs
@@ -469,7 +469,8 @@ class VcsCloseIfAdoptedTests(Fixture):
         with patch.object(vcs, "invoke", return_value=payload) as invoke:
             with self.assertRaises(Denied):
                 vcs.close_if_adopted_via({"close_grant": True}, dict(CLOSE_IF_PINS))
-            invoke.assert_called_once_with({"close_grant": True}, close_if_args())
+            invoke.assert_called_once_with({"close_grant": True}, close_if_args(),
+                                                cancel=ANY)
 
     def test_conditional_close_requires_every_receipt_field(self):
         valid = close_if_receipt(closed=False)

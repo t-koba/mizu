@@ -69,7 +69,7 @@ def _reject_terminal_controls(value: str, message: str) -> None:
             raise Denied(message)
 
 
-def invoke(settings: dict, request: dict) -> dict:
+def invoke(settings: dict, request: dict, *, cancel=lambda: False) -> dict:
     """Invoke the configured adapter once and return its JSON object.
 
     Schema: ``request`` is a JSON object with a string ``op`` field;
@@ -94,7 +94,7 @@ def invoke(settings: dict, request: dict) -> dict:
     if len(payload) > maximum:
         raise Denied("VCS adapter request exceeds byte limit")
     result = run(list(command), timeout=timeout, maximum=maximum,
-                 input_data=payload + b"\n")
+                 input_data=payload + b"\n", cancel=cancel)
     if result.reason == "timeout":
         raise Denied("Configured VCS program timed out")
     if result.reason == "output_limit":
@@ -142,14 +142,14 @@ def _check_ref_name(name) -> None:
         raise Denied("Invalid VCS ref name")
 
 
-def fetch_refs(settings: dict) -> dict:
+def fetch_refs(settings: dict, *, cancel=lambda: False) -> dict:
     """Fetch upstream refs via ``{"op": "fetch"}`` and validate the shape.
 
     Schema: response ``{"refs": {name: sha}}`` validated by
     ``validate_refs``. Bounds: at most 4096 refs. Trust: refs are
     external-untrusted until merged and verified. Failure: ``Denied``.
     """
-    data = invoke(settings, {"op": "fetch"})
+    data = invoke(settings, {"op": "fetch"}, cancel=cancel)
     return {"refs": validate_refs(data.get("refs")), "trust": "external-untrusted"}
 
 
@@ -737,7 +737,7 @@ def parse_acquired(data: dict, *, scope: str, base_sha=None) -> dict:
             "digest": content_digest, "content": content}
 
 
-def read_via(settings: dict, op: str, params: dict) -> dict:
+def read_via(settings: dict, op: str, params: dict, *, cancel=lambda: False) -> dict:
     """Invoke a read-only adapter operation (``status``/``log``/``comments``/``acquire``/``artifacts``/``artifact``).
 
     Schema: ``params`` must include ``branch`` for addressed reads
@@ -792,7 +792,7 @@ def read_via(settings: dict, op: str, params: dict) -> dict:
         request = {"op": op, "id": proposal_id, "sha": acquire_sha, "scope": scope}
         if base_sha is not None:
             request["base_sha"] = base_sha
-        acquired = parse_acquired(invoke(settings, request), scope=scope, base_sha=base_sha)
+        acquired = parse_acquired(invoke(settings, request, cancel=cancel), scope=scope, base_sha=base_sha)
         if acquired["id"] != proposal_id or acquired["sha"] != acquire_sha:
             raise Denied("Acquired content must match the requested proposal revision")
         if acquired["digest"] != acquire_digest(acquired["content"]):
@@ -814,7 +814,7 @@ def read_via(settings: dict, op: str, params: dict) -> dict:
         request = {"op": op, "branch": branch}
         if sha is not None:
             request["sha"] = sha
-        rows = parse_artifacts(invoke(settings, request))
+        rows = parse_artifacts(invoke(settings, request, cancel=cancel))
         out = {"op": op, "branch": branch, "artifacts": rows,
                "trust": "external-untrusted"}
         if sha is not None:
@@ -836,7 +836,7 @@ def read_via(settings: dict, op: str, params: dict) -> dict:
         request = {"op": op, "branch": branch, "artifact": name}
         if sha is not None:
             request["sha"] = sha
-        got = parse_artifact(invoke(settings, request), name=name)
+        got = parse_artifact(invoke(settings, request, cancel=cancel), name=name)
         if got["digest"] != acquire_digest(got["content"]):
             raise Denied("Artifact content digest mismatch")
         out = {"op": op, "branch": branch, "artifact": name,
@@ -869,7 +869,7 @@ def read_via(settings: dict, op: str, params: dict) -> dict:
         if not isinstance(sha, str) or not _SHA.fullmatch(sha):
             raise Denied("Invalid VCS sha filter")
         request["sha"] = sha
-    data = invoke(settings, request)
+    data = invoke(settings, request, cancel=cancel)
     if op == "status":
         return {"op": op, "branch": branch, "checks": parse_status_checks(data),
                 "trust": "external-untrusted"}
@@ -1223,7 +1223,7 @@ def live_proposal_refs(project, branch: str) -> list:
     return sorted(blocking)
 
 
-def publish_via(settings: dict, op: str, params: dict) -> dict:
+def publish_via(settings: dict, op: str, params: dict, *, cancel=lambda: False) -> dict:
     """Invoke a mutating adapter operation (``push``/``pr``) after approval.
 
     Schema: ``params`` must include ``branch`` and ``code_digest`` (64 hex
@@ -1246,7 +1246,8 @@ def publish_via(settings: dict, op: str, params: dict) -> dict:
     code_digest = params.get("code_digest")
     if not isinstance(code_digest, str) or not _DIGEST.fullmatch(code_digest):
         raise Denied("Invalid code digest for publication")
-    data = invoke(settings, {"op": op, "branch": branch, "digest": code_digest})
+    data = invoke(settings, {"op": op, "branch": branch, "digest": code_digest},
+                     cancel=cancel)
     if not isinstance(data, dict):
         raise Denied("VCS adapter must return a JSON object")
     if data.get("digest") != code_digest:
@@ -1323,7 +1324,7 @@ def classify_branch(ref, *, owned_prefixes=(), protected_refs=()) -> str:
     return "other"
 
 
-def retire_via(settings: dict, branch, expected_sha) -> dict:
+def retire_via(settings: dict, branch, expected_sha, *, cancel=lambda: False) -> dict:
     """Delete an owned temporary integration branch with expected-SHA protection.
 
     Schema: ``settings`` carries the operator grant (``retire_grant``
@@ -1364,7 +1365,8 @@ def retire_via(settings: dict, branch, expected_sha) -> dict:
     if classification != "owned":
         raise Denied(f"Only owned integration branches retire; '{branch}' is {classification}")
     data = invoke(settings, {"op": "retire", "branch": branch,
-                             "expected_sha": expected_sha})
+                             "expected_sha": expected_sha},
+                    cancel=cancel)
     if not isinstance(data, dict):
         raise Denied("VCS adapter must return a JSON object")
     if (data.get("branch") != branch or data.get("sha") != expected_sha
@@ -1407,7 +1409,8 @@ MAX_CLOSE_IF_ADOPTED_CHANGED_PATHS = 2000
 TERMINAL_STATES = frozenset({"closed", "merged"})
 
 
-def close_if_adopted_via(settings: dict, pins: dict, *, before_invoke=None) -> dict:
+def close_if_adopted_via(settings: dict, pins: dict, *, cancel=lambda: False,
+                           before_invoke=None) -> dict:
     """Ask the trusted adapter to close only when its adoption predicate holds.
 
     Schema: requires ``settings.close_grant is True`` and exactly the pins
@@ -1454,7 +1457,7 @@ def close_if_adopted_via(settings: dict, pins: dict, *, before_invoke=None) -> d
         if not callable(before_invoke):
             raise Denied("Invalid conditional-close dispatch guard")
         before_invoke()
-    data = invoke(settings, request)
+    data = invoke(settings, request, cancel=cancel)
     if not isinstance(data, dict):
         raise Denied("VCS adapter must return a conditional-close receipt")
     required = set(CLOSE_IF_ADOPTED_PINS) | {"predicate", "closed", "reason"}
@@ -1499,7 +1502,7 @@ def close_if_adopted_via(settings: dict, pins: dict, *, before_invoke=None) -> d
 
 
 def dispose_via(settings: dict, op: str, proposal_id: str, expected_sha,
-                  base_sha, target) -> dict:
+                  base_sha, target, *, cancel=lambda: False) -> dict:
     """Resolve an external proposal to its terminal state at exact endpoints.
 
     Schema: ``settings`` carries the per-action operator grant
@@ -1542,7 +1545,8 @@ def dispose_via(settings: dict, op: str, proposal_id: str, expected_sha,
         raise Denied("Invalid expected proposal base")
     check_branch(target)
     data = invoke(settings, {"op": op, "id": proposal_id, "sha": expected_sha,
-                             "base": base_sha, "target": target})
+                             "base": base_sha, "target": target},
+                    cancel=cancel)
     if not isinstance(data, dict) or set(data) != {"id", "sha", "base", "target", "state"}:
         raise Denied("VCS adapter must confirm the disposed proposal")
     if data.get("id") != proposal_id or data.get("sha") != expected_sha:
