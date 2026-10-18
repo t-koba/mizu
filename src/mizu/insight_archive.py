@@ -51,6 +51,64 @@ def _connect(root: Path, *, write: bool = False):
         raise Denied("Insight archive unavailable") from exc
 
 
+@contextlib.contextmanager
+def _immutable_connect(root: Path):
+    """No-recovery, no-lock connection for read-only projections.
+
+    The writable ``_connect`` reader uses ``mode=rw`` so a hot rollback
+    journal left by a killed writer is recovered on open. Read-only CLI
+    projections must never trigger that recovery, create the database, or
+    take SQLite locks. This path therefore refuses any ``-journal``,
+    ``-wal`` or ``-shm`` sidecar before opening and uses a ``mode=ro``
+    immutable handle; any sidecar fails closed without touching files.
+    """
+    path = root.resolve() / NAME
+    for suffix in ("-journal", "-wal", "-shm"):
+        sidecar = Path(str(path) + suffix)
+        try:
+            sidecar.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise Denied("Insight archive unavailable") from exc
+        raise Denied("Insight archive has pending recovery; refusing read-only access")
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        yield None
+        return
+    except OSError as exc:
+        raise Denied("Insight archive unavailable") from exc
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise Denied("Unsafe insight archive path")
+    try:
+        with contextlib.closing(sqlite3.connect(path.as_uri() + "?mode=ro&immutable=1",
+                                               uri=True)) as db:
+            if db.execute("PRAGMA journal_mode").fetchone()[0] != "delete":
+                raise Denied("Insight archive requires DELETE journal mode")
+            yield db
+    except (sqlite3.Error, OSError, LimitExceeded) as exc:
+        raise Denied("Insight archive unavailable") from exc
+
+
+def read_immutable(root: Path, insight_id: str, *, include_unavailable: bool = False) -> dict | None:
+    """No-recovery, no-lock archive read for read-only projections.
+
+    Returns the newest row for ``insight_id`` or None when the archive is
+    absent/unknown, without recovering journals, creating files, or taking
+    locks. Any pending ``-journal``/``-wal``/``-shm`` sidecar fails closed.
+    """
+    with _immutable_connect(root) as db:
+        if db is None:
+            return None
+        row = db.execute("SELECT record FROM insights WHERE id=? ORDER BY rev DESC LIMIT 1",
+                         (insight_id,)).fetchone()
+        record = json.loads(row[0]) if row else None
+        if record and record.get("body_unavailable") is True and not include_unavailable:
+            raise Denied("Insight body unavailable; legacy retention removed it before archival")
+        return record
+
+
 def _schema(db) -> None:
     """Lazy atomic migration on archive writes/pages; preserve row bytes/order.
 

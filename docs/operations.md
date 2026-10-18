@@ -330,6 +330,53 @@ identity; otherwise the current origin revision is unknown and the item is
 reported stale, not treated as a missing-work-item error. Default `insight list`,
 live pages and routine model context remain live-only.
 
+### Work-item view (read-only)
+
+```sh
+mizu work-items demo
+mizu work-items demo --limit 25 --cursor '<next_cursor>' --closed 10
+mizu work-items demo --limit 2 --closed 0
+```
+
+`mizu work-items PROJECT [--limit N] [--cursor TOKEN] [--closed N]` prints one JSON
+document `{"open": <page_open shape>, "closed": <bounded closed page>}` and never
+writes, locks, recovers or deletes. The project is opened with
+`Project(..., read_only=True)`.
+
+- Options and defaults: `--limit` is the open page size (default 25, exact int
+  1–100); `--cursor` is the opaque open-page continuation (default none);
+  `--closed` is the number of newest closed items to include (default 10, exact
+  int 0–100, where 0 reports the closed `total` with no rows). Invalid
+  limits/cursors fail closed with no partial page.
+- `open` is the exact `page_open` shape: items ordered by status
+  (doing, blocked, open), then oldest `created_at` and ID; the exclusive input
+  `cursor`, `next_cursor` (non-null exactly when another matching item follows),
+  `overflow_count` (matching rows after the cursor beyond this page),
+  `truncated` (`overflow_count > 0`), `unseeded_decisions` and
+  `coverage_complete`. Rows carry the current origin projection and bounded
+  reason previews; rows are at most 8192 canonical bytes and the response at
+  most 1 MiB.
+- `closed` holds the newest seeded terminal items first (`updated_at`
+  descending with a stable ascending ID tie-break), plus `total` seeded closed
+  count, `overflow_count` and `truncated`. Each row carries `id`, `title`,
+  `status` (`done` or `dropped`), `origin`, `rev`, `updated_at`, `actor`, a
+  bounded `reason_preview` with `reason_truncated` when a reason is stored, and
+  `snapshot_id` (the verified snapshot for `done`, null for `dropped`). Rows
+  are at most 8192 canonical bytes and the response at most 1 MiB.
+  Drop-only legacy sidecars without a seed stay in the `work_items_legacy_read`
+  audit, not here.
+- Live cursor semantics: the open cursor is a last-key bookmark over a live
+  view. Closing earlier items does not offset-skip later rows, but membership
+  is not frozen: items created, closed or transitioned between calls can move
+  rows. Restart without a cursor for a fresh traversal.
+- Read-only, no recovery: the view never acquires `insights.lock`, never
+  creates the lock file, and never removes atomic-write leftovers. Validated
+  `.new-*` orphans/aliases are ignored (never promoted); unsafe or unexpected
+  names, malformed records, incomplete chains and bound violations fail closed.
+  Runtime prompt projection and the `work_items_read` / `work_items_legacy_read`
+  operations keep their existing locked, recovering `page_open` / `page_legacy`
+  behavior.
+
 ## バックアップと復元
 
 プロジェクトを一時停止（`pause`）した状態で取得します:

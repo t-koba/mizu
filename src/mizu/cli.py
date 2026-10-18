@@ -99,6 +99,11 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--wait", default=None, help="Structured defer wait: deadline:<ISO-at> | code_change | insight_decided:<id> | dependency:<recipient>:<insight>:<rev>:<accept|modify|reject>")
     p.add_argument("--expected-rev", type=int, default=None, help="Compare-and-swap revision for revise/decide/withdraw")
     p.add_argument("--origin", default=None, help="Opaque origin label recorded alongside the operator authority (submit only)")
+    p = sub.add_parser("work-items", help="Show bounded open and recently closed work items; read-only, no recovery")
+    p.add_argument("project", help="Managed project name")
+    p.add_argument("--limit", type=int, default=25, help="Open items per page (1-100; default: 25)")
+    p.add_argument("--cursor", default=None, help="Opaque open-page continuation from a previous call")
+    p.add_argument("--closed", type=int, default=10, help="Closed items to include, newest first (0-100; default: 10)")
     p = sub.add_parser("editor", help="Export a capsule or serve the Editor MCP")
     esub = p.add_subparsers(dest="editor_command", required=True)
     p = esub.add_parser("export", help="Export an immutable Editor capsule")
@@ -373,6 +378,22 @@ def _cmd_storage(config, project, args):
     return audit(project)
 
 
+def _cmd_work_items(config, project, args):
+    """Read-only open plus newest-closed work-item view; no locks or recovery.
+
+    Schema: ``{"open": <page_open shape>, "closed": <bounded closed page>}``.
+    The open page keeps the exact ``page_open`` ordering, cursor, overflow,
+    ``unseeded_decisions`` and ``coverage_complete`` fields. The closed page
+    holds the newest seeded terminal items first. The project must already be
+    opened read-only by the caller.
+    """
+    open_page = project.work_items.page_open_readonly(
+        cursor=args.cursor, limit=args.limit if args.limit is not None else 25)
+    closed_page = project.work_items.page_closed_readonly(
+        limit=args.closed if args.closed is not None else 10)
+    return {"open": open_page, "closed": closed_page}
+
+
 _PROJECT_COMMANDS = {
     "status": _cmd_status, "arm": _cmd_arm, "disarm": _cmd_disarm,
     "pause": _cmd_pause, "resume": _cmd_resume, "wake": _cmd_wake, "drain": _cmd_drain,
@@ -490,6 +511,10 @@ def execute(args):
         # `editor export` needs a project; `editor mcp` handled above.
         project = Project(config, args.project)
         return _cmd_editor_export(config, project, args)
+    if args.command == "work-items":
+        from .project import Project as _ReadOnlyProject
+        project = _ReadOnlyProject(config, args.project, read_only=True)
+        return _cmd_work_items(config, project, args)
     project = Project(config, args.project)
     handler = _PROJECT_COMMANDS.get(args.command)
     if handler is None:
