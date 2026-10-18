@@ -787,10 +787,18 @@ class PromptProjectionTests(Fixture):
         import json
         from mizu.runtime import prompt_for, prompt_delta_for, UNIT_BEGINS_STATEMENT
         self.assertTrue(UNIT_BEGINS_STATEMENT)
-        for prompt in (prompt_for(self.context("worker")), prompt_delta_for(self.context("worker"), [])):
+        worker = self.context("worker")
+        for prompt in (prompt_for(worker), prompt_delta_for(worker, [])):
             decoded = json.loads(prompt)
-            self.assertEqual(list(decoded)[0], "unit")
+            self.assertEqual(list(decoded)[:2], ["unit", "run"])
             self.assertEqual(decoded["unit"], UNIT_BEGINS_STATEMENT)
+            self.assertEqual(decoded["run"], {"id": worker.run_dir.name})
+        worker_dir = worker.run_dir
+        (worker_dir / "started.json").write_text(
+            '{"run": %s, "started_at": "2026-10-18T00:00:00+00:00"}' % json.dumps(worker_dir.name))
+        for prompt in (prompt_for(worker), prompt_delta_for(worker, [])):
+            self.assertEqual(json.loads(prompt)["run"],
+                             {"id": worker_dir.name, "started_at": "2026-10-18T00:00:00+00:00"})
 
     def test_finish_refuses_unknown_next_profile(self):
         from mizu.errors import Denied
@@ -1369,7 +1377,7 @@ class PromptOrderTests(Fixture):
         from mizu.runtime import prompt_for, prompt_delta_for
         ctx = self.context("worker")
         self.assertEqual(list(json.loads(prompt_for(ctx)).keys()),
-                         ["unit", "goal", "published_snapshot", "recent_snapshots",
+                         ["unit", "run", "goal", "published_snapshot", "recent_snapshots",
                           "workspace", "workspace_mode", "pending_insights",
                           "open_insights", "open_work_items",
                           "decision_events", "decision_task", "wait_events", "obligations",
@@ -1379,7 +1387,7 @@ class PromptOrderTests(Fixture):
                           "timezone"])
         self.assertEqual(
             list(json.loads(prompt_delta_for(ctx, [])).keys()),
-            ["unit", "goal_digest", "published_snapshot", "snapshot_delta",
+            ["unit", "run", "goal_digest", "published_snapshot", "snapshot_delta",
              "pending_insights", "open_insights", "open_work_items", "decision_events", "decision_task", "wait_events", "obligations",
              "research_state", "workspace", "workspace_mode",
              "acceptance_commands", "ci_branch", "ci_failures",

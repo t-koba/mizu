@@ -2501,6 +2501,22 @@ UNIT_BEGINS_STATEMENT = (
     "seal: do useful work within your role and capabilities, then finish "
     "with mizu_finish and a short state.")
 
+def _prompt_run_identity(context: Context) -> dict:
+    """Bounded run identity for the opening prompt (never fails).
+
+    The run directory name is the run id. ``started_at`` is read back from
+    the run's own ``started.json`` when present; prompts built before it is
+    written (or with an unreadable record) carry the id alone.
+    """
+    identity = {"id": context.run_dir.name}
+    try:
+        started = read_json(context.run_dir / "started.json", {})
+    except Exception:
+        started = {}
+    if isinstance(started, dict) and isinstance(started.get("started_at"), str):
+        identity["started_at"] = started["started_at"]
+    return identity
+
 
 def prompt_for(context: Context) -> str:
     caps = set(context.role.capabilities)
@@ -2524,6 +2540,7 @@ def prompt_for(context: Context) -> str:
     if "vcs_read" in caps:
         ci_failures, ci_failures_may_be_truncated = ci_failures_projection(context.project)
     return json.dumps({"unit": UNIT_BEGINS_STATEMENT,
+                       "run": _prompt_run_identity(context),
                        "goal": context.goal,
                        "published_snapshot": {k: context.snapshot[k] for k in (
                            "id", "code_digest", "created_at", "state", "summary", "verification")},
@@ -2552,8 +2569,9 @@ def prompt_for(context: Context) -> str:
 def prompt_delta_for(context: Context, pending: list) -> str:
     """Append-only delta for a resumed persistent session.
 
-    Schema: ``goal_digest`` pin plus the pinned ``published_snapshot`` and a
-    small ``snapshot_delta`` (previous/current ids), then only the pending
+    Schema: the constant ``unit`` opening (a new work unit has begun, with
+    its run identity), then the ``goal_digest`` pin, the pinned ``published_snapshot`` and a small
+    ``snapshot_delta`` (previous/current ids), then only the pending
     proposals not yet offered, an ``open_insights`` statement of the still
     undecided backlog (ids plus total, so an already-offered insight never
     reads as done), the always-present bounded ``open_work_items`` page,
@@ -2588,6 +2606,7 @@ def prompt_delta_for(context: Context, pending: list) -> str:
     open_work_items = context.project.work_items.page_open(
         limit=context.config.limits.work_items_prompt)
     return json.dumps({"unit": UNIT_BEGINS_STATEMENT,
+                       "run": _prompt_run_identity(context),
                        "goal_digest": context.goal_digest,
                        "published_snapshot": {k: context.snapshot[k] for k in (
                            "id", "code_digest", "created_at", "state", "summary", "verification")},
