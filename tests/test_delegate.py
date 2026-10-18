@@ -59,6 +59,12 @@ class DelegateTests(Fixture):
         started = read_json(child_runs[0] / "started.json")
         self.assertEqual(started["workspace"], str(self.project.workspace))
         self.assertFalse((child_runs[0] / "input").exists())
+        dispatch = read_json(child_runs[0] / "dispatch-attempts.json")["attempts"][0]
+        self.assertEqual(dispatch["parent_run"], result["run"])
+        self.assertEqual(dispatch["class"], "delegate")
+        self.assertEqual(dispatch["role"], "helper")
+        self.assertEqual(dispatch["usage"]["status"], "unknown")
+        self.assertIsNone(dispatch["usage"]["cache_read_tokens"])
         delegation = read_json(child_runs[0] / "delegation.json")
         self.assertEqual(delegation["answer"], "child saw marker")
         self.assertEqual(delegation["activity"]["schema"], 1)

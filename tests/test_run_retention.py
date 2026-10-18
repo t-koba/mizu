@@ -32,8 +32,11 @@ class RunRetentionTests(Fixture):
         events.write_bytes(body)
         diag = run / "diagnostics.txt"
         diag.write_bytes(b"diagnostics")
+        dispatch = run / "dispatch-attempts.json"
+        write_json(dispatch, {"schema": 1, "attempts": []})
         _touch(events, days_old)
         _touch(diag, days_old)
+        _touch(dispatch, days_old)
         # Keep records fresh so only logs age out.
         now = time.time()
         for keep in ("result.json", "started.json", "selection.json"):
@@ -66,6 +69,8 @@ class RunRetentionTests(Fixture):
         self.assertEqual(dry["applied"], False)
         self.assertIn("runs/mid/pi-events.jsonl", dry["event_logs_compressed"])
         self.assertIn("runs/old/pi-events.jsonl", dry["event_logs_removed"])
+        self.assertIn("runs/mid/dispatch-attempts.json", dry["event_logs_compressed"])
+        self.assertIn("runs/old/dispatch-attempts.json", dry["event_logs_removed"])
         self.assertNotIn("runs/recent/pi-events.jsonl", dry["event_logs_compressed"] + dry["event_logs_removed"])
         # Dry run changes nothing.
         self.assertTrue((mid / "pi-events.jsonl").exists())
@@ -73,10 +78,13 @@ class RunRetentionTests(Fixture):
         self.assertTrue((recent / "pi-events.jsonl").exists())
         self.assertFalse((mid / "pi-events.jsonl").exists())
         self.assertTrue((mid / "pi-events.jsonl.gz").exists())
+        self.assertTrue((mid / "dispatch-attempts.json.gz").exists())
         self.assertEqual(gzip.open(mid / "pi-events.jsonl.gz", "rb").read(), b'{"type":"x"}\n')
         self.assertFalse((old / "pi-events.jsonl").exists())
         self.assertFalse((old / "pi-events.jsonl.gz").exists())
         self.assertFalse((old / "diagnostics.txt").exists())
+        self.assertFalse((old / "dispatch-attempts.json").exists())
+        self.assertFalse((old / "dispatch-attempts.json.gz").exists())
         # Records survive every stage.
         for run in (recent, mid, old):
             for keep in ("result.json", "started.json", "selection.json"):

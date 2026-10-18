@@ -260,6 +260,10 @@ def session_record(context, profile, settings):
                 not isinstance(record.get('usage'), dict) or len(canonical(record)) > 262144 or
                 ('created_at' in record and _session_created_at(record) is None)):
             raise ConfigError('Invalid session record; resume cannot be replaced with a new conversation')
+    # A dispatch observer only: peeks have no active record. It must never
+    # affect identity, rotation, resume validation, or model execution.
+    from .dispatch_evidence import selected_session
+    selected_session(context, profile, settings, path)
     return path, record
 
 

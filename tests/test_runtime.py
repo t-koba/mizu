@@ -661,6 +661,11 @@ class EngineTests(Fixture):
             activity = read_json(evidence_path)["activity"]
             self.assertEqual(activity["schema"], 1)
             self.assertGreaterEqual(activity["elapsed_seconds"], 0.0)
+            dispatch = read_json(child_dir / "dispatch-attempts.json")["attempts"][0]
+            self.assertEqual(dispatch["class"], "consult")
+            self.assertEqual(dispatch["parent_run"], read_json(child_dir / "started.json")["parent_run"])
+            self.assertEqual(dispatch["profile"], "alternate" if "error" in answer else "primary")
+            self.assertEqual(dispatch["status"], "raised" if "error" in answer else "returned")
 
     def test_agent_cannot_select_unapproved_consult_model(self):
         with self.assertRaises(ConfigError):
@@ -919,6 +924,7 @@ class PromptProjectionTests(Fixture):
         result = Engine(config, driver=ScriptDriver()).run(self.project, "worker")
         projection = read_json(self.project.root / "runs" / result["run"] / "prompt_projection.json")
         self.assertEqual(projection["run"], result["run"])
+        self.assertEqual(projection["profile"], config.roles["worker"].profile)
         self.assertEqual(projection["snapshot"], before)
         self.assertGreaterEqual(projection["prompt_bytes"], 100)
         self.assertGreaterEqual(projection["recent_snapshots"], 1)
@@ -1304,6 +1310,9 @@ class WrapUpTests(Fixture):
         self.assertIn("finish", grants)
         self.assertEqual(seen[3], ())
         self.assertEqual(attempts, [(1, 1), (2, 2)])
+        dispatches = read_json(self.project.root / "runs" / result["run"] / "dispatch-attempts.json")["attempts"]
+        self.assertEqual([r["execution_attempt"] for r in dispatches], [1, 2])
+        self.assertEqual([r["status"] for r in dispatches], ["raised", "returned"])
 
     def test_wrap_up_prompt_states_bound(self):
         from mizu.errors import LimitExceeded

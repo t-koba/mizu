@@ -469,14 +469,22 @@ class SelectionTests(SelectionFixture):
         self.assertEqual(driver.calls[-1][0].role.engine_tools, role.engine_tools)
 
     def test_pi_durable_unanswered_fallback_keeps_spend_and_usage_scoped(self):
+        alternate = dict(self.config.profiles["alternate"])
+        alternate["engine"] = "codex"
+        self.config = dataclasses.replace(
+            self.config, profiles={**self.config.profiles, "alternate": alternate})
+        self.project.config = self.config
         role, _ = self.setup_selection()
         seen = []
 
         def callback(ctx, prompt, profile):
+            from mizu.engine_config import effective, session_record
+            session_record(ctx, ctx.role.profile, effective(ctx.config, ctx.role, ctx.role.profile))
             # Repeated bridge events in one execute remain idempotent, while
             # the same adapter-local sequence in the next execute is new spend.
             ctx.handle('_budget', {'sequence': 1})
-            ctx.handle('_model_usage', {'sequence': 2, 'usage': {'input': 1},
+            token_input = 'input' if ctx.role.profile == 'primary' else 'input_tokens'
+            ctx.handle('_model_usage', {'sequence': 2, 'usage': {token_input: 1},
                                         'model': {'provider': 'test', 'model': 'model'}})
             seen.append((ctx.role.profile, ctx.attempt_ordinal,
                          ctx.execution_attempt, ctx.request_count))
@@ -493,6 +501,16 @@ class SelectionTests(SelectionFixture):
         observations = json.loads((context.run_dir / 'runtime-usage.json').read_text())['observations']
         self.assertEqual([(item['execution_attempt'], item['sequence']) for item in observations],
                          [(1, 2), (2, 2)])
+        dispatches = read_json(context.run_dir / 'dispatch-attempts.json')['attempts']
+        self.assertEqual([r['execution_attempt'] for r in dispatches], [1, 2])
+        self.assertEqual([r['profile'] for r in dispatches], ['primary', 'alternate'])
+        self.assertEqual([r['engine'] for r in dispatches], ['pi', 'codex'])
+        self.assertEqual([r['usage']['input_tokens'] for r in dispatches], [1, 1])
+        self.assertEqual(read_json(context.run_dir / 'prompt_projection.json')['profile'], 'primary')
+        fallback_session = dispatches[1]['session']
+        self.assertIsNone(fallback_session['key'])
+        self.assertIsNone(fallback_session['prompt_mode'])
+        self.assertEqual(fallback_session['unknown_reason'], 'prompt_profile_mismatch')
         budget = Budget(self.config.data / 'budget', self.config.limits.daily_requests,
                         self.config.limits.retention_days, self.config.limits.shared_daily_requests,
                         self.config.timezone)

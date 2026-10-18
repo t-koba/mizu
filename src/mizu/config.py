@@ -340,8 +340,9 @@ class Limits:
     #: decided (non-deferred) proposals. 0 disables time-based reaping;
     #: snapshots, runs, decisions and evidence are never reaped.
     retention_days: int = 31
-    #: Operator-selected retention (days) for bulky per-run engine logs
-    #: (``*-events.jsonl`` plus ``diagnostics.txt``). Files older than
+    #: Operator-selected retention (days) for per-run diagnostics and dispatch
+    #: measurements (``*-events.jsonl``, ``diagnostics.txt``, and
+    #: ``dispatch-attempts.json``). Files older than
     #: ``event_log_compress_days`` gzip to ``.gz``; raw and compressed logs
     #: older than ``event_log_retention_days`` are dropped. 0 disables that
     #: stage. Result/error/selection records are never candidates.

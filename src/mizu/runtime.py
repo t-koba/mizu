@@ -21,6 +21,7 @@ from pathlib import Path
 
 from . import platform as _platform
 from .admission import admission
+from . import dispatch_evidence
 from .budget import Budget
 from .config import (MAX_CI_WAKE_EXTRA_BRANCHES, Config, Role, load,
                      role_policy_bytes, role_requests_per_run,
@@ -2899,7 +2900,7 @@ class Engine:
             context.clear_request_deadlines()
             context.transport_idle_deadline = time.monotonic() + context.config.limits.model_request_seconds
             try:
-                model_result = driver.execute(context, prompt, **kwargs)
+                model_result = dispatch_evidence.execute(context, driver, prompt, **kwargs)
                 if context.finished is None:
                     context.enter_drain_wrap_up()
                     if context.bound_hit == "drain" and not context.wrap_up_attempted:
@@ -2928,7 +2929,7 @@ class Engine:
                     context.clear_request_deadlines()  # The failed transport was reaped, not renewed.
                     context.transport_idle_deadline = time.monotonic() + context.config.limits.model_request_seconds
                     context.execution_attempt += 1
-                    model_result = driver.execute(context, context._bound_message() + "\n\n" + prompt, **kwargs)
+                    model_result = dispatch_evidence.execute(context, driver, context._bound_message() + "\n\n" + prompt, **kwargs)
                 finally:
                     context.turn_authority_role = previous_authority
                     context.turn_continuation = previous_continuation
@@ -3000,7 +3001,7 @@ class Engine:
                     context.operations_stopped.clear()
                     context.transport_idle_deadline = time.monotonic() + context.config.limits.model_request_seconds
                     try:
-                        model_result = driver.execute(context, followup_prompt, **kwargs)
+                        model_result = dispatch_evidence.execute(context, driver, followup_prompt, **kwargs)
                     finally:
                         context.role = base_role
                         context.turn_authority_role = previous_authority
@@ -3366,10 +3367,12 @@ class Engine:
                     or bool(decision_events or wait_events or ci_failures)
                     or new_obligation or prior_wait_expired)
                 prompt, prompt_mode, session_key, rotation, session_dir = session_prompt(context, role, run_dir)
+                dispatch_evidence.capture_projection(context, role.profile, prompt_mode,
+                                                     session_key, rotation, session_dir)
                 decoded = json.loads(prompt)
                 work_items_page = decoded["open_work_items"]
                 write_json(run_dir / "prompt_projection.json",
-                           {"run": run_id, "role": role_name, "snapshot": snapshot["id"],
+                           {"run": run_id, "role": role_name, "profile": role.profile, "snapshot": snapshot["id"],
                             "recent_snapshots": len(decoded.get("recent_snapshots", [])),
                             "pending_insights": len(decoded.get("pending_insights", [])),
                             "open_insights": (decoded.get("open_insights") or {}).get("total", 0),
@@ -3830,6 +3833,8 @@ class Engine:
                 ctx = Context(self.config, parent.project, role,
                               run_dir, snap, workspace, stop=parent.stop, goal=parent.goal)
                 ctx.ephemeral = True
+                ctx.parent_run = parent.run_dir.name
+                ctx.dispatch_class = "consult"
                 model = self._execute(ctx, self.resolve(profile), prompt_for(ctx) + "\n\nQuestion:\n" + args["question"], profile=profile)
                 if ctx.host_cancelled() or (ctx.finished is None and ctx.cancelled()):
                     raise Cancelled("Consultation cancelled before completion")
@@ -3941,6 +3946,8 @@ class Engine:
             ctx = Context(self.config, parent.project, role,
                           run_dir, snap, parent.workspace, stop=parent.stop, goal=parent.goal)
             ctx.ephemeral = True
+            ctx.parent_run = parent.run_dir.name
+            ctx.dispatch_class = "delegate"
             ctx.consult = None
             ctx.spend_role = parent.role
             ctx.delegated_child = True

@@ -48,6 +48,43 @@ def normalize(entry, engine: str = "unknown") -> dict:
             "unknown_shape": invalid or not recognized}
 
 
+def attempt_usage(observations: list, engine: str | None) -> dict:
+    """Strict attempt-only totals: omitted/invalid fields stay null, not zero.
+
+    Unlike historical dashboard normalization, a total is known only when
+    every reported observation supplies that field. This cannot establish
+    completeness of provider reporting; it describes the observations only.
+    """
+    fields = _KEYS.get(engine, _CANONICAL)
+    totals = dict.fromkeys(_FIELDS, None)
+    unknown = set()
+    for field in _FIELDS:
+        values = []
+        for entry in observations:
+            value = None
+            if isinstance(entry, dict):
+                for key, mapped in fields.items():
+                    if mapped == field and key in entry:
+                        candidate = entry[key]
+                        if type(candidate) is int and 0 <= candidate <= 2**63 - 1:
+                            value = candidate
+            values.append(value)
+        if values and all(value is not None for value in values):
+            total = sum(values)
+            if total <= 2**63 - 1:
+                totals[field] = total
+    for entry in observations:
+        if isinstance(entry, dict):
+            unknown.update(key[:256] for key in entry if key not in fields and key not in _METADATA)
+            unknown = set(sorted(unknown)[:MAX_UNKNOWN_KEYS])
+    known = sum(value is not None for value in totals.values())
+    return {**totals, "observations": len(observations),
+            "status": "known" if known == len(_FIELDS) else "partial" if known else "unknown",
+            "unknown_reason": ("no_runtime_usage" if not observations else
+                               "missing_or_unrecognized_fields" if known < len(_FIELDS) else None),
+            "unrecognized_keys": sorted(unknown)[:MAX_UNKNOWN_KEYS]}
+
+
 def record_time(value) -> float:
     """Aware ISO-8601 evidence time; malformed/naive values sort oldest."""
     try:

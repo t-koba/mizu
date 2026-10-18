@@ -137,11 +137,10 @@ DEFAULT_KEEP_ARTIFACTS = 30
 #: Day length for run-evidence retention age (file mtime vs now).
 _DAY_SECONDS = 86400
 
-#: Bulky per-run engine logs eligible for retention (raw names). Compressed
-#: ``.gz`` siblings are eligible for the drop stage only. Every other run
-#: file (result/error/consultation/started/selection/admission/usage records,
-#: prompts, sessions, sources) is never a candidate.
-_EVENT_LOG_RAW = ("diagnostics.txt",)
+#: Per-run diagnostics and bounded dispatch measurements eligible for
+#: retention (raw names). Compressed ``.gz`` siblings are eligible for the
+#: drop stage only. Other run records remain durable.
+_EVENT_LOG_RAW = ("diagnostics.txt", "dispatch-attempts.json")
 
 
 def _event_log_paths(run_dir: Path) -> tuple[list[Path], list[Path]]:
@@ -354,7 +353,8 @@ def prune(project: Project, *, apply: bool = False, keep_artifacts: int = DEFAUL
 
     Schema/bounds: ``keep_artifacts`` counts the live pointer when it exists.
     ``[limits] event_log_compress_days`` (0 disables, 0-3650) gzips raw
-    ``*-events.jsonl``/``diagnostics.txt``/``*-events-truncated.json`` at or
+    ``*-events.jsonl``/``diagnostics.txt``/``dispatch-attempts.json``/
+    ``*-events-truncated.json`` at or
     beyond N days old;
     ``[limits] event_log_retention_days`` (0 disables, 0-3650) drops raw and
     ``.gz`` logs at or beyond M days old. ``[web] cache_seconds`` decides web-cache expiry
@@ -363,7 +363,7 @@ def prune(project: Project, *, apply: bool = False, keep_artifacts: int = DEFAUL
     mtime so the drop clock does not restart.
     Only top-level run-dir logs and expired
     web-cache entries are candidates; result/error/consultation/
-    started/selection/admission/usage records, snapshots, objects, sessions,
+    started/selection/admission/runtime-usage records, snapshots, objects, sessions,
     decisions, proposals, and work-item histories are never candidates.
     Trust: operator-invoked maintenance under quiescence (paused + locks);
     paths are local recorded state, never model input. The web cache is

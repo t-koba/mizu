@@ -389,3 +389,59 @@ mizu explain demo --role worker   # 複数役割の場合は対象を明示
 `mizu explain` は単一役割の JSON 根拠ビューを標準出力に返します。トップレベルは `schema_version` / `generated_at` / `project` / `role` / `observation` / `project_facts` / `role_facts` です。`project_facts` は保存済み control（reasonは512文字まで）、プロジェクト全体の現在snapshot、読み取り専用budget peekです。`role_facts` は対象roleのhealth/active記録、設定済みprofile/selector、daemon/interval/calendar/on-change/decision-event/source/CI-wake設定、選択制約、最終run結果（`runs/<id>/result.json`または`error.json`からの`kind`/`status`/`finished_at`のみ）とprobe待機（`selection/<role>-wait.json`からの`next_evaluation_at`と監査run）を含みます。保留中InsightやInsight構造化waitはinbox走査が必要なため対象外とし、`unknowns`に残します。選択制約ではblock key、sponsor project/role、rule、probeのnext timeと`until`、観測時刻での`probe_due`を示します（実際のprobe起動やsponsor認可を確認した意味ではありません）。selectorが設定されたroleでは、run履歴を走査しないため`current_choice`は`unknown`です。selectorがなければ設定済みprofileを示します。出典はローカルのbounded current recordと静的role設定に限り、任意のerror textやInsight本文は出力しません。control/health/activeは各64 KiB、selection stateは既存の1 MiB上限、budget peekは当日ファイル4 MiB上限で、budget peekは`gc`を行いません。コマンドは状態を書き換えず、engine/modelやVCS、service managerを呼びません。欠損・不正な個別記録は`absent` / `unavailable`として値を捏造せず示します。設定やproject/role指定が無効ならstderrにエラーを出して失敗します。修復後はコマンドを再実行してください。
 
 選択結果の予測、run 履歴の走査、Insight 本文の読み込み、queue や process/service-manager の確認は行いません。正確な次回起動、外部サービス状態、queue 順位、active process の生存・yield 可否、および pending Insight/structured wait は未検査であるため `unknown` として明示します（役割の最終記録 outcome は `role_facts.last_outcome` で報告します）。snapshot の outcome はプロジェクト全体の outcome であり、この役割の outcome ではありません。この出力は複数ファイルをまたぐ非 atomic な記録時点の観測で、scheduler verdict ではなく、役割が実行されるかどうかを示すものではありません。既存の `mizu status` は従来どおりです。
+
+### Local driver-dispatch measurements
+
+`runs/<run>/dispatch-attempts.json` is best-effort measurement evidence (schema
+1), not admission or cache-affinity policy. Each physical driver call made by
+`Engine._execute` has a record keyed by that context's `execution_attempt`:
+initial dispatch, selector fallback/retry, wrap-up and missing-finish
+continuation. Consult/delegate children retain their own records and parent-run
+reference; join by `(run, execution_attempt)`, not attempt number alone (children
+can start at zero). Calls directly to a driver outside the Engine are not covered.
+
+The record includes the actual selected role/profile and configured adapter
+engine, class (`normal`, `consult`, `delegate`, `ephemeral`), phase, UTC start/end,
+monotonic elapsed seconds and `started`/`returned`/`raised` status. Returned means
+the driver returned, not that the unit published successfully. Timing includes
+local evidence overhead, not just provider inference. Missing profile/engine
+identity is null with an unknown reason. No prompts, native session identifiers,
+private paths, provider errors or arbitrary provider payloads are copied here.
+
+Usage totals and distinct observed provider/model pairs come **only** from
+`runtime_usage`/`runtime_models` entries for that attempt, never the cumulative
+unit result or configured model name. Each token total is null unless every
+reported observation has a valid recognized value for that field; explicit zero
+is retained. Usage status is `unknown`, `partial` or `known` (all five fields
+reported); these describe reported observations, **not completeness of provider
+reporting**. Unknown keys are bounded, missing model attribution is marked, and
+missing/unrecognized usage is never synthesized as zero. Adapters that supply
+only final result usage, not runtime observations, therefore remain unknown.
+This ledger does not replace the existing usage dashboard or accounting.
+
+A passive observer of the driver's local `session_record` selection retains an
+opaque content-bound key, local rotation generation, prompt mode and rotation
+reason only if profile/key/generation match the captured prompt projection.
+`prompt_projection.json` now names its selected `profile`. Selector fallback
+keeps its actual selected profile in the dispatch record but cannot borrow the
+original profile's projected session: session/prompt fields are null with
+`prompt_profile_mismatch`. Other unknown reasons cover nonpersistent sessions,
+missing projection/driver observation and session mismatch. Matched continuation
+prompts use mode `continuation` and do not repeat an earlier rotation reason.
+These are local selections, **not proof of provider conversation/cache residency,
+a cache hit, or a TTL guarantee**. Native provider state can still change.
+
+Retention is a tail of at most 64 attempts and 256 KiB of strict finite JSON per
+run; oldest records are removed to satisfy either bound and `dropped_attempts`
+reports the loss. Model pairs are capped at 16, provider/model text at 256
+characters, unknown usage keys at 20 (256 characters each). This per-run
+measurement log is compressed/dropped by `mizu prune` according to
+`event_log_compress_days` and `event_log_retention_days` (defaults 7/31 days;
+0 disables each stage). Atomic fsynced
+replacement writes a start before calling the driver, updates local session
+selection when observed, and settles timing/attempt-only facts in `finally`.
+A crash can leave `started` without an end; later observations may still exist in
+`runtime-usage.json`, joined by attempt. Write/measurement failures are swallowed
+and do not retry, cancel or change model execution; evidence can consequently be
+missing or stale and is not an audit-completeness guarantee. Scheduling remains
+FIFO with unchanged slot/role/workspace locking, provider TTL and session policy.
