@@ -84,8 +84,11 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--profile", help="Model profile for the probe")
     p.add_argument("--role", default=None, help="Read-only probe role (default: configured consult_role, else single configured role, else required)")
     p = sub.add_parser("insight", help="Submit, list, read, decide or ingest proposals")
-    p.add_argument("action", choices=("submit", "list", "read", "decide", "ingest", "revise", "history", "withdraw"), help="Proposal operation")
+    p.add_argument("action", choices=("submit", "list", "page", "read", "decide", "ingest", "revise", "history", "withdraw"), help="Proposal operation")
     p.add_argument("project", help="Managed project name")
+    p.add_argument("--scope", choices=("live", "archive"), default=None, help="Insight page scope (default: live)")
+    p.add_argument("--limit", type=int, default=None, help="Insight page size (1-1000; default: 30)")
+    p.add_argument("--cursor", default=None, help="Opaque insight page continuation")
     p.add_argument("--id", help="Proposal ID for read/submit/decide/withdraw")
     p.add_argument("--title", help="Proposal title for submit")
     p.add_argument("--body", type=Path, help="Read Markdown body from this file; '-' reads stdin")
@@ -276,6 +279,11 @@ def _parse_wait(spec):
 def _cmd_insight(config, project, args):
     if args.work_item_intent is not None and args.action != "decide":
         raise ConfigError("--work-item-intent applies only to accept/modify decisions")
+    if args.action != "page" and any(getattr(args, key, None) is not None for key in ("scope", "limit", "cursor")):
+        raise ConfigError("--scope, --limit and --cursor apply only to insight page")
+    if args.action == "page":
+        return project.insights.list_page(scope=args.scope or "live", limit=args.limit if args.limit is not None else 30,
+                                          cursor=args.cursor)
     if args.action == "list":
         return project.insights.list(pending=False, limit=1000)
     if args.action == "read":

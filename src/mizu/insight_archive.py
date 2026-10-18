@@ -1,7 +1,7 @@
 """Permanent decided insight storage; callers serialize writes with insights.lock.
 
 DELETE journals and FULL synchronous commits keep the database self-contained at
-quiescence (including backups). No deletion, migration, or listing API. Rows bind
+quiescence (including backups). No deletion API. Rows bind
 complete normalized content to the decision and identity observed at archival.
 """
 from __future__ import annotations
@@ -42,13 +42,61 @@ def _connect(root: Path, *, write: bool = False):
             if write:
                 db.execute("PRAGMA journal_mode=DELETE")
                 db.execute("PRAGMA synchronous=FULL")
-                db.execute("CREATE TABLE IF NOT EXISTS insights ("
-                           "id TEXT NOT NULL, rev INTEGER NOT NULL, record TEXT NOT NULL, "
-                           "decision TEXT NOT NULL, identity TEXT NOT NULL, PRIMARY KEY (id, rev))")
-                db.execute("CREATE INDEX IF NOT EXISTS insight_prefix ON insights (id COLLATE NOCASE)")
+                _schema(db)
             yield db
     except sqlite3.Error as exc:
         raise Denied("Insight archive unavailable") from exc
+
+
+def _schema(db) -> None:
+    """Lazy atomic migration on archive writes/pages; preserve row bytes/order.
+
+    Old databases used (id, rev) as their primary key. Their rowid supplies a
+    stable initial sequence. AUTOINCREMENT allocation state travels with backups.
+    Ordinary ID reads and reference scans also work before migration.
+    """
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        columns = {row[1] for row in db.execute("PRAGMA table_info(insights)")}
+        if columns and "seq" not in columns:
+            db.execute("ALTER TABLE insights RENAME TO insights_legacy")
+        db.execute("CREATE TABLE IF NOT EXISTS insights ("
+                   "seq INTEGER PRIMARY KEY AUTOINCREMENT, "
+                   "id TEXT NOT NULL, rev INTEGER NOT NULL, record TEXT NOT NULL, "
+                   "decision TEXT NOT NULL, identity TEXT NOT NULL, UNIQUE (id, rev))")
+        if columns and "seq" not in columns:
+            db.execute("INSERT INTO insights (id, rev, record, decision, identity) "
+                       "SELECT id, rev, record, decision, identity FROM insights_legacy ORDER BY rowid")
+            db.execute("DROP TABLE insights_legacy")
+        db.execute("CREATE INDEX IF NOT EXISTS insight_prefix ON insights (id COLLATE NOCASE)")
+        db.commit()
+    except BaseException:
+        db.rollback()
+        raise
+
+
+def page(root: Path, *, limit: int, after: int = 0, high_water: int | None = None) -> tuple:
+    """Bounded indexed keyset read of immutable rows, including all revisions.
+
+    Caller holds insights.lock. Capture MAX(seq) once; later appends are outside
+    the traversal. Only limit+1 bodies are read, independent of archive size.
+    Rows stay complete; Insights.list_page projects bounded summaries.
+    """
+    with _connect(root, write=True) as db:
+        maximum = db.execute("SELECT COALESCE(MAX(seq), 0) FROM insights").fetchone()[0]
+        if high_water is None:
+            high_water = maximum
+        if not 0 <= after <= high_water <= maximum:
+            raise Denied("Stale insight archive cursor; restart pagination")
+        rows = db.execute("SELECT seq, record, decision FROM insights "
+                          "WHERE seq > ? AND seq <= ? ORDER BY seq LIMIT ?",
+                          (after, high_water, limit + 1)).fetchall()
+        more = len(rows) > limit
+        rows = rows[:limit]
+        items = [{**json.loads(record), "decision": json.loads(decision)}
+                 for _, record, decision in rows]
+        sync_dir(root)
+        return items, high_water, rows[-1][0] if rows else after, more
 
 
 def read(root: Path, insight_id: str) -> dict | None:
@@ -83,7 +131,7 @@ def store(root: Path, record: dict, decision: dict, identity: dict) -> None:
                              (record["id"], record["rev"])).fetchone()
             if old is not None and old[0] != body:
                 raise Denied("Insight archive content conflict")
-            db.execute("INSERT OR IGNORE INTO insights VALUES (?, ?, ?, ?, ?)",
+            db.execute("INSERT OR IGNORE INTO insights (id, rev, record, decision, identity) VALUES (?, ?, ?, ?, ?)",
                        (record["id"], record["rev"], body,
                         canonical(decision).decode(), canonical(identity).decode()))
     sync_dir(root)

@@ -218,6 +218,71 @@ mizu wake demo                                         # 作業再開を指示
 
 Worker が `blocked` で終了した場合、人間への質問事項が状態（state）内に番号付きリストとして記録されます。
 
+### Explicit insight pages
+
+```sh
+mizu insight page demo --scope live --limit 1000
+mizu insight page demo --scope archive --limit 1000
+mizu insight page demo --scope archive --limit 1000 --cursor '<next_cursor>'
+```
+
+`Insights.list_page(scope="live", limit=30, cursor=None)` and the explicit CLI
+return the same JSON envelope:
+
+```json
+{"items": [], "generation": "<sha256>", "next_cursor": null,
+ "has_more": false, "cursor_expires_at": "<UTC ISO-8601>"}
+```
+
+- Scope defaults to `live`; limit defaults to 30 and must be an integer 1–1000.
+  `insight list` is unchanged: a bare JSON array of at most the newest 1000 live
+  summaries. `read` and `history` retain their existing behavior.
+- Live pages enumerate **all** projected inbox rows, not just pending proposals,
+  in ascending `(created_at, id, filename)` order. Items have the same summary
+  fields as `list` (including effective decision and evidence count/timestamp).
+  Generation hashes the complete projected live set, full bodies/evidence and
+  effective decisions, including rows outside this page. A changed generation
+  fails continuation as **stale**; restart without a cursor. Meaningless no-op
+  retries do not invalidate it. Pages hold the insight lock during projection;
+  live work depends on inbox size, never archive size.
+- Archive pages enumerate every immutable archived `(id, rev)` row, including
+  older archived revisions of a subsequently revised insight. Items are bounded
+  summaries with the same shape as `insight list` (id, rev, source, title,
+  timestamps, `decision`, evidence count/timestamp); they carry no `body` or
+  full evidence text. Use `insight read` for the exact full body. `decision`
+  is the original terminal decision captured at archival (not a current
+  mutable decision). Order is ascending archival sequence. The first page
+  captures a sequence high-water mark; indexed keyset reads exclude later
+  appends until a fresh traversal. No total count or full archive scan is
+  needed per page.
+- `next_cursor` is null exactly when `has_more` is false. Carry it unchanged to
+  continue. Replaying the same cursor/limit returns the same page and continuation
+  while the generation is valid; changing limit is allowed. Cursors have a fixed
+  expiry from the first request (`limits.insight_cursor_ttl_seconds`, default one
+  day), never extended by continuation. `cursor_expires_at` reports that deadline
+  even on the final/empty page; it does not expire any stored insight.
+- Malformed, expired, foreign-scope or foreign-project cursors fail with `Denied`
+  (CLI: nonzero exit, JSON error on stderr, no partial page). Stale live cursors
+  and unavailable/corrupt archives also fail explicitly. Restart a stale/expired
+  enumeration; retry transient storage failures after repair. Tokens are bounded,
+  checksummed opaque bookmarks, **not authorization or tamper-proof credentials**;
+  project access remains the caller's responsibility. They bind to the project
+  storage location, so restart after restoring/moving to a different location.
+  Cancellation is normal CLI interruption: no continuation is consumed, so it can
+  be replayed. No model, provider, network or external publication is involved.
+- The first archive page or archive write lazily migrates the original SQLite
+  `(id, rev)` schema in an atomic transaction to an AUTOINCREMENT sequence and
+  unique `(id, rev)` index. Existing record/decision/identity bytes are preserved;
+  legacy rowid order establishes the initial sequence. Ordinary ID reads and
+  snapshot-reference scans work both before and after migration. Migration and
+  page failures do not unlink inbox records. The database remains a single-file
+  DELETE-journal archive at quiescence, covered by normal backup/restore.
+
+The archive is **permanent in this phase**: neither cursor expiry nor
+`retention_days` deletes archived bodies. There is no archive-expiry policy yet.
+Closed bodies deleted by retention before archive storage was introduced cannot
+be reconstructed; pagination cannot recover those missing records.
+
 ## バックアップと復元
 
 プロジェクトを一時停止（`pause`）した状態で取得します:
@@ -232,7 +297,7 @@ mizu status demo-restored
 - 復元先には新しいプロジェクト名を指定します（常に unarmed かつ paused で初期化）。
 - パストラバーサル、危険なリンク、1 GiB（既定値）超の展開は安全対策として拒否されます（大容量時は `--max-bytes` を指定）。
 - バックアップ対象は `storage.py` の `MEMBERS`（目標、設定、スナップショット、提案、成果物等）です。Git の完全な履歴、運用者共通設定（`config.toml`）、認証情報、共有日次予算は含まれません。復元内容をレビュー後、`mizu arm` で承認します。
-- `insight-archive.sqlite3` も対象です。バックアップは静止境界で SQLite の未完了 rollback journal を復旧してから DB 本体を保存します。`retention_days` は決定済み Insight の inbox 滞在期間であり、本文・証拠の削除期限ではありません。一覧は live inbox のみ、ID 読み取りはアーカイブも参照します（アーカイブ一覧・ページ API は未実装）。
+- `insight-archive.sqlite3` も対象です。バックアップは静止境界で SQLite の未完了 rollback journal を復旧してから DB 本体を保存します。`retention_days` は決定済み Insight の inbox 滞在期間であり、本文・証拠の削除期限ではありません。`insight list` は live inbox のみ、ID 読み取りはアーカイブも参照します。全件列挙には `insight page --scope live|archive` を使います（前述）。
 
 ## バージョン更新とロールバック
 

@@ -363,6 +363,8 @@ class Limits:
     #: Raw inbox/decisions stay on disk; the operator
     #: review path (`mizu insight list`) uses a separate 1000-item bound.
     pending_insights: int = 30
+    #: Absolute lifetime of an explicit insight enumeration cursor (seconds).
+    insight_cursor_ttl_seconds: int = 86400
     #: Maximum open work-item rows offered in each full or delta prompt.
     work_items_prompt: int = 20
     #: Operator-selected decision-event ride-along window per dispatch
@@ -633,6 +635,7 @@ def load(file: Path) -> Config:
     _LIMIT_RANGES = {"history_index": (8, 1000000), "prompt_snapshots": (1, 64),
                      "delegate_wrap_up_requests": (0, 2),
                      "delegate_wrap_up_tools": (0, 4),
+                     "insight_cursor_ttl_seconds": (60, 604800),
                      "retention_days": (0, 3650), "pending_insights": (1, 1000),
                      "work_items_prompt": (1, 100), "decision_events_limit": (1, 100),
                      "event_log_compress_days": (0, 3650), "event_log_retention_days": (0, 3650),

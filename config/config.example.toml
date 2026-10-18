@@ -58,6 +58,7 @@ retention_days = 31              # Operator-selected retention window (days) for
 event_log_compress_days = 7    # Compress bulky per-run engine logs (*-events.jsonl, diagnostics.txt) older than N days to .gz (0 disables).
 event_log_retention_days = 31   # Drop bulky per-run engine logs (raw and .gz) older than M days (0 disables); result/error/selection records are always kept.
 event_stream_bytes = 4194304  # Per-run engine event-stream retention in bytes (1 MiB-256 MiB); past-budget bytes are dropped with an explicit *-events-truncated.json marker while the run continues.
+insight_cursor_ttl_seconds = 86400 # Absolute insight page cursor lifetime (60-604800 seconds); continuation never extends it.
 pending_insights = 30            # Newest pending proposals offered per prompt. Raw inbox/decisions stay on disk; `mizu insight list` uses 1000.
 work_items_prompt = 20           # Open work-item rows per full/delta prompt (1-100; overflow and incomplete legacy coverage are explicit).
 decision_events_limit = 10      # Decision events delivered per dispatch (1-100; default 10). Bound stays 100; value is policy.

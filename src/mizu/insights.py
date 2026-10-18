@@ -38,6 +38,8 @@ and is stored with ``origin`` None; the Editor outbox accepts only
 from __future__ import annotations
 
 import json
+import base64
+import binascii
 import time
 import contextlib
 import datetime as dt
@@ -168,6 +170,33 @@ def _effective_decision(item_rev: int, decision) -> dict | None:
     return decision
 
 
+def _archive_summary(item: dict) -> dict:
+    """Bounded archive page summary matching the live list shape.
+
+    ``item`` is one archived row already merged with its archival
+    ``decision``. Only identifiers, timestamps, the decision and evidence
+    counts/timestamps are projected; ``body`` and full ``evidence`` text
+    stay behind ``read``.
+    """
+    record = {k: item[k] for k in ("id", "source", "origin", "title", "created_at", "base_snapshot") if k in item}
+    if "origin" not in record:
+        record["origin"] = None
+    record["rev"] = _rev_of(item)
+    if item.get("updated_at"):
+        record["updated_at"] = item["updated_at"]
+    record["decision"] = item.get("decision")
+    try:
+        entries = item.get("evidence") if isinstance(item.get("evidence"), list) else []
+        record["evidence_count"] = len(entries)
+        stamps = [e.get("created_at") for e in entries
+                  if isinstance(e, dict) and isinstance(e.get("created_at"), str)]
+        if stamps:
+            record["evidence_updated_at"] = max(stamps)
+    except (AttributeError, TypeError, ValueError):
+        record["evidence_count"] = 0
+    return record
+
+
 #: Observable wait kinds a deferral may register. All are checkable at
 #: dispatch from local recorded state, so waits survive restarts without
 #: polling or model calls. Anything else is refused at registration with
@@ -184,9 +213,11 @@ MAX_EVIDENCE_CHARS = 8192
 
 class Insights:
     def __init__(self, root: Path, maximum: int = PREVIEW_BYTES, retention_days: int = 31, *,
-                 work_item_intent_default: str = "create", work_item_intent_by_source: dict | None = None):
+                 work_item_intent_default: str = "create", work_item_intent_by_source: dict | None = None,
+                 cursor_ttl_seconds: int = 86400):
         self.root, self.maximum = root, maximum
         self.retention_days = retention_days
+        self.cursor_ttl_seconds = cursor_ttl_seconds
         self.work_item_intent_default = work_item_intent_default
         self.work_item_intent_by_source = dict(work_item_intent_by_source or {})
         #: Snapshot store for wait baselines; wired by Project, else None.
@@ -442,9 +473,8 @@ replacement insight without implying rejected substance.
             write_json(self.root / "inbox" / f"{insight_id}.json", record)
             return _normalize(record)
 
-    def projection(self, *, pending: bool = True, limit: int = 30, action: str | None = None) -> dict:
-        heap = []
-        total = 0
+    def _live_entries(self, *, pending: bool = False, action: str | None = None):
+        """Shared projection; keep the raw body for full-generation hashing."""
         for path in (self.root / "inbox").glob("*.json"):
             if path.is_symlink():
                 continue
@@ -476,19 +506,107 @@ replacement insight without implying rejected substance.
                 except (AttributeError, TypeError, ValueError):
                     record["evidence_count"] = 0
                 key = (record["created_at"], record["id"], path.name)
-                total += 1
-                if limit > 0:
-                    entry = (*key, record)
-                    if len(heap) < limit:
-                        heapq.heappush(heap, entry)
-                    elif key > heap[0][:3]:
-                        heapq.heapreplace(heap, entry)
+                yield key, record, item
             except (OSError, ValueError, KeyError, TypeError, AttributeError, Denied):
                 continue
+
+    def projection(self, *, pending: bool = True, limit: int = 30, action: str | None = None) -> dict:
+        heap = []
+        total = 0
+        for key, record, _ in self._live_entries(pending=pending, action=action):
+            total += 1
+            if limit > 0:
+                entry = (*key, record)
+                if len(heap) < limit:
+                    heapq.heappush(heap, entry)
+                elif key > heap[0][:3]:
+                    heapq.heapreplace(heap, entry)
         return {"items": [entry[3] for entry in sorted(heap)], "total": total, "truncated": total > len(heap)}
 
     def list(self, *, pending: bool = True, limit: int = 30) -> list[dict]:
         return self.projection(pending=pending, limit=limit)["items"]
+
+    def list_page(self, *, scope: str = "live", limit: int = 30, cursor: str | None = None) -> dict:
+        """Explicit complete enumeration; cursors are opaque, replayable bookmarks.
+
+        Live summaries match list(pending=False), ordered oldest first, with a
+        generation binding every projected row's complete body and effective
+        decision. Archive items use the same bounded summary shape (no body or
+        evidence text), plus their original archival decision, ordered by
+        monotonically increasing seq. All archive revisions are enumerated,
+        not just each ID's latest row. Use read for the exact full body.
+        No cursor is authorization; project access is the caller's responsibility.
+        """
+        if scope not in ("live", "archive"):
+            raise Denied("Insight page scope must be live or archive")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+            raise Denied("Insight page limit must be 1-1000")
+        project = digest(str(self.root.resolve()).encode())
+        stamp = int(time.time())
+        state = self._page_cursor(cursor, scope, project, stamp) if cursor is not None else None
+        expires = state["expires"] if state else stamp + self.cursor_ttl_seconds
+        with lock(self.root / "locks" / "insights.lock"):
+            if scope == "live":
+                entries = sorted(self._live_entries(), key=lambda entry: entry[0])
+                generation = digest(canonical([[key, record, raw] for key, record, raw in entries]))
+                if state and state["generation"] != generation:
+                    raise Denied("Stale insight live cursor; restart pagination")
+                position = state["position"] if state else 0
+                if position > len(entries):
+                    raise Denied("Malformed insight page cursor")
+                items = [record for _, record, _ in entries[position:position + limit]]
+                position += len(items)
+                more = position < len(entries)
+                high_water = None
+            else:
+                full, high_water, position, more = insight_archive.page(
+                    self.root, limit=limit, after=state["position"] if state else 0,
+                    high_water=state["high_water"] if state else None)
+                items = [_archive_summary(item) for item in full]
+                generation = digest(canonical([project, scope, high_water]))
+                if state and state["generation"] != generation:
+                    raise Denied("Malformed insight page cursor")
+        next_cursor = None
+        if more:
+            payload = {"v": 1, "scope": scope, "project": project, "generation": generation,
+                       "expires": expires, "position": position, "high_water": high_water}
+            body = canonical(payload)
+            next_cursor = base64.urlsafe_b64encode(body).decode() + "." + digest(body)
+        return {"items": items, "generation": generation, "next_cursor": next_cursor,
+                "has_more": more,
+                "cursor_expires_at": dt.datetime.fromtimestamp(expires, dt.timezone.utc).isoformat()}
+
+    @staticmethod
+    def _page_cursor(cursor: str, scope: str, project: str, stamp: int) -> dict:
+        try:
+            if not isinstance(cursor, str) or not 1 <= len(cursor) <= 4096:
+                raise ValueError
+            encoded, checksum = cursor.split(".")
+            body = base64.b64decode(encoded, altchars=b"-_", validate=True)
+            if digest(body) != checksum:
+                raise ValueError
+            state = json.loads(body)
+            if canonical(state) != body:
+                raise ValueError
+            if (not isinstance(state, dict) or set(state) != {
+                    "v", "scope", "project", "generation", "expires", "position", "high_water"}
+                    or type(state["v"]) is not int or state["v"] != 1
+                    or state["scope"] not in ("live", "archive")
+                    or not isinstance(state["project"], str) or not DIGEST.fullmatch(state["project"])
+                    or not isinstance(state["generation"], str) or not DIGEST.fullmatch(state["generation"])
+                    or type(state["expires"]) is not int or not 0 <= state["expires"] <= 253402300799
+                    or type(state["position"]) is not int or state["position"] < 0
+                    or (state["scope"] == "live" and state["high_water"] is not None)
+                    or (state["scope"] == "archive" and (type(state["high_water"]) is not int
+                        or not 0 <= state["position"] <= state["high_water"] <= 9223372036854775807))):
+                raise ValueError
+        except (ValueError, TypeError, binascii.Error, UnicodeError) as exc:
+            raise Denied("Malformed insight page cursor") from exc
+        if state["scope"] != scope or state["project"] != project:
+            raise Denied("Foreign scope or project insight page cursor")
+        if stamp >= state["expires"]:
+            raise Denied("Expired insight page cursor; restart pagination")
+        return state
 
     def _read_exact(self, insight_id: str) -> dict | None:
         path = self.root / "inbox" / f"{insight_id}.json"
