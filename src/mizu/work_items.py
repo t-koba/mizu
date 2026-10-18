@@ -1039,30 +1039,6 @@ class WorkItems:
         with lock(self.root / "locks" / "insights.lock"):
             return self._page_open_impl(cursor=cursor, limit=limit, readonly=False)
 
-    def _history_revisions_nolock(self, item_id: str) -> set[int] | None:
-        """Validate per-item history names without lock, recovery or deletion."""
-        return self._history_revisions(item_id, recover=False)
-
-    def _validate_decision_history_nolock(self, history: Path) -> bool:
-        """Validate decision-history temporaries without lock or deletion."""
-        return self._prepare_decision_history(history, recover=False)
-
-    def _decision_events_nolock(self):
-        """Enumerate committed decision events without lock or recovery."""
-        yield from self._iter_decision_events(recover=False)
-
-    def _current_decision_nolock(self, insight_id: str, *, include_work_item: bool = False) -> dict | None:
-        """Read-only origin decision without lock or recovery."""
-        return self._current_decision_impl(insight_id, include_work_item=include_work_item, readonly=True)
-
-    def _origin_projection_nolock(self, item: dict) -> dict:
-        """Project origin staleness without lock or recovery."""
-        return self._origin_projection_impl(item, readonly=True)
-
-    def _projection_nolock(self, item_id: str, *, seed_event: dict | None = None) -> dict:
-        """Build a bounded projection without lock, recovery or deletion."""
-        return self._build_projection(item_id, seed_event=seed_event, readonly=True)
-
     def _seed_for_event(self, event_id: str, event: dict, *, readonly: bool):
         """Resolve the seed for one committed event with an explicit mode.
 
