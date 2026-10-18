@@ -14,7 +14,8 @@ from support import Fixture, ROOT
 from mizu.budget import Budget
 from mizu.config import load
 from mizu.errors import Busy, ConfigError, Denied, LimitExceeded
-from mizu.fs import atomic_write, canonical, digest, lock, relative_parts, safe_read, safe_write
+from mizu.fs import (_open_read, atomic_write, canonical, digest, lock, read_json,
+                     relative_parts, safe_read, safe_write, write_json)
 from mizu.pi import credentials
 from mizu.process import environment, run
 
@@ -47,72 +48,59 @@ class FileTests(unittest.TestCase):
         self.assertEqual(target.read_bytes(), b"original")
         self.assertFalse(list(self.root.glob(".new-*")))
 
-    def test_replace_retries_transient_permission_error(self):
+    def test_atomic_replace_with_retained_reader(self):
+        # This same test runs on actual Windows CI: no mocked filesystem,
+        # PermissionError suppression, polling, or release-before-replace.
+        path = self.root / "state.json"
+        old = {"generation": "A", "payload": "a" * 65536}
+        new = {"generation": "B", "payload": "b" * 65536}
+        write_json(path, old)
+        opened = threading.Event()
+        release = threading.Event()
+
+        def reader():
+            with _open_read(path) as stream:
+                opened.set()
+                if not release.wait(10):
+                    raise AssertionError("reader was not released")
+                return stream.read()
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            retained = pool.submit(reader)
+            try:
+                self.assertTrue(opened.wait(5), "reader did not open generation A")
+                # B must publish and be readable *before* A's handle closes.
+                write_json(path, new)
+                self.assertFalse(retained.done())
+                self.assertEqual(read_json(path), new)
+                # Create-only publication must not replace B, even with A open.
+                write_json(path, new, exclusive=True)
+                with self.assertRaises(Denied):
+                    write_json(path, old, exclusive=True)
+                self.assertEqual(read_json(path), new)
+            finally:
+                release.set()
+            self.assertEqual(retained.result(timeout=5), canonical(old))
+        self.assertEqual(read_json(path), new)
+        self.assertFalse(list(self.root.glob(".new-*")))
+
+    def test_replace_permission_failure_is_immediate(self):
         path = self.root / "a/b.txt"
         atomic_write(path, b"one")
-        real_replace = os.replace
-        calls = []
-
-        def flaky(temporary, target):
-            calls.append(time.monotonic())
-            if len(calls) < 3:
-                raise PermissionError("transient lock")
-            return real_replace(temporary, target)
-
-        with patch("os.replace", flaky):
-            atomic_write(path, b"two")
-        self.assertEqual(path.read_bytes(), b"two")
-        self.assertEqual(len(calls), 3)
-        # Retried within a bounded window, not once per eternity.
-        self.assertLess(calls[-1] - calls[0], 5.0)
-        self.assertFalse(list(path.parent.glob(".new-*")))
-
-    def test_replace_retries_transient_windows_lock_beyond_half_second(self):
-        from types import SimpleNamespace
-
-        path = self.root / "a/b.txt"
-        atomic_write(path, b"one")
-        real_replace = os.replace
-        calls = []
-        clock = [0.0]
-
-        def monotonic():
-            return clock[0]
-
-        def sleep(seconds):
-            clock[0] += seconds
-
-        def flaky(temporary, target):
-            calls.append(temporary)
-            if len(calls) < 75:  # 0.74 s of transient sharing violations
-                raise PermissionError("transient Windows sharing violation")
-            return real_replace(temporary, target)
-
-        with patch("mizu.fs.time", SimpleNamespace(monotonic=monotonic, sleep=sleep)), \
-                patch("os.replace", flaky):
-            atomic_write(path, b"two")
-
-        self.assertEqual(len(calls), 75)
-        self.assertAlmostEqual(clock[0], 0.74)
-        self.assertEqual(path.read_bytes(), b"two")
-        self.assertFalse(list(path.parent.glob(".new-*")))
-
-    def test_replace_gives_up_after_bounded_window(self):
-        path = self.root / "a/b.txt"
-        atomic_write(path, b"one")
-
-        def stuck(temporary, target):
-            raise PermissionError("locked")
-
-        started = time.monotonic()
-        with patch("os.replace", stuck):
+        with patch("mizu.fs.os.replace", side_effect=PermissionError("locked")) as move:
             with self.assertRaises(PermissionError):
                 atomic_write(path, b"two")
-        elapsed = time.monotonic() - started
-        self.assertLess(elapsed, 10.0)
-        # Untouched destination and no litter left behind.
+            move.assert_called_once()
         self.assertEqual(path.read_bytes(), b"one")
         self.assertFalse(list(path.parent.glob(".new-*")))
+
+    def test_read_json_missing_and_permission_failure(self):
+        path = self.root / "state.json"
+        self.assertEqual(read_json(path, {"missing": True}), {"missing": True})
+        with patch("mizu.fs._open_read", side_effect=PermissionError("denied")) as read:
+            with self.assertRaises(PermissionError):
+                read_json(path, {})
+            read.assert_called_once_with(path)
 
     def test_immutable_idempotence_and_conflict(self):
         path = self.root / "record"

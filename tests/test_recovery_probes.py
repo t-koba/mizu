@@ -22,14 +22,6 @@ from mizu.runtime import Engine, daemon
 from mizu.selection import State, active, project_status, validate_selectors
 
 
-def _read_queue_for_poll(path):
-    """Treat a transient Windows replacement lock as not-yet-visible state."""
-    try:
-        return read_json(path, {})
-    except PermissionError:
-        return {}
-
-
 class ProbeDriver:
     def __init__(self, callback=None, *, admitted=True, settled=True, challenge=True, target=True):
         self.callback = callback
@@ -124,18 +116,6 @@ class RecoveryProbeTests(SelectionFixture):
         self.assertEqual(read_json(self.store.path)['version'], 2)
         self.assertEqual(self.store.read()['blocks'], legacy['blocks'])
 
-    def test_queue_poll_retries_after_transient_sharing_violation(self):
-        path = self.config.data / "slots/queue.json"
-        queue = {"version": 1, "tickets": [{"id": "a" * 32}]}
-        with patch.object(sys.modules[__name__], "read_json",
-                          side_effect=[PermissionError("sharing violation"), queue]):
-            tickets = []
-            for _ in range(2):
-                tickets = _read_queue_for_poll(path).get("tickets", [])
-                if tickets:
-                    break
-        self.assertEqual(tickets, queue["tickets"])
-
     def test_fail_fast_probe_cannot_bypass_a_pending_caller(self):
         action = self.setup_probe()
         stop = threading.Event()
@@ -153,7 +133,7 @@ class RecoveryProbeTests(SelectionFixture):
             with lock(resource, blocking=False):
                 thread.start()
                 deadline = time.monotonic() + 5
-                while not _read_queue_for_poll(config.data / "slots/queue.json").get("tickets"):
+                while not read_json(config.data / "slots/queue.json", {}).get("tickets"):
                     if time.monotonic() >= deadline:
                         self.fail("caller did not enqueue")
                     time.sleep(0.01)

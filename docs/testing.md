@@ -41,6 +41,27 @@ source changes after verification, read-only Editor transport, unsafe ingest,
 backup traversal/links/limits, hostile HTML, exact model mismatch, early Pi exit,
 Unicode LF framing and agent_end vs agent_settled.
 
+### Atomic state read/replace contract
+
+`read_json` opens managed state with Windows delete sharing (a `CreateFileW`
+handle transferred to a Python stream); publication still uses `os.replace`,
+not an extended native rename or a permission-error retry window. For files
+published by `atomic_write`, a retained product reader must read complete A
+while publication and new product reads complete B. External Windows readers
+that omit delete sharing can still block replacement; permission/sharing errors
+propagate rather than becoming missing state. This is not the untrusted-path
+validation contract of `safe_read`, nor a guarantee for in-place writes.
+
+`FileTests.test_atomic_replace_with_retained_reader` holds A behind events until
+B is published and read, and checks create-only idempotence/conflicts before
+releasing A. It is included in the ordinary CI matrix; Windows semantics require
+an actual Windows result for the exact revision, not a Linux pass or mocked
+Win32 calls. To run the focused file suite on Windows:
+
+```powershell
+python -m unittest discover -s tests -p test_primitives.py -v
+```
+
 ## Real-machine checklist
 
 Use a disposable source copy and dedicated unprivileged account. Record release

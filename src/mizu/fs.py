@@ -13,7 +13,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any, Iterator
+from typing import Any, BinaryIO, Iterator
 
 from . import platform as _platform
 from .errors import Busy, Denied, LimitExceeded
@@ -104,6 +104,10 @@ def atomic_write(path: Path, data: bytes, *, exclusive: bool = False,
                  mode: int = 0o600) -> None:
     """Publish only complete files; fsync data and containing directory.
 
+    Readers opened by _open_read (including read_json) retain a complete old
+    generation across replacement; subsequent opens see the complete new one.
+    Other Windows readers must also allow delete sharing. Sharing/permission
+    failures propagate immediately, without retrying publication.
     exclusive=True never replaces existing content. Identical retries are safe.
     """
     mkdir(path.parent)
@@ -121,43 +125,66 @@ def atomic_write(path: Path, data: bytes, *, exclusive: bool = False,
                     # Windows rename is atomic and fails if the destination
                     # exists; unlike a hard link, it leaves no second name if
                     # cleanup of the temporary path is delayed by the host.
-                    _move_with_retry(temporary, path, exclusive=True)
+                    os.rename(temporary, path)
                 else:
                     try:
                         os.link(temporary, path, follow_symlinks=False)
                     except (TypeError, NotImplementedError):
                         os.link(temporary, path)
             except FileExistsError:
-                if path.is_symlink() or path.read_bytes() != data:
+                if path.is_symlink() or _read_bytes(path) != data:
                     raise Denied(f"Immutable object conflict: {path.name}") from None
         else:
-            _move_with_retry(temporary, path, exclusive=False)
+            os.replace(temporary, path)
         sync_dir(path.parent)
     finally:
         with contextlib.suppress(FileNotFoundError, OSError):
             os.unlink(temporary)
 
 
-def _move_with_retry(temporary: Path, path: Path, *, exclusive: bool) -> None:
-    """Atomically publish a staged file, tolerating transient locks.
+def _open_read(path: Path) -> BinaryIO:
+    """Open one generation, allowing atomic replacement while it is retained.
 
-    Concurrent readers (Windows mandatory locking, antivirus scanners) can
-    briefly hold the destination; retry for at most two seconds before failing.
-    FileExistsError still fails fast for the immutable-conflict path above,
-    as do the create-only link attempts.
+    Python's Windows CRT open omits FILE_SHARE_DELETE. Use a delete-sharing
+    handle there so os.replace need not wait for product readers to close.
+    This is for managed state, not the untrusted-path checks in safe_read.
     """
-    move = os.rename if exclusive and _platform.IS_WINDOWS else os.replace
-    deadline = time.monotonic() + 2.0
-    while True:
-        try:
-            move(temporary, path)
-            return
-        except PermissionError:
-            # Transient sharing violation (a concurrent reader holds the
-            # destination); fail loud once the window passes.
-            if time.monotonic() >= deadline:
-                raise
-            time.sleep(0.01)
+    if os.name != "nt":
+        return path.open("rb")
+
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                  wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD,
+                                  wintypes.HANDLE)
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel.CloseHandle.restype = wintypes.BOOL
+    # GENERIC_READ; FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+    # OPEN_EXISTING; FILE_ATTRIBUTE_NORMAL. No inheritable security attributes.
+    handle = kernel.CreateFileW(str(path), 0x80000000, 0x1 | 0x2 | 0x4,
+                                None, 3, 0x80, None)
+    if handle == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+    except BaseException:
+        kernel.CloseHandle(handle)
+        raise
+    # open_osfhandle transfers ownership to the CRT descriptor.
+    try:
+        return os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _read_bytes(path: Path) -> bytes:
+    with _open_read(path) as stream:
+        return stream.read()
 
 
 def write_json(path: Path, value: Any, *, exclusive: bool = False) -> None:
@@ -165,8 +192,13 @@ def write_json(path: Path, value: Any, *, exclusive: bool = False) -> None:
 
 
 def read_json(path: Path, default: Any = None) -> Any:
+    """Read a complete generation of atomically published managed JSON state.
+
+    Missing paths return default; sharing, permission and decoding errors do
+    not become missing state. No polling or retry is hidden in this primitive.
+    """
     try:
-        return json.loads(path.read_bytes(), parse_constant=lambda v: (_ for _ in ()).throw(ValueError("Non-finite JSON value")))
+        return json.loads(_read_bytes(path), parse_constant=lambda v: (_ for _ in ()).throw(ValueError("Non-finite JSON value")))
     except FileNotFoundError:
         return default
 
