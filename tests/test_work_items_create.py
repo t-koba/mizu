@@ -284,6 +284,23 @@ class DirectWorkItemTests(Fixture):
             with self.assertRaises(ConfigError):
                 check(name, role)
 
+    def test_origin_schema_rejects_malformed_at_protocol(self):
+        schema = DEFINITIONS["work_items_create"][1]
+        base = {"idempotency_key": "origin-key", "title": "Origin work"}
+        parent = "wi_" + "a" * 32
+        validate(dict(base), schema)
+        for origin in ({"insight_id": "proposal", "rev": 1},
+                       {"work_item_id": parent, "rev": 1}):
+            with self.subTest(origin=origin):
+                validate({**base, "origin": origin}, schema)
+        for origin in ({"rev": 1}, {},
+                       {"insight_id": "proposal", "work_item_id": parent, "rev": 1},
+                       {"insight_id": "proposal"},
+                       {"insight_id": "proposal", "rev": True},
+                       {"work_item_id": parent, "rev": True}):
+            with self.subTest(origin=origin), self.assertRaises(Denied):
+                validate({**base, "origin": origin}, schema)
+
 
 class SharedSeedCreationTests(Fixture):
     def proposal(self):

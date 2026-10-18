@@ -39,6 +39,10 @@ def validate(value, schema: dict, path: str = "arguments") -> None:
         extra = set(value) - set(schema.get("properties", {}))
         if missing or (extra and not schema.get("additionalProperties", False)):
             raise Denied(f"Invalid fields for {path}; missing={sorted(missing)}, extra={sorted(extra)}")
+        if len(value) < schema.get("minProperties", 0):
+            raise Denied(f"Too few properties for {path}")
+        if "maxProperties" in schema and len(value) > schema["maxProperties"]:
+            raise Denied(f"Too many properties for {path}")
         for key, item in value.items():
             validate(item, schema["properties"][key], f"{path}.{key}")
     elif kind == "array":
@@ -127,9 +131,10 @@ DEFINITIONS = {
     "work_items_create": ("Create self-directed or split-off work with a stable caller-chosen idempotency_key (1-128 characters) and title (1-200). Actor is bound to the runtime role, never supplied. Optional origin has exactly one of insight_id or work_item_id plus rev; non-current referenced revisions are denied on first commit. Omitted origin is null in storage. Keys are actor-scoped: exact retries return the original immutable {record, created:false}, even after transitions; conflicting retries are denied. First commit returns created:true. No automatic retry, scheduling, decision or assignment; no model-supplied actor. Shared bounded seed/history readers and done-verification checks apply. Unsafe or malformed state fails closed; local I/O errors propagate. Retain the same key and request after cancellation or an uncertain response.",
                           obj({"idempotency_key": {"type": "string", "minLength": 1, "maxLength": 128},
                                "title": {"type": "string", "minLength": 1, "maxLength": 200},
-                               "origin": obj({"insight_id": text(128),
+                               "origin": dict(obj({"insight_id": text(128),
                                               "work_item_id": {"type": "string", "pattern": "^wi_[0-9a-f]{32}$"},
-                                              "rev": {"type": "integer", "minimum": 1}}, ("rev",))},
+                                              "rev": {"type": "integer", "minimum": 1}}, ("rev",)),
+                                              minProperties=2, maxProperties=2)},
                               ("idempotency_key", "title"))),
     "work_items_transition": ("Append one work-item state transition using the required expected_rev CAS. Re-read the current work-item projection/revision after a stale-CAS refusal; retries are not automatic. Actor is bound to the runtime role, never supplied by the caller. Done requires snapshot_id for retained published history with passing digest-bound verification; dropped requires a nonempty reason; blocked may register one structured wait using decide's wait semantics. Terminal transitions may wake explicitly subscribed roles; this does not schedule or assign work.",
                                obj({"id": text(64), "expected_rev": {"type": "integer", "minimum": 1},
