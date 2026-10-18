@@ -56,7 +56,9 @@ class ExplainTests(Fixture):
         self.assertNotIn("error", facts["health"]["record"])
         self.assertEqual(facts["active"]["process_liveness"], "unknown")
         self.assertEqual(facts["active"]["yieldability"], "unknown")
-        self.assertEqual(facts["unknowns"]["last_completed_outcome"], "unknown")
+        self.assertNotIn("last_completed_outcome", facts["unknowns"])
+        self.assertEqual(facts["last_outcome"], {"status": "unavailable", "record": None})
+        self.assertEqual(facts["selection_wait"], {"status": "absent", "record": None})
         self.assertEqual(facts["unknowns"]["pending_insight_state"], "unknown")
         self.assertEqual(facts["unknowns"]["structured_wait_state"], "unknown")
         self.assertIn("decision_sources", facts["triggers"])
@@ -137,6 +139,64 @@ class ExplainTests(Fixture):
         path.write_text("[" * 10000 + "]" * 10000)
         self.assertEqual(_snapshot(self.project), {
             "status": "unavailable", "scope": "project", "record": None})
+
+    def test_last_outcome_reports_bounded_run_record(self):
+        run = "0123456789abcdef0123456789abcdef"
+        health = self.project.root / "health" / "worker.json"
+        health.parent.mkdir(exist_ok=True)
+        health.write_text(json.dumps({"consecutive_failures": 0, "last_run": run,
+                                      "updated_at": "2026-01-02T03:04:05+00:00"}))
+        runs = self.project.root / "runs" / run
+        runs.mkdir(parents=True)
+        (runs / "result.json").write_text(json.dumps(
+            {"run": run, "role": "worker", "status": "prepared",
+             "finished_at": "2026-01-03T03:04:05+00:00", "extra": [1, 2, 3]}))
+        result = execute(self._args("--role", "worker"))
+        self.assertEqual(result["role_facts"]["last_outcome"], {
+            "status": "current",
+            "record": {"kind": "result", "status": "prepared",
+                       "finished_at": "2026-01-03T03:04:05+00:00"}})
+
+    def test_last_outcome_prefers_error_record_and_fails_closed(self):
+        run = "abcdef0123456789abcdef0123456789"
+        health = self.project.root / "health" / "worker.json"
+        health.parent.mkdir(exist_ok=True)
+        health.write_text(json.dumps({"consecutive_failures": 1, "last_run": run,
+                                      "updated_at": "2026-01-02T03:04:05+00:00"}))
+        runs = self.project.root / "runs" / run
+        runs.mkdir(parents=True)
+        (runs / "error.json").write_text(json.dumps(
+            {"run": run, "role": "worker", "status": "interrupted",
+             "finished_at": "2026-01-04T03:04:05+00:00"}))
+        result = execute(self._args("--role", "worker"))
+        self.assertEqual(result["role_facts"]["last_outcome"]["record"]["kind"], "error")
+        self.assertEqual(result["role_facts"]["last_outcome"]["record"]["status"], "interrupted")
+        # A malformed run record fails closed to unavailable, never a guess.
+        (runs / "error.json").write_text(json.dumps({"status": 42}))
+        result = execute(self._args("--role", "worker"))
+        self.assertEqual(result["role_facts"]["last_outcome"],
+                         {"status": "unavailable", "record": None})
+
+    def test_selection_wait_reports_probe_wait_without_scans(self):
+        from mizu import explain as explain_module
+        from unittest.mock import patch
+        selection = self.project.root / "selection"
+        selection.mkdir(exist_ok=True)
+        (selection / "worker-wait.json").write_text(json.dumps(
+            {"fingerprint": "ab" * 32, "run": "0123456789abcdef0123456789abcdef",
+             "next_evaluation_at": 1790000000.0, "version": 1}))
+        with (patch.object(explain_module, "_read_record",
+                           wraps=explain_module._read_record) as spy):
+            result = execute(self._args("--role", "worker"))
+        self.assertEqual(result["role_facts"]["selection_wait"], {
+            "status": "current",
+            "record": {"next_evaluation_at": 1790000000.0,
+                       "run": "0123456789abcdef0123456789abcdef"}})
+        # Only single bounded record reads; no inbox or wait scans.
+        for call in spy.call_args_list:
+            self.assertTrue(call.args[1].endswith(".json"))
+            self.assertNotIn("inbox", call.args[1])
+            self.assertNotIn("waits", call.args[1].split("/"))
 
     def test_unreadable_role_record_fails_closed_and_emits_no_file_text(self):
         health = self.project.root / "health" / "worker.json"

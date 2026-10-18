@@ -170,6 +170,57 @@ def _selection(config, role) -> dict:
                 "fixed_blocks": None, "probe_blocks": None}
 
 
+def _last_outcome(project, health) -> dict:
+    """Report the last completed run outcome from one bounded run-record read.
+
+    Schema: ``health`` is the ``_role_record`` health projection; its record
+    may carry ``last_run``. Reads only ``runs/<id>/result.json`` then
+    ``runs/<id>/error.json`` through the bounded record reader and reports
+    scalar ``kind``/``status``/``finished_at``. Bounds: two reads at most
+    ``RECORD_BYTES`` each, no inbox or wait scans. Trust: local run records.
+    Failure: anything missing or malformed reports ``unavailable``; never
+    raises.
+    """
+    record = health.get("record") if isinstance(health, dict) else None
+    last_run = record.get("last_run") if isinstance(record, dict) else None
+    if not _run_id(last_run):
+        return {"status": "unavailable", "record": None}
+    for kind in ("result", "error"):
+        status, outcome = _read_record(project.root, f"runs/{last_run}/{kind}.json")
+        if status != "current" or not isinstance(outcome, dict):
+            continue
+        state = outcome.get("status")
+        finished = outcome.get("finished_at")
+        if not isinstance(state, str) or not state or not _timestamp(finished):
+            continue
+        return {"status": "current",
+                "record": {"kind": kind, "status": state, "finished_at": finished}}
+    return {"status": "unavailable", "record": None}
+
+
+def _selection_wait(project, role_name: str) -> dict:
+    """Report the pending probe-evaluation wait for one role, if recorded.
+
+    Schema: ``selection/<role>-wait.json`` carries ``next_evaluation_at``
+    and the auditing run. Bounds: one bounded record read, two scalar
+    fields, no scans. Trust: local selection state. Failure: a missing file
+    reports ``absent``; a malformed one reports ``unavailable``; never
+    raises. This is the probe wait only; insight-structured waits need an
+    inbox scan, which this projection deliberately avoids.
+    """
+    status, record = _read_record(project.root, f"selection/{role_name}-wait.json")
+    if status == "absent":
+        return {"status": "absent", "record": None}
+    if status != "current" or not isinstance(record, dict):
+        return {"status": "unavailable", "record": None}
+    at = record.get("next_evaluation_at")
+    run = record.get("run")
+    if type(at) not in (int, float) or not isinstance(run, str) or not run:
+        return {"status": "unavailable", "record": None}
+    return {"status": "current",
+            "record": {"next_evaluation_at": at, "run": run}}
+
+
 def _snapshot(project, config=None, role_name: str | None = None) -> dict:
     try:
         snapshot = project.snapshots.get()
@@ -229,10 +280,15 @@ def explain(config, project, role_name: str) -> dict:
             "active": {**active, "process_liveness": "unknown", "yieldability": "unknown"},
             "selection_constraints": _selection(config, role),
             "triggers": triggers,
+            # Pending-insight and insight-wait state stay unknown: they need
+            # inbox/wait scans, which this projection deliberately avoids (see
+            # the no-unbounded-APIs test). The probe wait and the last run
+            # outcome are single bounded reads and reported.
+            "last_outcome": _last_outcome(project, health),
+            "selection_wait": _selection_wait(project, role_name),
             "unknowns": {
                 "exact_next_invocation": "unknown",
                 "external_service_manager_state": "unknown",
-                "last_completed_outcome": "unknown",
                 "admission_queue_position": "unknown",
                 "active_process_liveness": "unknown",
                 "active_process_yieldability": "unknown",
