@@ -95,10 +95,10 @@ class Channel:
                     self.truncated = True
                     self.dropped_bytes += len(block)
                 pending.extend(block)
-                if b'\n' not in pending and len(pending) > EVENT_RECORD_BYTES:
-                    raise ProtocolError('Engine record exceeds transport bound')
                 while b'\n' in pending:
                     end = pending.index(b'\n')+1
+                    if end > EVENT_RECORD_BYTES:
+                        raise ProtocolError('Engine record exceeds transport bound')
                     try:
                         event = parse_event(pending[:end])
                     except (ValueError, UnicodeError) as exc:
@@ -107,6 +107,8 @@ class Channel:
                     if not isinstance(event, dict):
                         raise ProtocolError('Engine record must be an object')
                     self._put(event)
+                if len(pending) > EVENT_RECORD_BYTES:
+                    raise ProtocolError('Engine record exceeds transport bound')
         except Exception as exc:
             if events:
                 self._put(exc)
