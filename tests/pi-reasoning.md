@@ -7,8 +7,9 @@ node --test tests/pi-reasoning.test.mjs
 python3 scripts/check.py
 ```
 
-The normal check runs this as `node-pi-reasoning-replay-tests`. Both adapters'
-installed versions must match their manifests. Missing dependencies fail closed
+The normal check runs this as `node-pi-reasoning-replay-tests`, alongside the
+existing `scripts/check-pi-sdk.mjs` gate. Both adapters' installed versions must
+match their manifests. Missing dependencies fail closed
 unless that exact gate is explicitly waived with `--allow-not-run`; a version
 mismatch cannot be waived. The test never downloads dependencies.
 

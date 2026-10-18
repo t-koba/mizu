@@ -40,7 +40,7 @@ def bash_available() -> bool:
     return probe.returncode == 0
 
 
-def durable_gate_entry(state, details, allowed, *, name='node-durable-contract-tests') -> dict | None:
+def sdk_gate_entry(state, details, allowed, *, name='node-durable-contract-tests') -> dict | None:
     """Map an SDK preflight state to its named gate entry (pure, no I/O).
 
     `ready` returns None: the caller runs the suite. `absent` fails closed
@@ -123,11 +123,11 @@ def unittest_failure_summary(sidecar: Path) -> str:
         return unavailable
 
 
-def durable_deps_status(adapter: Path) -> tuple:
+def pi_sdk_deps_status(adapter: Path) -> tuple:
     """Check pinned adapter dependencies are installed at pinned versions.
 
-    The durable contract suite imports the operator-verified Pi SDK, which is
-    provisioned through the offline npm cache and never vendored into git.
+    SDK contract suites import operator-verified Pi dependencies, provisioned
+    outside the offline test runner and never vendored into git.
     Returns ("ready", "") when every pinned dependency resolves at its pinned
     version, ("absent", reason) when nothing usable is installed, and
     ("mismatch", reason) when the manifest is unreadable or an installed
@@ -161,8 +161,9 @@ def main():
     parser.add_argument('--report', type=Path, help='Write a portable JSON validation receipt')
     parser.add_argument('--allow-not-run', default='',
                         help='Comma-separated check names explicitly permitted to stay not_run '
-                             '(e.g. node-durable-contract-tests where the operator has not '
-                             'provisioned the pinned SDK); absent durable dependencies fail '
+                             '(e.g. node-pi-sdk-contract-tests or '
+                             'node-pi-reasoning-replay-tests where the operator has not '
+                             'provisioned the pinned SDK); absent SDK dependencies fail '
                              'without an explicit waiver')
     args = parser.parse_args()
     allowed_not_run = _allow_list(args.allow_not_run)
@@ -292,22 +293,29 @@ def main():
     if shutil.which('node'):
         execute('node-transport-and-extension-tests', ['node', '--test', 'tests/bridge.test.mjs'],
                 count=node_counts)
-        durable_state, durable_details = durable_deps_status(ROOT / 'adapters/pi-durable')
+        durable_state, durable_details = pi_sdk_deps_status(ROOT / 'adapters/pi-durable')
         if durable_state == 'ready':
             execute('node-durable-contract-tests', ['node', '--test', 'tests/durable.test.mjs'],
                     count=node_counts)
         else:
-            checks.append(durable_gate_entry(durable_state, durable_details, allowed_not_run))
+            checks.append(sdk_gate_entry(durable_state, durable_details, allowed_not_run))
+        pi_sdk_name = 'node-pi-sdk-contract-tests'
+        pi_sdk_state, pi_sdk_details = pi_sdk_deps_status(ROOT / 'adapters/pi')
+        if pi_sdk_state == 'ready':
+            execute(pi_sdk_name, ['node', 'scripts/check-pi-sdk.mjs'])
+        else:
+            checks.append(sdk_gate_entry(pi_sdk_state, pi_sdk_details, allowed_not_run,
+                                         name=pi_sdk_name))
         # This gate uses both real installed SDKs, not the fake-RPC bridge.
         replay_name = 'node-pi-reasoning-replay-tests'
-        replay_deps = [(adapter, *durable_deps_status(ROOT / 'adapters' / adapter))
+        replay_deps = [(adapter, *pi_sdk_deps_status(ROOT / 'adapters' / adapter))
                        for adapter in ('pi', 'pi-durable')]
         if all(state == 'ready' for _, state, _ in replay_deps):
             execute(replay_name, ['node', '--test', 'tests/pi-reasoning.test.mjs'], count=node_counts)
         else:
             state = 'mismatch' if any(s == 'mismatch' for _, s, _ in replay_deps) else 'absent'
             details = '; '.join(f'{adapter}: {detail}' for adapter, s, detail in replay_deps if s != 'ready')
-            checks.append(durable_gate_entry(state, details, allowed_not_run, name=replay_name))
+            checks.append(sdk_gate_entry(state, details, allowed_not_run, name=replay_name))
         for path in sorted([*(ROOT / 'adapters/pi').glob('*.mjs'), *(ROOT / 'adapters/pi-durable').glob('*.mjs'), *(ROOT / 'scripts').glob('*.mjs')]):
             execute('javascript-syntax:' + path.name, ['node', '--check', str(path)])
     if has_bash:

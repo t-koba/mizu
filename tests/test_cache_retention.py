@@ -128,7 +128,7 @@ class CacheRetentionTests(Fixture):
         # pinned SDK the launcher fails on missing imports before reaching
         # validation, so skip for absent provisioning only. A version mismatch
         # is a contract violation and must fail like any other.
-        state, details = module.durable_deps_status(root / 'adapters/pi-durable')
+        state, details = module.pi_sdk_deps_status(root / 'adapters/pi-durable')
         if state == "absent":
             self.skipTest(f"pinned SDK not provisioned here: {details}")
         if state != "ready":

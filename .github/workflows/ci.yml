@@ -28,10 +28,10 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Offline core and transport contracts
-        # Offline runners do not provision the operator-owned Pi SDK, so the
-        # durable contract suite is explicitly waived here instead of silently
-        # passing without coverage; the receipt records the waiver.
-        run: python scripts/check.py --report private-validation/offline.json --allow-not-run node-durable-contract-tests
+        # Offline runners do not provision the operator-owned Pi SDKs, so the
+        # SDK, durable, and reasoning-replay gates are explicitly waived here;
+        # the authoritative network-enabled job below provisions both adapters.
+        run: python scripts/check.py --report private-validation/offline.json --allow-not-run node-durable-contract-tests,node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests
       - name: Core installer and CLI lifecycle
         if: runner.os == 'Linux' && matrix.python == '3.13'
         run: ./scripts/test-install.sh
@@ -54,10 +54,13 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.13"
-      - name: Provision pinned Pi SDK
+      - name: Provision pinned Pi coding SDK
         # Network-enabled setup only; contract execution below is offline.
         # --engine-strict fails closed when the runner Node predates engines;
         # --ignore-scripts matches the installer's default-deny posture.
+        run: npm ci --engine-strict --no-audit --no-fund --ignore-scripts
+        working-directory: adapters/pi
+      - name: Provision pinned Pi durable SDK
         run: npm ci --engine-strict --no-audit --no-fund --ignore-scripts
         working-directory: adapters/pi-durable
       - name: Unwaived offline and durable contracts

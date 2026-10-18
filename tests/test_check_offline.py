@@ -54,6 +54,12 @@ class CheckTimeoutTests(unittest.TestCase):
                     + 2 * CHECK.PROCESS_CLEANUP_TIMEOUT_SECONDS + 6 + 120)
         self.assertGreaterEqual(40 * 60, required)
 
+    def test_ci_provisions_both_pi_adapters_for_unwaived_contract_gates(self):
+        workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
+        self.assertIn('node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests', workflow)
+        for adapter in ('pi', 'pi-durable'):
+            self.assertIn(f'working-directory: adapters/{adapter}', workflow)
+
     def test_gate_cleans_up_descendant_after_parent_exit(self):
         self._gate_with_inherited_stdout(timed_out=False)
 
@@ -181,18 +187,18 @@ class CheckTimeoutTests(unittest.TestCase):
                     gate.join(timeout=5)
 
 
-class DurableDepsProbeTests(unittest.TestCase):
+class PiSdkDepsProbeTests(unittest.TestCase):
     def test_ready_when_pinned_versions_installed(self):
         import tempfile
         with tempfile.TemporaryDirectory() as td:
             adapter = write_adapter(Path(td), {"left-pad": "1.3.0"}, {"left-pad": "1.3.0"})
-            self.assertEqual(CHECK.durable_deps_status(adapter), ("ready", ""))
+            self.assertEqual(CHECK.pi_sdk_deps_status(adapter), ("ready", ""))
 
     def test_absent_when_nothing_installed(self):
         import tempfile
         with tempfile.TemporaryDirectory() as td:
             adapter = write_adapter(Path(td), {"left-pad": "1.3.0"}, {})
-            state, details = CHECK.durable_deps_status(adapter)
+            state, details = CHECK.pi_sdk_deps_status(adapter)
             self.assertEqual(state, "absent")
             self.assertIn("left-pad@1.3.0", details)
 
@@ -200,7 +206,7 @@ class DurableDepsProbeTests(unittest.TestCase):
         import tempfile
         with tempfile.TemporaryDirectory() as td:
             adapter = write_adapter(Path(td), {"left-pad": "1.3.0"}, {"left-pad": "9.9.9"})
-            state, details = CHECK.durable_deps_status(adapter)
+            state, details = CHECK.pi_sdk_deps_status(adapter)
             self.assertEqual(state, "mismatch")
             self.assertIn("9.9.9", details)
 
@@ -209,7 +215,7 @@ class DurableDepsProbeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
             (base / 'package.json').write_text("not json", encoding='utf-8')
-            state, _ = CHECK.durable_deps_status(base)
+            state, _ = CHECK.pi_sdk_deps_status(base)
             self.assertEqual(state, "mismatch")
 
     def test_real_adapter_reports_ready_where_provisioned(self):
@@ -217,7 +223,7 @@ class DurableDepsProbeTests(unittest.TestCase):
         # pinned SDK the probe must agree; elsewhere it skips instead of
         # failing the gate for provisioning. A version mismatch still fails:
         # wrong versions are a contract violation, not missing provisioning.
-        state, details = CHECK.durable_deps_status(ROOT / 'adapters/pi-durable')
+        state, details = CHECK.pi_sdk_deps_status(ROOT / 'adapters/pi-durable')
         if state == "absent":
             self.skipTest(f"pinned SDK not provisioned here: {details}")
         self.assertEqual((state, details), ("ready", ""))
@@ -531,38 +537,39 @@ class UnittestFailureSummaryTests(unittest.TestCase):
                 self.assertIn('[+', output.getvalue(), 'live timestamped output is still relayed')
 
 
-class DurableGateEntryTests(unittest.TestCase):
+class SdkGateEntryTests(unittest.TestCase):
     NAME = 'node-durable-contract-tests'
 
-    def test_replay_gate_uses_its_own_explicit_waiver(self):
-        name = 'node-pi-reasoning-replay-tests'
-        self.assertIsNone(CHECK.durable_gate_entry('ready', '', frozenset(), name=name))
-        entry = CHECK.durable_gate_entry('absent', 'missing SDK', frozenset({self.NAME}), name=name)
-        self.assertEqual((entry['name'], entry['status']), (name, 'fail'))
-        entry = CHECK.durable_gate_entry('absent', 'missing SDK', frozenset({name}), name=name)
-        self.assertEqual(entry['status'], 'not_run')
-        entry = CHECK.durable_gate_entry('mismatch', 'wrong SDK', frozenset({name}), name=name)
-        self.assertEqual(entry['status'], 'fail')
+    def test_each_pi_gate_requires_its_own_explicit_waiver(self):
+        for name in ('node-pi-sdk-contract-tests', 'node-pi-reasoning-replay-tests'):
+            with self.subTest(name=name):
+                self.assertIsNone(CHECK.sdk_gate_entry('ready', '', frozenset(), name=name))
+                entry = CHECK.sdk_gate_entry('absent', 'missing SDK', frozenset({self.NAME}), name=name)
+                self.assertEqual((entry['name'], entry['status']), (name, 'fail'))
+                entry = CHECK.sdk_gate_entry('absent', 'missing SDK', frozenset({name}), name=name)
+                self.assertEqual(entry['status'], 'not_run')
+                entry = CHECK.sdk_gate_entry('mismatch', 'wrong SDK', frozenset({name}), name=name)
+                self.assertEqual(entry['status'], 'fail')
 
     def test_ready_runs_the_suite(self):
-        self.assertIsNone(CHECK.durable_gate_entry("ready", "", frozenset()))
+        self.assertIsNone(CHECK.sdk_gate_entry("ready", "", frozenset()))
 
     def test_absent_fails_closed_by_default(self):
-        entry = CHECK.durable_gate_entry("absent", "left-pad@1.3.0 is not installed", frozenset())
+        entry = CHECK.sdk_gate_entry("absent", "left-pad@1.3.0 is not installed", frozenset())
         self.assertEqual(entry["status"], "fail")
         self.assertIn("not installed", entry["details"])
 
     def test_absent_waived_records_not_run(self):
-        entry = CHECK.durable_gate_entry("absent", "left-pad@1.3.0 is not installed", frozenset({self.NAME}))
+        entry = CHECK.sdk_gate_entry("absent", "left-pad@1.3.0 is not installed", frozenset({self.NAME}))
         self.assertEqual(entry["status"], "not_run")
         self.assertIn("waived", entry["details"])
 
     def test_mismatch_fails_even_when_waived(self):
-        entry = CHECK.durable_gate_entry("mismatch", "left-pad installed at 9.9.9", frozenset({self.NAME}))
+        entry = CHECK.sdk_gate_entry("mismatch", "left-pad installed at 9.9.9", frozenset({self.NAME}))
         self.assertEqual(entry["status"], "fail")
 
     def test_unknown_waiver_name_does_not_waive(self):
-        entry = CHECK.durable_gate_entry("absent", "not installed", frozenset({"other-suite"}))
+        entry = CHECK.sdk_gate_entry("absent", "not installed", frozenset({"other-suite"}))
         self.assertEqual(entry["status"], "fail")
 
     def test_allow_list_parsing(self):
