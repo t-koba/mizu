@@ -195,6 +195,18 @@ existing failure rules, even if the wall expires too. A seal accepted before
 the wall expires remains irreversible, even if settlement later times out;
 explicit host cancellation and final integrity checks still fail closed.
 
+Durable authority change. When the durable grant authority changes under a
+running unit (an operator policy/configuration edit mid-run), the next turn's
+resume refusal ends the unit as a clean bounded result with bound `authority`
+instead of a failure: no further turns run under either authority, workspace
+and session evidence are kept, `result.json` is recorded with
+`publication="not_published"` against the current snapshot digest, and the
+consecutive-failure brake does not advance (no pause). The next unit starts
+fresh under the new authority. Authority is the persisted work-unit grant
+(policy text, capabilities, model, adapter digest, and bound options);
+effort-only live keys ride the live conversation and never change authority.
+Daemon poll paths are unchanged and keep their own timeouts.
+
 Admitted delegation/consultation joins use child-local wall/request deadlines,
 not the minimum with the parent. Parent transport cleanup drains the join before
 releasing its lock. Shared explicit stop, pause/unarm/authority revocation, and

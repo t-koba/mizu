@@ -18,7 +18,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-from .errors import ConfigError
+from .errors import AuthorityGrantMismatch, ConfigError
 from .fs import canonical, digest, mkdir
 
 BACKENDS = ("sqlite",)
@@ -196,7 +196,7 @@ def begin_run(conn: sqlite3.Connection, *, run_key: str, session_key: str,
                        (run_key,)).fetchone()
     if row is not None:
         if row[2] != grant:
-            raise ConfigError("Durable resume refused: current authority differs from persisted grant")
+            raise AuthorityGrantMismatch("Durable resume refused: current authority differs from persisted grant")
         return {"run_key": row[0], "status": row[1], "resumed": True,
                 "result": json.loads(row[3]) if row[3] else None}
     conn.execute("INSERT INTO durable_runs(run_key, session_key, project, role, grant_digest, status, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?)",
@@ -210,7 +210,7 @@ def check_grant(conn: sqlite3.Connection, run_key: str, grant: str) -> None:
     if row is None:
         raise ConfigError("Unknown durable run; resume cannot invent history")
     if row[0] != grant:
-        raise ConfigError("Durable resume refused: current authority differs from persisted grant")
+        raise AuthorityGrantMismatch("Durable resume refused: current authority differs from persisted grant")
 
 
 def record_turn(conn: sqlite3.Connection, run_key: str, seq: int, kind: str, payload: dict) -> dict:

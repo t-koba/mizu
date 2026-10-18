@@ -6,7 +6,7 @@ from support import Fixture
 from mizu import pi_durable
 from mizu.drivers import driver_for
 from mizu.engine_config import effective
-from mizu.errors import ConfigError, LimitExceeded, ModelFailure, ProtocolError
+from mizu.errors import AuthorityGrantMismatch, ConfigError, LimitExceeded, ModelFailure, ProtocolError
 from mizu.engine_config import rotate_session, rotation_due, session_generation
 from mizu.pi_durable_store import (begin_run, check_grant, complete_run, complete_turn,
                                    grant_digest, load_run, open_store, project_context,
@@ -1061,8 +1061,11 @@ class SessionIsolationTests(Fixture):
             driver.execute(context, "retry same candidate", profile=profile)
         context.role = dataclasses.replace(context.role,
             capabilities=tuple([*context.role.capabilities, "delegate"]))
-        with self.assertRaisesRegex(ConfigError, "authority differs"):
+        with self.assertRaises(AuthorityGrantMismatch) as refused:
             driver.execute(context, "changed grant", profile=profile)
+        self.assertIs(type(refused.exception), AuthorityGrantMismatch)
+        self.assertIsInstance(refused.exception, ConfigError)
+        self.assertIn("authority differs", str(refused.exception))
         self.assertEqual([item[0] for item in seen], [context.run_dir.name])
         # The persistent store's identity does not change with the grant; the
         # original run row remains the only candidate for this request id.
@@ -1223,10 +1226,14 @@ class StoreTests(unittest.TestCase):
             grant = grant_digest(policy_text="p", capabilities=("a",), model={"provider": "x", "model": "y"},
                                  adapter_digest_value="d", options_digest="o")
             begin_run(conn, run_key="r", session_key="s", project="p", role="r", grant=grant)
-            with self.assertRaises(ConfigError):
+            with self.assertRaises(AuthorityGrantMismatch) as refused:
                 check_grant(conn, "r", "different-grant")
-            with self.assertRaises(ConfigError):
+            self.assertIs(type(refused.exception), AuthorityGrantMismatch)
+            self.assertIsInstance(refused.exception, ConfigError)
+            with self.assertRaises(AuthorityGrantMismatch) as resumed:
                 begin_run(conn, run_key="r", session_key="s", project="p", role="r", grant="different-grant")
+            self.assertIs(type(resumed.exception), AuthorityGrantMismatch)
+            self.assertIsInstance(resumed.exception, ConfigError)
             conn.close()
 
     def test_retention_keeps_unfinished_and_unknown(self):

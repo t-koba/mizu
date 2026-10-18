@@ -295,7 +295,12 @@ bounds still apply to every engine.
 
 For a durable work unit, the persisted grant must exactly equal the current
 configured authority (minus effort-only live keys, which ride the live conversation)
-even when the host narrows a continuation's turn role.
+even when the host narrows a continuation's turn role. A mid-run authority
+change does not fail the unit: the next turn's resume refusal ends it as a
+clean bounded result with bound `authority` (no further turns, no publication,
+no failure-brake increment; see the run-walls section of
+`docs/completion-contracts.md`). Daemon poll paths are unchanged and keep
+their own timeouts; no configuration schema changed.
 Only the effective turn's tools are exposed and authorized: a missing-finish
 follow-up exposes only `finish`. A normal unsealed return is stored as terminal
 `completed` with `sealed: false`; this is not a host finish seal. If the configured

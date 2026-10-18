@@ -14,7 +14,7 @@ from mizu.codex import CodexDriver
 from mizu.config import load, role_run_seconds
 from mizu.drivers import admit_invocation
 from mizu.engine_channel import Channel
-from mizu.errors import Cancelled, ConfigError, DeadlineWrapUp, Denied, LimitExceeded, RunDeadlineExceeded, ModelFailure, ProtocolError
+from mizu.errors import AuthorityGrantMismatch, Cancelled, ConfigError, DeadlineWrapUp, Denied, LimitExceeded, RunDeadlineExceeded, ModelFailure, ProtocolError
 from mizu.fs import read_json, write_json
 from mizu.mcp_proxy import forward
 from mizu.pi_durable import PiDurableDriver, interpret_result
@@ -510,6 +510,57 @@ class DeadlineTests(Fixture):
         self.assertEqual(read_json(run_dir / "result.json")["bound"], "deadline")
         self.assertFalse((run_dir / "finish-intent.json").exists())
         self.assertFalse((run_dir / "error.json").exists())
+
+    def test_authority_change_mid_run_ends_bounded_without_failure(self):
+        self.config = dataclasses.replace(self.config, profiles={
+            **self.config.profiles, "primary": {**self.config.profiles["primary"],
+                "engine": "pi-durable", "session": "ephemeral",
+                "options": {"durable_resume": "compatible"}}},
+            limits=dataclasses.replace(self.config.limits, max_failures=1))
+        self.project.set_control(armed=True, paused=False)
+        before = self.project.snapshots.get()
+        health = {"consecutive_failures": 2, "last_run": "prior"}
+        write_json(self.project.root / "health/worker.json", health)
+        real = PiDurableDriver(self.config)
+        first_dispatches = []
+        refused_dispatches = []
+        def fail_once(*args, **kwargs):
+            first_dispatches.append(args)
+            raise ModelFailure("pi-durable", kind="error", message="uncertain")
+        def spy(*args, **kwargs):
+            refused_dispatches.append(args)
+            return {"engine": "pi-durable", "requests": 1, "usage": []}
+        def work(ctx, prompt, profile=None):
+            profile = profile or ctx.role.profile
+            real._run_once = fail_once
+            with self.assertRaises(ModelFailure):
+                real.execute(ctx, prompt, profile=profile)
+            # Operator edits policy mid-run: the added grant changes authority.
+            ctx.role = dataclasses.replace(ctx.role,
+                capabilities=(*ctx.role.capabilities, "delegate"))
+            real._run_once = spy
+            return real.execute(ctx, prompt, profile=profile)
+        driver = ScriptDriver(work)
+        result = Engine(self.config, driver=driver).run(self.project, "worker")
+        ctx = driver.calls[-1][0]
+        self.assertEqual(len(driver.calls), 1)  # No further turns attempted after the refusal.
+        self.assertEqual(len(first_dispatches), 1)  # One dispatch under the old authority, then failure.
+        self.assertEqual(refused_dispatches, [])  # The refusal precedes any dispatch under the new authority.
+        self.assertEqual(result["status"], "bounded")
+        self.assertEqual(result["bound"], "authority")
+        self.assertEqual(result["publication"], "not_published")
+        self.assertIn("authority differs", result["error"])
+        self.assertNotIn("finish", result)
+        self.assertNotIn("wrap_up", result)
+        self.assertEqual(result["snapshot"], before["id"])
+        self.assertEqual(result["code_digest"], before["code_digest"])
+        self.assertEqual(result["activity"]["schema"], 1)
+        self.assertEqual(read_json(ctx.run_dir / "result.json"), result)
+        self.assertFalse((ctx.run_dir / "finish-intent.json").exists())
+        self.assertFalse((ctx.run_dir / "error.json").exists())
+        self.assertEqual(read_json(self.project.root / "health/worker.json"), health)
+        self.assertEqual(self.project.snapshots.get()["id"], before["id"])
+        self.assertFalse(self.project.control()["paused"])
 
     def test_bounded_result_storage_fault_remains_a_failure(self):
         self.configure_wall(100)

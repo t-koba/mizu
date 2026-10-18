@@ -28,7 +28,7 @@ from .config import (MAX_CI_WAKE_EXTRA_BRANCHES, Config, Role, load,
                      role_wrap_up_requests, role_wrap_up_tools)
 from .doctor import container_runtime
 from .drivers import driver_for
-from .errors import Busy, Cancelled, ConfigError, Denied, InfraExceeded, LimitExceeded, RunDeadlineExceeded, DeadlineWrapUp, DrainYieldExceeded, MissingFinish, MizuError, ModelFailure, ProtocolError
+from .errors import AuthorityGrantMismatch, Busy, Cancelled, ConfigError, Denied, InfraExceeded, LimitExceeded, RunDeadlineExceeded, DeadlineWrapUp, DrainYieldExceeded, MissingFinish, MizuError, ModelFailure, ProtocolError
 from .fs import (canonical, digest, lock, mkdir, now, read_json, relative_parts,
                    safe_read, write_json, PREVIEW_BYTES, READ_PAGE_CHARS, page,
                    text_preview, DIGEST)
@@ -57,6 +57,9 @@ def slot(config: Config):
 #: faults (logical-request deadlines, per-record transport/RPC bounds, per-run
 #: tool/request bounds, file-count/snapshot bounds). A whole-unit wall or
 #: deadline wrap-up ended without a seal is a bounded, non-failure result.
+#: A durable authority change mid-run is likewise a bounded, non-failure
+#: result (bound "authority"): the next turn's resume refusal ends the unit
+#: without further turns, publication, or health accounting.
 #: Event-stream retention
 #: past the operator budget truncates retained evidence explicitly instead
 #: of failing the run. The error record is still written and
@@ -3458,10 +3461,13 @@ class Engine:
                            {"consecutive_failures": 0, "last_run": run_id, "updated_at": now()})
                 return result
             except BaseException as exc:
-                if (isinstance(exc, (RunDeadlineExceeded, DrainYieldExceeded)) and context is not None
+                if (isinstance(exc, (RunDeadlineExceeded, DrainYieldExceeded, AuthorityGrantMismatch))
+                        and context is not None
                         and context.finished is None and not context.host_cancelled()):
                     result = {"run": run_id, "role": role_name, "status": "bounded",
-                              "bound": "drain" if isinstance(exc, DrainYieldExceeded) else "deadline",
+                              "bound": ("drain" if isinstance(exc, DrainYieldExceeded)
+                                        else ("authority" if isinstance(exc, AuthorityGrantMismatch)
+                                              else "deadline")),
                               "finished_at": now(), "error": str(exc),
                               "publication": "not_published", "snapshot": snapshot["id"],
                               "code_digest": snapshot["code_digest"],
@@ -3630,7 +3636,7 @@ class Engine:
                 return result
             except Exception as exc:
                 result = {"run": run_dir.name, "parent_run": parent.run_dir.name,
-                          "role": role_name, "status": "bounded" if isinstance(exc, RunDeadlineExceeded) else "interrupted",
+                          "role": role_name, "status": "bounded" if isinstance(exc, (RunDeadlineExceeded, AuthorityGrantMismatch)) else "interrupted",
                           "finished_at": now(), "profile": profile, "snapshot": snap["id"], "error": str(exc)}
                 if ctx is not None:
                     result["activity"] = ctx.activity_summary()
@@ -3768,7 +3774,7 @@ class Engine:
             return record
         except Exception as exc:
             result = {"run": run_dir.name, "parent_run": parent.run_dir.name,
-                      "role": role_name, "status": "bounded" if isinstance(exc, RunDeadlineExceeded) else "interrupted",
+                      "role": role_name, "status": "bounded" if isinstance(exc, (RunDeadlineExceeded, AuthorityGrantMismatch)) else "interrupted",
                       "finished_at": now(), "profile": profile, "snapshot": snap["id"], "error": str(exc)}
             if ctx is not None:
                 result["activity"] = ctx.activity_summary()

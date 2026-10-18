@@ -38,6 +38,10 @@ class DrainYieldExceeded(LimitExceeded):
     """Explicit drain wrap-up ended without a seal; bounded, not a fault."""
 
 
+class AuthorityGrantMismatch(ConfigError):
+    """Durable grant authority changed mid-run; bounded, not a fault."""
+
+
 class InfraExceeded(LimitExceeded):
     """Deferrable infrastructure limit: daily budget or disk reserve.
 
