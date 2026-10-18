@@ -354,15 +354,21 @@ writes, locks, recovers or deletes. The project is opened with
   `overflow_count` (matching rows after the cursor beyond this page),
   `truncated` (`overflow_count > 0`), `unseeded_decisions` and
   `coverage_complete`. Rows carry the current origin projection and bounded
-  reason previews; rows are at most 8192 canonical bytes and the response at
+  reason previews. When a seed has a description, rows also include
+  `description_preview` (1024 UTF-8 bytes maximum) and `description_truncated`,
+  never the full text; v1 seeds omit both fields. By-ID reads retain the full
+  immutable description, as do history records. Descriptions are untrusted
+  content. Rows are at most 8192 canonical bytes and the response at
   most 1 MiB.
 - `closed` holds the newest seeded terminal items first (`updated_at`
   descending with a stable ascending ID tie-break), plus `total` seeded closed
   count, `overflow_count` and `truncated`. Each row carries `id`, `title`,
   `status` (`done` or `dropped`), `origin`, `rev`, `updated_at`, `actor`, a
   bounded `reason_preview` with `reason_truncated` when a reason is stored, and
-  `snapshot_id` (the verified snapshot for `done`, null for `dropped`). Each row
-  also has `event_acknowledgements`: a role-name-sorted mapping of **every**
+  `snapshot_id` (the verified snapshot for `done`, null for `dropped`). Description
+  preview fields have the same bounds/presence as open rows and are included in
+  terminal work-item event payloads without changing routing or exact receipts.
+  Each row also has `event_acknowledgements`: a role-name-sorted mapping of **every**
   project role whose `work_item_events` includes that status and whose effective
   `work_item_sources` route matches, to a boolean exact receipt state. `own`
   matches the origin insight submitter, never the transition actor; unknown

@@ -1118,7 +1118,8 @@ class Context:
     def _op_work_items_create(self, args: dict) -> dict:
         return self.project.work_items.create(
             idempotency_key=args["idempotency_key"], title=args["title"],
-            origin=args.get("origin"), actor=self.role.name)
+            origin=args.get("origin"), actor=self.role.name,
+            **({"description": args["description"]} if "description" in args else {}))
 
     def _op_work_items_transition(self, args: dict) -> dict:
         return self.project.work_items.transition(

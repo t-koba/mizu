@@ -290,7 +290,7 @@ legacy decision binding; `page_open()` enumerates decision history and direct
 creation directories to build its inventory with O(limit) retained rows. The event's title is the immutable title authority, not the
 subsequently revisable insight.
 Both direct creation and decision seeding call the same lock-held
-`WorkItems.create_seed` preflight: title and typed origin validation, source/ID
+`WorkItems.create_seed` preflight: title, optional description and typed origin validation, source/ID
 binding, safe empty item slot, and exact current origin revision. New seeds
 recover a recognized regular orphan temporary (removed without promotion) and
 then refuse any pre-existing direct record, legacy sidecar, numeric history,
@@ -345,12 +345,21 @@ canonical JSON `["direct-work-item", actor, idempotency_key]`. The immutable
 `idempotency_key`, and `work_item` (the revision-1 seed). Direct creation and
 `Insights.decide(..., work_item_intent="create")` share the same seed constructor
 and shape validator; old decision IDs, keys, intent fields and stored seeds
-are not rewritten. Direct seeds never live in decision history. A direct ID
+are not rewritten. A seed without `description` retains the exact v1 field set;
+a supplied `description` adds only that field (v2), with no version marker.
+Descriptions must be strings of 1–4000 characters containing non-whitespace;
+whitespace is preserved, and explicit null is invalid. Both seed shapes are
+accepted on reads/replay. New decision seeds use the exact decision `reason`
+as their description; readers validate this binding only when the description
+field exists, so old events (including longer reasons) remain replayable.
+New transitions preserve their seed's field set: v1 never gains a description,
+and v2 must retain exactly its immutable text, rejecting change or removal.
+No migration or rewrite occurs. Direct seeds never live in decision history. A direct ID
 colliding with a decision event fails closed.
 
 First writes return `{record, created: true}`. Exact retries return the original
 creation `{record, created: false}`, not the current transitioned item; a changed
-title or origin with the same actor/key is denied. Retry comparison precedes
+title, origin, description text or description presence with the same actor/key is denied. Retry comparison precedes
 live reference checks so advancing an insight/parent cannot break replay.
 Callers must retain the key and exact request across cancellation or uncertain
 responses; there is no automatic retry. Atomic exclusive writes commit the seed
@@ -360,6 +369,14 @@ same open/closed pages, full/delta prompt inventory, by-ID reads, CAS/history,
 256-revision and record/page byte bounds, done-verification gates, event receipts
 and backup/restore tree as decision items.
 
+By-ID reads and history retain the full description. Compact open/closed rows,
+full/delta prompt inventories, and terminal event payloads include only
+`description_preview` (at most 1024 UTF-8 bytes) and `description_truncated`
+when the seed carries a description; both are absent for v1 seeds. Descriptions
+are untrusted recorded content, not instructions or authority. Preview clipping
+does not relax the 8192-canonical-byte row/event or 1-MiB response bounds;
+escaped JSON and all other fields still count, and excess bytes fail closed.
+
 Terminal routing resolves only an explicit insight origin's submitter.
 Null/parent provenance remains unknown routing (including for `sources="any"`
 subscriptions); it never falls back to the creator, holder, parent actor or
@@ -367,7 +384,7 @@ transition actor. Exact receipts still identify each terminal item/revision.
 
 Statuses are `open`, `doing`, `blocked`, `done`, `dropped`. Same-status changes
 and changes from terminal `done`/`dropped` are refused; other statuses can move
-to any different status. Title/origin/creation time stay fixed; every event
+to any different status. Title/origin/description/creation time stay fixed; every event
 records its revision, update time, caller-supplied actor, from/to transition,
 and explicit reason/wait/snapshot/verification fields (null when absent).
 Actor is trusted internal attribution, not a new authorization grant. `doing`

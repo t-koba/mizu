@@ -43,6 +43,7 @@ class DecisionRevisionFixture(Fixture):
         self.assertEqual(item, {
             "id": f"wi_{event['work_item']['id'][3:]}",
             "title": current["title"],
+            "description": record["reason"],
             "origin": {"insight_id": proposal["id"], "rev": current["rev"]},
             "status": "open",
             "rev": 1,

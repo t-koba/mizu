@@ -59,7 +59,11 @@ pointer repair. Revision CAS, append-only history, and source binding are
 unchanged. Read current state after uncertainty; refusals write no event or
 seed. Existing decision/seed byte bounds and lock/cancellation behavior apply;
 the decision-to-work policy adds no grant or scheduling. Independent task
-creation uses the separate grant below.
+creation uses the separate grant below. New `create` decision seeds store the
+exact decision reason as immutable `description` (1–4000 nonblank characters),
+and replay verifies that binding. Existing decision seeds without descriptions
+remain valid and are never upgraded or rewritten; their retries keep the old
+shape and reason bounds.
 
 ## Direct work-item creation grant
 
@@ -70,9 +74,14 @@ it. `work_items_read` does not imply create. The runtime binds actor to the role
 there is no model-supplied actor or implicit assignment.
 
 Supply a stable `idempotency_key` (1–128 characters) and `title` (1–200), optionally
-`origin` with exactly one `insight_id` or `work_item_id` plus a positive integer
-`rev`. The origin's current revision must match at first commit. Keys are scoped
-to the runtime role: retain the exact key/title/origin after an uncertain response.
+`description` (1–4000 characters with at least one non-whitespace character)
+and/or `origin` with exactly one `insight_id` or `work_item_id` plus a positive
+integer `rev`. Description text is immutable and preserved exactly, including
+whitespace; explicit null is invalid. Omitting description preserves the v1
+seed shape; supplying it uses the v2 field set. Both remain readable and keep
+their original shape through transitions. The origin's current revision must
+match at first commit. Keys are scoped to the runtime role: retain the exact
+key/title/origin and description presence/text after an uncertain response.
 Exact retries return the original creation record with `created: false`, even
 after valid transitions or origin revision changes; they validate stored history
 without rechecking the live origin. Changed requests with the same key are denied,

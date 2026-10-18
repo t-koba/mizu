@@ -102,7 +102,8 @@ def _validate_keyed_substantive_event(event, insight_id: str, rev: int, key: str
     if action in ("accept", "modify") and event["work_item_intent"] == "create":
         seed = event.get("work_item")
         validate_seed(seed)
-        if seed != make_seed(f"wi_{key}", title, {"insight_id": insight_id, "rev": rev}, stamp):
+        if seed != make_seed(f"wi_{key}", title, {"insight_id": insight_id, "rev": rev}, stamp,
+                             **({"description": event["reason"]} if "description" in seed else {})):
             raise Denied("Malformed keyed work-item seed")
     return event
 
@@ -772,10 +773,12 @@ replacement insight without implying rejected substance.
                       "run": run, "created_at": stamped, "rev": rev, "decision_key": key}
             if action in ("accept", "modify"):
                 record["work_item_intent"] = work_item_intent
+            if action in ("accept", "modify") and len(canonical(record)) > PREVIEW_BYTES:
+                raise LimitExceeded("Decision event with work-item intent exceeds byte bound")
             if work_item_intent == "create":
                 record["work_item"] = work_items.create_seed(
                     f"wi_{event_id}", current["title"], {"insight_id": insight_id, "rev": rev},
-                    stamped, decision_key=key)
+                    stamped, decision_key=key, description=reason)
             if action in ("accept", "modify") and len(canonical(record)) > PREVIEW_BYTES:
                 raise LimitExceeded("Decision event with work-item intent exceeds byte bound")
             work_items.prepare_decision_write(need_wait=(registered is not None))

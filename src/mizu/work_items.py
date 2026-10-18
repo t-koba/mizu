@@ -26,7 +26,8 @@ from .fs import (DIGEST, PREVIEW_BYTES, canonical, identifier, lock, now, safe_r
                  sync_dir, text_preview, write_json)
 from .insights import _decision_key
 from .platform import IS_WINDOWS
-from .work_item_seed import ITEM_ID, SEED_FIELDS, make_seed, validate_origin, validate_seed
+from .work_item_seed import (DESCRIPTION_UNSET, ITEM_ID, SEED_FIELDS, make_seed,
+                             validate_origin, validate_seed)
 
 MAX_REVISIONS = 256  # Includes the immutable seed at revision 1.
 STATUSES = ("open", "doing", "blocked", "done", "dropped")
@@ -181,7 +182,8 @@ class WorkItems:
         return record
 
     def create_seed(self, item_id: str, title: str, origin, stamp: str, *,
-                    actor=None, idempotency_key=None, decision_key=None) -> dict:
+                    actor=None, idempotency_key=None, decision_key=None,
+                    description=DESCRIPTION_UNSET) -> dict:
         """Preflight a new immutable seed while the caller holds insights.lock.
 
         Validate the source's ID binding, an empty safe storage slot, and the
@@ -192,7 +194,7 @@ class WorkItems:
         direct callers commit create.json; decisions embed the seed in their
         atomic event. Existing commits must use validate_seed_replay instead.
         """
-        seed = make_seed(item_id, title, origin, stamp)
+        seed = make_seed(item_id, title, origin, stamp, description=description)
         if decision_key is not None:
             if (actor is not None or idempotency_key is not None
                     or origin is None or "insight_id" not in origin
@@ -256,7 +258,8 @@ class WorkItems:
             if index == 0 and record != seed:
                 raise Denied("Conflicting work-item seed replay")
 
-    def create(self, *, idempotency_key, title, actor, origin=None) -> dict:
+    def create(self, *, idempotency_key, title, actor, origin=None,
+               description=DESCRIPTION_UNSET) -> dict:
         """Commit one immutable seed; exact retries return the original record.
 
         Keys are actor-scoped, 1-128 characters. Reference revisions must be
@@ -278,7 +281,8 @@ class WorkItems:
                     self._recover_temporary_writes(item_id)
                     existing = self._direct_record(item_id)
             if existing is not None:
-                seed = make_seed(item_id, title, origin, existing["work_item"]["created_at"])
+                seed = make_seed(item_id, title, origin, existing["work_item"]["created_at"],
+                                 description=description)
                 record = {"kind": "direct", "actor": actor, "idempotency_key": idempotency_key,
                           "work_item": seed}
                 if existing != record:
@@ -286,7 +290,7 @@ class WorkItems:
                 self.validate_seed_replay(seed, seed_event=existing)
                 return {"record": existing, "created": False}
             seed = self.create_seed(item_id, title, origin, now(), actor=actor,
-                                    idempotency_key=idempotency_key)
+                                    idempotency_key=idempotency_key, description=description)
             record = {"kind": "direct", "actor": actor, "idempotency_key": idempotency_key,
                       "work_item": seed}
             directory.mkdir(parents=True, exist_ok=True)
@@ -620,12 +624,13 @@ class WorkItems:
         if (event.get("action") not in ("accept", "modify")
                 or type(event.get("rev")) is not int or event["rev"] < 1
                 or not _timestamp(event.get("created_at"))
-                or not isinstance(seed, dict) or set(seed) != SEED_FIELDS):
+                or not isinstance(seed, dict)):
             raise Denied("Invalid work-item seed event")
         identifier(event.get("id"))
         validate_seed(seed)
         if seed != make_seed(item_id, seed["title"], {"insight_id": event["id"], "rev": event["rev"]},
-                             event["created_at"]):
+                             event["created_at"],
+                             **({"description": event.get("reason")} if "description" in seed else {})):
             raise Denied("Work-item seed does not match decision event")
         return seed
 
@@ -865,7 +870,7 @@ class WorkItems:
         return normalized
 
     def _validate_transition(self, previous: dict, record: dict) -> None:
-        if set(record) != EVENT_FIELDS:
+        if set(record) != (EVENT_FIELDS | ({"description"} if "description" in previous else set())):
             raise Denied("Invalid work-item transition fields")
         actor = identifier(record["actor"])
         validate_origin(record["origin"])
@@ -874,7 +879,8 @@ class WorkItems:
                 or status == previous["status"]):
             raise Denied("Invalid work-item status transition")
         holder = actor if status == "doing" else (previous["holder"] or actor) if status == "blocked" else None
-        if (any(record[key] != previous[key] for key in ("id", "title", "origin", "created_at"))
+        if (any(record[key] != previous[key] for key in ("id", "title", "origin", "created_at")
+                + (("description",) if "description" in previous else ()))
                 or type(record["rev"]) is not int or record["rev"] != previous["rev"] + 1
                 or record["rev"] > MAX_REVISIONS or record["holder"] != holder
                 or not _timestamp(record["updated_at"])
@@ -1297,6 +1303,10 @@ class WorkItems:
                     ("current_origin_rev", "stale", "redecision")})
         if item["status"] == "blocked":
             row["wait"] = item["wait"]
+        if "description" in item:
+            preview, clipped = text_preview(item["description"], 1024)
+            row["description_preview"] = preview
+            row["description_truncated"] = clipped
         reason = item.get("reason")
         if reason is not None:
             preview, clipped = text_preview(reason, 1024)
@@ -1314,6 +1324,10 @@ class WorkItems:
         row["actor"] = item.get("actor")
         if not isinstance(row["actor"], str) or not row["actor"]:
             raise Denied("Closed work item lacks actor attribution")
+        if "description" in item:
+            preview, clipped = text_preview(item["description"], 1024)
+            row["description_preview"] = preview
+            row["description_truncated"] = clipped
         reason = item.get("reason")
         if reason is not None:
             preview, clipped = text_preview(reason, 1024)

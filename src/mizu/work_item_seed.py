@@ -8,6 +8,7 @@ from .errors import Denied
 from .fs import identifier
 
 ITEM_ID = re.compile(r"wi_([0-9a-f]{32})\Z")
+DESCRIPTION_UNSET = object()
 SEED_FIELDS = {"id", "title", "origin", "status", "rev", "holder", "created_at", "updated_at"}
 
 
@@ -26,8 +27,17 @@ def validate_origin(origin) -> None:
 
 
 def validate_seed(seed) -> dict:
-    if not isinstance(seed, dict) or set(seed) != SEED_FIELDS:
+    if not isinstance(seed, dict) or set(seed) not in (SEED_FIELDS, SEED_FIELDS | {"description"}):
         raise Denied("Invalid work-item seed fields")
+    if "description" in seed:
+        description = seed["description"]
+        if (not isinstance(description, str) or not 1 <= len(description) <= 4000
+                or not description.strip() or "\x00" in description):
+            raise Denied("Work-item description must be 1-4000 nonblank characters")
+        try:
+            description.encode("utf-8")
+        except UnicodeEncodeError:
+            raise Denied("Work-item description must be valid UTF-8") from None
     validate_origin(seed["origin"])
     try:
         stamp = dt.datetime.fromisoformat(seed["created_at"])
@@ -42,7 +52,12 @@ def validate_seed(seed) -> dict:
     return seed
 
 
-def make_seed(item_id: str, title: str, origin, stamp: str) -> dict:
-    return validate_seed({"id": item_id, "title": title, "origin": origin,
-                          "status": "open", "rev": 1, "holder": None,
-                          "created_at": stamp, "updated_at": stamp})
+def make_seed(item_id: str, title: str, origin, stamp: str, *,
+              description=DESCRIPTION_UNSET) -> dict:
+    # Absence is part of the immutable v1 shape, not a null description.
+    seed = {"id": item_id, "title": title, "origin": origin,
+            "status": "open", "rev": 1, "holder": None,
+            "created_at": stamp, "updated_at": stamp}
+    if description is not DESCRIPTION_UNSET:
+        seed["description"] = description
+    return validate_seed(seed)
