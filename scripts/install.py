@@ -34,6 +34,18 @@ def source_manifest(root=ROOT):
             for relative, path in inventory(root)}
 
 
+def staging_not_run_checks(*, core_only: bool) -> str:
+    """Return only the SDK gates unavailable in each installer staging mode.
+
+    Both modes omit pi-durable. Core-only also omits the Pi adapter; full Pi
+    staging provisions it and must run its SDK contract gate unwaived.
+    """
+    checks = ["node-durable-contract-tests", "node-pi-reasoning-replay-tests"]
+    if core_only:
+        checks.insert(1, "node-pi-sdk-contract-tests")
+    return ",".join(checks)
+
+
 def verify_release(release: Path):
     receipt = read_json(release / "installation.json")
     manifest = read_json(release / "source-manifest.json")
@@ -257,11 +269,12 @@ def stage(args):
                 command([node, str(adapter / "launcher.mjs"), "--check-contract"], cwd=adapter)
                 pi_lock = digest((adapter / "package-lock.json").read_bytes())
             # Offline source tests are a release gate. They do not claim live Pi/Podman validation.
-            # The staged tree never carries provisioned pi-durable dependencies (sources exclude
-            # node_modules; install provisions adapters/pi only), so the gate waives that suite
-            # explicitly here instead of failing for provisioning; the receipt records the waiver.
+            # Staging never provisions pi-durable, and core-only staging has no Pi adapter;
+            # record only those unavailable SDK suites as not_run. Full Pi staging must run
+            # the Pi SDK contract gate against the adapter it just provisioned.
             command([sys.executable, "scripts/check.py", "--report", "installation-checks.json",
-                     "--allow-not-run", "node-durable-contract-tests"], cwd=temporary, timeout=240)
+                     "--allow-not-run", staging_not_run_checks(core_only=args.core_only)],
+                    cwd=temporary, timeout=240)
             checks = read_json(temporary / "installation-checks.json")
             write_json(temporary / "source-manifest.json", manifest)
             write_json(temporary / "installation.json", {"version": __version__, "source_sha256": sha,

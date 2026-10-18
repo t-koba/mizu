@@ -27,6 +27,7 @@ def load_script(name):
 
 CHECK = load_script('check')
 CHILD = load_script('check_unittest')
+INSTALLER = load_script('install')
 
 
 def write_adapter(base: Path, deps, installed: dict):
@@ -37,6 +38,17 @@ def write_adapter(base: Path, deps, installed: dict):
         target.mkdir(parents=True, exist_ok=True)
         (target / 'package.json').write_text(json.dumps({"version": version}), encoding='utf-8')
     return base
+
+
+class InstallerStagingWaiverTests(unittest.TestCase):
+    def test_core_only_waives_all_unprovisioned_adapter_gates(self):
+        self.assertEqual(INSTALLER.staging_not_run_checks(core_only=True),
+                         'node-durable-contract-tests,node-pi-sdk-contract-tests,'
+                         'node-pi-reasoning-replay-tests')
+
+    def test_pi_staging_runs_pi_sdk_contract_and_waives_only_missing_adapters(self):
+        self.assertEqual(INSTALLER.staging_not_run_checks(core_only=False),
+                         'node-durable-contract-tests,node-pi-reasoning-replay-tests')
 
 
 class CheckTimeoutTests(unittest.TestCase):
