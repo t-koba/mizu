@@ -32,7 +32,7 @@ from .doctor import container_runtime
 from .drivers import driver_for
 from .errors import AuthorityGrantMismatch, Busy, Cancelled, ConfigError, Denied, InfraExceeded, LimitExceeded, RunDeadlineExceeded, DeadlineWrapUp, DrainYieldExceeded, MissingFinish, MizuError, ModelFailure, ProtocolError
 from .fs import (canonical, digest, lock, mkdir, now, read_json, relative_parts,
-                   safe_read, safe_write, write_json, PREVIEW_BYTES, READ_PAGE_CHARS, page,
+                   safe_read, safe_write, sync_dir, write_json, PREVIEW_BYTES, READ_PAGE_CHARS, page,
                    text_preview, DIGEST)
 from .project import Project
 from .snapshot import (MAX_MISSING_FINISH_STREAK, PROGRESS_SIGNALS, missing_finish_recovery_due,
@@ -975,13 +975,50 @@ class Context:
         ``vcs-publish``, ``vcs-retire``, ``vcs-dispose``, ``materialize``);
         the path is ``<kind>/<uuid>.json``. Returns ``(evidence_id,
         relative_path)``. The caller builds the full bound record (with
-        ``evidence_id`` and ``evidence``) and writes it once, so the file
-        always equals the returned response and every invocation gets a
-        fresh id that no later call can overwrite. Failure: write errors
-        propagate like any other evidence write.
+        ``evidence_id`` and ``evidence``). Mutation callers persist an intent
+        before dispatch and update that same path with the observation; other
+        callers write once. Every invocation gets a fresh id that no later
+        call can overwrite. Write errors propagate.
         """
         evidence_id = uuid.uuid4().hex
         return evidence_id, f"{kind}/{evidence_id}.json"
+
+    def _mutation_evidence(self, kind: str, op: str, parameters: dict):
+        """Build dispatch/observation callbacks for one VCS mutation.
+
+        Only bounded, validated non-secret pins/approval identities belong in
+        ``parameters``, never adapter argv, credentials or approval bodies.
+        The dispatch guard allocates and durably writes an outcome-unknown
+        intent; failure prevents dispatch. A validated observation retains the
+        intent and identity at the same path. An interrupted/failed adapter call
+        leaves the intent alone; nothing here retries or reconciles it.
+        """
+        pending = None
+
+        def before_invoke():
+            nonlocal pending
+            evidence_id, evidence = self._new_invocation_evidence(kind)
+            pending = {"evidence_id": evidence_id, "evidence": evidence,
+                       "outcome": "unknown",
+                       "intent": {"op": op, "parameters": parameters}}
+            write_json(self.run_dir / evidence, pending, exclusive=True)
+            # Persist the evidence-directory entry as well as the file itself.
+            sync_dir(self.run_dir)
+
+        def observe(record):
+            record = {**record, **pending, "outcome": "observed"}
+            path = self.run_dir / pending["evidence"]
+            try:
+                write_json(path, record)
+            except BaseException:
+                # Atomic writes normally leave the intent untouched. Restore it
+                # also if a late failure (e.g. directory fsync) followed rename.
+                # This is evidence repair only, never another adapter attempt.
+                write_json(path, pending)
+                raise
+            return record
+
+        return before_invoke, observe
 
     def _op_command_evidence_read(self, args: dict) -> dict:
         return self._read_retained_evidence("commands", args)
@@ -1315,19 +1352,20 @@ class Context:
             raise Denied("Publication requires a representable snapshot")
         code_digest = captured["code_digest"]
         approval = _vcs.require_go_approval(self.project, args["branch"], code_digest)
+        before_invoke, observe = self._mutation_evidence(
+            "vcs-publish", args["op"],
+            {"branch": args["branch"], "code_digest": code_digest,
+             "approval": approval["insight"]})
         try:
             data = _vcs.publish_via(self.config.vcs, args["op"], {"branch": args["branch"], "code_digest": code_digest},
-                                    cancel=self.tools_cancelled)
+                                    cancel=self.tools_cancelled, before_invoke=before_invoke)
         except OSError as exc:
             raise Denied(f"VCS publication is unavailable: {exc}") from exc
-        evidence_id, evidence = self._new_invocation_evidence("vcs-publish")
         record = {"published": True, "op": args["op"], "branch": args["branch"],
                   "code_digest": code_digest, "approval": approval["insight"],
                   "trust": "external-untrusted",
-                  "evidence_id": evidence_id, "evidence": evidence,
                   "result": data}
-        write_json(self.run_dir / evidence, record)
-        return record
+        return observe(record)
 
     def _op_vcs_retire(self, args: dict) -> dict:
         # Branch retirement: delete an owned temporary integration branch
@@ -1351,20 +1389,21 @@ class Context:
                          f"reference(s) {', '.join(blocking)}; dispose the "
                          "proposal to a terminal state and re-observe before "
                          "retiring")
+        before_invoke, observe = self._mutation_evidence(
+            "vcs-retire", "retire",
+            {"branch": args.get("branch"), "expected_sha": args.get("expected_sha")})
         try:
             data = _vcs.retire_via(self.config.vcs, args.get("branch"),
-                                   args.get("expected_sha"), cancel=self.tools_cancelled)
+                                   args.get("expected_sha"), cancel=self.tools_cancelled,
+                                   before_invoke=before_invoke)
         except OSError as exc:
             raise Denied(f"Branch retirement is unavailable: {exc}") from exc
-        evidence_id, evidence = self._new_invocation_evidence("vcs-retire")
         record = {"retired": True, "branch": data["branch"], "sha": data["sha"],
                   "classification": data["classification"],
                   "live_refs": data["live_refs"],
                   "trust": "external-untrusted",
-                  "evidence_id": evidence_id, "evidence": evidence,
                   "result": data}
-        write_json(self.run_dir / evidence, record)
-        return record
+        return observe(record)
 
     def _op_vcs_dispose(self, args: dict) -> dict:
         # Proposal disposition: close/merge an external proposal at the
@@ -1397,6 +1436,8 @@ class Context:
                 raise Denied("Conditional close requires op and exactly the six observed pins")
             pins = {key: args[key] for key in _vcs.CLOSE_IF_ADOPTED_PINS}
 
+            before_invoke, observe = self._mutation_evidence("vcs-dispose", op, pins)
+
             def reserve_conditional_close():
                 # Called only after local grant/pin validation and immediately
                 # before adapter dispatch. Failed local input can be corrected;
@@ -1404,6 +1445,7 @@ class Context:
                 if self.conditional_close_attempted:
                     raise Denied("Conditional proposal close was already attempted in this work unit")
                 self.conditional_close_attempted = True
+                before_invoke()
 
             try:
                 data = _vcs.close_if_adopted_via(
@@ -1418,10 +1460,7 @@ class Context:
                       "adapter_receipt": data["adapter_receipt"]}
             # A valid refusal is durable evidence too: do not refetch,
             # retry, fall through to merge, or treat false as an exception.
-            evidence_id, evidence = self._new_invocation_evidence("vcs-dispose")
-            record = {**record, "evidence_id": evidence_id, "evidence": evidence}
-            write_json(self.run_dir / evidence, record)
-            return record
+            return observe(record)
         if op not in ("close", "merge") or set(args) != {
                 "op", "id", "sha", "base", "target", "branch"}:
             raise Denied("Invalid proposal disposition arguments")
@@ -1436,10 +1475,15 @@ class Context:
                 self.project, args["branch"], code_digest,
                 endpoints={"target": args.get("target"), "id": args.get("id"),
                            "sha": args.get("sha"), "base": args.get("base")})
+        parameters = {key: value for key, value in args.items() if key != "op"}
+        if approval is not None:
+            parameters.update(code_digest=code_digest, approval=approval["insight"])
+        before_invoke, observe = self._mutation_evidence("vcs-dispose", op, parameters)
         try:
             data = _vcs.dispose_via(self.config.vcs, args["op"], args.get("id"),
                                     args.get("sha"), args.get("base"),
-                                    args.get("target"), cancel=self.tools_cancelled)
+                                    args.get("target"), cancel=self.tools_cancelled,
+                                    before_invoke=before_invoke)
         except OSError as exc:
             raise Denied(f"Proposal disposition is unavailable: {exc}") from exc
         record = {"disposed": True, "op": args["op"], "id": data["id"],
@@ -1451,10 +1495,7 @@ class Context:
         if approval is not None:
             record["code_digest"] = code_digest
             record["approval"] = approval["insight"]
-        evidence_id, evidence = self._new_invocation_evidence("vcs-dispose")
-        record = {**record, "evidence_id": evidence_id, "evidence": evidence}
-        write_json(self.run_dir / evidence, record)
-        return record
+        return observe(record)
 
     def _op_materialize(self, args: dict) -> dict:
         # Generic offline-input materialization, one of two exclusive forms

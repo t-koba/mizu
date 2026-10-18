@@ -879,7 +879,34 @@ External publication requires recorded human approval (AGENTS.md: "no external p
 
 The stages share one contract shape. Observation (`vcs_read` `proposals`/`acquire`) is read-only and revision-bound: enumerate with cursor resume, assess exact heads by `(id, sha, scope)` with digest-bound content bound to the base revision, and record observations that revise on change. Integration is workspace edits plus verification under the untouched main promotion flow. Disposition (`vcs_dispose`) resolves one proposal behind the matching per-action grant: `close` uses `close_grant`; `merge` uses `merge_grant` plus a `GO <branch>` approval; `close_if_adopted` uses `close_grant` plus the adapter's independent `[vcs] close_adopted` gate and exact proposal/target pins, returning even a valid refusal receipt. Routine close/merge act only while the proposal remains at assessed endpoints. No observation automatically closes a proposal. Retirement (`vcs_retire`) deletes one owned branch behind `retire_grant` at an exact sha, and refuses while a recorded proposal still openly references it.
 
-Receipts are scoped per mutation: per-invocation `vcs-publish/`, `vcs-dispose/`, and `vcs-retire/` files each name the op, the exact revision (branch/sha or proposal pins), the outcome, and the approval or grant behind it. A well-formed `close_if_adopted` refusal (`closed: false`) is retained as its adapter receipt; other denied/malformed calls do not produce a successful mutation receipt. A failed call implies nothing about the remote either way, so reconcile by re-observing rather than assuming an outcome.
+Evidence is scoped per mutation: `vcs-publish/<uuid>.json`,
+`vcs-dispose/<uuid>.json`, and `vcs-retire/<uuid>.json` under the run directory.
+After local capability/workspace, approval, grant, branch/pin, snapshot and
+adapter-request checks pass, Mizu durably writes an intent immediately before
+adapter dispatch. Failure to persist it prevents dispatch; a local refusal leaves
+no intent. The initial record has `evidence_id`, relative `evidence` path,
+`outcome: "unknown"`, and `intent: {op, parameters}`. Parameters are bounded tool
+pins only: publish branch/code digest/approval identity; retire branch/expected
+sha; dispose proposal/target/integration-branch pins and, for merge, code digest
+and approval identity; conditional close's six exact observed pins. No adapter
+argv, credentials, approval body or unbounded external text is copied into intent.
+The configured per-action grants are checked, not inferred from intent.
+
+A validated observation atomically updates the **same** file and evidence identity,
+retains `intent` unchanged, sets `outcome: "observed"`, and adds the existing
+response fields (`result` or `adapter_receipt`, trust, outcome/approval fields).
+The file equals the returned response. A well-formed `close_if_adopted` refusal
+(`closed: false`) is an observed refusal, not success. Adapter exceptions,
+cancellation, malformed/stale echoes, interrupted calls, or a failed final evidence
+write leave outcome-unknown intent, not a successful mutation receipt. Atomic
+writes preserve the prior intent on failure; if a failure follows replacement,
+Mizu attempts to restore the unknown intent and surfaces the storage failure.
+As with any evidence, continuing storage failure can prevent durable repair.
+Unknown means the remote outcome is unknown, not that dispatch or mutation did
+or did not happen. Intent is never deleted, automatically retried, or reconciled.
+Conditional close reserves its one attempt at the validated pre-dispatch boundary,
+then persists intent; even an intent-write failure does not release that reservation.
+Read and materialize evidence are unchanged and do not gain mutation intent.
 
 For existing `close`/`merge`/`retire` recovery, re-observe after a failed mutation before any fresh attempt. `close_if_adopted` is deliberately different: no refetch or retry is initiated, and a `closed: false` receipt does not invite merge. A malformed adapter echo leaves the remote state unknown; only a fresh observation or a matching receipt supports a conclusion.
 

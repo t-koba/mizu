@@ -69,7 +69,8 @@ def _reject_terminal_controls(value: str, message: str) -> None:
             raise Denied(message)
 
 
-def invoke(settings: dict, request: dict, *, cancel=lambda: False) -> dict:
+def invoke(settings: dict, request: dict, *, cancel=lambda: False,
+           before_invoke=None) -> dict:
     """Invoke the configured adapter once and return its JSON object.
 
     Schema: ``request`` is a JSON object with a string ``op`` field;
@@ -79,6 +80,8 @@ def invoke(settings: dict, request: dict, *, cancel=lambda: False) -> dict:
     not model output. Failure: ``Denied`` with a short reason; adapter
     output is capped at ``max_bytes`` (combined stdout+stderr via
     ``process.run``) so adapter chatter cannot blow the frame.
+    Optional ``before_invoke`` runs once after request/configuration checks,
+    immediately before dispatch. Its failure prevents dispatch; no retries.
     """
     command = settings.get("command", [])
     timeout = settings.get("timeout_seconds", 20)
@@ -93,6 +96,10 @@ def invoke(settings: dict, request: dict, *, cancel=lambda: False) -> dict:
         raise Denied("VCS adapter request is not JSON-serializable") from exc
     if len(payload) > maximum:
         raise Denied("VCS adapter request exceeds byte limit")
+    if before_invoke is not None:
+        if not callable(before_invoke):
+            raise Denied("Invalid VCS dispatch guard")
+        before_invoke()
     result = run(list(command), timeout=timeout, maximum=maximum,
                  input_data=payload + b"\n", cancel=cancel)
     if result.reason == "timeout":
@@ -1223,7 +1230,8 @@ def live_proposal_refs(project, branch: str) -> list:
     return sorted(blocking)
 
 
-def publish_via(settings: dict, op: str, params: dict, *, cancel=lambda: False) -> dict:
+def publish_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
+                before_invoke=None) -> dict:
     """Invoke a mutating adapter operation (``push``/``pr``) after approval.
 
     Schema: ``params`` must include ``branch`` and ``code_digest`` (64 hex
@@ -1235,6 +1243,7 @@ def publish_via(settings: dict, op: str, params: dict, *, cancel=lambda: False) 
     checks the op gate, not the human record). Failure: ``Denied`` on
     read-only/unknown ops, bad digest, or adapter violations including a
     missing/mismatched digest echo.
+    Optional ``before_invoke`` has the validation/dispatch contract of ``invoke``.
     """
     from .fs import DIGEST as _DIGEST
     if op not in PUBLISH_OPS:
@@ -1247,7 +1256,7 @@ def publish_via(settings: dict, op: str, params: dict, *, cancel=lambda: False) 
     if not isinstance(code_digest, str) or not _DIGEST.fullmatch(code_digest):
         raise Denied("Invalid code digest for publication")
     data = invoke(settings, {"op": op, "branch": branch, "digest": code_digest},
-                     cancel=cancel)
+                     cancel=cancel, before_invoke=before_invoke)
     if not isinstance(data, dict):
         raise Denied("VCS adapter must return a JSON object")
     if data.get("digest") != code_digest:
@@ -1324,7 +1333,8 @@ def classify_branch(ref, *, owned_prefixes=(), protected_refs=()) -> str:
     return "other"
 
 
-def retire_via(settings: dict, branch, expected_sha, *, cancel=lambda: False) -> dict:
+def retire_via(settings: dict, branch, expected_sha, *, cancel=lambda: False,
+               before_invoke=None) -> dict:
     """Delete an owned temporary integration branch with expected-SHA protection.
 
     Schema: ``settings`` carries the operator grant (``retire_grant``
@@ -1353,6 +1363,7 @@ def retire_via(settings: dict, branch, expected_sha, *, cancel=lambda: False) ->
     on a missing or malformed ``live_refs`` affirmation, or naming the
     blockers when the provider reports any. A failed call implies
     nothing about the remote ref; reconcile by re-observing.
+    Optional ``before_invoke`` has the validation/dispatch contract of ``invoke``.
     """
     if not isinstance(settings, dict) or settings.get("retire_grant") is not True:
         raise Denied("Branch retirement is not granted in VCS configuration")
@@ -1366,7 +1377,7 @@ def retire_via(settings: dict, branch, expected_sha, *, cancel=lambda: False) ->
         raise Denied(f"Only owned integration branches retire; '{branch}' is {classification}")
     data = invoke(settings, {"op": "retire", "branch": branch,
                              "expected_sha": expected_sha},
-                    cancel=cancel)
+                    cancel=cancel, before_invoke=before_invoke)
     if not isinstance(data, dict):
         raise Denied("VCS adapter must return a JSON object")
     if (data.get("branch") != branch or data.get("sha") != expected_sha
@@ -1453,11 +1464,7 @@ def close_if_adopted_via(settings: dict, pins: dict, *, cancel=lambda: False,
     check_branch(pins.get("target_ref"))
 
     request = {"op": "close_if_adopted", **pins}
-    if before_invoke is not None:
-        if not callable(before_invoke):
-            raise Denied("Invalid conditional-close dispatch guard")
-        before_invoke()
-    data = invoke(settings, request, cancel=cancel)
+    data = invoke(settings, request, cancel=cancel, before_invoke=before_invoke)
     if not isinstance(data, dict):
         raise Denied("VCS adapter must return a conditional-close receipt")
     required = set(CLOSE_IF_ADOPTED_PINS) | {"predicate", "closed", "reason"}
@@ -1502,7 +1509,8 @@ def close_if_adopted_via(settings: dict, pins: dict, *, cancel=lambda: False,
 
 
 def dispose_via(settings: dict, op: str, proposal_id: str, expected_sha,
-                  base_sha, target, *, cancel=lambda: False) -> dict:
+                  base_sha, target, *, cancel=lambda: False,
+                  before_invoke=None) -> dict:
     """Resolve an external proposal to its terminal state at exact endpoints.
 
     Schema: ``settings`` carries the per-action operator grant
@@ -1530,6 +1538,7 @@ def dispose_via(settings: dict, op: str, proposal_id: str, expected_sha,
     ids/shas/branches, or a missing/mismatched confirmation echo. A
     failed call implies nothing about the remote proposal; reconcile by
     re-observing, never by assuming disposition.
+    Optional ``before_invoke`` has the validation/dispatch contract of ``invoke``.
     """
     if op not in DISPOSE_OPS:
         raise Denied("vcs_dispose cannot dispose with this operation")
@@ -1546,7 +1555,7 @@ def dispose_via(settings: dict, op: str, proposal_id: str, expected_sha,
     check_branch(target)
     data = invoke(settings, {"op": op, "id": proposal_id, "sha": expected_sha,
                              "base": base_sha, "target": target},
-                    cancel=cancel)
+                    cancel=cancel, before_invoke=before_invoke)
     if not isinstance(data, dict) or set(data) != {"id", "sha", "base", "target", "state"}:
         raise Denied("VCS adapter must confirm the disposed proposal")
     if data.get("id") != proposal_id or data.get("sha") != expected_sha:

@@ -10,6 +10,7 @@ from support import Fixture
 from mizu import vcs
 from mizu.errors import ConfigError, Denied
 from mizu.fs import mkdir
+from mizu.process import Result
 from mizu.runtime import Context, check_consult_role
 
 SHA_A = "a" * 40
@@ -331,7 +332,7 @@ if __name__ == "__main__":
 class VcsDisposeRecoveryTests(Fixture):
     def test_changed_head_retry_recovers(self):
         # The assessed head moved between observation and disposition:
-        # the first attempt fails closed with no evidence, and a retry
+        # the first attempt leaves outcome-unknown intent, and a fresh call
         # at the re-observed head succeeds. The adapter answers a stale
         # sha with the moved head and confirms the fresh one.
         code = ("import sys,json; req=json.load(sys.stdin); "
@@ -345,11 +346,14 @@ class VcsDisposeRecoveryTests(Fixture):
         args = close_args()
         with self.assertRaisesRegex(Denied, "expected sha"):
             ctx.handle("vcs_dispose", dict(args))
-        self.assertEqual(list((ctx.run_dir / "vcs-dispose").glob("*.json")), [])
+        pending_path, = (ctx.run_dir / "vcs-dispose").glob("*.json")
+        pending = json.loads(pending_path.read_text())
+        self.assertEqual(pending["outcome"], "unknown")
         out = ctx.handle("vcs_dispose", {**args, "sha": SHA_B})
         self.assertTrue(out["disposed"])
         self.assertEqual(out["sha"], SHA_B)
         self.assertEqual(out["state"], "closed")
+        self.assertEqual(json.loads(pending_path.read_text()), pending)
 
 CLOSE_IF_PINS = {
     "id": PROPOSAL_ID,
@@ -400,13 +404,14 @@ class VcsCloseIfAdoptedTests(Fixture):
         success = close_if_receipt(closed=True)
         refusal = close_if_receipt(closed=False, reason="already-terminal")
         ctx = self.context(close_if_code(success))
-        with patch.object(vcs, "invoke", side_effect=[success, refusal]) as invoke:
+        with patch.object(vcs, "run", side_effect=[
+                Result(0, json.dumps(success), "", "exited", 0),
+                Result(0, json.dumps(refusal), "", "exited", 0)]) as invoke:
             first = ctx.handle("vcs_dispose", close_if_args())
             with self.assertRaisesRegex(Denied, "already attempted"):
                 ctx.handle("vcs_dispose", close_if_args())
         invoke.assert_called_once()
-        self.assertEqual(invoke.call_args.args[0], ctx.config.vcs)
-        self.assertEqual(invoke.call_args.args[1], close_if_args())
+        self.assertEqual(json.loads(invoke.call_args.kwargs["input_data"]), close_if_args())
         self.assertTrue(first["closed"])
         evidence = json.loads((ctx.run_dir / first["evidence"]).read_text())
         self.assertEqual(evidence, first)
@@ -417,11 +422,10 @@ class VcsCloseIfAdoptedTests(Fixture):
         ctx = self.context(close_if_code(success))
         with self.assertRaises(Denied):
             ctx.handle("vcs_dispose", close_if_args(head_sha="invalid"))
-        with patch.object(vcs, "invoke", return_value=success) as invoke:
+        with patch.object(vcs, "run", return_value=Result(0, json.dumps(success), "", "exited", 0)) as invoke:
             result = ctx.handle("vcs_dispose", close_if_args())
         invoke.assert_called_once()
-        self.assertEqual(invoke.call_args.args[0], ctx.config.vcs)
-        self.assertEqual(invoke.call_args.args[1], close_if_args())
+        self.assertEqual(json.loads(invoke.call_args.kwargs["input_data"]), close_if_args())
         self.assertTrue(result["closed"])
 
     def test_conditional_close_refusal_is_returned_and_retained(self):
@@ -487,7 +491,7 @@ class VcsCloseIfAdoptedTests(Fixture):
             with self.assertRaises(Denied):
                 vcs.close_if_adopted_via({"close_grant": True}, dict(CLOSE_IF_PINS))
             invoke.assert_called_once_with({"close_grant": True}, close_if_args(),
-                                                cancel=ANY)
+                                                cancel=ANY, before_invoke=None)
 
     def test_conditional_close_requires_every_receipt_field(self):
         valid = close_if_receipt(closed=False)
@@ -581,12 +585,19 @@ class VcsCloseIfAdoptedTests(Fixture):
             out = vcs.close_if_adopted_via({"close_grant": True}, dict(CLOSE_IF_PINS))
             self.assertEqual(out["adapter_receipt"], payload)
 
-    def test_conditional_close_malformed_refusal_is_not_recorded(self):
+    def test_conditional_close_malformed_refusal_leaves_unknown_intent(self):
         calls = self.root / "adapter-calls.txt"
         ctx = self.context(close_if_code(close_if_receipt(closed=False, reason=""), calls))
         with self.assertRaises(Denied):
             ctx.handle("vcs_dispose", close_if_args())
-        self.assertEqual(list((ctx.run_dir / "vcs-dispose").glob("*.json")), [])
+        path, = (ctx.run_dir / "vcs-dispose").glob("*.json")
+        pending = json.loads(path.read_text())
+        self.assertEqual(pending["outcome"], "unknown")
+        self.assertNotIn("adapter_receipt", pending)
+        self.assertEqual(calls.read_text(), "1")
+        with self.assertRaisesRegex(Denied, "already attempted"):
+            ctx.handle("vcs_dispose", close_if_args())
+        self.assertEqual(json.loads(path.read_text()), pending)
         self.assertEqual(calls.read_text(), "1")
 
     def test_conditional_close_tool_schema_accepts_only_action_fields(self):

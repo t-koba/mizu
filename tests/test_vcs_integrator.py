@@ -308,7 +308,11 @@ class ReadIntegratorTests(Fixture):
                       ctx.snapshot, ctx.workspace)
         with self.assertRaisesRegex(Denied, "expected base and target"):
             ctx.handle("vcs_dispose", close_args(target="release/2"))
-        self.assertEqual(list((ctx.run_dir / "vcs-dispose").glob("*.json")), [])
+        path, = (ctx.run_dir / "vcs-dispose").glob("*.json")
+        pending = json.loads(path.read_bytes())
+        self.assertEqual(pending["outcome"], "unknown")
+        self.assertEqual(pending["intent"]["parameters"]["target"], "release/2")
+        self.assertNotIn("result", pending)
 
     def test_integrator_refused_protected_branch(self):
         role = integrator_role(self)
