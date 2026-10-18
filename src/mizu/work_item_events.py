@@ -179,9 +179,10 @@ def acknowledge(store, role, events):
             changed = True
             try:
                 write_json(path, receipt, exclusive=True)
-            except FileExistsError:
-                # Concurrent runs may finish the same batch. A valid existing
-                # exact receipt wins; malformed or conflicting data fails closed.
+            except (FileExistsError, Denied):
+                # Exclusive writes report differing timestamps as immutable
+                # conflicts. Only a fully validated existing receipt wins;
+                # malformed or unsafe data and missing receipts fail closed.
                 if not _received(store, role, item):
                     raise
     finally:
