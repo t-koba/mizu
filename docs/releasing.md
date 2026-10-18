@@ -42,6 +42,17 @@ updates; it does not auto-merge or change the deployed runtime. Action SHA pins
 and engine dependency locks should be refreshed through reviewed changes, not
 silently replaced by `latest`.
 
+For Pi, Dependabot watches both adapters weekly and groups by dependency name;
+those per-dependency proposals (and release-feed reports) are detection signals,
+not adoption commits. When any `@earendil-works/*` report shows a newer stable Pi
+release, review the package-specific changelogs, move every Pi package in both
+adapters to that same version, regenerate both lockfiles with the configured
+offline materializer, install from the approved offline npm cache, and run the
+Pi SDK gate plus the full check. Make this lockstep adoption one reviewed commit.
+Individual Dependabot PRs may be superseded by that commit and remain subject to
+normal proposal disposition; do not claim that Dependabot produces a single
+release-wide PR.
+
 ## Build distribution
 
 ```sh
