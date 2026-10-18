@@ -24,8 +24,8 @@ def _pip_version(interpreter):
     nums=[int(piece) for piece in match.group(1).split('.')]
     while len(nums)>1 and nums[-1]==0:
         nums.pop()
-    if match.group(2) is not None:
-        nums.append(int(match.group(2)))
+    # A post-release counter orders only within its release; it is not another
+    # release component and must not raise a base release below the security floor.
     return tuple(nums)
 
 

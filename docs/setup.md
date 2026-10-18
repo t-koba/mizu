@@ -142,7 +142,7 @@ mizu status demo
 本体の Python 依存は標準ライブラリのみです。運用者が明示的に
 `python3 scripts/install-claude-adapter.py --directory NEW_ENVIRONMENT`
 を実行して SDK 専用環境を作り（事前に安定版 pip を 26.1.2 以上に更新のこと:
-GHSA-wf93-45jw-7689 の entry-point traversal 対策、新規環境の pip が古い場合や prerelease / 未対応形式の場合は拒否）、出力された interpreter を
+GHSA-wf93-45jw-7689 の entry-point traversal 対策、新規環境の pip が古い場合や prerelease / 未対応形式の場合は拒否。post-release 番号は release 番号に加算せず、26.1.1.post999 のような古い release は拒否）、出力された interpreter を
 `[engines.claude].command` に設定します。`adapters/claude/requirements.lock`
 の全依存 hash を検証します。既存環境を置換せず、work unit では取得しません。
 `[engines.claude].directory` は専用の Claude 設定・認証保存先です。

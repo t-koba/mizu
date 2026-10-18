@@ -22,8 +22,15 @@ class ClaudeInstallerPipVersionTests(unittest.TestCase):
         self.assertLess(self._parse("26.1.1"), INSTALLER.PIP_MINIMUM)
         self.assertEqual(self._parse("26.1.2"), INSTALLER.PIP_MINIMUM)
         self.assertEqual(self._parse("26.1.2.0"), INSTALLER.PIP_MINIMUM)
-        self.assertGreater(self._parse("26.1.2.post1"), INSTALLER.PIP_MINIMUM)
+        self.assertEqual(self._parse("26.1.2.post1"), INSTALLER.PIP_MINIMUM)
+        self.assertEqual(self._parse("26.1.2.0.post999"), INSTALLER.PIP_MINIMUM)
         self.assertGreater(self._parse("26.2.0"), INSTALLER.PIP_MINIMUM)
+
+    def test_post_release_counter_cannot_raise_an_older_release_to_the_floor(self):
+        for version in ("26.1.post3", "26.1.0.post3", "26.1.0.0.post999",
+                        "26.0.post999", "26.1.1.post999"):
+            with self.subTest(version=version):
+                self.assertLess(self._parse(version), INSTALLER.PIP_MINIMUM)
 
     def test_prerelease_and_dev_releases_are_rejected(self):
         for version in ("26.1.2rc1", "26.1.2.dev0", "26.2.0b1", "26.2.0a1"):
