@@ -26,6 +26,16 @@ def specification():
 
 
 class RoutingFixture(Fixture):
+    def setUp(self):
+        super().setUp()
+        # "deep" is a configured profile here so finish-time validation passes;
+        # it is never a selector candidate, so routing still resolves through
+        # the operator rules exactly as with an unmapped name.
+        self.config = dataclasses.replace(
+            self.config,
+            profiles={**self.config.profiles, "deep": dict(self.config.profiles["primary"])})
+        self.project.config = self.config
+
     def setup_selection(self, spec=None, *, role_name="worker"):
         spec = copy.deepcopy(spec or specification())
         validate_selectors({"dynamic": spec}, self.config.profiles, self.file.parent)
@@ -117,9 +127,16 @@ class RoutingLifecycleTests(RoutingFixture):
         self.assertEqual(decision["profile"], "alternate")
         self.assertEqual(decision["rule"], 0)
 
-    def test_unmapped_recommendation_falls_back_to_default(self):
+    def test_unmapped_recommendation_is_refused_at_finish_but_falls_back_if_recorded(self):
+        from mizu.routing import record
         role = self.setup_selection()
-        self.finish_next("mystery")
+        with self.assertRaisesRegex(Denied, "no configured profile"):
+            self.finish_next("mystery")
+        # A hand-written record with an unknown profile still falls back
+        # gracefully at selection time instead of failing the dispatch.
+        record(self.project, "worker", {"next_profile": "mystery"},
+               {"id": self.project.snapshots.get()["id"]},
+               digest(self.project.goal.encode()), "hand-written-run")
         decision = self.prepare(role)
         self.assertEqual(decision["recommendation"]["status"], "fresh")
         self.assertEqual(decision["profile"], "primary")

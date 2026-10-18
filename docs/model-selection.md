@@ -358,8 +358,8 @@ a broken execution contract. Corrupt cache/state files fail explicitly.
 A finishing unit can recommend the profile the next unit should use, with
 no extra model call: the recommendation rides on the existing `finish`
 tool, which accepts optional `next_profile` (a profile identifier) and
-`next_reason` (bounded text, requires `next_profile`). Malformed values
-are refused at finish time.
+`next_reason` (bounded text, requires `next_profile`). Malformed values and
+names that match no configured profile are refused at finish time.
 
 The runtime records the recommendation under the run lock in
 `routing/ROLE.json`, bound to the finished task inputs: the goal digest

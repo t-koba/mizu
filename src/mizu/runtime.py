@@ -1371,6 +1371,8 @@ class Context:
             raise Denied("A nonempty work summary is required")
         from .routing import check_recommendation
         profile, reason = check_recommendation(args.get("next_profile"), args.get("next_reason"))
+        if profile is not None and profile not in self.config.profiles:
+            raise Denied("next_profile names no configured profile")
         args = {k: v for k, v in args.items() if k not in ("next_profile", "next_reason")}
         if profile is not None:
             args["next_profile"] = profile
@@ -2489,6 +2491,17 @@ def _open_backlog(context: Context, caps: set) -> dict:
         return stated
 
 
+#: Fixed statement opening every dispatch prompt, full and delta alike.
+#: A resumed session's delta is otherwise bare data; without this a model
+#: can read it as an acknowledgement of the previous seal ("sealed
+#: successfully") instead of a new unit that must do work and finish.
+#: Constant text in a fixed first position, so prompt caches stay warm.
+UNIT_BEGINS_STATEMENT = (
+    "A new work unit begins. This is not an acknowledgement of a previous "
+    "seal: do useful work within your role and capabilities, then finish "
+    "with mizu_finish and a short state.")
+
+
 def prompt_for(context: Context) -> str:
     caps = set(context.role.capabilities)
     # Mechanism enforces grants, not policy choice: capability-gated context
@@ -2510,7 +2523,8 @@ def prompt_for(context: Context) -> str:
     ci_failures = ci_failures_may_be_truncated = None
     if "vcs_read" in caps:
         ci_failures, ci_failures_may_be_truncated = ci_failures_projection(context.project)
-    return json.dumps({"goal": context.goal,
+    return json.dumps({"unit": UNIT_BEGINS_STATEMENT,
+                       "goal": context.goal,
                        "published_snapshot": {k: context.snapshot[k] for k in (
                            "id", "code_digest", "created_at", "state", "summary", "verification")},
                        "recent_snapshots": [{k: s[k] for k in ("id", "created_at", "outcome", "summary", "code_digest")}
@@ -2573,7 +2587,8 @@ def prompt_delta_for(context: Context, pending: list) -> str:
     open_backlog = _open_backlog(context, caps)
     open_work_items = context.project.work_items.page_open(
         limit=context.config.limits.work_items_prompt)
-    return json.dumps({"goal_digest": context.goal_digest,
+    return json.dumps({"unit": UNIT_BEGINS_STATEMENT,
+                       "goal_digest": context.goal_digest,
                        "published_snapshot": {k: context.snapshot[k] for k in (
                            "id", "code_digest", "created_at", "state", "summary", "verification")},
                        "snapshot_delta": {"id": context.snapshot["id"],

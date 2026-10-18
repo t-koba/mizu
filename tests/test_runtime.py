@@ -783,6 +783,27 @@ class PromptProjectionTests(Fixture):
             with self.assertRaisesRegex(Denied, "unsafe store"):
                 prompt_for(ctx)
 
+    def test_prompts_open_with_the_fixed_new_unit_statement(self):
+        import json
+        from mizu.runtime import prompt_for, prompt_delta_for, UNIT_BEGINS_STATEMENT
+        self.assertTrue(UNIT_BEGINS_STATEMENT)
+        for prompt in (prompt_for(self.context("worker")), prompt_delta_for(self.context("worker"), [])):
+            decoded = json.loads(prompt)
+            self.assertEqual(list(decoded)[0], "unit")
+            self.assertEqual(decoded["unit"], UNIT_BEGINS_STATEMENT)
+
+    def test_finish_refuses_unknown_next_profile(self):
+        from mizu.errors import Denied
+        finish = {"outcome": "continue", "summary": "s", "state": "n",
+                  "next_reason": "why", "next_profile": "no-such-profile"}
+        with self.assertRaisesRegex(Denied, "no configured profile"):
+            self.context("worker").handle("finish", dict(finish))
+        worker = self.context("worker")
+        self.assertEqual(worker.handle(
+            "finish", {**finish, "next_profile": "alternate"})["sealed"], True)
+        self.assertEqual(worker.finished["next_profile"], "alternate")
+        self.assertEqual(worker.finished["next_reason"], "why")
+
     def test_open_work_items_projection_is_always_present(self):
         import json
         from mizu.runtime import prompt_for, prompt_delta_for
@@ -1348,7 +1369,7 @@ class PromptOrderTests(Fixture):
         from mizu.runtime import prompt_for, prompt_delta_for
         ctx = self.context("worker")
         self.assertEqual(list(json.loads(prompt_for(ctx)).keys()),
-                         ["goal", "published_snapshot", "recent_snapshots",
+                         ["unit", "goal", "published_snapshot", "recent_snapshots",
                           "workspace", "workspace_mode", "pending_insights",
                           "open_insights", "open_work_items",
                           "decision_events", "decision_task", "wait_events", "obligations",
@@ -1358,7 +1379,7 @@ class PromptOrderTests(Fixture):
                           "timezone"])
         self.assertEqual(
             list(json.loads(prompt_delta_for(ctx, [])).keys()),
-            ["goal_digest", "published_snapshot", "snapshot_delta",
+            ["unit", "goal_digest", "published_snapshot", "snapshot_delta",
              "pending_insights", "open_insights", "open_work_items", "decision_events", "decision_task", "wait_events", "obligations",
              "research_state", "workspace", "workspace_mode",
              "acceptance_commands", "ci_branch", "ci_failures",
