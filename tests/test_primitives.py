@@ -34,6 +34,43 @@ class FileTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
         self.assertFalse(list(path.parent.glob(".new-*")))
 
+    def test_replace_retries_transient_permission_error(self):
+        path = self.root / "a/b.txt"
+        atomic_write(path, b"one")
+        real_replace = os.replace
+        calls = []
+
+        def flaky(temporary, target):
+            calls.append(time.monotonic())
+            if len(calls) < 3:
+                raise PermissionError("transient lock")
+            return real_replace(temporary, target)
+
+        with patch("os.replace", flaky):
+            atomic_write(path, b"two")
+        self.assertEqual(path.read_bytes(), b"two")
+        self.assertEqual(len(calls), 3)
+        # Retried within a bounded window, not once per eternity.
+        self.assertLess(calls[-1] - calls[0], 5.0)
+        self.assertFalse(list(path.parent.glob(".new-*")))
+
+    def test_replace_gives_up_after_bounded_window(self):
+        path = self.root / "a/b.txt"
+        atomic_write(path, b"one")
+
+        def stuck(temporary, target):
+            raise PermissionError("locked")
+
+        started = time.monotonic()
+        with patch("os.replace", stuck):
+            with self.assertRaises(PermissionError):
+                atomic_write(path, b"two")
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 10.0)
+        # Untouched destination and no litter left behind.
+        self.assertEqual(path.read_bytes(), b"one")
+        self.assertFalse(list(path.parent.glob(".new-*")))
+
     def test_immutable_idempotence_and_conflict(self):
         path = self.root / "record"
         atomic_write(path, b"first", exclusive=True)

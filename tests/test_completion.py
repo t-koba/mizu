@@ -293,7 +293,10 @@ class BoundaryTests(Fixture):
 
     def test_mcp_recursion_failure_continues_loop(self):
         from mizu.mcp_loop import serve_stdio
-        deep = b"[" * 20000 + b"]" * 20000
+        # Nest far past any plausible decoder bound (200k levels is still a
+        # ~400 KiB frame, well under MAX_FRAME): shallow fixed depths are
+        # version-fragile because a deeper bound parses them without failing.
+        deep = b"[" * 200000 + b"]" * 200000
         frames = [b'{"jsonrpc":"2.0","id":1,"method":"ping","params":{"deep":' + deep + b'}}\n',
                   b'{"jsonrpc":"2.0","id":2,"method":"ping","params":{}}\n']
         self.assertLess(max(map(len, frames)), MAX_FRAME)

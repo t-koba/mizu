@@ -11,6 +11,7 @@ import re
 import stat
 import tempfile
 import threading
+import time
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Iterator
 
@@ -120,7 +121,7 @@ def atomic_write(path: Path, data: bytes, *, exclusive: bool = False,
                     # Windows rename is atomic and fails if the destination
                     # exists; unlike a hard link, it leaves no second name if
                     # cleanup of the temporary path is delayed by the host.
-                    os.rename(temporary, path)
+                    _move_with_retry(temporary, path, exclusive=True)
                 else:
                     try:
                         os.link(temporary, path, follow_symlinks=False)
@@ -130,11 +131,33 @@ def atomic_write(path: Path, data: bytes, *, exclusive: bool = False,
                 if path.is_symlink() or path.read_bytes() != data:
                     raise Denied(f"Immutable object conflict: {path.name}") from None
         else:
-            os.replace(temporary, path)
+            _move_with_retry(temporary, path, exclusive=False)
         sync_dir(path.parent)
     finally:
         with contextlib.suppress(FileNotFoundError, OSError):
             os.unlink(temporary)
+
+
+def _move_with_retry(temporary: Path, path: Path, *, exclusive: bool) -> None:
+    """Atomically publish a staged file, tolerating transient locks.
+
+    Concurrent readers (Windows mandatory locking, antivirus scanners) can
+    briefly hold the destination; retry a bounded window before failing.
+    FileExistsError still fails fast for the immutable-conflict path above,
+    as do the create-only link attempts.
+    """
+    move = os.rename if exclusive and _platform.IS_WINDOWS else os.replace
+    deadline = time.monotonic() + 0.5
+    while True:
+        try:
+            move(temporary, path)
+            return
+        except PermissionError:
+            # Transient sharing violation (a concurrent reader holds the
+            # destination); fail loud once the window passes.
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
 
 
 def write_json(path: Path, value: Any, *, exclusive: bool = False) -> None:
