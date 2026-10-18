@@ -406,7 +406,10 @@ Terminal `done`/`dropped` transitions can wake roles explicitly subscribed via
 and full-chain validators, not a separate glob projection. Per-role exact
 terminal-identity receipts live outside the immutable work-item records and
 outside decision timestamp cursors; only a durably completed non-bounded run
-acknowledges its frozen batch. Inbox/archive origin submitter routing never
+acknowledges its frozen batch. The terminal batch uses the role-effective
+`work_item_events_limit` (role override when set, else the project default),
+independent of the decision-event batch; both stay under the fixed 100-event
+mechanism cap. Inbox/archive origin submitter routing never
 substitutes the transition actor. Terminal appends and successful/partial receipt writes touch the work-items
 parent metadata as a best-effort non-recursive platform wake hint; this is not
 event storage, assignment, or an admission decision. See
@@ -605,7 +608,8 @@ to it (insight source equals role name in `own` mode, any source when
 finding plus the reason as a `decision_events` field inside the role's ordinary prompt
 (all other granted inputs stay present), described factually by a `decision_task` field,
 records the admission and the
-delivered events under the run directory, and advances a per-role acknowledged
+delivered events under the run directory (sized by the role-effective
+`decision_events_limit`, independent of the terminal batch), and advances a per-role acknowledged
 cursor over substantive outcomes only after successful processing, so pause, budget,
 concurrency, and restart keep their authority and nothing is lost or repeated.
 Withdrawn or superseded decisions never emit, and a substantive decision never lands on a

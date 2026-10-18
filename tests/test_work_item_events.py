@@ -590,7 +590,7 @@ class WorkItemEventTests(Fixture):
         for _ in range(3):
             self.terminal()
         config = self.subscribed_config()
-        config = dataclasses.replace(config, limits=dataclasses.replace(config.limits, decision_events_limit=1))
+        config = dataclasses.replace(config, limits=dataclasses.replace(config.limits, work_item_events_limit=1))
         self.project.config = config
         driver = ScriptDriver()
         engine = Engine(config, driver=driver)

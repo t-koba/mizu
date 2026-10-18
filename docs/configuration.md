@@ -186,7 +186,8 @@ required). Operator tooling that concatenates configs
 | `event_stream_bytes` | Per-run engine event-stream retention in bytes (1 MiB–256 MiB; default 4 MiB). Bytes past the budget are dropped from `*-events.jsonl` with an explicit `*-events-truncated.json` marker while parsing and the run continue, so diagnostic volume can never discard sealed work. The per-record transport bound stays fixed mechanism |
 | `insight_cursor_ttl_seconds` | Absolute lifetime of `insight page` continuation cursors (60–604,800 seconds; default 86,400). Continuations never extend expiry. Expired cursors fail explicitly; restart enumeration. This is not archive retention |
 | `pending_insights` | Newest pending proposals offered in prompts (1–1,000; default 30). `mizu insight list` uses 1,000 |
-| `decision_events_limit` | Events delivered per source per dispatch (decisions and terminal work items) (1–100; default 10; 100-event cap stays fixed mechanism). With rotation, a role with many deferrals sees each one every N/value runs |
+| `decision_events_limit` | Decision events delivered per dispatch per role (1–100; default 10; 100-event cap stays fixed mechanism). With rotation, a role with many deferrals sees each one every N/value runs |
+| `work_item_events_limit` | Terminal work-item events delivered per dispatch per role (1–100; default 10; 100-event cap stays fixed mechanism). Independent of the decision batch: each source uses only its own limit |
 | `session_max_tokens` | Cumulative session tokens at which a resumed persistent session restarts with a fresh session key (0 disables; 0–1,073,741,824; default 0). The published snapshot and composed policy reload on the next unit; Pi accumulates per-run usage into the session record, Codex/Claude reuse their saved cumulative totals, unknown shapes count 0 (age still rotates) |
 | `session_max_cost_usd` | Estimated session cost (USD) at which a resumed persistent session restarts (0 disables; 0–1,000,000; default 0). Cost is the native provider estimate where reported (ADR-005); sessions without cost evidence never rotate on this bound |
 | `session_max_age_seconds` | Wall-clock conversation lifetime (stable creation time surviving same-id saves; legacy files fall back to mtime) at which a resumed persistent session restarts (0 disables; 0–31,536,000s; default 0) |
@@ -431,8 +432,14 @@ only for this role's findings. `mizu explain` reports the effective routes.
 
 Terminal events are validated through the existing WorkItems immutable seed
 and complete current chain, oldest terminal instant first (aware timestamps
-normalized to UTC, then item ID/revision). `decision_events_limit` bounds **each
-source separately**, 1–100 rows per source per dispatch. Each terminal row is
+normalized to UTC, then item ID/revision). Dispatch batches are independent per
+source: the role-effective `work_item_events_limit` (role override when set,
+else the project default) bounds terminal rows, 1–100 per dispatch, while the
+role-effective `decision_events_limit` bounds only decisions. Either role
+override is 1–100 with `None` meaning inherit; the fixed 100-event mechanism
+cap still applies to both. Choose each batch to fit the role's
+`requests_per_run`: a whole selected batch is acknowledged only after a
+completed run, otherwise it replays. Each terminal row is
 at most 8192 canonical bytes, the page at most 1 MiB; title retains the seed's
 200-character bound and reason is a 1024-byte preview with a truncation flag.
 Rows include stable `event: "work_item:<item-id>:<terminal-rev>"`, `source`,
@@ -489,7 +496,11 @@ optional per-role spend overrides `requests_per_run` / `tools_per_run` /
 `wrap_up_requests` / `wrap_up_tools`
 (1–1,073,741,824; unset keeps the project `[limits]` value, so an auditor may run
 200/400 while other roles stay at the project default; storage, transport, budgets,
-slots and rotation stay project/host policy), and at most one of `daemon`, `interval_seconds`, `calendar`. `policy` is a path
+slots and rotation stay project/host policy), optional per-role event batch
+overrides `decision_events_limit` / `work_item_events_limit` (1–100 each; unset
+keeps the matching project `[limits]` value, so one role may take larger
+decision windows while another takes smaller terminal batches), and at most one
+of `daemon`, `interval_seconds`, `calendar`. `policy` is a path
 string or an array of path strings (e.g. shared principles plus the role file);
 parts are read as UTF-8 in order and joined with one `\n` (trailing newline
 kept), so the composed text is the prompt and the policy digest. Missing,

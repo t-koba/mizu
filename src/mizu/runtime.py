@@ -24,8 +24,9 @@ from .admission import admission
 from . import dispatch_evidence, work_item_events
 from .budget import Budget
 from .config import (MAX_CI_WAKE_EXTRA_BRANCHES, Config, Role, load,
-                     role_policy_bytes, role_requests_per_run,
-                     role_tools_per_run, role_run_seconds,
+                     role_decision_events_limit, role_policy_bytes,
+                     role_requests_per_run, role_run_seconds,
+                     role_tools_per_run, role_work_item_events_limit,
                      role_wrap_up_requests, role_wrap_up_tools)
 from .doctor import container_runtime
 from .drivers import driver_for
@@ -3206,11 +3207,11 @@ class Engine:
             triggers = tuple(getattr(role, "decision_events", ()) or ())
             sources = getattr(role, "decision_sources", "own") or "own"
             decision_events = project.insights.decision_events(
-                role_name, triggers, limit=project.config.limits.decision_events_limit,
+                role_name, triggers, limit=role_decision_events_limit(project.config, role),
                 sources=sources) if triggers else []
             terminal_page = work_item_events.pending(
                 project.work_items, role_name, role.work_item_events, sources=role.work_item_sources,
-                limit=project.config.limits.decision_events_limit)
+                limit=role_work_item_events_limit(project.config, role))
             terminal_events = terminal_page["events"]
             wait_events = project.insights.due_waits(role_name, snapshot)
             # Dependency obligations addressed to this role ride along when
@@ -4140,7 +4141,8 @@ def _role_events_due(project: Project, snapshot: dict, role_name=None) -> bool:
                 sources = getattr(project.config.roles[name], "decision_sources", "own") or "own"
                 if triggers:
                     pending = project.insights.decision_events(
-                        name, triggers, limit=project.config.limits.decision_events_limit,
+                        name, triggers, limit=role_decision_events_limit(
+                            project.config, project.config.roles[name]),
                         sources=sources)
                     if sources == "any":
                         if any(isinstance(e, dict) for e in pending):

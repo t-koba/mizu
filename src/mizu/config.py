@@ -363,11 +363,16 @@ class Limits:
     insight_cursor_ttl_seconds: int = 86400
     #: Maximum open work-item rows offered in each full or delta prompt.
     work_items_prompt: int = 20
-    #: Operator-selected decision-event ride-along window per dispatch
-    #: (1-100; default 10). The 100-event cap stays fixed mechanism;
-    #: the value is policy: with rotation, a role with many deferrals sees
-    #: each one every N/value runs.
+    #: Operator-selected decision-event window per dispatch (1-100;
+    #: default 10). The 100-event cap stays fixed mechanism; the value is
+    #: policy: with rotation, a role with many deferrals sees each one
+    #: every N/value runs.
     decision_events_limit: int = 10
+    #: Operator-selected terminal work-item event window per dispatch
+    #: (1-100; default 10). Independent of the decision-event window above:
+    #: each source uses only its own project default unless the role
+    #: overrides it. The 100-event cap stays fixed mechanism.
+    work_item_events_limit: int = 10
     #: Operator-selected persistent-session rotation bounds. A resumed
     #: persistent session restarts with a fresh session key once cumulative
     #: usage or wall-clock conversation lifetime reaches a bound, carrying the
@@ -451,6 +456,10 @@ class Role:
     wrap_up_tools: int | None = None
     #: None inherits the project wall deadline; 0 disables only this wall.
     run_seconds: int | None = None
+    #: Per-role per-source event batch overrides. None inherits the matching
+    #: project `[limits]` default; a set value must lie in 1-100.
+    decision_events_limit: int | None = None
+    work_item_events_limit: int | None = None
 
 
 def role_requests_per_run(config: "Config", role: "Role") -> int:
@@ -505,6 +514,40 @@ def role_wrap_up_tools(config: "Config", role: "Role") -> int:
 def role_run_seconds(config: "Config", role: "Role") -> int:
     """Resolve the role's wall policy once when its Context is created."""
     return config.limits.run_seconds if role.run_seconds is None else role.run_seconds
+
+
+def role_decision_events_limit(config: "Config", role: "Role") -> int:
+    """Effective decision-event batch for one role for one dispatch.
+
+    Schema: role override when set, else project `[limits]`
+    decision_events_limit. Trust: configuration. Failure: never raises;
+    malformed overrides read as the project value (load already refuses
+    them fail-closed).
+    """
+    try:
+        value = getattr(role, "decision_events_limit", None)
+    except Exception:
+        value = None
+    if type(value) is int and 1 <= value <= 100:
+        return value
+    return config.limits.decision_events_limit
+
+
+def role_work_item_events_limit(config: "Config", role: "Role") -> int:
+    """Effective terminal work-item batch for one role for one dispatch.
+
+    Schema: role override when set, else project `[limits]`
+    work_item_events_limit. Trust: configuration. Failure: never raises;
+    malformed overrides read as the project value (load already refuses
+    them fail-closed).
+    """
+    try:
+        value = getattr(role, "work_item_events_limit", None)
+    except Exception:
+        value = None
+    if type(value) is int and 1 <= value <= 100:
+        return value
+    return config.limits.work_item_events_limit
 
 
 def role_policy_text(role: "Role") -> str:
@@ -635,6 +678,7 @@ def load(file: Path) -> Config:
                      "insight_cursor_ttl_seconds": (60, 604800),
                      "retention_days": (0, 3650), "pending_insights": (1, 1000),
                      "work_items_prompt": (1, 100), "decision_events_limit": (1, 100),
+                     "work_item_events_limit": (1, 100),
                      "event_log_compress_days": (0, 3650), "event_log_retention_days": (0, 3650),
                      "event_stream_bytes": (1048576, 268435456),
                      "role_state_bytes": (1024, 65536),
@@ -842,7 +886,7 @@ def load(file: Path) -> Config:
             raise ConfigError(f"Role name '{name}' is reserved for the operator channel")
         keys(role, {"profile", "policy", "workspace", "capabilities", "engine_tools", "on_change",
                     "interval_seconds", "calendar", "daemon", "selector", "attributes",
-                    "decision_events", "work_item_events", "decision_sources", "work_item_sources", "ci_wake", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds"}, f"roles.{name}")
+                    "decision_events", "work_item_events", "decision_sources", "work_item_sources", "ci_wake", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds", "decision_events_limit", "work_item_events_limit"}, f"roles.{name}")
         profile = string(role.get("profile", ""), f"roles.{name}.profile")
         selector = string(role.get("selector", ""), f"roles.{name}.selector")
         if ("profile" in role) == ("selector" in role):
@@ -974,6 +1018,12 @@ def load(file: Path) -> Config:
         role_seconds = role.get("run_seconds")
         if role_seconds is not None:
             number(role_seconds, f"roles.{name}.run_seconds", 0, 1073741824)
+        role_decision_limit = role.get("decision_events_limit")
+        if role_decision_limit is not None:
+            number(role_decision_limit, f"roles.{name}.decision_events_limit", 1, 100)
+        role_work_item_limit = role.get("work_item_events_limit")
+        if role_work_item_limit is not None:
+            number(role_work_item_limit, f"roles.{name}.work_item_events_limit", 1, 100)
         roles[name] = Role(name, profile, policy, workspace, caps,
                            strings(role.get("engine_tools", []), "engine_tools"),
                            boolean(role.get("on_change", False), "on_change"), interval, calendar, daemon, selector, attrs,
@@ -981,7 +1031,9 @@ def load(file: Path) -> Config:
                            work_item_sources=work_sources, ci_wake=ci_wake,
                            requests_per_run=role_requests, tools_per_run=role_tools,
                            wrap_up_requests=role_wrap_requests, wrap_up_tools=role_wrap_tools,
-                           run_seconds=role_seconds)
+                           run_seconds=role_seconds,
+                           decision_events_limit=role_decision_limit,
+                           work_item_events_limit=role_work_item_limit)
     if not roles:
         raise ConfigError("At least one role is required")
     consult_role = string(data.get("consult_role", ""), "consult_role")

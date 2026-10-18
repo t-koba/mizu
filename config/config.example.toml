@@ -61,7 +61,8 @@ event_stream_bytes = 4194304  # Per-run engine event-stream retention in bytes (
 insight_cursor_ttl_seconds = 86400 # Absolute insight page cursor lifetime (60-604800 seconds); continuation never extends it.
 pending_insights = 30            # Newest pending proposals offered per prompt. Raw inbox/decisions stay on disk; `mizu insight list` uses 1000.
 work_items_prompt = 20           # Open work-item rows per full/delta prompt (1-100; overflow and incomplete legacy coverage are explicit).
-decision_events_limit = 10      # Events per source per dispatch (decisions and terminal work items) (1-100; default 10). Bound stays 100; value is policy.
+decision_events_limit = 10  # Decision events per dispatch per role (1-100; default 10). Bound stays 100; value is policy.
+work_item_events_limit = 10 # Terminal work-item events per dispatch per role (1-100; default 10). Independent of the decision batch above.
 session_max_tokens = 0          # Restart a resumed persistent session once cumulative tokens reach N (0 disables).
 session_max_cost_usd = 0         # Restart a resumed persistent session once estimated cost (USD) reaches N (0 disables).
 session_max_age_seconds = 0      # Restart a resumed persistent session once wall-clock conversation lifetime reaches N seconds (stable creation surviving same-id saves; 0 disables).
@@ -234,6 +235,9 @@ daemon = true
 # tools_per_run = 64
 # wrap_up_requests = 3
 # wrap_up_tools = 5
+# Per-role event batch overrides (optional, 1-100 each; unset keeps the matching project default).
+# decision_events_limit = 10
+# work_item_events_limit = 10
 
 [roles.searcher]
 profile = "alternate"
@@ -259,6 +263,8 @@ interval_seconds = 900
 # its own nonempty subscription. Both default to own.
 # decision_sources = "any"  # decisions from any source; requires decision_events.
 # work_item_sources = "own" # terminal events by origin submitter, never actor.
+# Dispatch batches are independent per source: decision_events_limit bounds only
+# decisions, work_item_events_limit only terminal events (role override or project default).
 # Migration: omitted work_item_sources inherits legacy decision_sources for terminal
 # delivery; terminal-only legacy decision_sources="any" resolves to decision own, work-item any.
 # A red ci_branch wakes only roles with ci_wake (default true for write roles,
