@@ -177,6 +177,29 @@ class ExplainTests(Fixture):
         self.assertEqual(result["role_facts"]["last_outcome"],
                          {"status": "unavailable", "record": None})
 
+    def test_last_outcome_rejects_foreign_run_identity(self):
+        run = "0123456789abcdef0123456789abcdef"
+        health = self.project.root / "health" / "worker.json"
+        health.parent.mkdir(exist_ok=True)
+        health.write_text(json.dumps({"consecutive_failures": 0, "last_run": run,
+                                      "updated_at": "2026-01-02T03:04:05+00:00"}))
+        runs = self.project.root / "runs" / run
+        runs.mkdir(parents=True)
+        # Another run's record under this run id is never attributed.
+        (runs / "result.json").write_text(json.dumps(
+            {"run": "b" * 32, "role": "worker", "status": "prepared",
+             "finished_at": "2026-01-03T03:04:05+00:00"}))
+        result = execute(self._args("--role", "worker"))
+        self.assertEqual(result["role_facts"]["last_outcome"],
+                         {"status": "unavailable", "record": None})
+        # Another role's record is never attributed either.
+        (runs / "result.json").write_text(json.dumps(
+            {"run": run, "role": "reporter", "status": "prepared",
+             "finished_at": "2026-01-03T03:04:05+00:00"}))
+        result = execute(self._args("--role", "worker"))
+        self.assertEqual(result["role_facts"]["last_outcome"],
+                         {"status": "unavailable", "record": None})
+
     def test_selection_wait_reports_probe_wait_without_scans(self):
         from mizu import explain as explain_module
         from unittest.mock import patch

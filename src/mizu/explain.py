@@ -170,16 +170,18 @@ def _selection(config, role) -> dict:
                 "fixed_blocks": None, "probe_blocks": None}
 
 
-def _last_outcome(project, health) -> dict:
+def _last_outcome(project, health, role_name: str) -> dict:
     """Report the last completed run outcome from one bounded run-record read.
 
     Schema: ``health`` is the ``_role_record`` health projection; its record
     may carry ``last_run``. Reads only ``runs/<id>/result.json`` then
     ``runs/<id>/error.json`` through the bounded record reader and reports
-    scalar ``kind``/``status``/``finished_at``. Bounds: two reads at most
-    ``RECORD_BYTES`` each, no inbox or wait scans. Trust: local run records.
-    Failure: anything missing or malformed reports ``unavailable``; never
-    raises.
+    scalar ``kind``/``status``/``finished_at``. Identity: the record must
+    carry this run id and this role; a record for another run (or a record
+    without identity) is skipped, never attributed. Bounds: two reads at
+    most ``RECORD_BYTES`` each, no inbox or wait scans. Trust: local run
+    records. Failure: anything missing, mismatched, or malformed reports
+    ``unavailable``; never raises.
     """
     record = health.get("record") if isinstance(health, dict) else None
     last_run = record.get("last_run") if isinstance(record, dict) else None
@@ -188,6 +190,8 @@ def _last_outcome(project, health) -> dict:
     for kind in ("result", "error"):
         status, outcome = _read_record(project.root, f"runs/{last_run}/{kind}.json")
         if status != "current" or not isinstance(outcome, dict):
+            continue
+        if outcome.get("run") != last_run or outcome.get("role") != role_name:
             continue
         state = outcome.get("status")
         finished = outcome.get("finished_at")
@@ -284,7 +288,7 @@ def explain(config, project, role_name: str) -> dict:
             # inbox/wait scans, which this projection deliberately avoids (see
             # the no-unbounded-APIs test). The probe wait and the last run
             # outcome are single bounded reads and reported.
-            "last_outcome": _last_outcome(project, health),
+            "last_outcome": _last_outcome(project, health, role_name),
             "selection_wait": _selection_wait(project, role_name),
             "unknowns": {
                 "exact_next_invocation": "unknown",
