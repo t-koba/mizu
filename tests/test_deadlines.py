@@ -796,6 +796,10 @@ class DeadlineTests(Fixture):
                         "command": (sys.executable, str(ROOT / "tests/fake_engines.py"), engine, "stalled-request")}})
                 self.config = config
                 ctx = self.context("consult")
+                # Native process launch and handshake precede admission; keep
+                # their idle bound separate from the one-second request bound
+                # that starts only after admit_invocation.
+                ctx.transport_idle_deadline = time.monotonic() + 60
                 driver = ClaudeDriver(config) if engine == "claude" else CodexDriver(config)
                 started = time.monotonic()
                 with patch.dict("os.environ", {"CODEX_AUTH_FILE": str(self.root / "absent")}), \
