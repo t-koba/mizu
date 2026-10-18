@@ -44,8 +44,14 @@ Unicode LF framing and agent_end vs agent_settled.
 ### Atomic state read/replace contract
 
 `read_json` opens managed state with Windows delete sharing (a `CreateFileW`
-handle transferred to a Python stream); publication still uses `os.replace`,
-not an extended native rename or a permission-error retry window. For files
+handle transferred to a Python stream). Non-exclusive Windows publication uses
+`SetFileInformationByHandle(FileRenameInfoEx)` with `FILE_RENAME_INFO.Flags` set
+to `REPLACE_IF_EXISTS | POSIX_SEMANTICS` (0x1 | 0x2); delete sharing alone does
+not make `os.replace` work with a retained target reader. The source handle has
+`DELETE` access and the destination name is absolute UTF-16 with a byte length.
+Unsupported native operations and sharing/access errors fail immediately: no
+fallback or retry window. Exclusive create-only publication still uses
+non-replacing `os.rename`; POSIX publication still uses `os.replace`. For files
 published by `atomic_write`, a retained product reader must read complete A
 while publication and new product reads complete B. External Windows readers
 that omit delete sharing can still block replacement; permission/sharing errors
@@ -56,7 +62,13 @@ validation contract of `safe_read`, nor a guarantee for in-place writes.
 B is published and read, and checks create-only idempotence/conflicts before
 releasing A. It is included in the ordinary CI matrix; Windows semantics require
 an actual Windows result for the exact revision, not a Linux pass or mocked
-Win32 calls. To run the focused file suite on Windows:
+Win32 calls. `WindowsReplaceTests` checks the native wrapper's flags, buffer
+layout (including non-BMP UTF-16), error propagation and handle cleanup using
+mocked calls; it does not establish actual filesystem semantics. API references:
+[SetFileInformationByHandle](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setfileinformationbyhandle),
+[FILE_RENAME_INFO](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_rename_info),
+and [rename flags](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information).
+To run the focused file suite on Windows:
 
 ```powershell
 python -m unittest discover -s tests -p test_primitives.py -v

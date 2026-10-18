@@ -1,23 +1,97 @@
 import concurrent.futures
+import ctypes
 import dataclasses
 import json
 import os
 import stat
+import struct
 import sys
 import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from support import Fixture, ROOT
 from mizu.budget import Budget
 from mizu.config import load
 from mizu.errors import Busy, ConfigError, Denied, LimitExceeded
-from mizu.fs import (_open_read, atomic_write, canonical, digest, lock, read_json,
+from mizu.fs import (_open_read, _replace_windows, atomic_write, canonical, digest, lock, read_json,
                      relative_parts, safe_read, safe_write, write_json)
 from mizu.pi import credentials
 from mizu.process import environment, run
+
+
+class WindowsReplaceTests(unittest.TestCase):
+    """Mocked Win32 ABI/failure checks, not evidence of Windows FS semantics."""
+
+    def setUp(self):
+        self.kernel = Mock()
+        self.kernel.CreateFileW.return_value = 123
+        self.kernel.SetFileInformationByHandle.return_value = 1
+        self.error = PermissionError("native sharing/access failure")
+        for target, value in (("WinDLL", Mock(return_value=self.kernel)),
+                              ("get_last_error", Mock(return_value=5)),
+                              ("WinError", Mock(return_value=self.error))):
+            patcher = patch.object(ctypes, target, value, create=True)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_posix_rename_flags_layout_and_utf16_name(self):
+        destination = Path("state-雪-\U0001f642.json")
+        name = os.path.abspath(destination).encode("utf-16-le")
+
+        def rename(handle, info_class, buffer, size):
+            self.assertEqual((handle, info_class), (123, 22))
+            raw = buffer.raw
+            self.assertEqual(size, len(raw))
+            # Independently decode FILE_RENAME_INFO's DWORD/HANDLE/DWORD/WCHAR
+            # layout, including native pointer alignment and UTF-16 surrogates.
+            pointer_size = ctypes.sizeof(ctypes.c_void_p)
+            root_offset = pointer_size
+            length_offset = root_offset + pointer_size
+            name_offset = length_offset + 4
+            self.assertEqual(struct.unpack_from("<I", raw)[0], 3)
+            self.assertEqual(raw[root_offset:length_offset], b"\0" * pointer_size)
+            self.assertEqual(struct.unpack_from("<I", raw, length_offset)[0], len(name))
+            self.assertEqual(raw[name_offset:name_offset + len(name)], name)
+            self.assertEqual(raw[name_offset + len(name):][:2], b"\0\0")
+            return 1
+
+        self.kernel.SetFileInformationByHandle.side_effect = rename
+        _replace_windows(".new-test", destination)
+        ctypes.WinDLL.assert_called_once_with("kernel32", use_last_error=True)
+        self.kernel.CreateFileW.assert_called_once_with(
+            ".new-test", 0x10000, 7, None, 3, 0x80, None)
+        self.assertIs(self.kernel.CreateFileW.restype, ctypes.c_void_p)
+        self.kernel.SetFileInformationByHandle.assert_called_once()
+        self.kernel.CloseHandle.assert_called_once_with(123)
+        ctypes.WinError.assert_not_called()
+
+    def test_open_failure_does_not_rename_or_close_invalid_handle(self):
+        self.kernel.CreateFileW.return_value = ctypes.c_void_p(-1).value
+        with self.assertRaises(PermissionError) as raised:
+            _replace_windows(".new-test", Path("state.json"))
+        self.assertIs(raised.exception, self.error)
+        self.kernel.CreateFileW.assert_called_once()
+        self.kernel.SetFileInformationByHandle.assert_not_called()
+        self.kernel.CloseHandle.assert_not_called()
+        ctypes.WinError.assert_called_once_with(5)
+
+    def test_rename_failure_closes_source_without_retry_or_fallback(self):
+        self.kernel.SetFileInformationByHandle.return_value = 0
+        # CloseHandle may change last-error: capture the rename error first.
+        self.kernel.CloseHandle.side_effect = lambda _: setattr(
+            ctypes.get_last_error, "return_value", 6)
+        with patch("mizu.fs.os.replace") as fallback:
+            with self.assertRaises(PermissionError) as raised:
+                _replace_windows(".new-test", Path("state.json"))
+        self.assertIs(raised.exception, self.error)
+        self.kernel.CreateFileW.assert_called_once()
+        self.kernel.SetFileInformationByHandle.assert_called_once()
+        self.kernel.CloseHandle.assert_called_once_with(123)
+        ctypes.WinError.assert_called_once_with(5)
+        fallback.assert_not_called()
 
 
 class FileTests(unittest.TestCase):
@@ -87,12 +161,28 @@ class FileTests(unittest.TestCase):
     def test_replace_permission_failure_is_immediate(self):
         path = self.root / "a/b.txt"
         atomic_write(path, b"one")
-        with patch("mizu.fs.os.replace", side_effect=PermissionError("locked")) as move:
+        primitive = "_replace_windows" if os.name == "nt" else "os.replace"
+        with patch(f"mizu.fs.{primitive}", side_effect=PermissionError("locked")) as move:
             with self.assertRaises(PermissionError):
                 atomic_write(path, b"two")
             move.assert_called_once()
         self.assertEqual(path.read_bytes(), b"one")
         self.assertFalse(list(path.parent.glob(".new-*")))
+
+    def test_windows_replace_failure_preserves_destination_and_cleans_temporary(self):
+        path = self.root / "state.json"
+        atomic_write(path, b"old")
+        with patch("mizu.fs._platform.IS_WINDOWS", True), \
+                patch("mizu.fs._replace_windows", side_effect=PermissionError("locked")) as move, \
+                patch("mizu.fs.os.replace") as fallback:
+            with self.assertRaises(PermissionError):
+                atomic_write(path, b"new")
+            move.assert_called_once()
+            self.assertEqual(Path(move.call_args.args[0]).parent, path.parent)
+            self.assertEqual(move.call_args.args[1], path)
+            fallback.assert_not_called()
+        self.assertEqual(path.read_bytes(), b"old")
+        self.assertFalse(list(self.root.glob(".new-*")))
 
     def test_read_json_missing_and_permission_failure(self):
         path = self.root / "state.json"

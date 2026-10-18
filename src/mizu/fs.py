@@ -134,6 +134,8 @@ def atomic_write(path: Path, data: bytes, *, exclusive: bool = False,
             except FileExistsError:
                 if path.is_symlink() or _read_bytes(path) != data:
                     raise Denied(f"Immutable object conflict: {path.name}") from None
+        elif _platform.IS_WINDOWS:
+            _replace_windows(temporary, path)
         else:
             os.replace(temporary, path)
         sync_dir(path.parent)
@@ -142,11 +144,69 @@ def atomic_write(path: Path, data: bytes, *, exclusive: bool = False,
             os.unlink(temporary)
 
 
+def _replace_windows(source: str, destination: Path) -> None:
+    """Replace a name while delete-sharing readers retain the old generation.
+
+    Win32 FileRenameInfoEx uses FILE_RENAME_INFO's Flags union member, not
+    the legacy ReplaceIfExists boolean. POSIX_SEMANTICS keeps existing target
+    handles usable and makes the new file available immediately. Unsupported
+    filesystems/Windows versions and sharing/access failures propagate; there
+    is no weaker fallback or retry.
+
+    API/ABI references (Microsoft Learn):
+    /windows/win32/api/fileapi/nf-fileapi-setfileinformationbyhandle
+    /windows/win32/api/winbase/ns-winbase-file_rename_info
+    /windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information
+    """
+    import ctypes
+
+    # Fixed-width Win32 types also make the buffer layout testable off Windows.
+    dword = ctypes.c_uint32
+    handle_type = ctypes.c_void_p
+
+    class RenameInfo(ctypes.Structure):
+        _fields_ = [("Flags", dword), ("RootDirectory", handle_type),
+                    ("FileNameLength", dword), ("FileName", ctypes.c_uint16 * 1)]
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.argtypes = (ctypes.c_wchar_p, dword, dword, handle_type,
+                                  dword, dword, handle_type)
+    kernel.CreateFileW.restype = handle_type
+    kernel.SetFileInformationByHandle.argtypes = (handle_type, ctypes.c_int,
+                                                  handle_type, dword)
+    kernel.SetFileInformationByHandle.restype = ctypes.c_int
+    kernel.CloseHandle.argtypes = (handle_type,)
+    kernel.CloseHandle.restype = ctypes.c_int
+
+    # RootDirectory=NULL requires a fully qualified name; length is UTF-16
+    # bytes, excluding the trailing NUL (not Python characters or wchar size).
+    name = os.path.abspath(destination).encode("utf-16-le")
+    buffer = ctypes.create_string_buffer(ctypes.sizeof(RenameInfo) + len(name))
+    info = RenameInfo.from_buffer(buffer)
+    info.Flags = 0x1 | 0x2  # REPLACE_IF_EXISTS | POSIX_SEMANTICS
+    info.FileNameLength = len(name)
+    ctypes.memmove(ctypes.addressof(buffer) + RenameInfo.FileName.offset,
+                   name, len(name))
+    # DELETE access; READ | WRITE | DELETE sharing; OPEN_EXISTING;
+    # FILE_ATTRIBUTE_NORMAL. No inheritable security attributes.
+    handle = kernel.CreateFileW(source, 0x00010000, 0x1 | 0x2 | 0x4,
+                                None, 3, 0x80, None)
+    if handle == handle_type(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        # FILE_INFO_BY_HANDLE_CLASS.FileRenameInfoEx = 22.
+        if not kernel.SetFileInformationByHandle(handle, 22, buffer,
+                                                 ctypes.sizeof(buffer)):
+            raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        kernel.CloseHandle(handle)
+
+
 def _open_read(path: Path) -> BinaryIO:
     """Open one generation, allowing atomic replacement while it is retained.
 
     Python's Windows CRT open omits FILE_SHARE_DELETE. Use a delete-sharing
-    handle there so os.replace need not wait for product readers to close.
+    handle there so POSIX-semantics replacement need not wait for readers.
     This is for managed state, not the untrusted-path checks in safe_read.
     """
     if os.name != "nt":
