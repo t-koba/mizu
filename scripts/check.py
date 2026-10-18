@@ -40,15 +40,14 @@ def bash_available() -> bool:
     return probe.returncode == 0
 
 
-def durable_gate_entry(state, details, allowed) -> dict | None:
-    """Map a durable preflight state to its gate check entry (pure, no I/O).
+def durable_gate_entry(state, details, allowed, *, name='node-durable-contract-tests') -> dict | None:
+    """Map an SDK preflight state to its named gate entry (pure, no I/O).
 
     `ready` returns None: the caller runs the suite. `absent` fails closed
     unless the suite was explicitly waived, in which case it is recorded
     not_run with the waiver noted. `mismatch` always fails: wrong versions
     are a contract violation, not missing provisioning.
     """
-    name = 'node-durable-contract-tests'
     if state == 'ready':
         return None
     if state == 'absent' and name in allowed:
@@ -299,6 +298,16 @@ def main():
                     count=node_counts)
         else:
             checks.append(durable_gate_entry(durable_state, durable_details, allowed_not_run))
+        # This gate uses both real installed SDKs, not the fake-RPC bridge.
+        replay_name = 'node-pi-reasoning-replay-tests'
+        replay_deps = [(adapter, *durable_deps_status(ROOT / 'adapters' / adapter))
+                       for adapter in ('pi', 'pi-durable')]
+        if all(state == 'ready' for _, state, _ in replay_deps):
+            execute(replay_name, ['node', '--test', 'tests/pi-reasoning.test.mjs'], count=node_counts)
+        else:
+            state = 'mismatch' if any(s == 'mismatch' for _, s, _ in replay_deps) else 'absent'
+            details = '; '.join(f'{adapter}: {detail}' for adapter, s, detail in replay_deps if s != 'ready')
+            checks.append(durable_gate_entry(state, details, allowed_not_run, name=replay_name))
         for path in sorted([*(ROOT / 'adapters/pi').glob('*.mjs'), *(ROOT / 'adapters/pi-durable').glob('*.mjs'), *(ROOT / 'scripts').glob('*.mjs')]):
             execute('javascript-syntax:' + path.name, ['node', '--check', str(path)])
     if has_bash:

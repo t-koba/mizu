@@ -534,6 +534,16 @@ class UnittestFailureSummaryTests(unittest.TestCase):
 class DurableGateEntryTests(unittest.TestCase):
     NAME = 'node-durable-contract-tests'
 
+    def test_replay_gate_uses_its_own_explicit_waiver(self):
+        name = 'node-pi-reasoning-replay-tests'
+        self.assertIsNone(CHECK.durable_gate_entry('ready', '', frozenset(), name=name))
+        entry = CHECK.durable_gate_entry('absent', 'missing SDK', frozenset({self.NAME}), name=name)
+        self.assertEqual((entry['name'], entry['status']), (name, 'fail'))
+        entry = CHECK.durable_gate_entry('absent', 'missing SDK', frozenset({name}), name=name)
+        self.assertEqual(entry['status'], 'not_run')
+        entry = CHECK.durable_gate_entry('mismatch', 'wrong SDK', frozenset({name}), name=name)
+        self.assertEqual(entry['status'], 'fail')
+
     def test_ready_runs_the_suite(self):
         self.assertIsNone(CHECK.durable_gate_entry("ready", "", frozenset()))
 

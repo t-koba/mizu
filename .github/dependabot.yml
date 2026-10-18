@@ -4,8 +4,17 @@ updates:
     directory: /
     schedule:
       interval: monthly
+  # Track both Pi adapters weekly. Dependabot's documented cross-directory
+  # grouping is per dependency name; a release-wide batch is a separate policy.
   - package-ecosystem: npm
-    directory: /adapters/pi
+    directories:
+      - /adapters/pi
+      - /adapters/pi-durable
     schedule:
-      interval: monthly
+      interval: weekly
     open-pull-requests-limit: 3
+    groups:
+      pi-runtime:
+        patterns:
+          - "@earendil-works/*"
+        group-by: dependency-name
