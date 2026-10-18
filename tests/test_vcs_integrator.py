@@ -17,6 +17,7 @@ from mizu.fs import mkdir
 from mizu.runtime import Context
 
 SHA_A = "a" * 40
+SHA_B = "b" * 40
 BASE_A = "c" * 40
 TARGET = "main"
 PROPOSAL_ID = "forge:owner/repo#1"
@@ -222,6 +223,35 @@ class ReadIntegratorTests(Fixture):
         with self.assertRaisesRegex(Denied, "does not cover this merge"):
             ctx.handle("vcs_dispose", close_args(op="merge"))
         self.assertEqual(list((ctx.run_dir / "vcs-dispose").glob("*.json")), [])
+
+    def test_merge_retries_with_fresh_approval_after_moved_head(self):
+        # A moved head refuses against the old approval; re-observing and
+        # re-approving the new head lets the same merge proceed. Recovery
+        # is re-observation, never assumption.
+        role = integrator_role(self)
+        config, ctx = integrator_context(self, role)
+        captured = self.project.snapshots.capture_files(ctx.workspace)
+        code = ("import sys,json; req=json.load(sys.stdin); "
+                "print(json.dumps({'id': req['id'], 'sha': req['sha'], "
+                "'base': req['base'], 'target': req['target'], "
+                "'state': 'merged'}))")
+        settings = adapter_settings(code)
+        settings["close_grant"] = True
+        settings["merge_grant"] = True
+        config = dataclasses.replace(config, vcs=settings)
+        ctx = Context(config, self.project, role, ctx.run_dir,
+                      ctx.snapshot, ctx.workspace)
+        approve(self, "mizu/x-1", captured["code_digest"], target=TARGET,
+                proposal_id=PROPOSAL_ID, sha=SHA_A, base=BASE_A)
+        with self.assertRaisesRegex(Denied, "does not cover this merge"):
+            ctx.handle("vcs_dispose", close_args(op="merge", sha=SHA_B))
+        rec = approve(self, "mizu/x-1", captured["code_digest"], target=TARGET,
+                      proposal_id=PROPOSAL_ID, sha=SHA_B, base=BASE_A)
+        out = ctx.handle("vcs_dispose", close_args(op="merge", sha=SHA_B))
+        self.assertTrue(out["disposed"])
+        self.assertEqual(out["state"], "merged")
+        self.assertEqual(out["approval"], rec["id"])
+        self.assertEqual(out["sha"], SHA_B)
 
     def test_merge_refused_for_moved_head_or_base(self):
         # The approval pins the assessed head and base: either moving
