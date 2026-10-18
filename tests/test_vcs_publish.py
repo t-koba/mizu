@@ -91,6 +91,8 @@ class VcsPublishTests(Fixture):
         self.assertEqual(out["trust"], "external-untrusted")
         evidence = json.loads((ctx.run_dir / out["evidence"]).read_text())
         self.assertEqual(evidence["approval"], rec["id"])
+        # Uniform binding: the file always equals the returned response.
+        self.assertEqual(evidence, out)
 
     def test_branch_mismatch_refused(self):
         config, role = with_caps(self, "worker", ["vcs_publish"])

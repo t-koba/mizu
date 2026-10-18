@@ -176,6 +176,8 @@ class RetireOpTests(Fixture):
         self.assertEqual(out["classification"], "owned")
         evidence = json.loads((ctx.run_dir / out["evidence"]).read_text())
         self.assertEqual(evidence["sha"], out["sha"])
+        # Uniform binding: the file always equals the returned response.
+        self.assertEqual(evidence, out)
 
     def test_runtime_op_preserves_protected_without_spawn(self):
         config, role = with_caps(self, "worker", ["vcs_retire"])

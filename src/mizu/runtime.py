@@ -965,21 +965,20 @@ class Context:
                 "text": text[offset:end], "content_id": content_id, "offset": offset,
                 "next_offset": end if end < len(text) else None, "truncated": end < len(text)}
 
-    def _write_invocation_evidence(self, kind: str, payload: dict) -> tuple[str, str]:
-        """Write one immutable per-invocation adapter evidence file.
+    def _new_invocation_evidence(self, kind: str) -> tuple[str, str]:
+        """Return a fresh per-invocation adapter evidence identity.
 
         Schema: ``kind`` names the evidence directory (``vcs-read``,
         ``vcs-publish``, ``vcs-retire``, ``vcs-dispose``, ``materialize``);
-        the file is ``<kind>/<uuid>.json``. Returns ``(evidence_id,
-        relative_path)`` for the tool response. Every invocation gets a
-        fresh id, so a returned evidence path can never point at a later
-        call's content. Failure: write errors propagate like any other
-        evidence write.
+        the path is ``<kind>/<uuid>.json``. Returns ``(evidence_id,
+        relative_path)``. The caller builds the full bound record (with
+        ``evidence_id`` and ``evidence``) and writes it once, so the file
+        always equals the returned response and every invocation gets a
+        fresh id that no later call can overwrite. Failure: write errors
+        propagate like any other evidence write.
         """
         evidence_id = uuid.uuid4().hex
-        relative = f"{kind}/{evidence_id}.json"
-        write_json(self.run_dir / relative, payload)
-        return evidence_id, relative
+        return evidence_id, f"{kind}/{evidence_id}.json"
 
     def _op_command_evidence_read(self, args: dict) -> dict:
         return self._read_retained_evidence("commands", args)
@@ -1289,9 +1288,10 @@ class Context:
                              cancel=self.tools_cancelled)
         except OSError as exc:
             raise Denied(f"VCS read is unavailable: {exc}") from exc
-        evidence_id, evidence = self._write_invocation_evidence("vcs-read", data)
+        evidence_id, evidence = self._new_invocation_evidence("vcs-read")
         record = {"op": args["op"], "branch": args.get("branch"), "trust": "external-untrusted",
                   "evidence_id": evidence_id, "evidence": evidence, "result": data}
+        write_json(self.run_dir / evidence, record)
         return record
 
     def _op_vcs_publish(self, args: dict) -> dict:
@@ -1311,16 +1311,13 @@ class Context:
                                     cancel=self.tools_cancelled)
         except OSError as exc:
             raise Denied(f"VCS publication is unavailable: {exc}") from exc
-        evidence_id, evidence = self._write_invocation_evidence(
-            "vcs-publish",
-            {"op": args["op"], "branch": args["branch"],
-             "code_digest": code_digest, "approval": approval["insight"],
-             "trust": "external-untrusted", "result": data})
+        evidence_id, evidence = self._new_invocation_evidence("vcs-publish")
         record = {"published": True, "op": args["op"], "branch": args["branch"],
                   "code_digest": code_digest, "approval": approval["insight"],
                   "trust": "external-untrusted",
                   "evidence_id": evidence_id, "evidence": evidence,
                   "result": data}
+        write_json(self.run_dir / evidence, record)
         return record
 
     def _op_vcs_retire(self, args: dict) -> dict:
@@ -1350,13 +1347,14 @@ class Context:
                                    args.get("expected_sha"), cancel=self.tools_cancelled)
         except OSError as exc:
             raise Denied(f"Branch retirement is unavailable: {exc}") from exc
-        evidence_id, evidence = self._write_invocation_evidence("vcs-retire", data)
+        evidence_id, evidence = self._new_invocation_evidence("vcs-retire")
         record = {"retired": True, "branch": data["branch"], "sha": data["sha"],
                   "classification": data["classification"],
                   "live_refs": data["live_refs"],
                   "trust": "external-untrusted",
                   "evidence_id": evidence_id, "evidence": evidence,
                   "result": data}
+        write_json(self.run_dir / evidence, record)
         return record
 
     def _op_vcs_dispose(self, args: dict) -> dict:
@@ -1411,7 +1409,7 @@ class Context:
                       "adapter_receipt": data["adapter_receipt"]}
             # A valid refusal is durable evidence too: do not refetch,
             # retry, fall through to merge, or treat false as an exception.
-            evidence_id, evidence = self._write_invocation_evidence("vcs-dispose", record)
+            evidence_id, evidence = self._new_invocation_evidence("vcs-dispose")
             record = {**record, "evidence_id": evidence_id, "evidence": evidence}
             write_json(self.run_dir / evidence, record)
             return record
@@ -1444,7 +1442,7 @@ class Context:
         if approval is not None:
             record["code_digest"] = code_digest
             record["approval"] = approval["insight"]
-        evidence_id, evidence = self._write_invocation_evidence("vcs-dispose", record)
+        evidence_id, evidence = self._new_invocation_evidence("vcs-dispose")
         record = {**record, "evidence_id": evidence_id, "evidence": evidence}
         write_json(self.run_dir / evidence, record)
         return record
@@ -1463,10 +1461,11 @@ class Context:
                                        cancel=self.tools_cancelled)
         except OSError as exc:
             raise Denied(f"Materialization is unavailable: {exc}") from exc
-        evidence_id, evidence = self._write_invocation_evidence("materialize", data)
+        evidence_id, evidence = self._new_invocation_evidence("materialize")
         record = {"spec": args["spec"], "digest": data["digest"],
                   "cache": data["cache"], "trust": "external-untrusted",
                   "evidence_id": evidence_id, "evidence": evidence, "result": data}
+        write_json(self.run_dir / evidence, record)
         return record
 
     def _op_consult(self, args: dict) -> dict:
