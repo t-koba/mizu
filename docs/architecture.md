@@ -550,13 +550,36 @@ records carry their own receipts: admission reasons, finish-intent timestamps
 against command records, read-role writable commands, and verification
 self-consistency are checkable from retained files alone. Revision, a new decision, or
 withdrawal unbinds the wait; unsupported conditions are refused at
-registration, naming the supported kinds instead of implying a schedule. Decided (non-deferred,
-revision-current) proposals older than
-`limits.retention_days` are reaped on ingest; their decisions persist in
-`decisions/` and `decision-history/`, so inbox scans stay bounded. Decided
-work stays retrievable within retention: the `insights` tool lists decided
-proposals by action and reads by full id or unique prefix, so accepted work
-never depends on the model's memory across compaction. On an ID read only, the
+registration, naming the supported kinds instead of implying a schedule.
+
+Insight archival is currently a **storage-only phase**. `inbox/` is the live
+working set. On ingest, well-formed current-revision accept/modify/reject/withdraw
+records at least `limits.retention_days` old (default 31; 0 disables) move to
+`insight-archive.sqlite3`. Pending, deferred, stale and malformed records stay
+live. Under `insights.lock`, each `(id, rev)` row stores the complete normalized
+body (including evidence and provenance), plus the terminal decision and identity
+metadata observed at first archival. A FULL synchronous SQLite transaction and
+directory sync complete before inbox unlink. Commit failure keeps the live copy;
+unlink failure leaves both copies and a retry converges. Conflicting content at
+the same archive key retains the inbox rather than replacing audit. The archive
+uses DELETE rollback journals, never WAL; quiescent backup recovers a hot journal
+before copying the self-contained database. Archive rows are never deleted.
+Decisions remain independently durable in `decisions/` and `decision-history/`.
+
+Current lists, projections, source scans and routine prompts enumerate **only the
+live inbox**, not the complete archive. No archive page/cursor API exists yet;
+this phase does not claim to bound pending work or all listing costs. Exact ID
+reads fall back to the latest archived revision; hex-prefix reads resolve across
+both stores and refuse ambiguity (duplicate copies of one ID count once).
+Identical submit/revise retries preserve the stored record without reopening it.
+A meaningful owner-authorized CAS revision reopens into the inbox, retains the
+SQLite row, and writes the prior-revision audit as before. `history(id)` still
+returns only superseded revisions from `insight-revisions/`, never archived
+current content. Work-item origin checks also resolve archived revisions, and
+storage maintenance retains their snapshot references; unreadable archives
+refuse maintenance. Backups/restores include the archive.
+
+On an ID read only, the
 runtime adds an optional compact `work_item_status` for the original submitter
 when the current decision is accept/modify and its seeded item (including a
 validated open legacy reconciliation) exists. The projection includes item ID,

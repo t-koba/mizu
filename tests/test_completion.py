@@ -167,7 +167,8 @@ class CompletionTests(Fixture):
         decision["created_at"] = (dt.datetime.now(dt.timezone.utc)-dt.timedelta(days=40)).isoformat()
         write_json(self.project.root / "decisions/retained.json", decision)
         self.assertEqual(self.project.insights.gc_decided(), 1)
-        self.assertFalse(self.project.insights.submit(**args)["retained"])
+        self.assertEqual(self.project.insights.submit(**args)["body"], "b")
+        self.assertFalse((self.project.root / "inbox/retained.json").exists())
         with self.assertRaises(Denied):
             self.project.insights.submit(**{**args, "body": "different"})
 

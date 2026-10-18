@@ -27,13 +27,14 @@ from .config import keys, strings
 from .errors import Denied, LimitExceeded
 from .fs import (DIGEST, PREVIEW_BYTES, atomic_write, identifier, lock, mkdir, now,
                  read_json, safe_read, sync_dir, write_json, relative_parts)
+from . import insight_archive
 from .project import Project, check_verify, read_goal
 from .snapshot import open_store
 
 #: Project members covered by backup/restore (plus backup.json on restore).
 MEMBERS = (
     "project.toml", "PROJECT.md", "control.json", "current.json", "snapshots", "objects",
-    "inbox", "insight-ids", "insight-revisions", "histories", ".ingest", "decisions",
+    "inbox", "insight-ids", "insight-revisions", "insight-archive.sqlite3", "histories", ".ingest", "decisions",
     "decision-history", "decision-cursors", "work-items", "waits", "runs", "sessions",
     "artifacts", "health", "observed", "maintenance", "spool", "selection",
 )
@@ -62,6 +63,7 @@ def backup(project: Project, destination: Path, *, verify: bool = False) -> dict
     # Deliberately exclude project .git/hooks, active sockets/locks, caches and the
     # mutable worktree. A separate sealed snapshot captures uncommitted work.
     with quiescent(project):
+        insight_archive.recover(project.root)
         captured = project.snapshots.capture_files(project.workspace)
         checkpoint = project.snapshots.create(captured, goal=project.goal, state=project.snapshots.get()["state"],
                                               run=None, outcome="wait", summary="Operator backup checkpoint; not published")
@@ -684,6 +686,12 @@ def _audit_collect(project: Project) -> dict:
                 insight_ids.add(digest_id)
         except OSError:
             continue
+    # Archive bodies remain durable references after leaving the live inbox.
+    # An unreadable archive refuses maintenance rather than hiding references.
+    for reference in insight_archive.snapshot_references(root):
+        digest_id = _audit_digest(reference)
+        if digest_id is not None:
+            insight_ids.add(digest_id)
     work_item_ids: set[str] = set()
     work_item_events_skipped = 0
     work_items_dir = root / "work-items"

@@ -46,6 +46,7 @@ import uuid
 import os
 from pathlib import Path
 
+from . import insight_archive
 from .errors import Denied, LimitExceeded
 from .fs import PREVIEW_BYTES, canonical, digest, identifier, lock, now, read_json, safe_read, write_json, mkdir, DIGEST
 
@@ -222,6 +223,8 @@ class Insights:
             identity = read_json(identity_path)
             sha = digest(canonical(payload))
             old = read_json(path)
+            if old is None:
+                old = insight_archive.read(self.root, insight_id)
             if identity and identity.get("sha256") != sha:
                 # A revised identity exists; direct submit with different
                 # content is refused (use revise with expected_rev).
@@ -301,6 +304,8 @@ replacement insight without implying rejected substance.
         with lock(self.root / "locks" / "insights.lock"):
             path = self.root / "inbox" / f"{insight_id}.json"
             old = read_json(path)
+            if old is None:
+                old = insight_archive.read(self.root, insight_id)
             _origin = _normalize(old).get("origin") if old else None
             payload = {"id": insight_id, "source": source, "title": title, "body": body,
                        "base_snapshot": base_snapshot, "run": run, "origin": _origin}
@@ -402,8 +407,8 @@ replacement insight without implying rejected substance.
         not a revision. Retry: identical concurrent attaches each append
         under the lock; a stale ``expected_rev`` is Denied, never merged.
         Evidence: the entry ``{author, run, created_at, text}`` is stored on
-        the inbox record (archived with the rev on revise, reaped with a
-        decided record while the decision rationale cites it); the inbox
+        the inbox record (preserved with the rev on revise and in the permanent
+        decided archive); the inbox
         generation advances so the decider wakes once. Failure: Denied on
         unknown ID, revision conflict, bounds, a full entry list, or a
         revision-current substantive decision or withdrawal (revise the topic
@@ -485,38 +490,41 @@ replacement insight without implying rejected substance.
     def list(self, *, pending: bool = True, limit: int = 30) -> list[dict]:
         return self.projection(pending=pending, limit=limit)["items"]
 
+    def _read_exact(self, insight_id: str) -> dict | None:
+        path = self.root / "inbox" / f"{insight_id}.json"
+        if not path.is_symlink():
+            record = read_json(path)
+            if record:
+                return _normalize(record)
+        return insight_archive.read(self.root, insight_id)
+
     def read(self, insight_id: str) -> dict:
-        try:
-            key = identifier(insight_id)
-        except Denied:
-            key = None
-        if key is not None:
-            path = self.root / "inbox" / f"{key}.json"
-            if not path.is_symlink():
-                record = read_json(path)
-                if record:
-                    return _normalize(record)
-            # A valid identifier with no exact file may be a unique prefix
-            # of a longer id (compacted state often keeps only a prefix).
-            prefix = key.lower()
-            if len(prefix) >= 32 or any(c not in "0123456789abcdef" for c in prefix):
-                raise Denied("Insight not found")
-            matches = []
-            for candidate in (self.root / "inbox").glob("*.json"):
-                if candidate.is_symlink():
-                    continue
-                stem = candidate.stem
-                if len(stem) > len(prefix) and stem.lower().startswith(prefix):
-                    matches.append(stem)
-            if not matches:
-                raise Denied("Insight not found")
-            if len(matches) > 1:
-                raise Denied("Ambiguous insight prefix; use the full id")
-            record = read_json(self.root / "inbox" / f"{matches[0]}.json")
-            if not record:
-                raise Denied("Insight not found")
-            return _normalize(record)
-        raise Denied("Insight not found")
+        """Read current content, including archive; hex prefixes must be unique.
+
+        Exact IDs win over prefixes. Prefix ambiguity spans live and archived
+        IDs (deduplicating crash leftovers). Lists remain live-only.
+        """
+        key = identifier(insight_id)
+        record = self._read_exact(key)
+        if record is not None:
+            return record
+        prefix = key.lower()
+        if len(prefix) >= 32 or any(c not in "0123456789abcdef" for c in prefix):
+            raise Denied("Insight not found")
+        matches = set(insight_archive.prefixes(self.root, prefix))
+        for candidate in (self.root / "inbox").glob("*.json"):
+            if not candidate.is_symlink() and candidate.stem.lower().startswith(prefix):
+                matches.add(candidate.stem)
+                if len(matches) > 1:
+                    break
+        if not matches:
+            raise Denied("Insight not found")
+        if len(matches) > 1:
+            raise Denied("Ambiguous insight prefix; use the full id")
+        record = self._read_exact(matches.pop())
+        if record is None:
+            raise Denied("Insight not found")
+        return record
 
     def scan_source(self, source: str) -> list[dict]:
         """Return every inbox record carrying the given source.
@@ -1273,17 +1281,64 @@ replacement insight without implying rejected substance.
                 "acknowledged": [i for i in acked if isinstance(i, str)][:100],
                 "defer_offset": offset}
 
-    def gc_decided(self, *, keep_days: int | None = None) -> int:
-        """Remove long-decided proposals. Decisions persist separately in
-        decisions/ and decision-history/; deferred and undecided stay.
+    @staticmethod
+    def _archivable(item, decision, insight_id: str) -> bool:
+        """Conservative validation; malformed legacy state is not an expiry hint."""
+        if not isinstance(item, dict) or not isinstance(decision, dict):
+            return False
+        if (item.get("id") != insight_id or decision.get("id") != insight_id
+                or decision.get("action") not in ("accept", "modify", "reject", "withdraw")):
+            return False
+        if "base_snapshot" not in item:
+            return False
+        if item.get("run") is not None and not isinstance(item["run"], str):
+            return False
+        if item.get("updated_at") is not None and dt.datetime.fromisoformat(item["updated_at"]).tzinfo is None:
+            return False
+        if (not isinstance(decision.get("revisit"), str)
+                or (decision.get("run") is not None and not isinstance(decision["run"], str))
+                or (decision["action"] == "withdraw" and not isinstance(decision.get("actor"), str))):
+            return False
+        for record in (item, decision):
+            rev = record.get("rev", 1)
+            if type(rev) is not int or rev < 1:
+                return False
+            stamp = dt.datetime.fromisoformat(record["created_at"])
+            if stamp.tzinfo is None:
+                return False
+        if item.get("rev", 1) != decision.get("rev", 1):
+            return False
+        identifier(item["source"])
+        _check_origin(item.get("origin"))
+        if (not isinstance(item.get("title"), str) or not 1 <= len(item["title"]) <= 200
+                or not isinstance(item.get("body"), str) or not item["body"].strip()
+                or (item.get("base_snapshot") is not None and
+                    (not isinstance(item["base_snapshot"], str) or not DIGEST.fullmatch(item["base_snapshot"])))
+                or not isinstance(decision.get("reason"), str) or not decision["reason"].strip()
+                or not isinstance(item.get("evidence", []), list)
+                or len(item.get("evidence", [])) > MAX_EVIDENCE_ENTRIES):
+            return False
+        for entry in item.get("evidence", []):
+            if (not isinstance(entry, dict) or not isinstance(entry.get("text"), str)
+                    or not entry["text"].strip() or len(entry["text"]) > MAX_EVIDENCE_CHARS):
+                return False
+            if entry.get("run") is not None and not isinstance(entry["run"], str):
+                return False
+            identifier(entry["author"])
+            if dt.datetime.fromisoformat(entry["created_at"]).tzinfo is None:
+                return False
+        return True
 
-        Schema/bounds: ``keep_days`` defaults to the operator-selected
-        ``retention_days`` (``[limits] retention_days``, default 31, 0 disables).
-        Trust: local operator state only. Retry: best-effort per file.
-        Evidence: returns the reaped count. Failure: never raises for I/O.
-        Stale approvals (decided rev differs from current rev) are pending
-        re-evaluation and are never reaped. Revision audit in
-        insight-revisions/ is durable like decisions and is never reaped here.
+    def gc_decided(self, *, keep_days: int | None = None) -> int:
+        """Archive long-decided proposals, then remove their live inbox copies.
+
+        ``keep_days`` defaults to ``[limits] retention_days`` (31; 0 disables).
+        Only well-formed current-revision terminal decisions qualify. Pending,
+        deferred, stale and malformed records stay live. Under insights.lock,
+        a FULL SQLite commit precedes unlink; retries reconcile duplicate copies.
+        Returns the removed live count (ingest's historical ``reaped`` field).
+        Per-file I/O/archive failures retain the inbox; archives are never deleted.
+        Prior-revision history remains exclusively in insight-revisions/.
         """
         if keep_days is None:
             keep_days = self.retention_days
@@ -1296,27 +1351,24 @@ replacement insight without implying rejected substance.
                 if path.is_symlink():
                     continue
                 try:
-                    decision = read_json(self.root / "decisions" / f"{path.stem}.json")
-                    if not decision or decision.get("action") == "defer":
+                    decision_path = self.root / "decisions" / f"{path.stem}.json"
+                    if decision_path.is_symlink():
                         continue
+                    decision = read_json(decision_path)
                     item = read_json(path)
-                    if not item:
-                        continue
-                    try:
-                        decision_rev = int(decision.get("rev", 1))
-                    except (TypeError, ValueError):
-                        decision_rev = 1
-                    if decision_rev != _rev_of(item):
+                    if not self._archivable(item, decision, path.stem):
                         continue
                     decided_at = dt.datetime.fromisoformat(decision["created_at"]).timestamp()
                     if decided_at > cutoff:
                         continue
-                    payload = {k: item[k] for k in ("id", "source", "title", "body", "base_snapshot", "run", "origin") if k in item}
-                    if "origin" not in payload:
-                        payload["origin"] = None
-                    write_json(self.root / "insight-ids" / path.name,
-                               {"id": item["id"], "sha256": digest(canonical(payload)), "created_at": item["created_at"]},
-                               exclusive=True)
+                    record = _normalize(item)
+                    payload = {k: record.get(k) for k in
+                               ("id", "source", "title", "body", "base_snapshot", "run", "origin")}
+                    identity_path = self.root / "insight-ids" / path.name
+                    write_json(identity_path,
+                               {"id": item["id"], "sha256": digest(canonical(payload)),
+                                "created_at": item["created_at"]}, exclusive=True)
+                    insight_archive.store(self.root, record, decision, read_json(identity_path))
                 except (OSError, ValueError, AttributeError, KeyError, TypeError, Denied):
                     continue
                 try:

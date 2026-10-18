@@ -104,7 +104,7 @@ mizu cleanup demo
 - `control.json`: プロジェクトの制御状態（arm / pause 等） ★
 - `current.json`, `histories/`: 最新の確定状態を指すアトミックなポインタと不変の公開履歴 ★
 - `snapshots/`, `objects/`: 不変なスナップショットマニフェストとコンテンツオブジェクト ★
-- `inbox/`, `decisions/`, `decision-history/`: 提案（Insight）の受付、採否判断、判断履歴 ★
+- `inbox/`, `insight-archive.sqlite3`, `decisions/`, `decision-history/`: 提案（Insight）の現行作業集合、決定済み本文・証拠の永続アーカイブ、採否判断、判断履歴 ★
 - `runs/`, `sessions/`: タスク実行記録とセッションログ ★
 - `health/`: ヘルスチェック記録 ★
 - `observed/`, `spool/`, `maintenance/`: 観測状態、Editorキュー、保守監査記録 ★
@@ -232,6 +232,7 @@ mizu status demo-restored
 - 復元先には新しいプロジェクト名を指定します（常に unarmed かつ paused で初期化）。
 - パストラバーサル、危険なリンク、1 GiB（既定値）超の展開は安全対策として拒否されます（大容量時は `--max-bytes` を指定）。
 - バックアップ対象は `storage.py` の `MEMBERS`（目標、設定、スナップショット、提案、成果物等）です。Git の完全な履歴、運用者共通設定（`config.toml`）、認証情報、共有日次予算は含まれません。復元内容をレビュー後、`mizu arm` で承認します。
+- `insight-archive.sqlite3` も対象です。バックアップは静止境界で SQLite の未完了 rollback journal を復旧してから DB 本体を保存します。`retention_days` は決定済み Insight の inbox 滞在期間であり、本文・証拠の削除期限ではありません。一覧は live inbox のみ、ID 読み取りはアーカイブも参照します（アーカイブ一覧・ページ API は未実装）。
 
 ## バージョン更新とロールバック
 

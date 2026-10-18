@@ -16,6 +16,7 @@ import re
 import stat
 from pathlib import Path
 
+from . import insight_archive
 from .errors import Denied, LimitExceeded
 from .fs import (DIGEST, PREVIEW_BYTES, canonical, identifier, lock, now, safe_read,
                  sync_dir, text_preview, write_json)
@@ -445,6 +446,8 @@ class WorkItems:
 
     def _origin_revision(self, insight_id: str) -> int | None:
         current = self._optional_record(f"inbox/{insight_id}.json")
+        if current is None:
+            current = insight_archive.read(self.root, insight_id)
         if current is None:
             return None
         revision = current.get("rev", 1)
