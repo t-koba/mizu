@@ -200,9 +200,26 @@ class VcsDisposeTests(Fixture):
         self.assertEqual(out["base"], BASE_A)
         self.assertEqual(out["target"], TARGET)
         self.assertNotIn("approval", out)
-        evidence = json.loads((ctx.run_dir / "vcs-dispose.json").read_text())
+        evidence = json.loads((ctx.run_dir / out["evidence"]).read_text())
         self.assertEqual(evidence["state"], "closed")
         self.assertNotIn("approval", evidence)
+
+    def test_successive_invocations_keep_distinct_evidence(self):
+        # The reported defect: a second call's content overwrote the first
+        # call's evidence file. Each invocation now gets its own identity.
+        config, role = with_caps(self, "worker", ["vcs_dispose"])
+        config = dataclasses.replace(config, vcs=granted(dispose_code(echo())))
+        ctx = make_context(self, config, role)
+        first = ctx.handle("vcs_dispose", close_args())
+        second = ctx.handle("vcs_dispose", close_args())
+        self.assertNotEqual(first["evidence_id"], second["evidence_id"])
+        self.assertNotEqual(first["evidence"], second["evidence"])
+        first_path = ctx.run_dir / first["evidence"]
+        second_path = ctx.run_dir / second["evidence"]
+        self.assertTrue(first_path.exists())
+        self.assertTrue(second_path.exists())
+        self.assertEqual(json.loads(first_path.read_text()), first)
+        self.assertEqual(json.loads(second_path.read_text()), second)
 
     def test_unapproved_merge_refused_without_spawn(self):
         # Merge promotes the integrated tree: without a matching GO
@@ -213,7 +230,7 @@ class VcsDisposeTests(Fixture):
         ctx = make_context(self, config, role)
         with self.assertRaisesRegex(Denied, "recorded human approval"):
             ctx.handle("vcs_dispose", close_args(op="merge"))
-        self.assertFalse((ctx.run_dir / "vcs-dispose.json").exists())
+        self.assertEqual(list((ctx.run_dir / "vcs-dispose").glob("*.json")), [])
 
     def test_stale_digest_refused(self):
         config, role = with_caps(self, "worker", ["vcs_dispose"])
@@ -239,7 +256,7 @@ class VcsDisposeTests(Fixture):
         self.assertEqual(out["state"], "merged")
         self.assertEqual(out["approval"], rec["id"])
         self.assertEqual(out["code_digest"], digest)
-        evidence = json.loads((ctx.run_dir / "vcs-dispose.json").read_text())
+        evidence = json.loads((ctx.run_dir / out["evidence"]).read_text())
         self.assertEqual(evidence["approval"], rec["id"])
         self.assertEqual(evidence["state"], "merged")
 
@@ -328,7 +345,7 @@ class VcsDisposeRecoveryTests(Fixture):
         args = close_args()
         with self.assertRaisesRegex(Denied, "expected sha"):
             ctx.handle("vcs_dispose", dict(args))
-        self.assertFalse((ctx.run_dir / "vcs-dispose.json").exists())
+        self.assertEqual(list((ctx.run_dir / "vcs-dispose").glob("*.json")), [])
         out = ctx.handle("vcs_dispose", {**args, "sha": SHA_B})
         self.assertTrue(out["disposed"])
         self.assertEqual(out["sha"], SHA_B)
@@ -391,7 +408,7 @@ class VcsCloseIfAdoptedTests(Fixture):
         self.assertEqual(invoke.call_args.args[0], ctx.config.vcs)
         self.assertEqual(invoke.call_args.args[1], close_if_args())
         self.assertTrue(first["closed"])
-        evidence = json.loads((ctx.run_dir / "vcs-dispose.json").read_text())
+        evidence = json.loads((ctx.run_dir / first["evidence"]).read_text())
         self.assertEqual(evidence, first)
         self.assertTrue(evidence["closed"])
 
@@ -417,7 +434,7 @@ class VcsCloseIfAdoptedTests(Fixture):
         self.assertFalse(out["disposed"])
         self.assertEqual(out["predicate"], "changed-path-tree-entries/v1")
         self.assertEqual(out["adapter_receipt"], payload)
-        evidence = json.loads((ctx.run_dir / "vcs-dispose.json").read_text())
+        evidence = json.loads((ctx.run_dir / out["evidence"]).read_text())
         self.assertEqual(evidence["adapter_receipt"], payload)
         self.assertEqual(evidence["id"], CLOSE_IF_PINS["id"])
         self.assertFalse(evidence["closed"])
@@ -434,7 +451,7 @@ class VcsCloseIfAdoptedTests(Fixture):
         self.assertFalse(out["closed"])
         self.assertFalse(out["disposed"])
         self.assertEqual(out["adapter_receipt"], payload)
-        self.assertEqual(json.loads((ctx.run_dir / "vcs-dispose.json").read_text()), out)
+        self.assertEqual(json.loads((ctx.run_dir / out["evidence"]).read_text()), out)
         self.assertEqual(calls.read_text(), "1")
 
     def test_conditional_close_success_retains_adapter_receipt(self):
@@ -444,7 +461,7 @@ class VcsCloseIfAdoptedTests(Fixture):
         self.assertTrue(out["closed"])
         self.assertTrue(out["disposed"])
         self.assertEqual(out["adapter_receipt"], payload)
-        self.assertEqual(json.loads((ctx.run_dir / "vcs-dispose.json").read_text()), out)
+        self.assertEqual(json.loads((ctx.run_dir / out["evidence"]).read_text()), out)
 
     def test_conditional_close_requires_mizu_close_grant(self):
         self.assertFalse(self.config.vcs["close_grant"])
@@ -455,14 +472,14 @@ class VcsCloseIfAdoptedTests(Fixture):
                            close_grant=False)
         with self.assertRaisesRegex(Denied, "not granted"):
             ctx.handle("vcs_dispose", close_if_args())
-        self.assertFalse((ctx.run_dir / "vcs-dispose.json").exists())
+        self.assertEqual(list((ctx.run_dir / "vcs-dispose").glob("*.json")), [])
 
     def test_conditional_close_requires_role_capability(self):
         ctx = self.context(close_if_code(close_if_receipt(closed=True)),
                            capabilities=False)
         with self.assertRaisesRegex(Denied, "no capability: vcs_dispose"):
             ctx.handle("vcs_dispose", close_if_args())
-        self.assertFalse((ctx.run_dir / "vcs-dispose.json").exists())
+        self.assertEqual(list((ctx.run_dir / "vcs-dispose").glob("*.json")), [])
 
     def assert_receipt_denied(self, payload):
         # Parser matrix only: no host adapter, and no subprocess per case.
@@ -569,7 +586,7 @@ class VcsCloseIfAdoptedTests(Fixture):
         ctx = self.context(close_if_code(close_if_receipt(closed=False, reason=""), calls))
         with self.assertRaises(Denied):
             ctx.handle("vcs_dispose", close_if_args())
-        self.assertFalse((ctx.run_dir / "vcs-dispose.json").exists())
+        self.assertEqual(list((ctx.run_dir / "vcs-dispose").glob("*.json")), [])
         self.assertEqual(calls.read_text(), "1")
 
     def test_conditional_close_tool_schema_accepts_only_action_fields(self):

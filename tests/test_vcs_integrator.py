@@ -152,7 +152,7 @@ class ReadIntegratorTests(Fixture):
         with self.assertRaisesRegex(Denied, "recorded human approval"):
             ctx.handle("vcs_dispose", close_args(op="merge", target="main",
                                                  branch="main"))
-        self.assertFalse((ctx.run_dir / "vcs-dispose.json").exists())
+        self.assertEqual(list((ctx.run_dir / "vcs-dispose").glob("*.json")), [])
 
     def test_agent_origin_go_cannot_approve_merge(self):
         # Forged approvals fail on the integrator's promotion path too: a GO
@@ -173,7 +173,7 @@ class ReadIntegratorTests(Fixture):
                                          "", run, expected_rev=record["rev"])
         with self.assertRaisesRegex(Denied, "operator channel"):
             ctx.handle("vcs_dispose", close_args(op="merge"))
-        self.assertFalse((ctx.run_dir / "vcs-dispose.json").exists())
+        self.assertEqual(list((ctx.run_dir / "vcs-dispose").glob("*.json")), [])
 
     def test_merge_refused_without_endpoint_binding(self):
         # Reported defect repro: GO dev-only names the local digest, and the
@@ -193,7 +193,7 @@ class ReadIntegratorTests(Fixture):
         with self.assertRaisesRegex(Denied, "does not cover this merge"):
             ctx.handle("vcs_dispose", close_args(op="merge", branch="dev-only",
                                                 target="main"))
-        self.assertFalse((ctx.run_dir / "vcs-dispose.json").exists())
+        self.assertEqual(list((ctx.run_dir / "vcs-dispose").glob("*.json")), [])
 
     def test_merge_refused_for_wrong_destination(self):
         # A GO bound to target main never authorizes a merge at release/2.
@@ -207,7 +207,7 @@ class ReadIntegratorTests(Fixture):
                       ctx.snapshot, ctx.workspace)
         with self.assertRaisesRegex(Denied, "does not cover this merge"):
             ctx.handle("vcs_dispose", close_args(op="merge", target="release/2"))
-        self.assertFalse((ctx.run_dir / "vcs-dispose.json").exists())
+        self.assertEqual(list((ctx.run_dir / "vcs-dispose").glob("*.json")), [])
 
     def test_merge_refused_for_unrelated_proposal(self):
         # A GO bound to another proposal's endpoints never authorizes this one.
@@ -221,7 +221,7 @@ class ReadIntegratorTests(Fixture):
                       ctx.snapshot, ctx.workspace)
         with self.assertRaisesRegex(Denied, "does not cover this merge"):
             ctx.handle("vcs_dispose", close_args(op="merge"))
-        self.assertFalse((ctx.run_dir / "vcs-dispose.json").exists())
+        self.assertEqual(list((ctx.run_dir / "vcs-dispose").glob("*.json")), [])
 
     def test_merge_refused_for_moved_head_or_base(self):
         # The approval pins the assessed head and base: either moving
@@ -238,7 +238,7 @@ class ReadIntegratorTests(Fixture):
             ctx.handle("vcs_dispose", close_args(op="merge", sha="b" * 40))
         with self.assertRaisesRegex(Denied, "does not cover this merge"):
             ctx.handle("vcs_dispose", close_args(op="merge", base="d" * 40))
-        self.assertFalse((ctx.run_dir / "vcs-dispose.json").exists())
+        self.assertEqual(list((ctx.run_dir / "vcs-dispose").glob("*.json")), [])
 
     def test_retire_owned_branch_without_workspace_write(self):
         role = integrator_role(self)
@@ -278,7 +278,7 @@ class ReadIntegratorTests(Fixture):
                       ctx.snapshot, ctx.workspace)
         with self.assertRaisesRegex(Denied, "expected base and target"):
             ctx.handle("vcs_dispose", close_args(target="release/2"))
-        self.assertFalse((ctx.run_dir / "vcs-dispose.json").exists())
+        self.assertEqual(list((ctx.run_dir / "vcs-dispose").glob("*.json")), [])
 
     def test_integrator_refused_protected_branch(self):
         role = integrator_role(self)

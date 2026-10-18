@@ -1,5 +1,6 @@
 """Branch lifecycle classification plus owned-branch retirement. Offline only."""
 import dataclasses
+import json
 import sys
 import unittest
 import uuid
@@ -173,7 +174,8 @@ class RetireOpTests(Fixture):
         out = ctx.handle("vcs_retire", {"branch": "mizu/x-1", "expected_sha": SHA_A})
         self.assertTrue(out["retired"])
         self.assertEqual(out["classification"], "owned")
-        self.assertTrue((ctx.run_dir / "vcs-retire.json").exists())
+        evidence = json.loads((ctx.run_dir / out["evidence"]).read_text())
+        self.assertEqual(evidence["sha"], out["sha"])
 
     def test_runtime_op_preserves_protected_without_spawn(self):
         config, role = with_caps(self, "worker", ["vcs_retire"])
@@ -181,7 +183,7 @@ class RetireOpTests(Fixture):
         ctx = make_context(self, config, role)
         with self.assertRaisesRegex(Denied, "protected"):
             ctx.handle("vcs_retire", {"branch": "main", "expected_sha": SHA_A})
-        self.assertFalse((ctx.run_dir / "vcs-retire.json").exists())
+        self.assertEqual(list((ctx.run_dir / "vcs-retire").glob("*.json")), [])
 
     def test_consult_roles_cannot_retire(self):
         with self.assertRaises(ConfigError):
@@ -255,7 +257,7 @@ class RetireLiveRefTests(Fixture):
         with self.assertRaisesRegex(Denied, "forge:owner/repo#1"):
             ctx.handle("vcs_retire", {"branch": "mizu/x-1",
                                       "expected_sha": SHA_A})
-        self.assertFalse((ctx.run_dir / "vcs-retire.json").exists())
+        self.assertEqual(list((ctx.run_dir / "vcs-retire").glob("*.json")), [])
 
     def test_full_ref_spelling_blocks(self):
         # Either spelling deletes the same branch, so either spelling
@@ -271,7 +273,7 @@ class RetireLiveRefTests(Fixture):
         with self.assertRaisesRegex(Denied, "forge:owner/repo#1"):
             ctx.handle("vcs_retire", {"branch": "refs/heads/mizu/x-1",
                                       "expected_sha": SHA_A})
-        self.assertFalse((ctx.run_dir / "vcs-retire.json").exists())
+        self.assertEqual(list((ctx.run_dir / "vcs-retire").glob("*.json")), [])
 
     def test_open_base_reference_blocks(self):
         vcs.record_proposal_state(self.project,

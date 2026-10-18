@@ -67,7 +67,7 @@ class VcsPublishTests(Fixture):
         # No GO insight at all; adapter must never spawn (no evidence file).
         with self.assertRaisesRegex(Denied, "recorded human approval"):
             ctx.handle("vcs_publish", {"op": "push", "branch": "main"})
-        self.assertFalse((ctx.run_dir / "vcs-publish.json").exists())
+        self.assertEqual(list((ctx.run_dir / "vcs-publish").glob("*.json")), [])
 
     def test_stale_digest_refused(self):
         config, role = with_caps(self, "worker", ["vcs_publish"])
@@ -89,7 +89,7 @@ class VcsPublishTests(Fixture):
         self.assertEqual(out["code_digest"], digest)
         self.assertEqual(out["approval"], rec["id"])
         self.assertEqual(out["trust"], "external-untrusted")
-        evidence = json.loads((ctx.run_dir / "vcs-publish.json").read_text())
+        evidence = json.loads((ctx.run_dir / out["evidence"]).read_text())
         self.assertEqual(evidence["approval"], rec["id"])
 
     def test_branch_mismatch_refused(self):
