@@ -339,7 +339,7 @@ mizu work-items demo --limit 2 --closed 0
 ```
 
 `mizu work-items PROJECT [--limit N] [--cursor TOKEN] [--closed N]` prints one JSON
-document `{"open": <page_open shape>, "closed": <bounded closed page>}` and never
+document with `open`, `closed`, and `event_delivery` fields and never
 writes, locks, recovers or deletes. The project is opened with
 `Project(..., read_only=True)`.
 
@@ -365,6 +365,26 @@ writes, locks, recovers or deletes. The project is opened with
   are at most 8192 canonical bytes and the response at most 1 MiB.
   Drop-only legacy sidecars without a seed stay in the `work_items_legacy_read`
   audit, not here.
+- `event_delivery` reports up to 100 roles subscribed to `work_item_events`
+  (non-subscribers are omitted), in name order. Each has `role`, `subscribed`
+  terminal types, `sources`, exact `pending` and `acknowledged` counts for the
+  current subscription/route, up to 10 oldest `pending_event_ids` and up to 10
+  most-recent `acknowledged_event_ids`, plus truncation flags, `unknown_routing`,
+  `routing_complete`, `unseeded_decisions` and `coverage_complete`. It contains
+  no event payload rows. `total` and `truncated` report role coverage; the
+  summary is at most 1 MiB. Counts scan validated seeds/chains and exact
+  receipts, not a timestamp watermark. Unseeded legacy decisions make seeded
+  coverage incomplete; unknown routing is reported independently and excluded
+  in `own` mode (only explicit `any` opt-in receives it). A matching retained
+  event with no per-role receipt is pending even if it predates enabling that
+  subscription; receipts persist across unsubscribe/re-subscribe and backup /
+  restore. These are current exact receipt counts, not lifetime totals across
+  subscription settings. Open, closed and event-delivery pages are
+  individually bounded to 1 MiB (whole document at most 3 MiB plus field names).
+  The view is live/non-atomic, not a scheduler verdict. Reading never
+  acknowledges, repairs, recovers, rotates or writes a cursor. See
+  [terminal subscriptions](configuration.md#terminal-work-item-subscriptions)
+  for delivery/receipt/retry semantics.
 - Live cursor semantics: the open cursor is a last-key bookmark over a live
   view. Closing earlier items does not offset-skip later rows, but membership
   is not frozen: items created, closed or transitioned between calls can move

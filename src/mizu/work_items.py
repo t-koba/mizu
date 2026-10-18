@@ -10,6 +10,7 @@ committed CAS requires a re-read (same-status and terminal changes are refused).
 """
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import hashlib
 import heapq
@@ -1239,7 +1240,7 @@ class WorkItems:
 
     def transition(self, item_id: str, *, expected_rev, status, actor, reason=None,
                    wait=None, snapshot_id=None) -> dict:
-        """Append one immutable full-state CAS event; no scheduler/wake effects.
+        """Append one immutable full-state CAS event; terminal metadata wakes subscribers.
 
         Actor is trusted caller attribution, not authorization. Done validates an
         exact retained published snapshot and its embedded stored verification;
@@ -1282,4 +1283,11 @@ class WorkItems:
             if len(canonical(record)) > PREVIEW_BYTES:
                 raise LimitExceeded("Work-item event exceeds byte bound")
             write_json(self.root / "work-items" / item_id / f"{record['rev']}.json", record, exclusive=True)
+            if status in ("done", "dropped"):
+                # Non-authoritative wake hint for non-recursive platform directory
+                # watches. No new record/index, and no scheduling policy here.
+                # Failure/crash cannot acknowledge or hide an event: admission
+                # always replays the committed chain, not this metadata.
+                with contextlib.suppress(OSError, NotImplementedError):
+                    os.utime(self.root / "work-items", None, follow_symlinks=False)
             return record

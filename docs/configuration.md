@@ -126,7 +126,7 @@ required). Operator tooling that concatenates configs
 | `work_items_prompt` | Maximum open work-item rows included in each full and delta prompt (1–100; default 20). Overflow and legacy-unseeded coverage are reported explicitly; the tool page limit is separately available through `work_items_read` |
 | `idle_seconds`, `cooldown_seconds` | Daemon sleep between poll iterations and pause between work units |
 | `default_wait_seconds`, `maximum_wait_seconds` | Default and maximum model-selected wait times (1–86,400s) |
-| `progress_signals` | Signals qualifying a writable `continue`/`bounded` unit as progress. Default `tool`, `code`, `decision`, `insight`, `input`; any selected true signal qualifies. `state` is supported but opt-in because a free-text rewording alone is not substantive progress. Names must be unique supported signals; `[]` means no unit can qualify. `tool` is a successfully completed non-finish Mizu operation except pure reads of existing state (`files`, `read`, `diff`, `insights`, `research_read`, `vcs_read`, `work_items_read`, `work_items_legacy_read`, retained-evidence reads, exact `work_items_reconcile` replays (`created: false`), and replay of an existing fetch/probe/search receipt), or a new native engine-tool authorization (not an idempotent replay), `decision` a successful `decide`, `insight` a successful submit/revise/withdraw/evidence attachment, `code` a changed final code digest, `state` an explicitly selected changed finish state (including paraphrases), and `input` a changed inbox/operator wake generation, consumed decision/wait events, CI failures due for this snapshot, or an expired prior wait. Persistent obligations and non-due cached red CI are not repeated input progress; a bounded identity digest distinguishes newly offered obligations from unchanged pending visibility. |
+| `progress_signals` | Signals qualifying a writable `continue`/`bounded` unit as progress. Default `tool`, `code`, `decision`, `insight`, `input`; any selected true signal qualifies. `state` is supported but opt-in because a free-text rewording alone is not substantive progress. Names must be unique supported signals; `[]` means no unit can qualify. `tool` is a successfully completed non-finish Mizu operation except pure reads of existing state (`files`, `read`, `diff`, `insights`, `research_read`, `vcs_read`, `work_items_read`, `work_items_legacy_read`, retained-evidence reads, exact `work_items_reconcile` replays (`created: false`), and replay of an existing fetch/probe/search receipt), or a new native engine-tool authorization (not an idempotent replay), `decision` a successful `decide`, `insight` a successful submit/revise/withdraw/evidence attachment, `code` a changed final code digest, `state` an explicitly selected changed finish state (including paraphrases), and `input` a changed inbox/operator wake generation, consumed decision/terminal-work-item/wait events, CI failures due for this snapshot, or an expired prior wait. Persistent obligations and non-due cached red CI are not repeated input progress; a bounded identity digest distinguishes newly offered obligations from unchanged pending visibility. |
 | `no_progress_continuations` | Number of consecutive no-progress `continue`/`bounded` snapshots the same role may self-admit before parking (0–100; default 0 parks after its first no-progress finish). Selected progress, role change, or signal-policy change resets the streak. |
 | `no_progress_recovery_after` | Consecutive no-progress `continue`/`bounded` units before a persistent session is rotated to a fresh conversation on its next already-admitted dispatch (1–100; default 2). It never schedules a run; `mizu status` separates a due no-progress threshold (`pending_work: true`) from actionable rotation (`due` only for persistent profiles, `not_applicable` for ephemeral ones, and `conditional` for mixed selector choices). |
 | `no_progress_backoff_seconds` | Timer wake delay for a parked no-progress `continue`/`bounded` snapshot (0–86,400; default 0 means no timer wake). Explicit goal/operator/input/CI/wait wakes remain available. |
@@ -150,7 +150,7 @@ required). Operator tooling that concatenates configs
 | `event_stream_bytes` | Per-run engine event-stream retention in bytes (1 MiB–256 MiB; default 4 MiB). Bytes past the budget are dropped from `*-events.jsonl` with an explicit `*-events-truncated.json` marker while parsing and the run continue, so diagnostic volume can never discard sealed work. The per-record transport bound stays fixed mechanism |
 | `insight_cursor_ttl_seconds` | Absolute lifetime of `insight page` continuation cursors (60–604,800 seconds; default 86,400). Continuations never extend expiry. Expired cursors fail explicitly; restart enumeration. This is not archive retention |
 | `pending_insights` | Newest pending proposals offered in prompts (1–1,000; default 30). `mizu insight list` uses 1,000 |
-| `decision_events_limit` | Decision events delivered per dispatch (1–100; default 10; 100-event cap stays fixed mechanism). With rotation, a role with many deferrals sees each one every N/value runs |
+| `decision_events_limit` | Events delivered per source per dispatch (decisions and terminal work items) (1–100; default 10; 100-event cap stays fixed mechanism). With rotation, a role with many deferrals sees each one every N/value runs |
 | `session_max_tokens` | Cumulative session tokens at which a resumed persistent session restarts with a fresh session key (0 disables; 0–1,073,741,824; default 0). The published snapshot and composed policy reload on the next unit; Pi accumulates per-run usage into the session record, Codex/Claude reuse their saved cumulative totals, unknown shapes count 0 (age still rotates) |
 | `session_max_cost_usd` | Estimated session cost (USD) at which a resumed persistent session restarts (0 disables; 0–1,000,000; default 0). Cost is the native provider estimate where reported (ADR-005); sessions without cost evidence never rotate on this bound |
 | `session_max_age_seconds` | Wall-clock conversation lifetime (stable creation time surviving same-id saves; legacy files fall back to mtime) at which a resumed persistent session restarts (0 disables; 0–31,536,000s; default 0) |
@@ -217,7 +217,7 @@ Safety-critical bounds are fixed in code rather than exposed as configuration kn
 | **Completion** | `done` requires passing acceptance commands on the exact code digest (`runtime.py`) | always | Publication integrity floor: a goal cannot be declared done without binding proof to the final unchanged tree; never weakened to pass |
 | **Publication** | `vcs_publish` and merge in `vcs_dispose` require a recorded human `GO <branch>` approval | always | No autonomous external publication: pushes, PRs, and merges never run without recorded human approval behind the exact digest; standing grants never substitute |
 
-`on_change` is orthogonal to scheduling: it skips execution when the published `code_digest` is unchanged, so state-only republications do not reschedule it. An unacknowledged decision event routed to the role (`decision_events` in `own` mode, or any-source matches with `decision_sources = "any"` delivering once and admitting even deferrals), a due structured wait, or a red on the configured CI wake set admitted for a role with `ci_wake` is a distinct admission reason that unchanged-code suppression must not swallow. Event delivery reaches scheduling two ways: the writer daemon re-checks `should_run` against the event and wait stores every idle tick, and `mizu service` additionally renders file triggers for any non-daemon role with `decision_events`, with or without a schedule (systemd path units on Linux, `WatchPaths` on macOS), that invoke the same `mizu run` before the next interval; the timers keep their own schedules, and a trigger with nothing due reports unchanged without consuming anything. A role with neither a schedule nor event subscriptions stays explicit-run only. Linux event triggers keep systemd defaults with no trigger limit (`Type=oneshot` with `StartLimitIntervalSec=0` on the event service only): a burst may dispatch more than once, which is cheap because admission is state-based, while a trigger limit fails the path unit and stops dispatching until reset by hand. A role with `on_change` alone and no `daemon`/`interval_seconds`/`calendar` runs only via explicit `mizu run`.
+`on_change` is orthogonal to scheduling: it skips execution when the published `code_digest` is unchanged, so state-only republications do not reschedule it. An unacknowledged decision event routed to the role (`decision_events` in `own` mode, or any-source matches with `decision_sources = "any"` delivering once and admitting even deferrals), a subscribed terminal work-item event, a due structured wait, or a red on the configured CI wake set admitted for a role with `ci_wake` is a distinct admission reason that unchanged-code suppression must not swallow. Event delivery reaches scheduling two ways: the writer daemon re-checks `should_run` against the event and wait stores every idle tick, and `mizu service` additionally renders file triggers for any non-daemon role with `decision_events` or `work_item_events`, with or without a schedule (systemd path units on Linux, `WatchPaths` on macOS), that invoke the same `mizu run` before the next interval; the timers keep their own schedules, and a trigger with nothing due reports unchanged without consuming anything. A role with neither a schedule nor event subscriptions stays explicit-run only. Linux event triggers keep systemd defaults with no trigger limit (`Type=oneshot` with `StartLimitIntervalSec=0` on the event service only): a burst may dispatch more than once, which is cheap because admission is state-based, while a trigger limit fails the path unit and stops dispatching until reset by hand. A role with `on_change` alone and no `daemon`/`interval_seconds`/`calendar` runs only via explicit `mizu run`.
 
 ## Sandbox
 
@@ -368,13 +368,73 @@ registered without an issuer and rotate secrets/tokens after any
 untrusted-server contact. No
 installation, login, package acquisition or deployment runs during work.
 
+### Terminal work-item subscriptions
+
+`work_item_events = []` is disabled by default. Opt in to `["done"]`,
+`["dropped"]`, or both (unique values only); no other transitions are events.
+The existing `decision_sources` applies to both event sources: `own` routes by
+**the origin insight's submitter**, not the terminal transition actor. Routing
+reads the supported inbox/archive body, including revised and archived origins;
+item/origin references remain those of the immutable seed. Missing source data
+is explicitly `origin_source: null`, `routing: "unknown"`; only `any` opt-in
+receives those events, with no actor fallback. A malformed/unsafe origin fails
+closed rather than becoming a guessed route. `any` requires at least one of
+`decision_events` or `work_item_events` to be nonempty.
+
+Terminal events are validated through the existing WorkItems immutable seed
+and complete current chain, oldest terminal instant first (aware timestamps
+normalized to UTC, then item ID/revision). `decision_events_limit` bounds **each
+source separately**, 1–100 rows per source per dispatch. Each terminal row is
+at most 8192 canonical bytes, the page at most 1 MiB; title retains the seed's
+200-character bound and reason is a 1024-byte preview with a truncation flag.
+Rows include stable `event: "work_item:<item-id>:<terminal-rev>"`, `source`,
+`type`, item/origin references, transition, terminal time, actor and routing.
+`done` additionally includes `snapshot_id` and a bounded `verification`
+reference (SHA-256 of the canonical copied verification, passing flag and code
+digest); the full evidence remains in the immutable work-item history.
+
+These events admit `--event` and unchanged-code runs, appear in a separate
+`work_item_events` field in both full and delta prompts, and are frozen in
+`runs/<run>/work-item-events.json` before selection/execution. `started.json`
+and `prompt_projection.json` record their count. Completion acknowledges only
+that selected batch, after `result.json` is durably `completed`. Failures,
+selector waits, busy/budget exits, bounded and unsealed runs do not acknowledge
+terminal events. An event arriving during execution is not in that batch.
+
+Acknowledgements are source-scoped exact receipts at
+`work-item-receipts/<role>/<item-id>.<terminal-rev>.json`, separate from
+`decision-cursors`. There is **no terminal timestamp watermark**: a later
+decision or clock rollback cannot hide an unseen terminal event. A matching
+retained terminal event with no receipt for the role is backfilled even if it
+predates subscription; receipts remain effective across unsubscribe/re-subscribe.
+Receipts are excluded before applying the delivery limit. Each receipt is written atomically;
+a failed/partial batch replays only identities without committed receipts.
+Atomic-write leftovers are not receipts. Receipts have no automatic expiry,
+are included in backup/restore, and are not deleted by read-only views. An
+acknowledgement failure does not turn completed processing into an event loss;
+the next run may replay it. Decision acknowledgement/defer rotation is unchanged.
+
+Daemon admission checks pending terminal identities each idle tick. Non-daemon
+Linux/macOS service definitions also watch the work-items parent. After a
+terminal append or successful/partial receipt write the parent metadata is
+touched as a non-authoritative hint (nested directory writes alone are not
+assumed recursive platform watch events); this permits bounded-batch draining
+without requiring a receipt directory to pre-exist at service installation. No record schema or
+grant changes, assignments or automatic execution are implied. These are wake
+hints, not a transactional queue: a crash between append and metadata touch, a
+failed hint, or a platform-coalesced/busy dispatch can delay processing until
+another explicit/daemon/scheduled check. Windows keeps the existing scheduled
+checks (no file trigger in its current service schema). Re-render/reinstall
+service definitions after enabling a subscription; rendering does not install
+or start services itself.
+
 A role has exactly one of `profile` or `selector`, plus `policy`, `workspace` (`write`, `read`, `none`),
 `capabilities`, `engine_tools` (maximum 128 explicit names), `on_change`,
 `decision_events` (at most 8 unique lowercase decision actions, never
-`withdraw`) plus `ci_wake` (whether a red on the configured CI wake set wakes
+`withdraw`), `work_item_events` (unique `done`/`dropped` values, default `[]`) plus `ci_wake` (whether a red on the configured CI wake set wakes
 this role: default true for writable roles, false otherwise) plus `decision_sources` (`own` default routing only this role's findings,
 `any` routing matching actions from any source so a resolver runs on each new
-deferral; unset keeps `own`; `any` without `decision_events` fails load),
+deferral; unset keeps `own`; `any` without either event subscription list fails load),
 optional per-role spend overrides `requests_per_run` / `tools_per_run` /
 `wrap_up_requests` / `wrap_up_tools`
 (1–1,073,741,824; unset keeps the project `[limits]` value, so an auditor may run

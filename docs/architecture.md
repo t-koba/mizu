@@ -318,6 +318,18 @@ later publication-history retention. Backup/restore includes these histories;
 storage audit/reclaim protects their cited snapshot manifests. Work-item
 retention/expiration is not implemented, so those citations remain durable.
 
+Terminal `done`/`dropped` transitions can wake roles explicitly subscribed via
+`work_item_events` (default disabled). The event adapter reuses these same seed
+and full-chain validators, not a separate glob projection. Per-role exact
+terminal-identity receipts live outside the immutable work-item records and
+outside decision timestamp cursors; only a durably completed non-bounded run
+acknowledges its frozen batch. Inbox/archive origin submitter routing never
+substitutes the transition actor. Terminal appends and successful/partial receipt writes touch the work-items
+parent metadata as a best-effort non-recursive platform wake hint; this is not
+event storage, assignment, or an admission decision. See
+[configuration](configuration.md#terminal-work-item-subscriptions) for bounds,
+unknown routing, acknowledgement and crash/retry behavior.
+
 `projection(item_id)` returns one bounded view (`item`, `current_origin_rev`,
 `stale`, `redecision`) without changing the immutable seed or CAS record. A newer
 origin revision is stale until that revision has an `accept`, `modify`, `defer`

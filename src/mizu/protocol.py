@@ -124,7 +124,7 @@ DEFINITIONS = {
                                   "reason": {"type": "string", "minLength": 1, "maxLength": 4000},
                                   "title": {"type": "string", "minLength": 1, "maxLength": 200}},
                                  ("event_id", "expected_action", "outcome", "reason"))),
-    "work_items_transition": ("Append one work-item state transition using the required expected_rev CAS. Re-read the current work-item projection/revision after a stale-CAS refusal; retries are not automatic. Actor is bound to the runtime role, never supplied by the caller. Done requires snapshot_id for retained published history with passing digest-bound verification; dropped requires a nonempty reason; blocked may register one structured wait using decide's wait semantics. This operation has no scheduler or wakeup effects.",
+    "work_items_transition": ("Append one work-item state transition using the required expected_rev CAS. Re-read the current work-item projection/revision after a stale-CAS refusal; retries are not automatic. Actor is bound to the runtime role, never supplied by the caller. Done requires snapshot_id for retained published history with passing digest-bound verification; dropped requires a nonempty reason; blocked may register one structured wait using decide's wait semantics. Terminal transitions may wake explicitly subscribed roles; this does not schedule or assign work.",
                                obj({"id": text(64), "expected_rev": {"type": "integer", "minimum": 1},
                                     "status": {"type": "string", "enum": list(STATUSES)},
                                     "reason": {"type": "string", "minLength": 1, "maxLength": 4000},

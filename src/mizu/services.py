@@ -7,9 +7,9 @@ Scheduler XML on Windows. Each emitter is pure text over the same inputs;
 `system=` exists so tests cover all three spellings on any host. Nothing is
 started or enabled here on any platform.
 
-Decision events and due structured waits wake scheduled roles before their
+Decision/terminal work-item events and due structured waits wake subscribed roles before their
 next interval: systemd path units on Linux and WatchPaths on macOS invoke
-`mizu run --event`, which admits only on a subscribed decision event or a due
+`mizu run --event`, which admits only on a subscribed decision/terminal event or a due
 wait for that role and otherwise exits before any model use; the periodic
 timers invoke plain `mizu run` on their own schedules unchanged. Task
 Scheduler XML has no file trigger in this minimal schema, so Windows still
@@ -96,7 +96,7 @@ def _role_base(project: Project, name: str) -> str:
 def event_watches(config: Config, project: Project) -> dict[str, list[str]]:
     """Event-trigger watch directories per subscribed role.
 
-    Mechanism: roles with decision_events wake on decision-history and waits
+    Mechanism: roles with decision_events/work_item_events wake on their source and waits
     writes, but dispatch runs only on a substantive event or due wait;
     in own-source mode deferrals ride along and never admit a run on their own,
     while a role with decision_sources="any" admits once per new matching
@@ -114,10 +114,15 @@ def event_watches(config: Config, project: Project) -> dict[str, list[str]]:
         role = config.roles[name]
         if role.daemon:
             continue
-        if not role.decision_events and not (
+        if not (role.decision_events or role.work_item_events) and not (
                 role.workspace == "write" and (role.interval_seconds or role.calendar)):
             continue
         watches[name] = [str(project.root / "decision-history"), str(project.root / "waits")]
+        if role.work_item_events:
+            # Terminal appends and successful receipt batches touch this parent
+            # as a non-authoritative hint; nested item/receipt writes are not
+            # assumed to be recursive platform watch events.
+            watches[name].append(str(project.root / "work-items"))
     return watches
 
 

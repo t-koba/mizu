@@ -267,6 +267,7 @@ def explain(config, project, role_name: str) -> dict:
                 "daemon": role.daemon, "interval_seconds": role.interval_seconds,
                 "calendar": list(role.calendar), "on_change": role.on_change,
                 "decision_events": list(role.decision_events),
+                "work_item_events": list(role.work_item_events),
                 "decision_sources": role.decision_sources, "ci_wake": role.ci_wake}
     return {
         "schema_version": 1,

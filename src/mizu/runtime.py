@@ -21,7 +21,7 @@ from pathlib import Path
 
 from . import platform as _platform
 from .admission import admission
-from . import dispatch_evidence
+from . import dispatch_evidence, work_item_events
 from .budget import Budget
 from .config import (MAX_CI_WAKE_EXTRA_BRANCHES, Config, Role, load,
                      role_policy_bytes, role_requests_per_run,
@@ -373,6 +373,7 @@ class Context:
         # terminal pi-durable unanswered settlement can advance it.
         self.attempt_ordinal = 0
         self.decision_events: list = []
+        self.work_item_events: list = []
         self.wait_events: list = []
         self.obligations: list = []
         self.closed = False
@@ -2681,6 +2682,8 @@ def prompt_for(context: Context) -> str:
                        "open_insights": _open_backlog(context, caps),
                        "open_work_items": open_work_items,
                        "decision_events": list(getattr(context, "decision_events", []) or []),
+                       **({"work_item_events": list(context.work_item_events)}
+                          if getattr(context, "work_item_events", None) else {}),
                        "decision_task": _decision_task(context),
                        "wait_events": list(getattr(context, "wait_events", []) or []),
                        "obligations": list(getattr(context, "obligations", []) or []),
@@ -2746,6 +2749,8 @@ def prompt_delta_for(context: Context, pending: list) -> str:
                        "open_insights": open_backlog,
                        "open_work_items": open_work_items,
                        "decision_events": list(getattr(context, "decision_events", []) or []),
+                       **({"work_item_events": list(context.work_item_events)}
+                          if getattr(context, "work_item_events", None) else {}),
                        "decision_task": _decision_task(context),
                        "wait_events": list(getattr(context, "wait_events", []) or []),
                        "obligations": list(getattr(context, "obligations", []) or []),
@@ -3147,13 +3152,17 @@ class Engine:
             decision_events = project.insights.decision_events(
                 role_name, triggers, limit=project.config.limits.decision_events_limit,
                 sources=sources) if triggers else []
+            terminal_page = work_item_events.pending(
+                project.work_items, role_name, role.work_item_events, sources=sources,
+                limit=project.config.limits.decision_events_limit)
+            terminal_events = terminal_page["events"]
             wait_events = project.insights.due_waits(role_name, snapshot)
             # Dependency obligations addressed to this role ride along when
             # it runs for other reasons; they never admit a run on their
             # own, so no new wake source is implied.
             obligations = project.insights.pending_obligations(role_name)
             # Event-triggered dispatch (platform file triggers) admits only on a
-            # subscribed substantive decision event or a due structured wait
+            # subscribed substantive decision/terminal event or a due structured wait
             # for this role; in own-source mode deferrals ride along when the role
             # runs for other reasons and never admit a run on their own. A role
             # explicitly opted into decision_sources="any" admits on any matching
@@ -3175,7 +3184,7 @@ class Engine:
                 ci_failures = _ci_due_for(project, self.config, role, _ci_snapshot_id, time.time())
             except Exception:
                 ci_failures = []
-            if event_trigger and not substantive_events and not wait_events and not ci_failures:
+            if event_trigger and not substantive_events and not terminal_events and not wait_events and not ci_failures:
                 return {"skipped": "no-event", "snapshot": snapshot["id"],
                         "code_digest": snapshot["code_digest"]}
             # Writable roles consume these generations in their next snapshot.
@@ -3195,7 +3204,7 @@ class Engine:
                 disposition = progress_disposition(snapshot["progress"], snapshot["outcome"],
                                                    self.config, role_name)
                 progress_self_admits = disposition != "parked_no_progress"
-            if (code_unchanged and not substantive_events and not wait_events and not ci_failures
+            if (code_unchanged and not substantive_events and not terminal_events and not wait_events and not ci_failures
                     and not explicit_wake and not progress_self_admits):
                 return {"skipped": "unchanged", "snapshot": snapshot["id"],
                         "code_digest": snapshot["code_digest"]}
@@ -3241,16 +3250,20 @@ class Engine:
             workspace = project.workspace if role.workspace == "write" else run_dir / "input"
             try:
                 write_json(active, {"run": run_id, "role": role_name, "started_at": now()})
-                if code_unchanged and (substantive_events or wait_events or ci_failures):
+                if code_unchanged and (substantive_events or terminal_events or wait_events or ci_failures):
                     if substantive_events:
                         admission = "decision"
+                    elif terminal_events:
+                        admission = "work_item"
                     elif wait_events:
                         admission = "wait"
                     else:
                         admission = "ci"
-                elif event_trigger and (substantive_events or wait_events or ci_failures):
+                elif event_trigger and (substantive_events or terminal_events or wait_events or ci_failures):
                     if substantive_events:
                         admission = "decision"
+                    elif terminal_events:
+                        admission = "work_item"
                     elif wait_events:
                         admission = "wait"
                     else:
@@ -3270,6 +3283,7 @@ class Engine:
                             "snapshot": snapshot["id"], "started_at": now(),
                             "admission_elapsed_seconds": round(admission_elapsed, 6),
                             "admission": admission, "decision_events": len(decision_events),
+                            "work_item_events": len(terminal_events),
                             "wait_events": len(wait_events),
                             "obligation_events": len(obligations),
                             "ci_failures": len(ci_present),
@@ -3279,6 +3293,10 @@ class Engine:
                     write_json(run_dir / "decision-events.json",
                                {"run": run_id, "role": role_name, "admission": admission,
                                 "events": decision_events})
+                if terminal_events:
+                    write_json(run_dir / "work-item-events.json",
+                               {"run": run_id, "role": role_name, "admission": admission,
+                                **terminal_page})
                 if wait_events:
                     write_json(run_dir / "wait-events.json",
                                {"run": run_id, "role": role_name, "admission": admission,
@@ -3353,6 +3371,7 @@ class Engine:
                 context._slot_lease = True
                 context.ephemeral = self.ephemeral
                 context.decision_events = decision_events
+                context.work_item_events = terminal_events
                 context.wait_events = wait_events
                 context.obligations = obligations
                 context.progress_obligations_digest = _progress_obligations_digest(obligations)
@@ -3364,7 +3383,7 @@ class Engine:
                 context.progress_input = (
                     context.inbox_seen != snapshot.get("inbox_seen", "")
                     or context.wake_generation != snapshot.get("wake_generation", "")
-                    or bool(decision_events or wait_events or ci_failures)
+                    or bool(decision_events or terminal_events or wait_events or ci_failures)
                     or new_obligation or prior_wait_expired)
                 prompt, prompt_mode, session_key, rotation, session_dir = session_prompt(context, role, run_dir)
                 dispatch_evidence.capture_projection(context, role.profile, prompt_mode,
@@ -3383,6 +3402,7 @@ class Engine:
                                 "unseeded_decisions": work_items_page["unseeded_decisions"],
                                 "coverage_complete": work_items_page["coverage_complete"]},
                             "decision_events": len(decoded.get("decision_events", [])),
+                            "work_item_events": len(decoded.get("work_item_events", [])),
                             "wait_events": len(decoded.get("wait_events", [])),
                             "acceptance_commands": len(decoded.get("acceptance_commands", [])),
                             "prompt_bytes": len(prompt.encode("utf-8")), "created_at": now(),
@@ -3657,6 +3677,9 @@ class Engine:
                         project.insights.acknowledge_decisions(
                             role_name, context.decision_events,
                             sources=getattr(role, "decision_sources", "own") or "own")
+                if context.work_item_events and finished.get("outcome") != "bounded" and not context.bound_hit:
+                    with contextlib.suppress(OSError, ValueError, TypeError, AttributeError, Denied):
+                        work_item_events.acknowledge(project.work_items, role_name, context.work_item_events)
                 if context.wait_events:
                     with contextlib.suppress(OSError, ValueError, TypeError, AttributeError, Denied):
                         project.insights.consume_waits(role_name, context.wait_events)
@@ -4052,6 +4075,11 @@ def _role_events_due(project: Project, snapshot: dict, role_name=None) -> bool:
             if name in project.config.roles and project.config.roles[name].workspace == "write"]
         for name in names:
             try:
+                terminal_triggers = project.config.roles[name].work_item_events
+                if terminal_triggers and work_item_events.pending(
+                        project.work_items, name, terminal_triggers,
+                        sources=project.config.roles[name].decision_sources, limit=1)["events"]:
+                    return True
                 triggers = project.config.roles[name].decision_events
                 sources = getattr(project.config.roles[name], "decision_sources", "own") or "own"
                 if triggers:
