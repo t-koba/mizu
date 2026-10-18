@@ -3466,6 +3466,7 @@ class Engine:
                             "prompt_mode": prompt_mode, "session_key": session_key,
                             "rotation": (rotation or {}).get("reason", "")})
                 fallback_attempt = 0
+                fallback_wait_deadline = None
                 retry_budgets: dict = {}
                 selection_dispatches = 0
                 from .selection import DEFAULT_ON_ERROR_RETRIES as _default_retries
@@ -3565,11 +3566,36 @@ class Engine:
                         # chained to the model failure, never relabelled as a
                         # transient provider error.
                         reselected = prepare(self, project, selection_role, snapshot, attributes)
-                        if not reselected.get("profile"):
-                            # Nothing eligible under the recorded blocks: fail
-                            # on the last attempt as before (deferred below),
-                            # keeping its decision for the failure record.
-                            raise exc
+                        while not reselected.get("profile"):
+                            # Only one-shot calls may wait for timed recovery.
+                            # Keep one monotonic window across early wakes and
+                            # fallback attempts; polling never renews it.
+                            unblock_at = reselected.get("next_unblock_at")
+                            if (not retry_busy or unblock_at is None
+                                    or reselected.get("reason") == "classification_wait"):
+                                raise exc
+                            if fallback_wait_deadline is None:
+                                fallback_wait_deadline = (time.monotonic()
+                                                          + self.config.limits.busy_retry_seconds)
+                            remaining = fallback_wait_deadline - time.monotonic()
+                            wall_now = time.time()
+                            if remaining <= 0 or unblock_at - wall_now > remaining:
+                                # Preserve the failed decision and original
+                                # provider error, with no extra model attempt.
+                                raise exc
+                            wake_at = min(unblock_at, reselected["next_evaluation_at"])
+                            wait_seconds = min(self.config.limits.idle_seconds, remaining,
+                                               max(0.0, wake_at - wall_now))
+                            context._slot_lease = False
+                            self._selection_retry_wait(context, project, stack, selection_role,
+                                                       role_name, wait_seconds)
+                            if time.monotonic() > fallback_wait_deadline:
+                                raise exc
+                            # Read-only preparation: a wake must not spend on
+                            # classification or launch a recovery probe. Other
+                            # executors may have supplied recovery meanwhile.
+                            reselected = prepare(self, project, selection_role, snapshot,
+                                                 attributes, preview=True)
                         decision = reselected
                         selection_attempt += 1
                         write_json(run_dir / "selection.json", decision)

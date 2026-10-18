@@ -850,6 +850,7 @@ def select(config, role, facts, sources, *, at=None, classification=None):
                 'facts': evidence_facts, 'attribute_sources': sources,
                 'classification': classification, 'next_evaluation_at': at + spec['retry_seconds']}
     times = [decision['next_evaluation_at']]
+    unblocks = []
     for obs in observations.values():
         if obs.get('expires_at', 0) > at:
             times.append(obs['expires_at'])
@@ -866,6 +867,8 @@ def select(config, role, facts, sources, *, at=None, classification=None):
                 reasons.append('condition_false_or_unknown')
             if state['exhausted']:
                 reasons.append('selection_capacity_exhausted')
+            static_exclusion = bool(reasons)
+            candidate_unblocks = []
             for key in ('profile:'+profile, 'group:'+group):
                 for block in blocks_for(state, key, at):
                     obs = observations[group]
@@ -875,17 +878,28 @@ def select(config, role, facts, sources, *, at=None, classification=None):
                     if not recovered:
                         if key not in reasons:
                             reasons.append(key)
+                        block_times = []
                         if block['until'] is not None:
-                            times.append(block['until'])
+                            block_times.append(block['until'])
                         if block.get('next_probe_at', 0) > at:
-                            times.append(block['next_probe_at'])
+                            block_times.append(block['next_probe_at'])
+                        times.extend(block_times)
+                        if block_times:
+                            candidate_unblocks.append(min(block_times))
+                        else:
+                            static_exclusion = True
             if reasons:
+                # Every overlapping block must have a future expiry/probe,
+                # and time cannot fix a static predicate or capacity refusal.
+                if not static_exclusion and candidate_unblocks:
+                    unblocks.append(max(candidate_unblocks))
                 decision['excluded'].append({'profile': profile, 'reasons': reasons})
             else:
                 decision.update(profile=profile, group=group, facts={k: v for k, v in candidate_facts.items() if k != 'task'})
                 break
         break
     decision['next_evaluation_at'] = min(times)
+    decision['next_unblock_at'] = min(unblocks) if unblocks and not decision['profile'] else None
     if decision['profile'] and any('probe_seconds' in r for r in spec.get('on_error', [])):
         from .probes import target_binding, sponsor_binding
         # Capture the authority BEFORE execution, not after mutable native files

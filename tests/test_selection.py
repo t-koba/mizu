@@ -1,4 +1,5 @@
 """Synthetic selection/state tests. No provider quota, payment or isolation claim."""
+import contextlib
 import copy
 import dataclasses
 import json
@@ -12,7 +13,8 @@ from mizu.budget import Budget
 from mizu.cli import execute, parser
 from mizu.config import load
 from mizu.engine_config import effective, session_record
-from mizu.errors import Cancelled, ConfigError, Denied, ModelFailure, ProtocolError
+from mizu.errors import (Busy, Cancelled, ConfigError, Denied, InfraExceeded, ModelFailure,
+                         ProtocolError, RunDeadlineExceeded)
 from mizu.fs import canonical, read_json, write_json
 from mizu.runtime import Engine
 from mizu.selection import (State, UNKNOWN, attributes, base_facts, evaluate,
@@ -234,6 +236,212 @@ class SelectionTests(SelectionFixture):
         failure = read_json(self.project.root / 'runs' / failed['run'] / 'error.json')
         self.assertEqual([retry['profile'] for retry in failure['selection_retries']],
                          ['primary', 'primary', 'alternate', 'alternate'])
+
+    def setup_timed_fallback(self, *, unblock=6):
+        role, _ = self.setup_selection()
+        self.config = dataclasses.replace(self.config, limits=dataclasses.replace(
+            self.config.limits, parallel_runs=1, idle_seconds=2, busy_retry_seconds=10))
+        self.project.config = self.config
+        # Primary is initially eligible; alternate's earlier failure expires
+        # six seconds into the synthetic run. Primary's new block lasts 100s.
+        alternate = {**self.decision(role, at=900), 'profile': 'alternate', 'group': 'other'}
+        State(self.config).result(alternate, run='previous', at=900 + unblock,
+                                  error=ModelFailure('previous', code='synthetic-exhausted'))
+        return role
+
+    def test_unblock_time_excludes_static_conditions_and_capacity(self):
+        spec = specification()
+        spec['rules'][0]['candidates'] = spec['rules'][0]['candidates'][:1]
+        role, _ = self.setup_selection(spec)
+        store = State(self.config)
+        store.result(self.decision(role), run='fixed', at=1000,
+                     error=ModelFailure('synthetic', code='synthetic-exhausted'))
+        state = store.read()
+        # Overlapping profile/group blocks require BOTH to expire.
+        state['blocks']['profile:primary'] = {**state['blocks']['group:shared'], 'until': 1120}
+        store.save(state)
+        self.assertEqual(self.decision(role, at=1001)['next_unblock_at'], 1120)
+        self.assertEqual(self.decision(role, at=1001)['next_evaluation_at'], 1031)
+        state['exhausted'] = True
+        store.save(state)
+        self.assertIsNone(self.decision(role, at=1001)['next_unblock_at'])
+        state['exhausted'] = False
+        store.save(state)
+        spec['rules'][0]['candidates'][0]['when'] = cond('missing', 'eq', True)
+        self.setup_selection(spec)
+        self.assertIsNone(self.decision(role, at=1001)['next_unblock_at'])
+        spec['rules'][0]['when'] = cond('missing', 'eq', True)
+        self.setup_selection(spec)
+        self.assertIsNone(self.decision(role, at=1001)['next_unblock_at'])
+
+    def test_unblock_time_includes_future_probe_or_upper_expiry(self):
+        spec = specification()
+        spec['rules'][0]['candidates'] = spec['rules'][0]['candidates'][:1]
+        spec['on_error'] = [{'scope': 'profile', 'probe_seconds': 10, 'seconds': 100}]
+        role, _ = self.setup_selection(spec)
+        store = State(self.config)
+        store.result(self.decision(role), run='probe', at=1000,
+                     error=ModelFailure('synthetic', code='synthetic-exhausted'))
+        self.assertEqual(self.decision(role, at=1001)['next_unblock_at'], 1010)
+        # A due probe is not launched by the wait; the remaining upper expiry
+        # can still make the candidate eligible without spending.
+        self.assertEqual(self.decision(role, at=1010)['next_unblock_at'], 1100)
+        self.assertEqual(self.decision(role, at=1100)['profile'], 'primary')
+
+    def test_one_shot_wait_runs_earliest_fallback_without_slot_or_spend(self):
+        role = self.setup_timed_fallback()
+        elapsed, waits, attempted, deadlines = [0.0], [], [], []
+
+        def callback(ctx, *_):
+            attempted.append(ctx.role.profile)
+            deadlines.append(ctx.deadline)
+            if ctx.role.profile == 'primary':
+                raise ModelFailure('original provider failure', code='synthetic-exhausted')
+
+        driver = ScriptDriver(callback)
+        engine = Engine(self.config, driver=driver)
+        budget = Budget(self.config.data / 'budget', self.config.limits.daily_requests,
+                        self.config.limits.retention_days, self.config.limits.shared_daily_requests,
+                        self.config.timezone)
+
+        def wait(seconds):
+            ctx = driver.calls[-1][0]
+            self.assertFalse(ctx._slot_lease)
+            self.assertEqual(ctx.request_count, 1)
+            self.assertEqual(budget.usage(self.project.name)['used'], 1)
+            self.assertEqual(ctx.deadline, deadlines[0])
+            # With capacity one, acquiring all the same admission resources
+            # proves the slot AND role/workspace locks are released.
+            with contextlib.ExitStack() as other:
+                engine._admit(self.project, role.name, role, other, wait=False)
+            waits.append(seconds)
+            elapsed[0] += seconds
+            return False
+
+        from mizu.classification import prepare
+        with patch('time.time', lambda: 1000 + elapsed[0]), \
+                patch('time.monotonic', lambda: 1000 + elapsed[0]), \
+                patch.object(engine.stop, 'wait', wait), \
+                patch('mizu.classification.prepare', wraps=prepare) as selection:
+            result = engine.run(self.project, role.name, retry_busy=True)
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(result['selection']['profile'], 'alternate')
+        self.assertEqual(attempted, ['primary', 'alternate'])
+        self.assertEqual(waits, [2, 2, 2])
+        self.assertEqual(deadlines[0], deadlines[1])
+        self.assertEqual(len(driver.calls), 2)
+        self.assertEqual(budget.usage(self.project.name)['used'], 2)
+        # All wake reevaluations are read-only (no paid classification).
+        self.assertEqual([call.kwargs.get('preview') for call in selection.call_args_list],
+                         [None, None, True, True, True])
+
+    def test_one_shot_outside_window_preserves_original_failure(self):
+        role = self.setup_timed_fallback(unblock=11)
+        failure = ModelFailure('original provider failure', code='synthetic-exhausted')
+
+        def fail(*_):
+            raise failure
+
+        driver = ScriptDriver(fail)
+        with patch('time.time', return_value=1000), \
+                patch.object(Engine, '_selection_retry_wait') as wait:
+            result = Engine(self.config, driver=driver).run(self.project, role.name, retry_busy=True)
+        wait.assert_not_called()
+        self.assertEqual(result['status'], 'deferred')
+        self.assertEqual(result['selection']['profile'], 'primary')
+        self.assertEqual(len(driver.calls), 1)
+        error = read_json(self.project.root / 'runs' / result['run'] / 'error.json')
+        self.assertEqual(error['error'], str(failure))
+        self.assertEqual(error['selection']['profile'], 'primary')
+        self.assertEqual(error['selection_retries'], [{'profile': 'primary', 'error': str(failure)}])
+
+    def test_daemon_does_not_wait_for_timed_fallback(self):
+        role = self.setup_timed_fallback()
+
+        def fail(*_):
+            raise ModelFailure('original provider failure', code='synthetic-exhausted')
+
+        driver = ScriptDriver(fail)
+        with patch('time.time', return_value=1000), \
+                patch.object(Engine, '_selection_retry_wait') as wait:
+            result = Engine(self.config, driver=driver).run(self.project, role.name, retry_busy=False)
+        wait.assert_not_called()
+        self.assertEqual(result['status'], 'deferred')
+        self.assertEqual(len(driver.calls), 1)
+
+    def test_one_shot_early_reevaluation_does_not_renew_window(self):
+        role = self.setup_timed_fallback()
+        elapsed, waits = [0.0], []
+
+        def fail(*_):
+            raise ModelFailure('original provider failure', code='synthetic-exhausted')
+
+        def wait(engine, ctx, project, stack, selection_role, role_name, seconds):
+            self.assertFalse(ctx._slot_lease)
+            waits.append(seconds)
+            elapsed[0] += seconds
+            # Concurrent failure pushes alternate past the ORIGINAL window,
+            # but still within ten seconds of this early reevaluation.
+            state = State(self.config)
+            updated = state.read()
+            updated['blocks']['group:other']['until'] = 1011
+            state.save(updated)
+            ctx._slot_lease = True
+
+        driver = ScriptDriver(fail)
+        with patch('time.time', lambda: 1000 + elapsed[0]), \
+                patch('time.monotonic', lambda: 1000 + elapsed[0]), \
+                patch.object(Engine, '_selection_retry_wait', wait):
+            result = Engine(self.config, driver=driver).run(self.project, role.name, retry_busy=True)
+        self.assertEqual(waits, [2])
+        self.assertEqual(result['status'], 'deferred')
+        self.assertEqual(len(driver.calls), 1)
+
+    def test_retry_wait_revalidates_deadline_authority_budget_and_admission(self):
+        role, _ = self.setup_selection()
+        original_config = self.config
+        for guard, error in [('deadline', RunDeadlineExceeded), ('authority', Cancelled),
+                             ('budget', InfraExceeded), ('admission', Busy)]:
+            with self.subTest(guard=guard), contextlib.ExitStack() as stack, \
+                    contextlib.ExitStack() as competitor:
+                engine = Engine(original_config, driver=ScriptDriver())
+                self.project.set_control(armed=True, paused=False)
+                engine._admit(self.project, role.name, role, stack, wait=False)
+                ctx = self.context()
+                ctx._slot_lease = True
+                deadline_before = ctx.deadline
+                budget = Budget(original_config.data / 'budget',
+                                     original_config.limits.daily_requests,
+                                     original_config.limits.retention_days,
+                                     original_config.limits.shared_daily_requests,
+                                     original_config.timezone)
+                used_before = budget.usage(self.project.name)['used']
+
+                elapsed = [0.0]
+
+                def wait(_):
+                    self.assertFalse(ctx._slot_lease)
+                    elapsed[0] += 2
+                    if guard == 'deadline':
+                        ctx.deadline = 0
+                    elif guard == 'authority':
+                        self.project.set_control(paused=True)
+                    elif guard == 'budget':
+                        engine.config = dataclasses.replace(original_config, limits=dataclasses.replace(
+                            original_config.limits, daily_requests=0))
+                    else:
+                        engine._admit(self.project, role.name, role, competitor, wait=False)
+                    return False
+
+                with patch.object(engine.stop, 'wait', wait), \
+                        patch('time.monotonic', lambda: 1000 + elapsed[0]), \
+                        self.assertRaises(error):
+                    engine._selection_retry_wait(ctx, self.project, stack, role, role.name, 1)
+                self.assertFalse(ctx._slot_lease)
+                self.assertEqual(ctx.request_count, 0)
+                if guard != 'deadline':
+                    self.assertEqual(ctx.deadline, deadline_before)
+                self.assertEqual(budget.usage(self.project.name)['used'], used_before)
 
     def test_retry_wait_holds_no_slot_and_spends_nothing(self):
         import contextlib

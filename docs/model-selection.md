@@ -92,9 +92,21 @@ revalidated without consuming anything, and fail-fast re-admission is required
 before the retry. Waiting never renews deadlines. Budget, stop, wall/deadline
 or re-admission failure abandons the retry and the unit drops through the
 existing path for the raised error (the original failure deferred, or the
-infra/authority/bound error itself). The wait between runs for the earliest
-unblock is unchanged: a deferred run exits and the next evaluation at
-`next_evaluation_at` holds no slot either.
+infra/authority/bound error itself).
+
+When fallback finds no eligible profile after recording a provider error,
+one-shot calls (`retry_busy=True`) may use the same no-slot wait mechanism
+until the earliest candidate unblock. The total window is bounded by
+`[limits] busy_retry_seconds` (default 300); early reevaluations and subsequent
+fallbacks do not restart it. Selection is rechecked at idle cadence or an
+earlier `next_evaluation_at`/`next_unblock_at`, without running classification
+or recovery probes. A candidate is waitable only if its conditions match,
+selection capacity is available, and every blocking contribution has a future
+expiry or probe time; overlapping blocks use their latest earliest-recovery
+time. If none can unblock within the remaining window, the original provider
+failure is raised/deferred with no extra model attempt. Daemon/event-trigger
+calls (`retry_busy=False`) still fail fast. Deferred runs leave the next
+between-run evaluation at `next_evaluation_at`, holding no slot either.
 
 
 ### Optional paid recovery probes
