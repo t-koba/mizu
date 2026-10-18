@@ -361,13 +361,25 @@ writes, locks, recovers or deletes. The project is opened with
   count, `overflow_count` and `truncated`. Each row carries `id`, `title`,
   `status` (`done` or `dropped`), `origin`, `rev`, `updated_at`, `actor`, a
   bounded `reason_preview` with `reason_truncated` when a reason is stored, and
-  `snapshot_id` (the verified snapshot for `done`, null for `dropped`). Rows
-  are at most 8192 canonical bytes and the response at most 1 MiB.
+  `snapshot_id` (the verified snapshot for `done`, null for `dropped`). Each row
+  also has `event_acknowledgements`: a role-name-sorted mapping of **every**
+  project role whose `work_item_events` includes that status and whose effective
+  `work_item_sources` route matches, to a boolean exact receipt state. `own`
+  matches the origin insight submitter, never the transition actor; unknown
+  origins match only `any`. Nonmatching/unsubscribed roles are absent, and no
+  matches produces `{}`. True means the exact `work_item:<id>:<rev>` receipt
+  exists for that role; false means it does not. This is independent of the
+  ten-ID summary sample, including for older rows outside that sample.
+  Reads reuse validated immutable terminal chains/payloads and fail closed on
+  malformed receipts, unsafe origins or excess bytes, rather than omitting
+  matching roles. Rows including the map are at most 8192 canonical bytes and
+  the response at most 1 MiB.
   Drop-only legacy sidecars without a seed stay in the `work_items_legacy_read`
   audit, not here.
 - `event_delivery` reports up to 100 roles subscribed to `work_item_events`
   (non-subscribers are omitted), in name order. Each has `role`, `subscribed`
-  terminal types, `sources`, exact `pending` and `acknowledged` counts for the
+  terminal types, `sources` (effective `work_item_sources`, not decision routing),
+  exact `pending` and `acknowledged` counts for the
   current subscription/route, up to 10 oldest `pending_event_ids` and up to 10
   most-recent `acknowledged_event_ids`, plus truncation flags, `unknown_routing`,
   `routing_complete`, `unseeded_decisions` and `coverage_complete`. It contains

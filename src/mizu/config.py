@@ -429,10 +429,10 @@ class Role:
     attributes: dict = dataclasses.field(default_factory=dict)
     decision_events: tuple[str, ...] = ()
     work_item_events: tuple[str, ...] = ()
-    #: Shared decision/work-item event source scope: "own" routes only this role's findings
-    #: (default, fail-closed); "any" routes matching actions from any source
-    #: so a resolver runs on each new deferral. Unset keeps own-source.
+    #: Independent effective event routes; load resolves legacy shared settings.
+    #: "own" routes by origin submitter, "any" by subscription alone.
     decision_sources: str = "own"
+    work_item_sources: str = "own"
     #: Whether a red operator-selected ``ci_branch`` wakes this role.
     #: Default true for writable roles (the writer keeps its sticky-red wake),
     #: false otherwise, so event-only/read roles never spend runs on CI they
@@ -842,7 +842,7 @@ def load(file: Path) -> Config:
             raise ConfigError(f"Role name '{name}' is reserved for the operator channel")
         keys(role, {"profile", "policy", "workspace", "capabilities", "engine_tools", "on_change",
                     "interval_seconds", "calendar", "daemon", "selector", "attributes",
-                    "decision_events", "work_item_events", "decision_sources", "ci_wake", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds"}, f"roles.{name}")
+                    "decision_events", "work_item_events", "decision_sources", "work_item_sources", "ci_wake", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds"}, f"roles.{name}")
         profile = string(role.get("profile", ""), f"roles.{name}.profile")
         selector = string(role.get("selector", ""), f"roles.{name}.selector")
         if ("profile" in role) == ("selector" in role):
@@ -941,11 +941,23 @@ def load(file: Path) -> Config:
         if len(set(work_events)) != len(work_events) or any(e not in ("done", "dropped") for e in work_events):
             raise ConfigError(f"roles.{name}.work_item_events must list unique done/dropped values")
         raw_sources = role.get("decision_sources", "own")
-        if not isinstance(raw_sources, str) or raw_sources not in ("own", "any"):
-            raise ConfigError(f"roles.{name}.decision_sources must be own or any")
-        if raw_sources == "any" and not (events or work_events):
-            raise ConfigError(f"roles.{name}.decision_sources is any without decision_events or work_item_events; "
-                              "subscribe to at least one action")
+        work_sources = role.get("work_item_sources", raw_sources if work_events else "own")
+        for key, value in (("decision_sources", raw_sources), ("work_item_sources", work_sources)):
+            if not isinstance(value, str) or value not in ("own", "any"):
+                raise ConfigError(f"roles.{name}.{key} must be own or any")
+        if "work_item_sources" not in role:
+            # Legacy shared route: keep terminal delivery, but do not invent
+            # an any-source decision subscription for a terminal-only role.
+            if raw_sources == "any" and not (events or work_events):
+                raise ConfigError(f"roles.{name}.decision_sources is any without decision_events or work_item_events; "
+                                  "subscribe to at least one action")
+            if not events:
+                raw_sources = "own"
+        else:
+            for key, value, subscription in (("decision_sources", raw_sources, events),
+                                             ("work_item_sources", work_sources, work_events)):
+                if value == "any" and not subscription:
+                    raise ConfigError(f"roles.{name}.{key} is any without its event subscription")
         ci_wake = boolean(role.get("ci_wake", workspace == "write"), f"roles.{name}.ci_wake")
         role_requests = role.get("requests_per_run")
         if role_requests is not None:
@@ -965,7 +977,8 @@ def load(file: Path) -> Config:
         roles[name] = Role(name, profile, policy, workspace, caps,
                            strings(role.get("engine_tools", []), "engine_tools"),
                            boolean(role.get("on_change", False), "on_change"), interval, calendar, daemon, selector, attrs,
-                           decision_events=events, work_item_events=work_events, decision_sources=raw_sources, ci_wake=ci_wake,
+                           decision_events=events, work_item_events=work_events, decision_sources=raw_sources,
+                           work_item_sources=work_sources, ci_wake=ci_wake,
                            requests_per_run=role_requests, tools_per_run=role_tools,
                            wrap_up_requests=role_wrap_requests, wrap_up_tools=role_wrap_tools,
                            run_seconds=role_seconds)

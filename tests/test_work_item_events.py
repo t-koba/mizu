@@ -9,7 +9,7 @@ from support import Fixture, ScriptDriver
 from mizu import insight_archive, work_item_events as events
 from mizu.cli import execute, parser
 from mizu.config import load
-from mizu.errors import Busy, ConfigError, Denied, InfraExceeded, MissingFinish
+from mizu.errors import Busy, ConfigError, Denied, InfraExceeded, LimitExceeded, MissingFinish
 from mizu.fs import canonical, digest, lock, read_json, write_json
 from mizu.runtime import Engine, _role_events_due, prompt_for, prompt_delta_for
 from mizu.services import event_watches, render
@@ -67,10 +67,88 @@ class WorkItemEventTests(Fixture):
                 self.file.write_text(original.replace(
                     "[roles.reviewer]", f'[roles.reviewer]\nwork_item_events = {values}\ndecision_sources = "{scope}"'))
                 if valid:
-                    self.assertEqual(load(self.file).roles["reviewer"].decision_sources, scope)
+                    self.assertEqual(load(self.file).roles["reviewer"].work_item_sources, scope)
+                    self.assertEqual(load(self.file).roles["reviewer"].decision_sources, "own")
                 else:
                     with self.assertRaises(ConfigError):
                         load(self.file)
+
+    def test_independent_route_defaults_migration_and_validation(self):
+        original = self.file.read_text()
+        # decision subscription, terminal subscription, raw route lines, effective pair
+        cases = [
+            ('[]', '[]', '', ("own", "own")),
+            ('["reject"]', '["done"]', 'decision_sources = "any"', ("any", "any")),
+            ('[]', '["done"]', 'decision_sources = "any"', ("own", "any")),
+            ('["reject"]', '[]', 'decision_sources = "any"', ("any", "own")),
+            ('[]', '["done"]', 'work_item_sources = "any"', ("own", "any")),
+            ('["reject"]', '["done"]', 'decision_sources = "any"\nwork_item_sources = "own"', ("any", "own")),
+            ('["reject"]', '["done"]', 'decision_sources = "own"\nwork_item_sources = "any"', ("own", "any")),
+            ('["reject"]', '["done"]', 'decision_sources = "any"\nwork_item_sources = "any"', ("any", "any")),
+            ('["reject"]', '[]', 'decision_sources = "any"\nwork_item_sources = "own"', ("any", "own")),
+            ('[]', '["done"]', 'decision_sources = "any"\nwork_item_sources = "any"', None),
+            ('["reject"]', '[]', 'work_item_sources = "any"', None),
+            ('[]', '[]', 'work_item_sources = "any"', None),
+            ('[]', '["done"]', 'work_item_sources = "everyone"', None),
+            ('[]', '["done"]', 'work_item_sources = true', None),
+            ('[]', '["done"]', 'work_item_sources = []', None),
+            ('["reject"]', '["done"]', 'decision_sources = "everyone"\nwork_item_sources = "own"', None),
+        ]
+        for decisions, terminal, routes, expected in cases:
+            with self.subTest(decisions=decisions, terminal=terminal, routes=routes):
+                self.file.write_text(original.replace(
+                    "[roles.reviewer]", f"[roles.reviewer]\ndecision_events = {decisions}\n"
+                    f"work_item_events = {terminal}\n{routes}"))
+                if expected is None:
+                    with self.assertRaises(ConfigError):
+                        load(self.file)
+                else:
+                    role = load(self.file).roles["reviewer"]
+                    self.assertEqual((role.decision_sources, role.work_item_sources), expected)
+
+    def test_independent_routes_through_pending_admission_and_cli(self):
+        text = self.file.read_text()
+        for name, decisions, terminal in (("reviewer", "any", "own"), ("searcher", "own", "any")):
+            text = text.replace(f"[roles.{name}]", f'[roles.{name}]\ndecision_events = ["accept"]\n'
+                                f'work_item_events = ["dropped"]\ndecision_sources = "{decisions}"\n'
+                                f'work_item_sources = "{terminal}"')
+        self.file.write_text(text)
+        config = load(self.file)
+        self.project.config = config
+        self.terminal(source="worker")
+        driver = ScriptDriver()
+        engine = Engine(config, driver=driver)
+        for name in ("reviewer", "searcher"):
+            role = config.roles[name]
+            with self.subTest(role=name):
+                decisions = self.project.insights.decision_events(name, role.decision_events,
+                                                                  sources=role.decision_sources)
+                terminal = events.pending(self.store, name, role.work_item_events, sources=role.work_item_sources)
+                self.assertEqual(len(decisions), int(name == "reviewer"))
+                self.assertEqual(terminal["pending"], int(name == "searcher"))
+                self.assertTrue(_role_events_due(self.project, self.project.snapshots.get(), name))
+                cursor_before = self.project.insights.decision_cursor(name)
+                with patch.object(self.project.insights, "acknowledge_decisions",
+                                  wraps=self.project.insights.acknowledge_decisions) as decision_ack:
+                    result = engine.run(self.project, name, event_trigger=True)
+                self.assertEqual(result["status"], "completed")
+                prompt = json.loads(driver.calls[-1][1])
+                self.assertEqual(prompt["decision_events"], decisions)
+                self.assertEqual(prompt.get("work_item_events", []), terminal["events"])
+                if name == "reviewer":
+                    self.assertEqual(decision_ack.call_args.kwargs["sources"], "any")
+                else:
+                    decision_ack.assert_not_called()
+                    self.assertEqual(self.project.insights.decision_cursor(name), cursor_before)
+                self.assertFalse(_role_events_due(self.project, self.project.snapshots.get(), name))
+                self.assertEqual(engine.run(self.project, name, event_trigger=True)["skipped"], "no-event")
+        output = execute(parser().parse_args(["--config", str(self.file), "work-items", self.project.name]))
+        self.assertEqual(output["closed"]["items"][0]["event_acknowledgements"], {"searcher": True})
+        summaries = {row["role"]: row for row in output["event_delivery"]["roles"]}
+        self.assertEqual((summaries["reviewer"]["sources"], summaries["reviewer"]["acknowledged"]), ("own", 0))
+        self.assertEqual((summaries["searcher"]["sources"], summaries["searcher"]["acknowledged"]), ("any", 1))
+        # Any-source terminal delivery did not consume the foreign decision.
+        self.assertEqual(len(self.project.insights.decision_events("searcher", ("accept",), sources="any")), 1)
 
     def test_origin_not_actor_and_unknown_only_any(self):
         proposal, item = self.terminal()
@@ -373,6 +451,77 @@ class WorkItemEventTests(Fixture):
         self.assertFalse(bounded["coverage_complete"])
 
 
+    def test_closed_cli_exact_receipts_outside_summary_sample(self):
+        text = self.file.read_text()
+        for name, route in (("worker", "own"), ("reviewer", "own"), ("searcher", "any")):
+            text = text.replace(f"[roles.{name}]", f'[roles.{name}]\nwork_item_events = ["dropped"]\n'
+                                f'work_item_sources = "{route}"')
+        self.file.write_text(text)
+        for n in range(12):
+            self.terminal(timestamp=f"2030-01-{n+1:02d}T00:00:00+00:00")
+        rows = self.page(limit=100)["events"]
+        events.acknowledge(self.store, "reviewer", rows)
+        # The all-source role has a receipt for only the oldest event.
+        events.acknowledge(self.store, "searcher", rows[:1])
+        before = {p.relative_to(self.project.root): (p.stat().st_mtime_ns, p.read_bytes())
+                  for p in self.project.root.rglob("*") if p.is_file()}
+        args = parser().parse_args(["--config", str(self.file), "work-items", self.project.name, "--closed", "100"])
+        with patch("mizu.work_items.lock", side_effect=AssertionError("read lock")), \
+                patch("mizu.work_items.WorkItems._recover_temporary_writes", side_effect=AssertionError("recovery")), \
+                patch.object(events, "write_json", side_effect=AssertionError("read write")):
+            output = execute(args)
+        after = {p.relative_to(self.project.root): (p.stat().st_mtime_ns, p.read_bytes())
+                 for p in self.project.root.rglob("*") if p.is_file()}
+        self.assertEqual(before, after)
+        summary = next(row for row in output["event_delivery"]["roles"] if row["role"] == "reviewer")
+        self.assertEqual(summary["acknowledged"], 12)
+        self.assertEqual(len(summary["acknowledged_event_ids"]), 10)
+        self.assertTrue(summary["acknowledged_ids_truncated"])
+        self.assertNotIn(rows[0]["event"], summary["acknowledged_event_ids"])
+        closed = output["closed"]["items"]
+        self.assertEqual(closed[-1]["id"], rows[0]["id"])
+        for row in closed:
+            self.assertEqual(row["event_acknowledgements"],
+                             {"reviewer": True, "searcher": row["id"] == rows[0]["id"]})
+            self.assertEqual(list(row["event_acknowledgements"]), ["reviewer", "searcher"])
+        # Transition actor worker is not routed by own; done-only is not routed.
+        text = text.replace('[roles.searcher]\nwork_item_events = ["dropped"]',
+                            '[roles.searcher]\nwork_item_events = ["done"]')
+        self.file.write_text(text)
+        output = execute(args)
+        self.assertEqual(output["closed"]["items"][-1]["event_acknowledgements"], {"reviewer": True})
+        # Once the submitter is unknown, only any can match (not actor worker).
+        (self.project.root / "inbox" / f"{rows[0]['origin']['insight_id']}.json").unlink()
+        output = execute(args)
+        self.assertEqual(output["closed"]["items"][-1]["event_acknowledgements"], {})
+        self.file.write_text(text.replace('[roles.searcher]\nwork_item_events = ["done"]',
+                                          '[roles.searcher]\nwork_item_events = ["dropped"]'))
+        self.assertEqual(execute(args)["closed"]["items"][-1]["event_acknowledgements"], {"searcher": True})
+
+    def test_closed_acknowledgements_bounds_and_invalid_receipts_fail_closed(self):
+        _, item = self.terminal()
+        roles = self.subscribed_config().roles
+        base = self.store.page_closed_readonly()
+        with patch.object(events, "MAX_CLOSED_PAGE_BYTES", len(canonical(base))):
+            with self.assertRaises(LimitExceeded):
+                events.closed_page(self.store, roles)
+        # More than the summary's 100 roles must not be silently omitted.
+        many = {f"role-{n:04d}": dataclasses.replace(roles["reviewer"], work_item_sources="any")
+                for n in range(120)}
+        result = events.closed_page(self.store, many)
+        self.assertEqual(len(result["items"][0]["event_acknowledgements"]), 120)
+        payload_size = len(canonical(self.page()["events"][0]))
+        with patch.object(events, "MAX_CLOSED_ROW_BYTES", payload_size):
+            with self.assertRaises(LimitExceeded):
+                events.closed_page(self.store, many)
+        events.acknowledge(self.store, "reviewer", self.page()["events"])
+        receipt = self.project.root / "work-item-receipts/reviewer" / f"{item['id']}.2.json"
+        value = read_json(receipt)
+        value["event"] = f"work_item:{item['id']}:1"
+        write_json(receipt, value)
+        with self.assertRaises(Denied):
+            events.closed_page(self.store, roles)
+
     def test_receipts_survive_backup_restore(self):
         from mizu.storage import backup, restore
         from mizu.project import Project
@@ -407,7 +556,7 @@ class WorkItemEventTests(Fixture):
         (self.project.root / "inbox" / f"{proposal['id']}.json").unlink()
         own = Engine(self.subscribed_config(), driver=ScriptDriver())
         self.assertEqual(own.run(self.project, "reviewer", event_trigger=True)["skipped"], "no-event")
-        engine = Engine(self.subscribed_config(decision_sources="any"), driver=ScriptDriver())
+        engine = Engine(self.subscribed_config(work_item_sources="any"), driver=ScriptDriver())
         self.assertEqual(engine.run(self.project, "reviewer", event_trigger=True)["status"], "completed")
         self.assertEqual(self.page(sources="any")["acknowledged"], 1)
         self.assertEqual(engine.run(self.project, "reviewer", event_trigger=True)["skipped"], "no-event")

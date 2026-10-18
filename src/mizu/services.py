@@ -100,7 +100,8 @@ def event_watches(config: Config, project: Project) -> dict[str, list[str]]:
     writes, but dispatch runs only on a substantive event or due wait;
     in own-source mode deferrals ride along and never admit a run on their own,
     while a role with decision_sources="any" admits once per new matching
-    deferral from any source. Scheduled write roles
+    deferral from any source. Terminal admission separately uses work_item_sources
+    and exact receipts; file watches are only coarse source-specific wake hints. Scheduled write roles
     additionally wake when their own structured waits come due. Daemon roles need no file trigger (their loop
     re-checks admission every idle tick via should_run); whether a role runs on
     events, on a clock, or both is configuration, so an event-only role (event

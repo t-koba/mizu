@@ -255,8 +255,12 @@ interval_seconds = 900
 # decision_events = ["reject"]
 # Terminal work from this role's findings can also return for follow-up (default []).
 # work_item_events = ["done", "dropped"]
-# A resolver running on each new deferral from any source (unset keeps own-source).
-# decision_sources = "any"  # own (default) or any; any requires decision_events or work_item_events.
+# Routes are independent when work_item_sources is explicit; each any requires
+# its own nonempty subscription. Both default to own.
+# decision_sources = "any"  # decisions from any source; requires decision_events.
+# work_item_sources = "own" # terminal events by origin submitter, never actor.
+# Migration: omitted work_item_sources inherits legacy decision_sources for terminal
+# delivery; terminal-only legacy decision_sources="any" resolves to decision own, work-item any.
 # A red ci_branch wakes only roles with ci_wake (default true for write roles,
 # false otherwise), so event-only roles skip CI they never subscribed to.
 # ci_wake = false

@@ -3202,7 +3202,7 @@ class Engine:
                 role_name, triggers, limit=project.config.limits.decision_events_limit,
                 sources=sources) if triggers else []
             terminal_page = work_item_events.pending(
-                project.work_items, role_name, role.work_item_events, sources=sources,
+                project.work_items, role_name, role.work_item_events, sources=role.work_item_sources,
                 limit=project.config.limits.decision_events_limit)
             terminal_events = terminal_page["events"]
             wait_events = project.insights.due_waits(role_name, snapshot)
@@ -3212,10 +3212,10 @@ class Engine:
             obligations = project.insights.pending_obligations(role_name)
             # Event-triggered dispatch (platform file triggers) admits only on a
             # subscribed substantive decision/terminal event or a due structured wait
-            # for this role; in own-source mode deferrals ride along when the role
-            # runs for other reasons and never admit a run on their own. A role
-            # explicitly opted into decision_sources="any" admits on any matching
-            # action including deferrals (one-shot per new deferral). Otherwise
+            # for this role. Decision routing uses decision_sources: own-source
+            # deferrals ride along but do not admit; decision_sources="any" admits
+            # on matching actions including deferrals. Terminal routing is already
+            # filtered independently by work_item_sources above. Otherwise
             # it exits before allocating a run directory or model use,
             # like unchanged-code admission. Periodic timers invoke without the
             # flag, so scheduled discovery still runs at its interval.
@@ -4108,7 +4108,7 @@ def _on_change_observed(cursor: dict, snapshot: dict) -> bool:
 
 
 def _role_events_due(project: Project, snapshot: dict, role_name=None) -> bool:
-    """True when a decision event or due structured wait routes to a checked role.
+    """True when a routed decision/terminal event or due wait reaches a role.
 
     The checked set is the running role when named, else every write role in
     the project. Decision registration and wait expiry leave no inbox or
@@ -4127,7 +4127,7 @@ def _role_events_due(project: Project, snapshot: dict, role_name=None) -> bool:
                 terminal_triggers = project.config.roles[name].work_item_events
                 if terminal_triggers and work_item_events.pending(
                         project.work_items, name, terminal_triggers,
-                        sources=project.config.roles[name].decision_sources, limit=1)["events"]:
+                        sources=project.config.roles[name].work_item_sources, limit=1)["events"]:
                     return True
                 triggers = project.config.roles[name].decision_events
                 sources = getattr(project.config.roles[name], "decision_sources", "own") or "own"

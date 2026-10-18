@@ -202,7 +202,7 @@ def progress(store, roles, *, limit=100):
     rows = []
     for name in names[:limit]:
         role = roles[name]
-        page = pending(store, name, role.work_item_events, sources=role.decision_sources, limit=10)
+        page = pending(store, name, role.work_item_events, sources=role.work_item_sources, limit=10)
         summary = {key: value for key, value in page.items()
                    if key not in ("events", "overflow_count", "truncated")}
         summary["pending_event_ids"] = [event["event"] for event in page["events"]]
@@ -214,3 +214,37 @@ def progress(store, roles, *, limit=100):
     if len(canonical(result)) > MAX_CLOSED_PAGE_BYTES:
         raise LimitExceeded("Work-item event progress exceeds byte bound")
     return result
+
+
+def closed_page(store, roles, *, limit=10):
+    """Read-only closed page with exact, independently routed role receipts.
+
+    Reuse the validated terminal payload, not the progress summary's samples.
+    Every matching role is included in sorted order, or the entire read fails
+    closed at the existing row/page byte bounds. No locks or recovery.
+    """
+    page = store.page_closed_readonly(limit=limit)
+    for row in page["items"]:
+        item = store._get(row["id"], history_revisions=store._history_revisions(row["id"], recover=False))
+        _, expected = store._closed_row(item)
+        if row != expected:
+            raise Denied("Closed work-item row differs from terminal event")
+        payload = _payload(store, item)
+        acknowledgements = {}
+        row["event_acknowledgements"] = acknowledgements
+        for name in sorted(roles):
+            role = roles[name]
+            if payload["type"] not in role.work_item_events:
+                continue
+            if role.work_item_sources not in ("own", "any"):
+                raise Denied("Invalid work-item event source route")
+            if role.work_item_sources == "own" and payload["origin_source"] != name:
+                continue
+            acknowledgements[name] = _received(store, name, item)
+            if len(canonical(row)) > MAX_CLOSED_ROW_BYTES:
+                raise LimitExceeded("Closed work-item acknowledgements exceed row byte bound")
+        if len(canonical(row)) > MAX_CLOSED_ROW_BYTES:
+            raise LimitExceeded("Closed work-item acknowledgements exceed row byte bound")
+    if len(canonical(page)) > MAX_CLOSED_PAGE_BYTES:
+        raise LimitExceeded("Closed work-item acknowledgements exceed page byte bound")
+    return page

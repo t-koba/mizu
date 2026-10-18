@@ -268,7 +268,8 @@ def explain(config, project, role_name: str) -> dict:
                 "calendar": list(role.calendar), "on_change": role.on_change,
                 "decision_events": list(role.decision_events),
                 "work_item_events": list(role.work_item_events),
-                "decision_sources": role.decision_sources, "ci_wake": role.ci_wake}
+                "decision_sources": role.decision_sources,
+                "work_item_sources": role.work_item_sources, "ci_wake": role.ci_wake}
     return {
         "schema_version": 1,
         "generated_at": now(),

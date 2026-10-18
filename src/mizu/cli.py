@@ -385,17 +385,18 @@ def _cmd_work_items(config, project, args):
     per-role subscription/pending/acknowledged summaries (at most 100 roles).
     The open page keeps the exact ``page_open`` ordering, cursor, overflow,
     ``unseeded_decisions`` and ``coverage_complete`` fields. The closed page
-    holds the newest seeded terminal items first. The project must already be
+    holds the newest seeded terminal items first with exact per-role
+    ``event_acknowledgements`` (not limited to summary ID samples). The project must already be
     opened read-only by the caller.
     """
     open_page = project.work_items.page_open_readonly(
         cursor=args.cursor, limit=args.limit if args.limit is not None else 25)
-    closed_page = project.work_items.page_closed_readonly(
-        limit=args.closed if args.closed is not None else 10)
-    from .work_item_events import progress
-    return {"open": open_page, "closed": closed_page,
-            "event_delivery": progress(project.work_items,
-                                       {name: config.roles[name] for name in project.roles})}
+    from .work_item_events import closed_page, progress
+    roles = {name: config.roles[name] for name in project.roles}
+    closed = closed_page(project.work_items, roles,
+                         limit=args.closed if args.closed is not None else 10)
+    return {"open": open_page, "closed": closed,
+            "event_delivery": progress(project.work_items, roles)}
 
 
 _PROJECT_COMMANDS = {

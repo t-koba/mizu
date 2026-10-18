@@ -217,7 +217,7 @@ Safety-critical bounds are fixed in code rather than exposed as configuration kn
 | **Completion** | `done` requires passing acceptance commands on the exact code digest (`runtime.py`) | always | Publication integrity floor: a goal cannot be declared done without binding proof to the final unchanged tree; never weakened to pass |
 | **Publication** | `vcs_publish` and merge in `vcs_dispose` require a recorded human `GO <branch>` approval | always | No autonomous external publication: pushes, PRs, and merges never run without recorded human approval behind the exact digest; standing grants never substitute |
 
-`on_change` is orthogonal to scheduling: it skips execution when the published `code_digest` is unchanged, so state-only republications do not reschedule it. An unacknowledged decision event routed to the role (`decision_events` in `own` mode, or any-source matches with `decision_sources = "any"` delivering once and admitting even deferrals), a subscribed terminal work-item event, a due structured wait, or a red on the configured CI wake set admitted for a role with `ci_wake` is a distinct admission reason that unchanged-code suppression must not swallow. Event delivery reaches scheduling two ways: the writer daemon re-checks `should_run` against the event and wait stores every idle tick, and `mizu service` additionally renders file triggers for any non-daemon role with `decision_events` or `work_item_events`, with or without a schedule (systemd path units on Linux, `WatchPaths` on macOS), that invoke the same `mizu run` before the next interval; the timers keep their own schedules, and a trigger with nothing due reports unchanged without consuming anything. A role with neither a schedule nor event subscriptions stays explicit-run only. Linux event triggers keep systemd defaults with no trigger limit (`Type=oneshot` with `StartLimitIntervalSec=0` on the event service only): a burst may dispatch more than once, which is cheap because admission is state-based, while a trigger limit fails the path unit and stops dispatching until reset by hand. A role with `on_change` alone and no `daemon`/`interval_seconds`/`calendar` runs only via explicit `mizu run`.
+`on_change` is orthogonal to scheduling: it skips execution when the published `code_digest` is unchanged, so state-only republications do not reschedule it. An unacknowledged decision event routed to the role (`decision_events` in `own` mode, or any-source matches with `decision_sources = "any"` delivering once and admitting even deferrals), a terminal work-item event routed by `work_item_sources`, a due structured wait, or a red on the configured CI wake set admitted for a role with `ci_wake` is a distinct admission reason that unchanged-code suppression must not swallow. Event delivery reaches scheduling two ways: the writer daemon re-checks `should_run` against the event and wait stores every idle tick, and `mizu service` additionally renders file triggers for any non-daemon role with `decision_events` or `work_item_events`, with or without a schedule (systemd path units on Linux, `WatchPaths` on macOS), that invoke the same `mizu run` before the next interval; the timers keep their own schedules, and a trigger with nothing due reports unchanged without consuming anything. A role with neither a schedule nor event subscriptions stays explicit-run only. Linux event triggers keep systemd defaults with no trigger limit (`Type=oneshot` with `StartLimitIntervalSec=0` on the event service only): a burst may dispatch more than once, which is cheap because admission is state-based, while a trigger limit fails the path unit and stops dispatching until reset by hand. A role with `on_change` alone and no `daemon`/`interval_seconds`/`calendar` runs only via explicit `mizu run`.
 
 ## Sandbox
 
@@ -372,14 +372,26 @@ installation, login, package acquisition or deployment runs during work.
 
 `work_item_events = []` is disabled by default. Opt in to `["done"]`,
 `["dropped"]`, or both (unique values only); no other transitions are events.
-The existing `decision_sources` applies to both event sources: `own` routes by
+`work_item_sources` (`own`/`any`) routes terminal events independently of
+`decision_sources`, which routes decisions only. For terminal events, `own` routes by
 **the origin insight's submitter**, not the terminal transition actor. Routing
 reads the supported inbox/archive body, including revised and archived origins;
 item/origin references remain those of the immutable seed. Missing source data
 is explicitly `origin_source: null`, `routing: "unknown"`; only `any` opt-in
 receives those events, with no actor fallback. A malformed/unsafe origin fails
-closed rather than becoming a guessed route. `any` requires at least one of
-`decision_events` or `work_item_events` to be nonempty.
+closed rather than becoming a guessed route.
+
+With neither route set, both default to `own`. For migration, omitting
+`work_item_sources` preserves the legacy shared `decision_sources` route for
+terminal subscriptions. In particular, a terminal-only subscription with only
+`decision_sources = "any"` resolves to effective `work_item_sources = "any"`
+and `decision_sources = "own"`. Legacy `any` without either subscription still
+fails load. Once `work_item_sources` is explicit, the routes are independent:
+each `any` requires its **own** nonempty subscription (`decision_events` or
+`work_item_events` respectively). Set both fields explicitly to stop inheriting
+the shared route; for example, `decision_sources = "any"` with
+`work_item_sources = "own"` delivers decisions from anyone but terminal events
+only for this role's findings. `mizu explain` reports the effective routes.
 
 Terminal events are validated through the existing WorkItems immutable seed
 and complete current chain, oldest terminal instant first (aware timestamps
@@ -434,7 +446,9 @@ A role has exactly one of `profile` or `selector`, plus `policy`, `workspace` (`
 `withdraw`), `work_item_events` (unique `done`/`dropped` values, default `[]`) plus `ci_wake` (whether a red on the configured CI wake set wakes
 this role: default true for writable roles, false otherwise) plus `decision_sources` (`own` default routing only this role's findings,
 `any` routing matching actions from any source so a resolver runs on each new
-deferral; unset keeps `own`; `any` without either event subscription list fails load),
+deferral) and `work_item_sources` (terminal routing by origin submitter;
+`own`/`any`, default/migration rules in
+[terminal subscriptions](#terminal-work-item-subscriptions)),
 optional per-role spend overrides `requests_per_run` / `tools_per_run` /
 `wrap_up_requests` / `wrap_up_tools`
 (1–1,073,741,824; unset keeps the project `[limits]` value, so an auditor may run
