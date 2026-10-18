@@ -1,4 +1,5 @@
 """Offline gate preflight and structured, privacy-safe unittest diagnostics."""
+from contextlib import nullcontext
 from functools import partial
 import importlib.util
 import io
@@ -130,7 +131,7 @@ class CheckTimeoutTests(unittest.TestCase):
             real_spawn = CHECK.spawn
 
             def launch(command, **kwargs):
-                self.assertIn('check_unittest.py', command[-2])
+                self.assertTrue(any('check_unittest.py' in part for part in command), command)
                 process = real_spawn([sys.executable, '-u', str(parent), str(descendant),
                                       str(ready), 'timeout' if timed_out else 'exit'], **kwargs)
                 processes.append(process)
@@ -498,8 +499,11 @@ class UnittestFailureSummaryTests(unittest.TestCase):
                         self.stdout = io.StringIO(raw)
                         self.killed = False
                         self.command = command
-                        self.path = Path(command[-1])
+                        self.path = Path(command[3])
                         paths.append(self.path)
+                        self.timing_path = Path(command[4]) if len(command) > 4 else None
+                        if self.timing_path is not None:
+                            paths.append(self.timing_path)
                         if metadata:
                             self.path.write_text(json.dumps({
                                 'kind': 'ERROR', 'test': 'tests.RealTests.test_real',
@@ -535,6 +539,9 @@ class UnittestFailureSummaryTests(unittest.TestCase):
                 self.assertEqual(budgets[0], timeout)
                 self.assertEqual(entry['tests'], {'run': 3, 'failed': 3, 'skipped': 1})
                 self.assertFalse(paths[0].parent.exists(), 'private sidecar directory must be cleaned')
+                self.assertEqual(len(paths), 1, 'local checks do not collect timing sidecars without opt-in')
+                self.assertFalse((Path(temporary) / 'private-validation'
+                                  / 'windows-test-timings.json').exists())
                 self.assertNotIn('raw_fixture_value', details)
                 self.assertNotIn('forged_test', details)
                 self.assertNotIn('test_fake.py', details)
@@ -547,6 +554,412 @@ class UnittestFailureSummaryTests(unittest.TestCase):
                 if timed_out:
                     self.assertIn(f'timed out after {timeout} s', details)
                 self.assertIn('[+', output.getvalue(), 'live timestamped output is still relayed')
+
+
+class UnittestTimingEvidenceTests(unittest.TestCase):
+    """Per-test runtime evidence only; never a timeout policy or gate."""
+
+    def run_timing_case(self, case):
+        stream = io.StringIO()
+        with tempfile.TemporaryDirectory() as temporary:
+            failures = Path(temporary) / 'failures.jsonl'
+            timings = Path(temporary) / 'timings.jsonl'
+            with failures.open('w', encoding='utf-8') as sidecar, \
+                    timings.open('w', encoding='utf-8', newline='\n') as timing:
+                result = unittest.TextTestRunner(
+                    stream=stream, verbosity=2,
+                    resultclass=partial(CHILD.SafeTextTestResult, sidecar=sidecar, timing=timing),
+                ).run(unittest.defaultTestLoader.loadTestsFromTestCase(case))
+            parsed = CHECK.parse_unittest_timings(timings, elapsed_seconds=10.0)
+            raw = timings.read_text(encoding='utf-8')
+        return result, stream.getvalue(), raw, parsed
+
+    def test_complete_timings_record_durations_and_completion(self):
+        class TimingTest(unittest.TestCase):
+            def test_fast(self):
+                pass
+
+            def test_slow(self):
+                time.sleep(0.02)
+
+        result, output, raw, parsed = self.run_timing_case(TimingTest)
+        self.assertEqual(result.testsRun, 2)
+        self.assertEqual(len(parsed), 2)
+        by_test = {entry['test']: entry for entry in parsed}
+        for method in ('test_fast', 'test_slow'):
+            test_id = TimingTest(method).id()
+            self.assertIn(test_id, by_test)
+            entry = by_test[test_id]
+            self.assertTrue(entry['completed'])
+            self.assertIsInstance(entry['duration_seconds'], float)
+            self.assertGreaterEqual(entry['duration_seconds'], 0.0)
+            self.assertLessEqual(entry['duration_seconds'], 100000.0)
+        self.assertLessEqual(by_test[TimingTest('test_fast').id()]['duration_seconds'],
+                             by_test[TimingTest('test_slow').id()]['duration_seconds'] + 5.0)
+        # Value-free: only IDs, events, monotonic numbers.
+        for line in raw.splitlines():
+            record = json.loads(line)
+            self.assertEqual(set(record), {'test', 'event', 't'})
+        self.assertNotIn(str(ROOT), raw)
+
+    def test_partial_unfinished_entry_survives_kill(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'timings.jsonl'
+            path.write_text(
+                json.dumps({'test': 'tests.TimingTests.test_done', 'event': 'start', 't': 0.0}) + '\n'
+                + json.dumps({'test': 'tests.TimingTests.test_done', 'event': 'stop',
+                              't': 0.02}) + '\n'
+                + json.dumps({'test': 'tests.TimingTests.test_killed', 'event': 'start',
+                              't': 0.03}) + '\n',
+                encoding='utf-8')
+            parsed = CHECK.parse_unittest_timings(path, elapsed_seconds=10.0)
+        self.assertEqual(len(parsed), 2)
+        done = next(e for e in parsed if e['test'] == 'tests.TimingTests.test_done')
+        killed = next(e for e in parsed if e['test'] == 'tests.TimingTests.test_killed')
+        self.assertEqual((done['completed'], done['duration_seconds']), (True, 0.02))
+        self.assertEqual((killed['completed'], killed['duration_seconds']), (False, 9.97))
+
+    def test_timing_parser_bounds_and_sanitizes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'timings.jsonl'
+            # Missing/empty/oversized yield no evidence, never a failure.
+            self.assertEqual(CHECK.parse_unittest_timings(Path(temporary) / 'missing.jsonl', elapsed_seconds=10.0), [])
+            path.write_bytes(b'')
+            self.assertEqual(CHECK.parse_unittest_timings(path, elapsed_seconds=10.0), [])
+            path.write_bytes(b'x' * 1_000_001)
+            self.assertEqual(CHECK.parse_unittest_timings(path, elapsed_seconds=10.0), [])
+            path.write_text('\n' * 20001, encoding='utf-8')
+            self.assertEqual(CHECK.parse_unittest_timings(path, elapsed_seconds=10.0), [])
+            # Malformed and unsafe lines are skipped; valid ones survive sanitized.
+            good_start = json.dumps({'test': 'tests.RealTests.test_ok', 'event': 'start', 't': 1.0})
+            good_stop = json.dumps({'test': 'tests.RealTests.test_ok', 'event': 'stop',
+                                    't': 1.5})
+            bad_lines = [
+                '{malformed',
+                json.dumps({'test': '/synthetic-private-host/test', 'event': 'start', 't': 0.0}),
+                json.dumps({'test': 'tests.RealTests.test_ok (fixture_value)', 'event': 'start', 't': 0.0}),
+                json.dumps({'test': 'tests.RealTests.test_ok', 'event': 'start',
+                            't': 'raw_fixture_value'}),
+                json.dumps({'test': 'tests.RealTests.test_ok', 'event': 'stop',
+                            't': 1.5, 'duration': 'fixture_value'}),
+                json.dumps({'test': 'tests.RealTests.test_ok', 'event': 'stop',
+                            't': 1.5, 'duration': True}),
+                json.dumps({'test': 'tests.RealTests.test_ok', 'event': 'stop',
+                            't': float('inf'), 'duration': 0.1}),
+                json.dumps({'test': 'tests.RealTests.test_ok', 'event': 'start',
+                            't': -1.0, 'extra': 'fixture_value'}),
+                json.dumps({'test': 'tests.RealTests.test_bad', 'event': 'stop',
+                            't': 2.0, 'duration': 200000.0}),
+                json.dumps({'test': '../tests/test_check_offline.py', 'event': 'start', 't': 0.0}),
+                '[]',
+            ]
+            path.write_text('\n'.join([good_start] + bad_lines + [good_stop]) + '\n', encoding='utf-8')
+            parsed = CHECK.parse_unittest_timings(path, elapsed_seconds=10.0)
+            self.assertEqual(len(parsed), 1)
+            self.assertEqual(parsed[0], {'test': 'tests.RealTests.test_ok',
+                                         'duration_seconds': 0.5, 'completed': True})
+            text = json.dumps(parsed)
+            for value in ('fixture_value', 'synthetic-private-host', 'raw_fixture_value', str(ROOT)):
+                self.assertNotIn(value, text)
+            # Duplicate starts/stops do not duplicate or overwrite evidence.
+            path.write_text(
+                good_start + '\n' + good_start + '\n' + good_stop + '\n' + good_stop + '\n',
+                encoding='utf-8')
+            parsed = CHECK.parse_unittest_timings(path, elapsed_seconds=10.0)
+            self.assertEqual(parsed, [{'test': 'tests.RealTests.test_ok',
+                                       'duration_seconds': 0.5, 'completed': True}])
+            # A stop without a matching start is malformed.
+            path.write_text(good_stop + '\n', encoding='utf-8')
+            self.assertEqual(CHECK.parse_unittest_timings(path, elapsed_seconds=10.0), [])
+
+    def test_stops_require_bounded_matching_start(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'timings.jsonl'
+            test_id = 'tests.RealTests.test_ok'
+            start = {'test': test_id, 'event': 'start', 't': 1.0}
+            for moment in (0.5, 100001.0, float('nan')):
+                with self.subTest(moment=moment):
+                    stop = {'test': test_id, 'event': 'stop', 't': moment}
+                    path.write_text(json.dumps(start) + '\n' + json.dumps(stop) + '\n',
+                                    encoding='utf-8')
+                    self.assertEqual(CHECK.parse_unittest_timings(path, elapsed_seconds=3.0),
+                                     [{'test': test_id, 'completed': False,
+                                       'duration_seconds': 2.0}])
+            valid_stop = {'test': test_id, 'event': 'stop', 't': 2.0}
+            path.write_text(json.dumps(start) + '\n' + json.dumps(valid_stop) + '\n',
+                            encoding='utf-8')
+            self.assertEqual(CHECK.parse_unittest_timings(path, elapsed_seconds=3.0),
+                             [{'test': test_id, 'completed': True,
+                               'duration_seconds': 1.0}])
+            # An impossible child-exit/start delta is omitted, not exported.
+            path.write_text(json.dumps(start) + '\n', encoding='utf-8')
+            for elapsed in (0.5, 100002.0, float('nan')):
+                self.assertEqual(CHECK.parse_unittest_timings(path, elapsed_seconds=elapsed), [])
+
+    def test_sidecar_growth_preserves_a_bounded_parseable_prefix(self):
+        for name in ('TIMING_SIDECAR_MAX_BYTES', 'TIMING_SIDECAR_MAX_LINES',
+                     'TIMING_SIDECAR_MAX_TESTS', 'TIMING_MAX_SECONDS'):
+            self.assertEqual(getattr(CHECK, name), getattr(CHILD, name))
+
+        class GrowthTest(unittest.TestCase):
+            def __init__(self, index):
+                super().__init__()
+                self.index = index
+
+            def id(self):
+                return f'tests.GrowthTests.test_{self.index}_' + 'x' * 400
+
+            def runTest(self):
+                pass
+
+        # Hit the real byte bound, then independently exercise line/test caps.
+        for limits in ({}, {'TIMING_SIDECAR_MAX_LINES': 5},
+                       {'TIMING_SIDECAR_MAX_TESTS': 2}):
+            with self.subTest(limits=limits), tempfile.TemporaryDirectory() as temporary:
+                path = Path(temporary) / 'timings.jsonl'
+                suite = unittest.TestSuite(GrowthTest(i) for i in range(2000))
+                with path.open('w', encoding='utf-8', newline='\n') as timing, \
+                        (mock.patch.multiple(CHILD, **limits) if limits else nullcontext()):
+                    result = unittest.TextTestRunner(
+                        stream=io.StringIO(), resultclass=partial(
+                            CHILD.SafeTextTestResult, sidecar=io.StringIO(), timing=timing),
+                    ).run(suite)
+                self.assertTrue(result.wasSuccessful())
+                self.assertEqual(result.testsRun, 2000)
+                self.assertLessEqual(path.stat().st_size, CHECK.TIMING_SIDECAR_MAX_BYTES)
+                lines = path.read_text(encoding='utf-8').splitlines()
+                self.assertLessEqual(len(lines), limits.get('TIMING_SIDECAR_MAX_LINES',
+                                                            CHECK.TIMING_SIDECAR_MAX_LINES))
+                parsed = CHECK.parse_unittest_timings(path, elapsed_seconds=10.0)
+                self.assertGreater(len(parsed), 0)
+                self.assertLess(len(parsed), 2000)
+                self.assertEqual(len(lines), 2 * len(parsed))
+                self.assertTrue(all(entry['completed'] for entry in parsed))
+                if limits:
+                    self.assertEqual(len(parsed), 2)
+
+    def test_timing_io_failures_do_not_change_test_outcome(self):
+        class PassingTest(unittest.TestCase):
+            def runTest(self):
+                pass
+
+        timing = mock.Mock()
+        timing.write.side_effect = OSError('synthetic timing write failure')
+        result = unittest.TextTestRunner(
+            stream=io.StringIO(), resultclass=partial(
+                CHILD.SafeTextTestResult, sidecar=io.StringIO(), timing=timing),
+        ).run(unittest.TestSuite([PassingTest()]))
+        self.assertTrue(result.wasSuccessful())
+        with tempfile.TemporaryDirectory() as temporary:
+            blocked = Path(temporary) / 'not_a_directory'
+            blocked.write_text('fixture', encoding='utf-8')
+            CHECK.write_timings_artifact(blocked / 'timings.json', tests=[],
+                                        status='pass', exit_code=0, elapsed_seconds=1.0)
+
+    def test_local_acceptance_does_not_emit_artifact_without_opt_in(self):
+        for options in ([], ['--report']):
+            with self.subTest(options=options), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                argv = ['check.py'] + (options + [str(root / 'report.json')] if options else [])
+                process = mock.Mock(stdout=io.StringIO('Ran 0 tests\nOK\n'))
+                process.wait.return_value = 0
+                with mock.patch.object(CHECK, 'ROOT', root), \
+                        mock.patch.object(CHECK.sys, 'argv', argv), \
+                        mock.patch.object(CHECK, 'spawn', return_value=process), \
+                        mock.patch.object(CHECK, 'terminate_process'), \
+                        mock.patch.object(CHECK.shutil, 'which', return_value=None), \
+                        mock.patch.object(CHECK, 'bash_available', return_value=False), \
+                        mock.patch.object(CHECK.sys, 'stdout', io.StringIO()), \
+                        mock.patch.object(CHECK, 'write_timings_artifact') as writer:
+                    self.assertEqual(CHECK.main(), 1)  # unprovisioned tools
+                writer.assert_not_called()
+                self.assertFalse((root / 'private-validation').exists())
+                self.assertEqual(sorted(p.name for p in root.iterdir()),
+                                 ['report.json'] if options else [])
+
+    def test_real_child_termination_uses_shared_monotonic_origin(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'tests').mkdir()
+            (root / 'tests' / 'test_hung.py').write_text(
+                'import time, unittest\n'
+                'class HungTest(unittest.TestCase):\n'
+                '    def test_hung(self): time.sleep(60)\n', encoding='utf-8')
+            failures, timings = root / 'failures.jsonl', root / 'timings.jsonl'
+            # Deliberately predate the launch to catch a child-local origin.
+            origin = time.monotonic() - 10.0
+            child = subprocess.Popen(
+                [sys.executable, '-u', str(ROOT / 'scripts/check_unittest.py'),
+                 str(failures), str(timings), str(origin)], cwd=root,
+                env={**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'},
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                deadline = time.monotonic() + 15
+                while time.monotonic() < deadline:
+                    if timings.exists() and timings.read_bytes().endswith(b'\n'):
+                        break
+                    time.sleep(0.01)
+                else:
+                    self.fail('child did not flush its test start')
+                start = json.loads(timings.read_text(encoding='utf-8'))['t']
+                self.assertGreaterEqual(start, 10.0)
+                time.sleep(0.05)
+                ended_at = time.monotonic()
+            finally:
+                child.kill()
+                child.wait(timeout=10)
+            parsed = CHECK.parse_unittest_timings(timings, elapsed_seconds=ended_at - origin)
+            self.assertEqual(parsed, [{'test': 'test_hung.HungTest.test_hung',
+                                      'completed': False,
+                                      'duration_seconds': round(ended_at - origin - start, 3)}])
+            self.assertGreaterEqual(parsed[0]['duration_seconds'], 0.04)
+            self.assertLess(parsed[0]['duration_seconds'], ended_at - origin - 9.0)
+
+    def test_timings_never_govern_failures(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            failures = Path(temporary) / 'failures.jsonl'
+            timings = Path(temporary) / 'timings.jsonl'
+            failures.write_text(json.dumps({
+                'kind': 'FAIL', 'test': 'tests.RealTests.test_real',
+                'type': 'AssertionError', 'path': 'tests/test_check_offline.py', 'line': 10,
+            }) + '\n', encoding='utf-8')
+            timings.write_bytes(b'{malformed\n')
+            # Failure evidence still decides; broken timings yield empty evidence.
+            self.assertIn('FAIL tests.RealTests.test_real',
+                          CHECK.unittest_failure_summary(failures))
+            self.assertEqual(CHECK.parse_unittest_timings(timings, elapsed_seconds=10.0), [])
+            # Artifact writing is best-effort and holds no diagnostics.
+            artifact = Path(temporary) / 'windows-test-timings.json'
+            CHECK.write_timings_artifact(artifact, tests=[], status='fail', exit_code=1,
+                                          elapsed_seconds=2.5)
+            payload = json.loads(artifact.read_text(encoding='utf-8'))
+            self.assertEqual(payload['suite'], 'windows-test-timings')
+            self.assertEqual(payload['tests'], [])
+            self.assertEqual(payload['unittest_elapsed_seconds'], 2.5)
+            self.assertNotIn('details', json.dumps(payload))
+            self.assertNotIn('diagnostic', json.dumps(payload).lower())
+
+    def test_child_cli_writes_both_sidecars_privately(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'tests').mkdir()
+            (root / 'suite_helper.py').write_text('FLAG = True\n', encoding='utf-8')
+            (root / 'tests/test_sample.py').write_text(
+                "import unittest, suite_helper\n"
+                "class SampleTests(unittest.TestCase):\n"
+                "    def test_ok(self): self.assertTrue(suite_helper.FLAG)\n"
+                "    def test_slow(self):\n"
+                "        import time; time.sleep(0.01)\n",
+                encoding='utf-8')
+            failures = root / 'failures.jsonl'
+            timings = root / 'timings.jsonl'
+            env = {**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'}
+            child = subprocess.run([sys.executable, '-u', str(ROOT / 'scripts/check_unittest.py'),
+                                    str(failures), str(timings)],
+                                   cwd=root, env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(child.returncode, 0)
+            self.assertEqual(failures.read_text(encoding='utf-8'), '')
+            parsed = CHECK.parse_unittest_timings(timings, elapsed_seconds=10.0)
+            self.assertEqual(len(parsed), 2)
+            self.assertTrue(all(entry['completed'] for entry in parsed))
+            self.assertTrue(all(entry['duration_seconds'] is not None for entry in parsed))
+            ids = {entry['test'] for entry in parsed}
+            self.assertEqual(ids, {'test_sample.SampleTests.test_ok',
+                                   'test_sample.SampleTests.test_slow'})
+            self.assertNotIn(b'\r\n', timings.read_bytes())
+            combined = failures.read_text(encoding='utf-8') + timings.read_text(encoding='utf-8')
+            self.assertNotIn(str(root), child.stderr + combined)
+            if os.name == 'posix':
+                self.assertEqual(failures.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(timings.stat().st_mode & 0o777, 0o600)
+
+    def test_workflow_uploads_only_dedicated_timings(self):
+        workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
+        # Immutable v4.6.2 pin; short retention; always with missing-file tolerance.
+        self.assertIn('actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02', workflow)
+        self.assertIn('name: Upload Windows per-test timings', workflow)
+        self.assertIn('--test-timings private-validation/windows-test-timings.json', workflow)
+        ordinary = workflow.split('name: Offline core and transport contracts', 1)[1].split(
+            '      - name: Offline core and transport contracts with timings', 1)[0]
+        self.assertNotIn('--test-timings', ordinary)
+        upload = workflow.split('name: Upload Windows per-test timings', 1)[1].split('  durable-contract:', 1)[0]
+        self.assertEqual([line.strip() for line in upload.splitlines() if line.strip().startswith('path:')],
+                         ['path: private-validation/windows-test-timings.json'])
+        self.assertIn('private-validation/windows-test-timings.json', workflow)
+        self.assertIn('retention-days: 7', workflow)
+        self.assertIn('if-no-files-found: warn', workflow)
+        self.assertIn("if: always() && runner.os == 'Windows' && matrix.python == '3.13'", workflow)
+        # Budgets unchanged; no scope amendment claimed here.
+        self.assertIn('1800', workflow)
+        self.assertIn("timeout-minutes: ${{ matrix.os == 'windows-latest' && 45 || 20 }}", workflow)
+        self.assertEqual(CHECK._unittest_timeout_seconds('nt'), 1800)
+
+    def test_timings_artifact_survives_timeout_with_only_evidence(self):
+        raw = ('test_sample.SampleTests.test_slow ... ok\nRan 1 test in 0.1s\nOK\n')
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            report = root / 'report.json'
+            artifact = root / 'private-validation' / 'windows-test-timings.json'
+
+            class FakeProcess:
+                def __init__(self, command, **kwargs):
+                    self.stdout = io.StringIO(raw)
+                    self.command = command
+                    self.calls = 0
+                    self.failure_path = Path(command[3])
+                    self.timing_path = Path(command[4])
+                    self.timing_path.write_text(
+                        json.dumps({'test': 'tests.RealTests.test_done', 'event': 'start', 't': 0.0})
+                        + '\n'
+                        + json.dumps({'test': 'tests.RealTests.test_done', 'event': 'stop',
+                                      't': 0.5}) + '\n'
+                        + json.dumps({'test': 'tests.RealTests.test_hung', 'event': 'start',
+                                      't': 0.6}) + '\n',
+                        encoding='utf-8')
+
+                def wait(self, timeout):
+                    self.calls += 1
+                    if self.calls == 1:
+                        # End snapshot is 8 s after the shared origin; cleanup
+                        # must not be included in the hung-test duration.
+                        clock.return_value = float(self.command[5]) + 8.0
+                        raise subprocess.TimeoutExpired(self.command, timeout)
+                    return 0
+
+                def kill(self):
+                    clock.return_value += 30.0
+
+            output = io.StringIO()
+            with mock.patch.object(CHECK, 'ROOT', root), \
+                    mock.patch.object(CHECK.sys, 'argv', ['check.py', '--report', str(report),
+                                                          '--test-timings', str(artifact)]), \
+                    mock.patch.object(CHECK, 'spawn', FakeProcess), \
+                    mock.patch.object(CHECK.time, 'monotonic', return_value=1234.0) as clock, \
+                    mock.patch.object(CHECK, 'popen_kwargs', return_value={}), \
+                    mock.patch.object(CHECK, 'terminate_process', side_effect=lambda p: p.kill()), \
+                    mock.patch.object(CHECK.shutil, 'which', return_value=None), \
+                    mock.patch.object(CHECK, 'bash_available', return_value=False), \
+                    mock.patch.object(CHECK.sys, 'stdout', output):
+                self.assertEqual(CHECK.main(), 1)
+            payload = json.loads(artifact.read_text(encoding='utf-8'))
+            self.assertEqual(payload['suite'], 'windows-test-timings')
+            self.assertEqual(payload['unittest_status'], 'fail')
+            self.assertEqual(payload['unittest_elapsed_seconds'], 8.0)
+            self.assertIn('timed out after', json.loads(report.read_text(encoding='utf-8'))['checks'][1]['details'])
+            by_test = {entry['test']: entry for entry in payload['tests']}
+            self.assertEqual(by_test['tests.RealTests.test_done'],
+                             {'test': 'tests.RealTests.test_done',
+                              'duration_seconds': 0.5, 'completed': True})
+            self.assertEqual(by_test['tests.RealTests.test_hung'],
+                             {'test': 'tests.RealTests.test_hung',
+                              'duration_seconds': 7.4, 'completed': False})
+            # Only sanitized IDs, durations, completion, and minimal metadata.
+            self.assertEqual(set(payload), {'suite', 'mizu_version', 'python', 'os',
+                                            'unittest_timeout_seconds', 'unittest_elapsed_seconds',
+                                            'unittest_status',
+                                            'unittest_exit_code', 'tests'})
+            for entry in payload['tests']:
+                self.assertEqual(set(entry), {'test', 'duration_seconds', 'completed'})
 
 
 class SdkGateEntryTests(unittest.TestCase):

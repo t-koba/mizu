@@ -62,6 +62,41 @@ Win32 calls. To run the focused file suite on Windows:
 python -m unittest discover -s tests -p test_primitives.py -v
 ```
 
+### Windows per-test timing evidence
+
+Timing artifact emission is explicit, independent of `--report`:
+
+```sh
+python scripts/check.py --test-timings private-validation/windows-test-timings.json
+```
+
+Ordinary local `python3 scripts/check.py` creates no timing artifact. The child
+(`scripts/check_unittest.py`) flushes a value-free temporary JSONL sidecar per
+test: stable test ID, start/stop event, and monotonic offset only; the parent
+derives durations. Parent and child share a system-wide monotonic clock origin (Python 3.11+ on supported
+platforms); absolute clock values are never exported. An unmatched start records
+elapsed duration at child exit or timeout, before process cleanup, with
+`completed: false`; completed entries use the matching start-to-stop duration.
+Malformed/unmatched stops and invalid durations are ignored.
+
+Writer and parser share bounds of 1,000,000 bytes, 20,000 lines/tests and
+100,000 seconds per offset/duration. The writer reserves each start/stop pair
+before admission and stops collecting when full, preserving the parseable prefix
+rather than growing past the parser's cap. Malformed lines are skipped; missing,
+empty or oversized sidecars yield no timing entries. Collection, parsing and
+artifact writing are best-effort diagnostics only, never a test pass/failure
+signal. There is no retry protocol; temporary sidecars are removed after use.
+
+The dedicated artifact contains only sanitized test IDs,
+`duration_seconds`/`completed` flags, and minimal runtime metadata (suite,
+versions, platform, child timeout, total suite elapsed time, gate status). It never
+carries failure details, output tails or diagnostics; do not substitute the general
+`offline.json` receipt. Only the Windows-latest/Python 3.13 CI step supplies
+`--test-timings`; CI uploads only this dedicated file for that job (`actions/upload-artifact` v4.6.2, 7-day retention,
+`if: always()` with missing-file tolerance). It records evidence for the timeout
+review; it sets no timeout policy and amends no 40-minute scope. The 1800 s child
+cap and 45-minute job cap are unchanged.
+
 ## Real-machine checklist
 
 Use a disposable source copy and dedicated unprivileged account. Record release

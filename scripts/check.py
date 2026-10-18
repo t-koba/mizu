@@ -123,6 +123,123 @@ def unittest_failure_summary(sidecar: Path) -> str:
         return unavailable
 
 
+TIMING_SIDECAR_MAX_BYTES = 1_000_000
+TIMING_SIDECAR_MAX_LINES = 20000
+TIMING_SIDECAR_MAX_TESTS = 20000
+TIMING_MAX_SECONDS = 100000.0
+
+
+def _valid_timing_test(value) -> bool:
+    import re
+    return (isinstance(value, str) and 0 < len(value) <= 500
+            and re.fullmatch(r'[A-Za-z_]\w*(?:\.(?:[A-Za-z_]\w*|<locals>))*', value, re.ASCII) is not None)
+
+
+def _valid_timing_seconds(value) -> bool:
+    return (type(value) in (int, float)
+            and 0.0 <= value <= TIMING_MAX_SECONDS)
+
+
+def parse_unittest_timings(sidecar: Path, *, elapsed_seconds: float) -> list:
+    """Read only the child's timing JSONL into sanitized per-test evidence.
+
+    The private, run-local timing sidecar holds start/stop records keyed only
+    by stable test ID with monotonic offsets (see
+    check_unittest.py). No test output, arguments, or exception values are
+    ever recorded. Parsing is bounded (1,000,000 bytes, 20000 lines/tests) and
+    validated: malformed lines are skipped, missing/empty/oversized inputs
+    yield an empty list. A start without a matching stop yields an unfinished
+    entry with elapsed duration at child exit/timeout and completed False.
+    Times are offsets from the parent-supplied system-wide monotonic origin;
+    no absolute timestamps are exported. Invalid elapsed durations are omitted.
+    This never governs the gate outcome; failures remain decided by the failure
+    sidecar and exit status alone.
+    """
+    try:
+        with sidecar.open('rb') as stream:
+            data = stream.read(TIMING_SIDECAR_MAX_BYTES + 1)
+        if not data or len(data) > TIMING_SIDECAR_MAX_BYTES:
+            return []
+        lines = data.decode('utf-8').splitlines()
+        if len(lines) > TIMING_SIDECAR_MAX_LINES:
+            return []
+        ordered: list = []
+        index_by_test: dict = {}
+        start_times: dict = {}
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(record, dict):
+                continue
+            event = record.get('event')
+            if event == 'start':
+                if set(record) != {'test', 'event', 't'}:
+                    continue
+                test, moment = record['test'], record['t']
+                if not _valid_timing_test(test) or not _valid_timing_seconds(moment):
+                    continue
+                if test in index_by_test:
+                    continue
+                if len(ordered) >= TIMING_SIDECAR_MAX_TESTS:
+                    continue
+                index_by_test[test] = len(ordered)
+                start_times[test] = float(moment)
+                ordered.append({'test': test, 'duration_seconds': None, 'completed': False})
+            elif event == 'stop':
+                if set(record) != {'test', 'event', 't'}:
+                    continue
+                test, moment = record['test'], record['t']
+                if not _valid_timing_test(test) or not _valid_timing_seconds(moment):
+                    continue
+                if test not in start_times:
+                    continue
+                delta = float(moment) - start_times[test]
+                if not _valid_timing_seconds(delta):
+                    continue
+                entry = ordered[index_by_test[test]]
+                entry['duration_seconds'] = round(delta, 3)
+                entry['completed'] = True
+                start_times.pop(test)
+            else:
+                continue
+        for entry in ordered:
+            if not entry['completed']:
+                delta = elapsed_seconds - start_times[entry['test']]
+                if _valid_timing_seconds(delta):
+                    entry['duration_seconds'] = round(delta, 3)
+        return [entry for entry in ordered if entry['duration_seconds'] is not None]
+    except (OSError, ValueError, TypeError, RuntimeError):
+        return []
+
+
+def write_timings_artifact(path: Path, *, tests: list, status: str, exit_code: int,
+                           elapsed_seconds: float) -> None:
+    """Write the dedicated timing artifact with only sanitized evidence.
+
+    Best-effort: never raises; timing evidence must not change the gate
+    outcome. Holds only stable test IDs, durations/completion flags, and
+    minimal runtime metadata (versions, platform, timeout, total elapsed, gate
+    status). It
+    never includes failure details, output tails, or diagnostics.
+    """
+    try:
+        payload = {'suite': 'windows-test-timings',
+                   'mizu_version': __version__,
+                   'python': sys.version.split()[0], 'os': sys.platform,
+                   'unittest_timeout_seconds': _unittest_timeout_seconds(),
+                   'unittest_elapsed_seconds': round(elapsed_seconds, 3),
+                   'unittest_status': status, 'unittest_exit_code': exit_code,
+                   'tests': tests}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2) + '\n', encoding='utf-8')
+    except (OSError, ValueError, TypeError, RuntimeError):
+        pass
+
+
 def pi_sdk_deps_status(adapter: Path) -> tuple:
     """Check pinned adapter dependencies are installed at pinned versions.
 
@@ -159,6 +276,8 @@ def pi_sdk_deps_status(adapter: Path) -> tuple:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--report', type=Path, help='Write a portable JSON validation receipt')
+    parser.add_argument('--test-timings', type=Path,
+                        help='Write best-effort sanitized per-test timing evidence to this path')
     parser.add_argument('--allow-not-run', default='',
                         help='Comma-separated check names explicitly permitted to stay not_run '
                              '(e.g. node-pi-sdk-contract-tests or '
@@ -217,6 +336,7 @@ def main():
                     tail = ''.join(chunks)[-1500:]
                     details += f'; output tail: {tail.strip()}'
         finally:
+            ended_at = time.monotonic()
             # A successful direct child may still leave descendants holding
             # stdout. End the whole group/job before waiting for EOF, without
             # Popen.__exit__ closing a buffered stream under a blocked reader.
@@ -244,6 +364,7 @@ def main():
             entry['tests'] = found
             counts[name] = found
         checks.append(entry)
+        return ended_at
     # AST checks avoid leaving bytecode inside an immutable source release.
     for directory in ('src', 'scripts', 'tests', 'examples', 'adapters/claude'):
         for path in (ROOT / directory).rglob('*.py'):
@@ -271,14 +392,36 @@ def main():
     # Allow 1800 s for the child. The workflow's 45-minute
     # limit begins before checkout/setup and covers one full later check timeout
     # plus bounded shutdown and a receipt/suffix reserve; POSIX retains 1000 s.
-    # The child owns structured exception metadata. Its new sidecar is private
+    # The child owns structured exception metadata. Its failure sidecar is private
     # and deleted even on timeout; no failure/timeout details parse raw output.
+    # The timing sidecar is likewise private and run-local, flushed per test so
+    # a killed child still leaves a partial unfinished entry. Timings are
+    # evidence only: parsing is bounded/validated and never governs the gate.
+    # The dedicated windows-test-timings.json artifact (sanitized IDs plus
+    # durations/completion only) is opt-in via --test-timings and survives
+    # an ordinary child timeout; it records evidence, not a policy.
     with tempfile.TemporaryDirectory(prefix='mizu-unittest-') as temporary:
         sidecar = Path(temporary) / 'failures.jsonl'
-        execute('python-unit-and-contract-tests',
-                [sys.executable, '-u', str(ROOT / 'scripts/check_unittest.py'), str(sidecar)],
+        command = [sys.executable, '-u', str(ROOT / 'scripts/check_unittest.py'), str(sidecar)]
+        timing_sidecar = None
+        timing_origin = None
+        if args.test_timings:
+            timing_sidecar = Path(temporary) / 'timings.jsonl'
+            timing_origin = time.monotonic()
+            command.extend((str(timing_sidecar), str(timing_origin)))
+        ended_at = execute('python-unit-and-contract-tests', command,
                 count=unittest_counts, failure_summary=lambda: unittest_failure_summary(sidecar),
                 timeout=_unittest_timeout_seconds())
+        if args.test_timings and timing_sidecar is not None and timing_origin is not None:
+            timings = parse_unittest_timings(
+                timing_sidecar, elapsed_seconds=ended_at - timing_origin)
+            unittest_entry = next((c for c in reversed(checks)
+                                   if c.get('name') == 'python-unit-and-contract-tests'),
+                                  {'status': 'fail', 'exit_code': 1})
+            write_timings_artifact(args.test_timings, tests=timings,
+                                   status=str(unittest_entry.get('status', 'fail')),
+                                   exit_code=int(unittest_entry.get('exit_code', 1)),
+                                   elapsed_seconds=ended_at - timing_origin)
     if not shutil.which('node'):
         checks.append({'name': 'node-available', 'status': 'fail'})
     # bash is a POSIX convenience for shell-syntax checks, not a runtime

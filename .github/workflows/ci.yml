@@ -28,16 +28,35 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Offline core and transport contracts
+        if: runner.os != 'Windows' || matrix.python != '3.13'
         # Offline runners do not provision the operator-owned Pi SDKs, so the
         # SDK, durable, and reasoning-replay gates are explicitly waived here;
         # the authoritative network-enabled job below provisions both adapters.
         run: python scripts/check.py --report private-validation/offline.json --allow-not-run node-durable-contract-tests,node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests
+      - name: Offline core and transport contracts with timings
+        if: runner.os == 'Windows' && matrix.python == '3.13'
+        # Collect per-test timing only on the target Windows timeout job.
+        run: python scripts/check.py --report private-validation/offline.json --test-timings private-validation/windows-test-timings.json --allow-not-run node-durable-contract-tests,node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests
       - name: Core installer and CLI lifecycle
         if: runner.os == 'Linux' && matrix.python == '3.13'
         run: ./scripts/test-install.sh
       - name: Source distribution build
         if: runner.os == 'Linux' && matrix.python == '3.13'
         run: python scripts/package.py --output dist
+      - name: Upload Windows per-test timings
+        # Evidence only for the timeout review: the dedicated timings file
+        # holds sanitized test IDs plus durations/completion and minimal
+        # runtime metadata. It never includes failure details or output tails;
+        # do not upload offline.json, which can contain diagnostics. Always
+        # runs (even on timeout) with missing-file tolerance so a killed
+        # child still reports its partial entry.
+        if: always() && runner.os == 'Windows' && matrix.python == '3.13'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-test-timings
+          path: private-validation/windows-test-timings.json
+          retention-days: 7
+          if-no-files-found: warn
   durable-contract:
     # Authoritative durable coverage: the pinned Pi SDK is provisioned here in
     # a network-enabled setup step, then the whole gate runs unwaived and
