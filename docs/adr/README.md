@@ -196,3 +196,25 @@ midnight Tokyo time; each record carries the `zone` that wrote it alongside the
 ISO date. Projects sharing one `data_dir` should share one `timezone`: different
 zones name different days for the same instant, splitting the shared total across
 day-files. Reaping (`retention_days`) uses each caller's zone window and stays best-effort.
+
+## ADR-030 — Immutable publication receipts anchor exact-SHA waits
+Publication identity is a per-publication receipt, not a mutable branch head: it
+binds the source Git commit and approved `code_digest` to the exact destination
+branch and published commit SHA, plus the approval/run reference. The trusted
+adapter must return that published SHA under a stable publication ID; Mizu does
+not infer it from a later branch observation or CI result. Store the receipt as
+durable project evidence and let waits address it directly rather than scanning
+run history. Record intent before the external side effect; retry/recovery must
+use the same publication ID, and an uncertain outcome without adapter
+reconciliation stays unresolved rather than creating a second publication.
+`code_digest` remains the exact-content approval binding, distinct from Git
+commit identity.
+
+The first structured CI wait targets the receipt's published SHA, never merely
+the branch. Its declared check predicate is satisfied only by terminal evidence
+for that exact SHA (green or red); missing or pending check evidence leaves it
+unresolved, and failure wakes the item but does not mark the work done. Branch
+movement cannot satisfy or erase an older wait; if exact-SHA evidence is
+unavailable, the wait remains visibly unresolved rather than inferring a result
+from the new head. Review, promotion, and installation waits remain later
+slices.
