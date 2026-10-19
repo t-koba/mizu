@@ -255,25 +255,23 @@ class CiWaitTests(Fixture):
         page = ci_waits.pending(self.store, "worker", limit=2)
         self.assertEqual(len(page), 2)
         with patch("mizu.ci_waits.write_json", wraps=write_json) as writer:
-            def fail_second(path, record, **kwargs):
-                if writer.call_count == 2:
+            def fail_first(path, record, **kwargs):
+                if writer.call_count == 1:
                     raise OSError("interrupted ack")
                 return write_json(path, record, **kwargs)
-            writer.side_effect = fail_second
-            with self.assertRaises(OSError):
-                ci_waits.acknowledge(self.store, "worker", page)
+            writer.side_effect = fail_first
+            ci_waits.acknowledge(self.store, "worker", page)
+            self.assertEqual(writer.call_count, 2)
         remaining = ci_waits.pending(self.store, "worker")
         self.assertEqual(len(remaining), 2)
-        self.assertNotIn(page[0], remaining)
-        self.assertIn(page[1], remaining)
+        self.assertIn(page[0], remaining)
+        self.assertNotIn(page[1], remaining)
         self.assertTrue(all(self.store.get(i["id"])["status"] == "blocked" for i in items))
 
     def test_oversized_evidence_is_not_delivery_or_a_poll_crash(self):
-        from mizu.errors import LimitExceeded
         item = self.block()
         write_json(ci_waits._path(self.store, item), {"padding": "x" * PREVIEW_BYTES})
-        with self.assertRaises(LimitExceeded):
-            ci_waits.pending(self.store, "worker")
+        self.assertEqual(ci_waits.pending(self.store, "worker"), [])
         result, reader = self.poll()
         self.assertFalse(result["ok"])
         reader.assert_not_called()
@@ -293,6 +291,98 @@ class CiWaitTests(Fixture):
         record = read_json(path)
         record["conclusion"] = "failure"
         write_json(path, record)
+        self.assertEqual(ci_waits.pending(self.store, "worker"), [])
+        result, reader = self.poll()
+        self.assertFalse(result["ok"])
+        reader.assert_not_called()
+        ci_waits.acknowledge(self.store, "worker", [event])
+        self.assertFalse(ci_waits._path(self.store, item, "ack").exists())
+        self.assertEqual(read_json(path), record)
+        self.assertEqual(event["conclusion"], "success")
+
+    def test_corrupt_result_does_not_block_delivery_ack_or_unrelated_poll(self):
+        bad, good = [self.block(key) for key in ("bad", "good")]
+        self.assertEqual(self.poll()[0]["observed"], 2)
+        events = {e["work_item"]: e for e in ci_waits.pending(self.store, "worker")}
+        path = ci_waits._path(self.store, bad)
+        record = read_json(path)
+        record["conclusion"] = "failure"
+        write_json(path, record)
+        corrupted = path.read_bytes()
+
+        self.assertEqual(ci_waits.pending(self.store, "worker"), [events[good["id"]]])
+        # The corrupt event is first in a previously frozen delivery batch.
+        ci_waits.acknowledge(self.store, "worker", [events[bad["id"]], events[good["id"]]])
+        self.assertFalse(ci_waits._path(self.store, bad, "ack").exists())
+        self.assertTrue(ci_waits._path(self.store, good, "ack").exists())
+        self.assertEqual(ci_waits.pending(self.store, "worker"), [])
+
+        third = self.block("third")
+        result, reader = self.poll()
+        reader.assert_called_once_with(self.config.vcs, "status", {"branch": "published", "sha": SHA})
+        self.assertEqual((result["ok"], result["polled"], result["observed"]), (False, 1, 1))
+        self.assertEqual(len(result["errors"]), 1)
+        self.assertIn(bad["id"], result["errors"][0])
+        fresh = ci_waits.pending(self.store, "worker")
+        self.assertEqual([e["work_item"] for e in fresh], [third["id"]])
+        ci_waits.acknowledge(self.store, "worker", fresh)
+        self.assertEqual(ci_waits.pending(self.store, "worker"), [])
+        self.assertEqual(path.read_bytes(), corrupted)
+        for item in (bad, good, third):
+            self.assertEqual(self.store.get(item["id"]), item)
+
+    def test_corrupt_ack_is_not_delivered_or_replaced_and_batch_continues(self):
+        bad, good = [self.block(key) for key in ("bad-ack", "good-ack")]
+        self.poll()
+        events = {e["work_item"]: e for e in ci_waits.pending(self.store, "worker")}
+        path = ci_waits._path(self.store, bad, "ack")
+        for payload in (b'{"role":"other"}', b'not json'):
+            with self.subTest(payload=payload):
+                path.write_bytes(payload)
+                self.assertNotIn(events[bad["id"]], ci_waits.pending(self.store, "worker"))
+                ci_waits.acknowledge(self.store, "worker", [events[bad["id"]], events[good["id"]]])
+                self.assertEqual(path.read_bytes(), payload)
+                self.assertTrue(ci_waits._path(self.store, good, "ack").exists())
+                self.assertEqual(ci_waits.pending(self.store, "worker"), [])
+
+    def test_evidence_io_errors_are_local_and_poll_errors_are_bounded(self):
+        bad = [self.block("unreadable-" + str(i)) for i in range(4)]
+        good = self.block("readable")
+        original = ci_waits._read
+
+        def unreadable(store, item, suffix="result"):
+            if item["id"] in {i["id"] for i in bad}:
+                raise OSError("unreadable result")
+            return original(store, item, suffix)
+
+        with patch("mizu.ci_waits._read", side_effect=unreadable):
+            result, reader = self.poll()
+            reader.assert_called_once()
+            self.assertEqual((result["ok"], result["polled"], result["observed"]), (False, 1, 1))
+            self.assertEqual(len(result["errors"]), self.config.vcs["poll_max_branches"])
+            events = ci_waits.pending(self.store, "worker")
+            self.assertEqual([e["work_item"] for e in events], [good["id"]])
+            ci_waits.acknowledge(self.store, "worker", events)
+            self.assertEqual(ci_waits.pending(self.store, "worker"), [])
+
+    def test_invalid_receipt_or_ledger_still_fails_globally(self):
+        self.block()
+        self.poll()
+        events = ci_waits.pending(self.store, "worker")
+        self.publication.path("receipt").unlink()
         with self.assertRaises(Denied):
             ci_waits.pending(self.store, "worker")
-        self.assertEqual(event["conclusion"], "success")
+        with self.assertRaises(Denied):
+            ci_waits.acknowledge(self.store, "worker", events)
+        result, reader = self.poll()
+        self.assertFalse(result["ok"])
+        self.assertIn("error", result)  # global scan failure, not per-item errors
+        reader.assert_not_called()
+        for failure in (Denied("malformed ledger"), OSError("unreadable ledger")):
+            with self.subTest(failure=failure), patch.object(self.store, "_iter_item_events", side_effect=failure):
+                with self.assertRaises(type(failure)):
+                    ci_waits.pending(self.store, "worker")
+                result, reader = self.poll()
+                self.assertFalse(result["ok"])
+                self.assertIn("error", result)
+                reader.assert_not_called()

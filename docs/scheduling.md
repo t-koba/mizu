@@ -181,6 +181,15 @@ wait requires the normal CAS lifecycle (leave `blocked`, then block again).
 There is no automatic retry of publication or CI rerun, no wait cancellation
 API beyond that lifecycle, and no auto-transition on either conclusion.
 
+Malformed or unreadable per-waiter result/ack records fail closed for that
+waiter: they are neither delivered nor acknowledged or overwritten. They do
+not prevent delivery, acknowledgement or polling of unrelated waiters. Polls
+retain valid observation counts alongside at most `poll_max_branches` per-item
+errors (each at most 512 characters). Invalid ledger/seed/history state or
+receipt bindings still fail the whole scan; they are not per-waiter evidence
+errors. An acknowledgement error does not abort the remaining batch;
+unacknowledged valid events remain eligible for replay.
+
 Control and configured cooldown spacing remain in force. Daemons recheck on
 idle ticks; observation also touches the existing `waits` directory as a
 best-effort hint to already-configured platform event watches. Those hints

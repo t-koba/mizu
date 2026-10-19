@@ -124,6 +124,18 @@ def _evidence(store, item):
     return {**record, "evidence_digest": digest(canonical(record))}
 
 
+def _acknowledged(store, item, event):
+    ack = _read(store, item, "ack")
+    if ack is None:
+        return False
+    if (set(ack) != {"role", "evidence_digest", "acknowledged_at"}
+            or ack["role"] != item["holder"]
+            or ack["evidence_digest"] != event["evidence_digest"]
+            or not _timestamp(ack["acknowledged_at"])):
+        raise Denied("Invalid CI wait acknowledgement")
+    return True
+
+
 def _conclusion(rows):
     return "success" if all(r["state"] == "success" for r in rows) else "failure"
 
@@ -142,15 +154,12 @@ def _pending(store, role, *, limit):
     for item in _items(store):
         if item["holder"] != role:
             continue
-        event = _evidence(store, item)
-        if event is None:
-            continue
-        ack = _read(store, item, "ack")
-        if ack is not None:
-            if (set(ack) != {"role", "evidence_digest", "acknowledged_at"}
-                    or ack["role"] != role or ack["evidence_digest"] != event["evidence_digest"]
-                    or not _timestamp(ack["acknowledged_at"])):
-                raise Denied("Invalid CI wait acknowledgement")
+        try:
+            event = _evidence(store, item)
+            if event is None or _acknowledged(store, item, event):
+                continue
+        except (Denied, LimitExceeded, OSError, ValueError):
+            # Bad per-waiter evidence must not hide another holder-routed event.
             continue
         # Oldest blocked revision first; retain only the bounded delivery page.
         selected.append((item["updated_at"], item["id"], event))
@@ -163,17 +172,22 @@ def acknowledge(store, role, events):
     identifier(role)
     with lock(store.root / "locks" / "insights.lock"):
         for event in events:
-            if event.get("kind") != "ci" or "work_item" not in event:
+            if not isinstance(event, dict) or event.get("kind") != "ci" or "work_item" not in event:
                 continue
             item = store._get(event["work_item"], history_revisions=store._history_revisions(
                 event["work_item"], recover=False))
             if (item["status"] != "blocked" or item["holder"] != role
-                    or item["rev"] != event.get("rev") or _evidence(store, item) != event):
+                    or item["rev"] != event.get("rev")):
                 continue
-            if _read(store, item, "ack") is None:
+            try:
+                if _evidence(store, item) != event or _acknowledged(store, item, event):
+                    continue
                 write_json(_path(store, item, "ack"),
                            {"role": role, "evidence_digest": event["evidence_digest"],
                             "acknowledged_at": observed_now()}, exclusive=True)
+            except (Denied, LimitExceeded, OSError, ValueError):
+                # Leave this event unacknowledged and continue the frozen batch.
+                continue
 
 
 def poll(config, project, state, *, now, interval, reader=None):
@@ -191,9 +205,16 @@ def poll(config, project, state, *, now, interval, reader=None):
         cursor = ""
     # Two bounded heaps implement a wrap-around window without storing the ledger.
     after, before = [], []
+    errors = []
     try:
         for item in _items(project.work_items):
-            if _evidence(project.work_items, item) is not None:
+            try:
+                if _evidence(project.work_items, item) is not None:
+                    continue
+            except (Denied, LimitExceeded, OSError, ValueError) as exc:
+                # Never overwrite invalid immutable evidence or spend adapter calls on it.
+                if len(errors) < limit:
+                    errors.append(f"{item['id']}: {exc}"[:512])
                 continue
             bucket = after if item["id"] > cursor else before
             # IDs are fixed lowercase hex: a negated integer is a max-heap key.
@@ -206,7 +227,6 @@ def poll(config, project, state, *, now, interval, reader=None):
         targets = sorted(after, reverse=True) + sorted(before, reverse=True)
         targets = [entry[1] for entry in targets[:limit]]
         observed = 0
-        errors = []
         for item in targets:
             state["ci_wait_cursor"] = item["id"]  # advance even if the adapter fails
             try:
@@ -249,7 +269,8 @@ def poll(config, project, state, *, now, interval, reader=None):
                         mkdir(directory)
                         os.utime(directory, None, follow_symlinks=False)
             except (Denied, LimitExceeded, OSError, ValueError) as exc:
-                errors.append(str(exc)[:512])
+                if len(errors) < limit:
+                    errors.append(f"{item['id']}: {exc}"[:512])
         return {"event": "ci_wait_poll", "ok": not errors, "polled": len(targets),
                 "observed": observed, "errors": errors}
     except (Denied, LimitExceeded, OSError, ValueError) as exc:
