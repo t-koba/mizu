@@ -35,6 +35,7 @@ class DaemonFacts:
     goal_changed: bool | None = None
     operator_woke: bool | None = None
     ready_work: bool | None = None
+    ci_wait_due: bool | None = None
     outcome: str | None = None
     inbox_changed: bool | None = None
     routed_events_due: bool | None = None
@@ -119,6 +120,10 @@ def evaluate_daemon(facts: DaemonFacts) -> DaemonDecision:
         return DaemonDecision(ready=None, reason="collecting", needed="ready_work")
     if facts.ready_work:
         return DaemonDecision(ready=True, reason="ready_work")
+    if facts.ci_wait_due is None:
+        return DaemonDecision(ready=None, reason="collecting", needed="ci_wait_due")
+    if facts.ci_wait_due:
+        return DaemonDecision(ready=True, reason="ci_wait")
     if facts.outcome is None:
         return DaemonDecision(ready=None, reason="collecting", needed="outcome")
     if facts.outcome == "done":

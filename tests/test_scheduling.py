@@ -17,7 +17,7 @@ from mizu.scheduling import (
 def _daemon(**overrides):
     base = {
         "armed": True, "paused": False, "draining": False,
-        "goal_changed": False, "operator_woke": False, "ready_work": False, "outcome": "continue",
+        "goal_changed": False, "operator_woke": False, "ready_work": False, "ci_wait_due": False, "outcome": "continue",
         "inbox_changed": False, "routed_events_due": False, "ci_due": False,
         "wait_expired": False, "progress_admits": True,
     }
@@ -54,6 +54,9 @@ class DaemonEvaluatorTests(unittest.TestCase):
         decision = evaluate_daemon(facts)
         self.assertEqual((decision.ready, decision.needed), (None, "ready_work"))
         facts = dataclasses.replace(facts, ready_work=False)
+        decision = evaluate_daemon(facts)
+        self.assertEqual((decision.ready, decision.needed), (None, "ci_wait_due"))
+        facts = dataclasses.replace(facts, ci_wait_due=False)
         decision = evaluate_daemon(facts)
         self.assertEqual((decision.ready, decision.needed), (None, "outcome"))
         facts = dataclasses.replace(facts, outcome="done")
@@ -97,7 +100,9 @@ class DaemonEvaluatorTests(unittest.TestCase):
              True, "goal"),
             ("operator-before-done", _daemon(operator_woke=True, outcome="done", inbox_changed=True),
              True, "operator"),
-            # Done ignores inbox/events/CI/wait/progress.
+            # Receipt-pinned work-item waits wake their holder even after done.
+            ("ci-wait-before-done", _daemon(outcome="done", ci_wait_due=True), True, "ci_wait"),
+            # Done ignores inbox/events/general CI/insight wait/progress.
             ("done-ignores-news", _daemon(outcome="done", inbox_changed=True, routed_events_due=True,
                                           ci_due=True, wait_expired=True, progress_admits=True),
              False, "done"),

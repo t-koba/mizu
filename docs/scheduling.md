@@ -43,8 +43,10 @@ Ready work means a seeded ledger item whose current status is `open` or
 `doing` and which carries no structured wait. Any such item admits the writer
 even after `done`, an unexpired run-level `wait`, or a no-progress park. This
 is a project-wide source, not filtered by holder or terminal-event subscription.
-Without ready work, `done` still ignores inbox, routed events, CI, `wake_at`
-and progress; a changed goal or operator wake continues to admit it.
+Next, unacknowledged receipt-pinned CI wait evidence admits only its current
+blocked holder (daemon reason `ci_wait`), including after `done`. Without ready
+work or that evidence, `done` still ignores inbox, routed events, general CI,
+`wake_at` and progress; a changed goal or operator wake continues to admit it.
 For other outcomes, it checks inbox generation; role-routed decision/terminal
 events and due structured waits (`_role_events_due`); due CI reds for opted-in
 roles (`_ci_due_for`); expired `wait` `wake_at`; and finally the no-progress
@@ -112,12 +114,78 @@ silently omitting the unreadable projection. Unseeded legacy decisions are
 reported as a coverage gap, never guessed ready. Retrying reads yields a new
 live view; admission and prompt reads are not a frozen transaction.
 
-A blocked item, even one without a structured wait, is not ready. This slice
-does not add exact per-item CI-result waits or wait-on-green/red support.
+A blocked item, even one without a structured wait, is not ready. Exact-SHA
+CI wait evidence is a separate holder-routed wake, not ready work.
 A run-level `wait` does not block unrelated ready ledger work: record a work
 item as blocked when it is not actionable. Thus leaving an `open`/`doing` item
 while finishing `wait` or `done` intentionally allows another writer unit at
 the configured cadence. Cache-affinity ordering is separate.
+
+### Exact-SHA work-item CI waits
+
+Only `work_items_transition` to `blocked` accepts this additional wait:
+
+```json
+{"kind":"ci","publication_id":"<64 lowercase hex receipt ID>","checks":["Offline checks / unit","Offline checks / lint"]}
+```
+
+`checks` contains 1–64 unique, nonempty exact names, each at most 256 Unicode
+characters with valid UTF-8 and no terminal controls (the VCS status name
+contract); the canonical serialized array is bounded to 2048 UTF-8 bytes so
+compact work-item rows retain their 8192-byte limit. Names are sorted
+deterministically without trimming or case folding.
+Caller-supplied branch/SHA overrides are refused. The host loads and validates
+the immutable completed receipt, stores its branch and published SHA in the
+wait, and revalidates that binding on stored reads. Insight `decide`/defer waits
+do **not** accept `ci`; the existing work-item wait types remain unchanged.
+Registration requires `[vcs].poll_enabled = true` and a configured trusted
+adapter, otherwise it fails closed. An active polling daemon is needed to
+observe new results; disabling polling later leaves existing waits unresolved
+until polling resumes (already retained evidence remains deliverable).
+
+On each due VCS polling tick, the host observes at most `poll_max_branches`
+work-item waits, in addition to the existing branch/proposal polling budgets.
+It uses `poll_interval_seconds` and `poll_status_timeout_seconds`, rotates by
+item ID with a durable cursor in `vcs-poll.json`, and advances even on adapter
+failure. Selection scans the ledger with O(limit) retained rows, not an
+unbounded queue. Adapter status responses retain their existing 1024-row and
+byte limits. Every query names the receipt's **recorded branch and exact
+published SHA**; a moved branch never substitutes its new head.
+
+Completion is over the declared set, not over whichever rows happen to be
+returned. Every declared name must occur exactly once at that SHA, in exactly
+`success` or `failure` state. Missing, pending, unknown, duplicate or mismatched
+named rows leave the wait unresolved. Unrelated checks impose no requirement.
+Once all declared checks are terminal, all-success concludes `success`;
+otherwise the conclusion is `failure`. Adapter failures do not resolve waits.
+
+Before any wake, the host rechecks the current blocked revision and writes a
+create-only record under `evidence/ci-waits/<item>.<rev>.result.json` (128 KiB,
+bounded no-follow reads). It binds the item ID, blocked revision, holder,
+publication ID, branch, SHA, normalized wait digest, declared check states and
+available run IDs, conclusion and observation time. Facts remain
+external-untrusted. Receipt files are never modified and polling never
+publishes. Both green and red **only wake**: neither reopens, completes, drops,
+nor otherwise transitions the item.
+
+Only the matching current blocked holder receives this evidence, in full and
+delta prompt `wait_events` and the run's `wait-events.json` (at most ten CI
+records per run, separately from insight waits). Reopened/replaced waits or a
+changed holder do not receive old evidence. A completed, non-bounded run
+acknowledges the exact evidence digest in a create-only per-item/revision ack;
+there is no moving timestamp watermark. Unchanged terminal evidence is neither
+repolled nor redelivered after acknowledgement, avoiding scheduler spin even
+when the item remains blocked. Interrupted/failed/bounded delivery replays
+until acknowledged; a partial ack can only replay the remainder. Changing the
+wait requires the normal CAS lifecycle (leave `blocked`, then block again).
+There is no automatic retry of publication or CI rerun, no wait cancellation
+API beyond that lifecycle, and no auto-transition on either conclusion.
+
+Control and configured cooldown spacing remain in force. Daemons recheck on
+idle ticks; observation also touches the existing `waits` directory as a
+best-effort hint to already-configured platform event watches. Those hints
+never carry authority: dispatch revalidates the exact waiter and evidence.
+Unscheduled/unsubscribed roles keep their existing explicit-run policy.
 
 Deferrals ride along in `own`-source mode but do not admit a run on their
 own; with `decision_sources = "any"` a matching action — deferrals

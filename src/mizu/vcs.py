@@ -744,13 +744,16 @@ def parse_acquired(data: dict, *, scope: str, base_sha=None) -> dict:
             "digest": content_digest, "content": content}
 
 
-def read_via(settings: dict, op: str, params: dict, *, cancel=lambda: False) -> dict:
+def read_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
+             preserve_status_rows: bool = False) -> dict:
     """Invoke a read-only adapter operation (``status``/``log``/``comments``/``acquire``/``artifacts``/``artifact``).
 
     Schema: ``params`` must include ``branch`` for addressed reads
     (``status``/``log``/``comments``/``artifacts``/``artifact``);
     optional ``sha`` passes through when given, and status rows for other
-    SHAs are filtered out. ``proposals`` enumerates
+    SHAs are filtered out by default. Host-only ``preserve_status_rows`` keeps
+    mismatched rows for strict declared-set wait evaluation (not a tool argument).
+    ``proposals`` enumerates
     with an optional ``branch`` filter. ``acquire`` takes ``id``
     (proposal id), the exact head ``sha``, and the explicit content
     ``scope`` (``"head"`` for the head commit only, ``"full"`` for the
@@ -880,7 +883,7 @@ def read_via(settings: dict, op: str, params: dict, *, cancel=lambda: False) -> 
     data = invoke(settings, request, cancel=cancel)
     if op == "status":
         checks = parse_status_checks(data)
-        if sha is not None:
+        if sha is not None and not preserve_status_rows:
             # An adapter may return a branch rollup with checks for other
             # commits; never let those rows satisfy an exact-SHA query.
             checks = [row for row in checks if row["sha"] == sha]

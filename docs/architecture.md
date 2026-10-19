@@ -193,7 +193,8 @@ persistent conversation to a fresh generation on the next independently
 admitted dispatch after two empty `continue`/`bounded` units; it does not admit
 or schedule a run. `mizu status` exposes whether that recovery threshold is due
 and the count, so parked empty work is visible while awaiting its next trigger.
-Goal and operator wakes and ready work are checked before the saved outcome;
+Goal and operator wakes, ready work, and retained exact-SHA work-item CI wait
+evidence for the current blocked holder are checked before the saved outcome;
 inbox generations, routed decision/terminal work-item events, due CI, waits,
 and wait expiry then precede progress self-admission. Ready work is a
 project-wide writable-role wake for a seeded `open`/`doing` item without a
@@ -400,9 +401,10 @@ records its revision, update time, caller-supplied actor, from/to transition,
 and explicit reason/wait/snapshot/verification fields (null when absent).
 Actor is trusted internal attribution, not a new authorization grant. `doing`
 assigns the actor as holder, `blocked` preserves the holder or assigns the
-actor, and other statuses clear it. A blocked transition may include a wait
-normalized by the existing Insights validator, but registers **no scheduler
-wait or wake**.
+actor, and other statuses clear it. A blocked transition may include an
+Insights-style wait (stored only, no scheduler wake), or a work-item-only `ci`
+wait pinned to a completed immutable publication receipt. The latter wakes only
+its current holder on retained terminal evidence, without changing item status.
 Dropping requires a nonempty reason. Completion requires `Snapshots.get()`
 validation and membership in retained published history. The stored
 verification must have `passed is True` and a code digest matching the
@@ -487,9 +489,13 @@ fresh work-item projection and use its revision before retrying. `done` is
 accepted only for retained published snapshot history with passing verification
 bound to that snapshot's code digest; use a snapshot ID carrying that evidence.
 `dropped` requires a reason, and a `blocked` transition may include the same
-structured wait schema and normalization semantics as `decide`. These waits are
-stored on the item only: transitions do not register scheduler waits, wake a
-role, or create scheduling effects. This mutating operation is not observational
+structured wait schema and normalization semantics as `decide`, or a
+work-item-only `{kind:"ci", publication_id, checks}` wait. Existing wait kinds
+remain stored on the item only, without scheduler effects. CI waits validate a
+completed immutable publication receipt at registration and on stored reads,
+binding the recorded branch and published SHA; absent or uncertain receipts
+are refused. See [exact-SHA CI waits](scheduling.md#exact-sha-work-item-ci-waits)
+for terminal evidence, holder wake and acknowledgement semantics. This mutating operation is not observational
 and receives no exception to the existing per-run or wrap-up spend bounds.
 
 Under one `insights.lock` section, the reader scans committed

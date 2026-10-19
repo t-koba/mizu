@@ -128,8 +128,9 @@ def _directory(path: Path) -> bool:
 
 
 class WorkItems:
-    def __init__(self, root: Path, snapshots, insights):
+    def __init__(self, root: Path, snapshots, insights, *, vcs=None):
         self.root, self.snapshots, self.insights = root, snapshots, insights
+        self.vcs = vcs or {}
 
     def _read(self, name: str) -> dict:
         try:
@@ -858,6 +859,9 @@ class WorkItems:
         if not isinstance(value, dict):
             raise Denied("Blocked work items require a structured wait")
         kind = value.get("kind")
+        if kind == "ci":
+            from .ci_waits import normalize
+            return normalize(self.root, value, stored=True)
         if kind == "code_change":
             baseline = value.get("digest")
             if set(value) != {"kind", "digest"} or not isinstance(baseline, str) or not DIGEST.fullmatch(baseline):
@@ -1492,7 +1496,13 @@ class WorkItems:
             if wait is not None:
                 if status != "blocked":
                     raise Denied("Only blocked work items carry waits")
-                registered = self.insights._normalize_wait(wait, "defer")
+                if isinstance(wait, dict) and wait.get("kind") == "ci":
+                    from .ci_waits import normalize
+                    if not self.vcs.get("poll_enabled") or not self.vcs.get("command"):
+                        raise Denied("CI waits require automatic VCS polling and an adapter")
+                    registered = normalize(self.root, wait)
+                else:
+                    registered = self.insights._normalize_wait(wait, "defer")
             verification = None
             if snapshot_id is not None:
                 if status != "done":

@@ -21,7 +21,7 @@ from pathlib import Path
 
 from . import platform as _platform
 from .admission import admission
-from . import dispatch_evidence, work_item_events
+from . import ci_waits, dispatch_evidence, work_item_events
 from .budget import Budget
 from .config import (MAX_CI_WAKE_EXTRA_BRANCHES, Config, Role, load,
                      role_decision_events_limit, role_policy_bytes,
@@ -3322,7 +3322,8 @@ class Engine:
                 project.work_items, role_name, role.work_item_events, sources=role.work_item_sources,
                 limit=role_work_item_events_limit(project.config, role))
             terminal_events = terminal_page["events"]
-            wait_events = project.insights.due_waits(role_name, snapshot)
+            wait_events = (project.insights.due_waits(role_name, snapshot)
+                           + ci_waits.pending(project.work_items, role_name))
             # Dependency obligations addressed to this role ride along when
             # it runs for other reasons; they never admit a run on their
             # own, so no new wake source is implied.
@@ -3879,6 +3880,9 @@ class Engine:
                 if context.wait_events:
                     with contextlib.suppress(OSError, ValueError, TypeError, AttributeError, Denied):
                         project.insights.consume_waits(role_name, context.wait_events)
+                    if finished.get("outcome") != "bounded" and not context.bound_hit:
+                        with contextlib.suppress(OSError, ValueError, TypeError, AttributeError, Denied):
+                            ci_waits.acknowledge(project.work_items, role_name, context.wait_events)
                 write_json(project.root / "health" / f"{role_name}.json",
                            {"consecutive_failures": 0, "consecutive_missing_finish": 0,
                             "last_run": run_id, "updated_at": now()})
@@ -4288,14 +4292,15 @@ def _role_events_due(project: Project, snapshot: dict, role_name=None) -> bool:
                             return True
                     elif any(isinstance(e, dict) and e.get("action") != "defer" for e in pending):
                         return True
-            except (Denied, OSError, ValueError, TypeError, KeyError, AttributeError):
+            except (Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError, AttributeError):
                 pass
             try:
-                if project.insights.due_waits(name, snapshot):
+                if (project.insights.due_waits(name, snapshot)
+                        or ci_waits.pending(project.work_items, name, limit=1)):
                     return True
-            except (Denied, OSError, ValueError, TypeError, KeyError, AttributeError):
+            except (Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError, AttributeError):
                 pass
-    except (Denied, OSError, ValueError, TypeError, KeyError, AttributeError):
+    except (Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError, AttributeError):
         pass
     return False
 
@@ -4350,8 +4355,8 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
     """Collect daemon signals lazily, following the pure due evaluator's order.
 
     The evaluator names one next fact at a time. This preserves the old
-    short-circuit contract: absent ready work, done does not read
-    inbox/events/CI/wait/progress. A higher-priority wake does not probe
+    short-circuit contract: absent ready work or receipt-pinned CI wait evidence,
+    done does not read inbox/events/general CI/insight waits/progress. A higher-priority wake does not probe
     lower-priority stores. Read-only roles never self-admit on ready work.
     """
     current_time = time.time() if current_time is None else current_time
@@ -4373,6 +4378,14 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
             role = effective.roles.get(role_name) if effective is not None and role_name is not None else None
             value = ((role_name is None or (role is not None and role.workspace == "write"))
                      and _has_ready_work(project))
+        elif needed == "ci_wait_due":
+            names = [role_name] if role_name in project.roles else [
+                name for name in project.roles
+                if project.config.roles[name].workspace == "write"]
+            try:
+                value = any(ci_waits.pending(project.work_items, name, limit=1) for name in names)
+            except (Denied, LimitExceeded, OSError, ValueError):
+                value = False
         elif needed == "outcome":
             value = snapshot["outcome"]
         elif needed == "inbox_changed":
@@ -4443,13 +4456,15 @@ def refresh_poll_state(state: dict, shared: dict) -> dict:
     if not isinstance(shared, dict):
         return ci_state
     for key, target in (("last_fetch", state), ("last_poll", ci_state),
-                        ("last_proposal_poll", state)):
+                        ("last_proposal_poll", state), ("last_ci_wait_poll", state)):
         seen = _wall(shared.get(key))
         if seen is None:
             continue
         current = _wall(target.get(key))
         if current is None or seen > current:
             target[key] = seen
+    if isinstance(shared.get("ci_wait_cursor"), str):
+        state["ci_wait_cursor"] = shared["ci_wait_cursor"]
     if "proposal_cursor" in shared:
         stored_cursor = shared.get("proposal_cursor")
         if stored_cursor is None:
@@ -4493,6 +4508,9 @@ def poll_project_vcs(config, project, state: dict, *, now: float, interval: floa
             polled = poll_ci(config, project, ci_state, now=now, interval=interval)
             if polled is not None:
                 events.append(polled)
+            waited = ci_waits.poll(config, project, state, now=now, interval=interval)
+            if waited is not None:
+                events.append(waited)
             proposals = poll_proposals(config, project, state, now=now,
                                        interval=interval)
             if proposals is not None:
@@ -4503,6 +4521,8 @@ def poll_project_vcs(config, project, state: dict, *, now: float, interval: floa
                             "last_poll": ci_state.get("last_poll"),
                             "last_proposal_poll": state.get("last_proposal_poll"),
                             "proposal_cursor": state.get("proposal_cursor"),
+                            "last_ci_wait_poll": state.get("last_ci_wait_poll"),
+                            "ci_wait_cursor": state.get("ci_wait_cursor"),
                             "failures": _clean_ci_failures(ci_state.get("failures")),
                             "successes": _clean_ci_successes(ci_state.get("successes"))})
             except (OSError, ValueError, TypeError) as exc:

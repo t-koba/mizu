@@ -46,8 +46,12 @@ def validate(value, schema: dict, path: str = "arguments") -> None:
         for key, item in value.items():
             validate(item, schema["properties"][key], f"{path}.{key}")
     elif kind == "array":
+        if len(value) < schema.get("minItems", 0):
+            raise Denied(f"Too few values in {path}")
         if len(value) > schema.get("maxItems", 100):
             raise Denied(f"Too many values in {path}")
+        if schema.get("uniqueItems") and any(v in value[:i] for i, v in enumerate(value)):
+            raise Denied(f"Duplicate values in {path}")
         for index, item in enumerate(value):
             validate(item, schema["items"], f"{path}[{index}]")
     elif kind == "string":
@@ -81,6 +85,13 @@ WAIT_SCHEMA = obj({"kind": {"type": "string", "enum": ["deadline", "code_change"
                                      "action": {"type": "string", "enum": ["accept", "modify", "reject"]}},
                                     ("insight", "rev", "action"))}, ("kind",))
 
+# CI is deliberately work-item-only; insight deferrals retain WAIT_SCHEMA.
+WORK_ITEM_WAIT_SCHEMA = obj({**WAIT_SCHEMA["properties"],
+    "kind": {"type": "string", "enum": WAIT_SCHEMA["properties"]["kind"]["enum"] + ["ci"]},
+    "publication_id": {"type": "string", "pattern": "^[0-9a-f]{64}$", "maxLength": 64},
+    "checks": dict(array({"type": "string", "minLength": 1, "maxLength": 256}, 64),
+                   minItems=1, uniqueItems=True)}, ("kind",))
+
 DEFINITIONS = {
     "diff": ("Read the bounded difference between this published snapshot and the preceding distinct code snapshot.", obj()),
     "files": ("List visible workspace files without reading their contents; use offset/limit for subsequent pages.", obj(PAGE_FIELDS)),
@@ -109,7 +120,7 @@ DEFINITIONS = {
                obj({"query": text(1000), "result_id": text(64), **PAGE_FIELDS})),
     "insights": ("List pending proposals, or decided ones by action (accept/modify/defer/reject), or read one proposal by full ID or unique prefix. On an ID read only, the original submitter may also receive a small current work_item_status for a valid accepted/modified work item, including its ID, status, revision, holder, updated time, and origin staleness; other roles and list responses do not receive it. This projection does not transition, schedule, or wake work, and grants no work-item access.",
                  obj({"id": text(64), "action": {"type": "string", "enum": ["accept", "modify", "defer", "reject"]}, **PAGE_FIELDS})),
-    "work_items_read": ("Read a bounded page of currently open work items, or inspect one exact seeded item by id in any status with current origin-staleness and immutable ascending revision history including seed revision 1. Open-page mode accepts cursor (max 128 characters) and limit 1-100 (default 25); by-ID mode accepts exclusive after_rev 0-256 (default 0) and limit 1-100 (default 25), and cannot use cursor. Descriptions, when present, are immutable full text in by-ID item/history reads and 1024 UTF-8-byte description_preview with description_truncated in compact open rows. Existing seeds without descriptions remain valid. Each open row is at most 8192 canonical bytes; the complete response is at most 1 MiB. By-ID history returns at most 100 full records (each bounded by the 128 KiB record reader) and stops at the row or byte bound but replays and validates the complete chain, up to the 256-revision chain bound; history_total is current rev, cursor echoes after_rev, and next_cursor is the last returned rev when more history remains. Local records are untrusted. Reads are fresh live projections and do not transition items; recognized atomic-write leftovers may be recovered under the shared lock. Unsafe or malformed store data fails closed.",
+    "work_items_read": ("Read a bounded page of currently open work items, or inspect one exact seeded item by id in any status with current origin-staleness and immutable ascending revision history including seed revision 1. Open-page mode accepts cursor (max 128 characters) and limit 1-100 (default 25); by-ID mode accepts exclusive after_rev 0-256 (default 0) and limit 1-100 (default 25), and cannot use cursor. Descriptions, when present, are immutable full text in by-ID item/history reads and 1024 UTF-8-byte description_preview with description_truncated in compact open rows. Existing seeds without descriptions remain valid. Each open row is at most 8192 canonical bytes; receipt-pinned CI waits bound the serialized declared check set to 2048 UTF-8 bytes so compact rows remain within this limit. The complete response is at most 1 MiB. By-ID history returns at most 100 full records (each bounded by the 128 KiB record reader) and stops at the row or byte bound but replays and validates the complete chain, up to the 256-revision chain bound; history_total is current rev, cursor echoes after_rev, and next_cursor is the last returned rev when more history remains. Local records are untrusted. Reads are fresh live projections and do not transition items; recognized atomic-write leftovers may be recovered under the shared lock. Unsafe or malformed store data fails closed.",
                         obj({"id": {"type": "string", "minLength": 35, "maxLength": 35,
                                     "pattern": "^wi_[0-9a-f]{32}$"},
                              "cursor": text(MAX_OPEN_CURSOR_CHARS),
@@ -138,11 +149,11 @@ DEFINITIONS = {
                                               "rev": {"type": "integer", "minimum": 1}}, ("rev",)),
                                               minProperties=2, maxProperties=2)},
                               ("idempotency_key", "title"))),
-    "work_items_transition": ("Append one work-item state transition using the required expected_rev CAS. Re-read the current work-item projection/revision after a stale-CAS refusal; retries are not automatic. Actor is bound to the runtime role, never supplied by the caller. Done requires snapshot_id for retained published history with passing digest-bound verification; dropped requires a nonempty reason; blocked may register one structured wait using decide's wait semantics. Terminal transitions may wake explicitly subscribed roles; this does not schedule or assign work.",
+    "work_items_transition": ("Append one work-item state transition using the required expected_rev CAS. Re-read the current work-item projection/revision after a stale-CAS refusal; retries are not automatic. Actor is bound to the runtime role, never supplied by the caller. Done requires snapshot_id for retained published history with passing digest-bound verification; dropped requires a nonempty reason; blocked may register a decide-style wait or a work-item-only CI wait {kind:ci, publication_id, checks} with 1-64 unique exact check names and a 2048-byte serialized-set bound; automatic VCS polling and a completed publication receipt are required. Terminal CI evidence wakes the holder without changing status. Terminal transitions may wake explicitly subscribed roles; this does not schedule or assign work.",
                                obj({"id": text(64), "expected_rev": {"type": "integer", "minimum": 1},
                                     "status": {"type": "string", "enum": list(STATUSES)},
                                     "reason": {"type": "string", "minLength": 1, "maxLength": 4000},
-                                    "wait": WAIT_SCHEMA,
+                                    "wait": WORK_ITEM_WAIT_SCHEMA,
                                     "snapshot_id": {"type": "string", "minLength": 64, "maxLength": 64,
                                                     "pattern": "^[0-9a-f]{64}$"}},
                                    ("id", "expected_rev", "status"))),

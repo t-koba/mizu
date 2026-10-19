@@ -254,7 +254,12 @@ class ContextTests(Fixture):
         validate({"id": item_id, "expected_rev": 1, "status": "blocked"}, schema)
         validate({"id": item_id, "expected_rev": 2, "status": "blocked",
                   "wait": {"kind": "code_change"}}, schema)
-        self.assertIs(schema["properties"]["wait"], DEFINITIONS["decide"][1]["properties"]["wait"])
+        work_wait = schema["properties"]["wait"]["properties"]
+        insight_wait = DEFINITIONS["decide"][1]["properties"]["wait"]["properties"]
+        self.assertEqual(work_wait["kind"]["enum"], insight_wait["kind"]["enum"] + ["ci"])
+        for field in insight_wait.keys() - {"kind"}:
+            self.assertEqual(work_wait[field], insight_wait[field])
+        self.assertEqual(work_wait.keys() - insight_wait.keys(), {"publication_id", "checks"})
         bad_arguments = (
             {},
             {"id": item_id, "status": "doing"},

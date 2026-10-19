@@ -419,6 +419,24 @@ writes, locks, recovers or deletes. The project is opened with
   operations keep their existing locked, recovering `page_open` / `page_legacy`
   behavior.
 
+### Waiting on one publication's CI
+
+A blocked work item can use `wait = {kind:"ci", publication_id, checks}` through
+`work_items_transition`. Obtain `publication_id` from a completed publication
+receipt; do not guess a SHA from the current branch head. Supply 1–64 unique
+exact check names (1–256 characters each; the serialized set is at most 2048 UTF-8 bytes). This is not an insight deferral wait.
+Automatic VCS polling and its trusted adapter must be enabled before
+registration; run the polling daemon to observe results.
+
+Both all-green and terminal red results wake the current holder and deliver
+bounded `wait_events` evidence with the exact receipt/SHA, check states/run IDs
+and conclusion. Neither changes work-item status. Missing/pending/ambiguous
+checks remain unresolved even if the branch has moved. After a successful run
+the exact evidence is acknowledged once; for a new CI attempt or changed
+predicate, use the normal CAS transitions to leave `blocked` and block again.
+See [the full wait contract](scheduling.md#exact-sha-work-item-ci-waits) for
+bounds, restart/replay and failure behavior.
+
 ## バックアップと復元
 
 プロジェクトを一時停止（`pause`）した状態で取得します:
