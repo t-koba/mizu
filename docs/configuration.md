@@ -523,7 +523,9 @@ this role: default true for writable roles, false otherwise) plus `decision_sour
 deferral) and `work_item_sources` (terminal routing by origin submitter;
 `own`/`any`, default/migration rules in
 [terminal subscriptions](#terminal-work-item-subscriptions)),
-optional per-role spend overrides `requests_per_run` / `tools_per_run` /
+optional per-role no-progress backoff override `no_progress_backoff_seconds`
+(0–86,400; unset inherits the project `[limits]` value; 0 disables the timer
+wake), optional per-role spend overrides `requests_per_run` / `tools_per_run` /
 `wrap_up_requests` / `wrap_up_tools`
 (1–1,073,741,824; unset keeps the project `[limits]` value, so an auditor may run
 200/400 while other roles stay at the project default; storage, transport, budgets,
