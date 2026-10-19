@@ -23,6 +23,7 @@ def run_case(root, mode, point):
             raise OSError(errno.ENOSPC if mode == 'enospc' else errno.EIO, 'injected')
     originals = {name:getattr(fs.os,name) for name in ('fsync','replace','link','rename')}
     exclusive_rename = fs._rename_exclusive_posix
+    windows_replace = fs._replace_windows
     def wrapper(name):
         def call(*args,**kwargs):
             boundary(name,'before')
@@ -34,6 +35,11 @@ def run_case(root, mode, point):
         boundary('exclusive-rename','before')
         result=exclusive_rename(source, destination)
         boundary('exclusive-rename','after')
+        return result
+    def wrapped_windows_replace(source, destination):
+        boundary('windows-replace','before')
+        result=windows_replace(source, destination)
+        boundary('windows-replace','after')
         return result
     fdopen=fs.os.fdopen
     class Stream:
@@ -48,6 +54,7 @@ def run_case(root, mode, point):
             return result
     for name in originals:setattr(fs.os,name,wrapper(name))
     fs._rename_exclusive_posix=wrapped_exclusive_rename
+    fs._replace_windows=wrapped_windows_replace
     fs.os.fdopen=lambda *a,**k:Stream(fdopen(*a,**k))
     try:
         store=Snapshots(root/'store',excludes=(),max_file=1024,max_bytes=4096,max_files=4)
@@ -59,6 +66,7 @@ def run_case(root, mode, point):
     finally:
         for name,value in originals.items():setattr(fs.os,name,value)
         fs._rename_exclusive_posix=exclusive_rename
+        fs._replace_windows=windows_replace
         fs.os.fdopen=fdopen
     return events
 
