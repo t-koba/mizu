@@ -1,6 +1,6 @@
 /** pi-durable persistence/tool/recovery and launcher contracts. No inference, no network.
  *
- * Uses the pinned pi-durable 1.1.0 + pi-ai faux provider over file-backed
+ * Uses the pinned pi-durable 1.3.0 + pi-ai faux provider over file-backed
  * SQLite: idempotent requestId submit, exactly-once tool execution across
  * close/reopen with resume, committed usage, and replay-unsafe default.
  */

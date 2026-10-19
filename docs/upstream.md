@@ -4,23 +4,29 @@
 Python Agent SDK 0.2.163 の公開仕様と配布物を確認した。2026-10-06 に公式
 stable の Pi 1.0.4 へ追随し、adapters/pi の両 Pi 依存を 1.0.4 に固定した。2026-10-11 に Pi 1.1.0（2026-10-07 公開）へ追随し、adapters/pi の両依存と
 adapters/pi-durable の3依存を 1.1.0 に固定した。
+2026-10-19 に Pi 1.3.0 へ追随し、adapters/pi の2依存と
+adapters/pi-durable の3依存を同じリリースに固定した。両 lock は既存 lock を
+入力に含めた offline materialize で再生成し、Pi 以外の既存解決バージョンを維持した。
 実行物のバージョンは証跡であり、Mizu が旧実行物を判定・変換・拒否する
 ための条件ではない。内部の設定・bridge・保存記録には世代番号を持たせない。
 
 ## Pi
 
-[1.1.0 の変更履歴](https://github.com/earendil-works/pi/blob/v1.1.0/packages/coding-agent/CHANGELOG.md)、
-[公開 SDK](https://github.com/earendil-works/pi/blob/v1.1.0/packages/coding-agent/docs/sdk.md)、
-[拡張 API](https://github.com/earendil-works/pi/blob/v1.1.0/packages/coding-agent/docs/extensions.md)、
-[RPC](https://github.com/earendil-works/pi/blob/v1.1.0/packages/coding-agent/docs/rpc.md)
+[1.3.0 の変更履歴](https://github.com/earendil-works/pi/blob/v1.3.0/packages/coding-agent/CHANGELOG.md)、
+[公開 SDK](https://github.com/earendil-works/pi/blob/v1.3.0/packages/coding-agent/docs/sdk.md)、
+[拡張 API](https://github.com/earendil-works/pi/blob/v1.3.0/packages/coding-agent/docs/extensions.md)、
+[RPC](https://github.com/earendil-works/pi/blob/v1.3.0/packages/coding-agent/docs/rpc.md)
 を参照した。v1.0.1 から v1.0.4 の差分を評価し、Mizu が使う公開入口
 （`ModelRuntime`、`createAgentSession`、`runRpcMode`、設定・拡張・型）に
 契約破壊がないことを確認してから固定した。v1.0.4 から v1.1.0 の差分も同様に評価した：
 `agent_settled` が `aborted` を送出するようになり、`src/mizu/pi.py` の既存の防御的検査が
 有効になる。`server_busy` の再試行、長期プロンプトの費用計上修正、出力上限の入力見積り
 （4→3.5 文字/token）は Mizu が記録する数値に影響する。対話的・端末機能の追加は対象外とした。
-両 lock は materialize 経由で再生し、Pi 系以外の差分がないことと実際の npm 配布物の
-公開型定義との整合を確認した。
+v1.3.0 ではモデル切替時の reasoning replay と一時的な service-unavailable retry が変わる。
+pi-durable / Chord の公開契約も含め、実配布物の SDK 検査と
+`tests/pi-reasoning.test.mjs` の実 serializer・模擬 provider による replay gate で確認する。
+両 lock は既存 lock を保った offline materialize で再生成し、Pi 以外のパッケージの解決版は
+変更していない。
 
 pi-durable の launcher は Pi のログイン保存 (`auth.json`) を共有の
 file-backed `CredentialStore` として開き、環境 API キーと併せて
