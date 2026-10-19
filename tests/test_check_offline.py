@@ -150,20 +150,20 @@ class CheckTimeoutTests(unittest.TestCase):
                     mock.patch.object(CHECK.sys, 'argv', ['check.py', '--report', str(report)]), \
                     mock.patch.object(CHECK.sys, 'stdout', output), \
                     mock.patch.object(CHECK, 'spawn', side_effect=launch), \
-                    mock.patch.object(CHECK, '_unittest_timeout_seconds', return_value=10), \
+                    mock.patch.object(CHECK, '_unittest_timeout_seconds', return_value=3), \
                     mock.patch.object(CHECK, 'PROCESS_CLEANUP_TIMEOUT_SECONDS', 1), \
                     mock.patch.object(CHECK.shutil, 'which', return_value=None), \
                     mock.patch.object(CHECK, 'bash_available', return_value=False):
                 started = time.monotonic()
                 gate.start()
                 try:
-                    self.assertTrue(progress.wait(8), 'confirmed descendant progress must stream live')
+                    self.assertTrue(progress.wait(6), 'confirmed descendant progress must stream live')
                     if timed_out:
                         self.assertTrue(gate.is_alive(), 'progress must arrive before the timeout')
-                    gate.join(timeout=17)
+                    gate.join(timeout=9)
                     elapsed = time.monotonic() - started
                     self.assertFalse(gate.is_alive(), 'gate blocked on inherited stdout')
-                    self.assertLess(elapsed, 25, '10 s child cap plus conservative cleanup/startup margin')
+                    self.assertLess(elapsed, 14, '3 s child cap plus cleanup/startup margin')
                     self.assertFalse(errors, errors)
                     self.assertEqual(results, [1])  # node is deliberately unavailable
                     self.assertEqual(len(processes), 1)
@@ -176,7 +176,7 @@ class CheckTimeoutTests(unittest.TestCase):
                     if timed_out:
                         # Windows Job Object termination can report process exit
                         # status 0; the gate records timeout in status/details.
-                        self.assertIn('timed out after 10 s', entry['details'])
+                        self.assertIn('timed out after 3 s', entry['details'])
                         self.assertIn('unittest failure details unavailable', entry['details'])
                     else:
                         self.assertEqual(entry['exit_code'], 0)
