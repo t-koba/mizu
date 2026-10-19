@@ -18,7 +18,20 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'src'))
 from mizu import __version__
+from mizu.distribution import OFFLINE_REPORT_VERSION, source_manifest_sha
 from mizu.platform import popen_kwargs, spawn, terminate_process
+
+
+def node_version() -> str | None:
+    """Return the exact Node runtime used by the offline gate, if available."""
+    node = shutil.which('node')
+    if not node:
+        return None
+    try:
+        version = subprocess.check_output([node, '--version'], text=True, timeout=10).strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return version or None
 
 
 def bash_available() -> bool:
@@ -319,6 +332,12 @@ def main():
                              'without an explicit waiver')
     args = parser.parse_args()
     allowed_not_run = _allow_list(args.allow_not_run)
+    checked_node_version = node_version()
+    try:
+        source_sha = source_manifest_sha(ROOT)
+    except (OSError, ValueError) as exc:
+        print(f'source manifest is unreadable: {exc}', file=sys.stderr)
+        return 1
     checks = []
     counts = {}
     env = {**os.environ, 'PYTHONDONTWRITEBYTECODE': '1', 'PYTHONFAULTHANDLER': '1'}
@@ -494,11 +513,22 @@ def main():
             details = '; '.join(f'{adapter}: {detail}' for adapter, s, detail in replay_deps if s != 'ready')
             checks.append(sdk_gate_entry(state, details, allowed_not_run, name=replay_name))
         for path in sorted([*(ROOT / 'adapters/pi').glob('*.mjs'), *(ROOT / 'adapters/pi-durable').glob('*.mjs'), *(ROOT / 'scripts').glob('*.mjs')]):
-            execute('javascript-syntax:' + path.name, ['node', '--check', str(path)])
+            execute('javascript-syntax:' + path.relative_to(ROOT).as_posix(), ['node', '--check', str(path)])
     if has_bash:
         for path in sorted((ROOT / 'scripts').glob('*.sh')):
             execute('shell-syntax:' + path.name, ['bash', '-n', str(path)])
-    receipt = {'suite': 'offline', 'mizu_version': __version__,
+    try:
+        source_stable = source_sha == source_manifest_sha(ROOT)
+        stable_details = 'source manifest unchanged' if source_stable else 'source changed during validation'
+    except (OSError, ValueError):
+        source_stable = False
+        stable_details = 'source manifest unreadable after validation'
+    checks.append({'name': 'source-manifest-stable', 'status': 'pass' if source_stable else 'fail',
+                   'details': stable_details})
+    receipt = {'suite': 'offline', 'report_version': OFFLINE_REPORT_VERSION,
+               'mizu_version': __version__, 'source_sha256': source_sha,
+               'allowed_not_run': sorted(allowed_not_run), 'bash_available': has_bash,
+               'node_version': checked_node_version,
                'ok': all(c['status'] != 'fail' for c in checks),
                'checks': checks, 'counts': counts, 'python': sys.version.split()[0], 'os': sys.platform,
                'not_run': ['installed-Pi', 'rootless-Podman', 'live-provider', '24-hour-soak', 'cross-distribution-deployment']}

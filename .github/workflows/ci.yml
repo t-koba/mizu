@@ -39,7 +39,10 @@ jobs:
         run: python scripts/check.py --report private-validation/offline.json --test-timings private-validation/windows-test-timings.json --allow-not-run node-durable-contract-tests,node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests
       - name: Core installer and CLI lifecycle
         if: runner.os == 'Linux' && matrix.python == '3.13'
-        run: ./scripts/test-install.sh
+        # Reuse the full source gate above via an explicit content-bound
+        # receipt: the installer still verifies the staged manifest, and the
+        # receipt must bind to this exact source/runtime/schema/waiver set.
+        run: ./scripts/test-install.sh private-validation/offline.json
       - name: Source distribution build
         if: runner.os == 'Linux' && matrix.python == '3.13'
         run: python scripts/package.py --output dist

@@ -7,6 +7,7 @@ import contextlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -17,7 +18,8 @@ sys.path.insert(0, str(ROOT / "src"))
 from mizu import NODE_MINIMUM, __version__
 from mizu import platform as _platform
 from mizu.cli import configure
-from mizu.distribution import source_files as inventory
+from mizu.distribution import OFFLINE_REPORT_VERSION, source_files as inventory
+from mizu.distribution import source_manifest as distribution_manifest
 from mizu.config import load
 from mizu.errors import Denied, MizuError
 from mizu.fs import canonical, digest, sync_dir, lock, mkdir, now, read_json, write_json
@@ -30,8 +32,7 @@ def source_files():
 
 
 def source_manifest(root=ROOT):
-    return {relative.as_posix(): {"sha256": digest(path.read_bytes()), "executable": bool(path.stat().st_mode & 0o111)}
-            for relative, path in inventory(root)}
+    return distribution_manifest(root)
 
 
 def staging_not_run_checks(*, core_only: bool) -> str:
@@ -44,6 +45,107 @@ def staging_not_run_checks(*, core_only: bool) -> str:
     if core_only:
         checks.insert(1, "node-pi-sdk-contract-tests")
     return ",".join(checks)
+
+
+def functional_bash_available() -> bool:
+    """Match the check driver's POSIX Bash probe before reusing its evidence."""
+    if os.name != "posix":
+        return False
+    bash = shutil.which("bash")
+    if not bash:
+        return False
+    try:
+        probe = subprocess.run([bash, "-n"], input=b"exit 0\n", capture_output=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return probe.returncode == 0
+
+
+def current_node_version() -> str | None:
+    """Return the exact Node runtime used to compare source-gate evidence."""
+    node = shutil.which("node")
+    if not node:
+        return None
+    try:
+        version = subprocess.check_output([node, "--version"], text=True, timeout=10).strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return version or None
+
+
+#: Gates that must pass in any reused offline source report.
+REQUIRED_REUSED_GATE_NAMES = frozenset({"python-syntax", "python-unit-and-contract-tests",
+                                       "node-transport-and-extension-tests", "source-manifest-stable"})
+
+#: SDK gates that may appear as not_run; reuse binds to the exact core-only set.
+SDK_WAIVABLE_GATE_NAMES = frozenset({"node-durable-contract-tests", "node-pi-sdk-contract-tests",
+                                     "node-pi-reasoning-replay-tests"})
+
+
+def validate_reused_source_checks(report, *, expected_sha: str):
+    """Validate an explicit prior source-gate report for core-only reuse.
+
+    The report must be the versioned offline receipt produced by
+    scripts/check.py on this exact source tree, interpreter, and platform,
+    with ok true, complete required results, and exactly the core-only
+    staging waiver set. Anything else raises Denied; the caller still keeps
+    the mandatory staged-manifest equality check.
+    """
+    if not isinstance(report, dict):
+        raise Denied("Reused source report is malformed: expected a JSON object")
+    if report.get("report_version") != OFFLINE_REPORT_VERSION:
+        raise Denied(f"Reused source report has an unsupported schema version: {report.get('report_version')!r}")
+    if report.get("suite") != "offline":
+        raise Denied("Reused source report is malformed: expected suite 'offline'")
+    if report.get("mizu_version") != __version__:
+        raise Denied("Reused source report is stale: mizu version mismatch")
+    if report.get("source_sha256") != expected_sha:
+        raise Denied("Reused source report is stale: source manifest digest mismatch")
+    if report.get("python") != sys.version.split()[0]:
+        raise Denied("Reused source report is for a different Python version")
+    if report.get("os") != sys.platform:
+        raise Denied("Reused source report is for a different operating system")
+    if report.get("node_version") != current_node_version() or not report.get("node_version"):
+        raise Denied("Reused source report is for a different or unavailable Node runtime")
+    if report.get("ok") is not True:
+        raise Denied("Reused source report did not pass its gate")
+    entries = report.get("checks")
+    if not isinstance(entries, list) or not entries:
+        raise Denied("Reused source report is incomplete: missing check results")
+    expected_waivers = set(staging_not_run_checks(core_only=True).split(","))
+    if report.get("allowed_not_run") != sorted(expected_waivers):
+        raise Denied("Reused source report has an unexpected allowed_not_run set")
+    if not isinstance(report.get("bash_available"), bool):
+        raise Denied("Reused source report is missing its functional Bash status")
+    if report["bash_available"] != functional_bash_available():
+        raise Denied("Reused source report is for a different functional Bash environment")
+    by_name = {}
+    for entry in entries:
+        if (not isinstance(entry, dict) or not isinstance(entry.get("name"), str)
+                or entry.get("status") not in ("pass", "not_run")):
+            raise Denied("Reused source report contains an invalid or failed check")
+        name, status = entry["name"], entry["status"]
+        if name in by_name:
+            raise Denied(f"Reused source report contains a duplicate check: {name}")
+        by_name[name] = status
+        if status == "not_run" and name not in expected_waivers:
+            if name != "shell-syntax" or report["bash_available"]:
+                raise Denied(f"Reused source report contains an unsupported not_run check: {name}")
+    required = set(REQUIRED_REUSED_GATE_NAMES)
+    # Match check.py's syntax inventory for this same digest-bound tree.
+    for directory in ("adapters/pi", "adapters/pi-durable", "scripts"):
+        required.update("javascript-syntax:" + path.relative_to(ROOT).as_posix() for path in (ROOT / directory).glob("*.mjs"))
+    if report["bash_available"]:
+        required.update("shell-syntax:" + path.name for path in (ROOT / "scripts").glob("*.sh"))
+    elif by_name.get("shell-syntax") != "not_run":
+        raise Denied("Reused source report is missing its no-Bash shell-syntax result")
+    for name in sorted(required):
+        if by_name.get(name) != "pass":
+            raise Denied(f"Reused source report is incomplete: {name} did not pass")
+    for name in sorted(SDK_WAIVABLE_GATE_NAMES):
+        if by_name.get(name) not in ("pass", "not_run"):
+            raise Denied(f"Reused source report is incomplete: missing SDK gate {name}")
+    return entries
 
 
 def verify_release(release: Path):
@@ -227,6 +329,8 @@ def stage(args):
         raise Denied("Python >=3.11 is required")
     if _platform.is_root():
         raise Denied("Run setup as a normal user. The separate system-deps script is the only privileged step")
+    if getattr(args, "reuse_source_checks", None) is not None and not args.core_only:
+        raise Denied("Source-check reuse is only allowed with --core-only")
     node = shutil.which("node")
     if not args.core_only:
         if not node or not shutil.which("npm"):
@@ -268,20 +372,49 @@ def stage(args):
                 result = subprocess.check_output([node, pi, "--version"], text=True, timeout=30).strip()
                 command([node, str(adapter / "launcher.mjs"), "--check-contract"], cwd=adapter)
                 pi_lock = digest((adapter / "package-lock.json").read_bytes())
-            # Offline source tests are a release gate. They do not claim live Pi/Podman validation.
-            # Staging never provisions pi-durable, and core-only staging has no Pi adapter;
-            # record only those unavailable SDK suites as not_run. Full Pi staging must run
-            # the Pi SDK contract gate against the adapter it just provisioned.
-            command([sys.executable, "scripts/check.py", "--report", "installation-checks.json",
-                     "--allow-not-run", staging_not_run_checks(core_only=args.core_only)],
-                    cwd=temporary, timeout=240)
-            checks = read_json(temporary / "installation-checks.json")
+            reuse_report = getattr(args, "reuse_source_checks", None)
+            if reuse_report is not None:
+                # Explicit, content-bound reuse for core-only staging only.
+                # The staged-manifest equality check above stays mandatory;
+                # without an explicit receipt the full staged gate below runs.
+                if not args.core_only:
+                    raise Denied("Source-check reuse is only allowed with --core-only")
+                try:
+                    report_path = Path(reuse_report)
+                    if report_path.is_symlink():
+                        raise Denied("Reused source report must not be a symlink")
+                    report_stat = report_path.stat()
+                    if not stat.S_ISREG(report_stat.st_mode) or report_stat.st_size > 1024 * 1024:
+                        raise Denied("Reused source report must be a regular file of at most 1 MiB")
+                    with report_path.open("rb") as stream:
+                        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                            raise Denied("Reused source report must be a regular file")
+                        data = stream.read(1024 * 1024 + 1)
+                    if len(data) > 1024 * 1024:
+                        raise Denied("Reused source report exceeds 1 MiB")
+                    reused = json.loads(data)
+                except (OSError, ValueError, RecursionError) as exc:
+                    raise Denied(f"Reused source report is unreadable: {exc}") from exc
+                check_entries = validate_reused_source_checks(reused, expected_sha=sha)
+                checks_provenance = "reused-source-gate"
+            else:
+                # Offline source tests are a release gate. They do not claim live Pi/Podman validation.
+                # Staging never provisions pi-durable, and core-only staging has no Pi adapter;
+                # record only those unavailable SDK suites as not_run. Full Pi staging must run
+                # the Pi SDK contract gate against the adapter it just provisioned.
+                command([sys.executable, "scripts/check.py", "--report", "installation-checks.json",
+                         "--allow-not-run", staging_not_run_checks(core_only=args.core_only)],
+                        cwd=temporary, timeout=240)
+                staged_report = read_json(temporary / "installation-checks.json")
+                check_entries = staged_report["checks"]
+                checks_provenance = "staged-gate"
             write_json(temporary / "source-manifest.json", manifest)
             write_json(temporary / "installation.json", {"version": __version__, "source_sha256": sha,
                         "installed_at": now(), "mode": "core-only" if args.core_only else "pi",
                         "pi_version": None if args.core_only else result, "pi_lock_sha256": pi_lock,
                         "node": node, "install_scripts_enabled": args.allow_install_scripts,  # requested permission, not proof scripts ran (npm v12 may still deny via allowScripts),
-                        "validation": "local-install-checks-passed", "checks": checks["checks"], "live_validation": "not_run"})
+                        "validation": "local-install-checks-passed", "checks": check_entries,
+                        "checks_provenance": checks_provenance, "live_validation": "not_run"})
             os.rename(temporary, release)
         finally:
             if temporary.exists():
@@ -304,6 +437,10 @@ def main():
     p.add_argument("--bin-dir", type=Path, default=Path.home() / ".local/bin", help="Directory for the mizu launcher link")
     p.add_argument("--config", type=Path, default=_platform.default_config_file(), help="Private config file to create on activation")
     p.add_argument("--core-only", action="store_true", help="Offline core installation, without Pi or permission to run agents")
+    p.add_argument("--reuse-source-checks", type=Path, default=None,
+                   help="Reuse an explicit prior offline source-gate report (core-only only); "
+                        "the report must bind to this exact source manifest, Python, OS, schema, "
+                        "passing result, and core-only waiver set")
     p.add_argument("--allow-install-scripts", action="store_true", help="Permit dependency lifecycle scripts under npm's own policy after reviewing the lock")
     p.add_argument("--allow-mode-change", action="store_true", help="Permit promotion across core-only/pi modes after review")
     group = p.add_mutually_exclusive_group()

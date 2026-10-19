@@ -7,6 +7,24 @@ METADATA = frozenset({'README.md', 'Makefile', 'SECURITY.md', '.editorconfig', '
 EXCLUDED = frozenset({'.git', 'node_modules', '__pycache__', '.pytest_cache', '.ruff_cache', '.venv', 'dist', 'build', 'private-validation', '.DS_Store'})
 PRIVATE = frozenset({'credentials.env', 'config.local.toml', 'installation.json', 'source-manifest.json', 'installation-checks.json'})
 
+#: Versioned schema for the offline source-gate report reused by core-only
+#: installation. Both scripts/check.py (producer) and scripts/install.py
+#: (consumer) bind to this exact version; a mismatch is stale, not compatible.
+OFFLINE_REPORT_VERSION = 1
+
+
+def source_manifest(root: Path):
+    """Shared distribution source manifest: contents plus executable bits."""
+    from mizu.fs import digest
+    return {relative.as_posix(): {"sha256": digest(path.read_bytes()), "executable": bool(path.stat().st_mode & 0o111)}
+            for relative, path in source_files(root)}
+
+
+def source_manifest_sha(root: Path) -> str:
+    """Digest binding an offline report to its exact shared source tree."""
+    from mizu.fs import canonical, digest
+    return digest(canonical(source_manifest(root)))
+
 
 def source_files(root: Path):
     files = []

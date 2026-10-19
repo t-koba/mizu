@@ -30,6 +30,43 @@ On Linux:
 ./scripts/test-install.sh
 ```
 
+`scripts/check.py` writes a versioned offline receipt (`report_version`,
+`mizu_version`, `source_sha256` over contents plus executable bits, exact
+`python`/`os`, exact `node_version`, canonical sorted `allowed_not_run` from
+the CLI, functional `bash_available`, `ok`, and the full `checks` array). The
+source digest is captured before validation and compared again after all checks;
+`source-manifest-stable` must pass, otherwise the report fails. JavaScript
+syntax check names include source-relative paths to avoid basename collisions.
+Core-only installation may reuse that receipt instead of running the nested
+staged gate a second time, only via an explicit handoff:
+
+```sh
+python3 scripts/check.py --report private-validation/offline.json --allow-not-run node-durable-contract-tests,node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests
+./scripts/test-install.sh private-validation/offline.json
+```
+
+Reuse is explicit and content-bound: `scripts/install.py --reuse-source-checks`
+is allowed only with `--core-only`, binds to the exact shared distribution
+source-manifest digest, exact Python version and OS, the versioned report
+schema, `ok: true`, passing `python-syntax`, `python-unit-and-contract-tests`,
+`node-transport-and-extension-tests`, `source-manifest-stable`, and the source
+tree's JavaScript/shell syntax checks. All three Pi SDK gates must be present,
+with either `pass` or an allowed `not_run` result: a real SDK pass is accepted.
+The requested `allowed_not_run` must exactly equal the sorted
+`staging_not_run_checks(core_only=True)` waiver set, even when SDK gates pass.
+The current Node version and functional Bash availability must also match the
+report. No other `not_run` is accepted except generic `shell-syntax` when the
+report records no functional Bash. Duplicate check names are rejected. Explicit
+reports must be regular files of at most 1 MiB, read boundedly before parsing.
+Stale, malformed, failed, incomplete, wrong-environment, or unexpected-waiver
+reports are rejected, and the staged-manifest equality check still runs. Without an
+explicit receipt the installer runs its full staged gate unchanged. The
+installation receipt records `checks_provenance` as `reused-source-gate` or
+`staged-gate` so reused evidence is never presented as having run inside the
+staged tree. Never substitute the general `offline.json` receipt implicitly;
+the CI core-installer step passes the prior report path explicitly, while a
+plain local `./scripts/test-install.sh` still executes the staged gate.
+
 On Windows without bash: run `python scripts/install.py --core-only ...` and test via `bin\mizu.cmd`. Missing bash marks shell-syntax checks as `not_run`; missing Node fails the suite. The Pi SDK, durable-contract, and reasoning-replay gates need the pinned adapter dependencies: absent dependencies fail closed with the provisioning remedy unless their exact gate is explicitly waived; a version mismatch always fails. Installer staging records mode-specific `not_run` waivers: core-only stages waive the Pi SDK, durable-contract, and replay gates because neither adapter is provisioned; full Pi stages run the Pi SDK contract gate against the installed `adapters/pi` and waive only durable-contract and replay, because `pi-durable` is not installed. The required `durable-contract` CI job provisions both pinned adapters from committed lockfiles in a network-enabled setup step, then runs all gates unwaived and offline; the CI matrix and installer-staging waivers are scoped fallbacks, not substitutes for that authoritative job. Podman and systemd validations only run on Linux.
 
 Offline tests require no API credentials, internet access, or running container daemons. The CI matrix targets Python 3.11–3.14; the recorded local result is Linux 3.14.
