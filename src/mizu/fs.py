@@ -304,8 +304,9 @@ def write_json(path: Path, value: Any, *, exclusive: bool = False) -> None:
 def read_json(path: Path, default: Any = None, *, max_bytes: int | None = None) -> Any:
     """Read a complete generation of atomically published managed JSON state.
 
-    Missing paths return default; sharing, permission and decoding errors do
-    not become missing state. No polling or retry is hidden in this primitive.
+    An overlapping atomic replacement returns a complete old or new generation.
+    Missing paths return default; sharing, permission and decoding errors
+    propagate. No polling or retry is hidden in this primitive.
     When ``max_bytes`` is given, never materialize more than that many bytes:
     larger files raise ``LimitExceeded`` before loading. Nonregular or
     hardlinked files and in-place changes during reading raise ``Denied``.

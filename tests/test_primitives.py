@@ -183,17 +183,21 @@ class FileTests(unittest.TestCase):
         opened = threading.Event()
         release = threading.Event()
 
-        def reader():
-            with _open_read(path) as stream:
-                opened.set()
-                if not release.wait(10):
-                    raise AssertionError("reader was not released")
-                return stream.read()
+        def retain_open(target):
+            # Gate the actual handle used by read_json, not a substitute reader.
+            stream = _open_read(target)
+            opened.set()
+            if not release.wait(10):
+                stream.close()
+                raise AssertionError("reader was not released")
+            return stream
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            retained = pool.submit(reader)
             try:
-                self.assertTrue(opened.wait(5), "reader did not open generation A")
+                with patch("mizu.fs._open_read", side_effect=retain_open):
+                    retained = pool.submit(read_json, path)
+                    self.assertTrue(opened.wait(5), "reader did not open generation A")
+                # Later opens use the real primitive without the retention gate.
                 # B must publish and be readable *before* A's handle closes.
                 write_json(path, new)
                 self.assertFalse(retained.done())
@@ -205,7 +209,7 @@ class FileTests(unittest.TestCase):
                 self.assertEqual(read_json(path), new)
             finally:
                 release.set()
-            self.assertEqual(retained.result(timeout=5), canonical(old))
+            self.assertEqual(retained.result(timeout=5), old)
         self.assertEqual(read_json(path), new)
         self.assertFalse(list(self.root.glob(".new-*")))
 
