@@ -323,6 +323,69 @@ class PublicationReceiptTests(PublishFixture):
                       "publication_id": req["publication_id"],
                       "published_sha": "b" * 40}), "", "exited", 0)
 
+    def test_publication_id_status_query_uses_receipt_sha_only(self):
+        config, role = with_caps(self, "worker", ["vcs_publish", "vcs_read"])
+        config = dataclasses.replace(config, vcs=adapter_settings(PUSH_OK))
+        code_digest = current_digest(self)
+        approval = approve(self, "main", code_digest)
+        source = self.source_commit
+        publisher = make_context(self, config, role)
+        receipt_store = Publication(self.project.root, source, code_digest, "main", "push")
+        publish_args = {"op": "push", "branch": "main"}
+        with patch.object(vcs, "run", side_effect=self.reply):
+            published = publisher.handle("vcs_publish", publish_args)
+        self.assertEqual(published["publication_id"], receipt_store.id)
+        self.assertEqual(published["approval"], approval["id"])
+
+        def status_adapter(_argv, **kwargs):
+            request = json.loads(kwargs["input_data"])
+            self.assertEqual(request, {"op": "status", "branch": "main", "sha": "b" * 40})
+            return Result(0, json.dumps({"checks": [
+                {"check": "required", "state": "success", "sha": "b" * 40},
+                {"check": "unrelated", "state": "failure", "sha": "c" * 40},
+            ]}), "", "exited", 0)
+
+        reader_config = dataclasses.replace(config, vcs=adapter_settings(READ_OK))
+        reader = make_context(self, reader_config, role)
+        with patch.object(vcs, "run", side_effect=status_adapter) as adapter:
+            observed = reader.handle("vcs_read", {"op": "status",
+                                                   "publication_id": receipt_store.id})
+        adapter.assert_called_once()
+        self.assertEqual(observed["branch"], "main")
+        self.assertEqual(observed["result"]["publication"], {
+            "publication_id": receipt_store.id, "source_commit": source,
+            "code_digest": code_digest, "branch": "main",
+            "published_sha": "b" * 40, "approval": approval["id"],
+            "run": publisher.run_dir.name})
+        checks = observed["result"]["checks"]
+        self.assertEqual([(row["check"], row["sha"]) for row in checks],
+                         [("required", "b" * 40)])
+        retained = json.loads((reader.run_dir / observed["evidence"]).read_text())
+        self.assertEqual(retained, observed)
+
+    def test_publication_id_status_rejects_overrides_and_invalid_receipt(self):
+        config, role = with_caps(self, "worker", ["vcs_publish", "vcs_read"])
+        config = dataclasses.replace(config, vcs=adapter_settings(PUSH_OK))
+        code_digest = current_digest(self)
+        approve(self, "main", code_digest)
+        publisher = make_context(self, config, role)
+        store = Publication(self.project.root, self.source_commit, code_digest, "main", "push")
+        with patch.object(vcs, "run", side_effect=self.reply):
+            publisher.handle("vcs_publish", {"op": "push", "branch": "main"})
+        reader = make_context(self, dataclasses.replace(config, vcs=adapter_settings(READ_OK)), role)
+        with patch.object(vcs, "run") as adapter:
+            with self.assertRaisesRegex(Denied, "no branch, sha"):
+                reader.handle("vcs_read", {"op": "status", "publication_id": store.id,
+                                             "branch": "main"})
+            adapter.assert_not_called()
+        receipt = json.loads(store.path("receipt").read_text())
+        receipt["published_sha"] = "invalid"
+        store.path("receipt").write_text(json.dumps(receipt))
+        with patch.object(vcs, "run") as adapter:
+            with self.assertRaisesRegex(Denied, "Invalid publication receipt"):
+                reader.handle("vcs_read", {"op": "status", "publication_id": store.id})
+            adapter.assert_not_called()
+
     def test_receipt_fields_stable_identity_and_cross_run_replay(self):
         ctx, store, approval, args = self.publication()
         def dispatch(*argv, **kwargs):

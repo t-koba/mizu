@@ -1322,7 +1322,9 @@ class Context:
         # Read-only VCS view: CI status, logs, PR comments, external
         # proposals, and CI-recorded artifact files via the trusted
         # adapter. Never publishes; mutating ops are refused here even if
-        # the adapter would serve them. Requires a visible workspace.
+        # the adapter would serve them. Requires a visible workspace. A
+        # publication_id is a status-only locator resolved through the
+        # validated durable receipt; callers cannot override its branch/SHA.
         # Branch stays required for addressed reads
         # (status/log/comments/artifacts/artifact) inside read_via;
         # proposals enumerate with an optional branch filter; acquire
@@ -1333,10 +1335,18 @@ class Context:
         if self.role.workspace == "none":
             raise Denied("This role has no workspace")
         params = {}
-        if "branch" in args:
-            params["branch"] = args["branch"]
-        if "sha" in args:
-            params["sha"] = args["sha"]
+        publication = None
+        if "publication_id" in args:
+            if args["op"] != "status" or set(args) != {"op", "publication_id"}:
+                raise Denied("publication_id status reads take no branch, sha, or other filters")
+            publication = Publication.read_receipt(self.project.root, args["publication_id"])
+            params["branch"] = publication["branch"]
+            params["sha"] = publication["published_sha"]
+        else:
+            if "branch" in args:
+                params["branch"] = args["branch"]
+            if "sha" in args:
+                params["sha"] = args["sha"]
         if "id" in args:
             params["id"] = args["id"]
         if "cursor" in args:
@@ -1352,8 +1362,18 @@ class Context:
                              cancel=self.tools_cancelled)
         except OSError as exc:
             raise Denied(f"VCS read is unavailable: {exc}") from exc
+        if publication is not None:
+            data = {**data, "publication": {
+                "publication_id": publication["publication_id"],
+                "source_commit": publication["source_commit"],
+                "code_digest": publication["code_digest"],
+                "branch": publication["branch"],
+                "published_sha": publication["published_sha"],
+                "approval": publication["approval"],
+                "run": publication["run"],
+            }}
         evidence_id, evidence = self._new_invocation_evidence("vcs-read")
-        record = {"op": args["op"], "branch": args.get("branch"), "trust": "external-untrusted",
+        record = {"op": args["op"], "branch": params.get("branch"), "trust": "external-untrusted",
                   "evidence_id": evidence_id, "evidence": evidence, "result": data}
         write_json(self.run_dir / evidence, record)
         return record

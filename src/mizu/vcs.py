@@ -749,7 +749,8 @@ def read_via(settings: dict, op: str, params: dict, *, cancel=lambda: False) -> 
 
     Schema: ``params`` must include ``branch`` for addressed reads
     (``status``/``log``/``comments``/``artifacts``/``artifact``);
-    optional ``sha`` passes through when given. ``proposals`` enumerates
+    optional ``sha`` passes through when given, and status rows for other
+    SHAs are filtered out. ``proposals`` enumerates
     with an optional ``branch`` filter. ``acquire`` takes ``id``
     (proposal id), the exact head ``sha``, and the explicit content
     ``scope`` (``"head"`` for the head commit only, ``"full"`` for the
@@ -878,7 +879,12 @@ def read_via(settings: dict, op: str, params: dict, *, cancel=lambda: False) -> 
         request["sha"] = sha
     data = invoke(settings, request, cancel=cancel)
     if op == "status":
-        return {"op": op, "branch": branch, "checks": parse_status_checks(data),
+        checks = parse_status_checks(data)
+        if sha is not None:
+            # An adapter may return a branch rollup with checks for other
+            # commits; never let those rows satisfy an exact-SHA query.
+            checks = [row for row in checks if row["sha"] == sha]
+        return {"op": op, "branch": branch, "checks": checks,
                 "trust": "external-untrusted"}
     if op == "proposals":
         complete = data.get("complete", None)

@@ -96,6 +96,51 @@ class Publication:
         sync_dir(self.root.parent)
         sync_dir(self.root.parent.parent)
 
+    @classmethod
+    def read_receipt(cls, project_root: Path, publication_id: str) -> dict:
+        """Read and validate one completed receipt by its stable ID.
+
+        This is a bounded, no-follow read only: missing or uncertain publication
+        evidence is refused, never reconstructed from a branch head.
+        """
+        if not isinstance(publication_id, str) or not DIGEST.fullmatch(publication_id):
+            raise Denied("Invalid publication ID")
+        store = cls.__new__(cls)
+        store.id = publication_id
+        store.root = Path(project_root) / "evidence" / "publications"
+        store.identity = None
+        store._check_directories()
+        intent = store._read("intent")
+        dispatched = store._read("dispatch")
+        receipt = store._read("receipt")
+        if intent is None or dispatched is None or receipt is None:
+            raise Denied(f"Publication receipt unavailable or unresolved: {publication_id}")
+        from .vcs import PUBLISH_OPS, check_branch
+        fields = {"source_commit", "code_digest", "branch", "op", "schema",
+                  "publication_id", "approval", "run"}
+        if set(intent) != fields:
+            raise Denied(f"Invalid publication intent: {publication_id}")
+        identity = {key: intent[key] for key in ("source_commit", "code_digest", "branch", "op")}
+        if (type(intent.get("schema")) is not int or intent.get("schema") != 1
+                or intent.get("publication_id") != publication_id
+                or not isinstance(identity["source_commit"], str)
+                or not SHA.fullmatch(identity["source_commit"])
+                or not isinstance(identity["code_digest"], str)
+                or not DIGEST.fullmatch(identity["code_digest"])
+                or not isinstance(identity["op"], str) or identity["op"] not in PUBLISH_OPS
+                or digest(canonical(identity)) != publication_id):
+            raise Denied(f"Invalid publication identity: {publication_id}")
+        check_branch(identity["branch"])
+        identifier(intent["approval"])
+        identifier(intent["run"])
+        if dispatched != {"publication_id": publication_id}:
+            raise Denied(f"Invalid publication dispatch marker: {publication_id}")
+        published_sha = receipt.get("published_sha")
+        if (not isinstance(published_sha, str) or not SHA.fullmatch(published_sha)
+                or receipt != {**intent, "published_sha": published_sha}):
+            raise Denied(f"Invalid publication receipt: {publication_id}")
+        return receipt
+
     def prepare(self, approval: str, run: str) -> tuple[dict, dict | None]:
         """Reuse intent/receipt; refuse any uncertain prior dispatch."""
         self._check_directories()
