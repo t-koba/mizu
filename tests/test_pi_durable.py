@@ -1236,17 +1236,26 @@ class StoreTests(unittest.TestCase):
             self.assertIsInstance(resumed.exception, ConfigError)
             conn.close()
 
-    def test_retention_keeps_unfinished_and_unknown(self):
+    def test_retention_keeps_unfinished_and_unverifiable(self):
         import tempfile, time
         from pathlib import Path
         with tempfile.TemporaryDirectory() as td:
             conn = open_store(Path(td) / "s.sqlite")
             old = time.time() - 90 * 86400
-            for key, status in (("done", "completed"), ("active", "active"), ("broken", "completed")):
+            rows = (
+                ("done", "completed", '{"x":1}'),
+                ("active", "active", None),
+                ("unknown-turn", "completed", '{"x":1}'),
+                ("future-turn", "completed", '{"x":1}'),
+                ("missing-result", "completed", None),
+                ("malformed-result", "completed", "not-json"),
+            )
+            for key, status, result in rows:
                 conn.execute("INSERT INTO durable_runs(run_key, session_key, project, role, grant_digest, status, created_at, updated_at, result_json) VALUES(?,?,?,?,?,?,?,?,?)",
-                             (key, "s", "p", "r", "g", status, old, old, '{"x":1}' if status != "active" else None))
-            conn.execute("INSERT INTO durable_turns(run_key, seq, kind, payload_json, state) VALUES(?,?,?,?,?)",
-                         ("broken", 1, "prompt", '{"a":1}', "unknown"))
+                             (key, "s", "p", "r", "g", status, old, old, result))
+            for key, state in (("unknown-turn", "unknown"), ("future-turn", "future-pending")):
+                conn.execute("INSERT INTO durable_turns(run_key, seq, kind, payload_json, state) VALUES(?,?,?,?,?)",
+                             (key, 1, "prompt", '{"a":1}', state))
             conn.commit()
             candidates = retention_candidates(conn, retention_days=31, now=time.time())
             self.assertEqual(candidates, ["done"])
@@ -1256,8 +1265,8 @@ class StoreTests(unittest.TestCase):
             applied = prune(conn, candidates, dry_run=False)
             self.assertEqual(applied["removed"], ["done"])
             self.assertIsNone(load_run(conn, "done"))
-            self.assertIsNotNone(load_run(conn, "active"))
-            self.assertIsNotNone(load_run(conn, "broken"))
+            for key in ("active", "unknown-turn", "future-turn", "missing-result", "malformed-result"):
+                self.assertIsNotNone(conn.execute("SELECT 1 FROM durable_runs WHERE run_key=?", (key,)).fetchone())
             conn.close()
 
 

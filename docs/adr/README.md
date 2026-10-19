@@ -187,7 +187,9 @@ session record is removed, so a failed transition never silently resumes
 the prior conversation, and an abandoned generation store is retired only
 after it verifies as terminal (every run settled, no started/unknown
 turn) — active, unknown-completion, corrupt, or uninspectable stores are
-retained for the operator while time-based reaping stays per-store.
+retained for the operator. Time-based reaping stays per-store and likewise
+requires known terminal run/turn states and a recorded, valid result; otherwise
+the store remains available as recovery evidence.
 
 ## ADR-029 — Budget day follows the configured timezone
 Day-files name the date in `timezone` (UTC default unchanged when unset) via

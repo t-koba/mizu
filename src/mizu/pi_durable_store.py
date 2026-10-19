@@ -286,22 +286,39 @@ def project_context(conn: sqlite3.Connection, run_key: str, max_bytes: int = 655
 def retention_candidates(conn: sqlite3.Connection, *, retention_days: int, now: float | None = None) -> list[str]:
     """Terminal-store candidates older than retention_days.
 
-    Unfinished (active) and unknown-completion runs are always retained;
-    only terminal completed/cancelled/interrupted runs with a recorded
-    result are candidates. 0 disables time-based reaping.
+    Unfinished, unknown, or otherwise unverifiable runs are always retained;
+    candidates need a known terminal run and turn state plus a recorded,
+    bounded JSON-object result. 0 disables time-based reaping.
     """
     if not retention_days:
         return []
     now = time.time() if now is None else now
     cutoff = now - retention_days * 86400
-    rows = conn.execute("SELECT run_key FROM durable_runs WHERE status IN ('completed','cancelled','interrupted') AND updated_at < ?",
-                        (cutoff,)).fetchall()
-    # Reference protection: runs still carrying unfinished turns stay.
+    rows = conn.execute(
+        "SELECT run_key FROM durable_runs "
+        "WHERE status IN ('completed','cancelled','interrupted') "
+        "AND result_json IS NOT NULL AND updated_at < ?", (cutoff,)).fetchall()
+    # Reference protection: unknown/future turn states and incomplete results
+    # remain recovery evidence, just as they do during generation pruning.
+    terminal_placeholders = ",".join("?" for _ in _TERMINAL_TURN)
     kept = []
     for (key,) in rows:
-        pending = conn.execute("SELECT COUNT(*) FROM durable_turns WHERE run_key=? AND state IN ('started','unknown')",
-                               (key,)).fetchone()[0]
-        if pending == 0:
+        result_row = conn.execute("SELECT result_json FROM durable_runs WHERE run_key=?", (key,)).fetchone()
+        if result_row is None or not isinstance(result_row[0], str):
+            continue
+        result_json = result_row[0]
+        try:
+            if len(result_json.encode("utf-8")) > MAX_PAYLOAD_BYTES:
+                continue
+            if not isinstance(json.loads(result_json), dict):
+                continue
+        except (UnicodeEncodeError, ValueError, RecursionError):
+            continue
+        unsettled = conn.execute(
+            f"SELECT 1 FROM durable_turns WHERE run_key=? "
+            f"AND (state IS NULL OR state NOT IN ({terminal_placeholders})) LIMIT 1",
+            (key, *_TERMINAL_TURN)).fetchone()
+        if unsettled is None:
             kept.append(key)
     return sorted(kept)
 
