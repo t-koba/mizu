@@ -42,6 +42,7 @@ from .protocol import DEFINITIONS, validate
 from .report import previous as _previous_report, publish
 from .sandbox import Sandbox, cleanup
 from . import vcs as _vcs
+from . import scheduling as _scheduling
 from . import materialize as _materialize
 from .web import Web
 from .web_worker import bounded
@@ -3284,28 +3285,49 @@ class Engine:
                 ci_failures = _ci_due_for(project, self.config, role, _ci_snapshot_id, time.time())
             except Exception:
                 ci_failures = []
-            if event_trigger and not substantive_events and not terminal_events and not wait_events and not ci_failures:
-                return {"skipped": "no-event", "snapshot": snapshot["id"],
-                        "code_digest": snapshot["code_digest"]}
+            if event_trigger:
+                event_gate = _scheduling.evaluate_dispatch(_scheduling.DispatchFacts(
+                    event_trigger=True,
+                    has_decision=bool(substantive_events),
+                    has_work_item=bool(terminal_events),
+                    has_wait=bool(wait_events),
+                    has_ci=bool(ci_failures),
+                ))
+                if event_gate.skipped == "no-event":
+                    return {"skipped": "no-event", "snapshot": snapshot["id"],
+                            "code_digest": snapshot["code_digest"]}
             # Writable roles consume these generations in their next snapshot.
             # Read-only on-change roles keep their code/event cursor semantics;
             # they cannot acknowledge snapshot-wide input by publishing.
             goal_changed = digest(project.goal.encode()) != snapshot["goal_digest"]
             inbox_changed = project.insights.generation() != snapshot.get("inbox_seen", "")
             operator_woke = project.control().get("wake_generation", "") != snapshot.get("wake_generation", "")
+            _dispatch_now = time.time()
             prior_wait_expired = (snapshot.get("outcome") == "wait"
                                   and snapshot.get("wake_at") is not None
-                                  and time.time() >= snapshot["wake_at"])
-            explicit_wake = role.workspace == "write" and (
-                goal_changed or operator_woke or inbox_changed or prior_wait_expired)
+                                  and _dispatch_now >= snapshot["wake_at"])
             progress_self_admits = False
             if (role.workspace == "write" and snapshot.get("outcome") in ("continue", "bounded")
                     and snapshot.get("progress") is not None):
                 disposition = progress_disposition(snapshot["progress"], snapshot["outcome"],
                                                    self.config, role_name)
                 progress_self_admits = disposition != "parked_no_progress"
-            if (code_unchanged and not substantive_events and not terminal_events and not wait_events and not ci_failures
-                    and not explicit_wake and not progress_self_admits):
+            _dispatch = _scheduling.evaluate_dispatch(_scheduling.DispatchFacts(
+                event_trigger=bool(event_trigger),
+                on_change=bool(role.on_change),
+                code_unchanged=bool(code_unchanged),
+                workspace_write=role.workspace == "write",
+                has_decision=bool(substantive_events),
+                has_work_item=bool(terminal_events),
+                has_wait=bool(wait_events),
+                has_ci=bool(ci_failures),
+                goal_changed=bool(goal_changed),
+                inbox_changed=bool(inbox_changed),
+                operator_woke=bool(operator_woke),
+                wait_expired=bool(prior_wait_expired),
+                progress_self_admits=bool(progress_self_admits),
+            ))
+            if _dispatch.skipped == "unchanged":
                 return {"skipped": "unchanged", "snapshot": snapshot["id"],
                         "code_digest": snapshot["code_digest"]}
             # Pre-execution selection probe: evaluate before allocating a run
@@ -3350,28 +3372,7 @@ class Engine:
             workspace = project.workspace if role.workspace == "write" else run_dir / "input"
             try:
                 write_json(active, {"run": run_id, "role": role_name, "started_at": now()})
-                if code_unchanged and (substantive_events or terminal_events or wait_events or ci_failures):
-                    if substantive_events:
-                        admission = "decision"
-                    elif terminal_events:
-                        admission = "work_item"
-                    elif wait_events:
-                        admission = "wait"
-                    else:
-                        admission = "ci"
-                elif event_trigger and (substantive_events or terminal_events or wait_events or ci_failures):
-                    if substantive_events:
-                        admission = "decision"
-                    elif terminal_events:
-                        admission = "work_item"
-                    elif wait_events:
-                        admission = "wait"
-                    else:
-                        admission = "ci"
-                elif role.on_change:
-                    admission = "change"
-                else:
-                    admission = "schedule"
+                admission = _dispatch.admission
                 _ci_wake_branches = effective_ci_wake_branches(self.config)
                 if ci_present:
                     try:
@@ -4277,55 +4278,70 @@ def _progress_record(snapshot: dict, role_name: str, selected: tuple[str, ...],
 
 def should_run(project: Project, snapshot: dict, current_time: float | None = None,
                role_name: str | None = None, config=None) -> bool:
-    """Apply explicit wakes, then the configured no-progress self-admission guard.
+    """Collect daemon signals lazily, following the pure due evaluator's order.
 
-    Legacy snapshots without progress retain their former behavior. A current
-    matching record parks continue/bounded only after configured no-progress
-    continuation allowance; external wakes remain authoritative.
+    The evaluator names one next fact at a time. This preserves the old
+    short-circuit contract: done does not read inbox/events/CI/wake/progress,
+    and a higher-priority wake does not probe lower-priority stores.
     """
     current_time = time.time() if current_time is None else current_time
     control = project.control()
-    if not control.get("armed") or control.get("paused") or control.get("draining"):
-        return False
-    if digest(project.goal.encode()) != snapshot["goal_digest"]:
-        return True
-    if control.get("wake_generation", "") != snapshot.get("wake_generation", ""):
-        return True
-    outcome = snapshot["outcome"]
-    if outcome == "done":
-        return False  # A completed objective needs an explicit wake or changed goal.
-    if project.insights.generation() != snapshot.get("inbox_seen", ""):
-        return True
-    if _role_events_due(project, snapshot, role_name):
-        return True
-    try:
-        effective = config if config is not None else getattr(project, "config", None)
-        if role_name is not None and not _ci_wake_enabled(effective, role_name):
-            pass
-        elif role_name is not None:
-            _snapshot_id = snapshot.get("id") if isinstance(snapshot, dict) else None
-            if _ci_due_for(project, effective, role_name, _snapshot_id, current_time):
-                return True
-        elif wake_ci_failures(project, effective):
-            return True
-    except Exception:
-        pass
-    if outcome == "wait" and snapshot.get("wake_at") is not None and current_time >= snapshot["wake_at"]:
-        return True
-    if outcome not in ("continue", "bounded"):
-        return False
-    if "progress" not in snapshot or role_name is None:
-        return True
-    progress = snapshot["progress"]
-    try:
-        validate_progress(progress)
-    except Denied:
-        # Snapshots.get rejects malformed persisted records; fail closed for
-        # direct projections rather than treating corrupt evidence as legacy.
-        return False
-    effective = config if config is not None else getattr(project, "config", None)
-    disposition = progress_disposition(progress, outcome, effective, role_name, current_time)
-    return disposition != "parked_no_progress"
+    facts = _scheduling.DaemonFacts(
+        armed=bool(control.get("armed")),
+        paused=bool(control.get("paused")),
+        draining=bool(control.get("draining")),
+    )
+    decision = _scheduling.evaluate(facts)
+    while decision.ready is None:
+        needed = decision.needed
+        if needed == "goal_changed":
+            value = digest(project.goal.encode()) != snapshot["goal_digest"]
+        elif needed == "operator_woke":
+            value = control.get("wake_generation", "") != snapshot.get("wake_generation", "")
+        elif needed == "outcome":
+            value = snapshot["outcome"]
+        elif needed == "inbox_changed":
+            value = project.insights.generation() != snapshot.get("inbox_seen", "")
+        elif needed == "routed_events_due":
+            value = _role_events_due(project, snapshot, role_name)
+        elif needed == "ci_due":
+            try:
+                effective = config if config is not None else getattr(project, "config", None)
+                if role_name is not None and not _ci_wake_enabled(effective, role_name):
+                    value = False
+                elif role_name is not None:
+                    _snapshot_id = snapshot.get("id") if isinstance(snapshot, dict) else None
+                    value = bool(_ci_due_for(project, effective, role_name, _snapshot_id, current_time))
+                else:
+                    value = bool(wake_ci_failures(project, effective))
+            except Exception:
+                value = False
+        elif needed == "wait_expired":
+            value = (snapshot.get("outcome") == "wait"
+                     and snapshot.get("wake_at") is not None
+                     and current_time >= snapshot["wake_at"])
+        elif needed == "progress_admits":
+            if "progress" not in snapshot or role_name is None:
+                value = True
+            else:
+                progress = snapshot["progress"]
+                try:
+                    validate_progress(progress)
+                except Denied:
+                    # Snapshots.get rejects malformed persisted records; fail
+                    # closed for direct projections rather than treating corrupt
+                    # evidence as a legacy snapshot.
+                    value = False
+                else:
+                    effective = config if config is not None else getattr(project, "config", None)
+                    disposition = progress_disposition(progress, snapshot["outcome"],
+                                                       effective, role_name, current_time)
+                    value = disposition != "parked_no_progress"
+        else:
+            raise RuntimeError(f"scheduler evaluator requested unknown fact: {needed!r}")
+        facts = dataclasses.replace(facts, **{needed: value})
+        decision = _scheduling.evaluate(facts)
+    return bool(decision.ready)
 
 
 def _wall(value):
