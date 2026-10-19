@@ -3223,22 +3223,24 @@ class Engine:
         context._slot_lease = True
 
     def run(self, project: Project, role_name: str, *, attributes=None, retry_busy: bool = False,
-                event_trigger: bool = False) -> dict:
+                event_trigger: bool = False, probes_serviced: bool = False) -> dict:
         if role_name not in project.roles:
             raise Denied("Role is not enabled for this project")
         role = self.config.roles[role_name]
         # Any top-level run services due recovery probes first — daemon,
         # one-shot, or smoke — so block recovery never depends on a resident
         # daemon for the sponsoring role or that role's execution mode. The
-        # daemon loop calls the same function before its readiness gate, so
-        # a ready daemon iteration may service twice; the second call is a
-        # no-op scan. Best-effort: probe failures never fail the run's own
-        # work, exactly like a skipped daemon iteration.
-        try:
-            from .probes import service_due as _service_due_probes
-            _service_due_probes(self.config, project.name, self.stop)
-        except (MizuError, OSError, ValueError):
-            pass
+        # daemon loop already attempts the same service before its readiness
+        # gate and passes probes_serviced=True, so a ready daemon iteration
+        # services at most one event per top-level run. Standalone and
+        # one-shot runs keep the default attempt. Best-effort: probe failures
+        # never fail the run's own work, exactly like a skipped daemon iteration.
+        if not probes_serviced:
+            try:
+                from .probes import service_due as _service_due_probes
+                _service_due_probes(self.config, project.name, self.stop)
+            except (MizuError, OSError, ValueError):
+                pass
         with contextlib.ExitStack() as stack:
             admission_elapsed = self._admit(project, role_name, role, stack, wait=retry_busy)
             project.insights.ingest_editor(keep_days=project.config.limits.retention_days)
@@ -4461,7 +4463,7 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                     ready = should_run(project, project.snapshots.get(), role_name=role_name) if role.workspace == "write" else (
                         project.control().get("armed") and not project.control().get("paused") and not project.control().get("draining"))
                     if ready and time.monotonic() >= ordinary_after:
-                        result = Engine(config, stop=stop).run(project, role_name)
+                        result = Engine(config, stop=stop).run(project, role_name, probes_serviced=True)
                         print(json.dumps(result, ensure_ascii=False), flush=True)
                         delay = config.limits.cooldown_seconds if role.workspace == "write" else config.limits.idle_seconds
                         if result.get("status") in ("waiting", "deferred"):

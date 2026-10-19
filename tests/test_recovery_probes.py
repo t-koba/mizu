@@ -714,6 +714,67 @@ class RecoveryProbeTests(SelectionFixture):
         self.assertEqual(len(probe_driver.calls), 1)
         self.assertEqual(self.contribution(action)['status'], 'recovered')
 
+    def test_ready_daemon_services_only_one_probe_before_run(self):
+        self.setup_probe()
+        # Second independently due contribution with a distinct run identity.
+        self.record_failure(self.first, run='failure-second', attempt=0, at=1000)
+        self.assertEqual(len(self.store.read()['contributions']), 2)
+        real_service = service_due
+        driver = ProbeDriver()
+        service_calls = []
+        def run_probe(config, project_name, stop):
+            service_calls.append(project_name)
+            result = real_service(config, project_name, stop, resolve=lambda profile: driver,
+                                  reload_config=lambda: self.config, at=1010)
+            stop.set()
+            return result
+        # A ready daemon iteration must service exactly one due contribution
+        # before the ordinary run and mark the attempt so Engine.run does not
+        # service a second one in the same top-level iteration.
+        with patch('mizu.runtime.load', return_value=self.config), \
+             patch('mizu.runtime.vcs_poll_enabled', return_value=False), \
+             patch('mizu.probes.service_due', run_probe), \
+             patch('mizu.runtime.should_run', return_value=True), \
+             patch('builtins.print'), \
+             patch.object(Engine, 'run', return_value={'status': 'completed'}) as run:
+            daemon(self.config, 'sample', 'worker')
+        self.assertEqual(service_calls, ['sample'])
+        self.assertEqual(len(driver.calls), 1)
+        statuses = sorted(c['status'] for c in self.store.read()['contributions'].values())
+        self.assertEqual(statuses, ['active', 'recovered'])
+        self.assertEqual(run.call_count, 1)
+        _, kwargs = run.call_args
+        self.assertTrue(kwargs.get('probes_serviced') is True)
+
+    def test_engine_run_probes_serviced_flag_skips_duplicate_service(self):
+        from support import ScriptDriver
+        import mizu.probes as probes_module
+        action = self.setup_probe()
+        probe_driver = ProbeDriver()
+        def main(context, prompt, profile):
+            context.handle('finish', {'outcome': 'wait', 'summary': 'one-shot work',
+                                      'state': 'Next step is explicit.'})
+        # Default (standalone/one-shot) still services exactly one due probe.
+        with patch('mizu.probes.driver_for', return_value=probe_driver), \
+             patch('mizu.probes.service_due', wraps=probes_module.service_due) as spy:
+            result = Engine(self.config, driver=ScriptDriver(main)).run(self.project, 'worker')
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(spy.call_count, 1)
+        self.assertEqual(len(probe_driver.calls), 1)
+        self.assertEqual(self.contribution(action)['status'], 'recovered')
+        # A daemon that already attempted service passes the flag so the
+        # Engine skips only the duplicate without changing ordinary work.
+        followup = self.record_failure(self.first, run='failure-followup', attempt=0, at=1000)
+        skipped_driver = ProbeDriver()
+        with patch('mizu.probes.driver_for', return_value=skipped_driver), \
+             patch('mizu.probes.service_due', wraps=probes_module.service_due) as skipped_spy:
+            skipped = Engine(self.config, driver=ScriptDriver(main)).run(
+                self.project, 'worker', probes_serviced=True)
+        self.assertEqual(skipped['status'], 'completed')
+        self.assertEqual(skipped_spy.call_count, 0)
+        self.assertEqual(skipped_driver.calls, [])
+        self.assertEqual(self.store.read()['contributions'][followup['contribution']]['status'], 'active')
+
     def test_oneshot_run_settles_expired_probe_upper_bound(self):
         from support import ScriptDriver
         action = self.setup_probe(upper=60)
