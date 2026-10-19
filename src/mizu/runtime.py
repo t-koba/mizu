@@ -44,6 +44,7 @@ from .sandbox import Sandbox, cleanup
 from . import vcs as _vcs
 from . import scheduling as _scheduling
 from . import materialize as _materialize
+from .publication import Publication, source_commit
 from .web import Web
 from .web_worker import bounded
 
@@ -1369,19 +1370,42 @@ class Context:
             raise Denied("Publication requires a representable snapshot")
         code_digest = captured["code_digest"]
         approval = _vcs.require_go_approval(self.project, args["branch"], code_digest)
-        before_invoke, observe = self._mutation_evidence(
-            "vcs-publish", args["op"],
-            {"branch": args["branch"], "code_digest": code_digest,
-             "approval": approval["insight"]})
         try:
-            data = _vcs.publish_via(self.config.vcs, args["op"], {"branch": args["branch"], "code_digest": code_digest},
-                                    cancel=self.tools_cancelled, before_invoke=before_invoke)
+            source = source_commit(self.workspace, cancel=self.tools_cancelled)
+            publication = Publication(self.project.root, source, code_digest,
+                                      args["branch"], args["op"])
+            with lock(publication.lock):
+                intent, receipt = publication.prepare(approval["insight"], self.run_dir.name)
+                before_local, observe = self._mutation_evidence(
+                    "vcs-publish", args["op"],
+                    {"branch": args["branch"], "code_digest": code_digest,
+                     "approval": approval["insight"], "source_commit": source,
+                     "publication_id": publication.id})
+
+                def before_invoke():
+                    before_local()
+                    publication.mark_dispatch()
+
+                if receipt is None:
+                    try:
+                        data = _vcs.publish_via(
+                            self.config.vcs, args["op"],
+                            {**publication.identity, "publication_id": publication.id},
+                            cancel=self.tools_cancelled, before_invoke=before_invoke)
+                    except (Denied, OSError) as exc:
+                        raise Denied(f"VCS publication {publication.id}: {exc}") from exc
+                    receipt = publication.complete(intent, data["published_sha"])
+                else:
+                    # Retain a run-local observation even on a durable replay.
+                    before_local()
+                    data = {"digest": code_digest, "publication_id": publication.id,
+                            "published_sha": receipt["published_sha"],
+                            "trust": "external-untrusted"}
         except OSError as exc:
             raise Denied(f"VCS publication is unavailable: {exc}") from exc
-        record = {"published": True, "op": args["op"], "branch": args["branch"],
-                  "code_digest": code_digest, "approval": approval["insight"],
-                  "trust": "external-untrusted",
-                  "result": data}
+        record = {**receipt, "published": True,
+                  "receipt": publication.path("receipt").relative_to(self.project.root).as_posix(),
+                  "trust": "external-untrusted", "result": data}
         return observe(record)
 
     def _op_vcs_retire(self, args: dict) -> dict:

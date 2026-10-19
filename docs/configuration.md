@@ -886,7 +886,61 @@ bad adapter cannot busy-loop.
 
 ## VCS publish (M2 step 1: `vcs_read`/`vcs_publish` behind `GO <branch>` approval)
 
-Same `[vcs]` adapter, with no publish-specific keys. `vcs_read` serves only `status`/`log`/`comments`/`proposals`/`acquire`/`artifacts`/`artifact` (addressed reads take `{"op", "branch", optional `"sha"`}; `proposals` enumerates with an optional `branch` filter; `acquire` takes `{"op", "id", "sha", "scope"}` with no branch; `artifacts` takes `{"op", "branch", optional `"sha"`}; `artifact` takes `{"op", "branch", "artifact", optional `"sha"`}`); `vcs_publish` serves only `push`/`pr` (`{"op", "branch", "digest"}`). Cross-path calls are `Denied` (`vcs_read cannot publish`). Host-side only, single invocation under `timeout_seconds`, stdout capped at `max_bytes`; results stay `external-untrusted` with per-invocation `vcs-read/` / `vcs-publish/` evidence files named in the response `evidence` path. Publish requests carry the approved `code_digest` as `digest`; the adapter must verify the pushed tree matches it before pushing and echo the same `digest` in its response, else the call is `Denied` (`must confirm the pushed code digest`).
+Same `[vcs]` adapter, with no publish-specific configuration keys.
+`vcs_read` serves only `status`/`log`/`comments`/`proposals`/`acquire`/`artifacts`/`artifact`;
+`vcs_publish` serves only `push`/`pr`. Cross-path calls are `Denied`
+(`vcs_read cannot publish`). Calls are host-side only, bounded by
+`timeout_seconds` and `max_bytes`, and adapter observations remain
+`external-untrusted`. Run-local `vcs-read/` and `vcs-publish/` evidence paths
+are named in tool responses.
+
+The `vcs_publish` tool input remains `{"op", "branch"}`. After checking the
+recorded human approval against the captured `code_digest`, Mizu reads the
+source commit from the local workspace's Git `HEAD` (not a branch-status
+observation). Missing Git, an unborn/unavailable HEAD, or a non-full SHA fails
+closed. The source commit is distinct from the approved content digest:
+uncommitted content still needs the exact digest approval, and the adapter
+must verify the tree it actually publishes.
+
+The adapter request is
+`{"op", "branch", "digest", "source_commit", "publication_id"}`. The source
+commit is 40 or 64 lowercase hex; `digest` and `publication_id` are 64 lowercase
+hex. `publication_id` is the SHA-256 of Mizu's canonical JSON bytes (sorted keys,
+compact UTF-8, trailing LF) for
+`{"source_commit", "code_digest", "branch", "op"}`. It excludes run and approval
+identity, so retries of the same request reuse the same ID. The adapter must
+verify the pushed tree matches `digest` before any external mutation, echo
+both `digest` and `publication_id`, and return `published_sha`: the exact
+published commit, 40 or 64 lowercase hex. Missing, mismatched, abbreviated or
+malformed values are refused. A later branch head or CI result never supplies
+a missing publication SHA.
+
+Durable project evidence lives outside the workspace at
+`evidence/publications/<publication_id>.{intent,dispatch,receipt}.json`.
+Records are create-only under a per-ID lock and bounded no-follow reads
+(8 KiB each). The schema-1 intent binds `publication_id`, `source_commit`,
+`code_digest`, `branch`, `op`, `approval` (human approval insight ID), and `run`
+(the originating run ID). Intent persistence must succeed before dispatch.
+Immediately before starting the adapter, Mizu persists the usual run-local
+unknown-outcome mutation evidence and a create-only dispatch marker containing
+`publication_id`. A validated adapter response permits a create-only receipt:
+the complete intent plus `published_sha`. This receipt is durable before the
+run-local final observation. Successful output exposes these receipt fields,
+`published: true`, the project-relative `receipt` path, run-local `evidence`
+identity, and `result` (the adapter response on first dispatch; validated
+identity/digest/SHA fields on replay).
+
+A receipt replay returns the original receipt identity without invoking the
+adapter, while still requiring current human approval/digest/workspace gates
+and recording a fresh run-local observation. An existing intent without a
+dispatch marker can safely resume with the same ID. Once a dispatch marker
+exists without a receipt, all retries refuse with the unresolved publication
+ID visible, including timeout, cancellation, invalid response, or receipt-write
+failure. This conservative boundary may leave an intent unresolved even if a
+crash occurred before the adapter started. There is no automatic retry or
+reconciliation operation in this slice; do not delete a marker to retry.
+Structured exact-SHA CI waits remain a later ADR-030 slice.
+
 
 `status` responses are normalized to `{op, branch, checks: [{check, state, sha, url?, run?}], trust}` (at most 1024 checks; `check` 1-256 chars, `state` 1-64 chars, `sha` 40/64 hex, `url` max 4096 chars, optional `run` 1-128 chars without newlines/NUL as the opaque adapter run identity, stable per CI run across polls; omit `run` when the adapter cannot report it, in which case wake stays sha-keyed); malformed shapes are `Denied`. `log`/`comments` pass through with `trust: external-untrusted`. `artifacts` responses are normalized to `{op, branch, sha?, artifacts: [{artifact, size?, digest?}], trust}` (at most 256 rows; `artifact` a relative Unix path 1-512 chars with no empty/`.`/`..` components, no leading slash, no backslashes; `size` an int >= 0 when present; `digest` 64 hex when present); `artifact` responses are normalized to `{op, branch, sha?, artifact, digest, content, trust}` (text at most 524288 chars, `digest` recomputed locally as sha256 over `fs.canonical(content)` like `acquire`; a name or digest mismatch is `Denied`). Results stay `external-untrusted`; an unconfigured adapter fails closed as today, and any role holding `vcs_read` with a visible workspace may use both ops. `proposals` responses are normalized to `{op, branch?, proposals: [{id, state, head, base, draft, mergeable?, checks?, reviews?, url?}], complete?, cursor?, trust}` (at most 256 proposals; `id` 1-128 chars, `state` `open`/`closed`/`merged`, endpoints live `{repo, ref, sha}` or explicit tombstones `{deleted: true, repo, ref}` for removed forks, `draft` bool, `mergeable` bool or unknown, CI check rows reused with each row keeping its own tested sha (rollup checks may run on a merge commit rather than the head sha, so the adapter omits rather than misattaches them), `reviews` at most 64 `{reviewer, verdict, sha}` rows (`approved`/`changes_requested`/`dismissed`, each bound to the exact revision reviewed; absent means unknown, never none), `url` max 4096 chars). The envelope may carry `complete` (bool) and an opaque `cursor` (max 256 chars) for truncated enumerations: callers resume with the cursor, observation flows on partial evidence, and safe mutation stays blocked while required evidence is unavailable. A missing or truncated row never implies terminal disposition; only a reported `state` does. Proposal observations are recorded as one deduplicated insight per proposal (`proposal-<32 hex>` from the proposal id): identical facts are a read-only no-op with no rev bump, while changed head/base/check/state facts revise the record (`record_proposal_state` returns `changed`). The body carries facts only, never per-run log URLs. Check details use a fixed 16-KiB UTF-8 budget; oversized sets retain a failure-first bounded preview plus a deterministic SHA-256 over all normalized check name/state/SHA facts, so omitted rows still trigger revisions and can be queried through `vcs_read proposals`. Missing rows in even a complete enumeration never imply closed, merged, or any other terminal state; only an explicit validated row can revise an existing record.
 

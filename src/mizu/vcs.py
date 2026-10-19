@@ -1234,15 +1234,15 @@ def publish_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
                 before_invoke=None) -> dict:
     """Invoke a mutating adapter operation (``push``/``pr``) after approval.
 
-    Schema: ``params`` must include ``branch`` and ``code_digest`` (64 hex
-    of the approved tree). The request sends ``digest`` alongside ``op``
-    and ``branch``; the adapter must verify the pushed tree matches it
-    before pushing and echo the same ``digest`` in its response. Bounds:
-    same contract as ``invoke``. Trust: operator-owned adapter only; the
-    caller must have passed ``require_go_approval`` first (this helper
-    checks the op gate, not the human record). Failure: ``Denied`` on
-    read-only/unknown ops, bad digest, or adapter violations including a
-    missing/mismatched digest echo.
+    Schema: ``params`` includes ``branch``, ``code_digest`` (64 lowercase
+    hex), ``publication_id`` (64 lowercase hex), and ``source_commit`` (full
+    40/64 lowercase hex). Request carries the approved digest as ``digest``;
+    adapter verifies the exact pushed tree and echoes both ``digest`` and
+    ``publication_id`` plus the exact ``published_sha`` (40/64 lowercase hex).
+    Bounds: same as ``invoke``. Trust: operator-owned adapter only; caller
+    must pass ``require_go_approval`` and durably record publication intent
+    first. Failure: ``Denied`` for invalid pins, operations or response;
+    dispatched failures remain unresolved in the caller's durable store.
     Optional ``before_invoke`` has the validation/dispatch contract of ``invoke``.
     """
     from .fs import DIGEST as _DIGEST
@@ -1255,12 +1255,25 @@ def publish_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
     code_digest = params.get("code_digest")
     if not isinstance(code_digest, str) or not _DIGEST.fullmatch(code_digest):
         raise Denied("Invalid code digest for publication")
-    data = invoke(settings, {"op": op, "branch": branch, "digest": code_digest},
+    publication_id = params.get("publication_id")
+    if not isinstance(publication_id, str) or not _DIGEST.fullmatch(publication_id):
+        raise Denied("Invalid publication ID")
+    source_commit = params.get("source_commit")
+    if not isinstance(source_commit, str) or not _SHA.fullmatch(source_commit):
+        raise Denied("Invalid source commit for publication")
+    data = invoke(settings, {"op": op, "branch": branch, "digest": code_digest,
+                             "publication_id": publication_id,
+                             "source_commit": source_commit},
                      cancel=cancel, before_invoke=before_invoke)
     if not isinstance(data, dict):
         raise Denied("VCS adapter must return a JSON object")
     if data.get("digest") != code_digest:
         raise Denied("VCS adapter must confirm the pushed code digest")
+    if data.get("publication_id") != publication_id:
+        raise Denied("VCS adapter must confirm the publication ID")
+    published_sha = data.get("published_sha")
+    if not isinstance(published_sha, str) or not _SHA.fullmatch(published_sha):
+        raise Denied("VCS adapter must return an exact published_sha")
     return {**data, "trust": "external-untrusted"}
 
 

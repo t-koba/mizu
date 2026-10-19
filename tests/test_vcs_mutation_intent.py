@@ -6,6 +6,8 @@ from unittest.mock import patch
 
 from support import Fixture
 import test_vcs_dispose as dispose
+from test_vcs_publish import init_publish_git
+from mizu.publication import Publication
 from mizu import fs, vcs
 from mizu.errors import Denied
 from mizu.process import Result
@@ -27,6 +29,7 @@ class MutationIntentTests(Fixture):
                     "owned_prefixes": ["mizu/"], "protected_refs": ["main"]}
         config = dataclasses.replace(config, vcs=settings)
         if capability == "vcs_publish":
+            source = init_publish_git(self)
             args = {"op": op, "branch": "mizu/" + op}
         elif op == "retire":
             args = {"branch": "mizu/x-1", "expected_sha": dispose.SHA_A}
@@ -42,6 +45,9 @@ class MutationIntentTests(Fixture):
                          if op == "merge" else {})
             approval = dispose.approve(self, args["branch"], code_digest, **endpoints)
             parameters.update(code_digest=code_digest, approval=approval["id"])
+        if capability == "vcs_publish":
+            publication = Publication(self.project.root, source, code_digest, args["branch"], op)
+            parameters.update(source_commit=source, publication_id=publication.id)
         ctx = dispose.make_context(self, config, role)
         return ctx, capability, args, {"op": op, "parameters": parameters}
 
@@ -57,7 +63,8 @@ class MutationIntentTests(Fixture):
     def reply(self, request, case):
         op = request["op"]
         if op in ("push", "pr"):
-            data = {"digest": request["digest"], "pushed": True}
+            data = {"digest": request["digest"], "pushed": True,
+                    "publication_id": request["publication_id"], "published_sha": dispose.SHA_A}
         elif op == "retire":
             data = {"branch": request["branch"], "sha": request["expected_sha"],
                     "deleted": True, "live_refs": []}

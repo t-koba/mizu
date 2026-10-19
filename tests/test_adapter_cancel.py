@@ -84,7 +84,8 @@ class AdapterCancelForwardingTests(unittest.TestCase):
         with patch.object(vcs, "run", boom):
             with self.assertRaises(Sentinel):
                 vcs.publish_via(settings, "push",
-                                {"branch": "mizu/x", "code_digest": "d" * 64},
+                                {"branch": "mizu/x", "code_digest": "d" * 64,
+                                 "publication_id": "e" * 64, "source_commit": "a" * 40},
                                 cancel=lambda: True)
             self.assertTrue(boom.kwargs["cancel"]())
 
