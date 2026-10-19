@@ -90,8 +90,10 @@ preflight and refuse nonempty or unsafe item slots, including orphan temporaries
 no existing record is overwritten.
 Null and parent origins never acquire an inferred submitter for terminal routing.
 See [the runtime and persistence contract](architecture.md) for validation,
-projection, history, event delivery, cancellation and backup behavior. This grant
-does not retire or change `Tasks:`/`Blocking:` policy/state semantics.
+projection, history, event delivery, cancellation and backup behavior. The
+work-item ledger is the single record of accepted and planned work, including
+blocked conditions; the finish outcome and structured wake source record why a
+unit stopped, while `Now`/`Next` are short working notes, not a parallel backlog.
 
 ## Root keys
 
@@ -254,7 +256,32 @@ Safety-critical bounds are fixed in code rather than exposed as configuration kn
 | **Completion** | `done` requires passing acceptance commands on the exact code digest (`runtime.py`) | always | Publication integrity floor: a goal cannot be declared done without binding proof to the final unchanged tree; never weakened to pass |
 | **Publication** | `vcs_publish` and merge in `vcs_dispose` require a recorded human `GO <branch>` approval | always | No autonomous external publication: pushes, PRs, and merges never run without recorded human approval behind the exact digest; standing grants never substitute |
 
-`on_change` is orthogonal to scheduling: it skips execution when the published `code_digest` is unchanged, so state-only republications do not reschedule it. An unacknowledged decision event routed to the role (`decision_events` in `own` mode, or any-source matches with `decision_sources = "any"` delivering once and admitting even deferrals), a terminal work-item event routed by `work_item_sources`, a due structured wait, or a red on the configured CI wake set admitted for a role with `ci_wake` is a distinct admission reason that unchanged-code suppression must not swallow. Event delivery reaches scheduling two ways: the writer daemon re-checks `should_run` against the event and wait stores every idle tick, and `mizu service` additionally renders file triggers for any non-daemon role with `decision_events` or `work_item_events`, with or without a schedule (systemd path units on Linux, `WatchPaths` on macOS), that invoke the same `mizu run` before the next interval; the timers keep their own schedules. An event-triggered dispatch with nothing due returns `skipped: no-event` without consuming anything; a non-event `on_change` dispatch with an unchanged `code_digest` reports `unchanged`. A role with neither a schedule nor event subscriptions stays explicit-run only. Linux event triggers keep systemd defaults with no trigger limit (`Type=oneshot` with `StartLimitIntervalSec=0` on the event service only): a burst may dispatch more than once, which is cheap because admission is state-based, while a trigger limit fails the path unit and stops dispatching until reset by hand. A role with `on_change` alone and no `daemon`/`interval_seconds`/`calendar` runs only via explicit `mizu run`.
+`on_change` is orthogonal to scheduling: it skips execution when the published
+`code_digest` is unchanged, so state-only republications do not reschedule it.
+An unacknowledged decision event routed to the role (`decision_events` in
+`own` mode, or any-source matches with `decision_sources = "any"` delivering
+once and admitting even deferrals), a terminal work-item event routed by
+`work_item_sources`, a due structured wait, a red on the configured CI wake set
+for a role with `ci_wake`, or ready work is a distinct admission reason that
+unchanged-code suppression must not swallow. Ready work is project-wide and
+write-only: any seeded `open`/`doing` item without a structured wait qualifies,
+and its admission still observes the writer's configured cooldown. See the
+[scheduling contract](scheduling.md) for precedence and the bounded prompt
+projection. Event delivery reaches scheduling two ways: the writer daemon
+re-checks `should_run` against event, wait, CI and ready-work state every idle
+tick, and `mizu service` additionally renders file triggers for any non-daemon
+role with `decision_events` or `work_item_events`, with or without a schedule
+(systemd path units on Linux, `WatchPaths` on macOS), that invoke the same
+`mizu run` before the next interval; the timers keep their own schedules. An
+event-triggered dispatch with nothing due returns `skipped: no-event` without
+consuming anything; a non-event `on_change` dispatch with an unchanged
+`code_digest` reports `unchanged`. A role with neither a schedule nor event
+subscriptions stays explicit-run only. Linux event triggers keep systemd
+defaults with no trigger limit (`Type=oneshot` with `StartLimitIntervalSec=0`
+on the event service only): a burst may dispatch more than once, which is
+cheap because admission is state-based, while a trigger limit fails the path
+unit and stops dispatching until reset by hand. A role with `on_change` alone
+and no `daemon`/`interval_seconds`/`calendar` runs only via explicit `mizu run`.
 
 ## Sandbox
 

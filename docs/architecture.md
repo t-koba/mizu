@@ -193,12 +193,20 @@ persistent conversation to a fresh generation on the next independently
 admitted dispatch after two empty `continue`/`bounded` units; it does not admit
 or schedule a run. `mizu status` exposes whether that recovery threshold is due
 and the count, so parked empty work is visible while awaiting its next trigger.
-Goal and
-operator wakes, new inbox generations, due decision/wait/CI events, and wait
-expiry are checked before this self-admission gate. Writable on-change roles
-honor these explicit wakes even with unchanged code; event-triggered dispatch
-still requires a subscribed substantive decision event, due wait, or due CI. Legacy snapshots without progress keep
-their previous admission behavior. Schema 1 records the six observed booleans,
+Goal and operator wakes and ready work are checked before the saved outcome;
+inbox generations, routed decision/terminal work-item events, due CI, waits,
+and wait expiry then precede progress self-admission. Ready work is a
+project-wide writable-role wake for a seeded `open`/`doing` item without a
+structured wait; it overrides a prior `done`, `wait` or no-progress park and
+appears in the bounded `ready_work` prompt projection with its ledger age. The
+no-progress park applies only when no ready item exists, and the configured
+writer cooldown still applies. Writable on-change roles honor these explicit
+wakes with unchanged code; event-triggered dispatch admits subscribed
+substantive decision or terminal work-item events and due waits/CI; writable
+roles also admit ready work. See [scheduling](scheduling.md) for the complete
+ordering.
+Legacy snapshots without progress keep their previous admission behavior.
+Schema 1 records the six observed booleans,
 the selected signal names, role ID, aggregate progress boolean, saturated
 no-progress count (0–101), and a timezone-aware timestamp. The snapshot digest
 binds the record. A malformed progress object makes the snapshot unavailable
@@ -323,9 +331,12 @@ The separately granted `work_items_create` operation calls
 `Project.work_items.create(*, idempotency_key, title, actor, origin=None)` for
 self-directed work and splits. The runtime binds `actor` to the role, never a
 model argument. The example grants it only to `worker`; consultation and
-delegation children explicitly forbid it. It has no scheduling, assignment,
-insight-decision or publication effects. `Tasks:`/`Blocking:` policy and state
-semantics are unchanged by this capability.
+delegation children explicitly forbid it. Creation itself does not assign work,
+make an insight decision or publish; the independent writer readiness gate may
+admit a run for ready work, as described in [scheduling](scheduling.md). The
+work-item ledger is the single record of accepted and planned work, including
+blocked conditions; the finish outcome and structured wake source record why a
+unit stopped, while `Now`/`Next` are short working notes, not a second backlog.
 
 Required arguments are `idempotency_key` (1–128 characters) and `title` (1–200).
 Optional `origin` is exactly `{"insight_id": <id>, "rev": <positive int>}` or
