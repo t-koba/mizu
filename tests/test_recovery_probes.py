@@ -891,7 +891,9 @@ class RecoveryProbeTests(SelectionFixture):
 
     def test_long_running_probe_events_and_ordinary_successes_stay_bounded(self):
         action = self.setup_probe()
-        for index in range(20):
+        # One overflow beyond the eight-event history bound exercises pruning;
+        # extra retries repeat the same disk-heavy path without adding coverage.
+        for index in range(8):
             result, _ = self.service(ProbeDriver(admitted=False, challenge=False), at=1010 + index * 10)
             self.assertEqual(result['status'], 'failure')
         seen = []
