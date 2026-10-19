@@ -290,6 +290,32 @@ class StorageReclaimTests(Fixture):
         with self.assertRaises(Denied):
             reclaim(self.project, apply=True)
 
+    def test_integrity_invalid_live_manifest_blocks_reclaim_of_referenced_objects(self):
+        manifest = self.project.snapshots.get()
+        live = manifest["id"]
+        manifest_path = self.project.root / "snapshots" / f"{live}.json"
+        original_objects = {
+            entry["sha256"]: (self.project.root / "objects" / entry["sha256"]).read_bytes()
+            for entry in manifest["files"].values()
+        }
+        self.assertTrue(original_objects)
+        manifest["files"] = {}
+        write_json(manifest_path, manifest)
+
+        with self.assertRaisesRegex(Denied, "Snapshot integrity failure"):
+            self.project.snapshots.get(live)
+        self.project.set_control(paused=True)
+        preview = reclaim(self.project)
+        self.assertEqual(preview["manifest_skipped"], 1)
+        self.assertEqual(audit(self.project)["snapshots"]["skipped"], 1)
+        for sha in original_objects:
+            self.assertIn(f"objects/{sha}", preview["objects"])
+        with self.assertRaisesRegex(Denied, "snapshot manifest"):
+            reclaim(self.project, apply=True)
+        self.assertTrue(manifest_path.is_file())
+        for sha, data in original_objects.items():
+            self.assertEqual((self.project.root / "objects" / sha).read_bytes(), data)
+
     def test_oversized_live_manifest_blocks_reclaim_of_referenced_objects(self):
         live = self.project.snapshots.get()["id"]
         manifest_path = self.project.root / "snapshots" / f"{live}.json"

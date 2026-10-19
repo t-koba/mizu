@@ -631,20 +631,16 @@ def _audit_collect(project: Project) -> dict:
             except OSError:
                 manifest_skipped += 1
                 continue
-            record = _audit_json(child)
-            if not isinstance(record, dict) or not isinstance(record.get("files"), dict):
+            record, skipped = _audit_ref_dict(root, child)
+            # These files were enumerated as manifests, so even a raced
+            # disappearance makes object reachability incomplete.
+            if skipped or record is None:
                 manifest_skipped += 1
                 continue
+            project.snapshots.validate_manifest(sid, record)
             manifests[sid] = record
-            shapes: set[str] = set()
-            for entry in record["files"].values():
-                if not isinstance(entry, dict):
-                    continue
-                sha = _audit_digest(entry.get("sha256"))
-                if sha is not None:
-                    shapes.add(sha)
-            manifest_objects[sid] = shapes
-        except OSError:
+            manifest_objects[sid] = {entry["sha256"] for entry in record["files"].values()}
+        except (OSError, Denied, LimitExceeded, ValueError, TypeError, RecursionError):
             manifest_skipped += 1
     # Count unique record/scan paths, including a generation checked both as
     # a durable reference source and as the active publication history.

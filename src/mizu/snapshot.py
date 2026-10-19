@@ -510,6 +510,16 @@ class Snapshots:
         record = read_json(self.root / "snapshots" / f"{snapshot_id}.json")
         if record is None:
             raise Denied("Snapshot not found")
+        return self.validate_manifest(snapshot_id, record)
+
+    def validate_manifest(self, snapshot_id: str, record: dict) -> dict:
+        """Validate an already-read manifest against its content-addressed ID.
+
+        Uses this store's path policy and file bounds without reading disk.
+        Callers are responsible for bounding and safely reading the record.
+        """
+        if not isinstance(snapshot_id, str) or not DIGEST.fullmatch(snapshot_id):
+            raise Denied("Invalid snapshot ID")
         if not isinstance(record, dict):
             raise Denied("Invalid snapshot record")
         body = {k: v for k, v in record.items() if k != "id"}
