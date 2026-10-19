@@ -6,6 +6,8 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { register } from '../adapters/pi/register.mjs';
+import { buildBridgeTools } from '../adapters/pi-durable/launcher.mjs';
 
 // Resolve each adapter's own installed copy, not an unrelated top-level SDK.
 // These are the JS entry points named by the packages' public export maps.
@@ -19,6 +21,20 @@ const thinking = id => [
 ];
 const text = value => ({ type: 'text', text: value });
 const reasoningBlocks = blocks => blocks.filter(b => ['thinking', 'redacted_thinking'].includes(b.type));
+
+const bridgeTool = { name: 'mizu_probe', operation: 'contract_probe', description: 'Offline host tool',
+  inputSchema: { type: 'object', properties: { marker: { type: 'string' } }, required: ['marker'] } };
+const hostResult = { text: 'Distinctive host-tool result: 雪 🧭 / Mizu 1.3 boundary', value: 73013 };
+const toolInput = { marker: 'host-call-73013' };
+
+function assertHostOutput(payload) {
+  const outputs = payload.messages.flatMap(m => Array.isArray(m.content) ? m.content : [])
+    .filter(b => b.type === 'tool_result' && b.tool_use_id === 'probe-call');
+  assert.equal(outputs.length, 1, 'host tool output appears once in the next actual provider request');
+  assert.ok(!outputs[0].is_error, 'host tool succeeded');
+  assert.equal(outputs[0].content, JSON.stringify(hostResult),
+    'production adapter preserves distinctive host result text through the real SDK serializer');
+}
 
 function assertReplay(payload, expected) {
   const assistants = payload.messages.filter(m => m.role === 'assistant');
@@ -36,7 +52,14 @@ function sse(model, blocks) {
   const events = [{ type: 'message_start', message: { id: 'fixture-response', type: 'message',
     role: 'assistant', model, content: [], usage: { input_tokens: 10, output_tokens: 0 } } }];
   for (const [index, content_block] of blocks.entries()) {
-    events.push({ type: 'content_block_start', index, content_block }, { type: 'content_block_stop', index });
+    if (content_block.type === 'tool_use') {
+      events.push({ type: 'content_block_start', index, content_block: { ...content_block, input: {} } },
+        { type: 'content_block_delta', index,
+          delta: { type: 'input_json_delta', partial_json: JSON.stringify(content_block.input) } });
+    } else {
+      events.push({ type: 'content_block_start', index, content_block });
+    }
+    events.push({ type: 'content_block_stop', index });
   }
   events.push({ type: 'message_delta', delta: {
     stop_reason: blocks.some(b => b.type === 'tool_use') ? 'tool_use' : 'end_turn', stop_sequence: null,
@@ -123,6 +146,23 @@ async function endpoint(adapter) {
   };
 }
 
+test('host-output assertion rejects missing, empty, changed and failed tool results', () => {
+  const payload = { messages: [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 'probe-call',
+    content: JSON.stringify(hostResult) }] }] };
+  assert.doesNotThrow(() => assertHostOutput(payload));
+  for (const mutate of [
+    p => { p.messages = []; },
+    p => { p.messages[0].content[0].content = ''; },
+    p => { p.messages[0].content[0].content = 'changed'; },
+    p => { p.messages[0].content[0].tool_use_id = 'wrong-call'; },
+    p => { p.messages[0].content[0].is_error = true; },
+  ]) {
+    const altered = structuredClone(payload);
+    mutate(altered);
+    assert.throws(() => assertHostOutput(altered), assert.AssertionError);
+  }
+});
+
 test('faux endpoint rejects dropped, changed, reordered and unsigned reasoning', () => {
   const original = { id: 'negative-control', blocks: [...thinking('negative-control'), text('answer')] };
   const payload = { messages: [{ role: 'assistant', content: structuredClone(original.blocks) }] };
@@ -141,7 +181,7 @@ test('faux endpoint rejects dropped, changed, reordered and unsigned reasoning',
   }
 });
 
-test('Pi coding session replays tool turns and retained history after real compaction', { timeout: 30000 }, async () => {
+test('Pi production registration delivers host result text and replays retained history after real compaction', { timeout: 30000 }, async () => {
   const sdk = await installed('pi', 'pi-coding-agent');
   const directory = await mkdtemp(join(tmpdir(), 'mizu-reasoning-pi-'));
   let session;
@@ -152,32 +192,38 @@ test('Pi coding session replays tool turns and retained history after real compa
     runtime.registerNativeProvider(remote.provider);
     const settingsManager = sdk.SettingsManager.inMemory({ compaction: { enabled: false, keepRecentTokens: 200 },
       retry: { enabled: false }, cacheWarming: 'off' });
+    let tools = 0;
+    const call = async (_config, operation, args) => {
+      if (operation === '_hello') return {};
+      assert.equal(operation, bridgeTool.operation);
+      assert.deepEqual(args, toolInput);
+      tools++;
+      remote.reply('tool-answer');
+      return hostResult;
+    };
     const resourceLoader = new sdk.DefaultResourceLoader({ cwd: directory, agentDir: directory, settingsManager,
       noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-      systemPrompt: 'Offline reasoning contract.' });
+      systemPrompt: 'Offline reasoning contract.',
+      extensionFactories: [{ name: 'mizu', factory: pi => register(pi, remote.ai.Type,
+        { tools: [bridgeTool] }, { request: call }) }] });
     await resourceLoader.reload();
     const sessionManager = sdk.SessionManager.inMemory(directory);
-    let tools = 0;
     ({ session } = await sdk.createAgentSession({ cwd: directory, agentDir: directory, modelRuntime: runtime,
       model: remote.model, thinkingLevel: 'medium', settingsManager, resourceLoader, sessionManager,
-      tools: ['probe'], customTools: [{ name: 'probe', label: 'Probe', description: 'Offline probe',
-        parameters: remote.ai.Type.Object({}), execute: async () => {
-          tools++;
-          remote.reply('tool-answer');
-          return { content: [text('tool result')], details: {} };
-        } }] }));
+      noTools: 'builtin', tools: [bridgeTool.name] }));
     for (const id of ['old-one', 'old-two']) {
       remote.reply(id, [text(`answer-${id} ${'old context '.repeat(600)}`)]);
       await session.prompt(`input-${id}`);
       remote.checked();
     }
     remote.reply('tool-call', [text('answer-tool-call'),
-      { type: 'tool_use', id: 'probe-call', name: 'probe', input: {} }]);
-    await session.prompt('Use probe.');
+      { type: 'tool_use', id: 'probe-call', name: bridgeTool.name, input: toolInput }]);
+    const requestsBeforeTool = remote.requests.length;
+    await session.prompt('Use the host tool.');
     remote.checked();
     assert.equal(tools, 1);
-    assert.ok(remote.requests.at(-1).messages.some(m => Array.isArray(m.content)
-      && m.content.some(b => b.type === 'tool_result')), 'real tool result reaches provider');
+    assert.equal(remote.requests.length, requestsBeforeTool + 2);
+    assertHostOutput(remote.requests[requestsBeforeTool + 1]);
 
     remote.summarize();
     await session.compact(); // Real summary generation and SessionManager projection.
@@ -195,7 +241,7 @@ test('Pi coding session replays tool turns and retained history after real compa
   }
 });
 
-test('Pi durable reopens a completed unit and replays retained history after real compaction', { timeout: 30000 }, async () => {
+test('Pi durable production tools deliver host result text, reopen a completed unit and compact history', { timeout: 30000 }, async () => {
   const sdk = await installed('pi-durable', 'pi-durable');
   const { openNodeSqliteStorage } = await installed('pi-durable', 'pi-durable', 'storage/sqlite/node');
   const { BACKGROUND_CONTEXT: context } = await installed('pi-durable', 'chord', 'context/index');
@@ -206,19 +252,20 @@ test('Pi durable reopens a completed unit and replays retained history after rea
     const models = remote.ai.createModels();
     models.setProvider(remote.provider);
     let tools = 0;
-    const probe = sdk.defineTool({ name: 'probe', description: 'Offline probe', parameters: remote.ai.Type.Object({}),
-      execute: async () => {
-        tools++;
-        remote.reply('tool-answer');
-        return { content: [text('tool result')], details: {} };
-      } });
+    const toolsForHost = buildBridgeTools({ tools: [bridgeTool] }, {}, { request: async (_bridge, operation, args) => {
+      assert.equal(operation, bridgeTool.operation);
+      assert.deepEqual(args, toolInput);
+      tools++;
+      remote.reply('tool-answer');
+      return hostResult;
+    } });
     const registry = sdk.createRegistry();
-    registry.install(sdk.defineExtension({ name: 'replay-contract', tools: [probe] }));
+    registry.install(sdk.defineExtension({ name: 'replay-contract', tools: toolsForHost }));
     const open = async () => sdk.Harness.open(await openNodeSqliteStorage(join(directory, 'session.sqlite')),
       { models, registry, settings: { retry: { enabled: false }, compaction: { enabled: false, keepRecentTokens: 200 } } }, context);
     harness = await open();
     let root = await harness.root(context, { agent: { model: { provider: remote.model.provider, modelId: remote.model.id },
-      instructions: 'Offline reasoning contract.', tools: [probe] } });
+      instructions: 'Offline reasoning contract.', tools: toolsForHost } });
     const submit = async id => {
       const submission = await root.submit({ type: 'input', content: id, requestId: id }, context);
       const settled = await submission.wait(context);
@@ -231,9 +278,12 @@ test('Pi durable reopens a completed unit and replays retained history after rea
       await submit(id);
     }
     remote.reply('tool-call', [text('answer-tool-call'),
-      { type: 'tool_use', id: 'probe-call', name: 'probe', input: {} }]);
+      { type: 'tool_use', id: 'probe-call', name: bridgeTool.name, input: toolInput }]);
+    const requestsBeforeTool = remote.requests.length;
     const completed = await submit('tool-unit');
     assert.equal(tools, 1);
+    assert.equal(remote.requests.length, requestsBeforeTool + 2);
+    assertHostOutput(remote.requests[requestsBeforeTool + 1]);
     await harness.close(context);
     harness = await open();
     harness.resume();

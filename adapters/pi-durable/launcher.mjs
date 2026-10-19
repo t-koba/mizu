@@ -336,6 +336,27 @@ if (process.argv.includes('--check-contract') && invokedAsMain) {
   }
 }
 
+/** Build the same bridge tools for the launcher and installed-SDK contracts.
+ * Only bridge I/O and finish notification are injectable; result mapping stays here.
+ */
+export function buildBridgeTools(cfg, bridge, { request: call = request, onFinish = () => {} } = {}) {
+  return cfg.tools.map(tool => defineTool({
+    name: tool.name,
+    description: tool.description,
+    parameters: typeSchema(Type, tool.inputSchema),
+    execute: async (args) => {
+      const result = await call(bridge, tool.operation, args);
+      // Pi durable 1.3 uses output for model-facing blocks (coding Pi uses content).
+      if (tool.operation === 'finish') {
+        onFinish(result);
+        return { output: [{ type: 'text', text: JSON.stringify(result) }], details: result,
+          control: { terminate: true } };
+      }
+      return { output: [{ type: 'text', text: JSON.stringify(result) }], details: result };
+    },
+  }));
+}
+
 /** Preserve only bounded textual settlement detail in the one-shot result.
  * Provider error text is evidence, not a status code; Python pairs it with the
  * unchanged settlement reason for configured error predicates.
@@ -581,21 +602,10 @@ async function runOnce(cfg) {
   // uncertain side effect surfaces as `interrupted`, never a blind repeat.
   let finishCalled = false;
   let sealed = null;
-  const tools = cfg.tools.map(tool => defineTool({
-    name: tool.name,
-    description: tool.description,
-    parameters: typeSchema(Type, tool.inputSchema),
-    execute: async (args) => {
-      const result = await request(bridge, tool.operation, args);
-      if (tool.operation === 'finish') {
-        finishCalled = true;
-        sealed = result;
-        return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result,
-          control: { terminate: true } };
-      }
-      return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result };
-    },
-  }));
+  const tools = buildBridgeTools(cfg, bridge, { onFinish: result => {
+    finishCalled = true;
+    sealed = result;
+  } });
   const registry = createRegistry();
   registry.install(defineExtension({ name: 'mizu', tools }));
 
