@@ -216,15 +216,47 @@ def parse_unittest_timings(sidecar: Path, *, elapsed_seconds: float) -> list:
         return []
 
 
+def _timing_artifact_summary(tests: list) -> dict:
+    """Return a bounded, sanitized view that keeps hotspots readable in CI."""
+    valid = []
+    for entry in tests:
+        if not isinstance(entry, dict):
+            continue
+        test = entry.get('test')
+        duration = entry.get('duration_seconds')
+        completed = entry.get('completed')
+        if (_valid_timing_test(test) and _valid_timing_seconds(duration)
+                and isinstance(completed, bool)):
+            valid.append({'test': test, 'duration_seconds': round(duration, 3),
+                          'completed': completed})
+    completed_durations = sorted(item['duration_seconds'] for item in valid
+                                 if item['completed'])
+
+    def percentile(numerator: int, denominator: int):
+        if not completed_durations:
+            return None
+        rank = (len(completed_durations) * numerator + denominator - 1) // denominator
+        return completed_durations[max(0, rank - 1)]
+
+    return {'tests_recorded': len(valid),
+            'tests_completed': len(completed_durations),
+            'completed_duration_seconds': round(sum(completed_durations), 3),
+            'completed_duration_percentiles_seconds': {
+                'p50': percentile(50, 100), 'p90': percentile(90, 100),
+                'p95': percentile(95, 100), 'p99': percentile(99, 100)},
+            'slowest_tests': sorted(valid,
+                                    key=lambda item: (-item['duration_seconds'], item['test']))[:20]}
+
+
 def write_timings_artifact(path: Path, *, tests: list, status: str, exit_code: int,
                            elapsed_seconds: float) -> None:
     """Write the dedicated timing artifact with only sanitized evidence.
 
     Best-effort: never raises; timing evidence must not change the gate
-    outcome. Holds only stable test IDs, durations/completion flags, and
-    minimal runtime metadata (versions, platform, timeout, total elapsed, gate
-    status). It
-    never includes failure details, output tails, or diagnostics.
+    outcome. Holds only stable test IDs, durations/completion flags, a bounded
+    hotspot/percentile summary, and minimal runtime metadata (versions,
+    platform, timeout, total elapsed, gate status). It never includes failure
+    details, output tails, or diagnostics.
     """
     try:
         payload = {'suite': 'windows-test-timings',
@@ -233,6 +265,7 @@ def write_timings_artifact(path: Path, *, tests: list, status: str, exit_code: i
                    'unittest_timeout_seconds': _unittest_timeout_seconds(),
                    'unittest_elapsed_seconds': round(elapsed_seconds, 3),
                    'unittest_status': status, 'unittest_exit_code': exit_code,
+                   'summary': _timing_artifact_summary(tests),
                    'tests': tests}
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2) + '\n', encoding='utf-8')
@@ -397,8 +430,9 @@ def main():
     # The timing sidecar is likewise private and run-local, flushed per test so
     # a killed child still leaves a partial unfinished entry. Timings are
     # evidence only: parsing is bounded/validated and never governs the gate.
-    # The dedicated windows-test-timings.json artifact (sanitized IDs plus
-    # durations/completion only) is opt-in via --test-timings and survives
+    # The dedicated windows-test-timings.json artifact (sanitized IDs,
+    # durations/completion, and a bounded hotspot summary) is opt-in via
+    # --test-timings and survives
     # an ordinary child timeout; it records evidence, not a policy.
     with tempfile.TemporaryDirectory(prefix='mizu-unittest-') as temporary:
         sidecar = Path(temporary) / 'failures.jsonl'

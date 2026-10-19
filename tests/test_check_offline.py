@@ -839,6 +839,43 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
             self.assertNotIn('details', json.dumps(payload))
             self.assertNotIn('diagnostic', json.dumps(payload).lower())
 
+    def test_timing_artifact_has_bounded_hotspot_summary(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            artifact = Path(temporary) / 'windows-test-timings.json'
+            tests = [
+                {'test': 'sample.Suite.test_fast', 'duration_seconds': 1.0, 'completed': True},
+                {'test': 'sample.Suite.test_medium', 'duration_seconds': 2.0, 'completed': True},
+                {'test': 'sample.Suite.test_slow', 'duration_seconds': 4.0, 'completed': True},
+                {'test': 'sample.Suite.test_unfinished', 'duration_seconds': 9.5, 'completed': False},
+            ]
+            CHECK.write_timings_artifact(artifact, tests=tests, status='fail', exit_code=1,
+                                          elapsed_seconds=10.0)
+            payload = json.loads(artifact.read_text(encoding='utf-8'))
+            summary = payload['summary']
+            self.assertEqual(summary['tests_recorded'], 4)
+            self.assertEqual(summary['tests_completed'], 3)
+            self.assertEqual(summary['completed_duration_seconds'], 7.0)
+            self.assertEqual(summary['completed_duration_percentiles_seconds'],
+                             {'p50': 2.0, 'p90': 4.0, 'p95': 4.0, 'p99': 4.0})
+            self.assertEqual([item['test'] for item in summary['slowest_tests']],
+                             ['sample.Suite.test_unfinished', 'sample.Suite.test_slow',
+                              'sample.Suite.test_medium', 'sample.Suite.test_fast'])
+            self.assertFalse(summary['slowest_tests'][0]['completed'])
+            self.assertEqual(payload['tests'], tests)
+
+            many_artifact = Path(temporary) / 'many-timings.json'
+            many_tests = [
+                {'test': f'sample.Suite.test_{index:02}',
+                 'duration_seconds': float(index), 'completed': True}
+                for index in range(25)
+            ]
+            CHECK.write_timings_artifact(many_artifact, tests=many_tests, status='pass',
+                                          exit_code=0, elapsed_seconds=300.0)
+            many_summary = json.loads(many_artifact.read_text(encoding='utf-8'))['summary']
+            self.assertEqual(len(many_summary['slowest_tests']), 20)
+            self.assertEqual(many_summary['slowest_tests'][0]['test'],
+                             'sample.Suite.test_24')
+
     def test_child_cli_writes_both_sidecars_privately(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -953,11 +990,11 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
             self.assertEqual(by_test['tests.RealTests.test_hung'],
                              {'test': 'tests.RealTests.test_hung',
                               'duration_seconds': 7.4, 'completed': False})
-            # Only sanitized IDs, durations, completion, and minimal metadata.
+            # Only sanitized IDs, durations, completion, a bounded summary, and minimal metadata.
             self.assertEqual(set(payload), {'suite', 'mizu_version', 'python', 'os',
                                             'unittest_timeout_seconds', 'unittest_elapsed_seconds',
                                             'unittest_status',
-                                            'unittest_exit_code', 'tests'})
+                                            'unittest_exit_code', 'summary', 'tests'})
             for entry in payload['tests']:
                 self.assertEqual(set(entry), {'test', 'duration_seconds', 'completed'})
 
