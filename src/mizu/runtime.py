@@ -3286,7 +3286,7 @@ class Engine:
             except Exception:
                 ci_failures = []
             if event_trigger:
-                event_gate = _scheduling.evaluate_dispatch(_scheduling.DispatchFacts(
+                event_gate = _scheduling.evaluate(_scheduling.DispatchFacts(
                     event_trigger=True,
                     has_decision=bool(substantive_events),
                     has_work_item=bool(terminal_events),
@@ -3312,7 +3312,7 @@ class Engine:
                 disposition = progress_disposition(snapshot["progress"], snapshot["outcome"],
                                                    self.config, role_name)
                 progress_self_admits = disposition != "parked_no_progress"
-            _dispatch = _scheduling.evaluate_dispatch(_scheduling.DispatchFacts(
+            _dispatch = _scheduling.evaluate(_scheduling.DispatchFacts(
                 event_trigger=bool(event_trigger),
                 on_change=bool(role.on_change),
                 code_unchanged=bool(code_unchanged),
