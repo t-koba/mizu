@@ -66,8 +66,8 @@ PROCESS_CLEANUP_TIMEOUT_SECONDS = 30
 
 
 def _unittest_timeout_seconds(platform: str | None = None) -> int:
-    """Give the Windows suite a 1800-second child cap under the 45-minute job cap."""
-    return 1800 if (os.name if platform is None else platform) == 'nt' else 1000
+    """Keep the Windows suite within the original 1450-second child cap."""
+    return 1450 if (os.name if platform is None else platform) == 'nt' else 1000
 
 
 def unittest_failure_summary(sidecar: Path) -> str:
@@ -322,8 +322,8 @@ def main():
     checks = []
     counts = {}
     env = {**os.environ, 'PYTHONDONTWRITEBYTECODE': '1', 'PYTHONFAULTHANDLER': '1'}
-    # The offline suite is process-spawn heavy. The 45-minute Windows job cap
-    # starts before setup; budget for a 60 s setup, the 1800 s child, one 600 s
+    # The offline suite is process-spawn heavy. Keep the original 40-minute
+    # Windows job scope; budget for 60 s setup, the 1450 s child, one 600 s
     # later check, bounded process cleanup, and a 120 s suffix/receipt reserve.
     # A contract test keeps the full budget relationship explicit. Step output
     # streams live (merged in order) so a hung step leaves
@@ -420,11 +420,11 @@ def main():
                 'skipped': int(re.search(r'^# skipped (\d+)', output, re.M).group(1)) if re.search(r'^# skipped (\d+)', output, re.M) else 0}
     # Timestamped verbose progress: on a timeout the killed step leaves the
     # unfinished test as the last timestamped line in the live log.
-    # Windows/Python 3.13 was still progressing through test_vcs_ci when the
-    # 1450 s child cap killed a CI run without a reported test failure.
-    # Allow 1800 s for the child. The workflow's 45-minute
-    # limit begins before checkout/setup and covers one full later check timeout
-    # plus bounded shutdown and a receipt/suffix reserve; POSIX retains 1000 s.
+    # A historical Windows/Python 3.13 run was still in test_vcs_ci when the
+    # original 1450 s child cap fired, with no reported test failure. Keep the
+    # original 40-minute job and 1450 s child scope; the opt-in per-test timing
+    # artifact now retains partial progress on timeout for diagnosis. Samples
+    # remain diagnostic, not bounds; POSIX retains its 1000 s child cap.
     # The child owns structured exception metadata. Its failure sidecar is private
     # and deleted even on timeout; no failure/timeout details parse raw output.
     # The timing sidecar is likewise private and run-local, flushed per test so

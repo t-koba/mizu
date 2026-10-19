@@ -55,17 +55,18 @@ class InstallerStagingWaiverTests(unittest.TestCase):
 class CheckTimeoutTests(unittest.TestCase):
     def test_windows_budget_covers_setup_child_timeout_and_receipt_path(self):
         child_timeout = CHECK._unittest_timeout_seconds('nt')
-        self.assertEqual(child_timeout, 1800)
+        self.assertEqual(child_timeout, 1450)
         self.assertEqual(CHECK._unittest_timeout_seconds('posix'), 1000)
         self.assertEqual(CHECK.DEFAULT_CHECK_TIMEOUT_SECONDS, 600)
         workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
-        self.assertIn("timeout-minutes: ${{ matrix.os == 'windows-latest' && 45 || 20 }}", workflow)
-        # Exercise the reviewer's 60-second setup case, one later execute timeout,
-        # both bounded cleanup waits, process-group termination (1 s grace + 5 s
-        # reap), and the suffix/receipt reserve: 2646 s total, leaving 54 s slack.
+        self.assertIn("timeout-minutes: ${{ matrix.os == 'windows-latest' && 40 || 20 }}", workflow)
+        # Exercise the 60-second setup case, one later execute timeout, both
+        # bounded cleanup waits, process-group termination (1 s grace + 5 s
+        # reap), and the suffix/receipt reserve: 2296 s total, leaving 104 s.
         required = (60 + child_timeout + CHECK.DEFAULT_CHECK_TIMEOUT_SECONDS
                     + 2 * CHECK.PROCESS_CLEANUP_TIMEOUT_SECONDS + 6 + 120)
-        self.assertGreaterEqual(45 * 60, required)
+        self.assertEqual(required, 2296)
+        self.assertGreaterEqual(40 * 60, required)
 
     def test_ci_provisions_both_pi_adapters_for_unwaived_contract_gates(self):
         workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
@@ -926,10 +927,11 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
         self.assertIn('retention-days: 7', workflow)
         self.assertIn('if-no-files-found: warn', workflow)
         self.assertIn("if: always() && runner.os == 'Windows' && matrix.python == '3.13'", workflow)
-        # Budgets unchanged; no scope amendment claimed here.
-        self.assertIn('1800', workflow)
-        self.assertIn("timeout-minutes: ${{ matrix.os == 'windows-latest' && 45 || 20 }}", workflow)
-        self.assertEqual(CHECK._unittest_timeout_seconds('nt'), 1800)
+        # Timing stays diagnostic; the original 40-minute/1450-second scope is
+        # enforced while the always-uploaded artifact preserves partial progress.
+        self.assertIn('1450', workflow)
+        self.assertIn("timeout-minutes: ${{ matrix.os == 'windows-latest' && 40 || 20 }}", workflow)
+        self.assertEqual(CHECK._unittest_timeout_seconds('nt'), 1450)
 
     def test_timings_artifact_survives_timeout_with_only_evidence(self):
         raw = ('test_sample.SampleTests.test_slow ... ok\nRan 1 test in 0.1s\nOK\n')
