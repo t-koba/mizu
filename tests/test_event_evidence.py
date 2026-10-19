@@ -15,7 +15,10 @@ from mizu.errors import ProtocolError
 from mizu.fs import read_json
 
 
-FLOOD_LINES = 20000
+# 512 records with 200-byte payloads exceed the 64 KiB retention budget and
+# span more than one 64 KiB pipe read, while still checking parsing after
+# truncation without spending time on 20,000 synthetic records.
+FLOOD_LINES = 512
 
 
 def _flood_argv():
