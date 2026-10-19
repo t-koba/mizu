@@ -78,7 +78,9 @@ class Channel:
                         raise ProtocolError('Incomplete engine JSONL record')
                     break
                 if not events:
-                    self.diagnostics.extend(block[:max(0, DIAGNOSTICS_TAIL_BYTES-len(self.diagnostics))])
+                    self.diagnostics.extend(block)
+                    if len(self.diagnostics) > DIAGNOSTICS_TAIL_BYTES:
+                        del self.diagnostics[:len(self.diagnostics)-DIAGNOSTICS_TAIL_BYTES]
                     continue
                 # Retention is capped, parsing is not: every record is still
                 # dispatched, so the run completes on the same events regardless
