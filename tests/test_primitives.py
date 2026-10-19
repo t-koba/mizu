@@ -243,6 +243,88 @@ class FileTests(unittest.TestCase):
                 read_json(path, {})
             read.assert_called_once_with(path)
 
+    def test_bounded_json_validates_limit_and_preserves_missing_default(self):
+        path = self.root / "state.json"
+        missing = object()
+        self.assertIs(read_json(path, missing, max_bytes=0), missing)
+        class IntSubclass(int):
+            pass
+        for invalid in (-1, True, 1.0, "1", IntSubclass(1)):
+            with self.subTest(limit=invalid), patch("mizu.fs._open_read") as opened:
+                with self.assertRaises(ValueError):
+                    read_json(path, max_bytes=invalid)
+                opened.assert_not_called()
+        path.write_bytes(b"{}")
+        self.assertEqual(read_json(path, max_bytes=2), {})
+        self.assertEqual(read_json(path, max_bytes=10 ** 100), {})
+        for limit in (0, 1):
+            with _open_read(path) as stream, patch("mizu.fs._open_read") as opened:
+                spy = Mock(wraps=stream)
+                opened.return_value.__enter__.return_value = spy
+                with self.assertRaises(LimitExceeded):
+                    read_json(path, max_bytes=limit)
+                spy.read.assert_not_called()
+
+    def test_bounded_json_rejects_nonregular_and_hardlinked_handles(self):
+        path = self.root / "state.json"
+        path.write_bytes(b"{}")
+        for mode, links in ((stat.S_IFIFO, 1), (stat.S_IFREG, 2)):
+            with self.subTest(mode=mode, links=links), \
+                    patch("mizu.fs.os.fstat", return_value=Mock(st_mode=mode, st_nlink=links)):
+                with self.assertRaises(Denied):
+                    read_json(path, max_bytes=2)
+        # Default reads retain their existing behavior, including hardlinks.
+        other = self.root / "link.json"
+        os.link(path, other)
+        with self.assertRaises(Denied):
+            read_json(path, max_bytes=2)
+        self.assertEqual(read_json(path), {})
+
+    def test_bounded_json_retains_generation_replaced_before_first_stat(self):
+        path = self.root / "state.json"
+        write_json(path, {})
+        def open_then_replace(target):
+            stream = _open_read(target)
+            try:
+                write_json(target, {"new": True})
+            except BaseException:
+                stream.close()
+                raise
+            return stream
+        with patch("mizu.fs._open_read", side_effect=open_then_replace):
+            self.assertEqual(read_json(path, max_bytes=3), {})
+        self.assertEqual(read_json(path), {"new": True})
+
+    def test_bounded_json_checks_same_handle_after_read(self):
+        path = self.root / "state.json"
+        for change in ("grow", "shrink", "overwrite", "replace"):
+            with self.subTest(change=change):
+                path.write_bytes(b"{}")
+                with _open_read(path) as stream, patch("mizu.fs._open_read") as opened:
+                    spy = Mock(wraps=stream)
+                    opened.return_value.__enter__.return_value = spy
+                    def read(size):
+                        data = stream.read(size)
+                        if change == "replace":
+                            write_json(path, {"new": True})
+                        else:
+                            before = os.fstat(stream.fileno())
+                            path.write_bytes({"grow": b"{} ", "shrink": b"{",
+                                              "overwrite": b"[]"}[change])
+                            # Ensure a same-size mutation changes metadata even
+                            # on filesystems with coarse write-time resolution.
+                            os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 1000000000))
+                        return data
+                    spy.read.side_effect = read
+                    if change == "replace":
+                        self.assertEqual(read_json(path, max_bytes=2), {})
+                    else:
+                        with self.assertRaises(Denied):
+                            read_json(path, max_bytes=2)
+                    spy.read.assert_called_once_with(2)
+                if change == "replace":
+                    self.assertEqual(read_json(path), {"new": True})
+
     def test_immutable_idempotence_and_conflict(self):
         path = self.root / "record"
         atomic_write(path, b"first", exclusive=True)

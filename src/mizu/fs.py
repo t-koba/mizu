@@ -290,14 +290,48 @@ def write_json(path: Path, value: Any, *, exclusive: bool = False) -> None:
     atomic_write(path, canonical(value), exclusive=exclusive)
 
 
-def read_json(path: Path, default: Any = None) -> Any:
+def read_json(path: Path, default: Any = None, *, max_bytes: int | None = None) -> Any:
     """Read a complete generation of atomically published managed JSON state.
 
     Missing paths return default; sharing, permission and decoding errors do
     not become missing state. No polling or retry is hidden in this primitive.
+    When ``max_bytes`` is given, never materialize more than that many bytes:
+    larger files raise ``LimitExceeded`` before loading. Nonregular or
+    hardlinked files and in-place changes during reading raise ``Denied``.
+    Checks bind to the opened handle, not the replaceable path. The read keeps
+    using :func:`_open_read`, so retained readers still observe a complete old
+    generation across atomic replacement (including Windows delete sharing).
     """
+    if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 0):
+        raise ValueError("max_bytes must be an exact nonnegative integer")
     try:
-        return json.loads(_read_bytes(path), parse_constant=lambda v: (_ for _ in ()).throw(ValueError("Non-finite JSON value")))
+        with _open_read(path) as stream:
+            if max_bytes is None:
+                raw = stream.read()
+            else:
+                before = os.fstat(stream.fileno())
+                # A retained generation may already be unlinked by replacement.
+                if not stat.S_ISREG(before.st_mode) or before.st_nlink not in (0, 1):
+                    raise Denied("Only regular, non-hardlinked files are readable")
+                if before.st_size > max_bytes:
+                    raise LimitExceeded("File exceeds configured byte limit")
+                # Read no more than the checked size (and hence max_bytes),
+                # even if another writer grows the file in place.
+                raw = stream.read(before.st_size)
+                after = os.fstat(stream.fileno())
+                identity = lambda info: (info.st_dev, info.st_ino, info.st_mode,
+                                         info.st_size, info.st_mtime_ns)
+                # Replacement may unlink this generation, changing nlink and
+                # ctime without changing its contents. Do not stat the path:
+                # it can already name a complete, different generation.
+                if (identity(before) != identity(after)
+                        or after.st_nlink not in (0, 1)
+                        or after.st_nlink > before.st_nlink
+                        or (after.st_nlink == before.st_nlink
+                            and before.st_ctime_ns != after.st_ctime_ns)
+                        or len(raw) != before.st_size):
+                    raise Denied("File changed while reading")
+        return json.loads(raw, parse_constant=lambda v: (_ for _ in ()).throw(ValueError("Non-finite JSON value")))
     except FileNotFoundError:
         return default
 

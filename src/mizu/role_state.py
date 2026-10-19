@@ -8,10 +8,11 @@ insight submission is never a research-memory store.
 """
 from __future__ import annotations
 
+import datetime as dt
 import math
 from pathlib import Path
 
-from .errors import Busy, Denied
+from .errors import Busy, Denied, LimitExceeded
 from .fs import canonical, identifier, lock, now, read_json, write_json
 
 
@@ -82,22 +83,40 @@ class RoleStateStore:
         Schema: ``{"status", "generation", "record"}`` where ``record``
         is the stored object (with ``state``) on ``current``, else
         ``None``. Absent files read ``absent`` with generation 0;
-        unreadable or malformed files read ``unavailable`` with
-        generation ``None``: callers must not CAS against them, and a
-        later ``replace`` refuses until an operator clears the file.
+        oversized, unstable, unreadable or malformed files read
+        ``unavailable`` with generation ``None``: callers must not CAS
+        against them, and a later ``replace`` refuses until an operator
+        clears the file.
+        Only the exact replacement envelope is current: role, positive exact-int
+        generation, UTC ISO-seconds timestamp, validated author run and state.
         Failure: ``Denied`` only on a bad role name.
         """
         missing = object()
+        path = self._path(role)  # Bad role names remain caller errors.
         try:
-            record = read_json(self._path(role), missing)
-        except (OSError, ValueError):
+            record = read_json(path, missing, max_bytes=self.max_bytes)
+        except (OSError, ValueError, RecursionError, Denied, LimitExceeded):
             return {"status": "unavailable", "generation": None, "record": None}
         if record is missing:
             return {"status": "absent", "generation": 0, "record": None}
-        if (not isinstance(record, dict) or record.get("role") != role
-                or not isinstance(record.get("generation"), int)
+        if (not isinstance(record, dict)
+                or set(record) != {"role", "generation", "updated_at",
+                                   "updated_by_run", "state"}
+                or record["role"] != role
+                or type(record["generation"]) is not int
                 or record["generation"] < 1
-                or not isinstance(record.get("state"), dict)):
+                or not isinstance(record["updated_at"], str)):
+            return {"status": "unavailable", "generation": None, "record": None}
+        try:
+            timestamp = dt.datetime.fromisoformat(record["updated_at"])
+            if (timestamp.tzinfo != dt.timezone.utc
+                    or timestamp.isoformat(timespec="seconds") != record["updated_at"]):
+                raise Denied("Invalid role research state timestamp")
+            _check_state(record["state"])
+            _check_run(record["updated_by_run"])
+            if len(canonical(record)) > self.max_bytes:
+                raise Denied("Role research state exceeds the configured byte bound")
+        except (Denied, ValueError):
             return {"status": "unavailable", "generation": None, "record": None}
         return {"status": "current", "generation": record["generation"],
                 "record": record}

@@ -91,6 +91,136 @@ class RoleStateTests(Fixture):
                                               expected_generation=0)
         self.assertEqual(out["generation"], 1)
 
+    def test_externally_written_oversized_record_is_unavailable(self):
+        from mizu.fs import canonical, write_json
+        store = self.project.role_state
+        state = {"pad": "x" * (store.max_bytes)}
+        record = {"role": "searcher", "generation": 1,
+                  "updated_at": "2026-01-01T00:00:00+00:00",
+                  "updated_by_run": None, "state": state}
+        self.assertGreater(len(canonical(record)), store.max_bytes)
+        path = self.project.root / "role-state" / "searcher.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_json(path, record)
+        seen = store.read("searcher")
+        self.assertEqual(seen["status"], "unavailable")
+        self.assertIsNone(seen["generation"])
+        self.assertIsNone(seen["record"])
+        with self.assertRaisesRegex(Denied, "unavailable"):
+            store.replace("searcher", STATE, expected_generation=1)
+
+    def test_persisted_boolean_generation_is_unavailable(self):
+        from mizu.fs import write_json
+        store = self.project.role_state
+        record = {"role": "searcher", "generation": True,
+                  "updated_at": "2026-01-01T00:00:00+00:00",
+                  "updated_by_run": None, "state": {"ok": True}}
+        path = self.project.root / "role-state" / "searcher.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_json(path, record)
+        seen = store.read("searcher")
+        self.assertEqual(seen["status"], "unavailable")
+        self.assertIsNone(seen["generation"])
+        with self.assertRaisesRegex(Denied, "unavailable"):
+            store.replace("searcher", STATE, expected_generation=1)
+        # A raw JSON boolean literal behaves the same without a writer.
+        path.write_text('{"role":"searcher","generation":true,'
+                        '"updated_at":"2026-01-01T00:00:00+00:00",'
+                        '"updated_by_run":null,"state":{"ok":true}}')
+        seen = store.read("searcher")
+        self.assertEqual(seen["status"], "unavailable")
+
+    def test_persisted_invalid_state_and_run_is_unavailable(self):
+        from mizu.fs import write_json
+        store = self.project.role_state
+        path = self.project.root / "role-state" / "searcher.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        bad_states = [{"ok": "fine", "deep": {"a": {"b": {"c": {"d": 1}}}}},
+                      {"x" * 65: 1},
+                      {"ok": ["fine", ["nested", ["too", ["deep", ["here"]]]]]}]
+        for bad in bad_states:
+            record = {"role": "searcher", "generation": 1,
+                      "updated_at": "2026-01-01T00:00:00+00:00",
+                      "updated_by_run": None, "state": bad}
+            write_json(path, record)
+            seen = store.read("searcher")
+            self.assertEqual(seen["status"], "unavailable", bad)
+            self.assertIsNone(seen["generation"])
+            with self.assertRaisesRegex(Denied, "unavailable"):
+                store.replace("searcher", STATE, expected_generation=1)
+        for bad_run in ("", "x" * 9000, "has\nnewline", 123):
+            record = {"role": "searcher", "generation": 1,
+                      "updated_at": "2026-01-01T00:00:00+00:00",
+                      "updated_by_run": bad_run, "state": {"ok": True}}
+            write_json(path, record)
+            seen = store.read("searcher")
+            self.assertEqual(seen["status"], "unavailable", repr(bad_run))
+            with self.assertRaisesRegex(Denied, "unavailable"):
+                store.replace("searcher", STATE, expected_generation=1)
+
+    def test_persisted_envelope_must_match_writer_shape(self):
+        from mizu.fs import write_json
+        store = self.project.role_state
+        path = self.project.root / "role-state" / "searcher.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        valid = {"role": "searcher", "generation": 1,
+                 "updated_at": "2026-01-01T00:00:00+00:00",
+                 "updated_by_run": None, "state": {"ok": True}}
+        cases = [{k: v for k, v in valid.items() if k != missing} for missing in valid]
+        cases += [dict(valid, extra=True)]
+        for key, values in {
+                "role": ("worker", None),
+                "generation": (True, 0, -1, 1.0, "1", None),
+                "state": (None, [], "state"),
+                "updated_at": (None, 123, "", "not-a-date",
+                               "2026-02-30T00:00:00+00:00",
+                               "2026-01-01T00:00:00", "2026-01-01T00:00:00Z",
+                               "2026-01-01T00:00:00.000000+00:00",
+                               "2026-01-01T00:00:00+01:00",
+                               "2026-01-01 00:00:00+00:00")}.items():
+            cases.extend(dict(valid, **{key: value}) for value in values)
+        for record in cases:
+            with self.subTest(record=record):
+                write_json(path, record)
+                self.assertEqual(store.read("searcher"),
+                                 {"status": "unavailable", "generation": None, "record": None})
+        write_json(path, valid)
+        self.assertEqual(store.read("searcher")["status"], "current")
+
+    def test_read_failures_remain_unavailable_but_bad_role_is_denied(self):
+        from unittest.mock import patch
+        from mizu.errors import LimitExceeded
+        for error in (Denied("unstable or invalid file"), LimitExceeded("oversize"),
+                      PermissionError("denied"), ValueError("invalid JSON"),
+                      RecursionError("deep JSON")):
+            with self.subTest(error=error), patch("mizu.role_state.read_json", side_effect=error):
+                self.assertEqual(self.project.role_state.read("searcher"),
+                                 {"status": "unavailable", "generation": None, "record": None})
+        with self.assertRaises(Denied):
+            self.project.role_state.read("../bad")
+
+    def test_exact_byte_bound_reads_current(self):
+        from mizu.fs import canonical, write_json
+        from mizu.role_state import RoleStateStore
+        root = self.project.root / "role-state"
+        root.mkdir(parents=True, exist_ok=True)
+        state = {"ok": True}
+        record = {"role": "searcher", "generation": 1,
+                  "updated_at": "2026-01-01T00:00:00+00:00",
+                  "updated_by_run": None, "state": state}
+        size = len(canonical(record))
+        path = root / "searcher.json"
+        write_json(path, record)
+        exact = RoleStateStore(root, max_bytes=size)
+        seen = exact.read("searcher")
+        self.assertEqual(seen["status"], "current")
+        self.assertEqual(seen["generation"], 1)
+        self.assertEqual(seen["record"]["state"], state)
+        tight = RoleStateStore(root, max_bytes=size - 1)
+        seen = tight.read("searcher")
+        self.assertEqual(seen["status"], "unavailable")
+        self.assertIsNone(seen["generation"])
+
     def test_fresh_session_sees_latest_generation(self):
         self.project.role_state.replace("searcher", STATE,
                                         expected_generation=0)
