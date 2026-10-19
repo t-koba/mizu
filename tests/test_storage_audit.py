@@ -7,7 +7,7 @@ import unittest
 from unittest import mock
 from support import Fixture
 from mizu.errors import Denied
-from mizu.fs import write_json
+from mizu.fs import canonical, digest, write_json
 from mizu.storage import _AUDIT_JSON_BYTES, _session_accounting, audit, reclaim
 
 
@@ -353,6 +353,341 @@ class StorageReclaimTests(Fixture):
         result = reclaim(self.project, apply=True)
         self.assertNotIn(f"snapshots/{snap['id']}.json", result["snapshots"])
         self.assertTrue((self.project.root / "snapshots" / f"{snap['id']}.json").exists())
+
+
+    def hidden_snapshot(self):
+        captured = self.project.snapshots.capture_files(self.project.workspace)
+        return self.project.snapshots.create(
+            captured, goal=self.project.goal, state="Hidden reference",
+            run=None, outcome="wait", summary="Hidden reference snapshot")
+
+    def test_oversized_run_result_blocks_reclaim_of_hidden_reference(self):
+        snap = self.hidden_snapshot()
+        run = self.project.root / "runs" / "hidden"
+        run.mkdir(parents=True)
+        write_json(run / "result.json", {"run": "hidden", "snapshot": snap["id"],
+                                         "padding": "x" * (_AUDIT_JSON_BYTES + 128)})
+        self.assertGreater((run / "result.json").stat().st_size, _AUDIT_JSON_BYTES)
+        report = audit(self.project)
+        self.assertGreaterEqual(report["reference_records_skipped"], 1)
+        preview = reclaim(self.project)
+        self.assertGreaterEqual(preview["reference_records_skipped"], 1)
+        self.project.set_control(paused=True)
+        with self.assertRaisesRegex(Denied, "reference records"):
+            reclaim(self.project, apply=True)
+        self.assertTrue((self.project.root / "snapshots" / f"{snap['id']}.json").is_file())
+
+    def test_oversized_history_generation_blocks_reclaim_of_hidden_reference(self):
+        snap = self.hidden_snapshot()
+        histories = self.project.root / "histories"
+        histories.mkdir(parents=True, exist_ok=True)
+        hidden = histories / ("c" * 64 + ".json")
+        write_json(hidden, [snap["id"], "x" * (_AUDIT_JSON_BYTES + 128)])
+        self.assertGreater(hidden.stat().st_size, _AUDIT_JSON_BYTES)
+        report = audit(self.project)
+        self.assertGreaterEqual(report["reference_records_skipped"], 1)
+        preview = reclaim(self.project)
+        self.assertGreaterEqual(preview["reference_records_skipped"], 1)
+        self.project.set_control(paused=True)
+        with self.assertRaisesRegex(Denied, "reference records"):
+            reclaim(self.project, apply=True)
+        self.assertTrue((self.project.root / "snapshots" / f"{snap['id']}.json").is_file())
+
+    def test_oversized_artifact_evidence_blocks_reclaim_of_hidden_reference(self):
+        snap = self.hidden_snapshot()
+        evidence_dir = self.project.root / "artifacts" / "hidden"
+        evidence_dir.mkdir(parents=True)
+        write_json(evidence_dir / "evidence.json", {"snapshot": snap["id"],
+                                                    "padding": "x" * (_AUDIT_JSON_BYTES + 128)})
+        self.assertGreater((evidence_dir / "evidence.json").stat().st_size, _AUDIT_JSON_BYTES)
+        report = audit(self.project)
+        self.assertGreaterEqual(report["reference_records_skipped"], 1)
+        preview = reclaim(self.project)
+        self.assertGreaterEqual(preview["reference_records_skipped"], 1)
+        self.project.set_control(paused=True)
+        with self.assertRaisesRegex(Denied, "reference records"):
+            reclaim(self.project, apply=True)
+        self.assertTrue((self.project.root / "snapshots" / f"{snap['id']}.json").is_file())
+
+    def test_oversized_inbox_record_blocks_reclaim_of_hidden_reference(self):
+        snap = self.hidden_snapshot()
+        inbox = self.project.root / "inbox"
+        inbox.mkdir(parents=True, exist_ok=True)
+        hidden = inbox / "hidden.json"
+        write_json(hidden, {"base_snapshot": snap["id"],
+                            "padding": "x" * (_AUDIT_JSON_BYTES + 128)})
+        self.assertGreater(hidden.stat().st_size, _AUDIT_JSON_BYTES)
+        report = audit(self.project)
+        self.assertGreaterEqual(report["reference_records_skipped"], 1)
+        preview = reclaim(self.project)
+        self.assertGreaterEqual(preview["reference_records_skipped"], 1)
+        self.project.set_control(paused=True)
+        with self.assertRaisesRegex(Denied, "reference records"):
+            reclaim(self.project, apply=True)
+        self.assertTrue((self.project.root / "snapshots" / f"{snap['id']}.json").is_file())
+
+    def assert_reference_scan_blocked(self, skipped=1):
+        """Every incomplete scan must stop before even the first removal."""
+        self.assertEqual(audit(self.project)["reference_records_skipped"], skipped)
+        self.assertEqual(reclaim(self.project)["reference_records_skipped"], skipped)
+        self.project.set_control(paused=True)
+        with mock.patch.object(Path, "unlink", side_effect=AssertionError("premature removal")):
+            with self.assertRaisesRegex(Denied, "reference records"):
+                reclaim(self.project, apply=True)
+
+    def test_null_reference_records_are_skipped_not_missing(self):
+        current = self.project.root / "current.json"
+        pointer = json.loads(current.read_text())
+        history = self.project.root / "histories" / (pointer["history"] + ".json")
+        run = self.project.root / "runs" / "null-record"
+        run.mkdir(parents=True)
+        artifacts = self.project.root / "artifacts"
+        evidence = artifacts / "null-record" / "evidence.json"
+        inbox = self.project.root / "inbox" / "null-record.json"
+        inbox.parent.mkdir(exist_ok=True)
+        for path in (current, history, run / "result.json", artifacts / "latest.json", evidence, inbox):
+            with self.subTest(path=path.relative_to(self.project.root)):
+                original = path.read_bytes() if path.exists() else None
+                write_json(path, None)
+                self.assert_reference_scan_blocked()
+                if original is None:
+                    path.unlink()
+                else:
+                    path.write_bytes(original)
+                if path == evidence:
+                    path.parent.rmdir()
+
+    def test_invalid_reference_fields_are_skipped_but_null_is_optional(self):
+        root = self.project.root
+        paths = ((root / "runs" / "invalid" / "result.json", "snapshot"),
+                 (root / "artifacts" / "latest.json", "snapshot"),
+                 (root / "artifacts" / "invalid" / "evidence.json", "snapshot"),
+                 (root / "inbox" / "invalid.json", "base_snapshot"))
+        for path, field in paths:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            for value in ("bad-id", 7, [], {}):
+                with self.subTest(path=path.relative_to(root), value=value):
+                    write_json(path, {field: value})
+                    self.assert_reference_scan_blocked()
+            write_json(path, {field: None})
+            if "artifacts" in path.relative_to(root).parts:
+                self.assert_reference_scan_blocked()
+            else:
+                self.assertEqual(audit(self.project)["reference_records_skipped"], 0)
+            path.unlink()
+            if path.name == "evidence.json":
+                path.parent.rmdir()
+
+    def test_active_history_reads_are_bounded_and_reused(self):
+        from mizu.fs import safe_read
+        snap = self.hidden_snapshot()
+        live = self.project.snapshots.get()["id"]
+        history = [snap["id"], live]
+        generation = digest(canonical(history))
+        history_path = self.project.root / "histories" / (generation + ".json")
+        write_json(history_path, history)
+        write_json(self.project.root / "current.json", {"snapshot": live, "history": generation})
+        with mock.patch.object(self.project.snapshots, "_history_ids", side_effect=AssertionError("unbounded history")):
+            with mock.patch("mizu.storage.safe_read", wraps=safe_read) as reader:
+                report = audit(self.project)
+        self.assertEqual(report["reference_records_skipped"], 0)
+        self.assertEqual(report["snapshots"]["live"], 2)
+        active_reads = [call for call in reader.call_args_list
+                        if call.args[1] == f"histories/{generation}.json"]
+        self.assertEqual(len(active_reads), 1)
+        for call in reader.call_args_list:
+            self.assertEqual(call.args[2], _AUDIT_JSON_BYTES)
+
+    def test_oversized_current_pointer_is_bounded_and_blocks_apply(self):
+        current = self.project.root / "current.json"
+        pointer = json.loads(current.read_text())
+        pointer["padding"] = "x" * (_AUDIT_JSON_BYTES + 128)
+        write_json(current, pointer)
+        with mock.patch.object(self.project.snapshots, "_history_ids", side_effect=AssertionError("unbounded history")):
+            self.assert_reference_scan_blocked()
+        # Its valid history references remain visible despite the bad pointer.
+        self.assertEqual(audit(self.project)["snapshots"]["referenced"], 1)
+
+    def test_current_pointer_shape_and_fields_fail_closed(self):
+        current = self.project.root / "current.json"
+        pointer = json.loads(current.read_text())
+        bad_pointers = ([], {}, {"snapshot": pointer["snapshot"]},
+                        {**pointer, "snapshot": "bad"}, {**pointer, "history": "bad"},
+                        {**pointer, "history": "d" * 64})
+        for value in bad_pointers:
+            with self.subTest(pointer=value):
+                write_json(current, value)
+                self.assert_reference_scan_blocked()
+        current.unlink()
+        self.assertEqual(audit(self.project)["reference_records_skipped"], 0)
+
+    def test_active_history_shape_digest_and_end_are_checked_once(self):
+        current = self.project.root / "current.json"
+        pointer = json.loads(current.read_text())
+        path = self.project.root / "histories" / (pointer["history"] + ".json")
+        original = path.read_bytes()
+        snap = self.hidden_snapshot()
+        for value in ({}, [], [pointer["snapshot"], "bad"], [snap["id"]],
+                      [snap["id"], pointer["snapshot"]]):
+            with self.subTest(history=value):
+                write_json(path, value)
+                self.assert_reference_scan_blocked()
+                if isinstance(value, list) and snap["id"] in value:
+                    self.assertNotIn(f"snapshots/{snap['id']}.json", reclaim(self.project)["snapshots"])
+        path.write_bytes(original)
+        # A correctly hashed generation must still end at current.snapshot.
+        history = [snap["id"]]
+        generation = digest(canonical(history))
+        write_json(path.parent / (generation + ".json"), history)
+        write_json(current, {**pointer, "history": generation})
+        self.assert_reference_scan_blocked()
+        (path.parent / (generation + ".json")).unlink()
+        write_json(current, pointer)
+        path.unlink()  # An absent required generation is not an optional file.
+        self.assert_reference_scan_blocked()
+
+    def test_malformed_nonactive_history_preserves_usable_references(self):
+        snap = self.hidden_snapshot()
+        histories = self.project.root / "histories"
+        for name, value in (("invalid-name", [snap["id"]]),
+                            (digest(canonical([snap["id"], None])), [snap["id"], None])):
+            with self.subTest(name=name):
+                path = histories / (name + ".json")
+                write_json(path, value)
+                self.assert_reference_scan_blocked()
+                self.assertNotIn(f"snapshots/{snap['id']}.json", reclaim(self.project)["snapshots"])
+                path.unlink()
+
+    def test_artifacts_nondirectory_root_is_skipped_without_pointer_read(self):
+        artifacts = self.project.root / "artifacts"
+        artifacts.write_text("not a directory")
+        from mizu.fs import safe_read
+        with mock.patch("mizu.storage.safe_read", wraps=safe_read) as reader:
+            self.assert_reference_scan_blocked()
+        self.assertFalse(any(call.args[1].startswith("artifacts/") for call in reader.call_args_list))
+
+    def test_symlinked_artifacts_root_is_never_read(self):
+        artifacts = self.project.root / "artifacts"
+        outside = self.root / "outside-artifacts"
+        outside.mkdir()
+        write_json(outside / "latest.json", {"snapshot": "a" * 64})
+        try:
+            artifacts.symlink_to(outside, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+        from mizu.fs import safe_read
+        with mock.patch("mizu.storage.safe_read", wraps=safe_read) as reader:
+            self.assert_reference_scan_blocked()
+        self.assertFalse(any(call.args[1].startswith("artifacts/") for call in reader.call_args_list))
+
+    def test_artifact_directory_without_evidence_is_incomplete(self):
+        artifact = self.project.root / "artifacts" / "missing-evidence"
+        artifact.mkdir(parents=True)
+        self.assert_reference_scan_blocked()
+
+    def test_missing_snapshot_root_is_incomplete(self):
+        snapshots = self.project.root / "snapshots"
+        outside = self.root / "moved-snapshots"
+        snapshots.rename(outside)
+        try:
+            self.assertGreaterEqual(audit(self.project)["snapshots"]["skipped"], 1)
+            original_manifests = list(outside.glob("*.json"))
+            self.assertTrue(original_manifests)
+            self.project.set_control(paused=True)
+            with mock.patch.object(Path, "unlink", side_effect=AssertionError("premature removal")):
+                with self.assertRaises(Denied):
+                    reclaim(self.project, apply=True)
+            self.assertTrue(all(path.exists() for path in original_manifests))
+        finally:
+            if outside.exists() and not snapshots.exists():
+                outside.rename(snapshots)
+
+    def test_symlinked_snapshot_root_is_not_scanned_or_reclaimed(self):
+        snapshots = self.project.root / "snapshots"
+        outside = self.root / "outside-snapshots"
+        snapshots.rename(outside)
+        try:
+            snapshots.symlink_to(outside, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            outside.rename(snapshots)
+            self.skipTest("symlinks unavailable")
+        try:
+            self.assertGreaterEqual(audit(self.project)["snapshots"]["skipped"], 1)
+            original_manifests = list(outside.glob("*.json"))
+            self.assertTrue(original_manifests)
+            self.project.set_control(paused=True)
+            with mock.patch.object(Path, "unlink", side_effect=AssertionError("premature removal")):
+                with self.assertRaises(Denied):
+                    reclaim(self.project, apply=True)
+            self.assertTrue(all(path.exists() for path in original_manifests))
+        finally:
+            if snapshots.is_symlink():
+                snapshots.unlink()
+            if outside.exists():
+                outside.rename(snapshots)
+
+    def test_symlinked_object_root_is_never_unlinked(self):
+        objects = self.project.root / "objects"
+        outside = self.root / "outside-objects"
+        objects.rename(outside)
+        try:
+            objects.symlink_to(outside, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            outside.rename(objects)
+            self.skipTest("symlinks unavailable")
+        try:
+            self.assertGreaterEqual(audit(self.project)["objects"]["skipped"], 1)
+            original_objects = list(outside.iterdir())
+            self.assertTrue(original_objects)
+            self.project.set_control(paused=True)
+            with mock.patch.object(Path, "unlink", side_effect=AssertionError("premature removal")):
+                with self.assertRaises(Denied):
+                    reclaim(self.project, apply=True)
+            self.assertTrue(all(path.exists() for path in original_objects))
+        finally:
+            if objects.is_symlink():
+                objects.unlink()
+            if outside.exists():
+                outside.rename(objects)
+
+    def test_failed_reference_directory_listing_is_incomplete(self):
+        artifacts = self.project.root / "artifacts"
+        artifacts.mkdir()
+        scandir = os.scandir
+
+        def fail_listing(path):
+            if Path(path) == artifacts:
+                raise PermissionError("synthetic listing failure")
+            return scandir(path)
+
+        with mock.patch("mizu.storage.os.scandir", side_effect=fail_listing):
+            self.assert_reference_scan_blocked()
+
+    def test_symlinked_reference_record_is_skipped(self):
+        outside = self.root / "outside-reference.json"
+        write_json(outside, {"snapshot": "a" * 64})
+        run = self.project.root / "runs" / "unsafe"
+        run.mkdir(parents=True)
+        try:
+            (run / "result.json").symlink_to(outside)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+        self.assert_reference_scan_blocked()
+        self.assertEqual(audit(self.project)["references"]["run_snapshots"], 0)
+
+    def test_invalid_archived_reference_marks_archive_incomplete(self):
+        live = self.project.snapshots.get()["id"]
+        with mock.patch("mizu.storage.insight_archive.snapshot_references",
+                        return_value=[None, "bad", {}, live]):
+            self.assert_reference_scan_blocked()
+            self.assertEqual(audit(self.project)["references"]["insight_snapshots"], 1)
+
+    def test_clean_tree_reports_zero_reference_skips_and_reclaims(self):
+        report = audit(self.project)
+        self.assertEqual(report["reference_records_skipped"], 0)
+        self.assertEqual(report["work_item_events_skipped"], 0)
+        preview = reclaim(self.project)
+        self.assertEqual(preview["reference_records_skipped"], 0)
 
 
 class SessionAccountingTests(Fixture):

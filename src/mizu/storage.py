@@ -25,8 +25,9 @@ from pathlib import Path
 
 from .config import keys, strings
 from .errors import Denied, LimitExceeded
-from .fs import (DIGEST, PREVIEW_BYTES, atomic_write, identifier, lock, mkdir, now,
-                 read_json, safe_read, sync_dir, write_json, relative_parts)
+from .fs import (DIGEST, PREVIEW_BYTES, atomic_write, canonical, digest,
+                 identifier, lock, mkdir, now, read_json, safe_read,
+                 sync_dir, write_json, relative_parts)
 from . import insight_archive
 from .project import Project, check_verify, read_goal
 from .snapshot import open_store
@@ -537,6 +538,66 @@ def _audit_json(path: Path):
         return None
 
 
+def _audit_ref_json(root: Path, path: Path, shape: type) -> tuple[dict | list | None, bool]:
+    """Bounded, no-follow read; absent optional files are not skipped.
+
+    JSON null is a present wrong-shape record, not an absent file. Pin path
+    components through safe_read so a parent swap cannot bypass no-follow.
+    """
+    try:
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return None, False
+        record = json.loads(
+            safe_read(root, path.relative_to(root).as_posix(), _AUDIT_JSON_BYTES),
+            parse_constant=lambda v: (_ for _ in ()).throw(ValueError("Non-finite JSON value")))
+        if not isinstance(record, shape):
+            return None, True
+        return record, False
+    except Denied as exc:
+        # safe_read wraps OS errors; a raced deletion is still absence.
+        if isinstance(exc.__cause__, FileNotFoundError):
+            return None, False
+        return None, True
+    except (OSError, ValueError, RecursionError, LimitExceeded):
+        return None, True
+
+
+def _audit_ref_dict(root: Path, path: Path) -> tuple[dict | None, bool]:
+    """Read an optional reference dictionary, counting invalid records."""
+    return _audit_ref_json(root, path, dict)
+
+
+def _audit_ref_list(root: Path, path: Path) -> tuple[list | None, bool]:
+    """Read a history generation with the same absent/skipped rule."""
+    return _audit_ref_json(root, path, list)
+
+
+def _audit_list_dir(directory: Path, *, required: bool = False) -> tuple[list[Path], bool]:
+    """List immediate children without following a symlinked directory.
+
+    Returns ``(paths, scan_skipped)``. A missing optional directory is normal;
+    a missing required directory, symlink, non-directory, or failed listing
+    hides possible references and reports ``scan_skipped=True``.
+    """
+    try:
+        try:
+            info = directory.lstat()
+        except FileNotFoundError:
+            return [], required
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            return [], True
+        try:
+            # glob can suppress listing errors and falsely look like no refs.
+            with os.scandir(directory) as entries:
+                return sorted(Path(entry.path) for entry in entries), False
+        except OSError:
+            return [], True
+    except OSError:
+        return [], True
+
+
 def _audit_collect(project: Project) -> dict:
     """Full reference-aware collection; internal helper for audit/reclaim.
 
@@ -550,10 +611,12 @@ def _audit_collect(project: Project) -> dict:
     manifest_skipped = 0
     manifest_objects: dict[str, set[str]] = {}
     snapshots_dir = root / "snapshots"
-    try:
-        snapshot_paths = sorted(snapshots_dir.glob("*.json")) if snapshots_dir.is_dir() else []
-    except OSError:
+    snapshot_paths, snapshots_scan_skipped = _audit_list_dir(snapshots_dir, required=True)
+    if snapshots_scan_skipped:
+        manifest_skipped += 1
         snapshot_paths = []
+    else:
+        snapshot_paths = [child for child in snapshot_paths if child.suffix == ".json"]
     for child in snapshot_paths:
         try:
             if child.is_symlink():
@@ -583,116 +646,140 @@ def _audit_collect(project: Project) -> dict:
             manifest_objects[sid] = shapes
         except OSError:
             manifest_skipped += 1
+    # Count unique record/scan paths, including a generation checked both as
+    # a durable reference source and as the active publication history.
+    skipped_references: set[Path] = set()
+
+    def reference_field(path: Path, record: dict, field: str, ids: set[str], *, required=False):
+        value = record.get(field)
+        sid = _audit_digest(value)
+        if sid is not None:
+            ids.add(sid)
+        elif value is not None or required:
+            skipped_references.add(path)
+
+    def reference_dict(path: Path, field: str, ids: set[str], *, required=False,
+                       must_exist=False):
+        record, skipped = _audit_ref_dict(root, path)
+        if skipped or (must_exist and record is None):
+            skipped_references.add(path)
+        if record is not None:
+            reference_field(path, record, field, ids, required=required)
+        return record
+
+    def reference_children(directory: Path):
+        paths, skipped = _audit_list_dir(directory)
+        if skipped:
+            skipped_references.add(directory)
+        return paths
+
+    live_ids: set[str] = set()
+    current_path = root / "current.json"
+    pointer = reference_dict(current_path, "snapshot", live_ids, required=True)
+    generation = _audit_digest(pointer.get("history")) if pointer is not None else None
+    pointer_snapshot = _audit_digest(pointer.get("snapshot")) if pointer is not None else None
+    if pointer is not None and (generation is None or pointer_snapshot is None):
+        skipped_references.add(current_path)
+
     history_ids: set[str] = set()
+    active_history: list | None = None
     generations = 0
     histories_bytes = 0
     histories_dir = root / "histories"
-    try:
-        history_paths = sorted(histories_dir.glob("*.json")) if histories_dir.is_dir() else []
-    except OSError:
-        history_paths = []
-    for child in history_paths:
-        try:
-            if child.is_symlink() or not DIGEST.fullmatch(child.stem):
-                continue
-            try:
-                histories_bytes += child.stat().st_size
-            except OSError:
-                continue
-            generations += 1
-            try:
-                if child.stat().st_size <= _AUDIT_JSON_BYTES:
-                    record = read_json(child, None)
-                else:
-                    record = None
-            except (OSError, ValueError):
-                record = None
-            if isinstance(record, list):
-                for sid in record:
-                    digest_id = _audit_digest(sid)
-                    if digest_id is not None:
-                        history_ids.add(digest_id)
-        except OSError:
+    for child in reference_children(histories_dir):
+        if child.suffix != ".json":
             continue
-    live_ids: set[str] = set()
-    try:
-        live_ids = set(project.snapshots._history_ids())
-    except Exception:
         try:
-            pointer = read_json(root / "current.json", {})
-            if isinstance(pointer, dict):
-                digest_id = _audit_digest(pointer.get("snapshot"))
-                if digest_id is not None:
-                    live_ids = {digest_id}
-        except (OSError, ValueError):
-            live_ids = set()
+            info = child.lstat()
+            histories_bytes += info.st_size
+        except FileNotFoundError:
+            continue
+        except OSError:
+            skipped_references.add(child)
+            continue
+        valid_name = _audit_digest(child.stem) is not None
+        if valid_name:
+            generations += 1
+        else:
+            skipped_references.add(child)
+        record, skipped = _audit_ref_list(root, child)
+        if child.stem == generation:
+            active_history = record
+        if skipped:
+            skipped_references.add(child)
+        if record is None:
+            continue
+        for sid in record:
+            digest_id = _audit_digest(sid)
+            if digest_id is None:
+                skipped_references.add(child)
+            else:
+                history_ids.add(digest_id)
+        if child not in skipped_references and (not record or digest(canonical(record)) != child.stem):
+            skipped_references.add(child)
+
+    if generation is not None and histories_dir not in skipped_references:
+        history_path = histories_dir / (generation + ".json")
+        # Missing required generations are incomplete, unlike missing optional
+        # run/artifact records. Reuse the bounded read, never _history_ids().
+        if active_history is None:
+            skipped_references.add(history_path)
+        elif pointer_snapshot is not None:
+            if not active_history or active_history[-1] != pointer_snapshot:
+                skipped_references.add(history_path)
+            elif history_path not in skipped_references:
+                live_ids = set(active_history)
     history_ids |= live_ids
     run_ids: set[str] = set()
-    try:
-        run_dirs = sorted((root / "runs").glob("*")) if (root / "runs").is_dir() else []
-    except OSError:
-        run_dirs = []
-    for run_dir in run_dirs:
+    for run_dir in reference_children(root / "runs"):
         try:
-            if not run_dir.is_dir() or run_dir.is_symlink():
+            info = run_dir.lstat()
+            if stat.S_ISLNK(info.st_mode):
+                skipped_references.add(run_dir)
                 continue
+            if not stat.S_ISDIR(info.st_mode):
+                continue
+        except FileNotFoundError:
+            continue
         except OSError:
+            skipped_references.add(run_dir)
             continue
         for name in ("started.json", "result.json", "consultation.json", "error.json", "prompt_projection.json"):
-            record = _audit_json(run_dir / name)
-            if record is None:
-                continue
-            digest_id = _audit_digest(record.get("snapshot"))
-            if digest_id is not None:
-                run_ids.add(digest_id)
+            reference_dict(run_dir / name, "snapshot", run_ids)
     artifact_ids: set[str] = set()
-    try:
-        pointer = read_json(root / "artifacts" / "latest.json", {})
-        if isinstance(pointer, dict):
-            digest_id = _audit_digest(pointer.get("snapshot"))
-            if digest_id is not None:
-                artifact_ids.add(digest_id)
-    except (OSError, ValueError):
-        pass
-    try:
-        artifact_dirs = sorted((root / "artifacts").glob("*")) if (root / "artifacts").is_dir() else []
-    except OSError:
-        artifact_dirs = []
-    for child in artifact_dirs:
+    artifacts_dir = root / "artifacts"
+    artifact_children = reference_children(artifacts_dir)
+    # Validate the root before even attempting latest.json: an unsafe parent
+    # is one skipped scan, never an opportunity to read outside the project.
+    if artifacts_dir not in skipped_references:
+        reference_dict(artifacts_dir / "latest.json", "snapshot", artifact_ids, required=True)
+    for child in artifact_children:
         try:
-            if not child.is_dir() or child.is_symlink():
+            info = child.lstat()
+            if stat.S_ISLNK(info.st_mode):
+                skipped_references.add(child)
                 continue
-            record = _audit_json(child / "evidence.json")
-            if record is None:
+            if not stat.S_ISDIR(info.st_mode):
                 continue
-            digest_id = _audit_digest(record.get("snapshot"))
-            if digest_id is not None:
-                artifact_ids.add(digest_id)
-        except OSError:
+        except FileNotFoundError:
             continue
+        except OSError:
+            skipped_references.add(child)
+            continue
+        reference_dict(child / "evidence.json", "snapshot", artifact_ids,
+                       required=True, must_exist=True)
     insight_ids: set[str] = set()
-    try:
-        inbox_paths = sorted((root / "inbox").glob("*.json")) if (root / "inbox").is_dir() else []
-    except OSError:
-        inbox_paths = []
-    for child in inbox_paths:
-        try:
-            if child.is_symlink():
-                continue
-            record = _audit_json(child)
-            if record is None:
-                continue
-            digest_id = _audit_digest(record.get("base_snapshot"))
-            if digest_id is not None:
-                insight_ids.add(digest_id)
-        except OSError:
-            continue
+    for child in reference_children(root / "inbox"):
+        if child.suffix == ".json":
+            reference_dict(child, "base_snapshot", insight_ids)
     # Archive bodies remain durable references after leaving the live inbox.
     # An unreadable archive refuses maintenance rather than hiding references.
     for reference in insight_archive.snapshot_references(root):
         digest_id = _audit_digest(reference)
         if digest_id is not None:
             insight_ids.add(digest_id)
+        elif reference is not None:
+            skipped_references.add(root / "insight-archive.sqlite3")
     work_item_ids: set[str] = set()
     work_item_events_skipped = 0
     work_items_dir = root / "work-items"
@@ -749,12 +836,9 @@ def _audit_collect(project: Project) -> dict:
     for shapes in manifest_objects.values():
         live_objects |= shapes
     objects_dir = root / "objects"
-    try:
-        object_paths = sorted(objects_dir.glob("*")) if objects_dir.is_dir() else []
-    except OSError:
-        object_paths = []
+    object_paths, objects_scan_skipped = _audit_list_dir(objects_dir)
     object_sizes: dict[str, int] = {}
-    objects_skipped = 0
+    objects_skipped = int(objects_scan_skipped)
     for child in object_paths:
         try:
             if child.is_symlink() or not child.is_file() or not DIGEST.fullmatch(child.name):
@@ -780,6 +864,7 @@ def _audit_collect(project: Project) -> dict:
         "insight_ids": insight_ids,
         "work_item_ids": work_item_ids,
         "work_item_events_skipped": work_item_events_skipped,
+        "reference_records_skipped": len(skipped_references),
         "generations": generations,
         "histories_bytes": histories_bytes,
         "unreferenced": unreferenced,
@@ -804,21 +889,32 @@ def audit(project: Project) -> dict:
     orphan_count, orphan_bytes, orphan_sample, orphan_truncated, skipped},
     references: {history_snapshots, run_snapshots, artifact_snapshots,
     insight_snapshots, work_item_snapshots}, work_item_events_skipped,
-    preview_only: True}``. Counts and byte totals are
-    exact; sample lists hold at most ``_AUDIT_SAMPLE`` sorted IDs with a
+    reference_records_skipped, preview_only: True}``. Counts and byte totals
+    are exact; sample lists hold at most ``_AUDIT_SAMPLE`` sorted IDs with a
     truncation flag.
     Bounds: reference JSON files above ``_AUDIT_JSON_BYTES`` are skipped
-    and counted; symlinks are never followed; corrupt entries are skipped,
-    never raised. Manifest ``files`` entries with invalid digests are
-    skipped. Trust: local recorded state only (data, not proof); insight
-    prose is never read, only ``base_snapshot`` IDs. Retry/cancellation:
-    read-only, lock-free, idempotent; safe to retry while writers run, with
-    no quiescence requirement because nothing is removed.
+    and counted in ``reference_records_skipped``; symlinks are never
+    followed; corrupt entries are skipped, never raised. Missing optional
+    run/artifact files are normal and not counted; present-but-unreadable,
+    malformed, over-bound, wrong-shape, or failed directory scans are counted
+    as skipped. Missing optional run records and an absent latest-artifact
+    pointer are normal; an artifact directory without its evidence record is
+    incomplete. The count is unique record/scan paths, not failed checks;
+    null records, invalid non-null reference IDs, and invalid history names,
+    entries, digests, or active endpoints are incomplete. Usable valid IDs
+    are still reported, but an incomplete scan
+    is never proof that references are absent. Manifest ``files`` entries
+    with invalid digests are skipped. An unreadable insight archive raises
+    rather than hiding references. Trust: local recorded state only (data,
+    not proof); insight prose is never read, only ``base_snapshot`` IDs.
+    Retry/cancellation: read-only, lock-free, idempotent; safe to retry
+    while writers run, with no quiescence requirement because nothing is
+    removed.
     Evidence: exact counts/bytes plus bounded samples; full evidence stays
     on disk under ``snapshots/``, ``histories/`` and ``objects/``.
-    Failure: raises only when the project or its store is unreadable;
-    per-file faults are counted as skipped. Nothing is deleted, moved, or
-    rewritten by this preview.
+    Failure: raises only when the project or its store is unreadable (or the
+    insight archive is unreadable); per-file faults are counted as skipped.
+    Nothing is deleted, moved, or rewritten by this preview.
     """
     collected = _audit_collect(project)
     manifests = collected["manifests"]
@@ -872,6 +968,7 @@ def audit(project: Project) -> dict:
             "work_item_snapshots": len(collected["work_item_ids"]),
         },
         "work_item_events_skipped": collected["work_item_events_skipped"],
+        "reference_records_skipped": collected["reference_records_skipped"],
         "preview_only": True,
         "retained": "All manifests, history generations, objects, runs, artifacts, sessions, decisions, proposals, insight revisions, and work-item histories are retained; this preview removes nothing. "
                     "Web-cache entries expired past cache_seconds are disposable (see sessions/web_cache); "
@@ -884,15 +981,20 @@ def reclaim(project: Project, *, apply: bool = False) -> dict:
 
     Schema: ``{applied, snapshots: [relative manifest paths], objects:
     [relative object paths], unreferenced_bytes, orphan_bytes,
-    manifest_skipped, work_item_events_skipped, audit?}``.
+    manifest_skipped, work_item_events_skipped, reference_records_skipped,
+    audit?}``.
     The candidate sets are exactly what ``audit()`` reports in full: manifests
     outside every durable reference (live/history/run/artifact/insight/work-item) and
     objects referenced by no manifest on disk. Full ID lists are returned
     (sorted); use ``audit()`` for the bounded display samples.
     Bounds: same bounded reads, digest checks, and symlink skipping as
-    ``audit()``; dry-run lists known candidates and reports skipped manifests.
-    Apply refuses if any manifest is skipped because object reachability is
-    unknown. History generations are never candidates, nor are runs, artifacts,
+    ``audit()``; dry-run lists known candidates and reports skipped manifests
+    and skipped reference records. Apply refuses if any manifest or any
+    reference record scan was skipped because manifest or object reachability
+    is unknown. Missing optional run/artifact files are normal and not
+    counted; present-but-unreadable, malformed, over-bound, wrong-shape, or
+    failed directory scans set ``reference_records_skipped`` and refuse
+    apply. History generations are never candidates, nor are runs, artifacts,
     sessions, decisions, proposals, insight revisions, or work-item histories.
     Trust: operator-invoked maintenance; the explicit ``--apply`` invocation
     behind quiescence (paused + locks) is the grant. Candidates are
@@ -903,9 +1005,10 @@ def reclaim(project: Project, *, apply: bool = False) -> dict:
     idempotent. Apply writes a ``maintenance/storage-*.json`` audit record;
     a second reclaim converges on objects orphaned by manifest removal.
     Evidence: returns removed/retained paths plus the maintenance audit path.
-    Failure: Denied for skipped snapshot manifests, unsafe work-item history,
-    symlinks at removal time, or a non-quiescent project when applying; faults
-    in other reference stores are skipped, never raised.
+    Failure: Denied for skipped snapshot manifests, skipped reference
+    records, unsafe work-item history or storage roots, symlinks at removal time, or a
+    non-quiescent project when applying; an unreadable insight archive
+    raises rather than hiding references.
     """
     if not apply:
         collected = _audit_collect(project)
@@ -920,13 +1023,25 @@ def reclaim(project: Project, *, apply: bool = False) -> dict:
                         "runs, artifacts, sessions, decisions, proposals, insight revisions, and work-item histories. "
                         "Repeat audit/reclaim converges on newly orphaned objects.",
             "work_item_events_skipped": collected["work_item_events_skipped"],
+            "reference_records_skipped": collected["reference_records_skipped"],
         }
     with quiescent(project):
         collected = _audit_collect(project)
         if collected["manifest_skipped"]:
             raise Denied("Skipped snapshot manifest; cannot safely determine object references")
+        if collected["reference_records_skipped"]:
+            raise Denied("Skipped reference records; cannot safely reclaim snapshot references")
         if collected["work_item_events_skipped"]:
             raise Denied("Unreadable work-item history; cannot safely reclaim snapshot references")
+        for directory in (project.root / "snapshots", project.root / "objects"):
+            try:
+                info = directory.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise Denied("Cannot safely inspect storage directory before reclamation") from exc
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                raise Denied("Refusing a symlink or non-directory storage root during reclamation")
         manifest_paths = [project.root / "snapshots" / f"{sid}.json" for sid in collected["unreferenced"]]
         object_paths = [project.root / "objects" / name for name in collected["orphan"]]
         for path in (*manifest_paths, *object_paths):
@@ -955,7 +1070,8 @@ def reclaim(project: Project, *, apply: bool = False) -> dict:
                             "orphan_bytes": sum(collected["object_sizes"][name] for name in collected["orphan"]),
                             "work_item_snapshots": len(collected["work_item_ids"]),
                             "manifest_skipped": 0,
-                            "work_item_events_skipped": 0})
+                            "work_item_events_skipped": 0,
+                            "reference_records_skipped": 0})
         sync_dir(record.parent)
         removed["audit"] = record.relative_to(project.root).as_posix()
     return {"applied": True, **removed,
@@ -963,7 +1079,8 @@ def reclaim(project: Project, *, apply: bool = False) -> dict:
                         "runs, artifacts, sessions, decisions, proposals, insight revisions, and work-item histories. "
                         "Repeat audit/reclaim converges on newly orphaned objects.",
             "manifest_skipped": 0,
-            "work_item_events_skipped": 0}
+            "work_item_events_skipped": 0,
+            "reference_records_skipped": 0}
 
 
 def artifact_candidates(project: Project, keep: int) -> list[Path]:
