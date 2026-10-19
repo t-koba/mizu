@@ -132,7 +132,7 @@ Claude's sole counting boundary is the SDK `PreToolUse` callback, using its
 callback order charges once. A bridge error or anything other than explicit
 `allowed: true` denies the pre-send hook. Pi forwards `tool_call.toolCallId`;
 missing ids fail closed, with no model-input or parent-id fallback. In the locked
-Pi 1.1.0 contract, `ToolCallEventBase.toolCallId` is separate from `input`;
+Pi contract, `ToolCallEventBase.toolCallId` is separate from `input`;
 `AgentSession._beforeToolCall` copies `toolCall.id` to it, and the agent loop awaits
 `beforeToolCall` and checks `block` before executing. Pi assigns nested calls
 `<parent id>/<n>`. These SDKs and reviewed local extensions are trusted to preserve
