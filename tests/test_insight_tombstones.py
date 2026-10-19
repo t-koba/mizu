@@ -274,10 +274,13 @@ raise AssertionError('writer did not terminate')
 
     def test_over_1000_tombstones_prefixes_and_high_water_append_isolation(self):
         directory = self.project.root / "insight-ids"
+        directory.mkdir(parents=True, exist_ok=True)
+        # These synthetic candidates are read-only migration fixtures; the
+        # tests for durable identity publication use write_json separately.
         for n in range(1007):
             key = f"{n:032x}"
-            write_json(directory / f"{key}.json", {"id": key, "sha256": "f" * 64,
-                                                 "created_at": "2026-01-01T00:00:00+00:00"})
+            (directory / f"{key}.json").write_bytes(canonical({"id": key, "sha256": "f" * 64,
+                                                                  "created_at": "2026-01-01T00:00:00+00:00"}))
         first = self.page(limit=1000)
         self.assertTrue(first["has_more"])
         self.assertEqual(len(first["items"]), 1000)

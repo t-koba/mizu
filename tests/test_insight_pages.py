@@ -20,10 +20,13 @@ from mizu.storage import backup, restore
 class InsightPageTests(Fixture):
     def bulk_live(self, count=1007):
         # Reverse creation order and tied timestamps exercise all key columns,
-        # not filesystem iteration or a timestamp-only continuation.
+        # not filesystem iteration or a timestamp-only continuation. These are
+        # read-only fixtures, so durable atomic writes would add no coverage.
+        inbox = self.project.root / 'inbox'
+        inbox.mkdir(parents=True, exist_ok=True)
         for n in reversed(range(count)):
             record = self.record(n)
-            write_json(self.project.root / 'inbox' / f'{record["id"]}.json', record)
+            (inbox / f'{record["id"]}.json').write_bytes(canonical(record))
 
     def record(self, n, rev=1):
         return {"id": f"{n:032x}", "rev": rev, "source": "searcher", "origin": None,
@@ -278,18 +281,24 @@ class InsightPageTests(Fixture):
         return result, out.getvalue(), err.getvalue()
 
     def test_cli_list_bytes_unchanged_explicit_pages_read_and_history(self):
-        self.bulk_live()
+        self.bulk_live(3)
         expected = self.project.insights.list(pending=False, limit=1000)
         status, output, error = self.cli('list', 'sample')
         self.assertEqual((status, error), (0, ''))
         self.assertEqual(output, json.dumps(expected, ensure_ascii=False, indent=2) + '\n')
         self.assertIsInstance(json.loads(output), list)
+        # The public maximum is accepted here; the high-volume API regression
+        # separately exercises a full 1,000-row page and its continuation.
         status, output, error = self.cli('page', 'sample', '--limit', '1000')
         self.assertEqual((status, error), (0, ''))
-        first = json.loads(output)
-        status, output, error = self.cli('page', 'sample', '--cursor', first['next_cursor'], '--limit', '1000')
+        self.assertEqual(len(json.loads(output)['items']), 3)
+        status, output, error = self.cli('page', 'sample', '--limit', '2')
         self.assertEqual((status, error), (0, ''))
-        self.assertEqual(len(json.loads(output)['items']), 7)
+        first = json.loads(output)
+        self.assertTrue(first['has_more'])
+        status, output, error = self.cli('page', 'sample', '--cursor', first['next_cursor'], '--limit', '2')
+        self.assertEqual((status, error), (0, ''))
+        self.assertEqual(json.loads(output)['items'], expected[2:3])
         self.legacy_archive(2)
         status, output, error = self.cli('page', 'sample', '--scope', 'archive', '--limit', '1')
         self.assertEqual((status, error), (0, ''))
