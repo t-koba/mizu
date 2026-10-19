@@ -221,6 +221,39 @@ class RoleStateTests(Fixture):
         self.assertEqual(seen["status"], "unavailable")
         self.assertIsNone(seen["generation"])
 
+    def test_fifo_read_is_unavailable_without_hanging(self):
+        import os
+        import subprocess
+        import sys
+        from pathlib import Path
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("POSIX FIFO unavailable")
+        root = self.project.root / "role-state"
+        root.mkdir(parents=True, exist_ok=True)
+        fifo = root / "searcher.json"
+        if fifo.exists() or fifo.is_symlink():
+            fifo.unlink()
+        os.mkfifo(fifo)
+        self.addCleanup(lambda: fifo.unlink() if fifo.exists() or fifo.is_symlink() else None)
+        repo_src = str(Path(__file__).resolve().parents[1] / "src")
+        script = (
+            "import sys; sys.path.insert(0, %r); "
+            "from pathlib import Path; "
+            "from mizu.role_state import RoleStateStore; "
+            "store = RoleStateStore(Path(%r), max_bytes=%r); "
+            "out = store.read('searcher'); "
+            "assert out == {'status': 'unavailable', 'generation': None, 'record': None}, out; "
+            "print('fifo-unavailable-ok')"
+        ) % (repo_src, str(root), self.project.role_state.max_bytes)
+        try:
+            completed = subprocess.run(
+                [sys.executable, "-c", script],
+                timeout=3, capture_output=True, text=True, check=False)
+        except subprocess.TimeoutExpired as exc:
+            self.fail(f"bounded role-state read hung on FIFO: {exc}")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("fifo-unavailable-ok", completed.stdout)
+
     def test_fresh_session_sees_latest_generation(self):
         self.project.role_state.replace("searcher", STATE,
                                         expected_generation=0)

@@ -241,15 +241,26 @@ def _replace_windows(source: str, destination: Path) -> None:
         kernel.CloseHandle(handle)
 
 
-def _open_read(path: Path) -> BinaryIO:
+def _open_read(path: Path, *, nonblocking: bool = False) -> BinaryIO:
     """Open one generation, allowing atomic replacement while it is retained.
 
     Python's Windows CRT open omits FILE_SHARE_DELETE. Use a delete-sharing
     handle there so POSIX-semantics replacement need not wait for readers.
     This is for managed state, not the untrusted-path checks in safe_read.
+    On POSIX, ``nonblocking=True`` opens with ``O_NONBLOCK`` so a FIFO (or
+    other special file) never blocks before the caller validates the handle
+    with ``fstat``; regular files are unaffected. The Windows handle always
+    keeps ``FILE_SHARE_DELETE`` semantics regardless of ``nonblocking``.
     """
     if os.name != "nt":
-        return path.open("rb")
+        if not nonblocking:
+            return path.open("rb")
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
+        try:
+            return os.fdopen(fd, "rb")
+        except BaseException:
+            os.close(fd)
+            raise
 
     import ctypes
     import msvcrt
@@ -301,11 +312,16 @@ def read_json(path: Path, default: Any = None, *, max_bytes: int | None = None) 
     Checks bind to the opened handle, not the replaceable path. The read keeps
     using :func:`_open_read`, so retained readers still observe a complete old
     generation across atomic replacement (including Windows delete sharing).
+    The bounded path opens POSIX files with ``O_NONBLOCK`` so a FIFO never
+    blocks before the ``fstat`` type check rejects it; the unbounded path
+    keeps the historical blocking open.
     """
     if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 0):
         raise ValueError("max_bytes must be an exact nonnegative integer")
     try:
-        with _open_read(path) as stream:
+        reader = (_open_read(path, nonblocking=True) if max_bytes is not None
+                  else _open_read(path))
+        with reader as stream:
             if max_bytes is None:
                 raw = stream.read()
             else:

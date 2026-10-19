@@ -283,7 +283,7 @@ class FileTests(unittest.TestCase):
     def test_bounded_json_retains_generation_replaced_before_first_stat(self):
         path = self.root / "state.json"
         write_json(path, {})
-        def open_then_replace(target):
+        def open_then_replace(target, **kwargs):
             stream = _open_read(target)
             try:
                 write_json(target, {"new": True})
