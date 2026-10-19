@@ -313,7 +313,11 @@ def _session_accounting(project: Project) -> dict:
     Sessions are never reclamation candidates: content-bound session keys
     (``sessions/<role>/<key>/``) stay for audit after rotation or policy
     changes. Only exact counts/bytes are reported; symlinks are never
-    followed.
+    followed. The depth-first walk retains one open ``os.scandir`` iterator
+    per ancestor (O(tree depth) state, no visit limit or truncation): every
+    accessible regular file and its size is counted, ``session.json`` files also count
+    as records, per-entry faults and symlinks count as skipped, and a
+    missing sessions root reports all zeros.
     """
     root = project.root / "sessions"
     records = 0
@@ -321,30 +325,54 @@ def _session_accounting(project: Project) -> dict:
     total_bytes = 0
     skipped = 0
     try:
-        paths = sorted(root.rglob("*")) if root.is_dir() else []
+        if root.is_symlink():
+            return {"records": 0, "files": 0, "bytes": 0, "skipped": 1}
     except OSError:
-        paths = []
-    # Bound the walk so one huge session tree cannot exhaust the audit.
-    for child in paths[:100000]:
+        return {"records": 0, "files": 0, "bytes": 0, "skipped": 1}
+    try:
+        if not root.is_dir():
+            return {"records": 0, "files": 0, "bytes": 0, "skipped": 0}
+    except OSError:
+        return {"records": 0, "files": 0, "bytes": 0, "skipped": 1}
+    iterators = []
+    try:
         try:
-            if child.is_symlink():
-                skipped += 1
+            iterators.append(os.scandir(root))
+        except OSError:
+            skipped += 1
+        while iterators:
+            try:
+                entry = next(iterators[-1])
+            except StopIteration:
+                iterators.pop().close()
                 continue
-            if not child.is_file():
+            except OSError:
+                skipped += 1
+                iterators.pop().close()
                 continue
             try:
-                total_bytes += child.stat().st_size
+                if entry.is_symlink():
+                    skipped += 1
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    # Descend before advancing the parent: never retain siblings.
+                    iterators.append(os.scandir(entry.path))
+                    continue
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                total_bytes += entry.stat(follow_symlinks=False).st_size
             except OSError:
                 skipped += 1
                 continue
             files += 1
-            if child.name == "session.json":
+            if entry.name == "session.json":
                 records += 1
-        except OSError:
-            skipped += 1
-    truncated = len(paths) > 100000
-    if truncated:
-        skipped += len(paths) - 100000
+    finally:
+        # Also release ancestors on unexpected exceptions. ExitStack attempts
+        # every close even if another close fails; callbacks exist only here.
+        with contextlib.ExitStack() as cleanup:
+            for iterator in iterators:
+                cleanup.callback(iterator.close)
     return {"records": records, "files": files, "bytes": total_bytes, "skipped": skipped}
 
 

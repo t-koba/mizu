@@ -1,10 +1,63 @@
 """Reference-aware storage accounting preview plus gated reclamation. Offline only."""
 import json
+import os
+from pathlib import Path
+from types import SimpleNamespace
 import unittest
+from unittest import mock
 from support import Fixture
 from mizu.errors import Denied
 from mizu.fs import write_json
-from mizu.storage import audit, reclaim
+from mizu.storage import _session_accounting, audit, reclaim
+
+
+class SessionEntry:
+    """Minimal scandir entry; callbacks check consumption order without buffering."""
+    def __init__(self, path, *, directory=False, on_stat=None):
+        self.path = str(path)
+        self.name = path.name
+        self.directory = directory
+        self.on_stat = on_stat
+
+    def is_symlink(self):
+        return False
+
+    def is_dir(self, *, follow_symlinks=True):
+        assert not follow_symlinks
+        return self.directory
+
+    def is_file(self, *, follow_symlinks=True):
+        assert not follow_symlinks
+        return not self.directory
+
+    def stat(self, *, follow_symlinks=True):
+        assert not follow_symlinks
+        if self.on_stat:
+            self.on_stat()
+        return SimpleNamespace(st_size=7)
+
+
+class SessionIterator:
+    """Scandir-shaped lazy iterator with observable resource cleanup."""
+    def __init__(self, entries):
+        self.entries = iter(entries)
+        self.closed = False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return next(self.entries)
+
+    def close(self):
+        self.closed = True
+        self.entries.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
 
 
 class StorageAuditTests(Fixture):
@@ -277,3 +330,156 @@ class StorageReclaimTests(Fixture):
         result = reclaim(self.project, apply=True)
         self.assertNotIn(f"snapshots/{snap['id']}.json", result["snapshots"])
         self.assertTrue((self.project.root / "snapshots" / f"{snap['id']}.json").exists())
+
+
+class SessionAccountingTests(Fixture):
+    def test_missing_sessions_root_is_all_zero(self):
+        from pathlib import Path as _Path
+        import shutil
+        sessions = self.project.root / "sessions"
+        if sessions.is_symlink() or sessions.exists():
+            shutil.rmtree(sessions, ignore_errors=True)
+            try:
+                sessions.unlink(missing_ok=True)
+            except OSError:
+                pass
+        self.assertFalse(_Path(sessions).exists())
+        report = audit(self.project)
+        self.assertEqual(report["sessions"], {"records": 0, "files": 0, "bytes": 0, "skipped": 0})
+
+    def test_lazy_wide_directory_counts_exact_without_materialization(self):
+        wide = self.project.root / "sessions" / "worker" / "wide"
+        wide.mkdir(parents=True)
+        fake_count = 100001  # Cross the former cutoff without creating real files.
+        stat_count = 0
+
+        def counted():
+            nonlocal stat_count
+            stat_count += 1
+
+        def entries():
+            for i in range(fake_count):
+                self.assertEqual(stat_count, i, "entries buffered before stat")
+                name = "session.json" if i % 20000 == 0 else f"synthetic-{i}.bin"
+                yield SessionEntry(wide / name, on_stat=counted)
+            self.assertEqual(stat_count, fake_count)
+
+        iterator = SessionIterator(entries())
+        real_scandir = os.scandir
+
+        def scandir(path):
+            return iterator if Path(path) == wide else real_scandir(path)
+
+        with mock.patch("mizu.storage.os.scandir", side_effect=scandir):
+            with mock.patch.object(Path, "rglob", side_effect=AssertionError("eager rglob")):
+                report = audit(self.project)["sessions"]
+        self.assertEqual(report, {"records": 6, "files": fake_count,
+                                  "bytes": fake_count * 7, "skipped": 0})
+        self.assertTrue(iterator.closed)
+
+    def test_wide_sibling_directories_are_descended_before_parent_advances(self):
+        role = self.project.root / "sessions" / "worker"
+        role.mkdir(parents=True)
+        sibling_count = 128
+        stat_count = 0
+        last_child = None
+
+        def counted():
+            nonlocal stat_count
+            stat_count += 1
+
+        def siblings():
+            for i in range(sibling_count):
+                self.assertEqual(stat_count, i, "sibling directories buffered before descent")
+                if last_child is not None:
+                    self.assertTrue(last_child.closed)
+                yield SessionEntry(role / f"key-{i}", directory=True)
+            self.assertEqual(stat_count, sibling_count)
+            self.assertTrue(last_child.closed)
+
+        def child_entries(path):
+            yield SessionEntry(path / "session.json", on_stat=counted)
+
+        parent = SessionIterator(siblings())
+        real_scandir = os.scandir
+
+        def scandir(path):
+            nonlocal last_child
+            path = Path(path)
+            if path == role:
+                return parent
+            if path.parent == role:
+                last_child = SessionIterator(child_entries(path))
+                return last_child
+            return real_scandir(path)
+
+        with mock.patch("mizu.storage.os.scandir", side_effect=scandir):
+            report = audit(self.project)["sessions"]
+        self.assertEqual(report, {"records": sibling_count, "files": sibling_count,
+                                  "bytes": sibling_count * 7, "skipped": 0})
+        self.assertTrue(parent.closed)
+        self.assertTrue(last_child.closed)
+
+    def test_iterators_close_on_faults_and_ancestors_resume(self):
+        root = self.project.root / "sessions"
+        root.mkdir(exist_ok=True)
+        for fault in ("open", "iterate", "stat", "unexpected"):
+            with self.subTest(fault=fault):
+                def fail():
+                    if fault == "unexpected":
+                        raise RuntimeError("synthetic unexpected failure")
+                    raise OSError("synthetic entry failure")
+
+                def root_entries():
+                    yield SessionEntry(root / "key", directory=True)
+                    yield SessionEntry(root / "session.json")
+
+                def child_entries():
+                    if fault in ("iterate", "unexpected"):
+                        fail()
+                    yield SessionEntry(root / "key" / "bad.bin", on_stat=fail)
+                    yield SessionEntry(root / "key" / "session.json")
+
+                parent = SessionIterator(root_entries())
+                child = SessionIterator(child_entries())
+
+                def scandir(path):
+                    if Path(path) == root:
+                        return parent
+                    if fault == "open":
+                        fail()
+                    return child
+
+                with mock.patch("mizu.storage.os.scandir", side_effect=scandir):
+                    if fault == "unexpected":
+                        with self.assertRaisesRegex(RuntimeError, "synthetic unexpected"):
+                            _session_accounting(self.project)
+                    else:
+                        count = 2 if fault == "stat" else 1
+                        self.assertEqual(_session_accounting(self.project),
+                                         {"records": count, "files": count,
+                                          "bytes": count * 7, "skipped": 1})
+                self.assertTrue(parent.closed)
+                if fault != "open":
+                    self.assertTrue(child.closed)
+
+    def test_symlink_entries_are_skipped_not_followed(self):
+        import os as _os
+        outside = self.root / "outside.bin"
+        outside.write_bytes(b"outside-bytes")
+        sessions = self.project.root / "sessions"
+        key = sessions / "worker" / "k1"
+        key.mkdir(parents=True)
+        payload = b'{"v": 2}'
+        (key / "session.json").write_bytes(payload)
+        baseline = audit(self.project)["sessions"]
+        try:
+            _os.symlink(str(outside), str(key / "link-file.bin"))
+            _os.symlink(str(key), str(sessions / "link-dir"))
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"symlinks unsupported: {exc}")
+        report = audit(self.project)["sessions"]
+        self.assertEqual(report["files"], baseline["files"])
+        self.assertEqual(report["records"], baseline["records"])
+        self.assertEqual(report["bytes"], baseline["bytes"])
+        self.assertGreaterEqual(report["skipped"], baseline["skipped"] + 2)
