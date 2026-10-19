@@ -189,28 +189,6 @@ def _clear_missing_finish_streak(project, role_name):
         write_json(path, health)
 
 
-def _has_unblocked_open_work(project, config) -> bool:
-    """Whether the bounded open-work page shows actionable (open/doing) work.
-
-    Only ``open``/``doing`` rows count; a fully blocked/empty queue (or an
-    unreadable page) never rotates. The check reads one bounded page
-    (``[limits] work_items_prompt``); overflow beyond the page conservatively
-    reads as no rotation. Failure: never raises (False on any error).
-    """
-    try:
-        page = project.work_items.page_open(limit=config.limits.work_items_prompt)
-    except Exception:
-        return False
-    try:
-        items = page.get("items", [])
-        if not isinstance(items, list):
-            return False
-        return any(isinstance(row, dict) and row.get("status") in ("open", "doing")
-                   for row in items)
-    except Exception:
-        return False
-
-
 def _has_ready_work(project) -> bool:
     """Ready-work existence from a filtered bounded ledger scan; errors close."""
     try:
@@ -2924,10 +2902,11 @@ def session_prompt(context: Context, role, run_dir: Path) -> tuple:
     rotates a due persistent session before dispatch, even if its session
     record is missing. Missing-finish recovery likewise rotates a persistent
     session whose consecutive-missing-finish streak reached
-    ``[limits] missing_finish_recovery_after`` when the bounded open-work
-    page still shows actionable (open/doing) work; a fully blocked/empty
-    queue never rotates. Evidence: rotations write ``rotation.json``; dispatches
-    record the mode in ``prompt_projection.json``; failed rotations are stored
+    ``[limits] missing_finish_recovery_after`` when the filtered ready-work
+    scan still shows actionable (open/doing) work without structured waits;
+    a queue with no ready work never rotates. Evidence: rotations write
+    ``rotation.json``; dispatches record the mode in ``prompt_projection.json``;
+    failed rotations are stored
     in the run ``error.json`` by the Engine caller. Failure: a due rotation removes
     ``session.json`` so the next dispatch mints a fresh provider session
     while the published snapshot and composed policy reload unchanged; a
@@ -2961,7 +2940,7 @@ def session_prompt(context: Context, role, run_dir: Path) -> tuple:
         health_record = read_json(context.project.root / "health" / f"{context.role.name}.json", {})
         if isinstance(health_record, dict) and missing_finish_recovery_due(health_record, context.config):
             streak = missing_finish_streak(health_record)
-            if _has_unblocked_open_work(context.project, context.config):
+            if _has_ready_work(context.project):
                 missing_recovery_due = True
                 missing_reason = (
                     f"missing-finish units {streak} "

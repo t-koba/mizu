@@ -126,6 +126,49 @@ class MissingFinishRecoveryTests(Fixture):
         projection = read_json(run_dir / "prompt_projection.json")
         self.assertNotIn("missing-finish", projection.get("rotation", ""))
 
+    def test_blocked_overflow_still_rotates_for_later_ready_work(self):
+        # Fill the bounded general open page with older blocked rows so it
+        # shows only blocked work, then seed one later actionable open item
+        # beyond the page. The filtered ready-work scan must still rotate.
+        limit = 2
+        self.config = dataclasses.replace(
+            self.config, limits=dataclasses.replace(
+                self.config.limits, work_items_prompt=limit))
+        for index in range(limit):
+            proposal = self.project.insights.submit(
+                source="worker", title=f"Blocked filler {index}",
+                body="Fill the bounded general page", base_snapshot=None)
+            decision = self.project.insights.decide(
+                proposal["id"], "accept", "reviewed", "", "run-1", expected_rev=1)
+            item_id = decision["work_item"]["id"]
+            self.project.work_items.transition(
+                item_id, expected_rev=1, status="blocked", actor="worker")
+        ready_proposal = self.project.insights.submit(
+            source="worker", title="Later actionable work",
+            body="Ready work beyond the blocked page", base_snapshot=None)
+        ready_decision = self.project.insights.decide(
+            ready_proposal["id"], "accept", "reviewed", "", "run-1", expected_rev=1)
+        ready_id = ready_decision["work_item"]["id"]
+        general = self.project.work_items.page_open(limit=limit)
+        self.assertEqual(len(general["items"]), limit)
+        self.assertTrue(all(row["status"] == "blocked" for row in general["items"]))
+        ready = self.project.work_items.page_ready(limit=1)
+        self.assertTrue(ready["items"])
+        self.assertEqual(ready["items"][0]["id"], ready_id)
+        path = save_worker_session(self)
+        for _ in range(2):
+            with self.assertRaises(MissingFinish):
+                Engine(self.config, driver=NoFinishDriver()).run(self.project, "worker")
+        self.assertEqual(streak(self.project), 2)
+        result = Engine(self.config, driver=ScriptDriver()).run(self.project, "worker")
+        self.assertEqual(result["status"], "completed")
+        run_dir = self.project.root / "runs" / result["run"]
+        rotation = read_json(run_dir / "rotation.json")
+        self.assertTrue(rotation["rotated"])
+        self.assertIn("missing-finish units 2 >=2", rotation["reason"])
+        self.assertEqual(session_generation(path.parent), 1)
+        self.assertFalse(path.exists())
+
     def test_fully_blocked_queue_never_rotates(self):
         item_id = seed_open_work(self.project)
         self.project.work_items.transition(
