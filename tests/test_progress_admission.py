@@ -5,7 +5,7 @@ import time
 from unittest.mock import patch
 
 from support import Fixture, ScriptDriver
-from mizu.config import DEFAULT_PROGRESS_SIGNALS, load
+from mizu.config import DEFAULT_PROGRESS_SIGNALS, load, role_no_progress_backoff_seconds
 from mizu.errors import ConfigError, Denied
 from mizu.explain import explain
 from mizu.fs import canonical, digest, now, write_json
@@ -523,6 +523,65 @@ class ProgressAdmissionTests(Fixture):
         self.assertEqual(projected["progress_disposition"], "parked_no_progress")
         self.assertEqual(projected["progress"]["role"], "worker")
         self.assertEqual(set(projected["progress"]["signals"]), set(PROGRESS_SIGNALS))
+
+
+    def test_per_role_backoff_default_inherits_project_limit(self):
+        self.assertEqual(self.config.limits.no_progress_backoff_seconds, 0)
+        for name in ("worker", "searcher"):
+            with self.subTest(role=name):
+                self.assertIsNone(self.config.roles[name].no_progress_backoff_seconds)
+                self.assertEqual(role_no_progress_backoff_seconds(self.config, self.config.roles[name]), 0)
+
+    def test_per_role_backoff_rejects_out_of_range(self):
+        original = self.file.read_text()
+        for value in ("-1", "86401", '"60"', "1.5", "true"):
+            with self.subTest(value=value):
+                self.file.write_text(original.replace(
+                    "[roles.worker]", f"[roles.worker]\nno_progress_backoff_seconds = {value}"))
+                with self.assertRaises(ConfigError):
+                    load(self.file)
+        self.file.write_text(original)
+
+    def test_per_role_backoff_bounds_inherit_or_override(self):
+        original = self.file.read_text()
+        for value, expected in ((None, 0), (0, 0), (60, 60), (86400, 86400)):
+            with self.subTest(value=value):
+                text = original
+                if value is not None:
+                    text = text.replace(
+                        "[roles.worker]", f"[roles.worker]\nno_progress_backoff_seconds = {value}")
+                self.file.write_text(text)
+                config = load(self.file)
+                self.assertEqual(role_no_progress_backoff_seconds(config, config.roles["worker"]), expected)
+                # Unset roles keep the project default.
+                self.assertEqual(role_no_progress_backoff_seconds(config, config.roles["searcher"]),
+                                 config.limits.no_progress_backoff_seconds)
+                self.file.write_text(original)
+
+    def test_per_role_timer_expires_independently(self):
+        stamp = now()
+        epoch = dt.datetime.fromisoformat(stamp).timestamp()
+        worker_record = self._record(role="worker", count=1, stamp=stamp)
+        searcher_record = self._record(role="searcher", count=1, stamp=stamp)
+        limits = dataclasses.replace(self.config.limits, no_progress_backoff_seconds=3600)
+        roles = dict(self.config.roles)
+        roles["worker"] = dataclasses.replace(roles["worker"], no_progress_backoff_seconds=60)
+        config = dataclasses.replace(self.config, limits=limits, roles=roles)
+        # One role's short timer expires while the inheriting role stays parked.
+        self.assertEqual(progress_disposition(worker_record, "continue", config, "worker", epoch + 61),
+                         "self_admit_backoff")
+        self.assertEqual(progress_disposition(searcher_record, "continue", config, "searcher", epoch + 61),
+                         "parked_no_progress")
+        self.assertEqual(progress_disposition(searcher_record, "continue", config, "searcher", epoch + 3601),
+                         "self_admit_backoff")
+        parked = self._parked_snapshot(count=1, stamp=stamp)
+        self.assertTrue(should_run(self.project, parked, current_time=epoch + 61,
+                                   role_name="worker", config=config))
+        # Disabling the role timer keeps it parked after the project timer elapses.
+        roles["worker"] = dataclasses.replace(roles["worker"], no_progress_backoff_seconds=0)
+        disabled = dataclasses.replace(self.config, limits=limits, roles=roles)
+        self.assertEqual(progress_disposition(worker_record, "continue", disabled, "worker", epoch + 7200),
+                         "parked_no_progress")
 
 
 if __name__ == "__main__":

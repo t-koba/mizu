@@ -238,6 +238,8 @@ daemon = true
 # Per-role event batch overrides (optional, 1-100 each; unset keeps the matching project default).
 # decision_events_limit = 10
 # work_item_events_limit = 10
+# Per-role no-progress timer-wake override (optional, 0-86400; unset keeps the project value).
+# no_progress_backoff_seconds = 0
 
 [roles.searcher]
 profile = "alternate"

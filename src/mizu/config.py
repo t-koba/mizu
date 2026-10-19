@@ -460,6 +460,11 @@ class Role:
     #: project `[limits]` default; a set value must lie in 1-100.
     decision_events_limit: int | None = None
     work_item_events_limit: int | None = None
+    #: Per-role no-progress timer-wake override. None inherits the project
+    #: `[limits]` value; a set value must lie in 0-86400 like the project
+    #: bound. Only this wake timer is per role; allowance, recovery and
+    #: progress-record semantics stay project-wide.
+    no_progress_backoff_seconds: int | None = None
 
 
 def role_requests_per_run(config: "Config", role: "Role") -> int:
@@ -548,6 +553,23 @@ def role_work_item_events_limit(config: "Config", role: "Role") -> int:
     if type(value) is int and 1 <= value <= 100:
         return value
     return config.limits.work_item_events_limit
+
+
+def role_no_progress_backoff_seconds(config: "Config", role: "Role") -> int:
+    """Effective no-progress timer wake for one role for one dispatch.
+
+    Schema: role override when set, else project `[limits]`
+    no_progress_backoff_seconds. Trust: configuration. Failure: never raises;
+    malformed overrides read as the project value (load already refuses
+    them fail-closed).
+    """
+    try:
+        value = getattr(role, "no_progress_backoff_seconds", None)
+    except Exception:
+        value = None
+    if type(value) is int and 0 <= value <= 86400:
+        return value
+    return config.limits.no_progress_backoff_seconds
 
 
 def role_policy_text(role: "Role") -> str:
@@ -886,7 +908,7 @@ def load(file: Path) -> Config:
             raise ConfigError(f"Role name '{name}' is reserved for the operator channel")
         keys(role, {"profile", "policy", "workspace", "capabilities", "engine_tools", "on_change",
                     "interval_seconds", "calendar", "daemon", "selector", "attributes",
-                    "decision_events", "work_item_events", "decision_sources", "work_item_sources", "ci_wake", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds", "decision_events_limit", "work_item_events_limit"}, f"roles.{name}")
+                    "decision_events", "work_item_events", "decision_sources", "work_item_sources", "ci_wake", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds", "decision_events_limit", "work_item_events_limit", "no_progress_backoff_seconds"}, f"roles.{name}")
         profile = string(role.get("profile", ""), f"roles.{name}.profile")
         selector = string(role.get("selector", ""), f"roles.{name}.selector")
         if ("profile" in role) == ("selector" in role):
@@ -1024,6 +1046,9 @@ def load(file: Path) -> Config:
         role_work_item_limit = role.get("work_item_events_limit")
         if role_work_item_limit is not None:
             number(role_work_item_limit, f"roles.{name}.work_item_events_limit", 1, 100)
+        role_backoff = role.get("no_progress_backoff_seconds")
+        if role_backoff is not None:
+            number(role_backoff, f"roles.{name}.no_progress_backoff_seconds", 0, 86400)
         roles[name] = Role(name, profile, policy, workspace, caps,
                            strings(role.get("engine_tools", []), "engine_tools"),
                            boolean(role.get("on_change", False), "on_change"), interval, calendar, daemon, selector, attrs,
@@ -1033,7 +1058,8 @@ def load(file: Path) -> Config:
                            wrap_up_requests=role_wrap_requests, wrap_up_tools=role_wrap_tools,
                            run_seconds=role_seconds,
                            decision_events_limit=role_decision_limit,
-                           work_item_events_limit=role_work_item_limit)
+                           work_item_events_limit=role_work_item_limit,
+                           no_progress_backoff_seconds=role_backoff)
     if not roles:
         raise ConfigError("At least one role is required")
     consult_role = string(data.get("consult_role", ""), "consult_role")

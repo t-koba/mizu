@@ -53,7 +53,9 @@ self-admission guard for `continue`/`bounded` units
 
 Progress self-admission uses project `[limits].progress_signals` (example
 default: `tool`, `code`, `decision`, `insight`, `input`; `state` is
-optional), `no_progress_continuations`, and `no_progress_backoff_seconds`.
+optional), `no_progress_continuations`, and the effective per-role
+`no_progress_backoff_seconds` (`roles.<name>.no_progress_backoff_seconds`
+when set, else the project `[limits]` value).
 It bounds continuation of writer daemons; it is not a platform trigger.
 
 Non-write daemon readiness is only control state: the daemon loop in

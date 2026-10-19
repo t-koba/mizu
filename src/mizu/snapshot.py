@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 
 from . import platform as _platform
+from .config import role_no_progress_backoff_seconds
 from .errors import Denied, LimitExceeded, SnapshotConflict
 from .fs import DIGEST, ID, PREVIEW_BYTES, atomic_write, canonical, digest, lock, mkdir, now, publish_pointer, read_json, safe_read, safe_read_info, write_json, relative_parts
 from .vcs import REF_PREFIX
@@ -97,8 +98,14 @@ def progress_disposition(value: dict | None, outcome: str, config=None,
         limits = config.limits
         selected = tuple(limits.progress_signals)
         allowance = limits.no_progress_continuations
-        backoff = limits.no_progress_backoff_seconds
         role = value["role"] if role_name is None else role_name
+        # Effective per-role timer: roles.<name>.no_progress_backoff_seconds
+        # when set, else the project limit. Keep resolution centralized with
+        # the role configuration helpers; legacy config-like callers lacking
+        # a roles mapping still inherit the project value.
+        roles = getattr(config, "roles", None)
+        role_config = roles.get(role) if isinstance(roles, dict) else None
+        backoff = role_no_progress_backoff_seconds(config, role_config)
         if set(value["selected"]) != set(selected) or value["role"] != role:
             return "reevaluate"
         if outcome not in ("continue", "bounded"):
