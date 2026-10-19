@@ -1428,7 +1428,7 @@ class WrapUpTests(Fixture):
 class PromptOrderTests(Fixture):
     def test_prompt_key_order_is_fixed(self):
         # Stable key order keeps provider working caches warm: stable content
-        # first, volatile run identity and clock last.
+        # first, then the volatile ready-work age, run identity and clock.
         # Any reordering must update this test deliberately.
         import json
         from mizu.runtime import prompt_for, prompt_delta_for
@@ -1440,7 +1440,7 @@ class PromptOrderTests(Fixture):
                           "decision_events", "decision_task", "wait_events", "obligations",
                           "acceptance_commands", "research_state",
                           "ci_branch", "ci_failures", "ci_failures_may_be_truncated",
-                          "previous_report", "run", "now", "timezone"])
+                          "previous_report", "ready_work", "run", "now", "timezone"])
         self.assertEqual(
             list(json.loads(prompt_delta_for(ctx, [])).keys()),
             ["unit", "goal_digest", "published_snapshot", "snapshot_delta",
@@ -1448,4 +1448,4 @@ class PromptOrderTests(Fixture):
              "research_state", "workspace", "workspace_mode",
              "acceptance_commands", "ci_branch", "ci_failures",
              "ci_failures_may_be_truncated", "previous_report",
-             "run", "now", "timezone"])
+             "ready_work", "run", "now", "timezone"])

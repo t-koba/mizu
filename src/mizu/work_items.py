@@ -1248,6 +1248,19 @@ class WorkItems:
         with lock(self.root / "locks" / "insights.lock"):
             return self._page_open_impl(cursor=cursor, limit=limit, readonly=False)
 
+    def page_ready(self, *, limit=25) -> dict:
+        """Return a bounded page of open/doing items without structured waits.
+
+        Same bounds, ordering, recovery, lock and fail-closed contract as
+        page_open. Filter before selection/counting, scanning the ledger with
+        O(limit) retained rows: blocked rows cannot hide ready work. No state
+        transitions or wait resolution are performed. Legacy unseeded decisions
+        remain explicit coverage gaps, never inferred ready work.
+        """
+        with lock(self.root / "locks" / "insights.lock"):
+            return self._page_open_impl(cursor=None, limit=limit, readonly=False,
+                                        ready_only=True)
+
     def _seed_for_event(self, event_id: str, event: dict, *, readonly: bool):
         """Resolve the seed for one committed event with an explicit mode.
 
@@ -1343,7 +1356,7 @@ class WorkItems:
             raise LimitExceeded("Closed work-item page row exceeds byte bound")
         return sort_key, row
 
-    def _page_open_impl(self, *, cursor, limit, readonly: bool) -> dict:
+    def _page_open_impl(self, *, cursor, limit, readonly: bool, ready_only: bool = False) -> dict:
         """Collect the bounded open page with an explicit recovery mode.
 
         Callers hold insights.lock when ``readonly`` is False; the read-only
@@ -1370,6 +1383,8 @@ class WorkItems:
             view = self._build_projection(seed["id"], seed_event=event, readonly=readonly)
             item = view["item"]
             if item["status"] not in ("open", "doing", "blocked"):
+                continue
+            if ready_only and (item["status"] not in ("open", "doing") or item.get("wait") is not None):
                 continue
             total += 1
             sort_key, row = self._open_row(item, view)

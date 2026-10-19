@@ -38,11 +38,13 @@ no task for an unscheduled event-only role, as noted below.
 
 `should_run` (`src/mizu/runtime.py`) is the writer-daemon readiness gate. It
 first rejects unarmed/paused/draining control, then checks changed goal
-digest and operator wake-generation. If the saved outcome is `done`, it returns false at this point: only a
-changed goal or operator wake-generation can make a `done` writer daemon
-ready. Inbox, routed events, CI, `wake_at` and progress are not checked for
-that snapshot (covered by
-`tests/test_runtime.py::test_done_does_not_reopen_for_news`).
+digest and operator wake-generation, then an independent ready-work read.
+Ready work means a seeded ledger item whose current status is `open` or
+`doing` and which carries no structured wait. Any such item admits the writer
+even after `done`, an unexpired run-level `wait`, or a no-progress park. This
+is a project-wide source, not filtered by holder or terminal-event subscription.
+Without ready work, `done` still ignores inbox, routed events, CI, `wake_at`
+and progress; a changed goal or operator wake continues to admit it.
 For other outcomes, it checks inbox generation; role-routed decision/terminal
 events and due structured waits (`_role_events_due`); due CI reds for opted-in
 roles (`_ci_due_for`); expired `wait` `wake_at`; and finally the no-progress
@@ -66,18 +68,54 @@ route, and batch policies.
 Scheduled timer dispatches are plain one-shot runs: `mizu run` without
 `--event` (`src/mizu/cli.py` passes `event_trigger` only for `--event`).
 Event-triggered dispatch (`mizu run --event`, invoked by the platform file
-triggers below) admits only on a substantive decision event, a terminal
-`work_item_events` row, a due structured wait, or a due CI red for that
-role, and otherwise exits with `skipped: no-event` before allocating a run
-directory or any model use. For `on_change` roles whose code snapshot is
+triggers below) admits on a substantive decision event, a terminal
+`work_item_events` row, a due structured wait, a due CI red for that
+role, or ready work for a writable role, and otherwise exits with
+`skipped: no-event` before allocating a run directory or any model use. For `on_change` roles whose code snapshot is
 already observed, `Engine.run` otherwise skips unchanged-code dispatch unless
 there is a substantive decision, terminal event, due wait, or due CI red.
 Writable roles additionally bypass that skip for changed goal, operator wake,
-inbox generation, prior-wait expiry, or progress self-admission; read-only
-on-change roles do not use those snapshot-wide wakes or progress. A changed
-code snapshot bypasses the skip for either workspace mode. The recorded
-`admission` label is `decision` / `work_item` / `wait` / `ci` / `change` /
-`schedule`.
+inbox generation, prior-wait expiry, progress self-admission, or ready work;
+read-only on-change roles do not use those snapshot-wide wakes, progress or
+ready work. A changed code snapshot bypasses the skip for either workspace mode. The recorded
+`admission` label is `decision` / `work_item` / `wait` / `ci` / `ready_work` /
+`change` / `schedule`. Existing event labels take precedence over ready work;
+ready work has its own label for event-triggered or unchanged-code admission.
+It does not add or consume terminal work-item events. The daemon's configured
+`cooldown_seconds` spacing still applies; ready work does not accelerate it.
+
+### Bounded ready-work input
+
+Both full and delta prompts always include `ready_work`, independently of the
+ordinary `open_work_items` page. It has `items`, `total`, `overflow_count`,
+`truncated`, `unseeded_decisions`, and `coverage_complete`. Each item contains
+`id`, `title`, `status`, `stale`, `redecision`, ledger `updated_at`, and
+`age_seconds`: time since the latest work-item ledger update (normally creation
+or a transition), not time since the daemon last ran. Age is
+floored to integer seconds, clamps future timestamps to zero and saturates at
+2,147,483,647 seconds; invalid/missing/naive timestamps or a nonfinite clock
+produce JSON null, never a fabricated age. Age is display-only and does not
+prioritize admission.
+
+The store's internal `page_ready(limit=...)` shares the open-page validation,
+recovery and locking contract. It filters before bounded selection across the
+ledger, so even a general page filled with blocked items cannot hide ready
+work. Admission retains at most one ready row; prompts retain at most
+`[limits].work_items_prompt` rows (1–100), with the existing 8192-byte row and
+1 MiB page bounds. The scan retains O(limit) rows; scan time follows ledger
+size, as for `page_open`. Reads never change item status or resolve waits.
+Unsafe or malformed stores provide no ready-work wake (other explicit wakes
+keep their existing behavior); prompt construction fails closed rather than
+silently omitting the unreadable projection. Unseeded legacy decisions are
+reported as a coverage gap, never guessed ready. Retrying reads yields a new
+live view; admission and prompt reads are not a frozen transaction.
+
+A blocked item, even one without a structured wait, is not ready. This slice
+does not add exact per-item CI-result waits or wait-on-green/red support.
+A run-level `wait` does not block unrelated ready ledger work: record a work
+item as blocked when it is not actionable. Thus leaving an `open`/`doing` item
+while finishing `wait` or `done` intentionally allows another writer unit at
+the configured cadence. Cache-affinity ordering is separate.
 
 Deferrals ride along in `own`-source mode but do not admit a run on their
 own; with `decision_sources = "any"` a matching action — deferrals

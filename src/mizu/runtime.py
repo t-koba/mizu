@@ -211,6 +211,44 @@ def _has_unblocked_open_work(project, config) -> bool:
         return False
 
 
+def _has_ready_work(project) -> bool:
+    """Ready-work existence from a filtered bounded ledger scan; errors close."""
+    try:
+        return bool(project.work_items.page_ready(limit=1)["items"])
+    except Exception:
+        return False
+
+
+# Saturating display bound, not an admission/aging policy.
+MAX_READY_WORK_AGE_SECONDS = 2 ** 31 - 1
+
+
+def _ready_work_age(updated_at, current_time):
+    """Idle seconds since the latest ledger transition; unknown stays unknown."""
+    try:
+        timestamp = dt.datetime.fromisoformat(updated_at)
+        if timestamp.tzinfo is None:
+            return None
+        age = current_time - timestamp.timestamp()
+        if age != age or age in (float("inf"), float("-inf")):
+            return None
+        return int(min(MAX_READY_WORK_AGE_SECONDS, max(0, age)))
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+def _ready_work_projection(context):
+    """Independent bounded ready page, never inferred from the general page."""
+    page = context.project.work_items.page_ready(limit=context.config.limits.work_items_prompt)
+    current_time = time.time()
+    return {"items": [{**{key: row[key] for key in
+                        ("id", "title", "status", "stale", "redecision", "updated_at")},
+                       "age_seconds": _ready_work_age(row["updated_at"], current_time)}
+                      for row in page["items"]],
+            **{key: page[key] for key in ("total", "overflow_count", "truncated",
+                                         "unseeded_decisions", "coverage_complete")}}
+
+
 def is_deferred(exc: BaseException, context=None) -> bool:
     """True when a failure defers rather than counting toward the brake.
 
@@ -2793,6 +2831,7 @@ def prompt_for(context: Context) -> str:
                        "ci_failures_may_be_truncated": ci_failures_may_be_truncated,
                        "previous_report": (_previous_report(context.project)
                                           if "report" in caps else None),
+                       "ready_work": _ready_work_projection(context),
                        "run": _prompt_run_identity(context),
                        **_prompt_clock(context)},
                       ensure_ascii=False)
@@ -2808,10 +2847,12 @@ def prompt_delta_for(context: Context, pending: list) -> str:
     undecided backlog (ids plus total, so an already-offered insight never
     reads as done), the always-present bounded ``open_work_items`` page,
     workspace markers, capability-gated acceptance commands, and a
-    capability-gated ``previous_report`` preview for roles
-    holding ``report``. The full goal text and ``recent_snapshots`` history
-    are never repeated: the provider session already holds them. Key order is
-    fixed (stable context first, volatile run identity and clock last) so
+    capability-gated ``previous_report`` preview for roles holding
+    ``report``. The independent bounded ``ready_work`` projection follows
+    this stable context in the volatile suffix, before run identity and clock.
+    The full goal text and ``recent_snapshots`` history are never repeated: the
+    provider session already holds them. Key order is fixed (stable context
+    first, volatile ready-work age, run identity and clock last) so
     repeated prompts preserve as much identical prefix as possible.
     Bounds: pending and the open insight backlog both follow
     ``[limits] pending_insights`` (newest kept; ``truncated`` says so
@@ -2862,6 +2903,7 @@ def prompt_delta_for(context: Context, pending: list) -> str:
                        "ci_failures_may_be_truncated": ci_failures_may_be_truncated,
                        "previous_report": (_previous_report(context.project)
                                           if "report" in caps else None),
+                       "ready_work": _ready_work_projection(context),
                        "run": _prompt_run_identity(context),
                        **_prompt_clock(context)},
                       ensure_ascii=False)
@@ -3285,9 +3327,12 @@ class Engine:
                 ci_failures = _ci_due_for(project, self.config, role, _ci_snapshot_id, time.time())
             except Exception:
                 ci_failures = []
+            ready_work = role.workspace == "write" and _has_ready_work(project)
             if event_trigger:
                 event_gate = _scheduling.evaluate(_scheduling.DispatchFacts(
                     event_trigger=True,
+                    workspace_write=role.workspace == "write",
+                    ready_work=ready_work,
                     has_decision=bool(substantive_events),
                     has_work_item=bool(terminal_events),
                     has_wait=bool(wait_events),
@@ -3317,6 +3362,7 @@ class Engine:
                 on_change=bool(role.on_change),
                 code_unchanged=bool(code_unchanged),
                 workspace_write=role.workspace == "write",
+                ready_work=ready_work,
                 has_decision=bool(substantive_events),
                 has_work_item=bool(terminal_events),
                 has_wait=bool(wait_events),
@@ -4281,8 +4327,9 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
     """Collect daemon signals lazily, following the pure due evaluator's order.
 
     The evaluator names one next fact at a time. This preserves the old
-    short-circuit contract: done does not read inbox/events/CI/wake/progress,
-    and a higher-priority wake does not probe lower-priority stores.
+    short-circuit contract: absent ready work, done does not read
+    inbox/events/CI/wait/progress. A higher-priority wake does not probe
+    lower-priority stores. Read-only roles never self-admit on ready work.
     """
     current_time = time.time() if current_time is None else current_time
     control = project.control()
@@ -4298,6 +4345,11 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
             value = digest(project.goal.encode()) != snapshot["goal_digest"]
         elif needed == "operator_woke":
             value = control.get("wake_generation", "") != snapshot.get("wake_generation", "")
+        elif needed == "ready_work":
+            effective = config if config is not None else getattr(project, "config", None)
+            role = effective.roles.get(role_name) if effective is not None and role_name is not None else None
+            value = ((role_name is None or (role is not None and role.workspace == "write"))
+                     and _has_ready_work(project))
         elif needed == "outcome":
             value = snapshot["outcome"]
         elif needed == "inbox_changed":

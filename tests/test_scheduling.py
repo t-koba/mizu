@@ -17,7 +17,7 @@ from mizu.scheduling import (
 def _daemon(**overrides):
     base = {
         "armed": True, "paused": False, "draining": False,
-        "goal_changed": False, "operator_woke": False, "outcome": "continue",
+        "goal_changed": False, "operator_woke": False, "ready_work": False, "outcome": "continue",
         "inbox_changed": False, "routed_events_due": False, "ci_due": False,
         "wait_expired": False, "progress_admits": True,
     }
@@ -52,6 +52,9 @@ class DaemonEvaluatorTests(unittest.TestCase):
         self.assertEqual((decision.ready, decision.needed), (None, "operator_woke"))
         facts = dataclasses.replace(facts, operator_woke=False)
         decision = evaluate_daemon(facts)
+        self.assertEqual((decision.ready, decision.needed), (None, "ready_work"))
+        facts = dataclasses.replace(facts, ready_work=False)
+        decision = evaluate_daemon(facts)
         self.assertEqual((decision.ready, decision.needed), (None, "outcome"))
         facts = dataclasses.replace(facts, outcome="done")
         decision = evaluate_daemon(facts)
@@ -68,6 +71,16 @@ class DaemonEvaluatorTests(unittest.TestCase):
         facts = dataclasses.replace(facts, outcome="continue")
         decision = evaluate_daemon(facts)
         self.assertEqual((decision.ready, decision.needed), (None, "progress_admits"))
+
+    def test_ready_work_precedes_outcomes_but_not_control_or_explicit_wakes(self):
+        for outcome in ("done", "wait", "continue", "bounded"):
+            facts = _daemon(ready_work=True, outcome=outcome, progress_admits=False)
+            self.assertEqual(evaluate(facts).reason, "ready_work")
+            self.assertTrue(evaluate(facts).ready)
+            for gates in ({"armed": False}, {"paused": True}, {"draining": True}):
+                self.assertFalse(evaluate(dataclasses.replace(facts, **gates)).ready)
+            self.assertEqual(evaluate(dataclasses.replace(facts, goal_changed=True)).reason, "goal")
+            self.assertEqual(evaluate(dataclasses.replace(facts, operator_woke=True)).reason, "operator")
 
     def test_table(self):
         cases = [
@@ -167,6 +180,21 @@ class DispatchEvaluatorTests(unittest.TestCase):
             decision = evaluate(_dispatch(on_change=True, code_unchanged=True,
                                           workspace_write=workspace_write, has_wait=True))
             self.assertEqual((decision.admitted, decision.admission), (True, "wait"))
+
+    def test_ready_work_is_a_write_only_wake_source(self):
+        for event_trigger in (False, True):
+            for writable in (False, True):
+                facts = _dispatch(ready_work=True, workspace_write=writable,
+                                  code_unchanged=True, on_change=True,
+                                  event_trigger=event_trigger)
+                result = evaluate(facts)
+                self.assertEqual(result.admitted, writable)
+                self.assertEqual(result.admission, "ready_work" if writable else None)
+                if not writable:
+                    self.assertEqual(result.skipped, "no-event" if event_trigger else "unchanged")
+        # Keep terminal event routing/labels independent and higher priority.
+        self.assertEqual(evaluate(_dispatch(ready_work=True, workspace_write=True,
+                         has_work_item=True, event_trigger=True)).admission, "work_item")
 
     def test_change_vs_schedule(self):
         # Changed code dispatches for either workspace mode.
