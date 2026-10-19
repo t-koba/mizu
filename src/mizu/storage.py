@@ -884,14 +884,16 @@ def reclaim(project: Project, *, apply: bool = False) -> dict:
 
     Schema: ``{applied, snapshots: [relative manifest paths], objects:
     [relative object paths], unreferenced_bytes, orphan_bytes,
-    work_item_events_skipped, audit?}``.
+    manifest_skipped, work_item_events_skipped, audit?}``.
     The candidate sets are exactly what ``audit()`` reports in full: manifests
     outside every durable reference (live/history/run/artifact/insight/work-item) and
     objects referenced by no manifest on disk. Full ID lists are returned
     (sorted); use ``audit()`` for the bounded display samples.
     Bounds: same bounded reads, digest checks, and symlink skipping as
-    ``audit()``; history generations are never candidates, and neither are
-    runs, artifacts, sessions, decisions, proposals, insight revisions, or work-item histories.
+    ``audit()``; dry-run lists known candidates and reports skipped manifests.
+    Apply refuses if any manifest is skipped because object reachability is
+    unknown. History generations are never candidates, nor are runs, artifacts,
+    sessions, decisions, proposals, insight revisions, or work-item histories.
     Trust: operator-invoked maintenance; the explicit ``--apply`` invocation
     behind quiescence (paused + locks) is the grant. Candidates are
     recomputed inside the quiescent section, so a stale preview can never
@@ -901,9 +903,9 @@ def reclaim(project: Project, *, apply: bool = False) -> dict:
     idempotent. Apply writes a ``maintenance/storage-*.json`` audit record;
     a second reclaim converges on objects orphaned by manifest removal.
     Evidence: returns removed/retained paths plus the maintenance audit path.
-    Failure: Denied for unsafe work-item history, symlinks at removal time, or
-    a non-quiescent project when applying; faults in other reference stores are
-    skipped, never raised.
+    Failure: Denied for skipped snapshot manifests, unsafe work-item history,
+    symlinks at removal time, or a non-quiescent project when applying; faults
+    in other reference stores are skipped, never raised.
     """
     if not apply:
         collected = _audit_collect(project)
@@ -913,6 +915,7 @@ def reclaim(project: Project, *, apply: bool = False) -> dict:
             "objects": [f"objects/{name}" for name in collected["orphan"]],
             "unreferenced_bytes": collected["unreferenced_bytes"],
             "orphan_bytes": sum(collected["object_sizes"][name] for name in collected["orphan"]),
+            "manifest_skipped": collected["manifest_skipped"],
             "retained": "All live/history/run/artifact/insight/work-item-referenced manifests, history generations, "
                         "runs, artifacts, sessions, decisions, proposals, insight revisions, and work-item histories. "
                         "Repeat audit/reclaim converges on newly orphaned objects.",
@@ -920,6 +923,8 @@ def reclaim(project: Project, *, apply: bool = False) -> dict:
         }
     with quiescent(project):
         collected = _audit_collect(project)
+        if collected["manifest_skipped"]:
+            raise Denied("Skipped snapshot manifest; cannot safely determine object references")
         if collected["work_item_events_skipped"]:
             raise Denied("Unreadable work-item history; cannot safely reclaim snapshot references")
         manifest_paths = [project.root / "snapshots" / f"{sid}.json" for sid in collected["unreferenced"]]
@@ -949,6 +954,7 @@ def reclaim(project: Project, *, apply: bool = False) -> dict:
                             "unreferenced_bytes": collected["unreferenced_bytes"],
                             "orphan_bytes": sum(collected["object_sizes"][name] for name in collected["orphan"]),
                             "work_item_snapshots": len(collected["work_item_ids"]),
+                            "manifest_skipped": 0,
                             "work_item_events_skipped": 0})
         sync_dir(record.parent)
         removed["audit"] = record.relative_to(project.root).as_posix()
@@ -956,6 +962,7 @@ def reclaim(project: Project, *, apply: bool = False) -> dict:
             "retained": "All live/history/run/artifact/insight/work-item-referenced manifests, history generations, "
                         "runs, artifacts, sessions, decisions, proposals, insight revisions, and work-item histories. "
                         "Repeat audit/reclaim converges on newly orphaned objects.",
+            "manifest_skipped": 0,
             "work_item_events_skipped": 0}
 
 

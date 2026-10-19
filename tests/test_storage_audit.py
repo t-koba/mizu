@@ -8,7 +8,7 @@ from unittest import mock
 from support import Fixture
 from mizu.errors import Denied
 from mizu.fs import write_json
-from mizu.storage import _session_accounting, audit, reclaim
+from mizu.storage import _AUDIT_JSON_BYTES, _session_accounting, audit, reclaim
 
 
 class SessionEntry:
@@ -289,6 +289,29 @@ class StorageReclaimTests(Fixture):
     def test_apply_requires_quiescence(self):
         with self.assertRaises(Denied):
             reclaim(self.project, apply=True)
+
+    def test_oversized_live_manifest_blocks_reclaim_of_referenced_objects(self):
+        live = self.project.snapshots.get()["id"]
+        manifest_path = self.project.root / "snapshots" / f"{live}.json"
+        manifest = json.loads(manifest_path.read_text())
+        object_ids = [entry.get("sha256") for entry in manifest["files"].values()
+                      if isinstance(entry, dict) and isinstance(entry.get("sha256"), str)]
+        self.assertTrue(object_ids)
+        object_path = self.project.root / "objects" / object_ids[0]
+        self.assertTrue(object_path.is_file())
+
+        manifest["oversized_padding"] = "x" * (_AUDIT_JSON_BYTES + 128)
+        write_json(manifest_path, manifest)
+        self.assertGreater(manifest_path.stat().st_size, _AUDIT_JSON_BYTES)
+        self.project.set_control(paused=True)
+
+        preview = reclaim(self.project)
+        self.assertEqual(preview["manifest_skipped"], 1)
+        self.assertIn(f"objects/{object_ids[0]}", preview["objects"])
+        with self.assertRaisesRegex(Denied, "snapshot manifest"):
+            reclaim(self.project, apply=True)
+        self.assertTrue(manifest_path.is_file())
+        self.assertTrue(object_path.is_file())
 
     def test_apply_removes_only_unreferenced_and_writes_audit(self):
         orphan = "e" * 64
