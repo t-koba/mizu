@@ -293,6 +293,10 @@ instead, since exfiltration risk was explicitly accepted.
 
 ## Profiles and roles
 
+How these settings behave today is mapped in [scheduling](scheduling.md):
+schedule modes, wake sources versus delivered inputs, platform triggers,
+and workspace/lock isolation.
+
 Optional [dynamic model selection](model-selection.md) uses named TOML selectors,
 explicit task attributes, rule/inference classification and operator observations.
 Only roles with `selector` enable it; fixed profiles keep their existing behavior.

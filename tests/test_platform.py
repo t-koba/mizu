@@ -490,6 +490,27 @@ class ServiceRendererTests(unittest.TestCase):
         self.assertIn("--event", job["ProgramArguments"])
         worker = plistlib.loads(macos["mizu-3-svc-worker.plist"].encode())
         self.assertNotIn("WatchPaths", worker)
+        # work_item_events adds the work-items parent watch on Linux/macOS.
+        terminal_roles = dict(self.config.roles)
+        terminal_roles["reporter"] = dataclasses.replace(
+            terminal_roles["reporter"], decision_events=(),
+            work_item_events=("done",))
+        terminal_config = dataclasses.replace(self.config, roles=terminal_roles)
+        terminal_watches = event_watches(terminal_config, self.project)
+        self.assertEqual(sorted(terminal_watches), ["reporter"])
+        self.assertTrue(any(str(watch).endswith("work-items")
+                            for watch in terminal_watches["reporter"]))
+        # Windows keeps only the scheduled trigger for this subscribed role:
+        # the reporter XML carries its calendar trigger, with no --event
+        # arguments or separate file-trigger job.
+        windows = render(config, self.project, ROOT / "bin/mizu", system="windows")
+        self.assertIn(base + ".xml", windows)
+        self.assertNotIn(base + "-event.xml", windows)
+        reporter_xml = windows[base + ".xml"]
+        self.assertIn("CalendarTrigger", reporter_xml)
+        self.assertNotIn("--event", reporter_xml)
+        self.assertNotIn("WatchPaths", reporter_xml)
+        self.assertNotIn("PathChanged", reporter_xml)
         directory = self.root / "units-event-linux"
         result = install(config, self.project, ROOT / "bin/mizu", directory, system="linux")
         self.assertIn(base + "-event.path", result["written"])

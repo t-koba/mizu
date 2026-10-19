@@ -795,3 +795,24 @@ class QueueTests(Fixture):
                 self.assertIsInstance(outcome[0], expected)
                 self.assertEqual(driver.calls, [])
                 self.assertEqual(self.tickets(synchronized=True), [])
+
+    def test_admit_requests_role_lock_and_workspace_lock_for_writes(self):
+        import contextlib
+        from mizu.runtime import Engine
+        engine = Engine(self.config)
+        for role_name, expected in (
+                ('reporter', ('run-reporter.lock',)),
+                ('worker', ('run-worker.lock', 'workspace.lock'))):
+            with self.subTest(role=role_name):
+                role = self.config.roles[role_name]
+                seen = {}
+
+                def fake_admission(config, resources=(), *, wait=False, stop=None, check=None):
+                    seen['resources'] = tuple(resources)
+                    return contextlib.nullcontext(0.0)
+
+                with contextlib.ExitStack() as stack, patch('mizu.runtime.admission', side_effect=fake_admission):
+                    self.assertEqual(engine._admit(self.project, role_name, role, stack, wait=False), 0.0)
+                names = tuple(path.name for path in seen['resources'])
+                self.assertEqual(names, expected)
+                self.assertTrue(all(path.parent == self.project.root / 'locks' for path in seen['resources']))
