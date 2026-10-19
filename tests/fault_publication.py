@@ -22,6 +22,7 @@ def run_case(root, mode, point):
                 os._exit(86)
             raise OSError(errno.ENOSPC if mode == 'enospc' else errno.EIO, 'injected')
     originals = {name:getattr(fs.os,name) for name in ('fsync','replace','link','rename')}
+    exclusive_rename = fs._rename_exclusive_posix
     def wrapper(name):
         def call(*args,**kwargs):
             boundary(name,'before')
@@ -29,6 +30,11 @@ def run_case(root, mode, point):
             boundary(name,'after')
             return result
         return call
+    def wrapped_exclusive_rename(source, destination):
+        boundary('exclusive-rename','before')
+        result=exclusive_rename(source, destination)
+        boundary('exclusive-rename','after')
+        return result
     fdopen=fs.os.fdopen
     class Stream:
         def __init__(self,stream):self.stream=stream
@@ -41,6 +47,7 @@ def run_case(root, mode, point):
             boundary('write','after')
             return result
     for name in originals:setattr(fs.os,name,wrapper(name))
+    fs._rename_exclusive_posix=wrapped_exclusive_rename
     fs.os.fdopen=lambda *a,**k:Stream(fdopen(*a,**k))
     try:
         store=Snapshots(root/'store',excludes=(),max_file=1024,max_bytes=4096,max_files=4)
@@ -51,6 +58,7 @@ def run_case(root, mode, point):
         if mode == 'trace':raise
     finally:
         for name,value in originals.items():setattr(fs.os,name,value)
+        fs._rename_exclusive_posix=exclusive_rename
         fs.os.fdopen=fdopen
     return events
 

@@ -17,6 +17,12 @@ Source paths reject traversal, symlinks, hardlinks and nonregular files; objects
 are hash-checked. Project state directories are operator-owned: model-reachable
 reads re-validate identifiers and refuse symlinked state, projections skip what
 they cannot strictly read, and `doctor` reports skipped stores loudly.
+Create-only durable files publish by an atomic no-replace rename (Linux
+`renameat2(RENAME_NOREPLACE)`, macOS `renamex_np(RENAME_EXCL)`, Windows
+`rename`). Unsupported native operations/filesystems fail closed; there is no
+hard-link fallback that could expose a multiply-linked file to strict readers
+or leave one behind after a crash. Existing identical content remains an
+idempotent retry; conflicting content is never overwritten.
 Experiments get readonly source plus ephemeral writable work.
 Time/output bounds kill process groups and labelled containers. A finished unit
 cannot continue to call tools or acquire another provider admission.

@@ -1,6 +1,7 @@
 import concurrent.futures
 import ctypes
 import dataclasses
+import errno
 import json
 import os
 import stat
@@ -16,8 +17,9 @@ from support import Fixture, ROOT
 from mizu.budget import Budget
 from mizu.config import load
 from mizu.errors import Busy, ConfigError, Denied, LimitExceeded
-from mizu.fs import (_open_read, _replace_windows, atomic_write, canonical, digest, lock, read_json,
-                     relative_parts, safe_read, safe_write, write_json)
+from mizu.fs import (_open_read, _rename_exclusive_posix, _replace_windows, atomic_write,
+                     canonical, digest, lock, read_json, relative_parts, safe_read, safe_write,
+                     write_json)
 from mizu.pi import credentials
 from mizu.process import environment, run
 
@@ -94,6 +96,48 @@ class WindowsReplaceTests(unittest.TestCase):
         fallback.assert_not_called()
 
 
+class PosixExclusiveRenameTests(unittest.TestCase):
+    """Native ABI/error mapping checks; actual filesystem tests are in FileTests."""
+
+    def test_native_abi_and_error_mapping(self):
+        source, destination = "temporary", Path("receipt")
+        cases = [(True, "renameat2", (-100, b"temporary", -100, b"receipt", 1),
+                  [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]),
+                 (False, "renamex_np", (b"temporary", b"receipt", 4),
+                  [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint])]
+        for linux, symbol, args, argtypes in cases:
+            for code in (0, errno.EEXIST, errno.EACCES, errno.ENOTSUP):
+                with self.subTest(symbol=symbol, errno=code):
+                    libc = Mock()
+                    native = getattr(libc, symbol)
+                    native.return_value = -1 if code else 0
+                    with patch("ctypes.CDLL", return_value=libc) as load, patch(
+                            "ctypes.get_errno", return_value=code), patch(
+                            "mizu.fs._platform.IS_LINUX", linux), patch(
+                            "mizu.fs._platform.IS_MACOS", not linux), patch(
+                            "mizu.fs.os.link") as link, patch("mizu.fs.os.rename") as rename:
+                        if code:
+                            error = FileExistsError if code == errno.EEXIST else OSError
+                            with self.assertRaises(error) as caught:
+                                _rename_exclusive_posix(source, destination)
+                            self.assertEqual(caught.exception.errno, code)
+                        else:
+                            _rename_exclusive_posix(source, destination)
+                        load.assert_called_once_with(None, use_errno=True)
+                        native.assert_called_once_with(*args)
+                        self.assertEqual(native.argtypes, argtypes)
+                        self.assertIs(native.restype, ctypes.c_int)
+                        link.assert_not_called()
+                        rename.assert_not_called()
+
+    def test_missing_native_symbol_fails_closed(self):
+        with patch("ctypes.CDLL", return_value=Mock(spec=[])), patch(
+                "mizu.fs._platform.IS_LINUX", True):
+            with self.assertRaises(OSError) as caught:
+                _rename_exclusive_posix("temporary", Path("receipt"))
+        self.assertEqual(caught.exception.errno, errno.ENOSYS)
+
+
 class FileTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -108,6 +152,13 @@ class FileTests(unittest.TestCase):
         if os.name != "nt":
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
         self.assertFalse(list(path.parent.glob(".new-*")))
+
+    def test_atomic_exclusive_rejects_embedded_nul_without_truncating_path(self):
+        destination = Path(str(self.root / "target") + "\0suffix")
+        with self.assertRaises(ValueError):
+            atomic_write(destination, b"payload", exclusive=True)
+        self.assertFalse((self.root / "target").exists())
+        self.assertFalse(list(self.root.glob(".new-*")))
 
     def test_safe_write_zero_write_preserves_destination(self):
         from mizu import platform
@@ -201,6 +252,50 @@ class FileTests(unittest.TestCase):
         self.assertEqual(path.stat().st_nlink, 1)
         self.assertEqual(safe_read(self.root, "record", 5), b"first")
         self.assertFalse(list(self.root.glob(".new-*")))
+
+    def test_exclusive_publication_is_safe_before_cleanup(self):
+        path = self.root / "record"
+
+        def at_commit(directory):
+            self.assertEqual(directory, self.root)
+            self.assertEqual(path.stat().st_nlink, 1)
+            self.assertEqual(safe_read(self.root, "record", 5), b"first")
+            # A process death here must leave no extra name for this inode.
+            self.assertFalse(list(self.root.glob(".new-*")))
+
+        with patch("mizu.fs.sync_dir", side_effect=at_commit) as sync:
+            atomic_write(path, b"first", exclusive=True)
+            sync.assert_called_once_with(self.root)
+
+    def test_exclusive_publication_does_not_replace_symlink(self):
+        target = self.root / "target"
+        target.write_bytes(b"first")
+        path = self.root / "record"
+        path.symlink_to(target)
+        with self.assertRaises(Denied):
+            atomic_write(path, b"first", exclusive=True)
+        self.assertTrue(path.is_symlink())
+        self.assertEqual(target.read_bytes(), b"first")
+        target.unlink()
+        with self.assertRaises(Denied):
+            atomic_write(path, b"other", exclusive=True)
+        self.assertTrue(path.is_symlink())
+        self.assertFalse(target.exists())
+        self.assertFalse(list(self.root.glob(".new-*")))
+
+    @unittest.skipIf(os.name == "nt", "POSIX exclusive primitive failure")
+    def test_exclusive_native_failure_preserves_destination_and_cleans_temporary(self):
+        path = self.root / "record"
+        path.write_bytes(b"original")
+        for code in (errno.ENOSYS, errno.ENOTSUP, errno.EACCES):
+            with self.subTest(errno=code), patch(
+                    "mizu.fs._rename_exclusive_posix", side_effect=OSError(code, "unavailable")) as move:
+                with self.assertRaises(OSError) as caught:
+                    atomic_write(path, b"other", exclusive=True)
+                self.assertEqual(caught.exception.errno, code)
+                move.assert_called_once()
+                self.assertEqual(path.read_bytes(), b"original")
+                self.assertFalse(list(self.root.glob(".new-*")))
 
     def test_bad_relative_paths(self):
         for path in ("/etc/passwd", "../x", "a/../x", "a//x", "", ".", "x\\y", "x\x00y"):

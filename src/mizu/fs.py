@@ -109,6 +109,9 @@ def atomic_write(path: Path, data: bytes, *, exclusive: bool = False,
     Other Windows readers must also allow delete sharing. Sharing/permission
     failures propagate immediately, without retrying publication.
     exclusive=True never replaces existing content. Identical retries are safe.
+    Create-only publication uses a no-replace rename, never a transient hard
+    link: safe_read can validate the file immediately at the commit point.
+    Unsupported native operations/filesystems fail closed without a fallback.
     """
     mkdir(path.parent)
     fd, temporary = tempfile.mkstemp(prefix=".new-", dir=path.parent)
@@ -127,10 +130,7 @@ def atomic_write(path: Path, data: bytes, *, exclusive: bool = False,
                     # cleanup of the temporary path is delayed by the host.
                     os.rename(temporary, path)
                 else:
-                    try:
-                        os.link(temporary, path, follow_symlinks=False)
-                    except (TypeError, NotImplementedError):
-                        os.link(temporary, path)
+                    _rename_exclusive_posix(temporary, path)
             except FileExistsError:
                 if path.is_symlink() or _read_bytes(path) != data:
                     raise Denied(f"Immutable object conflict: {path.name}") from None
@@ -142,6 +142,45 @@ def atomic_write(path: Path, data: bytes, *, exclusive: bool = False,
     finally:
         with contextlib.suppress(FileNotFoundError, OSError):
             os.unlink(temporary)
+
+
+def _rename_exclusive_posix(source: str, destination: Path) -> None:
+    """Move a complete file without replacing any destination or adding a link.
+
+    Linux renameat2(RENAME_NOREPLACE) and macOS renamex_np(RENAME_EXCL)
+    provide the atomic create-only operation absent from Python's POSIX rename.
+    No link/unlink fallback: readers reject multiply-linked files, and a crash
+    between those operations would leave a permanently unreadable publication.
+    """
+    import ctypes
+
+    source_bytes = os.fsencode(source)
+    destination_bytes = os.fsencode(destination)
+    # ctypes' c_char_p truncates at NUL, unlike os.rename/os.link which reject it.
+    # Preserve the path API's rejection rather than renaming to an unintended prefix.
+    if b"\0" in source_bytes or b"\0" in destination_bytes:
+        raise ValueError("embedded null byte")
+    libc = ctypes.CDLL(None, use_errno=True)
+    try:
+        if _platform.IS_LINUX:
+            rename = libc.renameat2
+            rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+                               ctypes.c_char_p, ctypes.c_uint]
+            args = (-100, source_bytes, -100, destination_bytes, 1)
+            # AT_FDCWD = -100; RENAME_NOREPLACE = 1 (Linux UAPI).
+        elif _platform.IS_MACOS:
+            rename = libc.renamex_np
+            rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+            args = (source_bytes, destination_bytes, 4)
+            # RENAME_EXCL = 0x00000004 (Darwin stdio.h).
+        else:
+            raise OSError(errno.ENOTSUP, "Atomic exclusive rename unavailable", destination)
+    except AttributeError:
+        raise OSError(errno.ENOSYS, "Atomic exclusive rename unavailable", destination) from None
+    rename.restype = ctypes.c_int
+    if rename(*args) != 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code), destination)
 
 
 def _replace_windows(source: str, destination: Path) -> None:

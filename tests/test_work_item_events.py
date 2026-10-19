@@ -2,12 +2,13 @@
 import concurrent.futures
 import dataclasses
 import json
+import os
 import threading
 from contextlib import nullcontext
 from unittest.mock import patch
 
 from support import Fixture, ScriptDriver
-from mizu import insight_archive, work_item_events as events
+from mizu import fs, insight_archive, work_item_events as events
 from mizu.cli import execute, parser
 from mizu.config import load
 from mizu.errors import Busy, ConfigError, Denied, InfraExceeded, LimitExceeded, MissingFinish
@@ -277,19 +278,49 @@ class WorkItemEventTests(Fixture):
         timestamps = ["2026-01-01T00:00:00+00:00", "2026-01-01T00:00:01+00:00"]
         barrier = threading.Barrier(2)
         real_write = events.write_json
+        real_sync = fs.sync_dir
+        published = threading.Event()
+        loser_finished = threading.Event()
+        writer = threading.local()
+        receipt = events._receipt_path(self.store, "reviewer", item)
 
         def simultaneous_write(path, value, **kwargs):
-            # Both calls have passed the absence check and built their distinct
-            # receipts before either can publish to the same exclusive path.
+            # Both calls pass the absence check before publication. The loser
+            # must validate the winner while its atomic_write is still active.
             barrier.wait(timeout=10)
+            if value["acknowledged_at"] == timestamps[0]:
+                return real_write(path, value, **kwargs)
+            writer.loser = True
+            if not published.wait(10):
+                raise AssertionError("winner did not publish")
             return real_write(path, value, **kwargs)
 
+        def acknowledge(_):
+            try:
+                events.acknowledge(self.store, "reviewer", selected)
+            finally:
+                # Signal after acknowledge's collision handler, not just after
+                # write_json: validation must finish before the winner resumes.
+                if getattr(writer, "loser", False):
+                    loser_finished.set()
+
+        def hold_publication(directory):
+            if directory == receipt.parent:
+                # Pause after the commit point but before temporary cleanup.
+                # A hard-link publication leaves nlink=2 throughout this gap.
+                published.set()
+                if not loser_finished.wait(10):
+                    raise AssertionError("losing acknowledgement did not finish")
+                self.assertEqual(receipt.stat().st_nlink, 1)
+                self.assertTrue(events._received(self.store, "reviewer", item))
+            return real_sync(directory)
+
         with patch.object(events, "now", side_effect=timestamps), patch.object(
-                events, "write_json", side_effect=simultaneous_write) as writes:
+                events, "write_json", side_effect=simultaneous_write) as writes, patch.object(
+                fs, "sync_dir", side_effect=hold_publication):
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-                list(pool.map(lambda _: events.acknowledge(self.store, "reviewer", selected), range(2)))
+                list(pool.map(acknowledge, range(2)))
         self.assertEqual(sorted(call.args[1]["acknowledged_at"] for call in writes.call_args_list), timestamps)
-        receipt = events._receipt_path(self.store, "reviewer", item)
         self.assertEqual([call.args[0] for call in writes.call_args_list], [receipt, receipt])
         self.assertTrue(all(call.kwargs == {"exclusive": True} for call in writes.call_args_list))
         original = receipt.read_bytes()
@@ -312,7 +343,7 @@ class WorkItemEventTests(Fixture):
         invalid += [json.dumps({**valid, key: value}) for key, value in (
             ("role", "searcher"), ("source", "decision"), ("event", "work_item:other:2"),
             ("acknowledged_at", "invalid"), ("extra", True))]
-        for content in [*invalid, "symlink", "absent"]:
+        for content in [*invalid, "symlink", "hardlink", "absent"]:
             with self.subTest(content=content):
                 def collide(path, value, **kwargs):
                     if content == "absent":
@@ -322,6 +353,8 @@ class WorkItemEventTests(Fixture):
                             path.symlink_to(target)
                         except (OSError, NotImplementedError):
                             self.skipTest("Symlinks unavailable")
+                    elif content == "hardlink":
+                        os.link(target, path)
                     else:
                         path.write_text(content)
                     return real_write(path, value, **kwargs)
@@ -331,7 +364,8 @@ class WorkItemEventTests(Fixture):
                         with self.assertRaises(Denied):
                             events.acknowledge(self.store, "reviewer", selected)
                     if receipt.exists() and not receipt.is_symlink():
-                        self.assertEqual(receipt.read_text(), content)
+                        self.assertEqual(receipt.read_bytes(), target.read_bytes()
+                                         if content == "hardlink" else content.encode())
                     self.assertEqual(read_json(target), valid)
                 finally:
                     receipt.unlink(missing_ok=True)
