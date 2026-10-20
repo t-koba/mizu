@@ -47,6 +47,7 @@ from .sandbox import Sandbox, cleanup
 from . import vcs as _vcs
 from . import scheduling as _scheduling
 from . import materialize as _materialize
+from .ci_requests import CiRequests, request_id as ci_request_id
 from .publication import Publication, source_commit
 from .web import Web
 from .web_worker import bounded
@@ -301,7 +302,7 @@ def is_deferred(exc: BaseException, context=None) -> bool:
 #: stay operator choice, plus the required finish.
 CONSULT_FORBIDDEN = frozenset({"exec", "experiment", "verify", "decide",
                                "submit_insight", "revise_insight", "withdraw_insight", "withdraw_decided", "attach_evidence", "consult", "report", "sync",
-                               "vcs_publish", "vcs_retire", "vcs_dispose",
+                               "vcs_publish", "vcs_retire", "vcs_dispose", "vcs_request",
                                "research", "materialize", "work_items_create", "work_items_transition", "work_items_reconcile"})
 
 
@@ -314,7 +315,7 @@ CONSULT_FORBIDDEN = frozenset({"exec", "experiment", "verify", "decide",
 #: and delegation ensures it (idempotent when already present).
 DELEGATE_FORBIDDEN = frozenset({"decide", "submit_insight", "revise_insight",
                                 "withdraw_insight", "withdraw_decided", "attach_evidence", "delegate",
-                                "vcs_publish", "vcs_retire", "vcs_dispose",
+                                "vcs_publish", "vcs_retire", "vcs_dispose", "vcs_request",
                                 "work_items_create", "work_items_transition", "work_items_reconcile"})
 
 
@@ -1507,6 +1508,41 @@ class Context:
                   "trust": "external-untrusted", "result": data}
         return observe(record)
 
+    def _op_vcs_request(self, args: dict) -> dict:
+        # Ask the provider for one CI run per workflow at an exact published
+        # commit. The target is a completed publication receipt, never a
+        # branch head: the product verifies every returned run's head sha
+        # against that commit and fails closed on any other binding. A
+        # recorded request replays, and an unresolved dispatch is never
+        # retried blindly, because a second request would spend a second run
+        # for the same commit.
+        receipt = Publication.read_receipt(self.project.root, args["publication_id"])
+        sha = receipt["published_sha"]
+        workflows = [str(name) for name in args["workflows"]]
+        requests = CiRequests(self.project.root)
+        identity = ci_request_id(receipt["publication_id"], sha, workflows)
+        recorded = requests.outcome(identity)
+        if recorded is not None:
+            return {**recorded, "replayed": True}
+        if requests.dispatched(identity) is not None:
+            raise Denied("An earlier CI request for this publication is unresolved; "
+                         "re-observe the CI status before requesting again")
+
+        def before_invoke():
+            requests.mark_dispatch(identity, {
+                "request_id": identity, "publication_id": receipt["publication_id"],
+                "sha": sha, "workflows": workflows, "dispatched_at": now()})
+
+        runs = _vcs.request_runs_via(self.config.vcs, sha, workflows,
+                                     cancel=self.tools_cancelled, before_invoke=before_invoke)
+        record = {"request_id": identity, "publication_id": receipt["publication_id"],
+                  "sha": sha, "workflows": workflows, "runs": runs, "requested_at": now()}
+        requests.record_outcome(identity, record)
+        evidence_id, evidence = self._new_invocation_evidence("vcs-request")
+        write_json(self.run_dir / evidence,
+                   {**record, "trust": "external-untrusted", "evidence_id": evidence_id})
+        return {**record, "replayed": False}
+
     def _op_vcs_retire(self, args: dict) -> dict:
         # Branch retirement: delete an owned temporary integration branch
         # at an exact expected sha behind the configured retire grant.
@@ -1797,6 +1833,7 @@ class Context:
         "revise_insight": _op_revise_insight, "withdraw_insight": _op_withdraw_insight,
         "attach_evidence": _op_attach_evidence,
         "sync": _op_sync, "vcs_read": _op_vcs_read, "vcs_publish": _op_vcs_publish,
+        "vcs_request": _op_vcs_request,
         "vcs_retire": _op_vcs_retire, "vcs_dispose": _op_vcs_dispose,
         "materialize": _op_materialize,
         "consult": _op_consult, "delegate": _op_delegate, "report": _op_report,

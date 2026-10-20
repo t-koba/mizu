@@ -513,6 +513,21 @@ are refused. See [exact-SHA CI waits](scheduling.md#exact-sha-work-item-ci-waits
 for terminal evidence, holder wake and acknowledgement semantics. This mutating operation is not observational
 and receives no exception to the existing per-run or wrap-up spend bounds.
 
+### Requesting CI at an exact published commit
+
+CI usually starts from a push, which spends a run per publication whether the
+work needs one or not. `vcs_request` lets a role ask for one run per workflow
+at one exact published commit instead. The target is a completed publication
+receipt, never a branch head, and the product verifies that every run the
+provider reports names that commit, so a run at another commit is refused
+rather than accepted as close enough. The request and the returned run
+identities are recorded durably, a dispatch marker is written before the
+provider is called, and an unresolved dispatch is never retried blindly: a
+second request would spend a second run for the same commit, so the caller
+re-observes the CI status instead. The role capability and the operator's
+`request_grant` are both required, so the path exists without anything
+triggering it until the operator grants them.
+
 ### Externally recorded publication receipts
 
 The product's own publish path records a schema-1 receipt in

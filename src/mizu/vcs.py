@@ -1663,3 +1663,75 @@ def record_ci_result(project, *, branch: str, sha: str, check: str,
                                      base_snapshot=None, run=run, origin=origin,
                                      insight_id=insight_id)
     return {"recorded": True, "id": record["id"], "title": title}
+
+
+#: At most eight workflows per CI request.
+MAX_CI_WORKFLOWS = 8
+
+
+def request_runs_via(settings: dict, sha: str, workflows, *, cancel=lambda: False,
+                     before_invoke=None) -> list[dict]:
+    """Ask the provider for one CI run per workflow at an exact published commit.
+
+    Schema: ``settings`` carries the operator grant (``request_grant``
+    true) and the adapter contract. ``sha`` is the 40/64 hex published
+    commit; ``workflows`` is a list of 1-8 distinct names. The adapter
+    request sends ``{"op": "request_runs", "sha", "workflows"}``; the
+    adapter must return ``{"runs": [{workflow, run_id, head_sha, url}]}``
+    where every ``head_sha`` equals the requested ``sha``. The product
+    verifies that binding itself and refuses a run reported at another
+    commit: a branch head is never a substitute for the exact published
+    commit, and a provider that cannot prove the binding refuses instead
+    of guessing.
+    Bounds: same contract as ``invoke``; at most eight workflows and eight
+    runs. Trust: operator-owned adapter only; results stay
+    external-untrusted. Evidence: the returned runs name workflow, run id,
+    head sha and url. Failure: ``Denied`` without the configured grant, on
+    a bad sha or workflow list, on a malformed response, or when a
+    reported run names another commit. A refused call implies nothing
+    about the remote queue: reconcile by re-observing the CI status, never
+    by assuming a run started.
+    Optional ``before_invoke`` has the validation/dispatch contract of ``invoke``.
+    """
+    if not isinstance(settings, dict) or settings.get("request_grant") is not True:
+        raise Denied("CI requests are not granted in VCS configuration")
+    if not isinstance(sha, str) or not _SHA.fullmatch(sha):
+        raise Denied("Invalid published sha for a CI request")
+    if (not isinstance(workflows, list) or not workflows
+            or len(workflows) > MAX_CI_WORKFLOWS
+            or any(not isinstance(name, str) or not name or len(name) > 128
+                   or "\n" in name or "\x00" in name for name in workflows)
+            or len(set(workflows)) != len(workflows)):
+        raise Denied("Invalid CI workflow list")
+    data = invoke(settings, {"op": "request_runs", "sha": sha,
+                             "workflows": list(workflows)},
+                  cancel=cancel, before_invoke=before_invoke)
+    if not isinstance(data, dict):
+        raise Denied("VCS adapter must return a JSON object")
+    runs = data.get("runs")
+    if not isinstance(runs, list) or not runs or len(runs) > MAX_CI_WORKFLOWS:
+        raise Denied("VCS adapter must return the requested runs")
+    out = []
+    for entry in runs:
+        if (not isinstance(entry, dict)
+                or set(entry) - {"workflow", "run_id", "head_sha", "url"}):
+            raise Denied("Invalid CI run entry")
+        workflow = entry.get("workflow")
+        run = entry.get("run_id")
+        head_sha = entry.get("head_sha")
+        url = entry.get("url", "")
+        if (not isinstance(workflow, str) or not workflow or len(workflow) > 128
+                or "\n" in workflow or "\x00" in workflow):
+            raise Denied("Invalid CI run workflow")
+        if (not isinstance(run, str) or not run or len(run) > 128
+                or "\n" in run or "\x00" in run):
+            raise Denied("Invalid CI run identity")
+        if not isinstance(head_sha, str) or not _SHA.fullmatch(head_sha):
+            raise Denied("Invalid CI run head sha")
+        if head_sha != sha:
+            # The exact published commit is the whole point of the request.
+            raise Denied("CI run is not bound to the requested published commit")
+        if not isinstance(url, str) or len(url) > 4096:
+            raise Denied("Invalid CI run URL")
+        out.append({"workflow": workflow, "run_id": run, "head_sha": head_sha, "url": url})
+    return out

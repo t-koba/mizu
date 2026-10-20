@@ -16,7 +16,7 @@ from .process import ADAPTER_DIAGNOSTIC_BYTES_DEFAULT, ADAPTER_DIAGNOSTIC_BYTES_
 CAPABILITIES = frozenset({"diff", "files", "read", "exec", "experiment", "verify", "fetch", "probe",
                           "search", "insights", "decide", "submit_insight", "revise_insight", "withdraw_insight", "withdraw_decided", "attach_evidence", "consult", "delegate",
                           "report", "finish", "sync", "vcs_read", "vcs_publish",
-                          "vcs_retire", "vcs_dispose", "research_read", "research",
+                          "vcs_retire", "vcs_dispose", "vcs_request", "research_read", "research",
                           "materialize", "command_evidence_read", "experiment_evidence_read",
                           "work_items_read", "work_items_create", "work_items_transition", "work_items_legacy_read", "work_items_reconcile"})
 ENGINES = ("pi", "pi-durable", "codex", "claude")
@@ -1102,7 +1102,7 @@ def load(file: Path) -> Config:
                "poll_interval_seconds", "poll_max_branches",
                "poll_fetch_timeout_seconds", "poll_status_timeout_seconds",
                "retire_grant", "owned_prefixes", "protected_refs",
-               "close_grant", "merge_grant"}, "vcs")
+               "close_grant", "merge_grant", "request_grant"}, "vcs")
     vcs = {"command": [], "timeout_seconds": 20,
            "max_bytes": 524288, "diagnostic_bytes": ADAPTER_DIAGNOSTIC_BYTES_DEFAULT,
            "ci_branch": "", "ci_wake_extra_branches": [], "ci_rewake_seconds": 1800,
@@ -1111,7 +1111,7 @@ def load(file: Path) -> Config:
            "poll_fetch_timeout_seconds": 30,
            "poll_status_timeout_seconds": 15, "retire_grant": False,
            "owned_prefixes": [], "protected_refs": [],
-           "close_grant": False, "merge_grant": False, **vcs}
+           "close_grant": False, "merge_grant": False, "request_grant": False, **vcs}
     strings(vcs["command"], "vcs.command")
     if vcs["command"] and any(not s or "\n" in s for s in vcs["command"]):
         raise ConfigError("vcs.command must be a nonempty argv array without newlines")
@@ -1137,6 +1137,7 @@ def load(file: Path) -> Config:
     vcs["retire_grant"] = boolean(vcs["retire_grant"], "vcs.retire_grant")
     vcs["close_grant"] = boolean(vcs["close_grant"], "vcs.close_grant")
     vcs["merge_grant"] = boolean(vcs["merge_grant"], "vcs.merge_grant")
+    vcs["request_grant"] = boolean(vcs["request_grant"], "vcs.request_grant")
     vcs["owned_prefixes"] = strings(vcs["owned_prefixes"], "vcs.owned_prefixes")
     for prefix in vcs["owned_prefixes"]:
         _vcs_prefix(prefix, "vcs.owned_prefixes")

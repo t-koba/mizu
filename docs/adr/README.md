@@ -285,3 +285,19 @@ own file-backed auth store, which removes the in-adapter credential store and
 its lock handling. Everything that held before still holds: the exact pin
 fails closed when a model is unknown or its provider has no auth, per-request
 admission and usage are unchanged, and credentials stay out of evidence.
+
+## ADR-035 — CI runs are requested at an exact published commit
+CI starts from a push, so every publication spends a run whether or not the
+work needs one, and a writer cannot ask for evidence about the exact commit it
+published. `vcs_request` asks the provider for one run per workflow at one
+exact published commit: the target is a completed publication receipt, never a
+branch head, and the product itself verifies that every returned run names
+that commit, so a provider that cannot prove the binding refuses instead of
+guessing. The request and the returned run identities are recorded durably; a
+dispatch marker is written before the provider is called, and an unresolved
+dispatch is never retried blindly, because a second request would spend a
+second run for the same commit. The role capability and the operator's
+`request_grant` are both required and both off by default, so the mechanism
+exists without any role able to trigger it until the operator grants them.
+Ref handling stays provider policy: the product never creates or deletes a
+ref to target a commit.
