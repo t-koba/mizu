@@ -167,6 +167,26 @@ class DrainYieldTests(Fixture):
         variants = set(re.findall(r"['\"]([^'\"]*Drain bound refused[^'\"]*)['\"]", launcher))
         self.assertEqual(variants, {message})
 
+    def test_the_durable_launcher_expects_the_same_request_budget_message(self):
+        # The request-budget half of the same shared handshake is a text too:
+        # every host refusal and the launcher's classification of it must be
+        # the same string, so a change to one side alone fails the suite.
+        import re
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[1]
+        launcher = (root / "adapters" / "pi-durable" / "launcher.mjs").read_text(encoding="utf-8")
+        message = "Per-run provider request budget exhausted"
+        hosts = [root / "src" / "mizu" / "runtime.py", root / "src" / "mizu" / "drivers.py",
+                 root / "src" / "mizu" / "pi_durable.py"]
+        pattern = r"['\"]([^'\"]*Per-run provider request budget[^'\"]*)['\"]"
+        for path in hosts:
+            source = path.read_text(encoding="utf-8")
+            self.assertIn(message, source)
+            self.assertEqual(set(re.findall(pattern, source)), {message})
+        start = launcher.index("export function boundStatusFor")
+        self.assertIn(message, launcher[start:launcher.index("\n}", start)])
+        self.assertEqual(set(re.findall(pattern, launcher)), {message})
+
     def test_non_pi_drain_wrap_up_allowance_exhaustion_is_bounded(self):
         ctx = self.context()
         ctx.bound_hit = "drain"

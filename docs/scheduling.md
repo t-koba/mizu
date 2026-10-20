@@ -165,8 +165,10 @@ its holder keeps the completion decision, green or red. A replay never spends
 a second run: it returns the recorded outcome whatever became of the covered
 items, completes a coverage whose registration was interrupted, and reports
 the items it could not register, so a holder that resumed an item keeps that
-decision. A replay that names other items reports them as not applied, because
-the recorded request's coverage governs. Covering work items needs the
+decision. A replay reports the requested items the recorded request does not
+cover as not applied, and the recorded request's coverage governs the rest:
+the comparison is by item identity, so the same items in another order are
+the same coverage. Covering work items needs the
 work-item capability and automatic CI polling, because a wait that nothing
 observes would never resolve.
 

@@ -1555,8 +1555,14 @@ class Context:
             # The recorded coverage governs; a different set is reported.
             coverage = self._coverage_state(self._recorded_coverage(recorded), identity,
                                             register=True)
-            if [entry["record"] for entry in covered] != recorded.get("covered", []):
-                coverage["not_applied"] = [entry["id"] for entry in covered]
+            # The recorded coverage governs, so only the requested items it
+            # does not name are reported as not applied. The comparison is by
+            # item identity: the same items in another order are the same
+            # coverage, and an item the recorded request covers is never
+            # reported as uncovered.
+            recorded_ids = {entry["id"] for entry in recorded.get("covered", [])}
+            coverage["not_applied"] = [entry["id"] for entry in covered
+                                       if entry["id"] not in recorded_ids]
             return {**recorded, "replayed": True, "coverage": coverage}
         if requests.dispatched(identity) is not None:
             raise Denied("An earlier CI request for this publication is unresolved; "

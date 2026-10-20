@@ -252,6 +252,29 @@ class CiRequestTests(Fixture):
         self.assertEqual(again["coverage"]["moved"], [covered["id"]])
         self.assertEqual(self.project.work_items.get(covered["id"])["status"], "doing")
 
+    def test_a_replay_reports_only_the_items_the_recorded_request_does_not_cover(self):
+        ctx = self.context(runs(), poll_enabled=True)
+        first = self.covered_item("first")
+        second = self.covered_item("second")
+        self.request_covered(ctx, [first])
+        ctx = self.context(runs(), poll_enabled=True)
+        again = self.request_covered(ctx, [first, second])
+        # The recorded request covers the first item, so only the second one is
+        # not applied, and an item that is waiting is never reported as such.
+        self.assertEqual(again["coverage"]["not_applied"], [second["id"]])
+        self.assertEqual(again["coverage"]["waiting"], [first["id"]])
+
+    def test_a_reordered_replay_is_the_same_coverage(self):
+        ctx = self.context(runs(), poll_enabled=True)
+        first = self.covered_item("first")
+        second = self.covered_item("second")
+        self.request_covered(ctx, [first, second])
+        ctx = self.context(runs(), poll_enabled=True)
+        again = self.request_covered(ctx, [second, first])
+        self.assertEqual(again["coverage"]["not_applied"], [])
+        self.assertEqual(sorted(again["coverage"]["waiting"]),
+                         sorted([first["id"], second["id"]]))
+
     def test_the_daily_listing_groups_the_recorded_requests(self):
         ctx = self.context(runs(), poll_enabled=True)
         covered = self.covered_item()
