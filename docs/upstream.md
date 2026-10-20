@@ -28,16 +28,17 @@ pi-durable / Chord の公開契約も含め、実配布物の SDK 検査と
 両 lock は既存 lock を保った offline materialize で再生成し、Pi 以外のパッケージの解決版は
 変更していない。
 
-pi-durable の launcher は Pi のログイン保存 (`auth.json`) を共有の
-file-backed `CredentialStore` として開き、環境 API キーと併せて
-`builtinModels({ credentials })` に渡す。`api_key` と `oauth` のいずれも
-検証のうえ共有し、`pi-ai` が `modify` 内で回転する refresh token を
-永続化する。read-only seed が置換を破棄して共有ログインを `invalid_grant`
-で壊すことを 2026-10-11 に確認したため、durable 側も pi と同じ
-`proper-lockfile` (`realpath: false`、`stale: 30000`) によるプロセス間
-lock で write-back し、並行する pi / pi-durable の refresh を直列化する。
-欠落ファイルは env-only として扱い、読み取りでは作成しない。不正な
-store は fail-closed で拒否する。
+pi-durable の launcher は Pi 自身の `ModelRuntime` で固定モデルを解決する。
+解決元は pi と同じ二つ: 同梱カタログと engine directory の `models.json`。
+そのため operator が `models.json` に定義したモデルは ephemeral な各 role と
+persistent worker で同じように解決・拒否される（未知のモデルや認証の無い
+provider は fail-closed）。ログイン保存 (`auth.json`) も Pi 自身の
+file-backed auth store が共有し、環境 API キーと併せて `api_key` と `oauth`
+を検証する。refresh token の回転は Pi の `modify` 内で永続化され、プロセス間
+lock で write-back する（read-only seed が置換を破棄して共有ログインを
+`invalid_grant` で壊す事象は 2026-10-11 に確認済み）。欠落ファイルは
+env-only として扱い、読み取りでは作成しない。不正な store は fail-closed で
+拒否する。
 
 管理下の launcher が `ModelRuntime`、`createAgentSession`、`runRpcMode` を使用する。
 `stream` / `streamSimple` / deferred fetch、分類、画像生成の公開要求入口に

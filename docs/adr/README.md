@@ -270,3 +270,18 @@ run record, the health record and the pause reason, and the next unit of that
 role reads it from its context, so the same stray file is not rediscovered
 from scratch and a resolved cause is never read as a live blocker. Nothing is skipped or truncated: a file the snapshot cannot hold stays
 a visible refusal, and the limits keep their current defaults.
+
+## ADR-034 — Both Pi engines resolve the pinned model from the same source
+The two Pi engines resolved a profile's exact `provider/model` differently: the
+`pi` engine built its model runtime from the engine directory's `models.json`
+plus Pi's bundled catalog, while `pi-durable` resolved built-in providers only
+and refused an operator-defined model with "Configured exact model is
+unavailable on pi-durable". The persistent worker therefore could not run a
+model that every other role could, and Pi's bundled catalog trails provider
+releases by days. Both engines now resolve the pinned model through Pi's own
+`ModelRuntime` over the same two sources, so one `models.json` defines a model
+for every role. The durable adapter reads the shared login store through Pi's
+own file-backed auth store, which removes the in-adapter credential store and
+its lock handling. Everything that held before still holds: the exact pin
+fails closed when a model is unknown or its provider has no auth, per-request
+admission and usage are unchanged, and credentials stay out of evidence.

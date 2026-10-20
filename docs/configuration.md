@@ -407,8 +407,10 @@ No accounting read admits a provider request.
 
 Pi SDK knobs
 are refused on pi-durable profiles and durable policy is refused on pi
-profiles instead of silently ignored. pi-durable resolves the exact model
-over built-in providers only; custom provider setups stay on pi. Pi operators bound
+profiles instead of silently ignored. Both Pi engines resolve the exact model
+from the same source through Pi's own model runtime: the bundled catalog plus
+the engine directory's `models.json`, so an operator-defined model behaves the
+same on the ephemeral roles and on the persistent worker. Pi operators bound
 its live context through `options.settings.compaction` (`reserveTokens`,
 `keepRecentTokens`); pi-durable operators use the three `durable_compaction_*`
 keys above. Codex native configuration keys plus `options.turn` for native turn fields
@@ -553,7 +555,7 @@ boundary; see [admission bounds and trust](completion-contracts.md#extra-tool-pr
 | Engine | Managed interface | Completion | Admission unit |
 |---|---|---|---|
 | Pi | `createAgentSession`, `ModelRuntime`, `runRpcMode` | `agent_settled` and seal | Logical model request (includes auxiliary inference) |
-| Pi-durable | Pinned pi-durable Harness over file-backed SQLite; one admitted submission per engine attempt, with per-turn Harness request IDs bound to the durable work-unit grant key | Settled submission and seal | Logical model request (includes auxiliary inference) |
+| Pi-durable | Pinned pi-durable Harness over file-backed SQLite with Pi's own `ModelRuntime` for the pinned model; one admitted submission per engine attempt, with per-turn Harness request IDs bound to the durable work-unit grant key | Settled submission and seal | Logical model request (includes auxiliary inference) |
 | Codex | `app-server --listen stdio://` | `turn/completed` with completed status and seal | Turn |
 | Claude | Official Python Agent SDK in separate interpreter | `terminal_reason=completed`, successful subtype, no error and seal | Query |
 

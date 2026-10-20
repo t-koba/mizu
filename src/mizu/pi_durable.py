@@ -84,8 +84,8 @@ def durable_auth_path(config) -> Path:
     """Pi login store read by the durable launcher (same source as pi).
 
     Schema: ``config.agent_dir("pi-durable")/auth.json`` (operator-owned
-    engine directory, like the pi engine's own ``auth.json``). The
-    launcher opens the shared store file-backed and persists OAuth
+    engine directory, like the pi engine's own ``auth.json``). Pi's own
+    model runtime opens the shared store file-backed and persists OAuth
     refreshes under Pi's cross-process lock, so a rotating refresh is
     never spent without write-back (observed 2026-10-11 ``invalid_grant``
     from the prior read-only seed). Bounds:
@@ -98,6 +98,22 @@ def durable_auth_path(config) -> Path:
     agent_dir = config.agent_dir(ENGINE)
     mkdir(agent_dir)
     return agent_dir / "auth.json"
+
+
+def durable_models_path(config) -> Path:
+    """Operator-defined model catalog read by the durable launcher.
+
+    Schema: ``config.agent_dir("pi-durable")/models.json`` (the same
+    engine directory the pi engine reads, so one file defines a model for
+    both engines). Bounds: path only, never content: the catalog names
+    providers, endpoints and prices, and the model file stays out of
+    evidence and content hashes. Trust: operator-owned engine state, read
+    host-side by the controller. Failure: a missing file leaves the
+    bundled catalog in force; a malformed file refuses loudly.
+    """
+    agent_dir = config.agent_dir(ENGINE)
+    mkdir(agent_dir)
+    return agent_dir / "models.json"
 
 
 #: Options bound into the durable resume grant. Reasoning effort is
@@ -336,6 +352,7 @@ class PiDurableDriver:
             "cwd": str(cwd), "store": str(store_path),
             "requestId": getattr(context, "_durable_request_id", run_key), "prompt": prompt,
             "authPath": str(durable_auth_path(self.config)),
+            "modelsPath": str(durable_models_path(self.config)),
         }
         # Unset keeps the engine/provider default: omit the field so the
         # Harness resolves its own built-in policy instead of a Mizu value.

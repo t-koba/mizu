@@ -16,7 +16,7 @@ import { createServer } from 'node:net';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join as joinPath } from 'node:path';
-import { agentChanges, credentialsFromFile, meterModels, settlementFields, submitWithCurrentAgent, usageDelta }
+import { agentChanges, meterModels, resolveConfiguredModel, settlementFields, submitWithCurrentAgent, usageDelta }
   from '../adapters/pi-durable/launcher.mjs';
 import { AssistantEntry, BACKGROUND_CONTEXT, Harness, Type, createModels, createRegistry,
   defineExtension, defineTool, fauxAssistantMessage, fauxProvider, fauxToolCall,
@@ -292,42 +292,34 @@ test('terminal unanswered replay is bound to requestId; a distinct id starts a n
   }
 });
 
-test('pi login store is shared file-backed with locked OAuth persistence', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'mizu-durable-auth-'));
+test('the pinned model resolves from the engine directory models.json', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'mizu-durable-models-'));
   try {
-    const missing = join(directory, 'auth.json');
-    const empty = await credentialsFromFile(missing);
-    assert.equal(await empty.read('openai'), undefined);
-    assert.deepEqual(await empty.list(), []);
-    // A missing store keeps env-only behavior and never creates the file.
-    assert.equal(existsSync(missing), false);
-    const credential = { type: 'api_key', key: 'synthetic-test-only' };
-    writeFileSync(missing, JSON.stringify({ 'test-only': credential }));
-    const seeded = await credentialsFromFile(missing);
-    assert.deepEqual(await seeded.read('test-only'), credential);
-    assert.deepEqual(await seeded.list(), [{ providerId: 'test-only', type: 'api_key' }]);
-    const oauth = { type: 'oauth', access: 'a', refresh: 'r', expires: Date.now() + 3600000 };
-    writeFileSync(missing, JSON.stringify({ openai: oauth }));
-    const subscription = await credentialsFromFile(missing);
-    // OAuth entries are shared, not skipped: reads serve the stored
-    // credential and modify persists the rotated replacement under Pi's
-    // cross-process lock instead of discarding it (invalid_grant).
-    assert.deepEqual(await subscription.read('openai'), oauth);
-    assert.deepEqual(await subscription.list(), [{ providerId: 'openai', type: 'oauth' }]);
-    const rotated = { type: 'oauth', access: 'a2', refresh: 'r2', expires: Date.now() + 7200000 };
-    await subscription.modify('openai', async () => rotated);
-    assert.deepEqual(await subscription.read('openai'), rotated);
-    const persisted = JSON.parse(readFileSync(missing, 'utf8'));
-    assert.deepEqual(persisted.openai, rotated);
-    // api_key entries still read alongside an oauth entry.
-    writeFileSync(missing, JSON.stringify({ openai: rotated, 'test-only': credential }));
-    const mixed = await credentialsFromFile(missing);
-    assert.deepEqual(await mixed.read('test-only'), credential);
-    assert.deepEqual(await mixed.read('openai'), rotated);
-    writeFileSync(missing, '{corrupt');
-    await assert.rejects(credentialsFromFile(missing), /Invalid Pi auth store/);
-    writeFileSync(missing, JSON.stringify({ 'test-only': { type: 'oauth', access: 'a' } }));
-    await assert.rejects(credentialsFromFile(missing), /Invalid Pi auth credential/);
+    const modelsPath = join(directory, 'models.json');
+    const authPath = join(directory, 'auth.json');
+    writeFileSync(modelsPath, JSON.stringify({ providers: { 'test-only': {
+      name: 'Test Only', api: 'openai-completions', baseUrl: 'https://models.example.invalid/v1',
+      models: [{ id: 'model-x', name: 'Model X',
+        cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 } }] } } }));
+    // An operator-defined model resolves the way the pi engine resolves it:
+    // the bundled catalog plus the engine directory's models.json.
+    const resolved = await resolveConfiguredModel(
+      { authPath, modelsPath, provider: 'test-only', model: 'model-x' });
+    assert.equal(resolved.model.id, 'model-x');
+    assert.equal(resolved.model.baseUrl, 'https://models.example.invalid/v1');
+    assert.equal(resolved.model.cost.input, 1);
+    assert.equal(resolved.model.cost.output, 2);
+    // An unknown model still refuses loudly instead of guessing.
+    await assert.rejects(
+      resolveConfiguredModel({ authPath, modelsPath, provider: 'test-only', model: 'absent' }),
+      /unavailable on pi-durable: test-only\/absent/);
+    // A missing catalog leaves the bundled catalog in force: a built-in
+    // provider still resolves, and no file is created for it.
+    const empty = join(directory, 'empty');
+    const builtins = await resolveConfiguredModel(
+      { authPath, modelsPath: join(empty, 'models.json'), provider: 'openai', model: 'gpt-4o-mini' });
+    assert.equal(builtins.model.id, 'gpt-4o-mini');
+    assert.equal(existsSync(join(empty, 'models.json')), false);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -630,7 +622,7 @@ test('launcher settles a model-admission failure from its process entrypoint', {
       timeout_ms: 2000, token: 'local-test', joined_operations: [] }));
     writeFileSync(configPath, JSON.stringify({ provider: 'openai', model: 'gpt-4o-mini',
       instructions: 'test', store: join(directory, 'store.sqlite'), requestId: 'offline-test',
-      prompt: 'test', cwd: directory, authPath,
+      prompt: 'test', cwd: directory, authPath, modelsPath: join(directory, 'models.json'),
       tools: [{ name: 'finish', description: 'Seal', operation: 'finish',
         inputSchema: { type: 'object', properties: {}, required: [] } }] }));
     const launcher = joinPath(dirname(fileURLToPath(import.meta.url)), '..', 'adapters', 'pi-durable', 'launcher.mjs');

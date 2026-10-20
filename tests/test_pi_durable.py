@@ -859,7 +859,7 @@ class AuthPathTests(Fixture):
         self.assertEqual(pi_durable.durable_auth_path(self.config), expected)
         self.assertTrue(Path(expected).parent.is_dir())
 
-    def test_run_once_writes_auth_path_into_effective_config(self):
+    def test_run_once_writes_engine_paths_into_effective_config(self):
         import json
         import types
         from pathlib import Path
@@ -886,6 +886,10 @@ class AuthPathTests(Fixture):
         written = json.loads((context.run_dir / "pi-durable-effective.json").read_text())
         self.assertEqual(written["authPath"],
                          str(self.config.agent_dir("pi-durable") / "auth.json"))
+        # The operator-defined model catalog is read from the same engine
+        # directory, so one models.json defines a model for both engines.
+        self.assertEqual(written["modelsPath"],
+                         str(self.config.agent_dir("pi-durable") / "models.json"))
         self.assertEqual(written["requestId"], "run-key")
         # Unset keeps the engine default: the effective file omits the field
         # so no Mizu value is injected.
