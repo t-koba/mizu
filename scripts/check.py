@@ -527,8 +527,10 @@ def main():
     # durations/completion, a bounded hotspot summary, and bounded sanitized
     # per-check/phase entries) is opt-in via --test-timings. Per-test timings
     # are parsed immediately so they survive an ordinary child timeout; the
-    # artifact itself is written after all checks finish so it also carries
-    # phase data. It records evidence, not a policy.
+    # artifact is written immediately with partial phases so a later hang/job
+    # timeout still leaves per-test evidence, then rewritten after all checks
+    # finish so it also carries complete phase data. It records evidence, not
+    # a policy.
     pending_timings: list = []
     pending_unittest_status = 'fail'
     pending_unittest_exit = 1
@@ -566,6 +568,14 @@ def main():
                 pending_unittest_elapsed = ended_at - timing_origin
             except TypeError:
                 pending_unittest_elapsed = 0.0
+            # Early partial write so a later hang/job timeout still leaves
+            # per-test evidence; rewritten with complete phases below.
+            # Best-effort: never changes the gate outcome.
+            write_timings_artifact(args.test_timings, tests=pending_timings,
+                                   status=pending_unittest_status,
+                                   exit_code=pending_unittest_exit,
+                                   elapsed_seconds=pending_unittest_elapsed,
+                                   phases=checks)
     if not shutil.which('node'):
         checks.append({'name': 'node-available', 'status': 'fail'})
     # bash is a POSIX convenience for shell-syntax checks, not a runtime
@@ -617,8 +627,8 @@ def main():
     checks.append({'name': 'source-manifest-stable', 'status': 'pass' if source_stable else 'fail',
                    'details': stable_details})
     if args.test_timings:
-        # Written after all checks so phases are complete; per-test evidence
-        # was already captured above and survives a unittest child timeout.
+        # Rewrite with complete phases; the early partial write above already
+        # preserved per-test evidence if a later check hangs or times out.
         # Best-effort: never changes the gate outcome.
         write_timings_artifact(args.test_timings, tests=pending_timings,
                                status=pending_unittest_status,

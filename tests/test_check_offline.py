@@ -1030,6 +1030,79 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
             self.assertNotIn('output tail', blob)
             self.assertNotIn('details', blob)
 
+    def test_early_timings_artifact_survives_later_interruption(self):
+        # A later hang/job timeout must not lose per-test evidence: the
+        # artifact is written immediately after unittest parsing with partial
+        # phases, then rewritten with complete phases. Simulate an
+        # interruption after unittest returns and assert the early sanitized
+        # artifact remains with only partial phase summaries.
+        raw = 'Ran 1 test in 0.1s\nOK\n'
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifact = root / 'private-validation' / 'test-timings.json'
+
+            class FakeProcess:
+                def __init__(self, command, **kwargs):
+                    self.stdout = io.StringIO(raw)
+                    if len(command) > 4:
+                        Path(command[4]).write_text(
+                            json.dumps({'test': 'tests.RealTests.test_done',
+                                        'event': 'start', 't': 0.0}) + '\n'
+                            + json.dumps({'test': 'tests.RealTests.test_done',
+                                          'event': 'stop', 't': 0.5}) + '\n',
+                            encoding='utf-8')
+
+                def wait(self, timeout=None):
+                    return 0
+
+            def _boom(name):
+                raise RuntimeError('simulated later interruption')
+
+            output = io.StringIO()
+            with mock.patch.object(CHECK, 'ROOT', root), \
+                    mock.patch.object(CHECK.sys, 'argv',
+                                      ['check.py', '--test-timings', str(artifact)]), \
+                    mock.patch.object(CHECK, 'node_version', return_value=None), \
+                    mock.patch.object(CHECK, 'spawn', FakeProcess), \
+                    mock.patch.object(CHECK, 'popen_kwargs', return_value={}), \
+                    mock.patch.object(CHECK, 'terminate_process',
+                                      side_effect=lambda process: None), \
+                    mock.patch.object(CHECK.shutil, 'which', side_effect=_boom), \
+                    mock.patch.object(CHECK.sys, 'stdout', output):
+                with self.assertRaises(RuntimeError):
+                    CHECK.main()
+            payload = json.loads(artifact.read_text(encoding='utf-8'))
+            self.assertEqual(payload['suite'], 'test-timings')
+            self.assertEqual(payload['unittest_status'], 'pass')
+            self.assertEqual(payload['unittest_exit_code'], 0)
+            by_test = {entry['test']: entry for entry in payload['tests']}
+            self.assertEqual(by_test['tests.RealTests.test_done'],
+                             {'test': 'tests.RealTests.test_done',
+                              'duration_seconds': 0.5, 'completed': True})
+            # Only sanitized IDs, durations, completion, a bounded summary,
+            # partial phases, and minimal metadata; the final rewrite with
+            # complete phases never ran because the later check was
+            # interrupted.
+            self.assertEqual(set(payload), {'suite', 'mizu_version', 'python', 'os',
+                                            'unittest_timeout_seconds', 'unittest_elapsed_seconds',
+                                            'unittest_status',
+                                            'unittest_exit_code', 'summary', 'tests', 'phases'})
+            for entry in payload['tests']:
+                self.assertEqual(set(entry), {'test', 'duration_seconds', 'completed'})
+            by_phase = {phase['name']: phase for phase in payload['phases']}
+            self.assertIn('python-syntax', by_phase)
+            self.assertIn('python-unit-and-contract-tests', by_phase)
+            self.assertEqual(by_phase['python-unit-and-contract-tests']['status'], 'pass')
+            self.assertNotIn('source-manifest-stable', by_phase)
+            self.assertNotIn('node-available', by_phase)
+            for phase in payload['phases']:
+                self.assertEqual(set(phase) - {'duration_seconds', 'tests'}, {'name', 'status'})
+                self.assertNotIn('details', phase)
+                self.assertNotIn('exit_code', phase)
+            blob = json.dumps(payload)
+            self.assertNotIn('simulated later interruption', blob)
+            self.assertNotIn('details', blob)
+
     def test_timing_phases_are_sanitized_and_bounded(self):
         # Only stable name/status/duration/counts survive; details, exit
         # codes, output, and diagnostics are dropped. Malformed names,
