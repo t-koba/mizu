@@ -99,7 +99,7 @@ class CaptureLimitTests(Fixture):
         later = self.context()
         self.assertEqual(json.loads(prompt_for(later))["capture_limit"], cause)
 
-    def test_the_cause_is_cleared_once_the_workspace_is_representable_again(self):
+    def test_the_health_writer_clears_a_resolved_cause_and_keeps_a_live_one(self):
         ctx = self.context()
         (ctx.workspace / "big.profraw").write_bytes(b"x" * 200)
         with self.assertRaises(Denied):
@@ -117,6 +117,39 @@ class CaptureLimitTests(Fixture):
         self.assertNotIn("capture_limit", health)
         later = self.context()
         self.assertIsNone(json.loads(prompt_for(later))["capture_limit"])
+
+    def test_the_engine_clears_a_resolved_cause_and_keeps_a_live_one(self):
+        # The engine wiring, not a hand-fed helper call, decides the cause.
+
+        def unrepresentable(ctx, *_):
+            (ctx.workspace / "big.profraw").write_bytes(b"x" * 200)
+            ctx.handle("finish", {"outcome": "continue", "summary": "work",
+                                  "state": "cleaning"})
+
+        with self.assertRaises(Denied):
+            Engine(self.config, driver=ScriptDriver(unrepresentable)).run(self.project, "worker")
+        health = read_json(self.project.root / "health" / "worker.json")
+        self.assertIn("big.profraw", health["capture_limit"])
+
+        # A unit that fails before any capture keeps the cause that still applies.
+        def unrelated(ctx, *_):
+            raise Denied("provider down")
+
+        with self.assertRaises(Denied):
+            Engine(self.config, driver=ScriptDriver(unrelated)).run(self.project, "worker")
+        health = read_json(self.project.root / "health" / "worker.json")
+        self.assertIn("big.profraw", health["capture_limit"])
+
+        # A successful unit clears it: the workspace is representable again.
+        (self.project.workspace / "big.profraw").unlink()
+
+        def succeeding(ctx, *_):
+            ctx.handle("finish", {"outcome": "continue", "summary": "work", "state": "clean"})
+
+        Engine(self.config, driver=ScriptDriver(succeeding)).run(self.project, "worker")
+        health = read_json(self.project.root / "health" / "worker.json")
+        self.assertNotIn("capture_limit", health)
+        self.assertIsNone(json.loads(prompt_for(self.context()))["capture_limit"])
 
     def test_a_live_cause_survives_an_unrelated_failure(self):
         ctx = self.context()

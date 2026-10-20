@@ -2901,11 +2901,13 @@ def _prompt_run_identity(context: Context) -> dict:
 
 
 def _prompt_capture_limit(context: Context) -> str | None:
-    """The last recorded capture-limit cause of this role, if any.
+    """The capture-limit cause that still applies to this role, if any.
 
     A workspace file that cannot be captured ends the unit that produced it.
-    The next unit reads the cause here instead of repeating the same capture
-    failure. Bounded to the stored health record value.
+    The cause is set when a capture fails, kept while it applies, and
+    cleared when a capture succeeds, so the next unit reads a live cause
+    instead of repeating the same capture failure. Bounded to the stored
+    health record value.
     """
     try:
         health = read_json(context.project.root / "health" / f"{context.role.name}.json", {})
