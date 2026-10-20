@@ -941,6 +941,52 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
         self.assertIn("timeout-minutes: ${{ matrix.os == 'windows-latest' && 40 || 20 }}", workflow)
         self.assertEqual(CHECK._unittest_timeout_seconds('nt'), 1450)
 
+    def test_offline_steps_run_exactly_once_per_matrix_cell(self):
+        workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
+        ordinary = workflow.split('name: Offline core and transport contracts', 1)[1].split(
+            '      - name: Offline core and transport contracts with timings', 1)[0]
+        timed = workflow.split('name: Offline core and transport contracts with timings', 1)[1].split(
+            '      - name: Core installer', 1)[0]
+
+        def condition(section):
+            for line in section.splitlines():
+                stripped = line.strip()
+                if stripped.startswith('if: '):
+                    return stripped[len('if: '):].strip()
+            return None
+
+        def holds(expression, runner_os, matrix_python):
+            values = {'runner.os': runner_os, 'matrix.python': matrix_python}
+
+            def term(text):
+                left, _, right = text.strip().partition(' ')
+                operator, _, literal = right.partition(' ')
+                literal = literal.strip().strip('"').strip("'")
+                value = values[left.strip()]
+                return value != literal if operator == '!=' else value == literal
+
+            return any(all(term(part) for part in clause.split('&&'))
+                       for clause in expression.split('||'))
+
+        ordinary_if = condition(ordinary)
+        timed_if = condition(timed)
+        self.assertIsNotNone(ordinary_if)
+        self.assertIsNotNone(timed_if)
+        # The two offline steps are exact complements, so every matrix cell
+        # runs the gate once. Two runs on the Windows 3.13 cell would exceed
+        # that cell's job budget and lose the timing evidence it exists for.
+        # runner.os names the platform, not the matrix label.
+        cells = [(runner_os, matrix_python)
+                 for runner_os in ('Linux', 'macOS', 'Windows')
+                 for matrix_python in ('3.11', '3.12', '3.13', '3.14')]
+        for runner_os, matrix_python in cells:
+            with self.subTest(os=runner_os, python=matrix_python):
+                self.assertNotEqual(holds(ordinary_if, runner_os, matrix_python),
+                                    holds(timed_if, runner_os, matrix_python))
+        self.assertTrue(holds(timed_if, 'Windows', '3.13'))
+        self.assertFalse(holds(timed_if, 'Linux', '3.13'))
+        self.assertFalse(holds(timed_if, 'Windows', '3.12'))
+
     def test_timings_artifact_survives_timeout_with_only_evidence(self):
         raw = ('test_sample.SampleTests.test_slow ... ok\nRan 1 test in 0.1s\nOK\n')
         with tempfile.TemporaryDirectory() as temporary:
