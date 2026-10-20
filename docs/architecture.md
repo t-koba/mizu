@@ -498,6 +498,37 @@ are refused. See [exact-SHA CI waits](scheduling.md#exact-sha-work-item-ci-waits
 for terminal evidence, holder wake and acknowledgement semantics. This mutating operation is not observational
 and receives no exception to the existing per-run or wrap-up spend bounds.
 
+### Externally recorded publication receipts
+
+The product's own publish path records a schema-1 receipt in
+`evidence/publications/` as `<publication_id>.intent.json`,
+`<publication_id>.dispatch.json` and `<publication_id>.receipt.json`. An
+operator-run publisher that pushes approved commits to the development branch
+outside the product leaves no such record, so its publications had no durable
+source-to-published identity.
+
+A publication by such a publisher may be recorded afterwards as a schema-2
+external receipt: one create-only file
+`evidence/publications/<publication_id>.external.json` holding exactly the
+operation `external`, the branch, the published SHA, the code digest, the
+approval reference, the optional source commit and run reference, and the
+recording time. Its identity is the digest of the operation, branch, code
+digest and published SHA, so one publication keeps one ID across recordings.
+The write is create-only and idempotent: an identical request replays the
+stored receipt unchanged, a request that disagrees about the approval,
+source commit or run reference is refused by naming the conflicting
+publication ID, and nothing is ever overwritten.
+
+Trust boundary: the receipt is operator-asserted evidence. The product never
+infers a published SHA from a branch head, and a recorded receipt does not by
+itself prove that CI passed; CI evidence must still confirm the exact SHA the
+receipt names. A role reads recorded receipts from the project's own durable
+evidence through the `vcs_read` op `publications`, which contacts no provider
+and returns at most 100 summaries filtered by exact code digest or branch. An
+unreadable or invalid record is skipped, never returned unvalidated, and the
+same validation path lets an exact-SHA CI wait pin a `publication_id` to either
+receipt shape.
+
 Under one `insights.lock` section, the reader scans committed
 `decision-history/*.json`, validates and reconstructs every seeded item
 (including closed states), and returns only

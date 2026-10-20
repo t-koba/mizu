@@ -99,6 +99,20 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--wait", default=None, help="Structured defer wait: deadline:<ISO-at> | code_change | insight_decided:<id> | dependency:<recipient>:<insight>:<rev>:<accept|modify|reject>")
     p.add_argument("--expected-rev", type=int, default=None, help="Compare-and-swap revision for revise/decide/withdraw")
     p.add_argument("--origin", default=None, help="Opaque origin label recorded alongside the operator authority (submit only)")
+    p = sub.add_parser("publication", help="Record or list durable publication receipts")
+    publication = p.add_subparsers(dest="publication_command", required=True)
+    record = publication.add_parser("record", help="Record an operator-run publication receipt; create-only and idempotent")
+    record.add_argument("project", help="Managed project name")
+    record.add_argument("--branch", required=True, help="Published branch name")
+    record.add_argument("--published-sha", required=True, help="Published commit SHA (40 or 64 hex)")
+    record.add_argument("--code-digest", required=True, help="Approved code digest of the published tree (64 hex)")
+    record.add_argument("--approval", required=True, help="Operator approval reference")
+    record.add_argument("--source-commit", default=None, help="Source commit of the published tree (40 or 64 hex)")
+    record.add_argument("--run", default=None, help="Optional publisher run reference")
+    listing = publication.add_parser("list", help="List recorded publication receipts; read-only")
+    listing.add_argument("project", help="Managed project name")
+    listing.add_argument("--code-digest", default=None, help="Filter by exact code digest (64 hex)")
+    listing.add_argument("--branch", default=None, help="Filter by exact branch name")
     p = sub.add_parser("work-items", help="Show bounded open and recently closed work items; read-only, no recovery")
     p.add_argument("project", help="Managed project name")
     p.add_argument("--limit", type=int, default=25, help="Open items per page (1-100; default: 25)")
@@ -378,6 +392,35 @@ def _cmd_storage(config, project, args):
     return audit(project)
 
 
+def _cmd_publication_record(config, project, args):
+    """Record one operator-run publication as a durable receipt.
+
+    Schema: the recorded receipt, as stored. The write is create-only: an
+    identical request replays the stored record, a conflicting one is
+    refused. Trust: the operator asserts the published SHA and approval
+    reference; the product never infers them from a branch head. Failure:
+    ``Denied`` for invalid input or a conflicting receipt.
+    """
+    from .publication import Publication
+    return Publication.record_external(
+        project.root, branch=args.branch, published_sha=args.published_sha,
+        code_digest=args.code_digest, approval=args.approval,
+        source_commit=args.source_commit, run=args.run)
+
+
+def _cmd_publication_list(config, project, args):
+    """List the recorded publication receipts of one project.
+
+    Schema: ``{"publications": [...]}`` with publication ID, operation,
+    branch, published SHA, code digest, approval and the optional source
+    commit and run reference. Filters are exact matches. Failure:
+    ``Denied`` on invalid filters; unreadable records are skipped.
+    """
+    from .publication import Publication
+    return {"publications": Publication.list_receipts(
+        project.root, code_digest=args.code_digest, branch=args.branch)}
+
+
 def _cmd_work_items(config, project, args):
     """Read-only open plus newest-closed work-item view; no locks or recovery.
 
@@ -520,6 +563,13 @@ def execute(args):
         from .project import Project as _ReadOnlyProject
         project = _ReadOnlyProject(config, args.project, read_only=True)
         return _cmd_work_items(config, project, args)
+    if args.command == "publication":
+        from .project import Project
+        if args.publication_command == "list":
+            project = Project(config, args.project, read_only=True)
+            return _cmd_publication_list(config, project, args)
+        project = Project(config, args.project)
+        return _cmd_publication_record(config, project, args)
     project = Project(config, args.project)
     handler = _PROJECT_COMMANDS.get(args.command)
     if handler is None:

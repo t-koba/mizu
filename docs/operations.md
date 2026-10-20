@@ -438,6 +438,40 @@ predicate, use the normal CAS transitions to leave `blocked` and block again.
 See [the full wait contract](scheduling.md#exact-sha-work-item-ci-waits) for
 bounds, restart/replay and failure behavior.
 
+### 外部公開の記録 (operator-run publisher)
+
+The operator's own harvest publishes approved commits to the development branch
+outside Mizu. Record what it published so the project keeps a durable
+source-to-published identity and a CI wait can be pinned to that exact SHA:
+
+```sh
+mizu publication record demo \
+  --branch mizu \
+  --published-sha 0123456789abcdef0123456789abcdef01234567 \
+  --code-digest 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  --approval 'GO mizu (insight id)'
+```
+
+`--source-commit` and `--run` are optional references to the published tree and
+the publisher run. The record is create-only and idempotent: repeating the same
+command replays the stored receipt, and a request that disagrees about the
+approval or the run is refused. The published SHA and the approval reference
+are the operator's assertion; Mizu never infers a published SHA from a branch
+head, and CI evidence must still confirm that exact SHA.
+
+List the recorded receipts of a project (read-only):
+
+```sh
+mizu publication list demo
+mizu publication list demo --branch mizu --code-digest 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+```
+
+A role discovers the same receipts with the `vcs_read` op `publications`
+(`{"op":"publications"}`, optionally with `code_digest` or `branch`); it reads
+local durable evidence and contacts no provider. Use the returned
+`publication_id` as the `publication_id` of a `{kind:"ci", publication_id,
+checks}` work-item wait.
+
 ## バックアップと復元
 
 プロジェクトを一時停止（`pause`）した状態で取得します:

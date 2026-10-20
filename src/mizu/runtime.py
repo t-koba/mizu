@@ -1318,11 +1318,30 @@ class Context:
         write_json(self.run_dir / "research-state.json", record)
         return record
 
+    def _op_vcs_read_publications(self, args: dict) -> dict:
+        # Local listing of the project's recorded publication receipts.
+        # No provider is contacted: this reads the project's own durable
+        # evidence, so no adapter call is made. Only the op and the exact
+        # code_digest/branch filters are accepted.
+        if set(args) - {"op", "code_digest", "branch"}:
+            raise Denied("publication listing takes only code_digest and branch filters")
+        publications = Publication.list_receipts(
+            self.project.root, code_digest=args.get("code_digest"),
+            branch=args.get("branch"), limit=100)
+        evidence_id, evidence = self._new_invocation_evidence("vcs-read")
+        record = {"op": "publications", "branch": args.get("branch"),
+                  "trust": "recorded-local-untrusted", "evidence_id": evidence_id,
+                  "evidence": evidence, "result": {"publications": publications}}
+        write_json(self.run_dir / evidence, record)
+        # The listing is also the top-level result, like the other read ops.
+        return {**record, "publications": publications}
+
     def _op_vcs_read(self, args: dict) -> dict:
         # Read-only VCS view: CI status, logs, PR comments, external
         # proposals, and CI-recorded artifact files via the trusted
         # adapter. Never publishes; mutating ops are refused here even if
-        # the adapter would serve them. Requires a visible workspace. A
+        # the adapter would serve them. The adapter-backed reads require a
+        # visible workspace. A
         # publication_id is a status-only locator resolved through the
         # validated durable receipt; callers cannot override its branch/SHA.
         # Branch stays required for addressed reads
@@ -1331,9 +1350,18 @@ class Context:
         # takes a proposal id, the exact head sha, and the explicit
         # content scope (plus an optional base sha pin for full scope)
         # and needs no branch; artifact takes a branch, an artifact file
-        # name, and an optional sha filter.
+        # name, and an optional sha filter. The publications op lists the
+        # project's recorded receipts from local durable evidence and
+        # contacts no provider.
+        if args["op"] == "publications":
+            # Local evidence listing: no adapter, no network, no workspace.
+            return self._op_vcs_read_publications(args)
         if self.role.workspace == "none":
             raise Denied("This role has no workspace")
+        if "code_digest" in args:
+            # The digest filter belongs to the local publications listing
+            # only; an addressed read never accepts it.
+            raise Denied("code_digest is only valid for the publications listing")
         params = {}
         publication = None
         if "publication_id" in args:

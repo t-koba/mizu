@@ -136,7 +136,10 @@ compact work-item rows retain their 8192-byte limit. Names are sorted
 deterministically without trimming or case folding.
 Caller-supplied branch/SHA overrides are refused. The host loads and validates
 the immutable completed receipt, stores its branch and published SHA in the
-wait, and revalidates that binding on stored reads. Insight `decide`/defer waits
+wait, and revalidates that binding on stored reads. The receipt is either the
+product's own publish receipt or one recorded afterwards by an operator-run
+publisher; both validate through the same path, and neither is inferred from a
+branch head. Insight `decide`/defer waits
 do **not** accept `ci`; the existing work-item wait types remain unchanged.
 Registration requires `[vcs].poll_enabled = true` and a configured trusted
 adapter, otherwise it fails closed. An active polling daemon is needed to

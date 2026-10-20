@@ -5,9 +5,17 @@ hold the per-ID kernel lock across inspection and dispatch. Each JSON record is
 create-only and read with a fixed 8 KiB no-follow bound. A dispatch marker is a
 conservative point of no return: without a valid receipt it requires manual
 reconciliation, even if the process died before actually starting the adapter.
+
+Two receipt shapes share this store. The schema-1 receipt is the product's own
+publish path: intent, dispatch marker and receipt for one publication ID. The
+schema-2 external receipt is recorded after the fact by an operator-run
+publisher that pushed outside the product. It is create-only, idempotent for an
+identical request, and carries the same caller-visible fields, so an exact-SHA
+CI wait can be pinned to either shape.
 """
 from __future__ import annotations
 
+import datetime as dt
 import os
 import re
 import stat
@@ -15,11 +23,105 @@ from pathlib import Path
 
 from . import process
 from .errors import Denied
-from .fs import (DIGEST, canonical, digest, identifier, loads_finite, safe_read,
-                 sync_dir, write_json)
+from .fs import (DIGEST, canonical, digest, identifier, loads_finite,
+                 lock as kernel_lock, now, safe_read, sync_dir, write_json)
 
 SHA = re.compile(r"[0-9a-f]{40}([0-9a-f]{24})?\Z")
 RECORD_BYTES = 8192
+
+#: Operation label of a receipt recorded by an operator-run publisher.
+EXTERNAL_OP = "external"
+#: Schema version of an external receipt record.
+EXTERNAL_SCHEMA = 2
+#: Exact fields of an external receipt record.
+EXTERNAL_FIELDS = {"schema", "publication_id", "op", "branch", "published_sha",
+                   "code_digest", "approval", "source_commit", "run", "recorded_at"}
+#: File names of recorded receipts inside the publications directory.
+RECEIPT_FILE = re.compile(r"([0-9a-f]{64})\.(external|receipt)\.json\Z")
+#: Directory entries read by one bounded listing.
+RECEIPT_SCAN_LIMIT = 10000
+#: Candidate records validated by one bounded listing.
+RECEIPT_RECORD_LIMIT = 1000
+#: Maximum characters of an operator approval or run reference.
+REFERENCE_CHARS = 256
+
+
+def _reference(value, label: str) -> str:
+    """Validate one operator reference (approval or run) of a receipt.
+
+    Schema: a nonempty string of at most 256 characters with no control
+    characters (code point below 32 or 127) and at least one non-whitespace
+    character. Trust: the operator asserts this reference; it names evidence,
+    it does not grant authority. Failure: ``Denied`` for anything else.
+    """
+    if (not isinstance(value, str) or not value or len(value) > REFERENCE_CHARS
+            or not value.strip()
+            or any(ord(char) < 32 or ord(char) == 127 for char in value)):
+        raise Denied(f"Invalid publication {label} reference")
+    return value
+
+
+def _timestamp(value) -> bool:
+    """Accept only a timezone-aware ISO 8601 timestamp."""
+    if not isinstance(value, str):
+        return False
+    try:
+        return dt.datetime.fromisoformat(value).tzinfo is not None
+    except ValueError:
+        return False
+
+
+def _external_record(record, publication_id: str) -> dict:
+    """Validate one external receipt record against its stable publication ID.
+
+    Schema: exactly the recorded fields, schema 2, operation ``external``, and
+    a publication ID equal to the file name and to the digest of its identity.
+    Bounds: 8 KiB record (read bound), 40/64-hex commit SHAs, a 64-hex code
+    digest, and references of at most 256 characters. Trust: the operator
+    asserts the recorded content; it is never inferred from a branch head.
+    Failure: ``Denied`` for any mismatch.
+    """
+    if not isinstance(record, dict) or set(record) != EXTERNAL_FIELDS:
+        raise Denied(f"Invalid external publication receipt: {publication_id}")
+    if (type(record.get("schema")) is not int or record["schema"] != EXTERNAL_SCHEMA
+            or record.get("op") != EXTERNAL_OP
+            or record.get("publication_id") != publication_id):
+        raise Denied(f"Invalid external publication receipt: {publication_id}")
+    identity = {"op": EXTERNAL_OP, "branch": record["branch"],
+                "code_digest": record["code_digest"],
+                "published_sha": record["published_sha"]}
+    try:
+        computed = digest(canonical(identity))
+    except (TypeError, ValueError) as exc:
+        raise Denied(f"Invalid external publication identity: {publication_id}") from exc
+    if computed != publication_id:
+        raise Denied(f"Invalid external publication identity: {publication_id}")
+    from .vcs import check_branch
+    check_branch(record["branch"])
+    if (not isinstance(record["published_sha"], str)
+            or not SHA.fullmatch(record["published_sha"])):
+        raise Denied(f"Invalid external publication receipt: {publication_id}")
+    if (not isinstance(record["code_digest"], str)
+            or not DIGEST.fullmatch(record["code_digest"])):
+        raise Denied(f"Invalid external publication receipt: {publication_id}")
+    source_commit = record["source_commit"]
+    if source_commit is not None and (not isinstance(source_commit, str)
+                                      or not SHA.fullmatch(source_commit)):
+        raise Denied(f"Invalid external publication receipt: {publication_id}")
+    _reference(record["approval"], "approval")
+    if record["run"] is not None:
+        _reference(record["run"], "run")
+    if not _timestamp(record["recorded_at"]):
+        raise Denied(f"Invalid external publication receipt: {publication_id}")
+    return record
+
+
+def _summary(record: dict) -> dict:
+    """Project one validated receipt onto its caller-visible fields."""
+    return {"publication_id": record["publication_id"], "op": record["op"],
+            "branch": record["branch"], "published_sha": record["published_sha"],
+            "code_digest": record["code_digest"], "approval": record["approval"],
+            "source_commit": record.get("source_commit"), "run": record.get("run")}
 
 
 def source_commit(workspace: Path, *, cancel=lambda: False) -> str:
@@ -113,6 +215,14 @@ class Publication:
         intent = store._read("intent")
         dispatched = store._read("dispatch")
         receipt = store._read("receipt")
+        if intent is None and dispatched is None and receipt is None:
+            # An operator-run publisher records one receipt without the
+            # product's intent/dispatch trio; every other combination stays
+            # unresolved exactly as before.
+            external = store._read("external")
+            if external is not None:
+                return _external_record(external, publication_id)
+            raise Denied(f"Publication receipt unavailable or unresolved: {publication_id}")
         if intent is None or dispatched is None or receipt is None:
             raise Denied(f"Publication receipt unavailable or unresolved: {publication_id}")
         from .vcs import PUBLISH_OPS, check_branch
@@ -180,6 +290,119 @@ class Publication:
 
     def mark_dispatch(self) -> None:
         self._write("dispatch", {"publication_id": self.id})
+
+    @classmethod
+    def record_external(cls, project_root: Path, *, branch: str, published_sha: str,
+                        code_digest: str, approval: str, source_commit: str | None = None,
+                        run: str | None = None) -> dict:
+        """Record one operator-run publication as a durable receipt.
+
+        The publisher pushes outside the product, then records what it
+        published. Schema: branch (ref name), published SHA (40 or 64 hex),
+        code digest (64 hex), an approval reference, an optional source commit
+        and an optional run reference; the record carries schema 2, the
+        operation ``external``, the publication ID and the recording time.
+        Identity: the publication ID is the digest of the operation, branch,
+        code digest and published SHA, so the same publication keeps one ID.
+        Bounds: 8 KiB record, 256 characters per reference. Trust: the
+        operator asserts this content; the product never infers a published
+        SHA from a branch head. Retry: none; the write is create-only and an
+        identical request replays the stored record, a conflicting one is
+        refused. Failure: ``Denied`` for invalid input or a conflicting
+        receipt.
+        """
+        from .vcs import check_branch
+        check_branch(branch)
+        if not isinstance(published_sha, str) or not SHA.fullmatch(published_sha):
+            raise Denied("Invalid published SHA for external publication")
+        if not isinstance(code_digest, str) or not DIGEST.fullmatch(code_digest):
+            raise Denied("Invalid code digest for external publication")
+        if source_commit is not None and (not isinstance(source_commit, str)
+                                          or not SHA.fullmatch(source_commit)):
+            raise Denied("Invalid source commit for external publication")
+        approval = _reference(approval, "approval")
+        if run is not None:
+            run = _reference(run, "run")
+        identity = {"op": EXTERNAL_OP, "branch": branch, "code_digest": code_digest,
+                    "published_sha": published_sha}
+        publication_id = digest(canonical(identity))
+        store = cls.__new__(cls)
+        store.id = publication_id
+        store.root = Path(project_root) / "evidence" / "publications"
+        store.identity = identity
+        record = {"schema": EXTERNAL_SCHEMA, "publication_id": publication_id,
+                  "op": EXTERNAL_OP, "branch": branch, "published_sha": published_sha,
+                  "code_digest": code_digest, "approval": approval,
+                  "source_commit": source_commit, "run": run, "recorded_at": now()}
+        with kernel_lock(store.lock):
+            existing = store._read("external")
+            if existing is not None:
+                stored = _external_record(existing, publication_id)
+                if any(stored[key] != record[key] for key in
+                       ("branch", "published_sha", "code_digest", "approval",
+                        "source_commit", "run")):
+                    raise Denied(f"Conflicting external publication receipt: {publication_id}")
+                return stored
+            store._write("external", record)
+        return record
+
+    @classmethod
+    def list_receipts(cls, project_root: Path, *, code_digest: str | None = None,
+                      branch: str | None = None, limit: int = 100) -> list[dict]:
+        """List the recorded publication receipts of one project.
+
+        Schema: receipt summaries with the publication ID, operation, branch,
+        published SHA, code digest, approval and the optional source commit
+        and run reference. Filters: exact code digest and branch matches.
+        Bounds: at most 100 entries, at most 10000 directory entries read and
+        at most 1000 candidate records validated.
+        Trust: locally recorded evidence; an unreadable or invalid record is
+        skipped rather than returned unvalidated. Failure: ``Denied`` on
+        invalid arguments; a missing publications directory lists nothing.
+        """
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise Denied("Invalid publication listing limit")
+        if code_digest is not None and (not isinstance(code_digest, str)
+                                        or not DIGEST.fullmatch(code_digest)):
+            raise Denied("Invalid code digest for publication listing")
+        if branch is not None:
+            from .vcs import check_branch
+            check_branch(branch)
+        store = cls.__new__(cls)
+        store.id = ""
+        store.root = Path(project_root) / "evidence" / "publications"
+        store.identity = None
+        store._check_directories()
+        try:
+            names = sorted(os.listdir(store.root))
+        except (FileNotFoundError, NotADirectoryError):
+            return []
+        except OSError as exc:
+            raise Denied("Publication evidence is unavailable") from exc
+        records = []
+        seen = set()
+        for name in names[:RECEIPT_SCAN_LIMIT]:
+            match = RECEIPT_FILE.fullmatch(name)
+            if match is None:
+                continue
+            publication_id = match.group(1)
+            if publication_id in seen:
+                continue
+            seen.add(publication_id)
+            if len(seen) > RECEIPT_RECORD_LIMIT:
+                break
+            try:
+                record = cls.read_receipt(project_root, publication_id)
+            except (Denied, OSError):
+                # An unreadable or invalid record is never listed unvalidated.
+                continue
+            if code_digest is not None and record.get("code_digest") != code_digest:
+                continue
+            if branch is not None and record.get("branch") != branch:
+                continue
+            records.append(_summary(record))
+        records.sort(key=lambda item: item["publication_id"])
+        return records[:limit]
 
     def complete(self, intent: dict, published_sha: str) -> dict:
         if not isinstance(published_sha, str) or not SHA.fullmatch(published_sha):

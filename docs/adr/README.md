@@ -220,3 +220,19 @@ movement cannot satisfy or erase an older wait; if exact-SHA evidence is
 unavailable, the wait remains visibly unresolved rather than inferring a result
 from the new head. Review, promotion, and installation waits remain later
 slices.
+
+## ADR-031 — An operator-run publisher may record its publication post hoc
+The operator's own harvest publishes approved commits to the development branch
+outside the product, so those publications leave no durable source-to-published
+identity and no wait can be pinned to their published SHA. A publication by an
+operator-run publisher may therefore be recorded post hoc as a durable receipt
+anchored by code digest, branch, published SHA and approval reference. The
+record is create-only and idempotent: an identical request replays the stored
+receipt, a conflicting one is refused, and the write never overwrites. It is
+readable through the same validation path as the product's own receipt, so an
+exact-SHA CI wait can be pinned to it.
+
+Consequence: the product never infers a published SHA from a branch head. A
+recorded receipt is operator-asserted evidence; CI evidence must still confirm
+the exact SHA it names, and the product's own publish path keeps its
+intent/dispatch/receipt trio unchanged.
