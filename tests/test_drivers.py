@@ -482,8 +482,12 @@ class McpProxyTests(unittest.TestCase):
                  + b', "operation": "finish", "arguments": {"nested": '
                  + b"[" * depth + b"0" + b"]" * depth + b"}}\n")
         self.assertLess(len(frame), 1024 * 1024)
-        with self.assertRaises(RecursionError):
+        try:
             loads_finite(frame)
+        except RecursionError:
+            rejected = True
+        else:
+            rejected = False
         client = connect(config)
         try:
             client.settimeout(10)
@@ -496,6 +500,47 @@ class McpProxyTests(unittest.TestCase):
                 data.extend(chunk)
         finally:
             client.close()
+        response = json.loads(data[:data.index(b"\n")].decode("utf-8"))
+        self.assertNotIn("Internal tool failure", str(response))
+        if rejected:
+            self.assertFalse(response["ok"])
+            self.assertEqual(response["error"], "Invalid bridge frame")
+            self.assertEqual(calls, [])
+        else:
+            self.assertTrue(response["ok"])
+            self.assertEqual(response["result"], {})
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][0], "finish")
+
+    def test_forced_decoder_recursion_error_is_bounded_parse_failure(self):
+        from mizu.bridge import connect
+        import mizu.bridge as bridge_module
+        calls = []
+
+        def handle(operation, arguments):
+            calls.append((operation, arguments))
+            return {}
+
+        bridge = Bridge(handle, tool_definitions(("finish",)), timeout=60, transport="tcp")
+        bridge.__enter__()
+        self.addCleanup(bridge.__exit__, None, None, None)
+        config = read_json(bridge.config_file)
+        frame = (b'{"token": ' + json.dumps(config["token"]).encode()
+                 + b', "operation": "finish", "arguments": {}}\n')
+        with unittest.mock.patch.object(bridge_module, "loads_finite",
+                                       side_effect=RecursionError("forced")):
+            client = connect(config)
+            try:
+                client.settimeout(10)
+                client.sendall(frame)
+                data = bytearray()
+                while b"\n" not in data:
+                    chunk = client.recv(65536)
+                    if not chunk:
+                        break
+                    data.extend(chunk)
+            finally:
+                client.close()
         response = json.loads(data[:data.index(b"\n")].decode("utf-8"))
         self.assertFalse(response["ok"])
         self.assertEqual(response["error"], "Invalid bridge frame")
