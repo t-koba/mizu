@@ -413,11 +413,13 @@ def _cmd_publication_list(config, project, args):
     """List the recorded publication receipts of one project.
 
     Schema: one bounded page, ``{"publications": [...], "total": int,
-    "truncated": bool}``, with publication ID, operation, branch, published
-    SHA, code digest, approval and the optional source commit and run
-    reference. Filters are exact matches on code digest, branch or published
-    SHA. Failure: ``Denied`` on invalid filters; unreadable records are
-    skipped, never listed unvalidated.
+    "truncated": bool, "scan_stopped": bool}``, with publication ID,
+    operation, branch, published SHA, code digest, approval and the optional
+    source commit and run reference. ``total`` is a lower bound when
+    ``scan_stopped`` is true, so an empty page never claims that no receipt
+    exists. Filters are exact matches on code digest, branch or published SHA.
+    Failure: ``Denied`` on invalid filters; unreadable records are skipped,
+    never listed unvalidated.
     """
     from .publication import Publication
     return Publication.list_receipts(

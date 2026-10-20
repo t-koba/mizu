@@ -116,8 +116,9 @@ class ExternalPublicationTests(Fixture):
         broken = self.root / "evidence" / "publications" / ("0" * 64 + ".external.json")
         broken.write_text("{}", encoding="utf-8")
         listing = Publication.list_receipts(self.root)
-        self.assertEqual(set(listing), {"publications", "total", "truncated"})
+        self.assertEqual(set(listing), {"publications", "total", "truncated", "scan_stopped"})
         self.assertFalse(listing["truncated"])
+        self.assertFalse(listing["scan_stopped"])
         listed = listing["publications"]
         ids = [row["publication_id"] for row in listed]
         self.assertIn(first["publication_id"], ids)
@@ -161,6 +162,21 @@ class ExternalPublicationTests(Fixture):
         exact = Publication.list_receipts(self.root, published_sha="%040x" % 0)
         self.assertEqual(exact["total"], 1)
         self.assertFalse(exact["truncated"])
+        self.assertFalse(exact["scan_stopped"])
+
+    def test_list_receipts_reports_a_stopped_scan_instead_of_an_absent_receipt(self):
+        from mizu import publication as publication_module
+        for index in range(3):
+            self.record(published_sha="%040x" % index, code_digest="%064x" % index)
+        with patch.object(publication_module, "RECEIPT_RECORD_LIMIT", 1):
+            page = Publication.list_receipts(self.root)
+        # The scan stopped at its bound, so the count is a lower bound and the
+        # page never claims that no receipt exists.
+        self.assertTrue(page["scan_stopped"])
+        self.assertLess(page["total"], 3)
+        complete = Publication.list_receipts(self.root)
+        self.assertFalse(complete["scan_stopped"])
+        self.assertEqual(complete["total"], 3)
 
     def test_oversized_record_is_skipped_and_never_overwritten(self):
         from mizu.fs import canonical, digest
@@ -243,7 +259,7 @@ class ExternalPublicationTests(Fixture):
         self.assertEqual(record["source_commit"], "e" * 40)
         listed = execute(parser().parse_args(
             ["--config", str(self.file), "publication", "list", "sample"]))
-        self.assertEqual(set(listed), {"publications", "total", "truncated"})
+        self.assertEqual(set(listed), {"publications", "total", "truncated", "scan_stopped"})
         self.assertEqual([row["publication_id"] for row in listed["publications"]],
                          [record["publication_id"]])
         by_sha = execute(parser().parse_args(

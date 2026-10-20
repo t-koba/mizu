@@ -358,12 +358,15 @@ class Publication:
         """List the recorded publication receipts of one project.
 
         Schema: one bounded page, ``{"publications": [...], "total": int,
-        "truncated": bool}``. A summary carries the publication ID, operation,
-        branch, published SHA, code digest, approval and the optional source
-        commit and run reference. ``total`` counts every matching receipt and
-        ``truncated`` says whether the page dropped matches, so a caller can
-        tell an absent receipt from an omitted one. Filters: exact code
-        digest, branch and published SHA matches.
+        "truncated": bool, "scan_stopped": bool}``. A summary carries the
+        publication ID, operation, branch, published SHA, code digest, approval
+        and the optional source commit and run reference. ``total`` counts the
+        matching receipts the scan found and ``truncated`` says whether the
+        page dropped matches. ``scan_stopped`` says that a scan bound cut the
+        search short, so ``total`` is a lower bound and a matching receipt may
+        exist beyond it: an empty page with ``scan_stopped`` means "not found
+        within the scanned set", never "no receipt exists". Filters: exact
+        code digest, branch and published SHA matches.
         Bounds: at most 100 entries per page, at most 10000 directory entries
         read and at most 1000 candidate records validated.
         Trust: locally recorded evidence; an unreadable, oversized or
@@ -390,11 +393,12 @@ class Publication:
         try:
             names = sorted(os.listdir(store.root))
         except (FileNotFoundError, NotADirectoryError):
-            return {"publications": [], "total": 0, "truncated": False}
+            return {"publications": [], "total": 0, "truncated": False, "scan_stopped": False}
         except OSError as exc:
             raise Denied("Publication evidence is unavailable") from exc
         records = []
         seen = set()
+        scan_stopped = len(names) > RECEIPT_SCAN_LIMIT
         for name in names[:RECEIPT_SCAN_LIMIT]:
             match = RECEIPT_FILE.fullmatch(name)
             if match is None:
@@ -404,6 +408,7 @@ class Publication:
                 continue
             seen.add(publication_id)
             if len(seen) > RECEIPT_RECORD_LIMIT:
+                scan_stopped = True
                 break
             try:
                 record = cls.read_receipt(project_root, publication_id)
@@ -421,7 +426,7 @@ class Publication:
         records.sort(key=lambda item: item["publication_id"])
         page = records[:limit]
         return {"publications": page, "total": len(records),
-                "truncated": len(records) > len(page)}
+                "truncated": len(records) > len(page), "scan_stopped": scan_stopped}
 
     def complete(self, intent: dict, published_sha: str) -> dict:
         if not isinstance(published_sha, str) or not SHA.fullmatch(published_sha):
