@@ -518,6 +518,39 @@ class CiRewakeTests(Fixture):
         self.assertEqual(len(driver.calls), calls_after_first)
 
 
+class CiCheckTimeTests(Fixture):
+    """A provider's check times make the job time of a run derivable."""
+
+    def test_status_carries_bounded_check_times(self):
+        rows = vcs.parse_status_checks(
+            {"checks": [{"check": "unit", "state": "success", "sha": SHA_A,
+                         "started_at": "2026-07-20T05:00:00+00:00",
+                         "completed_at": "2026-07-20T05:03:20+00:00"}]})
+        self.assertEqual(rows[0]["started_at"], "2026-07-20T05:00:00+00:00")
+        self.assertEqual(rows[0]["completed_at"], "2026-07-20T05:03:20+00:00")
+        # A check that has not finished may report only its start.
+        started = vcs.parse_status_checks(
+            {"checks": [{"check": "unit", "state": "pending", "sha": SHA_A,
+                         "started_at": "2026-07-20T05:00:00+00:00"}]})
+        self.assertNotIn("completed_at", started[0])
+        # Absent stays absent (exactly check/state/sha/url).
+        plain = vcs.parse_status_checks(
+            {"checks": [{"check": "unit", "state": "success", "sha": SHA_A}]})
+        self.assertEqual(set(plain[0]), {"check", "state", "sha", "url"})
+
+    def test_status_refuses_malformed_check_times(self):
+        for bad in ("", "x" * 65, "yesterday", "2026-07-20T05:00:00", 3, None,
+                    "2026-07-20T05:00:00+00:00\n"):
+            with self.assertRaises(Denied, msg=repr(bad)):
+                vcs.parse_status_checks(
+                    {"checks": [{"check": "unit", "state": "success", "sha": SHA_A,
+                                 "started_at": bad}]})
+            with self.assertRaises(Denied, msg=repr(bad)):
+                vcs.parse_status_checks(
+                    {"checks": [{"check": "unit", "state": "success", "sha": SHA_A,
+                                 "completed_at": bad}]})
+
+
 class CiRunIdentityTests(Fixture):
     """Adapter run identity keys the CI wake fact; absent stays sha-keyed."""
 

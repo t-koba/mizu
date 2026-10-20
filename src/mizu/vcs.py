@@ -23,6 +23,7 @@ fetch refreshes the store.
 """
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
 import re
@@ -910,15 +911,37 @@ def read_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
 MAX_CHECKS = 1024
 
 
+def _ci_timestamp(value, label: str) -> str:
+    """Validate one CI check timestamp: a bounded timezone-aware ISO 8601 text.
+
+    A provider that reports when a check started or completed lets every role
+    derive the job time of a run without a project-specific reporter. The
+    value stays external-untrusted: only its shape is checked here.
+    """
+    if not isinstance(value, str) or not value or len(value) > 64:
+        raise Denied(f"Invalid CI {label} time")
+    try:
+        parsed = dt.datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise Denied(f"Invalid CI {label} time") from exc
+    if parsed.tzinfo is None:
+        raise Denied(f"Invalid CI {label} time")
+    return value
+
+
 def parse_status_checks(data: dict) -> list:
     """Validate a ``status`` adapter response into normalized check rows.
 
-    Schema: ``{"checks": [{check, state, sha, url?, run?}]}``; ``check`` 1-256
+    Schema: ``{"checks": [{check, state, sha, url?, run?, started_at?,
+    completed_at?}]}``; ``check`` 1-256
     chars without newline/NUL, ``state`` 1-64 chars without newline/NUL,
     ``sha`` 40/64 lowercase hex, optional ``url`` at most 4096 chars
     without newline/NUL, optional ``run`` 1-128 chars without
     newline/NUL (opaque adapter run identity, stable per CI run across
-    polls). Bounds: at most 1024 checks. Trust: adapter
+    polls), optional ``started_at``/``completed_at`` timezone-aware ISO 8601
+    timestamps of at most 64 chars (the check's start and completion, so the
+    job time of a run is derivable from the rows). Bounds: at most 1024
+    checks. Trust: adapter
     facts stay external-untrusted; this only validates shape. Failure:
     ``Denied`` on missing/malformed shapes.
     """
@@ -929,7 +952,8 @@ def parse_status_checks(data: dict) -> list:
         raise Denied("VCS status must carry a checks array with at most 1024 entries")
     out = []
     for entry in checks:
-        if not isinstance(entry, dict) or set(entry) - {"check", "state", "sha", "url", "run"}:
+        if not isinstance(entry, dict) or set(entry) - {"check", "state", "sha", "url", "run",
+                                                       "started_at", "completed_at"}:
             raise Denied("Invalid VCS status check entry")
         check = entry.get("check")
         state = entry.get("state")
@@ -954,6 +978,9 @@ def parse_status_checks(data: dict) -> list:
                 raise Denied("Invalid CI run identity")
             _reject_terminal_controls(run, "Invalid CI run identity")
             row["run"] = run
+        for key, label in (("started_at", "start"), ("completed_at", "completion")):
+            if key in entry:
+                row[key] = _ci_timestamp(entry.get(key), label)
         out.append(row)
     return out
 
