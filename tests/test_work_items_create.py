@@ -426,7 +426,11 @@ class SharedSeedCreationTests(Fixture):
             self.assertEqual(list(outside.iterdir()), [])
             future = (datetime.datetime.now(datetime.timezone.utc)
                       + datetime.timedelta(hours=1)).isoformat(timespec="seconds")
-            parked = self.proposal()
+            # Distinct title keeps an independent record under content dedup
+            # (plain carries a deferred pointer, so it is still open).
+            parked = self.project.insights.submit(
+                source="worker", title="Parked proposal", body="Evidence",
+                base_snapshot=None)
             with self.assertRaises(Denied):
                 self.decide(parked, "defer", wait={"kind": "deadline", "at": future})
             self.assert_no_decision(parked)
@@ -465,7 +469,11 @@ class SharedSeedCreationTests(Fixture):
         from mizu.insights import _decision_key
         for filename in ("2.json", "3.json", "legacy.json", "create.json"):
             with self.subTest(filename=filename):
-                proposal = self.proposal()
+                # Distinct title keeps an independent record per file under
+                # content dedup (each prior proposal stays open after refusal).
+                proposal = self.project.insights.submit(
+                    source="worker", title=f"Proposal {filename}", body="Evidence",
+                    base_snapshot=None)
                 item_id = "wi_" + _decision_key(proposal["id"], 1)
                 directory = self.project.root / "work-items" / item_id
                 directory.mkdir(parents=True)

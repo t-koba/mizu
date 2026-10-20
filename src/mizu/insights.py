@@ -243,19 +243,49 @@ class Insights:
         but a different ``run``/``origin`` returns the stored record instead
         of raising, so stable IDs (for example CI dedup) never break on
         provenance alone.
+
+        Auto-generated IDs (``insight_id`` omitted) also deduplicate by open
+        content: an identical ``source``/``title``/``body`` with a live inbox
+        record that is still open (undecided or deferred) returns the oldest
+        stored record with ``replayed`` set to ``True`` on the response only.
+        ``base_snapshot``/``run``/``origin`` are context, not identity, and
+        never update the stored record. Closed (accepted/modified/rejected/
+        withdrawn) or archive-only matches stay distinct, explicit IDs keep
+        their identity semantics, and no ``replayed`` marker is persisted.
         """
         identifier(source)
         origin = _check_origin(origin)
-        insight_id = identifier(insight_id or uuid.uuid4().hex)
+        explicit = bool(insight_id)
+        if explicit:
+            insight_id = identifier(insight_id)
         if not isinstance(title, str) or not 1 <= len(title) <= 200 or not isinstance(body, str) or not body.strip():
             raise Denied("Insight requires a title (1–200 characters) and nonempty body")
         if base_snapshot is not None and (not isinstance(base_snapshot, str) or not DIGEST.fullmatch(base_snapshot)):
             raise Denied("base_snapshot must be a SHA-256 ID or null")
-        payload = {"id": insight_id, "source": source, "title": title, "body": body,
-                   "base_snapshot": base_snapshot, "run": run, "origin": origin}
-        if len(canonical(payload)) > self.maximum:
+        probe_id = insight_id if explicit else "0" * 32
+        probe = {"id": probe_id, "source": source, "title": title, "body": body,
+                 "base_snapshot": base_snapshot, "run": run, "origin": origin}
+        if len(canonical(probe)) > self.maximum:
             raise Denied("Insight exceeds byte limit")
         with lock(self.root / "locks" / "insights.lock"):
+            if not explicit:
+                best = None
+                best_key = None
+                for key, _, item in self._live_entries(pending=True):
+                    if (not isinstance(key[0], str) or item.get("source") != source
+                            or item.get("title") != title or item.get("body") != body):
+                        continue
+                    if best_key is None or key < best_key:
+                        best, best_key = item, key
+                if best is not None:
+                    out = _normalize(best)
+                    out["replayed"] = True
+                    return out
+                insight_id = identifier(uuid.uuid4().hex)
+            payload = {"id": insight_id, "source": source, "title": title, "body": body,
+                       "base_snapshot": base_snapshot, "run": run, "origin": origin}
+            if len(canonical(payload)) > self.maximum:
+                raise Denied("Insight exceeds byte limit")
             path = self.root / "inbox" / f"{insight_id}.json"
             identity_path = self.root / "insight-ids" / f"{insight_id}.json"
             identity = read_json(identity_path)

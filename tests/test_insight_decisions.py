@@ -67,7 +67,10 @@ class WorkItemSeedTests(DecisionRevisionFixture):
     def test_defer_and_reject_do_not_seed_work_item(self):
         for action in ("defer", "reject"):
             with self.subTest(action=action):
-                proposal = self.submit()
+                snap = self.project.snapshots.get()
+                proposal = self.project.insights.submit(
+                    source="worker", title=f"Proposal {action}",
+                    body="original claims", base_snapshot=snap["id"])
                 record = self.project.insights.decide(
                     proposal["id"], action, "reviewed", "revisit later" if action == "defer" else "",
                     "run-1", expected_rev=1)
@@ -275,7 +278,12 @@ class WorkItemIntentTests(DecisionRevisionFixture):
         self.assertEqual(len(self.history_records()), count)
 
         # Actual pre-key history: random ID, no new-format marker, defer pointer.
-        legacy = self.submit()
+        # Distinct title keeps this an independent record under content dedup
+        # (the live proposal currently carries a deferred pointer, so it is open).
+        snap = self.project.snapshots.get()
+        legacy = self.project.insights.submit(
+            source="worker", title="Legacy proposal",
+            body="original claims", base_snapshot=snap["id"])
         deferred = {**deferred, "id": legacy["id"]}
         deferred.pop("decision_key")
         old = {**deferred, "action": "accept", "revisit": ""}

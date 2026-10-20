@@ -316,3 +316,179 @@ os._exit(0)
         self.assertEqual(self.project.insights.decide(item["id"], "reject", "reason", "", "retry", expected_rev=1), decision)
         with self.assertRaises(Denied):
             self.project.insights.decide(item["id"], "accept", "reason", "", "retry", expected_rev=1)
+
+
+class ContentDedupTests(Fixture):
+    """Auto-generated IDs deduplicate identical open source/title/body."""
+
+    def inbox_ids(self):
+        return sorted(p.stem for p in (self.project.root / "inbox").glob("*.json"))
+
+    def test_auto_retry_replays_same_open_record(self):
+        first = self.project.insights.submit(source="searcher", title="Idea", body="Evidence",
+                                             base_snapshot=None)
+        self.assertNotIn("replayed", first)
+        generation = self.project.insights.generation()
+        second = self.project.insights.submit(source="searcher", title="Idea", body="Evidence",
+                                              base_snapshot=None, run="retry-run", origin="other")
+        self.assertEqual(second["id"], first["id"])
+        self.assertTrue(second["replayed"])
+        self.assertEqual({k: v for k, v in second.items() if k != "replayed"},
+                         {k: v for k, v in first.items() if k != "replayed"})
+        # No extra record, stored file untouched, no wake.
+        self.assertEqual(self.inbox_ids(), [first["id"]])
+        stored = read_json(self.project.root / "inbox" / f"{first['id']}.json")
+        self.assertNotIn("replayed", stored)
+        self.assertEqual(stored["run"], first["run"])
+        self.assertEqual(self.project.insights.generation(), generation)
+        self.assertEqual(self.project.insights.read(first["id"])["body"], "Evidence")
+        self.assertNotIn("replayed", self.project.insights.read(first["id"]))
+        self.assertNotIn("replayed", self.project.insights.list(pending=False)[0])
+
+    def test_concurrent_auto_retries_create_one_open_record(self):
+        import concurrent.futures
+        def submit(_):
+            return self.project.insights.submit(source="searcher", title="Idea", body="Evidence",
+                                                base_snapshot=None)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            results = list(pool.map(submit, range(4)))
+        self.assertEqual({record["id"] for record in results}, {results[0]["id"]})
+        self.assertEqual(sum("replayed" not in record for record in results), 1)
+        self.assertEqual(self.inbox_ids(), [results[0]["id"]])
+
+    def test_provenance_context_is_ignored_but_original_preserved(self):
+        snap = self.project.snapshots.get()["id"]
+        first = self.project.insights.submit(source="searcher", title="T", body="B",
+                                             base_snapshot=None, run="first", origin=None)
+        second = self.project.insights.submit(source="searcher", title="T", body="B",
+                                              base_snapshot=snap, run="second", origin="caller")
+        self.assertEqual(second["id"], first["id"])
+        self.assertTrue(second["replayed"])
+        stored = read_json(self.project.root / "inbox" / f"{first['id']}.json")
+        self.assertIsNone(stored["base_snapshot"])
+        self.assertEqual(stored["run"], "first")
+        self.assertIsNone(stored.get("origin"))
+
+    def test_different_source_title_body_are_distinct(self):
+        first = self.project.insights.submit(source="searcher", title="Idea", body="Evidence",
+                                             base_snapshot=None)
+        other_source = self.project.insights.submit(source="worker", title="Idea", body="Evidence",
+                                                    base_snapshot=None)
+        other_title = self.project.insights.submit(source="searcher", title="Other", body="Evidence",
+                                                   base_snapshot=None)
+        other_body = self.project.insights.submit(source="searcher", title="Idea", body="Changed",
+                                                  base_snapshot=None)
+        self.assertNotEqual(other_source["id"], first["id"])
+        self.assertNotEqual(other_title["id"], first["id"])
+        self.assertNotEqual(other_body["id"], first["id"])
+        for record in (other_source, other_title, other_body):
+            self.assertNotIn("replayed", record)
+        self.assertEqual(len(self.inbox_ids()), 4)
+
+    def test_no_case_or_whitespace_normalization(self):
+        first = self.project.insights.submit(source="searcher", title="Idea", body="Evidence",
+                                             base_snapshot=None)
+        for title, body in (("idea", "Evidence"), ("Idea ", "Evidence"),
+                            ("Idea", "evidence"), ("Idea", "Evidence ")):
+            other = self.project.insights.submit(source="searcher", title=title, body=body,
+                                                 base_snapshot=None)
+            self.assertNotEqual(other["id"], first["id"])
+            self.assertNotIn("replayed", other)
+
+    def test_closed_match_stays_distinct(self):
+        first = self.project.insights.submit(source="searcher", title="Idea", body="Evidence",
+                                             base_snapshot=None)
+        self.project.insights.decide(first["id"], "reject", "no", "", "run", expected_rev=1)
+        second = self.project.insights.submit(source="searcher", title="Idea", body="Evidence",
+                                              base_snapshot=None)
+        self.assertNotEqual(second["id"], first["id"])
+        self.assertNotIn("replayed", second)
+        self.assertEqual(len(self.inbox_ids()), 2)
+
+    def test_archived_match_stays_distinct(self):
+        first = self.project.insights.submit(source="searcher", title="Idea", body="Evidence",
+                                             base_snapshot=None)
+        decision = self.project.insights.decide(first["id"], "reject", "no", "", "run", expected_rev=1)
+        decided = dt.datetime.fromisoformat(decision["created_at"]).timestamp()
+        with patch("mizu.insights.time.time", return_value=decided + 32 * 86400):
+            self.assertEqual(self.project.insights.gc_decided(), 1)
+        second = self.project.insights.submit(source="searcher", title="Idea", body="Evidence",
+                                              base_snapshot=None)
+        self.assertNotEqual(second["id"], first["id"])
+        self.assertNotIn("replayed", second)
+
+    def test_deferred_stays_open_and_replays(self):
+        first = self.project.insights.submit(source="searcher", title="Idea", body="Evidence",
+                                             base_snapshot=None)
+        self.project.insights.decide(first["id"], "defer", "later", "condition", "run", expected_rev=1)
+        second = self.project.insights.submit(source="searcher", title="Idea", body="Evidence",
+                                              base_snapshot=None)
+        self.assertEqual(second["id"], first["id"])
+        self.assertTrue(second["replayed"])
+        self.assertEqual(self.inbox_ids(), [first["id"]])
+
+    def test_explicit_id_semantics_preserved(self):
+        first = self.project.insights.submit(source="searcher", title="Idea", body="Evidence",
+                                             base_snapshot=None, insight_id="explicit-one")
+        retry = self.project.insights.submit(source="searcher", title="Idea", body="Evidence",
+                                             base_snapshot=None, insight_id="explicit-one",
+                                             run="retry", origin="other")
+        self.assertEqual(retry["id"], first["id"])
+        self.assertNotIn("replayed", retry)
+        distinct = self.project.insights.submit(source="searcher", title="Idea", body="Evidence",
+                                                base_snapshot=None, insight_id="explicit-two")
+        self.assertNotEqual(distinct["id"], first["id"])
+        self.assertNotIn("replayed", distinct)
+        with self.assertRaises(Denied):
+            self.project.insights.submit(source="searcher", title="Idea", body="Changed",
+                                         base_snapshot=None, insight_id="explicit-one")
+        self.assertEqual(len(self.inbox_ids()), 2)
+
+    def test_legacy_duplicates_return_oldest(self):
+        from mizu.fs import canonical, digest
+        first = self.project.insights.submit(source="searcher", title="Idea", body="Evidence",
+                                             base_snapshot=None)
+        # Simulate a legacy duplicate written before dedup: same open content,
+        # distinct auto ID, newer timestamp.
+        stored = read_json(self.project.root / "inbox" / f"{first['id']}.json")
+        newer = dict(stored)
+        newer["id"] = "f" * 32
+        newer["created_at"] = dt.datetime.fromtimestamp(
+            dt.datetime.fromisoformat(stored["created_at"]).timestamp() + 60,
+            dt.timezone.utc).isoformat()
+        newer["updated_at"] = newer["created_at"]
+        write_json(self.project.root / "inbox" / f"{newer['id']}.json", newer)
+        write_json(self.project.root / "insight-ids" / f"{newer['id']}.json",
+                   {"id": newer["id"], "sha256": digest(canonical(
+                       {k: newer.get(k) for k in ("id", "source", "title", "body",
+                                                 "base_snapshot", "run", "origin")})) ,
+                    "created_at": newer["created_at"]}, exclusive=True)
+        replay = self.project.insights.submit(source="searcher", title="Idea", body="Evidence",
+                                              base_snapshot=None)
+        self.assertEqual(replay["id"], first["id"])
+        self.assertTrue(replay["replayed"])
+
+    def test_cli_submit_path_exposes_replay(self):
+        from mizu.cli import _cmd_insight, parser
+        body_path = self.root / "body.md"
+        body_path.write_text("Evidence")
+        args = parser().parse_args(["insight", "submit", self.project.name,
+                                    "--title", "Idea", "--body", str(body_path)])
+        first = _cmd_insight(self.config, self.project, args)
+        self.assertNotIn("replayed", first)
+        args = parser().parse_args(["insight", "submit", self.project.name,
+                                    "--title", "Idea", "--body", str(body_path)])
+        second = _cmd_insight(self.config, self.project, args)
+        self.assertEqual(second["id"], first["id"])
+        self.assertTrue(second["replayed"])
+        self.assertEqual(self.inbox_ids(), [first["id"]])
+
+    def test_runtime_submit_path_exposes_replay(self):
+        first = self.context("searcher").handle("submit_insight", {"title": "Idea", "body": "Evidence"})
+        self.assertNotIn("replayed", first)
+        second = self.context("searcher").handle("submit_insight", {"title": "Idea", "body": "Evidence"})
+        self.assertEqual(second["id"], first["id"])
+        self.assertTrue(second["replayed"])
+        self.assertEqual(self.inbox_ids(), [first["id"]])
+        stored = read_json(self.project.root / "inbox" / f"{first['id']}.json")
+        self.assertNotIn("replayed", stored)
