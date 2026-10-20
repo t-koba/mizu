@@ -61,6 +61,20 @@ export async function resolveConfiguredModel(cfg) {
 }
 
 /**
+ * Name the bound a shared admission refusal carries.
+ *
+ * The handshake message names the bound the host was given, so the launcher
+ * reports that bound instead of always the request budget. Any other
+ * admission failure keeps its own path.
+ */
+export function boundStatusFor(error) {
+  const message = error && typeof error.message === 'string' ? error.message : '';
+  if (message.includes('Drain bound refused the provider request')) return 'drain';
+  if (message.includes('Per-run provider request budget exhausted')) return 'request_bound';
+  return null;
+}
+
+/**
  * Refuse a provider without configured credentials.
  *
  * The shared login store and the environment keys are the only sources. A
@@ -407,14 +421,13 @@ async function runOnce(cfg) {
       // submission. wait() below settles the aborted submission; the flag
       // maps it to request_bound. Any other admission failure keeps its
       // own path (a daily-budget refusal still defers via admission_wait).
-      if (!boundTripped && error && typeof error.message === 'string'
-          && (error.message.includes('Per-run provider request budget exhausted')
-              || error.message.includes('Drain bound refused the provider request'))) {
+      const status = boundStatusFor(error);
+      if (!boundTripped && status) {
         boundTripped = true;
         // The bound kind travels with the shared handshake, so the result
         // names the bound the host was given instead of always the request
         // budget.
-        drainTripped = error.message.includes('Drain bound refused the provider request');
+        drainTripped = status === 'drain';
         try { if (submission) await submission.abort(context); } catch {}
       }
       throw error;

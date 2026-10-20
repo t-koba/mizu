@@ -97,6 +97,21 @@ class CiWaitTests(Fixture):
         with self.assertRaisesRegex(Denied, "outcome unresolved; already dispatched"):
             restored_uncertain.prepare("uncertain-approval", "retry-run")
 
+    def test_wait_evidence_carries_the_job_time(self):
+        item = self.block()
+        rows = [{"check": c, "state": "success", "sha": SHA, "run": "run-" + c,
+                 "started_at": "2026-07-20T05:00:00+00:00",
+                 "completed_at": "2026-07-20T05:03:20+00:00"} for c in ["lint", "unit"]]
+        observed, _ = self.poll(rows=rows)
+        self.assertEqual(observed["observed"], 1)
+        events = ci_waits.pending(self.store, "worker")
+        self.assertEqual(len(events), 1)
+        checks = {row["check"]: row for row in events[0]["checks"]}
+        self.assertEqual(checks["unit"]["job_seconds"], 200)
+        self.assertEqual(checks["unit"]["started_at"], "2026-07-20T05:00:00+00:00")
+        # The stored evidence revalidates through the same parser.
+        self.assertEqual(ci_waits._evidence(self.store, self.store.get(item["id"])), events[0])
+
     def test_registration_refuses_invalid_bounds_uncertain_receipts_and_disabled_polling(self):
         bad = [[], ["unit"] * 2, [""], ["x\x85"], ["x\n"], ["x" * 257], [1], ["x\ud800"],
                [str(i) for i in range(65)], ["x" * 256 for _ in range(64)]]

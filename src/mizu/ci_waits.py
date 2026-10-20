@@ -97,7 +97,9 @@ def terminal(wait, data):
             return None
         row = matches[0]
         selected.append({"check": name, "sha": row["sha"], "state": row["state"],
-                         **({"run": row["run"]} if "run" in row else {})})
+                         **({"run": row["run"]} if "run" in row else {}),
+                         **{key: row[key] for key in ("started_at", "completed_at", "job_seconds")
+                            if key in row}})
     return selected
 
 

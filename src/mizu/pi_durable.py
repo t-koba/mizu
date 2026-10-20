@@ -556,7 +556,10 @@ def interpret_result(reported, context, model, thinking_level) -> None:
     context._durable_dispatch_usage = _dispatch_usage(reported, context, model, thinking_level)
     if reported.get("status") in ("request_bound", "drain"):
         _record_launcher_evidence(reported, context, model, thinking_level)
-        context.bound_hit = context.bound_hit or "requests"
+        # The launcher names the bound it was given: a reported drain is the
+        # drain bound, never the request budget.
+        context.bound_hit = "drain" if reported.get("status") == "drain" else (
+            context.bound_hit or "requests")
         requests_used, requests_limit = context._wrap_up_request_used_limit()
         if context.bound_hit == "drain":
             if not context.wrap_up_attempted:

@@ -471,6 +471,22 @@ class PolicyTests(Fixture):
             pi_durable.interpret_result({"durable_result": True, "status": "done",
                                          "finish_called": "false"}, context, model, None)
 
+    def test_a_reported_drain_is_the_drain_bound(self):
+        from mizu.errors import DeadlineWrapUp
+        context = self.context()
+        context.handle("_hello", {})
+        context.handle("_budget", {"sequence": 1})
+        context.model_evidence = {"requests": 0, "usage": [], "usage_known": False}
+        model = {"provider": "p", "model": "m"}
+        # The host had latched the request bound; the launcher's word wins.
+        context.bound_hit = "requests"
+        with self.assertRaises(DeadlineWrapUp):
+            pi_durable.interpret_result({"durable_result": True, "status": "drain",
+                                         "reason": "Drain bound refused the provider request",
+                                         "requests": 1, "usage": {"input": 1, "output": 1}},
+                                        context, model, None)
+        self.assertEqual(context.bound_hit, "drain")
+
     def test_request_bound_result_maps_to_limit(self):
         from mizu.errors import ProtocolError
         from mizu.usage import normalize

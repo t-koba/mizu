@@ -934,17 +934,26 @@ def parse_status_checks(data: dict) -> list:
     """Validate a ``status`` adapter response into normalized check rows.
 
     Schema: ``{"checks": [{check, state, sha, url?, run?, started_at?,
-    completed_at?}]}``; ``check`` 1-256
+    completed_at?, job_seconds?}]}``; ``check`` 1-256
     chars without newline/NUL, ``state`` 1-64 chars without newline/NUL,
     ``sha`` 40/64 lowercase hex, optional ``url`` at most 4096 chars
     without newline/NUL, optional ``run`` 1-128 chars without
     newline/NUL (opaque adapter run identity, stable per CI run across
     polls), optional ``started_at``/``completed_at`` timezone-aware ISO 8601
     timestamps of at most 64 chars (the check's start and completion, so the
-    job time of a run is derivable from the rows). Bounds: at most 1024
+    job time of a run is derivable from the rows). When both times are
+    present the completion must not precede the start; the comparison is on
+    the parsed instants, so the same instants in another offset are accepted.
+    A row then carries the derived ``job_seconds`` (at most seven days),
+    which this function recomputes: a supplied value is only accepted when
+    it matches the recomputed one. Bounds: at most 1024
     checks. Trust: adapter
     facts stay external-untrusted; this only validates shape. Failure:
-    ``Denied`` on missing/malformed shapes.
+    ``Denied`` on missing/malformed shapes, on a completion that precedes
+    its start, on a job longer than seven days, and on a supplied
+    ``job_seconds`` that does not match the recomputed one. The refusal
+    covers the whole response: a row that cannot be trusted denies the
+    status call, never a silently dropped row.
     """
     if not isinstance(data, dict):
         raise Denied("VCS status must be a JSON object")
@@ -954,7 +963,7 @@ def parse_status_checks(data: dict) -> list:
     out = []
     for entry in checks:
         if not isinstance(entry, dict) or set(entry) - {"check", "state", "sha", "url", "run",
-                                                       "started_at", "completed_at"}:
+                                                       "started_at", "completed_at", "job_seconds"}:
             raise Denied("Invalid VCS status check entry")
         check = entry.get("check")
         state = entry.get("state")
@@ -996,7 +1005,13 @@ def parse_status_checks(data: dict) -> list:
             job_seconds = int((completed - started).total_seconds())
             if job_seconds > MAX_CI_JOB_SECONDS:
                 raise Denied("CI check job time exceeds the seven-day bound")
+            if "job_seconds" in entry and entry["job_seconds"] != job_seconds:
+                # The derived value is recomputed here; a supplied one is only
+                # accepted when it agrees.
+                raise Denied("CI check job time does not match the reported times")
             row["job_seconds"] = job_seconds
+        elif "job_seconds" in entry:
+            raise Denied("CI check job time needs both a start and a completion")
         out.append(row)
     return out
 

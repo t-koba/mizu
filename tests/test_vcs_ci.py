@@ -557,6 +557,21 @@ class CiCheckTimeTests(Fixture):
         self.assertEqual(rows[0]["completed_at"], "2026-07-20T06:00:00+01:00")
         # The same instant in another offset: the job time is zero, not an hour.
         self.assertEqual(rows[0]["job_seconds"], 0)
+        # A supplied job time is only accepted when it matches the derived one.
+        accepted = vcs.parse_status_checks(
+            {"checks": [{"check": "unit", "state": "success", "sha": SHA_A,
+                         "started_at": "2026-07-20T05:00:00+00:00",
+                         "completed_at": "2026-07-20T05:03:20+00:00", "job_seconds": 200}]})
+        self.assertEqual(accepted[0]["job_seconds"], 200)
+        with self.assertRaises(Denied):
+            vcs.parse_status_checks(
+                {"checks": [{"check": "unit", "state": "success", "sha": SHA_A,
+                             "started_at": "2026-07-20T05:00:00+00:00",
+                             "completed_at": "2026-07-20T05:03:20+00:00", "job_seconds": 5}]})
+        with self.assertRaises(Denied):
+            vcs.parse_status_checks(
+                {"checks": [{"check": "unit", "state": "success", "sha": SHA_A,
+                             "started_at": "2026-07-20T05:00:00+00:00", "job_seconds": 200}]})
         # A reported job longer than a week is refused rather than believed.
         with self.assertRaises(Denied):
             vcs.parse_status_checks(

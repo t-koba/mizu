@@ -16,7 +16,7 @@ import { createServer } from 'node:net';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join as joinPath } from 'node:path';
-import { agentChanges, assertProviderAuth, meterModels, resolveConfiguredModel, settlementFields, submitWithCurrentAgent, usageDelta }
+import { agentChanges, assertProviderAuth, boundStatusFor, meterModels, resolveConfiguredModel, settlementFields, submitWithCurrentAgent, usageDelta }
   from '../adapters/pi-durable/launcher.mjs';
 import { AssistantEntry, BACKGROUND_CONTEXT, Harness, Type, createModels, createRegistry,
   defineExtension, defineTool, fauxAssistantMessage, fauxProvider, fauxToolCall,
@@ -589,6 +589,15 @@ test('launcher runs without a turn bound; requests_per_run governs spend', async
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test('the launcher reports the bound the handshake names', () => {
+  assert.equal(boundStatusFor(new Error('Drain bound refused the provider request')), 'drain');
+  assert.equal(boundStatusFor(new Error('Per-run provider request budget exhausted')),
+    'request_bound');
+  // Any other admission failure keeps its own path.
+  assert.equal(boundStatusFor(new Error('daily model-request budget exhausted')), null);
+  assert.equal(boundStatusFor(undefined), null);
 });
 
 test('the durable auth gate accepts a provider authenticated by an environment key', async () => {
