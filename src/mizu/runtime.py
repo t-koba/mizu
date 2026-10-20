@@ -491,30 +491,34 @@ class Context:
             self._activity_counts[count] = self._activity_counts.get(count, 0) + 1
 
     def _publish_activity(self) -> None:
-        """Best-effort live activity gauge in the run's active record.
+        """Publish the same bounded live gauge for top-level and child runs.
 
-        Writes ``active/<role>.json`` with the current activity bucket, its
-        start time, and cumulative per-bucket seconds whenever the bucket
-        changes. Never raises: unreadable state or a superseded record
-        (another run owns the slot) skips the write. The file stays small
-        and bounded; full cumulative totals remain in the run record.
+        runs/<id>/activity.json is local observational evidence (schema 1),
+        not authority. Updates atomically replace one record on bucket changes;
+        no prompt, command or model content is included. Failure is best-effort,
+        never blocks cancellation or changes admission. Terminal run evidence
+        determines whether this retained gauge is still live.
         """
         try:
             from .fs import read_json as _read, write_json as _write
             path = self.project.root / "active" / f"{self.role.name}.json"
             record = _read(path, {})
-            if not isinstance(record, dict) or record.get("run") != self.run_dir.name:
+            owns_active = isinstance(record, dict) and record.get("run") == self.run_dir.name
+            if not owns_active and not getattr(self, "parent_run", None):
                 return
             seconds = dict(self._activity_seconds)
             total = sum(seconds.values())
             seconds[self._activity_current] = seconds.get(self._activity_current, 0.0)
-            record = {**record,
-                      "activity": self._activity_current,
-                      "activity_since": now(),
-                      "activity_seconds": {key: round(value, 3) for key, value in sorted(seconds.items())},
-                      "activity_total_seconds": round(total, 3)}
-            _write(path, record)
+            gauge = {"activity": self._activity_current,
+                     "activity_since": now(),
+                     "activity_seconds": {key: round(value, 3) for key, value in sorted(seconds.items())},
+                     "activity_total_seconds": round(total, 3)}
+            _write(self.run_dir / "activity.json", {
+                "schema": 1, "run": self.run_dir.name, "role": self.role.name,
+                "parent_run": getattr(self, "parent_run", None), **gauge})
             self._activity_published = self._activity_current
+            if owns_active:
+                _write(path, {**record, **gauge})
         except Exception:
             return
 
