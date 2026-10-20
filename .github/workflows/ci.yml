@@ -27,15 +27,16 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ matrix.python }}
-      - name: Offline core and transport contracts with timings
+      - name: Offline core and transport contracts
+        if: runner.os != 'Windows' || matrix.python != '3.13'
         # Offline runners do not provision the operator-owned Pi SDKs, so the
         # SDK, durable, and reasoning-replay gates are explicitly waived here;
         # the authoritative network-enabled job below provisions both adapters.
-        # Temporary one-run timing evidence collection across every core cell
-        # (revert to a single cell after evidence is gathered): same gates and
-        # waivers as before, plus sanitized per-test timings and bounded
-        # per-phase entries on each OS/Python combination.
-        run: python scripts/check.py --report private-validation/offline.json --test-timings private-validation/test-timings-${{ matrix.os }}-py${{ matrix.python }}.json --allow-not-run node-durable-contract-tests,node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests
+        run: python scripts/check.py --report private-validation/offline.json --allow-not-run node-durable-contract-tests,node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests
+      - name: Offline core and transport contracts with timings
+        if: runner.os == 'Windows' && matrix.python == '3.13'
+        # Collect per-test timing only on the target Windows timeout job.
+        run: python scripts/check.py --report private-validation/offline.json --test-timings private-validation/windows-test-timings.json --allow-not-run node-durable-contract-tests,node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests
       - name: Core installer and CLI lifecycle
         if: runner.os == 'Linux' && matrix.python == '3.13'
         # Reuse the full source gate above via an explicit content-bound
@@ -45,19 +46,18 @@ jobs:
       - name: Source distribution build
         if: runner.os == 'Linux' && matrix.python == '3.13'
         run: python scripts/package.py --output dist
-      - name: Upload per-matrix test timings
-        # Temporary one-run evidence collection: one sanitized artifact per
-        # OS/Python cell. Each file holds only sanitized test IDs plus
-        # durations/completion, a bounded summary, bounded per-phase entries,
-        # and minimal runtime metadata. It never includes failure details or
-        # output tails; do not upload offline.json, which can contain
-        # diagnostics. Always runs (even on timeout) with missing-file
-        # tolerance so a killed child still reports its partial entry.
-        if: always()
+      - name: Upload Windows per-test timings
+        # Evidence only for the timeout review: the dedicated timings file
+        # holds sanitized test IDs plus durations/completion and minimal
+        # runtime metadata. It never includes failure details or output tails;
+        # do not upload offline.json, which can contain diagnostics. Always
+        # runs (even on timeout) with missing-file tolerance so a killed
+        # child still reports its partial entry.
+        if: always() && runner.os == 'Windows' && matrix.python == '3.13'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: test-timings-${{ matrix.os }}-py${{ matrix.python }}
-          path: private-validation/test-timings-${{ matrix.os }}-py${{ matrix.python }}.json
+          name: windows-test-timings
+          path: private-validation/windows-test-timings.json
           retention-days: 7
           if-no-files-found: warn
   durable-contract:

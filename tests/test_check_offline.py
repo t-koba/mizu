@@ -916,27 +916,23 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
         workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
         # Immutable v4.6.2 pin; short retention; always with missing-file tolerance.
         self.assertIn('actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02', workflow)
-        # Temporary one-run collection: every core cell emits the sanitized
-        # artifact under a per-OS/Python name; reverted after evidence.
-        self.assertIn('name: Upload per-matrix test timings', workflow)
-        self.assertNotIn('name: Upload Windows per-test timings', workflow)
-        self.assertIn('--test-timings private-validation/test-timings-${{ matrix.os }}-py${{ matrix.python }}.json', workflow)
-        self.assertNotIn('windows-test-timings.json', workflow)
-        self.assertIn('name: test-timings-${{ matrix.os }}-py${{ matrix.python }}', workflow)
-        upload = workflow.split('name: Upload per-matrix test timings', 1)[1].split('  durable-contract:', 1)[0]
+        self.assertIn('name: Upload Windows per-test timings', workflow)
+        self.assertIn('--test-timings private-validation/windows-test-timings.json', workflow)
+        ordinary = workflow.split('name: Offline core and transport contracts', 1)[1].split(
+            '      - name: Offline core and transport contracts with timings', 1)[0]
+        self.assertNotIn('--test-timings', ordinary)
+        timed = workflow.split('name: Offline core and transport contracts with timings', 1)[1].split(
+            '      - name: Core installer', 1)[0]
+        self.assertIn("if: runner.os == 'Windows' && matrix.python == '3.13'", timed)
+        self.assertNotIn('test-timings-${{ matrix.os }}', workflow)
+        upload = workflow.split('name: Upload Windows per-test timings', 1)[1].split('  durable-contract:', 1)[0]
         self.assertEqual([line.strip() for line in upload.splitlines() if line.strip().startswith('path:')],
-                         ['path: private-validation/test-timings-${{ matrix.os }}-py${{ matrix.python }}.json'])
-        self.assertIn('private-validation/test-timings-${{ matrix.os }}-py${{ matrix.python }}.json', workflow)
+                         ['path: private-validation/windows-test-timings.json'])
+        self.assertIn('private-validation/windows-test-timings.json', workflow)
         self.assertIn('retention-days: 7', workflow)
         self.assertIn('if-no-files-found: warn', workflow)
-        # Per-cell upload always runs; the core timings step itself is
-        # unconditional so all 12 cells report (no Windows-only gate).
-        self.assertIn('\n        if: always()\n', upload)
-        self.assertNotIn("runner.os == 'Windows' && matrix.python == '3.13'", workflow.split('name: Upload per-matrix test timings', 1)[1].split('  durable-contract:', 1)[0])
-        core_section = workflow.split('name: Offline core and transport contracts with timings', 1)[1].split('- name: Core installer', 1)[0]
-        self.assertIn('--test-timings', core_section)
-        self.assertNotIn("\n        if: runner.os", core_section)
-        # No diagnostics upload: only the dedicated timings path is uploaded.
+        self.assertIn("if: always() && runner.os == 'Windows' && matrix.python == '3.13'", workflow)
+        # Do not upload offline reports, which may contain diagnostics.
         self.assertNotIn('path: private-validation/offline.json', workflow)
         self.assertNotIn('path: private-validation/durable.json', workflow)
         # Timing stays diagnostic; the original 40-minute/1450-second scope is
