@@ -6,6 +6,7 @@ import {
   Type, createModels, fauxAssistantMessage, fauxProvider, fauxToolCall,
 } from '@earendil-works/pi-ai';
 import { builtinModels } from '@earendil-works/pi-ai/providers/all';
+import { openaiProvider } from '@earendil-works/pi-ai/providers/openai';
 import {
   AssistantEntry, createRegistry, defineExtension, defineTool, Harness, MemoryStorage,
 } from '@earendil-works/pi-durable';
@@ -13,4 +14,5 @@ import { openNodeSqliteStorage } from '@earendil-works/pi-durable/storage/sqlite
 
 export { AssistantEntry, BACKGROUND_CONTEXT, Harness, MemoryStorage, Type,
   builtinModels, createModels, createRegistry, defineExtension, defineTool,
-  fauxAssistantMessage, fauxProvider, fauxToolCall, openNodeSqliteStorage };
+  fauxAssistantMessage, fauxProvider, fauxToolCall, openNodeSqliteStorage,
+  openaiProvider };

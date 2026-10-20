@@ -16,11 +16,11 @@ import { createServer } from 'node:net';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join as joinPath } from 'node:path';
-import { agentChanges, meterModels, resolveConfiguredModel, settlementFields, submitWithCurrentAgent, usageDelta }
+import { agentChanges, assertProviderAuth, meterModels, resolveConfiguredModel, settlementFields, submitWithCurrentAgent, usageDelta }
   from '../adapters/pi-durable/launcher.mjs';
 import { AssistantEntry, BACKGROUND_CONTEXT, Harness, Type, createModels, createRegistry,
   defineExtension, defineTool, fauxAssistantMessage, fauxProvider, fauxToolCall,
-  openNodeSqliteStorage } from '../adapters/pi-durable/test-support.mjs';
+  openNodeSqliteStorage, openaiProvider } from '../adapters/pi-durable/test-support.mjs';
 
 const context = BACKGROUND_CONTEXT;
 
@@ -589,6 +589,23 @@ test('launcher runs without a turn bound; requests_per_run governs spend', async
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test('the durable auth gate accepts a provider authenticated by an environment key', async () => {
+  const models = createModels();
+  models.setProvider(openaiProvider());
+  const previous = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = 'offline-test-key';
+  try {
+    // The gate admits the provider: an environment key is a configured
+    // credential, so the durable engine does not refuse the submission.
+    await assertProviderAuth(models, 'openai');
+  } finally {
+    if (previous === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previous;
+  }
+  await assert.rejects(assertProviderAuth(models, 'test-only'),
+    /Provider auth is not configured for test-only/);
 });
 
 test('the durable launcher refuses a provider without configured auth', { timeout: 10000 }, async () => {

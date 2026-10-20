@@ -777,10 +777,12 @@ class Context:
             if operation == "_budget":
                 self.enter_drain_wrap_up()
                 if self.bound_hit == "drain" and not self.wrap_up_attempted:
-                    # Reuse the adapters' existing settled request_bound handshake;
-                    # this is not a daily-budget rejection or an admitted request.
+                    # One shared handshake: the message carries the bound kind,
+                    # so each engine reports the kind it was given instead of
+                    # naming the request budget. This is not a daily-budget
+                    # rejection or an admitted request.
                     self.drain_admission_refused = True
-                    raise DeadlineWrapUp("Per-run provider request budget exhausted")
+                    raise DeadlineWrapUp("Drain bound refused the provider request")
                 try:
                     sequence = arguments.get("sequence")
                     if type(sequence) is not int or sequence < 1:
@@ -792,7 +794,7 @@ class Context:
                         requests_used, requests_limit = self._wrap_up_request_used_limit()
                         if over and requests_used >= requests_limit:
                             if self.bound_hit == "drain":
-                                raise DrainYieldExceeded("Per-run provider request budget exhausted")
+                                raise DrainYieldExceeded("Drain wrap-up request allowance exhausted")
                             if self.bound_hit == "deadline":
                                 raise RunDeadlineExceeded("Deadline wrap-up request allowance exhausted")
                             raise LimitExceeded("Per-run provider request budget exhausted")
@@ -1518,7 +1520,9 @@ class Context:
         # for the same commit.
         receipt = Publication.read_receipt(self.project.root, args["publication_id"])
         sha = receipt["published_sha"]
-        workflows = [str(name) for name in args["workflows"]]
+        # One request per set of workflows: a reordered retry is the same
+        # request and replays its recorded outcome.
+        workflows = sorted(str(name) for name in args["workflows"])
         requests = CiRequests(self.project.root)
         identity = ci_request_id(receipt["publication_id"], sha, workflows)
         recorded = requests.outcome(identity)

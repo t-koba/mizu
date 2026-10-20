@@ -988,10 +988,15 @@ def parse_status_checks(data: dict) -> list:
                     started = moment
                 else:
                     completed = moment
-        if started is not None and completed is not None and completed < started:
-            # A check cannot finish before it started: a negative job time would
-            # make the cost of the run unreadable.
-            raise Denied("CI check completion precedes its start")
+        if started is not None and completed is not None:
+            if completed < started:
+                # A check cannot finish before it started: a negative job time
+                # would make the cost of the run unreadable.
+                raise Denied("CI check completion precedes its start")
+            job_seconds = int((completed - started).total_seconds())
+            if job_seconds > MAX_CI_JOB_SECONDS:
+                raise Denied("CI check job time exceeds the seven-day bound")
+            row["job_seconds"] = job_seconds
         out.append(row)
     return out
 
@@ -1678,6 +1683,8 @@ def record_ci_result(project, *, branch: str, sha: str, check: str,
 
 #: At most eight workflows per CI request.
 MAX_CI_WORKFLOWS = 8
+#: A reported check cannot have run for longer than a week.
+MAX_CI_JOB_SECONDS = 7 * 86400
 
 
 def request_runs_via(settings: dict, sha: str, workflows, *, cancel=lambda: False,
@@ -1745,4 +1752,9 @@ def request_runs_via(settings: dict, sha: str, workflows, *, cancel=lambda: Fals
         if not isinstance(url, str) or len(url) > 4096:
             raise Denied("Invalid CI run URL")
         out.append({"workflow": workflow, "run_id": run, "head_sha": head_sha, "url": url})
+    reported = {entry["workflow"] for entry in out}
+    if reported != set(workflows) or len(out) != len(workflows):
+        # A request that came back short is not a fulfilled request: the
+        # missing workflow would look like a run that never started.
+        raise Denied("CI request response does not cover every requested workflow")
     return out

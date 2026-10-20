@@ -537,9 +537,10 @@ def interpret_result(reported, context, model, thinking_level) -> None:
     """Validate the launcher result document and record usage evidence.
 
     Schema: ``reported`` is the parsed one-shot result (``durable_result``
-    true, ``status`` done/unanswered/request_bound). ``request_bound`` maps
-    to ``LimitExceeded`` so the spent budget surfaces as a bound, never a
-    silent stop; only the known terminal ``unanswered`` status maps to
+    true, ``status`` done/unanswered/request_bound/drain). ``request_bound``
+    maps to ``LimitExceeded`` so the spent budget surfaces as a bound, never a
+    silent stop; ``drain`` names the drain bound, so a drained unit is bounded
+    as a drain rather than as request-budget exhaustion; only the known terminal ``unanswered`` status maps to
     ``ModelFailure``, while unknown statuses are ``ProtocolError``. A done
     a normal ``done`` result may lack the host seal; Engine._execute applies
     the configured bounded follow-up. A reported finish still must match the
@@ -553,7 +554,7 @@ def interpret_result(reported, context, model, thinking_level) -> None:
     if not isinstance(reported, dict) or reported.get("durable_result") is not True:
         raise ProtocolError("Durable launcher returned an invalid result")
     context._durable_dispatch_usage = _dispatch_usage(reported, context, model, thinking_level)
-    if reported.get("status") == "request_bound":
+    if reported.get("status") in ("request_bound", "drain"):
         _record_launcher_evidence(reported, context, model, thinking_level)
         context.bound_hit = context.bound_hit or "requests"
         requests_used, requests_limit = context._wrap_up_request_used_limit()

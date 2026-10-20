@@ -160,7 +160,7 @@ class DrainYieldTests(Fixture):
         ctx.handle("_budget", {"sequence": 1})
         self.project.set_control(draining=True)
         ctx.handle("_request_done", {"sequence": 1})
-        with self.assertRaisesRegex(DeadlineWrapUp, "Per-run provider request budget exhausted"):
+        with self.assertRaisesRegex(DeadlineWrapUp, "Drain bound refused the provider request"):
             ctx.handle("_budget", {"sequence": 2})
         self.assertEqual(ctx.request_count, 1)
         self.assertFalse(ctx.request_deadlines)

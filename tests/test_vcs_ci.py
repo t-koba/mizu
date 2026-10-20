@@ -528,11 +528,14 @@ class CiCheckTimeTests(Fixture):
                          "completed_at": "2026-07-20T05:03:20+00:00"}]})
         self.assertEqual(rows[0]["started_at"], "2026-07-20T05:00:00+00:00")
         self.assertEqual(rows[0]["completed_at"], "2026-07-20T05:03:20+00:00")
+        # The job time is derived here, so a consumer need not re-parse the text.
+        self.assertEqual(rows[0]["job_seconds"], 200)
         # A check that has not finished may report only its start.
         started = vcs.parse_status_checks(
             {"checks": [{"check": "unit", "state": "pending", "sha": SHA_A,
                          "started_at": "2026-07-20T05:00:00+00:00"}]})
         self.assertNotIn("completed_at", started[0])
+        self.assertNotIn("job_seconds", started[0])
         # Absent stays absent (exactly check/state/sha/url).
         plain = vcs.parse_status_checks(
             {"checks": [{"check": "unit", "state": "success", "sha": SHA_A}]})
@@ -552,6 +555,14 @@ class CiCheckTimeTests(Fixture):
                          "started_at": "2026-07-20T05:00:00+00:00",
                          "completed_at": "2026-07-20T06:00:00+01:00"}]})
         self.assertEqual(rows[0]["completed_at"], "2026-07-20T06:00:00+01:00")
+        # The same instant in another offset: the job time is zero, not an hour.
+        self.assertEqual(rows[0]["job_seconds"], 0)
+        # A reported job longer than a week is refused rather than believed.
+        with self.assertRaises(Denied):
+            vcs.parse_status_checks(
+                {"checks": [{"check": "unit", "state": "success", "sha": SHA_A,
+                             "started_at": "2026-01-01T00:00:00+00:00",
+                             "completed_at": "2026-07-20T00:00:00+00:00"}]})
 
     def test_status_refuses_malformed_check_times(self):
         for bad in ("", "x" * 65, "yesterday", "2026-07-20T05:00:00", 3, None,

@@ -60,6 +60,20 @@ export async function resolveConfiguredModel(cfg) {
   return { models, model };
 }
 
+/**
+ * Refuse a provider without configured credentials.
+ *
+ * The shared login store and the environment keys are the only sources. A
+ * provider with neither never reaches a model: the refusal names the provider
+ * instead of the request budget, so a drained unit is not mistaken for a
+ * spent budget.
+ */
+export async function assertProviderAuth(models, provider) {
+  const auth = await models.checkAuth(provider).catch(() => undefined);
+  if (!auth) throw new Error(`Provider auth is not configured for ${provider}`);
+  return auth;
+}
+
 export function meterModels(models, hooks) {
   // Guarded provider metering shared by the one-shot submission path.
   // Each entry point is wrapped only when the pinned SDK provides it as a
@@ -371,10 +385,7 @@ async function runOnce(cfg) {
   // (authPath) plus environment API keys. Pi's own file-backed store
   // persists OAuth refreshes under its cross-process lock, so a rotating
   // refresh token is never spent without write-back.
-  const auth = await models.checkAuth(cfg.provider).catch(() => undefined);
-  if (!auth) {
-    throw new Error(`Provider auth is not configured for ${cfg.provider}`);
-  }
+  await assertProviderAuth(models, cfg.provider);
 
   // Admission + usage metering around every provider call, mirroring the
   // pi engine: one _budget reservation before dispatch, one _model_usage
@@ -383,6 +394,7 @@ async function runOnce(cfg) {
   let sequence = 0;
   let requests = 0;
   let boundTripped = false;
+  let drainTripped = false;
   let submission = null;
   const observations = [];
   async function admit() {
@@ -396,8 +408,13 @@ async function runOnce(cfg) {
       // maps it to request_bound. Any other admission failure keeps its
       // own path (a daily-budget refusal still defers via admission_wait).
       if (!boundTripped && error && typeof error.message === 'string'
-          && error.message.includes('Per-run provider request budget exhausted')) {
+          && (error.message.includes('Per-run provider request budget exhausted')
+              || error.message.includes('Drain bound refused the provider request'))) {
         boundTripped = true;
+        // The bound kind travels with the shared handshake, so the result
+        // names the bound the host was given instead of always the request
+        // budget.
+        drainTripped = error.message.includes('Drain bound refused the provider request');
         try { if (submission) await submission.abort(context); } catch {}
       }
       throw error;
@@ -455,7 +472,10 @@ async function runOnce(cfg) {
     const settled = await submission.wait(context);
     if (boundTripped) {
       const usage = await harness.usage(context).catch(() => null);
-      return { durable_result: true, status: 'request_bound', reason: 'Per-run provider request budget exhausted',
+      const reason = drainTripped
+        ? 'Drain bound refused the provider request'
+        : 'Per-run provider request budget exhausted';
+      return { durable_result: true, status: drainTripped ? 'drain' : 'request_bound', reason,
         finish_called: finishCalled, sealed, requests, observed: observations,
         usage: usageDelta(usageBefore, usage, `${cfg.provider}/${cfg.model}`),
         usage_models: Object.keys(usage?.models ?? {}), answer: null };

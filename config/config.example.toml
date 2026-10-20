@@ -335,6 +335,16 @@ interval_seconds = 21600
 # workspace = "read"
 # capabilities = ["files", "read", "vcs_read", "vcs_dispose", "vcs_retire", "insights", "finish"]
 
+# Optional role that asks the provider for CI at an exact published commit. It
+# also needs `[vcs] request_grant = true`; without that grant the capability
+# stays unusable even when the role holds it. The target is always a
+# completed publication receipt, never a branch head.
+# [roles.evidence]
+# profile = "alternate"
+# policy = "policies/evidence.md"
+# workspace = "read"
+# capabilities = ["files", "read", "vcs_read", "vcs_request", "finish"]
+
 # Optional dynamic selection. Replace a role's profile with selector = "adaptive".
 # Existing profiles above remain unchanged; set exact provider/model IDs yourself.
 # See docs/model-selection.md for external facts, task classification and errors.

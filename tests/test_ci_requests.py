@@ -105,6 +105,23 @@ class CiRequestTests(Fixture):
         with self.assertRaises(Denied):
             ctx.handle("vcs_request", {"publication_id": "0" * 64, "workflows": ["ci"]})
 
+    def test_a_response_that_omits_a_workflow_is_refused(self):
+        ctx = self.context(runs(workflow="other"))
+        with self.assertRaises(Denied):
+            self.request(ctx)
+        identity = request_id(self.receipt["publication_id"], SHA, ["ci"])
+        self.assertIsNone(CiRequests(self.project.root).outcome(identity))
+
+    def test_a_reordered_request_replays_the_recorded_outcome(self):
+        ctx = self.context(runs())
+        first = self.request(ctx, workflows=("ci",))
+        ctx = self.context(runs())
+        again = self.request(ctx, workflows=("ci",))
+        self.assertTrue(again["replayed"])
+        self.assertEqual(again["request_id"], first["request_id"])
+        reordered = self.request(ctx, workflows=("ci",))
+        self.assertTrue(reordered["replayed"])
+
     def test_the_capability_is_off_by_default(self):
         self.assertNotIn("vcs_request", self.config.roles["worker"].capabilities)
         self.assertNotIn("mizu_vcs_request",

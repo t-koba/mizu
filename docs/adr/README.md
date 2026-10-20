@@ -303,3 +303,15 @@ second run for the same commit. The role capability and the operator's
 exists without any role able to trigger it until the operator grants them.
 Ref handling stays provider policy: the product never creates or deletes a
 ref to target a commit.
+
+## ADR-036 — A drain is recorded as a drain, and a drained unit keeps its finish
+A drain that reached a running `pi` unit was recorded as if the unit had run out
+of requests: the run ended interrupted, its finish was never published, and the
+record said "Per-run provider request budget exhausted", which points an
+operator at the wrong bound. The shared admission handshake now carries the
+bound kind, so a drain is named a drain wherever it surfaces (run record,
+health, events), the durable launcher reports the kind it was given instead of
+always the request budget, and a drained unit on the `pi` engine takes the
+same wrap-up as on `pi-durable`: it records its finish state and yields instead
+of being interrupted as an admission failure. The request budget keeps its own
+cause, and the per-request budget bound is unchanged.

@@ -18,20 +18,18 @@ from .fs import canonical, digest, loads_finite, mkdir, safe_read, sync_dir, wri
 
 #: Bounded record size (8 KiB), like the other evidence records.
 RECORD_BYTES = 8192
-#: At most eight workflows per request.
-MAX_WORKFLOWS = 8
-#: Bounded workflow name length.
-WORKFLOW_CHARS = 128
 
 
 def request_id(publication_id: str, sha: str, workflows: list[str]) -> str:
     """The stable identity of one request: the receipt, the commit, the workflows.
 
     The same request always names the same record, so a retry replays the
-    stored outcome instead of spending a second run.
+    stored outcome instead of spending a second run. The workflows are sorted:
+    the same set of workflows in another order is the same request, not a
+    second run.
     """
     return digest(canonical({"publication_id": publication_id, "sha": sha,
-                             "workflows": list(workflows)}))
+                             "workflows": sorted(workflows)}))
 
 
 class CiRequests:

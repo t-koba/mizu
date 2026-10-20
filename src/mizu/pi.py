@@ -77,9 +77,14 @@ class PiDriver:
                         message = event.get("message", {})
                         if message.get("role") == "assistant":
                             if message.get("stopReason") == "error":
+                                # A drain that refused the request is the
+                                # drain bound, not a provider failure: the unit
+                                # gets its wrap-up and records its finish, like
+                                # the durable engine. A request deadline ends
+                                # the request as "aborted" and takes the other
+                                # branch, so it is never reported as a drain.
                                 if (getattr(context, "drain_admission_refused", False)
-                                        and context.bound_hit == "drain" and not context.wrap_up_attempted
-                                        and not context.request_deadlines):
+                                        and context.bound_hit == "drain" and not context.wrap_up_attempted):
                                     raise DeadlineWrapUp(context._bound_message())
                                 raise ModelFailure("pi", kind="error", message=message.get("errorMessage", "error"))
                             if message.get("stopReason") == "aborted":
