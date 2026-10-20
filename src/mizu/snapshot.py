@@ -13,7 +13,7 @@ from pathlib import Path
 
 from . import platform as _platform
 from .config import role_no_progress_backoff_seconds
-from .errors import Denied, LimitExceeded, SnapshotConflict
+from .errors import CaptureLimitExceeded, Denied, LimitExceeded, SnapshotConflict
 from .fs import DIGEST, ID, PREVIEW_BYTES, atomic_write, canonical, digest, lock, mkdir, now, publish_pointer, read_json, safe_read, safe_read_info, write_json, relative_parts
 from .vcs import REF_PREFIX
 
@@ -349,26 +349,26 @@ class Snapshots:
         # Every bound names what tripped it, so the writer that owns the
         # workspace can act on the cause instead of repeating the failure.
         if len(files) >= self.max_files:
-            raise LimitExceeded(
+            raise CaptureLimitExceeded(
                 f"Snapshot file count exceeded: {len(files) + 1} files > {self.max_files}")
         if size > self.max_file:
-            raise LimitExceeded(
+            raise CaptureLimitExceeded(
                 f"Snapshot file exceeds the byte limit: {name} ({size} > {self.max_file} bytes)")
         if bounds_only:
             total += size
             if total > self.max_bytes:
-                raise LimitExceeded(
+                raise CaptureLimitExceeded(
                     f"Snapshot byte limit exceeded: {total} > {self.max_bytes} bytes at {name}")
             files[name] = {"bytes": size}
             return total
         try:
             data, info = safe_read_info(workspace, name, self.max_file)
         except LimitExceeded as exc:
-            raise LimitExceeded(
+            raise CaptureLimitExceeded(
                 f"Snapshot file exceeds the byte limit: {name} (over {self.max_file} bytes)") from exc
         total += len(data)
         if total > self.max_bytes:
-            raise LimitExceeded(
+            raise CaptureLimitExceeded(
                 f"Snapshot byte limit exceeded: {total} > {self.max_bytes} bytes at {name}")
         sha = digest(data)
         atomic_write(self.root / "objects" / sha, data, exclusive=True)

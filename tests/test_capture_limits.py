@@ -4,12 +4,14 @@ Offline only: no adapter, no network, no publication.
 """
 import dataclasses
 import json
+from unittest.mock import patch
 
-from support import Fixture
-from mizu.errors import Denied, LimitExceeded
+from support import Fixture, ScriptDriver
+from mizu import snapshot as snapshot_module
+from mizu.errors import CaptureLimitExceeded, Denied, LimitExceeded
 from mizu.fs import read_json
 from mizu.project import Project
-from mizu.runtime import _record_health_failure, prompt_for
+from mizu.runtime import Engine, _record_health_failure, prompt_for
 
 
 class CaptureLimitTests(Fixture):
@@ -77,3 +79,53 @@ class CaptureLimitTests(Fixture):
         later = self.context()
         prompt = json.loads(prompt_for(later))
         self.assertEqual(prompt["capture_limit"], cause)
+
+    def test_publication_capture_failure_reaches_health_and_the_next_unit(self):
+        # The authoritative capture at publication fails, not the finish
+        # precondition: the cause must still reach health and the next unit.
+        cause = "Snapshot file exceeds the byte limit: big.profraw (200 > 64 bytes)"
+
+        def work(ctx, *_):
+            ctx.handle("finish", {"outcome": "continue", "summary": "work", "state": "done"})
+
+        with patch.object(snapshot_module.Snapshots, "capture_files",
+                          side_effect=CaptureLimitExceeded(cause)):
+            with self.assertRaises(CaptureLimitExceeded):
+                Engine(self.config, driver=ScriptDriver(work)).run(self.project, "worker")
+        error = read_json(next((self.project.root / "runs").glob("*/error.json")))
+        self.assertEqual(error["capture_limit"], cause)
+        health = read_json(self.project.root / "health" / "worker.json")
+        self.assertEqual(health["capture_limit"], cause)
+        later = self.context()
+        self.assertEqual(json.loads(prompt_for(later))["capture_limit"], cause)
+
+    def test_the_cause_is_cleared_once_the_workspace_is_representable_again(self):
+        ctx = self.context()
+        (ctx.workspace / "big.profraw").write_bytes(b"x" * 200)
+        with self.assertRaises(Denied):
+            ctx._op_finish({"summary": "work", "state": "cleaning", "outcome": "continue"})
+        cause = ctx.capture_limit
+        _record_health_failure(self.project, "worker", "run-1", Denied("boom"), 3, cause=cause)
+        # The writer removes the file: the workspace is representable again.
+        (ctx.workspace / "big.profraw").unlink()
+        ctx._op_finish({"summary": "work", "state": "clean", "outcome": "continue"})
+        self.assertIsNone(ctx.capture_limit)
+        self.assertTrue(ctx.capture_resolved)
+        _record_health_failure(self.project, "worker", "run-2", Denied("boom"), 3,
+                               resolved=ctx.capture_resolved)
+        health = read_json(self.project.root / "health" / "worker.json")
+        self.assertNotIn("capture_limit", health)
+        later = self.context()
+        self.assertIsNone(json.loads(prompt_for(later))["capture_limit"])
+
+    def test_a_live_cause_survives_an_unrelated_failure(self):
+        ctx = self.context()
+        (ctx.workspace / "big.profraw").write_bytes(b"x" * 200)
+        with self.assertRaises(Denied):
+            ctx._op_finish({"summary": "work", "state": "cleaning", "outcome": "continue"})
+        cause = ctx.capture_limit
+        _record_health_failure(self.project, "worker", "run-1", Denied("boom"), 3, cause=cause)
+        # A later unrelated failure keeps the cause that still applies.
+        _record_health_failure(self.project, "worker", "run-2", Denied("provider down"), 3)
+        health = read_json(self.project.root / "health" / "worker.json")
+        self.assertEqual(health["capture_limit"], cause)

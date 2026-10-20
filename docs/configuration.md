@@ -892,7 +892,7 @@ Same `[vcs]` adapter, with no publish-specific configuration keys.
 and the local `publications` listing of recorded publication receipts, which contacts
 no adapter and answers from the project's own durable evidence; the listing accepts
 exact `code_digest`, `branch` or `published_sha` filters and returns one bounded page
-(`publications`, `total`, `truncated`);
+(`publications`, `total`, `truncated`, `scan_stopped`);
 `vcs_publish` serves only `push`/`pr`. Cross-path calls are `Denied`
 (`vcs_read cannot publish`). Calls are host-side only, bounded by
 `timeout_seconds` and `max_bytes`, and adapter observations remain

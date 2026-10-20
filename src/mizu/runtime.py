@@ -30,7 +30,10 @@ from .config import (MAX_CI_WAKE_EXTRA_BRANCHES, Config, Role, load,
                      role_wrap_up_requests, role_wrap_up_tools)
 from .doctor import container_runtime
 from .drivers import driver_for
-from .errors import AuthorityGrantMismatch, Busy, Cancelled, ConfigError, Denied, InfraExceeded, LimitExceeded, RunDeadlineExceeded, DeadlineWrapUp, DrainYieldExceeded, MissingFinish, MizuError, ModelFailure, ProtocolError
+from .errors import (AuthorityGrantMismatch, Busy, Cancelled, CaptureLimitExceeded,
+                      ConfigError, Denied, InfraExceeded, LimitExceeded, RunDeadlineExceeded,
+                      DeadlineWrapUp, DrainYieldExceeded, MissingFinish, MizuError, ModelFailure,
+                      ProtocolError)
 from .fs import (canonical, digest, lock, mkdir, now, read_json, relative_parts,
                    safe_read, safe_write, sync_dir, write_json, PREVIEW_BYTES, READ_PAGE_CHARS, page,
                    text_preview, DIGEST)
@@ -124,7 +127,22 @@ def is_infra_wait(exc: BaseException) -> bool:
     return isinstance(exc, INFRA_WAIT)
 
 
-def _record_health_failure(project, role_name, run_id, exc, maximum, cause=None):
+def _capture_cause(exc, cause=None) -> str | None:
+    """The capture-limit cause this unit observed, if any.
+
+    A capture bound names its cause in the error itself, so the authoritative
+    publication capture reaches health without a separate hand-off. A cause
+    recorded by an earlier observation of this unit wins.
+    """
+    if isinstance(cause, str) and cause:
+        return cause
+    if isinstance(exc, CaptureLimitExceeded):
+        return str(exc)[:512]
+    return None
+
+
+def _record_health_failure(project, role_name, run_id, exc, maximum, cause=None,
+                           resolved=False):
     """Advance the existing role failure brake once for a terminal failure.
 
     The consecutive-failure brake semantics are unchanged. A terminal
@@ -141,18 +159,29 @@ def _record_health_failure(project, role_name, run_id, exc, maximum, cause=None)
             streak = min(streak, MAX_MISSING_FINISH_STREAK)
         else:
             streak = 0
+        observed = _capture_cause(exc, cause)
+        previous = health.get("capture_limit") if isinstance(health, dict) else None
+        # The cause that still applies: this unit's, or the recorded one while
+        # nothing proved the workspace representable again.
+        if observed:
+            recorded = observed
+        elif resolved:
+            recorded = None
+        else:
+            recorded = previous if isinstance(previous, str) and previous else None
         write_json(project.root / "health" / f"{role_name}.json",
                    {"consecutive_failures": failures, "consecutive_missing_finish": streak,
                     "last_run": run_id, "error": str(exc), "updated_at": now(),
-                    **({"capture_limit": cause} if cause else {})})
+                    **({"capture_limit": recorded} if recorded else {})})
         if maximum > 0 and failures >= maximum and not isinstance(exc, Cancelled):
             reason = "Repeated failures; inspect health and run records"
-            if cause:
-                reason = f"{reason}: {cause}"
+            if recorded:
+                reason = f"{reason}: {recorded}"
             project.set_control(paused=True, reason=reason)
 
 
-def _record_missing_finish_only(project, role_name, run_id, exc, cause=None):
+def _record_missing_finish_only(project, role_name, run_id, exc, cause=None,
+                                resolved=False):
     """Count a suppressed missing-finish toward the rotation streak only.
 
     A missing-finish with ``missing_finish_counts_as_failure`` disabled never
@@ -168,10 +197,18 @@ def _record_missing_finish_only(project, role_name, run_id, exc, cause=None):
         failures = health.get("consecutive_failures", 0)
         if type(failures) is not int or failures < 0:
             failures = 0
+        observed = _capture_cause(exc, cause)
+        previous = health.get("capture_limit") if isinstance(health, dict) else None
+        if observed:
+            recorded = observed
+        elif resolved:
+            recorded = None
+        else:
+            recorded = previous if isinstance(previous, str) and previous else None
         write_json(project.root / "health" / f"{role_name}.json",
                    {"consecutive_failures": failures, "consecutive_missing_finish": streak,
                     "last_run": run_id, "error": str(exc), "updated_at": now(),
-                    **({"capture_limit": cause} if cause else {})})
+                    **({"capture_limit": recorded} if recorded else {})})
 
 
 def _clear_missing_finish_streak(project, role_name):
@@ -386,8 +423,11 @@ class Context:
         self.finished: dict | None = None
         self.missing_finish_evidence: dict | None = None
         # The capture-limit cause of this unit, when the workspace could not
-        # be represented. It reaches the writer, the run record and health.
+        # be represented, and whether a capture proved it representable
+        # again. The cause reaches the writer, the run record and health; it
+        # stays while it applies and is cleared when a capture succeeds.
         self.capture_limit: str | None = None
+        self.capture_resolved: bool = False
         # Temporary follow-up grants do not fork an otherwise identical saved session.
         self.session_identity_capabilities: tuple[str, ...] | None = None
         # Host-only authority and permission for a reduced-grant continuation.
@@ -1333,6 +1373,9 @@ class Context:
         # code_digest/branch filters are accepted.
         if set(args) - {"op", "code_digest", "branch", "published_sha"}:
             raise Denied("publication listing takes only code_digest, branch and published_sha filters")
+        # The page reports the match count, whether the page dropped matches
+        # and whether a scan bound stopped the search, so an absent receipt is
+        # never confused with an omitted one.
         listing = Publication.list_receipts(
             self.project.root, code_digest=args.get("code_digest"),
             branch=args.get("branch"), published_sha=args.get("published_sha"), limit=100)
@@ -1717,6 +1760,10 @@ class Context:
             except LimitExceeded as exc:
                 self.capture_limit = str(exc)[:512]
                 raise Denied(self.capture_limit) from exc
+            # The workspace is representable again: a recorded cause no longer
+            # applies to this role.
+            self.capture_limit = None
+            self.capture_resolved = True
         wait = min(args.get("wait_seconds", self.config.limits.default_wait_seconds),
                    self.config.limits.maximum_wait_seconds)
         if self.bound_hit is not None and self.bound_hit != "drain":
@@ -4005,7 +4052,9 @@ class Engine:
                         publication = "published" if published else "not_published"
                     except (OSError, ValueError, TypeError, AttributeError):
                         pass
-                    cause = getattr(context, "capture_limit", None) if context is not None else None
+                    cause = _capture_cause(
+                        exc, getattr(context, "capture_limit", None) if context is not None else None)
+                    resolved = bool(getattr(context, "capture_resolved", False)) and not cause
                     error = {"run": run_id, "role": role_name,
                              "status": "interrupted", "error": str(exc), "finished_at": now(),
                              **({"capture_limit": cause} if cause else {}),
@@ -4033,7 +4082,8 @@ class Engine:
                         raise ConfigError("Invalid selector counts_as_failure policy")
                     if counts_as_failure:
                         _record_health_failure(project, role_name, run_id, exc,
-                                               self.config.limits.max_failures, cause=cause)
+                                               self.config.limits.max_failures, cause=cause,
+                                               resolved=resolved)
                     else:
                         _clear_missing_finish_streak(project, role_name)
                     return {"run": run_id, "role": role_name, "status": "deferred",
@@ -4045,10 +4095,12 @@ class Engine:
                 if is_deferred(exc, context):
                     _clear_missing_finish_streak(project, role_name)
                 elif suppress_missing_finish_brake:
-                    _record_missing_finish_only(project, role_name, run_id, exc, cause=cause)
+                    _record_missing_finish_only(project, role_name, run_id, exc, cause=cause,
+                                                resolved=resolved)
                 else:
                     _record_health_failure(project, role_name, run_id, exc,
-                                           self.config.limits.max_failures, cause=cause)
+                                           self.config.limits.max_failures, cause=cause,
+                                           resolved=resolved)
                 raise exc
             finally:
                 if context is not None:

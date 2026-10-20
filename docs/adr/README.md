@@ -262,8 +262,11 @@ file count against the count bound. A writable role's `finish` checks the same
 bounds before it seals, so an unrepresentable workspace is refused with the
 offending path while the writer can still remove or ignore the file and finish
 again in the same unit. The capture stays authoritative at publication time;
-the finish check only reads file sizes. The cause is recorded in the run
-record, the health record and the pause reason, and the next unit of that role
-reads it from its context, so the same stray file is not rediscovered from
-scratch. Nothing is skipped or truncated: a file the snapshot cannot hold stays
+the finish check only reads file sizes, and a failure there names its cause in
+the error itself, so the publication path reaches health as well. The recorded
+cause is the one that still applies: it is set when a capture fails, kept
+while it applies, and cleared when a capture succeeds. It is recorded in the
+run record, the health record and the pause reason, and the next unit of that
+role reads it from its context, so the same stray file is not rediscovered
+from scratch and a resolved cause is never read as a live blocker. Nothing is skipped or truncated: a file the snapshot cannot hold stays
 a visible refusal, and the limits keep their current defaults.

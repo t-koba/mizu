@@ -86,7 +86,10 @@ against the per-file limit, the running total against the snapshot byte bound,
 or the file count against the count bound. The refusal reaches the run record,
 the health record and the pause reason, and the next unit of that role reads
 the cause from its context, so one stray file no longer costs repeated units
-and a silent pause.
+and a silent pause. The recorded cause is the one that still applies: it is
+set when a capture fails, kept while it applies, and cleared when a capture
+succeeds, so a later unit never reads a resolved cause as the current
+blocker.
 
 `current.json` is the publication commit point. A crash may leave a prepared
 result with or without publication; inspect the pointer rather than treating a
@@ -537,8 +540,9 @@ itself prove that CI passed; CI evidence must still confirm the exact SHA the
 receipt names. A role reads recorded receipts from the project's own durable
 evidence through the `vcs_read` op `publications`, which contacts no provider
 and returns one bounded page of at most 100 summaries, filtered by exact code
-digest, branch or published SHA, with the match count and a `truncated` flag so
-a caller can tell an absent receipt from an omitted one. An unreadable,
+digest, branch or published SHA, with the match count, a `truncated` flag and a
+`scan_stopped` flag so a caller can tell an absent receipt from one the scan
+never reached. An unreadable,
 oversized or invalid record is skipped, never returned unvalidated, and it
 never denies the valid records beside it. The same validation path lets an
 exact-SHA CI wait pin a `publication_id` to either receipt shape.

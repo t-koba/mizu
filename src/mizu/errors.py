@@ -26,6 +26,14 @@ class LimitExceeded(MizuError):
     code = 69
 
 
+class CaptureLimitExceeded(LimitExceeded):
+    """A workspace file or bound prevents the snapshot capture.
+
+    The message names the path, the size or the count that tripped the
+    bound, so the role that owns the workspace can act on the cause.
+    """
+
+
 class RunDeadlineExceeded(LimitExceeded):
     """Wall or deadline wrap-up ended without a seal; bounded, not a fault."""
 

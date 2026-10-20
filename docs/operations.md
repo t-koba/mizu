@@ -107,9 +107,10 @@ mizu cleanup demo
 - `inbox/`, `insight-archive.sqlite3`, `decisions/`, `decision-history/`: 提案（Insight）の現行作業集合、決定済み本文・証拠の永続アーカイブ、採否判断、判断履歴 ★
 - `runs/`, `sessions/`: タスク実行記録とセッションログ ★
 - `evidence/`: 不変な公開ID・dispatch marker と receipt-pinned CI wait の結果・ack ★
-- `health/`: ヘルスチェック記録 ★（`capture_limit` は直近の snapshot 上限超過の
-  原因（パスとサイズ）を持ちます。実行の `error.json` にも同じ原因が記録され、
-  次の実行の context にも渡されます）
+- `health/`: ヘルスチェック記録 ★（`capture_limit` は現在も適用されている
+  snapshot 上限超過の原因（パスとサイズ）です。capture が成功すると解除され
+  ます。実行の `error.json` にも同じ原因が記録され、次の実行の context に
+  も渡されます）
 - `observed/`, `spool/`, `maintenance/`: 観測状態、Editorキュー、保守監査記録 ★
 - `artifacts/`: 生成された成果物（Markdown + 根拠データ） ★
 - `active/`, `locks/`: 実行中ステータス、排他ロック（backup対象外：live状態）
@@ -470,8 +471,10 @@ mizu publication list demo --published-sha 0123456789abcdef0123456789abcdef01234
 ```
 
 The listing returns one bounded page: `publications` (at most 100 summaries),
-`total` (every matching receipt) and `truncated` (whether the page dropped
-matches). A record that cannot be read is skipped, never listed unvalidated.
+`total` (the matching receipts the scan found), `truncated` (whether the page
+dropped matches) and `scan_stopped` (whether a scan bound cut the search short,
+so `total` is a lower bound and a receipt may exist beyond it). A record that
+cannot be read is skipped, never listed unvalidated.
 
 A role discovers the same receipts with the `vcs_read` op `publications`
 (`{"op":"publications"}`, optionally with `code_digest`, `branch` or
