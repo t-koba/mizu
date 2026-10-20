@@ -45,8 +45,9 @@ class CiRequestTests(Fixture):
     def context(self, payload, **extra):
         config = dataclasses.replace(self.config, vcs=adapter_settings(payload, **extra))
         drop = extra.pop("drop", ())
+        add = extra.pop("add", ())
         capabilities = [name for name in config.roles["worker"].capabilities
-                         if name not in drop] + ["vcs_request"]
+                         if name not in drop] + ["vcs_request"] + list(add)
         role = dataclasses.replace(config.roles["worker"], capabilities=tuple(capabilities))
         config = dataclasses.replace(config, roles={**config.roles, "worker": role})
         # The work-item store carries the same VCS settings as the runtime, so
@@ -250,3 +251,43 @@ class CiRequestTests(Fixture):
         self.assertEqual(again["runs"], first["runs"])
         self.assertEqual(again["coverage"]["moved"], [covered["id"]])
         self.assertEqual(self.project.work_items.get(covered["id"])["status"], "doing")
+
+    def test_the_daily_listing_groups_the_recorded_requests(self):
+        ctx = self.context(runs(), poll_enabled=True)
+        covered = self.covered_item()
+        self.request_covered(ctx, [covered])
+        listing = CiRequests(self.project.root).daily()
+        self.assertEqual(listing["total"], 1)
+        self.assertFalse(listing["truncated"])
+        self.assertFalse(listing["scan_stopped"])
+        identity = request_id(self.receipt["publication_id"], SHA, ["ci"])
+        record = CiRequests(self.project.root).outcome(identity)
+        day = listing["days"][0]
+        self.assertEqual(day["date"], record["requested_at"][:10])
+        self.assertEqual(day["requests"], 1)
+        self.assertEqual(day["covered_items"], 1)
+        item = day["items"][0]
+        self.assertEqual(item["request_id"], identity)
+        self.assertEqual(item["sha"], SHA)
+        self.assertEqual(item["workflows"], ["ci"])
+        self.assertEqual(item["runs"][0]["run_id"], "run-1")
+        self.assertEqual(item["covered"], [{"id": covered["id"], "rev": covered["rev"]}])
+
+    def test_the_daily_listing_skips_an_invalid_record(self):
+        ctx = self.context(runs(), poll_enabled=True)
+        self.request_covered(ctx, [])
+        identity = request_id(self.receipt["publication_id"], SHA, ["ci"])
+        path = CiRequests(self.project.root).root / f"{identity}.request.json"
+        path.write_text("{\"request_id\": \"other\"}", encoding="utf-8")
+        listing = CiRequests(self.project.root).daily()
+        self.assertEqual(listing["total"], 0)
+        self.assertEqual(listing["days"], [])
+
+    def test_the_daily_listing_op_reads_local_evidence_only(self):
+        ctx = self.context(runs(), poll_enabled=True, add=("vcs_read",))
+        self.request_covered(ctx, [])
+        out = ctx.handle("vcs_read", {"op": "ci_requests"})
+        self.assertEqual(out["total"], 1)
+        self.assertEqual(out["days"][0]["requests"], 1)
+        with self.assertRaises(Denied):
+            ctx.handle("vcs_read", {"op": "ci_requests", "branch": "mizu"})

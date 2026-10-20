@@ -141,6 +141,17 @@ product's own publish receipt or one recorded afterwards by an operator-run
 publisher; both validate through the same path, and neither is inferred from a
 branch head. Insight `decide`/defer waits
 do **not** accept `ci`; the existing work-item wait types remain unchanged.
+The recorded requests are visible per day. `vcs_read` with the `ci_requests` op
+lists the project's recorded CI requests from local durable evidence, grouped
+by UTC day: each day row counts the requests made on that day and names the
+work items they covered, next to the request's own identity, workflows and
+provider run identities. The listing is a bounded page (`total`, `truncated`
+and `scan_stopped`, as the publication listing is), an unreadable or invalid
+record is skipped rather than returned unvalidated, and no provider is
+contacted. The derived job time of a run is not part of this view: it needs
+the check instants in the status rows, and a provider that reports none leaves
+it empty.
+
 A CI request may cover work items. `vcs_request` takes an optional `covered`
 list of at most 16 entries, each naming a work item, the revision it is
 covered at, and the checks whose result settles it. The covered items are

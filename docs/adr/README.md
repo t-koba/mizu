@@ -326,12 +326,13 @@ saving. The adapter contract this product drives exposes
 no provider usage endpoint, so nothing about a provider's billing enters the
 measure.
 
-The per-day view that groups those seconds by day, and the run records that
-show the requests per unit and per day, are decided here and are not built
-yet; the cost-visibility work item owns them. The view will count a re-run
-again, because a re-run spends runner time, and it is never presented as a
-saving. Until then no document may describe such a view as existing
-behaviour.
+The per-day view that groups those seconds by day is decided here and is not
+built yet, because the provider's status rows carry no check instants; the
+cost-visibility work item owns it. The requests a unit spent are already
+visible per day, through the local listing of the recorded requests. The
+seconds view will count a re-run again, because a re-run spends runner time,
+and it is never presented as a saving. Until then no document may describe
+such a view as existing behaviour.
 
 The seven-day bound on a reported job is a bound on an untrusted duration:
 the product refuses a value it cannot sanity-check, and the refusal covers

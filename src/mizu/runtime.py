@@ -1392,6 +1392,20 @@ class Context:
         # The listing is also the top-level result, like the other read ops.
         return {**record, **listing}
 
+    def _op_vcs_read_ci_requests(self, args: dict) -> dict:
+        # Local listing of the project's recorded CI requests, grouped by day.
+        # No provider is contacted: this reads the project's own durable
+        # evidence, so no adapter call is made. Only the op is accepted.
+        if set(args) - {"op"}:
+            raise Denied("CI request listing takes no filters")
+        listing = CiRequests(self.project.root).daily(limit=100)
+        evidence_id, evidence = self._new_invocation_evidence("vcs-read")
+        record = {"op": "ci_requests", "trust": "recorded-local-untrusted",
+                  "evidence_id": evidence_id, "evidence": evidence, "result": listing}
+        write_json(self.run_dir / evidence, record)
+        # The listing is also the top-level result, like the other read ops.
+        return {**record, **listing}
+
     def _op_vcs_read(self, args: dict) -> dict:
         # Read-only VCS view: CI status, logs, PR comments, external
         # proposals, and CI-recorded artifact files via the trusted
@@ -1412,6 +1426,9 @@ class Context:
         if args["op"] == "publications":
             # Local evidence listing: no adapter, no network, no workspace.
             return self._op_vcs_read_publications(args)
+        if args["op"] == "ci_requests":
+            # Local evidence listing: no adapter, no network, no workspace.
+            return self._op_vcs_read_ci_requests(args)
         if self.role.workspace == "none":
             raise Denied("This role has no workspace")
         if "code_digest" in args:
