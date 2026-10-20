@@ -464,9 +464,21 @@ class McpProxyTests(unittest.TestCase):
             forward({"transport":"unix", "socket": "/nonexistent.sock", "token": "x",
                      "timeout_ms": 1000, "tools": []}, "finish", {"outcome": "wait"})
 
+    def test_json_depth_bound_is_a_product_rule_not_an_interpreter_limit(self):
+        from mizu.fs import JSON_DEPTH_REFUSED, MAX_JSON_DEPTH, loads_finite
+        within = b"[" * MAX_JSON_DEPTH + b"0" + b"]" * MAX_JSON_DEPTH
+        self.assertIsNotNone(loads_finite(within))
+        beyond = b"[" * (MAX_JSON_DEPTH + 1) + b"0" + b"]" * (MAX_JSON_DEPTH + 1)
+        with self.assertRaises(ValueError) as refused:
+            loads_finite(beyond)
+        self.assertEqual(str(refused.exception), JSON_DEPTH_REFUSED)
+        # A bracket inside a string is text, not nesting.
+        self.assertEqual(loads_finite(b'{"a": "' + b"[" * 500 + b'"}'),
+                         {"a": "[" * 500})
+
     def test_deeply_nested_bridge_frame_is_bounded_parse_failure(self):
         from mizu.bridge import connect
-        from mizu.fs import loads_finite
+        from mizu.fs import JSON_DEPTH_REFUSED, loads_finite
         calls = []
 
         def handle(operation, arguments):
@@ -482,12 +494,12 @@ class McpProxyTests(unittest.TestCase):
                  + b', "operation": "finish", "arguments": {"nested": '
                  + b"[" * depth + b"0" + b"]" * depth + b"}}\n")
         self.assertLess(len(frame), 1024 * 1024)
-        try:
+        # The product refuses the frame by its own depth bound, before the
+        # document is parsed, so the outcome is the same on every supported
+        # Python version instead of following that runtime's recursion limit.
+        with self.assertRaises(ValueError) as refused:
             loads_finite(frame)
-        except RecursionError:
-            rejected = True
-        else:
-            rejected = False
+        self.assertEqual(str(refused.exception), JSON_DEPTH_REFUSED)
         client = connect(config)
         try:
             client.settimeout(10)
@@ -502,15 +514,9 @@ class McpProxyTests(unittest.TestCase):
             client.close()
         response = json.loads(data[:data.index(b"\n")].decode("utf-8"))
         self.assertNotIn("Internal tool failure", str(response))
-        if rejected:
-            self.assertFalse(response["ok"])
-            self.assertEqual(response["error"], "Invalid bridge frame")
-            self.assertEqual(calls, [])
-        else:
-            self.assertTrue(response["ok"])
-            self.assertEqual(response["result"], {})
-            self.assertEqual(len(calls), 1)
-            self.assertEqual(calls[0][0], "finish")
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error"], JSON_DEPTH_REFUSED)
+        self.assertEqual(calls, [])
 
     def test_forced_decoder_recursion_error_is_bounded_parse_failure(self):
         from mizu.bridge import connect

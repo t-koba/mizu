@@ -236,3 +236,17 @@ Consequence: the product never infers a published SHA from a branch head. A
 recorded receipt is operator-asserted evidence; CI evidence must still confirm
 the exact SHA it names, and the product's own publish path keeps its
 intent/dispatch/receipt trio unchanged.
+
+## ADR-032 — JSON nesting depth is a product bound, not an interpreter limit
+`loads_finite` bounded a JSON document by size and by the runtime's recursion
+limit, so the accepted nesting depth depended on the Python version: a deeply
+nested frame was refused on 3.11-3.13 and parsed on 3.14, where it reached a
+tool handler. The product supports all four versions, so the same hostile input
+must be refused everywhere. `MAX_JSON_DEPTH` (64) is therefore a fixed
+mechanism bound beside `MAX_FRAME`, and a document deeper than it is refused
+before it is parsed, so a hostile frame costs no allocation and no version
+sees a different outcome. It is not a knob: no legitimate frame, tool
+argument or recorded document in the product nests that deep. The bridge, the
+MCP loop and the MCP proxy keep their existing invalid-frame refusals, so the
+depth refusal is reported the same way as any other unparseable frame, and the
+`RecursionError` mapping stays as a backstop.

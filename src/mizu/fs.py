@@ -29,6 +29,16 @@ READ_PAGE_CHARS = 8192
 #: MCP/socket LF framing bound shared by the bridge, the MCP proxy and the
 #: Editor capsule server (each rejects anything above it).
 MAX_FRAME = 1024 * 1024
+#: Maximum JSON nesting depth accepted by loads_finite. This is a product
+#: rule, not an interpreter artifact: without it the accepted depth follows
+#: the runtime's recursion limit, so the same hostile frame is refused on one
+#: supported Python version and parsed on another.
+MAX_JSON_DEPTH = 64
+#: Refusal message for a JSON document nested deeper than MAX_JSON_DEPTH.
+JSON_DEPTH_REFUSED = "JSON exceeds the nesting depth bound"
+#: One JSON string or structural bracket. A string matches whole, so a bracket
+#: inside a string never counts as nesting.
+_JSON_TOKEN = re.compile(rb'"(?:[^"\\]|\\.)*"|[\[\]{}]')
 
 
 def _reject_nonfinite_constant(value: str) -> object:
@@ -42,14 +52,43 @@ def _reject_nonfinite_number(text: str) -> float:
     return value
 
 
+def _too_deep(raw: bytes) -> bool:
+    """True when one JSON text nests deeper than the fixed bound.
+
+    The nesting depth can never exceed the number of opening brackets, so a
+    small count needs no scan at all. The exact scan matches strings whole,
+    so a bracket inside a string is text, not nesting. A refused document is
+    never parsed, so a hostile frame costs no allocation.
+    """
+    if raw.count(b"{") + raw.count(b"[") <= MAX_JSON_DEPTH:
+        return False
+    depth = 0
+    for match in _JSON_TOKEN.finditer(raw):
+        token = match.group()
+        if token[:1] in (b"{", b"["):
+            depth += 1
+            if depth > MAX_JSON_DEPTH:
+                return True
+        else:
+            depth -= 1
+    return False
+
+
 def loads_finite(raw: bytes | str) -> Any:
-    """Parse one JSON document, refusing non-finite numbers.
+    """Parse one JSON document, refusing non-finite numbers and deep nesting.
 
     ``parse_constant`` rejects NaN/Infinity literals; ``parse_float``
     rejects valid-syntax numbers (for example ``1e9999``) that overflow
     to infinity. Finite numbers, including large integers within the
     decoder bound, keep working.
+
+    A document nested deeper than ``MAX_JSON_DEPTH`` is refused before it is
+    parsed, so the refusal is the product's own rule on every supported
+    Python version instead of following that runtime's recursion limit.
     """
+    data = raw.encode("utf-8", "surrogatepass") if isinstance(raw, str) else raw
+    if _too_deep(data):
+        raise ValueError(JSON_DEPTH_REFUSED)
     return json.loads(raw, parse_constant=_reject_nonfinite_constant,
                       parse_float=_reject_nonfinite_number)
 #: Shell-input bound shared by the tool contract and the sandbox executor.

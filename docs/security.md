@@ -26,6 +26,10 @@ idempotent retry; conflicting content is never overwritten.
 Experiments get readonly source plus ephemeral writable work.
 Time/output bounds kill process groups and labelled containers. A finished unit
 cannot continue to call tools or acquire another provider admission.
+Model-supplied frames are size-bounded (1 MiB) and depth-bounded (64 nesting
+levels): a deeper document is refused before it is parsed, so the refusal is
+the product's own rule on every supported Python version instead of an
+artifact of that runtime's recursion limit.
 
 Trust-handoff audit (writer-influenced files consumed on host): the container
 boundary does not cover files the writer shapes that host-side components
