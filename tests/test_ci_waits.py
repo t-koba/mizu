@@ -65,6 +65,38 @@ class CiWaitTests(Fixture):
         with self.assertRaises(Denied):
             self.store.get(item["id"])
 
+    def test_publication_and_ci_evidence_survive_backup_restore(self):
+        from mizu.storage import backup, restore
+        item = self.block("backup-roundtrip")
+        observed, _ = self.poll()
+        events = ci_waits.pending(self.store, "worker")
+        self.assertEqual(observed["observed"], 1)
+        self.assertEqual(len(events), 1)
+        ci_waits.acknowledge(self.store, "worker", events)
+
+        # Preserve the point-of-no-return marker even when publication has no
+        # receipt: restoring without it would authorize a fresh dispatch.
+        uncertain = Publication(self.project.root, "d" * 40, "e" * 64, "published", "push")
+        uncertain.prepare("uncertain-approval", "uncertain-run")
+        uncertain.mark_dispatch()
+
+        self.project.set_control(paused=True)
+        archive = self.root / "backup.tar.gz"
+        backup(self.project, archive)
+        restore(self.config, "restored", archive)
+        restored = Project(self.config, "restored", read_only=True)
+
+        self.assertEqual(Publication.read_receipt(restored.root, self.publication.id), self.receipt)
+        restored_item = restored.work_items.get(item["id"])
+        self.assertEqual(restored_item["wait"], item["wait"])
+        self.assertEqual(ci_waits._evidence(restored.work_items, restored_item), events[0])
+        self.assertTrue(ci_waits._acknowledged(restored.work_items, restored_item, events[0]))
+        self.assertEqual(ci_waits.pending(restored.work_items, "worker"), [])
+
+        restored_uncertain = Publication(restored.root, "d" * 40, "e" * 64, "published", "push")
+        with self.assertRaisesRegex(Denied, "outcome unresolved; already dispatched"):
+            restored_uncertain.prepare("uncertain-approval", "retry-run")
+
     def test_registration_refuses_invalid_bounds_uncertain_receipts_and_disabled_polling(self):
         bad = [[], ["unit"] * 2, [""], ["x\x85"], ["x\n"], ["x" * 257], [1], ["x\ud800"],
                [str(i) for i in range(65)], ["x" * 256 for _ in range(64)]]

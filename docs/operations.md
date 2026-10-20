@@ -106,6 +106,7 @@ mizu cleanup demo
 - `snapshots/`, `objects/`: 不変なスナップショットマニフェストとコンテンツオブジェクト ★
 - `inbox/`, `insight-archive.sqlite3`, `decisions/`, `decision-history/`: 提案（Insight）の現行作業集合、決定済み本文・証拠の永続アーカイブ、採否判断、判断履歴 ★
 - `runs/`, `sessions/`: タスク実行記録とセッションログ ★
+- `evidence/`: 不変な公開ID・dispatch marker と receipt-pinned CI wait の結果・ack ★
 - `health/`: ヘルスチェック記録 ★
 - `observed/`, `spool/`, `maintenance/`: 観測状態、Editorキュー、保守監査記録 ★
 - `artifacts/`: 生成された成果物（Markdown + 根拠データ） ★
