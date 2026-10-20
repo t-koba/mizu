@@ -591,6 +591,38 @@ test('launcher runs without a turn bound; requests_per_run governs spend', async
   }
 });
 
+test('the durable launcher refuses a provider without configured auth', { timeout: 10000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'mizu-durable-noauth-'));
+  try {
+    const bridgePath = join(directory, 'bridge.json');
+    const configPath = join(directory, 'effective.json');
+    writeFileSync(bridgePath, JSON.stringify({ transport: 'tcp', host: '127.0.0.1', port: 1,
+      timeout_ms: 2000, token: 'local-test', joined_operations: [] }));
+    // No login store and no environment key: the provider has no auth.
+    writeFileSync(configPath, JSON.stringify({ provider: 'openai', model: 'gpt-4o-mini',
+      instructions: 'test', store: join(directory, 'store.sqlite'), requestId: 'offline-test',
+      prompt: 'test', cwd: directory, authPath: join(directory, 'auth.json'),
+      modelsPath: join(directory, 'models.json'),
+      tools: [{ name: 'finish', description: 'Seal', operation: 'finish',
+        inputSchema: { type: 'object', properties: {}, required: [] } }] }));
+    const launcher = joinPath(dirname(fileURLToPath(import.meta.url)), '..', 'adapters', 'pi-durable', 'launcher.mjs');
+    const childEnv = { PATH: process.env.PATH ?? '', HOME: directory, USERPROFILE: directory,
+      TMP: directory, TEMP: directory, MIZU_BRIDGE_CONFIG: bridgePath };
+    const child = spawn(process.execPath, [launcher, configPath], {
+      cwd: dirname(launcher), env: childEnv, stdio: ['ignore', 'pipe', 'pipe'], timeout: 8000 });
+    let stderr = '';
+    child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
+    const { code } = await new Promise((resolve, reject) => {
+      child.once('error', reject);
+      child.once('close', (exitCode) => resolve({ code: exitCode }));
+    });
+    assert.notEqual(code, 0);
+    assert.match(stderr, /Provider auth is not configured for openai/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('launcher settles a model-admission failure from its process entrypoint', { timeout: 10000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), 'mizu-durable-launcher-error-'));
   const operations = [];

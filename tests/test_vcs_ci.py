@@ -538,6 +538,21 @@ class CiCheckTimeTests(Fixture):
             {"checks": [{"check": "unit", "state": "success", "sha": SHA_A}]})
         self.assertEqual(set(plain[0]), {"check", "state", "sha", "url"})
 
+    def test_status_refuses_a_completion_before_its_start(self):
+        for started, completed in (
+                ("2026-07-20T05:00:00+00:00", "2026-07-20T04:59:59+00:00"),
+                ("2026-07-20T05:00:00+02:00", "2026-07-20T04:00:00+02:00")):
+            with self.assertRaises(Denied):
+                vcs.parse_status_checks(
+                    {"checks": [{"check": "unit", "state": "success", "sha": SHA_A,
+                                 "started_at": started, "completed_at": completed}]})
+        # The same instants in another offset are the same order, so they pass.
+        rows = vcs.parse_status_checks(
+            {"checks": [{"check": "unit", "state": "success", "sha": SHA_A,
+                         "started_at": "2026-07-20T05:00:00+00:00",
+                         "completed_at": "2026-07-20T06:00:00+01:00"}]})
+        self.assertEqual(rows[0]["completed_at"], "2026-07-20T06:00:00+01:00")
+
     def test_status_refuses_malformed_check_times(self):
         for bad in ("", "x" * 65, "yesterday", "2026-07-20T05:00:00", 3, None,
                     "2026-07-20T05:00:00+00:00\n"):

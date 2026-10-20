@@ -911,12 +911,13 @@ def read_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
 MAX_CHECKS = 1024
 
 
-def _ci_timestamp(value, label: str) -> str:
+def _ci_timestamp(value, label: str) -> dt.datetime:
     """Validate one CI check timestamp: a bounded timezone-aware ISO 8601 text.
 
     A provider that reports when a check started or completed lets every role
     derive the job time of a run without a project-specific reporter. The
-    value stays external-untrusted: only its shape is checked here.
+    value stays external-untrusted: only its shape is checked here. The
+    parsed instant is returned so a completion can be compared with its start.
     """
     if not isinstance(value, str) or not value or len(value) > 64:
         raise Denied(f"Invalid CI {label} time")
@@ -926,7 +927,7 @@ def _ci_timestamp(value, label: str) -> str:
         raise Denied(f"Invalid CI {label} time") from exc
     if parsed.tzinfo is None:
         raise Denied(f"Invalid CI {label} time")
-    return value
+    return parsed
 
 
 def parse_status_checks(data: dict) -> list:
@@ -978,9 +979,19 @@ def parse_status_checks(data: dict) -> list:
                 raise Denied("Invalid CI run identity")
             _reject_terminal_controls(run, "Invalid CI run identity")
             row["run"] = run
+        started = completed = None
         for key, label in (("started_at", "start"), ("completed_at", "completion")):
             if key in entry:
-                row[key] = _ci_timestamp(entry.get(key), label)
+                moment = _ci_timestamp(entry.get(key), label)
+                row[key] = entry.get(key)
+                if key == "started_at":
+                    started = moment
+                else:
+                    completed = moment
+        if started is not None and completed is not None and completed < started:
+            # A check cannot finish before it started: a negative job time would
+            # make the cost of the run unreadable.
+            raise Denied("CI check completion precedes its start")
         out.append(row)
     return out
 

@@ -38,7 +38,8 @@ file-backed auth store が共有し、環境 API キーと併せて `api_key` �
 lock で write-back する（read-only seed が置換を破棄して共有ログインを
 `invalid_grant` で壊す事象は 2026-10-11 に確認済み）。欠落ファイルは
 env-only として扱い、読み取りでは作成しない。不正な store は fail-closed で
-拒否する。
+拒否する。認証が無い provider は durable 側が submission の前に拒否する
+（pi 側は同じ session の provider 呼び出しで失敗する）。
 
 管理下の launcher が `ModelRuntime`、`createAgentSession`、`runRpcMode` を使用する。
 `stream` / `streamSimple` / deferred fetch、分類、画像生成の公開要求入口に

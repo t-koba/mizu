@@ -283,8 +283,10 @@ releases by days. Both engines now resolve the pinned model through Pi's own
 for every role. The durable adapter reads the shared login store through Pi's
 own file-backed auth store, which removes the in-adapter credential store and
 its lock handling. Everything that held before still holds: the exact pin
-fails closed when a model is unknown or its provider has no auth, per-request
-admission and usage are unchanged, and credentials stay out of evidence.
+fails closed for an unknown model, a provider without configured auth never
+reaches a model (the durable engine refuses before the submission, while the
+pi engine's session fails at the provider), per-request admission and usage are
+unchanged, and credentials stay out of evidence.
 
 ## ADR-035 — CI runs are requested at an exact published commit
 CI starts from a push, so every publication spends a run whether or not the
