@@ -124,7 +124,7 @@ def is_infra_wait(exc: BaseException) -> bool:
     return isinstance(exc, INFRA_WAIT)
 
 
-def _record_health_failure(project, role_name, run_id, exc, maximum):
+def _record_health_failure(project, role_name, run_id, exc, maximum, cause=None):
     """Advance the existing role failure brake once for a terminal failure.
 
     The consecutive-failure brake semantics are unchanged. A terminal
@@ -143,12 +143,16 @@ def _record_health_failure(project, role_name, run_id, exc, maximum):
             streak = 0
         write_json(project.root / "health" / f"{role_name}.json",
                    {"consecutive_failures": failures, "consecutive_missing_finish": streak,
-                    "last_run": run_id, "error": str(exc), "updated_at": now()})
+                    "last_run": run_id, "error": str(exc), "updated_at": now(),
+                    **({"capture_limit": cause} if cause else {})})
         if maximum > 0 and failures >= maximum and not isinstance(exc, Cancelled):
-            project.set_control(paused=True, reason="Repeated failures; inspect health and run records")
+            reason = "Repeated failures; inspect health and run records"
+            if cause:
+                reason = f"{reason}: {cause}"
+            project.set_control(paused=True, reason=reason)
 
 
-def _record_missing_finish_only(project, role_name, run_id, exc):
+def _record_missing_finish_only(project, role_name, run_id, exc, cause=None):
     """Count a suppressed missing-finish toward the rotation streak only.
 
     A missing-finish with ``missing_finish_counts_as_failure`` disabled never
@@ -166,7 +170,8 @@ def _record_missing_finish_only(project, role_name, run_id, exc):
             failures = 0
         write_json(project.root / "health" / f"{role_name}.json",
                    {"consecutive_failures": failures, "consecutive_missing_finish": streak,
-                    "last_run": run_id, "error": str(exc), "updated_at": now()})
+                    "last_run": run_id, "error": str(exc), "updated_at": now(),
+                    **({"capture_limit": cause} if cause else {})})
 
 
 def _clear_missing_finish_streak(project, role_name):
@@ -380,6 +385,9 @@ class Context:
         self.wrap_up_attempted = False
         self.finished: dict | None = None
         self.missing_finish_evidence: dict | None = None
+        # The capture-limit cause of this unit, when the workspace could not
+        # be represented. It reaches the writer, the run record and health.
+        self.capture_limit: str | None = None
         # Temporary follow-up grants do not fork an otherwise identical saved session.
         self.session_identity_capabilities: tuple[str, ...] | None = None
         # Host-only authority and permission for a reduced-grant continuation.
@@ -1700,6 +1708,15 @@ class Context:
                 raise Denied("Writable roles must provide the updated short state")
             if args["outcome"] == "done" and not (self.verification and self.verification["passed"]):
                 raise Denied("Completion requires passing the configured acceptance commands")
+            # The final snapshot must be representable. Check it here, while
+            # the writer can still remove or ignore the offending file: a
+            # capture limit that only surfaced at publication ended the unit
+            # without naming the cause.
+            try:
+                self.project.snapshots.check_bounds(self.workspace)
+            except LimitExceeded as exc:
+                self.capture_limit = str(exc)[:512]
+                raise Denied(self.capture_limit) from exc
         wait = min(args.get("wait_seconds", self.config.limits.default_wait_seconds),
                    self.config.limits.maximum_wait_seconds)
         if self.bound_hit is not None and self.bound_hit != "drain":
@@ -2836,6 +2853,23 @@ def _prompt_run_identity(context: Context) -> dict:
     return identity
 
 
+def _prompt_capture_limit(context: Context) -> str | None:
+    """The last recorded capture-limit cause of this role, if any.
+
+    A workspace file that cannot be captured ends the unit that produced it.
+    The next unit reads the cause here instead of repeating the same capture
+    failure. Bounded to the stored health record value.
+    """
+    try:
+        health = read_json(context.project.root / "health" / f"{context.role.name}.json", {})
+    except (OSError, ValueError, TypeError):
+        return None
+    if not isinstance(health, dict):
+        return None
+    cause = health.get("capture_limit")
+    return cause if isinstance(cause, str) and cause else None
+
+
 def prompt_for(context: Context) -> str:
     caps = set(context.role.capabilities)
     # Mechanism enforces grants, not policy choice: capability-gated context
@@ -2876,6 +2910,7 @@ def prompt_for(context: Context) -> str:
                        "obligations": list(getattr(context, "obligations", []) or []),
                        "acceptance_commands": acceptance,
                        "research_state": _prompt_research_state(context),
+                       "capture_limit": _prompt_capture_limit(context),
                        "ci_branch": ci_branch,
                        "ci_failures": ci_failures,
                        "ci_failures_may_be_truncated": ci_failures_may_be_truncated,
@@ -2945,6 +2980,7 @@ def prompt_delta_for(context: Context, pending: list) -> str:
                        "wait_events": list(getattr(context, "wait_events", []) or []),
                        "obligations": list(getattr(context, "obligations", []) or []),
                        "research_state": _prompt_research_state(context),
+                       "capture_limit": _prompt_capture_limit(context),
                        "workspace": "/workspace", "workspace_mode": context.role.workspace,
                        "acceptance_commands": acceptance,
                        "ci_branch": ((context.config.vcs.get("ci_branch") or None)
@@ -3969,8 +4005,10 @@ class Engine:
                         publication = "published" if published else "not_published"
                     except (OSError, ValueError, TypeError, AttributeError):
                         pass
+                    cause = getattr(context, "capture_limit", None) if context is not None else None
                     error = {"run": run_id, "role": role_name,
                              "status": "interrupted", "error": str(exc), "finished_at": now(),
+                             **({"capture_limit": cause} if cause else {}),
                              "publication": publication,
                              "durability": "unconfirmed" if isinstance(exc, OSError) or publication == "unknown" or _platform.IS_WINDOWS else "confirmed",
                              **({"activity": context.activity_summary()} if context is not None else {}),
@@ -3995,7 +4033,7 @@ class Engine:
                         raise ConfigError("Invalid selector counts_as_failure policy")
                     if counts_as_failure:
                         _record_health_failure(project, role_name, run_id, exc,
-                                               self.config.limits.max_failures)
+                                               self.config.limits.max_failures, cause=cause)
                     else:
                         _clear_missing_finish_streak(project, role_name)
                     return {"run": run_id, "role": role_name, "status": "deferred",
@@ -4007,10 +4045,10 @@ class Engine:
                 if is_deferred(exc, context):
                     _clear_missing_finish_streak(project, role_name)
                 elif suppress_missing_finish_brake:
-                    _record_missing_finish_only(project, role_name, run_id, exc)
+                    _record_missing_finish_only(project, role_name, run_id, exc, cause=cause)
                 else:
                     _record_health_failure(project, role_name, run_id, exc,
-                                           self.config.limits.max_failures)
+                                           self.config.limits.max_failures, cause=cause)
                 raise exc
             finally:
                 if context is not None:

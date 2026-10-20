@@ -250,3 +250,20 @@ argument or recorded document in the product nests that deep. The bridge, the
 MCP loop and the MCP proxy keep their existing invalid-frame refusals, so the
 depth refusal is reported the same way as any other unparseable frame, and the
 `RecursionError` mapping stays as a backstop.
+
+## ADR-033 — A capture limit names its cause and reaches the writer
+The snapshot capture failed closed on a workspace file above the per-file byte
+limit, but the error carried no path: the run ended interrupted, its finish
+was never published, health counted a failure, and three such runs paused the
+project without telling the writer that owned the workspace what to remove.
+Every capture bound now names what tripped it, the path with its size against
+the per-file limit, the running total against the snapshot byte bound, or the
+file count against the count bound. A writable role's `finish` checks the same
+bounds before it seals, so an unrepresentable workspace is refused with the
+offending path while the writer can still remove or ignore the file and finish
+again in the same unit. The capture stays authoritative at publication time;
+the finish check only reads file sizes. The cause is recorded in the run
+record, the health record and the pause reason, and the next unit of that role
+reads it from its context, so the same stray file is not rediscovered from
+scratch. Nothing is skipped or truncated: a file the snapshot cannot hold stays
+a visible refusal, and the limits keep their current defaults.

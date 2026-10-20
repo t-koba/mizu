@@ -70,11 +70,23 @@ JSON is the machine format; Markdown is the human policy/report format.
    every Mizu operation; extra native tools require `engine_tools`.
 7. `finish` seals the work unit. Pi additionally requires `agent_settled`,
    Codex requires successful `turn/completed`, and Claude checks terminal_reason.
+   A writable role's finish first checks that the workspace can be captured:
+   a file above the byte limit, a total above the snapshot bound or a file
+   count above the bound refuses the finish and names the offending path and
+   size, so the writer can remove or ignore it and finish again in the same
+   unit instead of losing the unit to an unnamed publication failure.
 8. A writer captures actual files again. Verification is retained as passing
    only when it applies to exactly the captured code. Write a prepared result,
    publish the immutable snapshot pointer, then finalize the run record.
 9. Remove active state and reproducible observer input; dispose processes and
    containers. Evidence and model sessions are retained.
+
+Every capture bound names what tripped it: the offending path with its size
+against the per-file limit, the running total against the snapshot byte bound,
+or the file count against the count bound. The refusal reaches the run record,
+the health record and the pause reason, and the next unit of that role reads
+the cause from its context, so one stray file no longer costs repeated units
+and a silent pause.
 
 `current.json` is the publication commit point. A crash may leave a prepared
 result with or without publication; inspect the pointer rather than treating a

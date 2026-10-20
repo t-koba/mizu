@@ -232,6 +232,25 @@ class Snapshots:
         return any(fnmatch.fnmatchcase(part, pattern)
                    for part in name.split("/") for pattern in self.excludes)
 
+    def check_bounds(self, workspace: Path) -> None:
+        """Fail with the offending paths when the workspace cannot be captured.
+
+        This is the cheap precondition the finish path uses: it walks the
+        same paths as a capture and applies the same limits, but reads no
+        file content, so the writer learns which file is too large while it
+        can still remove or ignore it. The capture stays authoritative.
+
+        Failure: ``LimitExceeded`` naming the path and the size, or the
+        count, that tripped the bound.
+        """
+        files: dict[str, dict] = {}
+        skipped: list[str] = []
+        reserved: list[str] = []
+        if _platform.HAS_OPENAT and _platform.HAS_DIR_FD:
+            self._capture_openat(workspace, files, skipped, reserved, 0, bounds_only=True)
+        else:
+            self._capture_portable(workspace, files, skipped, reserved, 0, bounds_only=True)
+
     def capture_files(self, workspace: Path) -> dict:
         files: dict[str, dict] = {}
         skipped: list[str] = []
@@ -241,7 +260,8 @@ class Snapshots:
             return self._capture_openat(workspace, files, skipped, reserved, total)
         return self._capture_portable(workspace, files, skipped, reserved, total)
 
-    def _capture_openat(self, workspace: Path, files: dict, skipped: list, reserved: list, total: int) -> dict:
+    def _capture_openat(self, workspace: Path, files: dict, skipped: list, reserved: list,
+                        total: int, *, bounds_only: bool = False) -> dict:
         # fwalk does not traverse symlink directories; safe_read pins each component.
         for directory, dirs, names, directory_fd in os.fwalk(workspace, follow_symlinks=False):
             relative = Path(directory).relative_to(workspace)
@@ -272,11 +292,13 @@ class Snapshots:
                 if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                     skipped.append(path)
                     continue
-                total = self._capture_file(workspace, path, files, total)
+                total = self._capture_file(workspace, path, files, total, info.st_size,
+                                           bounds_only=bounds_only)
         return {"files": files, "code_digest": digest(canonical(files)), "skipped": skipped,
                 "reserved": reserved, "bytes": total}
 
-    def _capture_portable(self, workspace: Path, files: dict, skipped: list, reserved: list, total: int) -> dict:
+    def _capture_portable(self, workspace: Path, files: dict, skipped: list, reserved: list,
+                          total: int, *, bounds_only: bool = False) -> dict:
         # Fallback where openat/dir_fd is unavailable: walk without following
         # links, refuse any symlink, and read through the same safe_read path.
         for directory, dirs, names in os.walk(workspace, followlinks=False):
@@ -317,17 +339,37 @@ class Snapshots:
                 if not stat.S_ISREG(info.st_mode) or getattr(info, "st_nlink", 1) != 1:
                     skipped.append(rel)
                     continue
-                total = self._capture_file(workspace, rel, files, total)
+                total = self._capture_file(workspace, rel, files, total, info.st_size,
+                                           bounds_only=bounds_only)
         return {"files": files, "code_digest": digest(canonical(files)), "skipped": skipped,
                 "reserved": reserved, "bytes": total}
 
-    def _capture_file(self, workspace: Path, name: str, files: dict, total: int) -> int:
+    def _capture_file(self, workspace: Path, name: str, files: dict, total: int,
+                      size: int, *, bounds_only: bool = False) -> int:
+        # Every bound names what tripped it, so the writer that owns the
+        # workspace can act on the cause instead of repeating the failure.
         if len(files) >= self.max_files:
-            raise LimitExceeded("Snapshot file count exceeded")
-        data, info = safe_read_info(workspace, name, self.max_file)
+            raise LimitExceeded(
+                f"Snapshot file count exceeded: {len(files) + 1} files > {self.max_files}")
+        if size > self.max_file:
+            raise LimitExceeded(
+                f"Snapshot file exceeds the byte limit: {name} ({size} > {self.max_file} bytes)")
+        if bounds_only:
+            total += size
+            if total > self.max_bytes:
+                raise LimitExceeded(
+                    f"Snapshot byte limit exceeded: {total} > {self.max_bytes} bytes at {name}")
+            files[name] = {"bytes": size}
+            return total
+        try:
+            data, info = safe_read_info(workspace, name, self.max_file)
+        except LimitExceeded as exc:
+            raise LimitExceeded(
+                f"Snapshot file exceeds the byte limit: {name} (over {self.max_file} bytes)") from exc
         total += len(data)
         if total > self.max_bytes:
-            raise LimitExceeded("Snapshot byte limit exceeded")
+            raise LimitExceeded(
+                f"Snapshot byte limit exceeded: {total} > {self.max_bytes} bytes at {name}")
         sha = digest(data)
         atomic_write(self.root / "objects" / sha, data, exclusive=True)
         files[name] = {"sha256": sha, "bytes": len(data), "executable": bool(info.st_mode & 0o111)}
@@ -491,10 +533,12 @@ class Snapshots:
 
     def _manifest_bounds(self, files: dict) -> int:
         if len(files) > self.max_files:
-            raise LimitExceeded("Snapshot file count exceeded")
+            raise LimitExceeded(
+                f"Snapshot file count exceeded: {len(files)} files > {self.max_files}")
         total = sum(entry["bytes"] for entry in files.values())
         if total > self.max_bytes:
-            raise LimitExceeded("Snapshot byte limit exceeded")
+            raise LimitExceeded(
+                f"Snapshot byte limit exceeded: {total} > {self.max_bytes} bytes")
         return total
 
     def get(self, snapshot_id: str | None = None) -> dict:
