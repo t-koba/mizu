@@ -304,14 +304,6 @@ exists without any role able to trigger it until the operator grants them.
 Ref handling stays provider policy: the product never creates or deletes a
 ref to target a commit.
 
-A CI minute is runner wall time, not money. The per-day view sums the derived
-`job_seconds` the product already computes from the provider's own instants:
-it excludes the provider's per-job rounding and its per-OS multipliers, and it
-counts a re-run again, so it is labelled runner wall time and never presented
-as a saving. No provider usage endpoint supplies it, and none is available to
-supply it. The seven-day bound on a reported job stays: it is above every
-platform's own job limit, so it refuses nothing a provider can produce.
-
 ## ADR-036 — A drain is recorded as a drain, and a drained unit keeps its finish
 A drain that reached a running `pi` unit was recorded as if the unit had run out
 of requests: the run ended interrupted, its finish was never published, and the
@@ -323,3 +315,25 @@ always the request budget, and a drained unit on the `pi` engine takes the
 same wrap-up as on `pi-durable`: it records its finish state and yields instead
 of being interrupted as an admission failure. The request budget keeps its own
 cause, and the per-request budget bound is unchanged.
+
+## ADR-037 — A CI minute is runner wall time, and the per-day view is a local sum
+The cost of a CI run is not a bill. A provider charges for minutes only where
+it charges at all, and what it charges applies per-job rounding and per-OS
+multipliers the product never sees, so the product derives its own measure: the
+sum of the `job_seconds` it recomputes from each check's reported instants.
+That measure is runner wall time, it counts a re-run again, and it is labelled
+as such, never as a saving. The adapter contract this product drives exposes
+no provider usage endpoint, so nothing about a provider's billing enters the
+measure.
+
+The per-day view that groups those seconds by day, and the run records that
+show the requests per unit and per day, are decided here and are not built
+yet; the cost-visibility work item owns them. Until then no document may
+describe such a view as existing behaviour.
+
+The seven-day bound on a reported job is a bound on an untrusted duration:
+the product refuses a value it cannot sanity-check, and the refusal covers
+the whole status response rather than silently dropping one row. A provider
+can report a longer span (a self-hosted agent whose job timeout is
+unlimited), so the bound refuses values a provider may produce; it is a
+product rule, not a claim about every platform.
