@@ -102,7 +102,7 @@ class ExternalPublicationTests(Fixture):
         for overrides in cases:
             with self.subTest(overrides=overrides), self.assertRaises(Denied):
                 self.record(**overrides)
-        self.assertEqual(Publication.list_receipts(self.root), [])
+        self.assertEqual(Publication.list_receipts(self.root)["publications"], [])
 
     def test_list_receipts_filters_by_digest_and_branch_and_skips_invalid_records(self):
         first = self.record()
@@ -115,7 +115,10 @@ class ExternalPublicationTests(Fixture):
         # An unvalidatable record is skipped, never returned unvalidated.
         broken = self.root / "evidence" / "publications" / ("0" * 64 + ".external.json")
         broken.write_text("{}", encoding="utf-8")
-        listed = Publication.list_receipts(self.root)
+        listing = Publication.list_receipts(self.root)
+        self.assertEqual(set(listing), {"publications", "total", "truncated"})
+        self.assertFalse(listing["truncated"])
+        listed = listing["publications"]
         ids = [row["publication_id"] for row in listed]
         self.assertIn(first["publication_id"], ids)
         self.assertIn(second["publication_id"], ids)
@@ -128,19 +131,62 @@ class ExternalPublicationTests(Fixture):
         self.assertEqual(row["op"], "external")
         self.assertEqual(row["published_sha"], SHA)
         self.assertEqual(
-            [r["publication_id"] for r in Publication.list_receipts(self.root, code_digest=DIGEST)],
+            [r["publication_id"] for r in Publication.list_receipts(
+                self.root, code_digest=DIGEST)["publications"]],
             [first["publication_id"]])
         self.assertEqual(
-            [r["publication_id"] for r in Publication.list_receipts(self.root, branch="other")],
+            [r["publication_id"] for r in Publication.list_receipts(
+                self.root, branch="other")["publications"]],
             [second["publication_id"]])
-        self.assertEqual(Publication.list_receipts(self.root, branch="absent"), [])
-        for bad in ({"code_digest": "short"}, {"branch": "bad:branch"}, {"limit": 0}, {"limit": 101}):
+        self.assertEqual(Publication.list_receipts(self.root, branch="absent")["publications"], [])
+        # A caller that knows the published SHA can find its receipt directly.
+        self.assertEqual(
+            [r["publication_id"] for r in Publication.list_receipts(
+                self.root, published_sha=SHA)["publications"]],
+            [first["publication_id"]])
+        self.assertEqual(
+            Publication.list_receipts(self.root, published_sha="2" * 40)["publications"], [])
+        for bad in ({"code_digest": "short"}, {"branch": "bad:branch"},
+                    {"published_sha": "not-a-sha"}, {"limit": 0}, {"limit": 101}):
             with self.subTest(bad=bad), self.assertRaises(Denied):
                 Publication.list_receipts(self.root, **bad)
 
+    def test_list_receipts_reports_a_truncated_page(self):
+        for index in range(3):
+            self.record(published_sha="%040x" % index, code_digest="%064x" % index)
+        page = Publication.list_receipts(self.root, limit=2)
+        self.assertEqual(len(page["publications"]), 2)
+        self.assertEqual(page["total"], 3)
+        self.assertTrue(page["truncated"])
+        exact = Publication.list_receipts(self.root, published_sha="%040x" % 0)
+        self.assertEqual(exact["total"], 1)
+        self.assertFalse(exact["truncated"])
+
+    def test_oversized_record_is_skipped_and_never_overwritten(self):
+        from mizu.fs import canonical, digest
+        record = self.record()
+        # A record larger than the read bound must not deny the valid receipts
+        # beside it, and must never be overwritten by a new recording.
+        oversized = self.root / "evidence" / "publications" / ("0" * 64 + ".external.json")
+        oversized.write_bytes(b'{"x": "' + b"y" * 20000 + b'"}')
+        listing = Publication.list_receipts(self.root)
+        self.assertEqual([row["publication_id"] for row in listing["publications"]],
+                         [record["publication_id"]])
+        identity = {"op": "external", "branch": BRANCH, "code_digest": DIGEST,
+                    "published_sha": SHA}
+        publication_id = digest(canonical(identity))
+        blocking = self.root / "evidence" / "publications" / (publication_id + ".external.json")
+        blocking.write_bytes(b'{"x": "' + b"y" * 20000 + b'"}')
+        with self.assertRaises(Denied):
+            self.record()
+        self.assertEqual(blocking.read_bytes(), b'{"x": "' + b"y" * 20000 + b'"}')
+
     def test_missing_publications_directory_lists_nothing(self):
         empty = self.root / "empty-project"
-        self.assertEqual(Publication.list_receipts(empty), [])
+        listing = Publication.list_receipts(empty)
+        self.assertEqual(listing["publications"], [])
+        self.assertEqual(listing["total"], 0)
+        self.assertFalse(listing["truncated"])
 
     def test_ci_wait_pins_an_external_receipt_branch_and_sha(self):
         config = dataclasses.replace(self.config, vcs={**self.config.vcs,
@@ -175,6 +221,11 @@ class ExternalPublicationTests(Fixture):
         self.assertEqual(evidence["trust"], "recorded-local-untrusted")
         filtered = ctx.handle("vcs_read", {"op": "publications", "code_digest": DIGEST})
         self.assertEqual(len(filtered["result"]["publications"]), 1)
+        self.assertEqual(filtered["result"]["total"], 1)
+        self.assertFalse(filtered["result"]["truncated"])
+        by_sha = ctx.handle("vcs_read", {"op": "publications", "published_sha": SHA})
+        self.assertEqual([row["publication_id"] for row in by_sha["result"]["publications"]],
+                         [record["publication_id"]])
         self.assertEqual(ctx.handle("vcs_read", {"op": "publications", "code_digest": OTHER_DIGEST})
                          ["result"]["publications"], [])
         for extra in ({"sha": SHA}, {"publication_id": record["publication_id"]}, {"id": "x"}):
@@ -192,7 +243,13 @@ class ExternalPublicationTests(Fixture):
         self.assertEqual(record["source_commit"], "e" * 40)
         listed = execute(parser().parse_args(
             ["--config", str(self.file), "publication", "list", "sample"]))
+        self.assertEqual(set(listed), {"publications", "total", "truncated"})
         self.assertEqual([row["publication_id"] for row in listed["publications"]],
+                         [record["publication_id"]])
+        by_sha = execute(parser().parse_args(
+            ["--config", str(self.file), "publication", "list", "sample",
+             "--published-sha", SHA]))
+        self.assertEqual([row["publication_id"] for row in by_sha["publications"]],
                          [record["publication_id"]])
         self.assertEqual(listed["publications"][0]["approval"], APPROVAL)
         filtered = execute(parser().parse_args(

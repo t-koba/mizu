@@ -464,13 +464,18 @@ List the recorded receipts of a project (read-only):
 ```sh
 mizu publication list demo
 mizu publication list demo --branch mizu --code-digest 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+mizu publication list demo --published-sha 0123456789abcdef0123456789abcdef01234567
 ```
 
+The listing returns one bounded page: `publications` (at most 100 summaries),
+`total` (every matching receipt) and `truncated` (whether the page dropped
+matches). A record that cannot be read is skipped, never listed unvalidated.
+
 A role discovers the same receipts with the `vcs_read` op `publications`
-(`{"op":"publications"}`, optionally with `code_digest` or `branch`); it reads
-local durable evidence and contacts no provider. Use the returned
-`publication_id` as the `publication_id` of a `{kind:"ci", publication_id,
-checks}` work-item wait.
+(`{"op":"publications"}`, optionally with `code_digest`, `branch` or
+`published_sha`); it reads local durable evidence and contacts no provider.
+Use the returned `publication_id` as the `publication_id` of a `{kind:"ci",
+publication_id, checks}` work-item wait.
 
 ## バックアップと復元
 

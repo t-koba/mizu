@@ -22,7 +22,7 @@ import stat
 from pathlib import Path
 
 from . import process
-from .errors import Denied
+from .errors import Denied, LimitExceeded
 from .fs import (DIGEST, canonical, digest, identifier, loads_finite,
                  lock as kernel_lock, now, safe_read, sync_dir, write_json)
 
@@ -335,7 +335,12 @@ class Publication:
                   "code_digest": code_digest, "approval": approval,
                   "source_commit": source_commit, "run": run, "recorded_at": now()}
         with kernel_lock(store.lock):
-            existing = store._read("external")
+            try:
+                existing = store._read("external")
+            except LimitExceeded as exc:
+                # An unreadable or oversized record is a refusal, never a
+                # silent overwrite of a receipt the product cannot read.
+                raise Denied(f"Invalid external publication receipt: {publication_id}") from exc
             if existing is not None:
                 stored = _external_record(existing, publication_id)
                 if any(stored[key] != record[key] for key in
@@ -348,16 +353,22 @@ class Publication:
 
     @classmethod
     def list_receipts(cls, project_root: Path, *, code_digest: str | None = None,
-                      branch: str | None = None, limit: int = 100) -> list[dict]:
+                      branch: str | None = None, published_sha: str | None = None,
+                      limit: int = 100) -> dict:
         """List the recorded publication receipts of one project.
 
-        Schema: receipt summaries with the publication ID, operation, branch,
-        published SHA, code digest, approval and the optional source commit
-        and run reference. Filters: exact code digest and branch matches.
-        Bounds: at most 100 entries, at most 10000 directory entries read and
-        at most 1000 candidate records validated.
-        Trust: locally recorded evidence; an unreadable or invalid record is
-        skipped rather than returned unvalidated. Failure: ``Denied`` on
+        Schema: one bounded page, ``{"publications": [...], "total": int,
+        "truncated": bool}``. A summary carries the publication ID, operation,
+        branch, published SHA, code digest, approval and the optional source
+        commit and run reference. ``total`` counts every matching receipt and
+        ``truncated`` says whether the page dropped matches, so a caller can
+        tell an absent receipt from an omitted one. Filters: exact code
+        digest, branch and published SHA matches.
+        Bounds: at most 100 entries per page, at most 10000 directory entries
+        read and at most 1000 candidate records validated.
+        Trust: locally recorded evidence; an unreadable, oversized or
+        invalid record is skipped rather than returned unvalidated, and it
+        never denies the valid records beside it. Failure: ``Denied`` on
         invalid arguments; a missing publications directory lists nothing.
         """
         if type(limit) is not int or not 1 <= limit <= 100:
@@ -365,6 +376,9 @@ class Publication:
         if code_digest is not None and (not isinstance(code_digest, str)
                                         or not DIGEST.fullmatch(code_digest)):
             raise Denied("Invalid code digest for publication listing")
+        if published_sha is not None and (not isinstance(published_sha, str)
+                                          or not SHA.fullmatch(published_sha)):
+            raise Denied("Invalid published SHA for publication listing")
         if branch is not None:
             from .vcs import check_branch
             check_branch(branch)
@@ -376,7 +390,7 @@ class Publication:
         try:
             names = sorted(os.listdir(store.root))
         except (FileNotFoundError, NotADirectoryError):
-            return []
+            return {"publications": [], "total": 0, "truncated": False}
         except OSError as exc:
             raise Denied("Publication evidence is unavailable") from exc
         records = []
@@ -393,16 +407,21 @@ class Publication:
                 break
             try:
                 record = cls.read_receipt(project_root, publication_id)
-            except (Denied, OSError):
-                # An unreadable or invalid record is never listed unvalidated.
+            except (Denied, LimitExceeded, OSError):
+                # An unreadable, oversized or invalid record is never listed
+                # unvalidated, and it never denies the records beside it.
                 continue
             if code_digest is not None and record.get("code_digest") != code_digest:
                 continue
             if branch is not None and record.get("branch") != branch:
                 continue
+            if published_sha is not None and record.get("published_sha") != published_sha:
+                continue
             records.append(_summary(record))
         records.sort(key=lambda item: item["publication_id"])
-        return records[:limit]
+        page = records[:limit]
+        return {"publications": page, "total": len(records),
+                "truncated": len(records) > len(page)}
 
     def complete(self, intent: dict, published_sha: str) -> dict:
         if not isinstance(published_sha, str) or not SHA.fullmatch(published_sha):

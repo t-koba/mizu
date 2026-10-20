@@ -113,6 +113,7 @@ def parser() -> argparse.ArgumentParser:
     listing.add_argument("project", help="Managed project name")
     listing.add_argument("--code-digest", default=None, help="Filter by exact code digest (64 hex)")
     listing.add_argument("--branch", default=None, help="Filter by exact branch name")
+    listing.add_argument("--published-sha", default=None, help="Filter by exact published SHA (40 or 64 hex)")
     p = sub.add_parser("work-items", help="Show bounded open and recently closed work items; read-only, no recovery")
     p.add_argument("project", help="Managed project name")
     p.add_argument("--limit", type=int, default=25, help="Open items per page (1-100; default: 25)")
@@ -411,14 +412,17 @@ def _cmd_publication_record(config, project, args):
 def _cmd_publication_list(config, project, args):
     """List the recorded publication receipts of one project.
 
-    Schema: ``{"publications": [...]}`` with publication ID, operation,
-    branch, published SHA, code digest, approval and the optional source
-    commit and run reference. Filters are exact matches. Failure:
-    ``Denied`` on invalid filters; unreadable records are skipped.
+    Schema: one bounded page, ``{"publications": [...], "total": int,
+    "truncated": bool}``, with publication ID, operation, branch, published
+    SHA, code digest, approval and the optional source commit and run
+    reference. Filters are exact matches on code digest, branch or published
+    SHA. Failure: ``Denied`` on invalid filters; unreadable records are
+    skipped, never listed unvalidated.
     """
     from .publication import Publication
-    return {"publications": Publication.list_receipts(
-        project.root, code_digest=args.code_digest, branch=args.branch)}
+    return Publication.list_receipts(
+        project.root, code_digest=args.code_digest, branch=args.branch,
+        published_sha=args.published_sha)
 
 
 def _cmd_work_items(config, project, args):

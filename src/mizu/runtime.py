@@ -1323,18 +1323,18 @@ class Context:
         # No provider is contacted: this reads the project's own durable
         # evidence, so no adapter call is made. Only the op and the exact
         # code_digest/branch filters are accepted.
-        if set(args) - {"op", "code_digest", "branch"}:
-            raise Denied("publication listing takes only code_digest and branch filters")
-        publications = Publication.list_receipts(
+        if set(args) - {"op", "code_digest", "branch", "published_sha"}:
+            raise Denied("publication listing takes only code_digest, branch and published_sha filters")
+        listing = Publication.list_receipts(
             self.project.root, code_digest=args.get("code_digest"),
-            branch=args.get("branch"), limit=100)
+            branch=args.get("branch"), published_sha=args.get("published_sha"), limit=100)
         evidence_id, evidence = self._new_invocation_evidence("vcs-read")
         record = {"op": "publications", "branch": args.get("branch"),
                   "trust": "recorded-local-untrusted", "evidence_id": evidence_id,
-                  "evidence": evidence, "result": {"publications": publications}}
+                  "evidence": evidence, "result": listing}
         write_json(self.run_dir / evidence, record)
         # The listing is also the top-level result, like the other read ops.
-        return {**record, "publications": publications}
+        return {**record, **listing}
 
     def _op_vcs_read(self, args: dict) -> dict:
         # Read-only VCS view: CI status, logs, PR comments, external

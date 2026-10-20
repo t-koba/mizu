@@ -616,7 +616,7 @@ models are recorded. Model usage excludes unreported auxiliary billing.
 | `attach_evidence` | Append an attributed evidence entry to any open insight (bound to the read rev, title/body/rev unchanged; at most 16 entries of 8192 chars each; no role holds it by default) |
 | `report` | Stage a Markdown document for static artifact publication |
 | `sync` | Refresh upstream refs via the trusted VCS adapter (writable workspace only); merges stay as workspace edits followed by verification |
-| `vcs_read` | Read CI status, logs, PR comments, external proposals, exact-revision proposal content, and CI-recorded artifact files via the trusted VCS adapter; the `publications` op lists the project's recorded publication receipts from local durable evidence and contacts no provider; never publishes (read roles may hold it) |
+| `vcs_read` | Read CI status, logs, PR comments, external proposals, exact-revision proposal content, and CI-recorded artifact files via the trusted VCS adapter; the `publications` op lists the project's recorded publication receipts from local durable evidence (exact `code_digest`, `branch` or `published_sha` filters, one bounded page with `total` and `truncated`) and contacts no provider; never publishes (read roles may hold it) |
 | `vcs_publish` | Push a branch or open a PR via the trusted VCS adapter behind a recorded human `GO <branch>` approval (writable workspace only; consultation roles cannot hold it) |
 | `vcs_retire` | Retire an owned temporary integration branch at an exact expected sha behind the configured `retire_grant` (read workspace suffices: integration authority is the capability plus the grant, never source-write access; consultation roles cannot hold it; never combines with `decide` (ordinary `submit_insight` is allowed but can never mint an operator-channel approval)) |
 | `vcs_dispose` | Close or merge an external proposal at exact assessed endpoints behind per-action grants (`close_grant`; `merge_grant` plus human `GO <branch>` for merge); also permits an explicit `close_if_adopted` action with exact proposal/target pins, `close_grant`, and the separate host-adapter `[vcs] close_adopted` gate. Role capability plus both gates are required; a valid `closed: false` adapter receipt is retained without retry/refetch/merge. Read workspace suffices; consultation roles cannot hold it; never combines with `decide`; observation never closes automatically |
@@ -890,7 +890,9 @@ bad adapter cannot busy-loop.
 Same `[vcs]` adapter, with no publish-specific configuration keys.
 `vcs_read` serves only `status`/`log`/`comments`/`proposals`/`acquire`/`artifacts`/`artifact`
 and the local `publications` listing of recorded publication receipts, which contacts
-no adapter and answers from the project's own durable evidence;
+no adapter and answers from the project's own durable evidence; the listing accepts
+exact `code_digest`, `branch` or `published_sha` filters and returns one bounded page
+(`publications`, `total`, `truncated`);
 `vcs_publish` serves only `push`/`pr`. Cross-path calls are `Denied`
 (`vcs_read cannot publish`). Calls are host-side only, bounded by
 `timeout_seconds` and `max_bytes`, and adapter observations remain

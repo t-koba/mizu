@@ -524,10 +524,12 @@ infers a published SHA from a branch head, and a recorded receipt does not by
 itself prove that CI passed; CI evidence must still confirm the exact SHA the
 receipt names. A role reads recorded receipts from the project's own durable
 evidence through the `vcs_read` op `publications`, which contacts no provider
-and returns at most 100 summaries filtered by exact code digest or branch. An
-unreadable or invalid record is skipped, never returned unvalidated, and the
-same validation path lets an exact-SHA CI wait pin a `publication_id` to either
-receipt shape.
+and returns one bounded page of at most 100 summaries, filtered by exact code
+digest, branch or published SHA, with the match count and a `truncated` flag so
+a caller can tell an absent receipt from an omitted one. An unreadable,
+oversized or invalid record is skipped, never returned unvalidated, and it
+never denies the valid records beside it. The same validation path lets an
+exact-SHA CI wait pin a `publication_id` to either receipt shape.
 
 Under one `insights.lock` section, the reader scans committed
 `decision-history/*.json`, validates and reconstructs every seeded item
