@@ -464,6 +464,76 @@ class McpProxyTests(unittest.TestCase):
             forward({"transport":"unix", "socket": "/nonexistent.sock", "token": "x",
                      "timeout_ms": 1000, "tools": []}, "finish", {"outcome": "wait"})
 
+    def test_deeply_nested_bridge_frame_is_bounded_parse_failure(self):
+        from mizu.bridge import connect
+        from mizu.fs import loads_finite
+        calls = []
+
+        def handle(operation, arguments):
+            calls.append((operation, arguments))
+            return {}
+
+        bridge = Bridge(handle, tool_definitions(("finish",)), timeout=60, transport="tcp")
+        bridge.__enter__()
+        self.addCleanup(bridge.__exit__, None, None, None)
+        config = read_json(bridge.config_file)
+        depth = 20000
+        frame = (b'{"token": ' + json.dumps(config["token"]).encode()
+                 + b', "operation": "finish", "arguments": {"nested": '
+                 + b"[" * depth + b"0" + b"]" * depth + b"}}\n")
+        self.assertLess(len(frame), 1024 * 1024)
+        with self.assertRaises(RecursionError):
+            loads_finite(frame)
+        client = connect(config)
+        try:
+            client.settimeout(10)
+            client.sendall(frame)
+            data = bytearray()
+            while b"\n" not in data:
+                chunk = client.recv(65536)
+                if not chunk:
+                    break
+                data.extend(chunk)
+        finally:
+            client.close()
+        response = json.loads(data[:data.index(b"\n")].decode("utf-8"))
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error"], "Invalid bridge frame")
+        self.assertNotIn("Internal tool failure", response["error"])
+        self.assertEqual(calls, [])
+
+    def test_forward_rejects_nonfinite_bridge_response(self):
+        import mizu.mcp_proxy as proxy
+        from mizu.fs import loads_finite
+        payload = b'{"ok": true, "result": {"v": 1e9999}}\n'
+        with self.assertRaises(ValueError):
+            loads_finite(payload)
+
+        class _FakeBridge:
+            def __init__(self, payload):
+                self._payload = bytearray(payload)
+
+            def sendall(self, data):
+                pass
+
+            def settimeout(self, timeout):
+                pass
+
+            def recv(self, size):
+                chunk = bytes(self._payload[:size])
+                del self._payload[:size]
+                return chunk
+
+            def close(self):
+                pass
+
+        config = {"transport": "tcp", "host": "127.0.0.1", "port": 1,
+                  "token": "x", "timeout_ms": 1000, "tools": []}
+        with unittest.mock.patch.object(proxy, "_bridge_connect",
+                                        return_value=_FakeBridge(payload)):
+            with self.assertRaisesRegex(Denied, "Bridge response was not valid JSON"):
+                forward(config, "finish", {"outcome": "wait"})
+
     def test_trickling_peer_cannot_defer_deadline(self):
         import socket as _socket
         import threading as _threading

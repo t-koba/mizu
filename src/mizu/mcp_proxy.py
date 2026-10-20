@@ -15,7 +15,6 @@ newline-delimited JSON-RPC on stdio, stdout exclusively protocol output.
 """
 from __future__ import annotations
 
-import json
 import os
 import socket
 import time
@@ -23,7 +22,7 @@ from pathlib import Path
 
 from .bridge import LOOPBACK_HOSTS, connect as _bridge_connect
 from .errors import Denied
-from .fs import MAX_FRAME, canonical, read_json
+from .fs import MAX_FRAME, canonical, loads_finite, read_json
 from .protocol import MCP_VERSIONS
 assert MCP_VERSIONS is not None  # re-exported: single-sourced in protocol.py, framed in mcp_loop.py
 
@@ -91,8 +90,8 @@ def forward(config: dict, operation: str, arguments: dict) -> dict:
                 break
         end = data.index(b"\n")
         try:
-            response = json.loads(data[:end].decode("utf-8"), parse_constant=lambda v: (_ for _ in ()).throw(ValueError("Non-finite JSON")))
-        except (ValueError, UnicodeError):
+            response = loads_finite(data[:end].decode("utf-8"))
+        except (ValueError, UnicodeError, RecursionError):
             raise Denied("Bridge response was not valid JSON")
         if not isinstance(response, dict) or type(response.get("ok")) is not bool:
             raise Denied("Bridge response was not a valid envelope")

@@ -159,7 +159,10 @@ class Bridge:
                     raw = self.rfile.readline(MAX_FRAME + 1)
                     if len(raw) > MAX_FRAME or not raw.endswith(b"\n"):
                         raise ValueError("Invalid bridge frame")
-                    request = loads_finite(raw)
+                    try:
+                        request = loads_finite(raw)
+                    except RecursionError as exc:
+                        raise ValueError("Invalid bridge frame") from exc
                     if not isinstance(request, dict) or not isinstance(request.get("token"), str):
                         raise ValueError("Unauthenticated request")
                     if not hmac.compare_digest(request["token"], outer.token):
