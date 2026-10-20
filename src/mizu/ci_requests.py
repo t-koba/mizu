@@ -16,7 +16,7 @@ import os
 import re
 from pathlib import Path
 
-from .errors import Denied
+from .errors import Denied, LimitExceeded
 from .fs import canonical, digest, loads_finite, mkdir, safe_read, sync_dir, write_json
 
 #: Bounded record size (8 KiB), like the other evidence records.
@@ -120,7 +120,12 @@ class CiRequests:
             if len(seen) > REQUEST_RECORD_LIMIT:
                 scan_stopped = True
                 break
-            record = self._read(match.group(1), "request")
+            try:
+                record = self._read(match.group(1), "request")
+            except (Denied, LimitExceeded, OSError):
+                # An unreadable, oversized or invalid record is never listed
+                # unvalidated, and it never denies the records beside it.
+                continue
             if record is None:
                 continue
             row = _summary(record, match.group(1))

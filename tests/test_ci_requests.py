@@ -306,6 +306,19 @@ class CiRequestTests(Fixture):
         self.assertEqual(listing["total"], 0)
         self.assertEqual(listing["days"], [])
 
+    def test_the_daily_listing_skips_a_damaged_record_beside_a_valid_one(self):
+        ctx = self.context(runs(), poll_enabled=True)
+        self.request_covered(ctx, [])
+        store = CiRequests(self.project.root)
+        identity = request_id(self.receipt["publication_id"], SHA, ["ci"])
+        # A malformed record and an oversized one must not deny the view: the
+        # valid record beside them is still listed.
+        (store.root / ("d" * 64 + ".request.json")).write_text("{not json", encoding="utf-8")
+        (store.root / ("e" * 64 + ".request.json")).write_text("x" * 9000, encoding="utf-8")
+        listing = store.daily()
+        self.assertEqual(listing["total"], 1)
+        self.assertEqual(listing["days"][0]["items"][0]["request_id"], identity)
+
     def test_the_daily_listing_op_reads_local_evidence_only(self):
         ctx = self.context(runs(), poll_enabled=True, add=("vcs_read",))
         self.request_covered(ctx, [])
