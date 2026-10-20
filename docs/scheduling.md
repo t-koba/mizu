@@ -166,7 +166,11 @@ Before any wake, the host rechecks the current blocked revision and writes a
 create-only record under `evidence/ci-waits/<item>.<rev>.result.json` (128 KiB,
 bounded no-follow reads). It binds the item ID, blocked revision, holder,
 publication ID, branch, SHA, normalized wait digest, declared check states and
-available run IDs, conclusion and observation time. Facts remain
+available run IDs, conclusion and observation time. When the provider reports
+them, each declared check also keeps its start, its completion and the derived
+job time: the product recomputes that job time from the two instants and never
+takes it from the provider, and the stored record fails closed on the same
+rules as the status row. Facts remain
 external-untrusted. Receipt files are never modified and polling never
 publishes. Both green and red **only wake**: neither reopens, completes, drops,
 nor otherwise transitions the item.

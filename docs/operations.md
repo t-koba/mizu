@@ -434,7 +434,10 @@ registration; run the polling daemon to observe results.
 
 Both all-green and terminal red results wake the current holder and deliver
 bounded `wait_events` evidence with the exact receipt/SHA, check states/run IDs
-and conclusion. Neither changes work-item status. Missing/pending/ambiguous
+and conclusion. When the provider reports them, the evidence keeps each
+declared check's start, its completion and the derived job time, so the cost
+of the wait is readable from the durable record; the times stay
+external-untrusted and the product recomputes the job time itself. Neither changes work-item status. Missing/pending/ambiguous
 checks remain unresolved even if the branch has moved. After a successful run
 the exact evidence is acknowledged once; for a new CI attempt or changed
 predicate, use the normal CAS transitions to leave `blocked` and block again.

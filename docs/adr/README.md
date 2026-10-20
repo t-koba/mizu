@@ -304,6 +304,14 @@ exists without any role able to trigger it until the operator grants them.
 Ref handling stays provider policy: the product never creates or deletes a
 ref to target a commit.
 
+A CI minute is runner wall time, not money. The per-day view sums the derived
+`job_seconds` the product already computes from the provider's own instants:
+it excludes the provider's per-job rounding and its per-OS multipliers, and it
+counts a re-run again, so it is labelled runner wall time and never presented
+as a saving. No provider usage endpoint supplies it, and none is available to
+supply it. The seven-day bound on a reported job stays: it is above every
+platform's own job limit, so it refuses nothing a provider can produce.
+
 ## ADR-036 — A drain is recorded as a drain, and a drained unit keeps its finish
 A drain that reached a running `pi` unit was recorded as if the unit had run out
 of requests: the run ended interrupted, its finish was never published, and the

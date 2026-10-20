@@ -147,6 +147,18 @@ class DrainYieldTests(Fixture):
                 else:
                     self.assertEqual(read_json(path)["id"], "persistent-drain-session")
 
+    def test_the_durable_launcher_expects_the_same_drain_message(self):
+        # The shared handshake is a text, so the host's refusal and the
+        # durable launcher's expectation must be the same string: a change to
+        # one side alone would silently misname the bound.
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[1]
+        launcher = (root / "adapters" / "pi-durable" / "launcher.mjs").read_text(encoding="utf-8")
+        host = (root / "src" / "mizu" / "runtime.py").read_text(encoding="utf-8")
+        message = "Drain bound refused the provider request"
+        self.assertIn(message, launcher)
+        self.assertIn(message, host)
+
     def test_non_pi_drain_wrap_up_allowance_exhaustion_is_bounded(self):
         ctx = self.context()
         ctx.bound_hit = "drain"
