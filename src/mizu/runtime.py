@@ -1533,18 +1533,20 @@ class Context:
         covered = self._covered_waits(args.get("covered"), receipt)
         recorded = requests.outcome(identity)
         if recorded is not None:
-            if recorded.get("covered", []) != [entry["record"] for entry in covered]:
-                raise Denied("The recorded CI request covers different work items")
-            # A replay never spends a second run, but it completes a coverage
-            # whose registration was interrupted after the run was spent.
-            self._register_covered(covered, identity)
-            return {**recorded, "replayed": True}
+            # A recorded request replays: the durable outcome is returned
+            # whatever became of the covered items, because the run is spent.
+            # The recorded coverage governs; a different set is reported.
+            coverage = self._coverage_state(self._recorded_coverage(recorded), identity,
+                                            register=True)
+            if [entry["record"] for entry in covered] != recorded.get("covered", []):
+                coverage["not_applied"] = [entry["id"] for entry in covered]
+            return {**recorded, "replayed": True, "coverage": coverage}
         if requests.dispatched(identity) is not None:
             raise Denied("An earlier CI request for this publication is unresolved; "
                          "re-observe the CI status before requesting again")
-        # The covered items are checked before the provider is called, so an
-        # unknown item or a stale revision never spends a run.
-        self._pending_covered(covered)
+        # The covered items are checked before the provider is called, so a
+        # coverage that cannot take the wait never spends a run.
+        self._coverage_state(covered, identity, register=False)
 
         def before_invoke():
             requests.mark_dispatch(identity, {
@@ -1562,8 +1564,8 @@ class Context:
                    {**record, "trust": "external-untrusted", "evidence_id": evidence_id})
         # The outcome is durable before the waits are registered: the run was
         # spent, so the evidence of the request must survive a failure here.
-        self._register_covered(covered, identity)
-        return {**record, "replayed": False}
+        coverage = self._coverage_state(covered, identity, register=True)
+        return {**record, "replayed": False, "coverage": coverage}
 
     def _covered_waits(self, raw, receipt):
         """Validate the covered work items and the CI waits they carry.
@@ -1600,27 +1602,53 @@ class Context:
             raise Denied("The covered work-item set exceeds 2048 UTF-8 bytes")
         return waits
 
-    def _pending_covered(self, waits):
-        """The covered items that still need their CI wait registered."""
-        pending = []
+    def _coverage_state(self, waits, identity, *, register):
+        """Report the covered items' state and register the pending waits.
+
+        A covered item that cannot take the CI wait is refused before the
+        provider is called, so a bad coverage never spends a run. Once the
+        run is spent the state is only reported: a holder that resumed an
+        item keeps that decision, and the recorded outcome is still returned.
+        """
+        registered, waiting, moved, refused = [], [], [], []
         for entry in waits:
             item = self.project.work_items.get(entry["id"])
             if item["status"] == "blocked" and item.get("wait") == entry["wait"]:
                 # Already registered: the item's revision moved with the wait.
+                waiting.append(entry["id"])
+                continue
+            if item["status"] in ("done", "dropped") or item["status"] == "blocked":
+                # A finished item takes no wait, and a blocked item carries
+                # another wait that only its holder may replace.
+                refused.append(entry["id"])
+                if not register:
+                    raise Denied(f"Covered work item {entry['id']} cannot take the CI wait")
                 continue
             if item["rev"] != entry["rev"]:
-                raise Denied(f"Covered work item {entry['id']} changed; "
-                             "re-read it before registering the wait")
-            pending.append(entry)
-        return pending
+                moved.append(entry["id"])
+                if not register:
+                    raise Denied(f"Covered work item {entry['id']} changed; "
+                                 "re-read it before registering the wait")
+                continue
+            if register:
+                self.project.work_items.transition(
+                    entry["id"], expected_rev=entry["rev"], status="blocked",
+                    actor=self.role.name, wait=entry["input"],
+                    reason=f"Waits for the CI request {identity}")
+                registered.append(entry["id"])
+        return {"registered": registered, "waiting": waiting,
+                "moved": moved, "refused": refused, "not_applied": []}
 
-    def _register_covered(self, waits, identity):
-        """Register the receipt-pinned CI wait on every covered work item."""
-        for entry in self._pending_covered(waits):
-            self.project.work_items.transition(
-                entry["id"], expected_rev=entry["rev"], status="blocked",
-                actor=self.role.name, wait=entry["input"],
-                reason=f"Waits for the CI request {identity}")
+    def _recorded_coverage(self, recorded):
+        """The waits a recorded request covered, rebuilt from its own record."""
+        waits = []
+        for entry in recorded.get("covered", []):
+            wait = {key: entry[key]
+                    for key in ("kind", "publication_id", "branch", "sha", "checks")}
+            waits.append({"id": entry["id"], "rev": entry["rev"], "wait": wait,
+                          "input": {"kind": "ci", "publication_id": wait["publication_id"],
+                                    "checks": wait["checks"]}})
+        return waits
 
     def _op_vcs_retire(self, args: dict) -> dict:
         # Branch retirement: delete an owned temporary integration branch

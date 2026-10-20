@@ -144,14 +144,18 @@ do **not** accept `ci`; the existing work-item wait types remain unchanged.
 A CI request may cover work items. `vcs_request` takes an optional `covered`
 list of at most 16 entries, each naming a work item, the revision it is
 covered at, and the checks whose result settles it. The covered items are
-validated before the provider is called, so an unknown item or a stale
-revision never spends a run, and the request's durable record keeps the
-covered set, so the request's wall time is attributable to what it covered.
+validated before the provider is called, so an unknown item, a stale
+revision, or an item that cannot take the wait never spends a run, and the
+request's durable record keeps the covered set, so the request's wall time is
+attributable to what it covered.
 After the request is recorded, the product registers the same receipt-pinned
 CI wait on each covered item: the item becomes `blocked` with that wait, and
 its holder keeps the completion decision, green or red. A replay never spends
-a second run but completes a coverage whose registration was interrupted, and
-a replay that names other items is refused. Covering work items needs the
+a second run: it returns the recorded outcome whatever became of the covered
+items, completes a coverage whose registration was interrupted, and reports
+the items it could not register, so a holder that resumed an item keeps that
+decision. A replay that names other items reports them as not applied, because
+the recorded request's coverage governs. Covering work items needs the
 work-item capability and automatic CI polling, because a wait that nothing
 observes would never resolve.
 

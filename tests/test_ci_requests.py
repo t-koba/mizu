@@ -206,11 +206,47 @@ class CiRequestTests(Fixture):
         # One registration only: the replay does not wait a second time.
         self.assertEqual(item["rev"], 2)
 
-    def test_a_replay_that_covers_other_items_is_refused(self):
+    def test_a_replay_that_covers_other_items_reports_them_as_not_applied(self):
         ctx = self.context(runs(), poll_enabled=True)
         covered = self.covered_item()
-        self.request_covered(ctx, [covered])
+        first = self.request_covered(ctx, [covered])
         other = self.covered_item("other")
         ctx = self.context(runs(), poll_enabled=True)
-        with self.assertRaises(Denied):
-            self.request_covered(ctx, [other])
+        again = self.request_covered(ctx, [other])
+        # The recorded run is returned; the requested coverage is reported,
+        # never silently applied to a run the record does not name.
+        self.assertTrue(again["replayed"])
+        self.assertEqual(again["runs"], first["runs"])
+        self.assertEqual(again["coverage"]["not_applied"], [other["id"]])
+        self.assertEqual(self.project.work_items.get(other["id"])["status"], "open")
+
+    def test_a_covered_item_that_cannot_take_the_wait_is_refused_before_a_run_is_spent(self):
+        dropped = self.covered_item("dropped")
+        self.project.work_items.transition(dropped["id"], expected_rev=dropped["rev"],
+                                           status="dropped", actor="worker", reason="not needed")
+        blocked = self.covered_item("blocked")
+        self.project.work_items.transition(blocked["id"], expected_rev=blocked["rev"],
+                                           status="blocked", actor="worker",
+                                           wait={"kind": "code_change"})
+        ctx = self.context(runs(), poll_enabled=True)
+        for entry in (dropped, blocked):
+            with self.assertRaises(Denied):
+                self.request_covered(ctx, [entry])
+        identity = request_id(self.receipt["publication_id"], SHA, ["ci"])
+        self.assertIsNone(CiRequests(self.project.root).dispatched(identity))
+        self.assertIsNone(CiRequests(self.project.root).outcome(identity))
+
+    def test_a_replay_returns_the_recorded_outcome_after_the_holder_resumes_the_item(self):
+        ctx = self.context(runs(), poll_enabled=True)
+        covered = self.covered_item()
+        first = self.request_covered(ctx, [covered])
+        item = self.project.work_items.get(covered["id"])
+        # The holder takes the item back: its decision outranks the coverage.
+        self.project.work_items.transition(covered["id"], expected_rev=item["rev"],
+                                           status="doing", actor="worker")
+        ctx = self.context(runs(), poll_enabled=True)
+        again = self.request_covered(ctx, [covered])
+        self.assertTrue(again["replayed"])
+        self.assertEqual(again["runs"], first["runs"])
+        self.assertEqual(again["coverage"]["moved"], [covered["id"]])
+        self.assertEqual(self.project.work_items.get(covered["id"])["status"], "doing")
