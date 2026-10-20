@@ -12,6 +12,7 @@ from mizu.ci_requests import CiRequests, request_id
 from mizu.errors import Denied
 from mizu.fs import mkdir, read_json
 from mizu.protocol import tool_definitions
+from mizu.project import Project
 from mizu.publication import Publication
 from mizu.runtime import Context
 
@@ -43,10 +44,14 @@ class CiRequestTests(Fixture):
 
     def context(self, payload, **extra):
         config = dataclasses.replace(self.config, vcs=adapter_settings(payload, **extra))
-        role = dataclasses.replace(
-            config.roles["worker"],
-            capabilities=tuple(list(config.roles["worker"].capabilities) + ["vcs_request"]))
+        drop = extra.pop("drop", ())
+        capabilities = [name for name in config.roles["worker"].capabilities
+                         if name not in drop] + ["vcs_request"]
+        role = dataclasses.replace(config.roles["worker"], capabilities=tuple(capabilities))
         config = dataclasses.replace(config, roles={**config.roles, "worker": role})
+        # The work-item store carries the same VCS settings as the runtime, so
+        # a CI wait is registrable exactly when the runtime says it is.
+        self.project = Project(config, "sample")
         run = self.project.root / "runs" / uuid.uuid4().hex
         mkdir(run)
         return Context(config, self.project, role, run, self.project.snapshots.get(),
@@ -131,3 +136,81 @@ class CiRequestTests(Fixture):
             capabilities=tuple(list(self.config.roles["worker"].capabilities) + ["vcs_request"]))
         self.assertIn("mizu_vcs_request",
                       [tool["name"] for tool in tool_definitions(granted.capabilities)])
+
+    def covered_item(self, key="covered", checks=("unit", "lint")):
+        seed = self.project.work_items.create(actor="worker", idempotency_key=key,
+                                              title="Covered item")["record"]["work_item"]
+        return {"id": seed["id"], "rev": seed["rev"], "checks": list(checks)}
+
+    def request_covered(self, ctx, covered):
+        return ctx.handle("vcs_request", {"publication_id": self.receipt["publication_id"],
+                                          "workflows": ["ci"], "covered": covered})
+
+    def test_a_covered_item_waits_for_the_requested_checks(self):
+        ctx = self.context(runs(), poll_enabled=True)
+        covered = self.covered_item()
+        out = self.request_covered(ctx, [covered])
+        self.assertEqual(out["covered"][0]["id"], covered["id"])
+        self.assertEqual(out["covered"][0]["checks"], ["lint", "unit"])
+        item = self.project.work_items.get(covered["id"])
+        self.assertEqual(item["status"], "blocked")
+        self.assertEqual(item["wait"]["kind"], "ci")
+        self.assertEqual(item["wait"]["publication_id"], self.receipt["publication_id"])
+        self.assertEqual(item["wait"]["checks"], ["lint", "unit"])
+        self.assertEqual(item["wait"]["sha"], SHA)
+        # The holder keeps the completion decision.
+        self.assertEqual(item["holder"], "worker")
+
+    def test_an_unknown_covered_item_is_refused_before_a_run_is_spent(self):
+        ctx = self.context(runs(), poll_enabled=True)
+        with self.assertRaises(Denied):
+            self.request_covered(ctx, [{"id": "wi_" + "0" * 32, "rev": 1, "checks": ["unit"]}])
+        identity = request_id(self.receipt["publication_id"], SHA, ["ci"])
+        self.assertIsNone(CiRequests(self.project.root).dispatched(identity))
+        self.assertIsNone(CiRequests(self.project.root).outcome(identity))
+
+    def test_a_stale_covered_revision_is_refused_before_a_run_is_spent(self):
+        ctx = self.context(runs(), poll_enabled=True)
+        covered = self.covered_item()
+        covered["rev"] = covered["rev"] + 1
+        with self.assertRaises(Denied):
+            self.request_covered(ctx, [covered])
+        identity = request_id(self.receipt["publication_id"], SHA, ["ci"])
+        self.assertIsNone(CiRequests(self.project.root).dispatched(identity))
+
+    def test_covering_work_items_requires_the_work_item_capability(self):
+        ctx = self.context(runs(), poll_enabled=True, drop=("work_items_transition",))
+        covered = self.covered_item()
+        with self.assertRaises(Denied):
+            self.request_covered(ctx, [covered])
+        identity = request_id(self.receipt["publication_id"], SHA, ["ci"])
+        self.assertIsNone(CiRequests(self.project.root).dispatched(identity))
+
+    def test_covering_work_items_requires_automatic_ci_polling(self):
+        ctx = self.context(runs())
+        covered = self.covered_item()
+        with self.assertRaises(Denied):
+            self.request_covered(ctx, [covered])
+        identity = request_id(self.receipt["publication_id"], SHA, ["ci"])
+        self.assertIsNone(CiRequests(self.project.root).dispatched(identity))
+
+    def test_a_replay_completes_the_coverage_without_a_second_run(self):
+        ctx = self.context(runs(), poll_enabled=True)
+        covered = self.covered_item()
+        self.request_covered(ctx, [covered])
+        ctx = self.context(runs(), poll_enabled=True)
+        again = self.request_covered(ctx, [covered])
+        self.assertTrue(again["replayed"])
+        item = self.project.work_items.get(covered["id"])
+        self.assertEqual(item["status"], "blocked")
+        # One registration only: the replay does not wait a second time.
+        self.assertEqual(item["rev"], 2)
+
+    def test_a_replay_that_covers_other_items_is_refused(self):
+        ctx = self.context(runs(), poll_enabled=True)
+        covered = self.covered_item()
+        self.request_covered(ctx, [covered])
+        other = self.covered_item("other")
+        ctx = self.context(runs(), poll_enabled=True)
+        with self.assertRaises(Denied):
+            self.request_covered(ctx, [other])

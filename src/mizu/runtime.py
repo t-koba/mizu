@@ -83,6 +83,8 @@ INSIGHT_RETRIEVAL_LIMIT = 1000
 #: Fixed memory bounds for run-local pre-send admission identities.
 MAX_ENGINE_TOOL_INVOCATIONS = 4096
 MAX_ENGINE_TOOL_ID = 256
+#: Bounded serialized size of the work items a CI request covers.
+MAX_COVERED_BYTES = 2048
 
 #: Exact retained-evidence locators, never prefixes or filesystem paths.
 EVIDENCE_UUID = re.compile(r"[0-9a-f]{32}\Z")
@@ -1525,12 +1527,24 @@ class Context:
         workflows = sorted(str(name) for name in args["workflows"])
         requests = CiRequests(self.project.root)
         identity = ci_request_id(receipt["publication_id"], sha, workflows)
+        # A request may cover work items: each covered item waits for the
+        # request's result through a receipt-pinned CI wait, and its holder
+        # keeps the completion decision.
+        covered = self._covered_waits(args.get("covered"), receipt)
         recorded = requests.outcome(identity)
         if recorded is not None:
+            if recorded.get("covered", []) != [entry["record"] for entry in covered]:
+                raise Denied("The recorded CI request covers different work items")
+            # A replay never spends a second run, but it completes a coverage
+            # whose registration was interrupted after the run was spent.
+            self._register_covered(covered, identity)
             return {**recorded, "replayed": True}
         if requests.dispatched(identity) is not None:
             raise Denied("An earlier CI request for this publication is unresolved; "
                          "re-observe the CI status before requesting again")
+        # The covered items are checked before the provider is called, so an
+        # unknown item or a stale revision never spends a run.
+        self._pending_covered(covered)
 
         def before_invoke():
             requests.mark_dispatch(identity, {
@@ -1540,12 +1554,73 @@ class Context:
         runs = _vcs.request_runs_via(self.config.vcs, sha, workflows,
                                      cancel=self.tools_cancelled, before_invoke=before_invoke)
         record = {"request_id": identity, "publication_id": receipt["publication_id"],
-                  "sha": sha, "workflows": workflows, "runs": runs, "requested_at": now()}
+                  "sha": sha, "workflows": workflows, "runs": runs, "requested_at": now(),
+                  "covered": [entry["record"] for entry in covered]}
         requests.record_outcome(identity, record)
         evidence_id, evidence = self._new_invocation_evidence("vcs-request")
         write_json(self.run_dir / evidence,
                    {**record, "trust": "external-untrusted", "evidence_id": evidence_id})
+        # The outcome is durable before the waits are registered: the run was
+        # spent, so the evidence of the request must survive a failure here.
+        self._register_covered(covered, identity)
         return {**record, "replayed": False}
+
+    def _covered_waits(self, raw, receipt):
+        """Validate the covered work items and the CI waits they carry.
+
+        Each covered item names the revision it is covered at and the checks
+        whose result settles it. The wait is pinned to the published receipt,
+        so it observes exactly that commit, and the holder of the item keeps
+        the completion decision. Bounds: at most 16 items, at most 64 checks
+        each, and at most 2048 UTF-8 bytes of covered records.
+        """
+        if raw is None:
+            return []
+        if not isinstance(raw, list) or len(raw) > 16:
+            raise Denied("A CI request covers at most 16 work items")
+        if raw and "work_items_transition" not in set(self.role.capabilities):
+            raise Denied("Covering work items requires the work-item capability")
+        if raw and not (self.config.vcs.get("poll_enabled") and self.config.vcs.get("command")):
+            raise Denied("Covering work items requires automatic VCS polling and an adapter")
+        from .ci_waits import normalize as normalize_ci_wait
+        waits = []
+        seen = set()
+        for entry in raw:
+            item_id = entry["id"]
+            if item_id in seen:
+                raise Denied("Duplicate covered work item")
+            seen.add(item_id)
+            request_wait = {"kind": "ci", "publication_id": receipt["publication_id"],
+                            "checks": entry["checks"]}
+            wait = normalize_ci_wait(self.project.root, request_wait)
+            waits.append({"id": item_id, "rev": entry["rev"], "wait": wait,
+                          "input": request_wait,
+                          "record": {"id": item_id, "rev": entry["rev"], **wait}})
+        if len(canonical([entry["record"] for entry in waits])) > MAX_COVERED_BYTES:
+            raise Denied("The covered work-item set exceeds 2048 UTF-8 bytes")
+        return waits
+
+    def _pending_covered(self, waits):
+        """The covered items that still need their CI wait registered."""
+        pending = []
+        for entry in waits:
+            item = self.project.work_items.get(entry["id"])
+            if item["status"] == "blocked" and item.get("wait") == entry["wait"]:
+                # Already registered: the item's revision moved with the wait.
+                continue
+            if item["rev"] != entry["rev"]:
+                raise Denied(f"Covered work item {entry['id']} changed; "
+                             "re-read it before registering the wait")
+            pending.append(entry)
+        return pending
+
+    def _register_covered(self, waits, identity):
+        """Register the receipt-pinned CI wait on every covered work item."""
+        for entry in self._pending_covered(waits):
+            self.project.work_items.transition(
+                entry["id"], expected_rev=entry["rev"], status="blocked",
+                actor=self.role.name, wait=entry["input"],
+                reason=f"Waits for the CI request {identity}")
 
     def _op_vcs_retire(self, args: dict) -> dict:
         # Branch retirement: delete an owned temporary integration branch

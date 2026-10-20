@@ -524,7 +524,11 @@ rather than accepted as close enough. The request and the returned run
 identities are recorded durably, a dispatch marker is written before the
 provider is called, and an unresolved dispatch is never retried blindly: a
 second request would spend a second run for the same commit, so the caller
-re-observes the CI status instead. The role capability and the operator's
+re-observes the CI status instead. A request may cover work items: each
+covered item names the revision it is covered at and the checks whose result
+settles it, and the product registers a receipt-pinned CI wait on it, so the
+item waits for the request's result and its holder keeps the completion
+decision. The role capability and the operator's
 `request_grant` are both required, so the path exists without anything
 triggering it until the operator grants them.
 
