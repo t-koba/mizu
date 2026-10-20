@@ -150,6 +150,32 @@ runtime claim. The historical run reached `test_vcs_ci` at the child cap without
 a reported test failure. If the bounded run stalls again, use its partial
 per-test artifact to identify the unfinished test; timing samples are not bounds.
 
+## Real-machine checklist
+
+Use a disposable source copy and dedicated unprivileged account. Record release
+SHA, dependency-lock SHA, Node/Python/CLI versions (Pi/Podman plus `codex`/`claude`
+when those engines are configured), image digest, provider and
+model IDs, engine per profile, container runtime and version, commands and sanitized evidence.
+Do not store credentials in a public receipt.
+
+Run doctor including the sandbox, then explicit live smoke. Execute the demo
+work unit and inspect actual files and configured tests. Interrupt a bounded
+command in a disposable project; confirm process groups/containers are gone,
+the workspace remains, and restart does not silently replay. Try concurrent
+workers and verify rejection. Lower request/time/output limits deliberately and
+confirm refusal. Export an Editor capsule and attempt a write to its source;
+confirm failure and successful proposal submission. Inspect artifact evidence
+and stale snapshot labeling. Exercise backup/restore and staged update and removal of replaced code.
+
+Then enable periodic roles with modest budgets. Observe an entire day, including
+idle periods, paper generation, source refresh, provider failures and a restart.
+Track request admissions, provider bills, container count, memory, disk growth,
+iteration latency and usefulness of accepted changes. Use measured baselines;
+no throughput or cost improvements are claimed without a reproducible workload.
+
+Only after this evidence is reviewed should an operator mark a release as
+accepted for that environment. An absent test is `not_run`, not a success.
+
 ### Single-ID hosts
 
 Record additionally the wrapper path, the single `0 -> self` map observed by
