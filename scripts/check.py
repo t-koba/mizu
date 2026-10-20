@@ -261,25 +261,99 @@ def _timing_artifact_summary(tests: list) -> dict:
                                     key=lambda item: (-item['duration_seconds'], item['test']))[:20]}
 
 
+TIMING_PHASE_MAX_ENTRIES = 200
+TIMING_PHASE_MAX_NAME_LEN = 500
+TIMING_COUNTS_MAX = 1000000
+
+
+def _valid_timing_phase_name(value) -> bool:
+    import re
+    return (isinstance(value, str) and 0 < len(value) <= TIMING_PHASE_MAX_NAME_LEN
+            and re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.\-/:]*', value, re.ASCII) is not None)
+
+
+def _valid_timing_counts(value):
+    if not isinstance(value, dict):
+        return None
+    allowed = ('run', 'failed', 'skipped')
+    sanitized = {}
+    for key in allowed:
+        if key in value:
+            item = value[key]
+            if type(item) is not int or not 0 <= item <= TIMING_COUNTS_MAX:
+                return None
+            sanitized[key] = item
+    for key in value:
+        if key not in allowed:
+            return None
+    if not sanitized:
+        return None
+    return sanitized
+
+
+def sanitize_timing_phases(checks) -> list:
+    """Return bounded, sanitized per-check/phase timing entries.
+
+    Each entry holds only a stable phase name, status, duration, and safe
+    test counts. Details, exit codes, output tails, and failure diagnostics
+    are never included. Malformed entries are skipped; over-limit entries
+    are truncated. This never governs the gate outcome.
+    """
+    try:
+        phases = []
+        for entry in list(checks)[:TIMING_PHASE_MAX_ENTRIES * 2]:
+            if len(phases) >= TIMING_PHASE_MAX_ENTRIES:
+                break
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get('name')
+            status = entry.get('status')
+            if not _valid_timing_phase_name(name):
+                continue
+            if status not in ('pass', 'fail', 'not_run'):
+                continue
+            phase = {'name': name, 'status': status}
+            seconds = entry.get('seconds', None)
+            if seconds is not None:
+                if _valid_timing_seconds(seconds):
+                    phase['duration_seconds'] = round(float(seconds), 3)
+                else:
+                    continue
+            counts = _valid_timing_counts(entry.get('tests')) if 'tests' in entry else None
+            if 'tests' in entry and counts is None:
+                continue
+            if counts is not None:
+                phase['tests'] = counts
+            phases.append(phase)
+        return phases
+    except (TypeError, ValueError, RuntimeError):
+        return []
+
+
 def write_timings_artifact(path: Path, *, tests: list, status: str, exit_code: int,
-                           elapsed_seconds: float) -> None:
+                           elapsed_seconds: float, phases=()) -> None:
     """Write the dedicated timing artifact with only sanitized evidence.
 
     Best-effort: never raises; timing evidence must not change the gate
     outcome. Holds only stable test IDs, durations/completion flags, a bounded
-    hotspot/percentile summary, and minimal runtime metadata (versions,
-    platform, timeout, total elapsed, gate status). It never includes failure
-    details, output tails, or diagnostics.
+    hotspot/percentile summary, bounded sanitized per-check/phase entries
+    (stable name, status, duration, safe test counts only), and minimal
+    runtime metadata (versions, platform, timeout, total elapsed, gate
+    status). It never includes failure details, output tails, or diagnostics.
     """
     try:
-        payload = {'suite': 'windows-test-timings',
+        if not _valid_timing_seconds(elapsed_seconds):
+            elapsed_seconds = 0.0
+        payload = {'suite': 'test-timings',
                    'mizu_version': __version__,
                    'python': sys.version.split()[0], 'os': sys.platform,
                    'unittest_timeout_seconds': _unittest_timeout_seconds(),
-                   'unittest_elapsed_seconds': round(elapsed_seconds, 3),
-                   'unittest_status': status, 'unittest_exit_code': exit_code,
+                   'unittest_elapsed_seconds': round(float(elapsed_seconds), 3),
+                   'unittest_status': status if status in ('pass', 'fail', 'not_run') else 'fail',
+                   'unittest_exit_code': exit_code if type(exit_code) is int else 1,
                    'summary': _timing_artifact_summary(tests),
-                   'tests': tests}
+                   'tests': tests,
+                   'phases': sanitize_timing_phases(phases)}
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2) + '\n', encoding='utf-8')
     except (OSError, ValueError, TypeError, RuntimeError):
@@ -449,10 +523,16 @@ def main():
     # The timing sidecar is likewise private and run-local, flushed per test so
     # a killed child still leaves a partial unfinished entry. Timings are
     # evidence only: parsing is bounded/validated and never governs the gate.
-    # The dedicated windows-test-timings.json artifact (sanitized IDs,
-    # durations/completion, and a bounded hotspot summary) is opt-in via
-    # --test-timings and survives
-    # an ordinary child timeout; it records evidence, not a policy.
+    # The dedicated test-timings artifact (sanitized per-test IDs,
+    # durations/completion, a bounded hotspot summary, and bounded sanitized
+    # per-check/phase entries) is opt-in via --test-timings. Per-test timings
+    # are parsed immediately so they survive an ordinary child timeout; the
+    # artifact itself is written after all checks finish so it also carries
+    # phase data. It records evidence, not a policy.
+    pending_timings: list = []
+    pending_unittest_status = 'fail'
+    pending_unittest_exit = 1
+    pending_unittest_elapsed = 0.0
     with tempfile.TemporaryDirectory(prefix='mizu-unittest-') as temporary:
         sidecar = Path(temporary) / 'failures.jsonl'
         command = [sys.executable, '-u', str(ROOT / 'scripts/check_unittest.py'), str(sidecar)]
@@ -466,15 +546,26 @@ def main():
                 count=unittest_counts, failure_summary=lambda: unittest_failure_summary(sidecar),
                 timeout=_unittest_timeout_seconds())
         if args.test_timings and timing_sidecar is not None and timing_origin is not None:
-            timings = parse_unittest_timings(
-                timing_sidecar, elapsed_seconds=ended_at - timing_origin)
+            try:
+                pending_timings = parse_unittest_timings(
+                    timing_sidecar, elapsed_seconds=ended_at - timing_origin)
+            except (OSError, ValueError, TypeError, RuntimeError):
+                pending_timings = []
             unittest_entry = next((c for c in reversed(checks)
                                    if c.get('name') == 'python-unit-and-contract-tests'),
                                   {'status': 'fail', 'exit_code': 1})
-            write_timings_artifact(args.test_timings, tests=timings,
-                                   status=str(unittest_entry.get('status', 'fail')),
-                                   exit_code=int(unittest_entry.get('exit_code', 1)),
-                                   elapsed_seconds=ended_at - timing_origin)
+            try:
+                pending_unittest_status = str(unittest_entry.get('status', 'fail'))
+            except (AttributeError, ValueError):
+                pending_unittest_status = 'fail'
+            try:
+                pending_unittest_exit = int(unittest_entry.get('exit_code', 1))
+            except (TypeError, ValueError):
+                pending_unittest_exit = 1
+            try:
+                pending_unittest_elapsed = ended_at - timing_origin
+            except TypeError:
+                pending_unittest_elapsed = 0.0
     if not shutil.which('node'):
         checks.append({'name': 'node-available', 'status': 'fail'})
     # bash is a POSIX convenience for shell-syntax checks, not a runtime
@@ -525,6 +616,15 @@ def main():
         stable_details = 'source manifest unreadable after validation'
     checks.append({'name': 'source-manifest-stable', 'status': 'pass' if source_stable else 'fail',
                    'details': stable_details})
+    if args.test_timings:
+        # Written after all checks so phases are complete; per-test evidence
+        # was already captured above and survives a unittest child timeout.
+        # Best-effort: never changes the gate outcome.
+        write_timings_artifact(args.test_timings, tests=pending_timings,
+                               status=pending_unittest_status,
+                               exit_code=pending_unittest_exit,
+                               elapsed_seconds=pending_unittest_elapsed,
+                               phases=checks)
     receipt = {'suite': 'offline', 'report_version': OFFLINE_REPORT_VERSION,
                'mizu_version': __version__, 'source_sha256': source_sha,
                'allowed_not_run': sorted(allowed_not_run), 'bash_available': has_bash,

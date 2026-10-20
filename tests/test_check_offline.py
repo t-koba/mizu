@@ -543,7 +543,7 @@ class UnittestFailureSummaryTests(unittest.TestCase):
                 self.assertFalse(paths[0].parent.exists(), 'private sidecar directory must be cleaned')
                 self.assertEqual(len(paths), 1, 'local checks do not collect timing sidecars without opt-in')
                 self.assertFalse((Path(temporary) / 'private-validation'
-                                  / 'windows-test-timings.json').exists())
+                                  / 'test-timings.json').exists())
                 self.assertNotIn('raw_fixture_value', details)
                 self.assertNotIn('forged_test', details)
                 self.assertNotIn('test_fake.py', details)
@@ -831,11 +831,11 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
                           CHECK.unittest_failure_summary(failures))
             self.assertEqual(CHECK.parse_unittest_timings(timings, elapsed_seconds=10.0), [])
             # Artifact writing is best-effort and holds no diagnostics.
-            artifact = Path(temporary) / 'windows-test-timings.json'
+            artifact = Path(temporary) / 'test-timings.json'
             CHECK.write_timings_artifact(artifact, tests=[], status='fail', exit_code=1,
-                                          elapsed_seconds=2.5)
+                                          elapsed_seconds=2.5, phases=[])
             payload = json.loads(artifact.read_text(encoding='utf-8'))
-            self.assertEqual(payload['suite'], 'windows-test-timings')
+            self.assertEqual(payload['suite'], 'test-timings')
             self.assertEqual(payload['tests'], [])
             self.assertEqual(payload['unittest_elapsed_seconds'], 2.5)
             self.assertNotIn('details', json.dumps(payload))
@@ -843,7 +843,7 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
 
     def test_timing_artifact_has_bounded_hotspot_summary(self):
         with tempfile.TemporaryDirectory() as temporary:
-            artifact = Path(temporary) / 'windows-test-timings.json'
+            artifact = Path(temporary) / 'test-timings.json'
             tests = [
                 {'test': 'sample.Suite.test_fast', 'duration_seconds': 1.0, 'completed': True},
                 {'test': 'sample.Suite.test_medium', 'duration_seconds': 2.0, 'completed': True},
@@ -916,18 +916,29 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
         workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
         # Immutable v4.6.2 pin; short retention; always with missing-file tolerance.
         self.assertIn('actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02', workflow)
-        self.assertIn('name: Upload Windows per-test timings', workflow)
-        self.assertIn('--test-timings private-validation/windows-test-timings.json', workflow)
-        ordinary = workflow.split('name: Offline core and transport contracts', 1)[1].split(
-            '      - name: Offline core and transport contracts with timings', 1)[0]
-        self.assertNotIn('--test-timings', ordinary)
-        upload = workflow.split('name: Upload Windows per-test timings', 1)[1].split('  durable-contract:', 1)[0]
+        # Temporary one-run collection: every core cell emits the sanitized
+        # artifact under a per-OS/Python name; reverted after evidence.
+        self.assertIn('name: Upload per-matrix test timings', workflow)
+        self.assertNotIn('name: Upload Windows per-test timings', workflow)
+        self.assertIn('--test-timings private-validation/test-timings-${{ matrix.os }}-py${{ matrix.python }}.json', workflow)
+        self.assertNotIn('windows-test-timings.json', workflow)
+        self.assertIn('name: test-timings-${{ matrix.os }}-py${{ matrix.python }}', workflow)
+        upload = workflow.split('name: Upload per-matrix test timings', 1)[1].split('  durable-contract:', 1)[0]
         self.assertEqual([line.strip() for line in upload.splitlines() if line.strip().startswith('path:')],
-                         ['path: private-validation/windows-test-timings.json'])
-        self.assertIn('private-validation/windows-test-timings.json', workflow)
+                         ['path: private-validation/test-timings-${{ matrix.os }}-py${{ matrix.python }}.json'])
+        self.assertIn('private-validation/test-timings-${{ matrix.os }}-py${{ matrix.python }}.json', workflow)
         self.assertIn('retention-days: 7', workflow)
         self.assertIn('if-no-files-found: warn', workflow)
-        self.assertIn("if: always() && runner.os == 'Windows' && matrix.python == '3.13'", workflow)
+        # Per-cell upload always runs; the core timings step itself is
+        # unconditional so all 12 cells report (no Windows-only gate).
+        self.assertIn('\n        if: always()\n', upload)
+        self.assertNotIn("runner.os == 'Windows' && matrix.python == '3.13'", workflow.split('name: Upload per-matrix test timings', 1)[1].split('  durable-contract:', 1)[0])
+        core_section = workflow.split('name: Offline core and transport contracts with timings', 1)[1].split('- name: Core installer', 1)[0]
+        self.assertIn('--test-timings', core_section)
+        self.assertNotIn("\n        if: runner.os", core_section)
+        # No diagnostics upload: only the dedicated timings path is uploaded.
+        self.assertNotIn('path: private-validation/offline.json', workflow)
+        self.assertNotIn('path: private-validation/durable.json', workflow)
         # Timing stays diagnostic; the original 40-minute/1450-second scope is
         # enforced while the always-uploaded artifact preserves partial progress.
         self.assertIn('1450', workflow)
@@ -939,7 +950,7 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             report = root / 'report.json'
-            artifact = root / 'private-validation' / 'windows-test-timings.json'
+            artifact = root / 'private-validation' / 'test-timings.json'
 
             class FakeProcess:
                 def __init__(self, command, **kwargs):
@@ -982,7 +993,7 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
                     mock.patch.object(CHECK.sys, 'stdout', output):
                 self.assertEqual(CHECK.main(), 1)
             payload = json.loads(artifact.read_text(encoding='utf-8'))
-            self.assertEqual(payload['suite'], 'windows-test-timings')
+            self.assertEqual(payload['suite'], 'test-timings')
             self.assertEqual(payload['unittest_status'], 'fail')
             self.assertEqual(payload['unittest_elapsed_seconds'], 8.0)
             self.assertIn('timed out after', json.loads(report.read_text(encoding='utf-8'))['checks'][1]['details'])
@@ -993,13 +1004,118 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
             self.assertEqual(by_test['tests.RealTests.test_hung'],
                              {'test': 'tests.RealTests.test_hung',
                               'duration_seconds': 7.4, 'completed': False})
-            # Only sanitized IDs, durations, completion, a bounded summary, and minimal metadata.
+            # Only sanitized IDs, durations, completion, a bounded summary,
+            # bounded phases, and minimal metadata; artifact is written after
+            # all checks so phases are complete despite the unittest timeout.
             self.assertEqual(set(payload), {'suite', 'mizu_version', 'python', 'os',
                                             'unittest_timeout_seconds', 'unittest_elapsed_seconds',
                                             'unittest_status',
-                                            'unittest_exit_code', 'summary', 'tests'})
+                                            'unittest_exit_code', 'summary', 'tests', 'phases'})
             for entry in payload['tests']:
                 self.assertEqual(set(entry), {'test', 'duration_seconds', 'completed'})
+            by_phase = {phase['name']: phase for phase in payload['phases']}
+            # The timed-out unittest phase is present with fail status; later
+            # phases (syntax, manifest) are also recorded because the write
+            # happens after checks finish.
+            self.assertIn('python-unit-and-contract-tests', by_phase)
+            self.assertEqual(by_phase['python-unit-and-contract-tests']['status'], 'fail')
+            self.assertIn('python-syntax', by_phase)
+            self.assertIn('source-manifest-stable', by_phase)
+            for phase in payload['phases']:
+                self.assertEqual(set(phase) - {'duration_seconds', 'tests'}, {'name', 'status'})
+                self.assertNotIn('details', phase)
+                self.assertNotIn('exit_code', phase)
+            blob = json.dumps(payload)
+            self.assertNotIn('timed out after', blob)
+            self.assertNotIn('output tail', blob)
+            self.assertNotIn('details', blob)
+
+    def test_timing_phases_are_sanitized_and_bounded(self):
+        # Only stable name/status/duration/counts survive; details, exit
+        # codes, output, and diagnostics are dropped. Malformed names,
+        # statuses, durations, and counts are skipped; entries are bounded.
+        checks = [
+            {'name': 'python-syntax', 'status': 'pass'},
+            {'name': 'python-unit-and-contract-tests', 'status': 'fail',
+             'seconds': 12.5, 'exit_code': 1,
+             'tests': {'run': 10, 'failed': 2, 'skipped': 1},
+             'details': 'timed out after 1450 s; secret output tail'},
+            {'name': 'javascript-syntax:adapters/pi/launcher.mjs', 'status': 'pass',
+             'seconds': 0.4},
+            {'name': 'node-transport-and-extension-tests', 'status': 'pass',
+             'seconds': 1.0, 'tests': {'run': 5, 'failed': 0, 'skipped': 0}},
+            {'name': '/synthetic-private-host/evil', 'status': 'pass', 'seconds': 1.0,
+             'details': 'raw_fixture_value'},
+            {'name': 'tests.RealTests.test_ok (fixture_value)', 'status': 'pass'},
+            {'name': 'good-name', 'status': 'bogus', 'seconds': 1.0},
+            {'name': 'good-name-2', 'status': 'pass', 'seconds': float('inf')},
+            {'name': 'good-name-3', 'status': 'pass', 'seconds': 1.0,
+             'tests': {'run': 'many', 'failed': 0}},
+            {'name': 'good-name-4', 'status': 'pass', 'seconds': 1.0,
+             'tests': {'run': 1, 'extra': 2}},
+            {'name': 'x' * 501, 'status': 'pass'},
+            'not-a-dict',
+        ]
+        phases = CHECK.sanitize_timing_phases(checks)
+        self.assertEqual([phase['name'] for phase in phases],
+                         ['python-syntax', 'python-unit-and-contract-tests',
+                          'javascript-syntax:adapters/pi/launcher.mjs',
+                          'node-transport-and-extension-tests'])
+        unit = next(phase for phase in phases if phase['name'] == 'python-unit-and-contract-tests')
+        self.assertEqual(unit, {'name': 'python-unit-and-contract-tests', 'status': 'fail',
+                               'duration_seconds': 12.5,
+                               'tests': {'run': 10, 'failed': 2, 'skipped': 1}})
+        blob = json.dumps(phases)
+        for leaked in ('raw_fixture_value', 'synthetic-private-host', 'fixture_value',
+                       'secret', 'output tail', 'details', 'exit_code'):
+            self.assertNotIn(leaked, blob)
+        # Bound: at most 200 phases even with many valid checks.
+        many = [{'name': f'phase-{index:04}', 'status': 'pass', 'seconds': 0.1}
+                for index in range(500)]
+        self.assertEqual(len(CHECK.sanitize_timing_phases(many)), 200)
+        # Counts must be ints in range; bools and negatives are rejected.
+        self.assertIsNone(CHECK._valid_timing_counts({'run': True}))
+        self.assertIsNone(CHECK._valid_timing_counts({'run': -1}))
+        self.assertIsNone(CHECK._valid_timing_counts({'run': 1000001}))
+        self.assertEqual(CHECK._valid_timing_counts({'run': 3}), {'run': 3})
+
+    def test_timing_artifact_pass_records_phases_without_diagnostics(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            artifact = Path(temporary) / 'test-timings.json'
+            tests = [{'test': 'sample.Suite.test_ok', 'duration_seconds': 0.5,
+                      'completed': True}]
+            phases = [{'name': 'python-syntax', 'status': 'pass'},
+                      {'name': 'python-unit-and-contract-tests', 'status': 'pass',
+                       'seconds': 3.0, 'tests': {'run': 1, 'failed': 0, 'skipped': 0},
+                       'details': 'must not leak', 'exit_code': 0}]
+            CHECK.write_timings_artifact(artifact, tests=tests, status='pass',
+                                         exit_code=0, elapsed_seconds=3.0, phases=phases)
+            payload = json.loads(artifact.read_text(encoding='utf-8'))
+            self.assertEqual(payload['suite'], 'test-timings')
+            self.assertEqual(payload['unittest_status'], 'pass')
+            self.assertEqual(payload['unittest_exit_code'], 0)
+            self.assertEqual(payload['tests'], tests)
+            self.assertEqual(payload['phases'],
+                             [{'name': 'python-syntax', 'status': 'pass'},
+                              {'name': 'python-unit-and-contract-tests', 'status': 'pass',
+                               'duration_seconds': 3.0,
+                               'tests': {'run': 1, 'failed': 0, 'skipped': 0}}])
+            blob = json.dumps(payload)
+            self.assertNotIn('must not leak', blob)
+            self.assertNotIn('details', blob)
+
+    def test_matrix_scope_timeouts_gates_and_jobs_preserved(self):
+        workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
+        # The 3x4 matrix, timeouts, installer step, and durable job are unchanged.
+        self.assertIn('os: [ubuntu-24.04, macos-latest, windows-latest]', workflow)
+        self.assertIn('python: ["3.11", "3.12", "3.13", "3.14"]', workflow)
+        self.assertIn("timeout-minutes: ${{ matrix.os == 'windows-latest' && 40 || 20 }}", workflow)
+        self.assertIn('run: python scripts/check.py --report private-validation/offline.json', workflow)
+        self.assertIn('--allow-not-run node-durable-contract-tests,node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests', workflow)
+        self.assertIn("- name: Core installer and CLI lifecycle\n        if: runner.os == 'Linux' && matrix.python == '3.13'", workflow)
+        self.assertIn('run: ./scripts/test-install.sh private-validation/offline.json', workflow)
+        self.assertIn('  durable-contract:', workflow)
+        self.assertIn('run: python scripts/check.py --report private-validation/durable.json', workflow)
 
 
 class SdkGateEntryTests(unittest.TestCase):
