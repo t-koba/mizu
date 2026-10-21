@@ -198,3 +198,33 @@ class ReadyWorkTests(Fixture):
             daemon(config, "sample", "worker")
         self.assertEqual(starts, [1000, 1100])
         self.assertEqual(waits, [10] * 12)
+
+class SatisfiedWorkWaitTests(Fixture):
+    item = ReadyWorkTests.item
+    parked = ReadyWorkTests.parked
+
+    def test_expired_deadline_wakes_and_preserves_blocked_revision(self):
+        self.parked('done')
+        original = self.item('expired', 'blocked', {'kind': 'deadline', 'at': '2000-01-01T00:00:00+00:00'})
+        before = self.project.work_items.get(original['id'])
+        page = self.project.work_items.page_ready(limit=1)
+        self.assertEqual(page['total'], 1)
+        self.assertEqual(page['items'][0]['status'], 'blocked')
+        self.assertTrue(should_run(self.project, self.project.snapshots.get(), role_name='worker'))
+        self.assertEqual(self.project.work_items.get(original['id']), before)
+        ready = json.loads(prompt_for(self.context()))['ready_work']['items'][0]
+        self.assertTrue(ready['wait_satisfied'])
+        self.assertEqual(ready['wait']['kind'], 'deadline')
+
+    def test_unexpired_and_unstructured_blocks_stay_out_of_ready_page(self):
+        self.item('future', 'blocked', {'kind': 'deadline', 'at': '2099-01-01T00:00:00+00:00'})
+        self.item('manual', 'blocked')
+        self.assertEqual(self.project.work_items.page_ready()['total'], 0)
+
+    def test_code_change_wait_wakes_only_on_published_code_change(self):
+        self.parked('done')
+        self.item('code', 'blocked', {'kind': 'code_change'})
+        self.assertEqual(self.project.work_items.page_ready()['total'], 0)
+        (self.project.workspace / 'changed.txt').write_text('changed\n')
+        self.parked('done')
+        self.assertEqual(self.project.work_items.page_ready()['total'], 1)

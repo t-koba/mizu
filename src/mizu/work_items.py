@@ -1253,12 +1253,14 @@ class WorkItems:
             return self._page_open_impl(cursor=cursor, limit=limit, readonly=False)
 
     def page_ready(self, *, limit=25) -> dict:
-        """Return a bounded page of open/doing items without structured waits.
+        """Return actionable open/doing items and blocked items whose wait is due.
 
         Same bounds, ordering, recovery, lock and fail-closed contract as
         page_open. Filter before selection/counting, scanning the ledger with
         O(limit) retained rows: blocked rows cannot hide ready work. No state
-        transitions or wait resolution are performed. Legacy unseeded decisions
+        transitions are performed. Satisfied generic waits re-enter this page
+        for the writer to reassess; they never imply completion. CI waits retain
+        their receipt-bound event path. Legacy unseeded decisions
         remain explicit coverage gaps, never inferred ready work.
         """
         with lock(self.root / "locks" / "insights.lock"):
@@ -1372,6 +1374,7 @@ class WorkItems:
         if type(limit) is not int or not 1 <= limit <= MAX_OPEN_PAGE_ROWS:
             raise Denied("Work-item page limit must be an integer in [1, 100]")
         events = self._iter_item_events(recover=not readonly)
+        published_snapshot = None
         selected = []
         total = 0
         eligible = 0
@@ -1388,8 +1391,17 @@ class WorkItems:
             item = view["item"]
             if item["status"] not in ("open", "doing", "blocked"):
                 continue
-            if ready_only and (item["status"] not in ("open", "doing") or item.get("wait") is not None):
-                continue
+            if ready_only:
+                if item["status"] == "blocked":
+                    wait = item.get("wait")
+                    if not wait or wait.get("kind") == "ci":
+                        continue
+                    if wait.get("kind") == "code_change" and published_snapshot is None:
+                        published_snapshot = self.snapshots.get()
+                    if not self.insights._wait_due(wait, published_snapshot):
+                        continue
+                elif item.get("wait") is not None:
+                    continue
             total += 1
             sort_key, row = self._open_row(item, view)
             if cursor_key is not None and sort_key <= cursor_key:
@@ -1417,6 +1429,7 @@ class WorkItems:
         if type(limit) is not int or not 0 <= limit <= MAX_CLOSED_PAGE_ROWS:
             raise Denied("Closed work-item page limit must be an integer in [0, 100]")
         events = self._iter_item_events(recover=not readonly)
+        published_snapshot = None
         selected = []
         total = 0
         for event_id, event in events:

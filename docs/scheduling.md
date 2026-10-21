@@ -101,6 +101,15 @@ floored to integer seconds, clamps future timestamps to zero and saturates at
 produce JSON null, never a fabricated age. Age is display-only and does not
 prioritize admission.
 
+A blocked item with a satisfied `deadline`, `code_change`,
+`insight_decided`, or `dependency` wait re-enters `ready_work` for reassessment.
+Its prompt row includes the normalized `wait` and `wait_satisfied: true`;
+the ledger stays blocked at the same revision until the writer decides what
+work or evidence remains. A missing or unsatisfied wait is not ready. CI
+waits keep their existing receipt-bound result notifications. Re-evaluation
+uses current local time, published code and exact-revision decisions; it
+neither imports acceptance nor closes work automatically.
+
 The store's internal `page_ready(limit=...)` shares the open-page validation,
 recovery and locking contract. It filters before bounded selection across the
 ledger, so even a general page filled with blocked items cannot hide ready
@@ -303,3 +312,12 @@ materializing the published snapshot (`project.snapshots.materialize`).
 No role gets an empty run-local input by accident: read roles observe the
 same content-addressed snapshot the writer published, mounted read-only by
 the sandbox — never the live workspace, never an unseeded directory.
+
+On-change and event attempts evaluate the same scheduling conditions before
+entering execution admission and again after obtaining its locks. An unchanged
+or unsubscribed attempt returns its ordinary `skipped` reason without queueing
+or using a model request. A queued attempt can still become obsolete when
+another run consumes its event; the locked recheck returns `skipped` in that
+case, preserving pending events until their actual consumer acknowledges them.
+A disappeared admission ticket by itself is not evidence of completed work:
+consult the command result (`skipped` or `Busy`) or the run's terminal receipt.

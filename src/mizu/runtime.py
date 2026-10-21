@@ -270,7 +270,9 @@ def _ready_work_projection(context):
     current_time = time.time()
     return {"items": [{**{key: row[key] for key in
                         ("id", "title", "status", "stale", "redecision", "updated_at")},
-                       "age_seconds": _ready_work_age(row["updated_at"], current_time)}
+                       "age_seconds": _ready_work_age(row["updated_at"], current_time),
+                       **({"wait": row["wait"], "wait_satisfied": True}
+                          if row["status"] == "blocked" else {})}
                       for row in page["items"]],
             **{key: page[key] for key in ("total", "overflow_count", "truncated",
                                          "unseeded_decisions", "coverage_complete")}}
@@ -3648,6 +3650,105 @@ class Engine:
         self._admit(project, role_name, selection_role, stack, wait=False)
         context._slot_lease = True
 
+    def _dispatch_state(self, project, role_name, role, *, event_trigger):
+        """Recompute scheduling inputs; a skipped attempt never claims execution.
+
+        Used before queueing and again under dispatch locks. No events or
+        observed cursors are acknowledged here, so a concurrent consumer can
+        make a queued attempt obsolete without losing pending work.
+        """
+        snapshot = project.snapshots.get()
+        cursor = read_json(project.root / "observed" / f"{role_name}.json", {})
+        code_unchanged = role.on_change and _on_change_observed(cursor, snapshot)
+        triggers = tuple(getattr(role, "decision_events", ()) or ())
+        sources = getattr(role, "decision_sources", "own") or "own"
+        decision_events = project.insights.decision_events(
+            role_name, triggers, limit=role_decision_events_limit(project.config, role),
+            sources=sources) if triggers else []
+        terminal_page = work_item_events.pending(
+            project.work_items, role_name, role.work_item_events, sources=role.work_item_sources,
+            limit=role_work_item_events_limit(project.config, role))
+        terminal_events = terminal_page["events"]
+        wait_events = (project.insights.due_waits(role_name, snapshot)
+                       + ci_waits.pending(project.work_items, role_name))
+        # Dependency obligations addressed to this role ride along when
+        # it runs for other reasons; they never admit a run on their
+        # own, so no new wake source is implied.
+        obligations = project.insights.pending_obligations(role_name)
+        # Event-triggered dispatch (platform file triggers) admits only on a
+        # subscribed substantive decision/terminal event or a due structured wait
+        # for this role. Decision routing uses decision_sources: own-source
+        # deferrals ride along but do not admit; decision_sources="any" admits
+        # on matching actions including deferrals. Terminal routing is already
+        # filtered independently by work_item_sources above. Otherwise
+        # it exits before allocating a run directory or model use,
+        # like unchanged-code admission. Periodic timers invoke without the
+        # flag, so scheduled discovery still runs at its interval.
+        if sources == "any":
+            substantive_events = [e for e in decision_events if isinstance(e, dict)]
+        else:
+            substantive_events = [e for e in decision_events
+                                  if isinstance(e, dict) and e.get("action") != "defer"]
+        try:
+            ci_present = _ci_due_for(project, self.config, role)
+        except Exception:
+            ci_present = []
+        try:
+            _ci_snapshot_id = snapshot.get("id") if isinstance(snapshot, dict) else None
+            ci_failures = _ci_due_for(project, self.config, role, _ci_snapshot_id, time.time())
+        except Exception:
+            ci_failures = []
+        ready_work = role.workspace == "write" and _has_ready_work(project)
+        if event_trigger:
+            event_gate = _scheduling.evaluate(_scheduling.DispatchFacts(
+                event_trigger=True,
+                workspace_write=role.workspace == "write",
+                ready_work=ready_work,
+                has_decision=bool(substantive_events),
+                has_work_item=bool(terminal_events),
+                has_wait=bool(wait_events or check_jobs.pending(project, role_name)),
+                has_ci=bool(ci_failures),
+            ))
+            if event_gate.skipped == "no-event":
+                return {"skip": {"skipped": "no-event", "snapshot": snapshot["id"],
+                        "code_digest": snapshot["code_digest"]}}
+        # Writable roles consume these generations in their next snapshot.
+        # Read-only on-change roles keep their code/event cursor semantics;
+        # they cannot acknowledge snapshot-wide input by publishing.
+        goal_changed = digest(project.goal.encode()) != snapshot["goal_digest"]
+        inbox_changed = project.insights.generation() != snapshot.get("inbox_seen", "")
+        operator_woke = project.control().get("wake_generation", "") != snapshot.get("wake_generation", "")
+        _dispatch_now = time.time()
+        prior_wait_expired = (snapshot.get("outcome") == "wait"
+                              and snapshot.get("wake_at") is not None
+                              and _dispatch_now >= snapshot["wake_at"])
+        progress_self_admits = False
+        if (role.workspace == "write" and snapshot.get("outcome") in ("continue", "bounded")
+                and snapshot.get("progress") is not None):
+            disposition = progress_disposition(snapshot["progress"], snapshot["outcome"],
+                                               self.config, role_name)
+            progress_self_admits = disposition != "parked_no_progress"
+        _dispatch = _scheduling.evaluate(_scheduling.DispatchFacts(
+            event_trigger=bool(event_trigger),
+            on_change=bool(role.on_change),
+            code_unchanged=bool(code_unchanged),
+            workspace_write=role.workspace == "write",
+            ready_work=ready_work,
+            has_decision=bool(substantive_events),
+            has_work_item=bool(terminal_events),
+            has_wait=bool(wait_events or check_jobs.pending(project, role_name)),
+            has_ci=bool(ci_failures),
+            goal_changed=bool(goal_changed),
+            inbox_changed=bool(inbox_changed),
+            operator_woke=bool(operator_woke),
+            wait_expired=bool(prior_wait_expired),
+            progress_self_admits=bool(progress_self_admits),
+        ))
+        if _dispatch.skipped == "unchanged":
+            return {"skip": {"skipped": "unchanged", "snapshot": snapshot["id"],
+                    "code_digest": snapshot["code_digest"]}}
+        return {'snapshot': snapshot, 'sources': sources, 'terminal_events': terminal_events, 'terminal_page': terminal_page, 'wait_events': wait_events, 'obligations': obligations, 'ci_present': ci_present, 'ci_failures': ci_failures, 'prior_wait_expired': prior_wait_expired, 'decision_events': decision_events, '_dispatch': _dispatch}
+
     def run(self, project: Project, role_name: str, *, attributes=None, retry_busy: bool = False,
                 event_trigger: bool = False, probes_serviced: bool = False) -> dict:
         if role_name not in project.roles:
@@ -3670,98 +3771,27 @@ class Engine:
         with contextlib.ExitStack() as stack:
             if "check_job" in role.capabilities and check_jobs.waiting(project, role_name):
                 raise Busy("Waiting for sandbox check completion; no model slot acquired")
-            admission_elapsed = self._admit(project, role_name, role, stack, wait=retry_busy)
+            self._check_admission(project)
             project.insights.ingest_editor(keep_days=project.config.limits.retention_days)
-            snapshot = project.snapshots.get()
-            cursor = read_json(project.root / "observed" / f"{role_name}.json", {})
-            code_unchanged = role.on_change and _on_change_observed(cursor, snapshot)
-            triggers = tuple(getattr(role, "decision_events", ()) or ())
-            sources = getattr(role, "decision_sources", "own") or "own"
-            decision_events = project.insights.decision_events(
-                role_name, triggers, limit=role_decision_events_limit(project.config, role),
-                sources=sources) if triggers else []
-            terminal_page = work_item_events.pending(
-                project.work_items, role_name, role.work_item_events, sources=role.work_item_sources,
-                limit=role_work_item_events_limit(project.config, role))
-            terminal_events = terminal_page["events"]
-            wait_events = (project.insights.due_waits(role_name, snapshot)
-                           + ci_waits.pending(project.work_items, role_name))
-            # Dependency obligations addressed to this role ride along when
-            # it runs for other reasons; they never admit a run on their
-            # own, so no new wake source is implied.
-            obligations = project.insights.pending_obligations(role_name)
-            # Event-triggered dispatch (platform file triggers) admits only on a
-            # subscribed substantive decision/terminal event or a due structured wait
-            # for this role. Decision routing uses decision_sources: own-source
-            # deferrals ride along but do not admit; decision_sources="any" admits
-            # on matching actions including deferrals. Terminal routing is already
-            # filtered independently by work_item_sources above. Otherwise
-            # it exits before allocating a run directory or model use,
-            # like unchanged-code admission. Periodic timers invoke without the
-            # flag, so scheduled discovery still runs at its interval.
-            if sources == "any":
-                substantive_events = [e for e in decision_events if isinstance(e, dict)]
-            else:
-                substantive_events = [e for e in decision_events
-                                      if isinstance(e, dict) and e.get("action") != "defer"]
-            try:
-                ci_present = _ci_due_for(project, self.config, role)
-            except Exception:
-                ci_present = []
-            try:
-                _ci_snapshot_id = snapshot.get("id") if isinstance(snapshot, dict) else None
-                ci_failures = _ci_due_for(project, self.config, role, _ci_snapshot_id, time.time())
-            except Exception:
-                ci_failures = []
-            ready_work = role.workspace == "write" and _has_ready_work(project)
-            if event_trigger:
-                event_gate = _scheduling.evaluate(_scheduling.DispatchFacts(
-                    event_trigger=True,
-                    workspace_write=role.workspace == "write",
-                    ready_work=ready_work,
-                    has_decision=bool(substantive_events),
-                    has_work_item=bool(terminal_events),
-                    has_wait=bool(wait_events or check_jobs.pending(project, role_name)),
-                    has_ci=bool(ci_failures),
-                ))
-                if event_gate.skipped == "no-event":
-                    return {"skipped": "no-event", "snapshot": snapshot["id"],
-                            "code_digest": snapshot["code_digest"]}
-            # Writable roles consume these generations in their next snapshot.
-            # Read-only on-change roles keep their code/event cursor semantics;
-            # they cannot acknowledge snapshot-wide input by publishing.
-            goal_changed = digest(project.goal.encode()) != snapshot["goal_digest"]
-            inbox_changed = project.insights.generation() != snapshot.get("inbox_seen", "")
-            operator_woke = project.control().get("wake_generation", "") != snapshot.get("wake_generation", "")
-            _dispatch_now = time.time()
-            prior_wait_expired = (snapshot.get("outcome") == "wait"
-                                  and snapshot.get("wake_at") is not None
-                                  and _dispatch_now >= snapshot["wake_at"])
-            progress_self_admits = False
-            if (role.workspace == "write" and snapshot.get("outcome") in ("continue", "bounded")
-                    and snapshot.get("progress") is not None):
-                disposition = progress_disposition(snapshot["progress"], snapshot["outcome"],
-                                                   self.config, role_name)
-                progress_self_admits = disposition != "parked_no_progress"
-            _dispatch = _scheduling.evaluate(_scheduling.DispatchFacts(
-                event_trigger=bool(event_trigger),
-                on_change=bool(role.on_change),
-                code_unchanged=bool(code_unchanged),
-                workspace_write=role.workspace == "write",
-                ready_work=ready_work,
-                has_decision=bool(substantive_events),
-                has_work_item=bool(terminal_events),
-                has_wait=bool(wait_events or check_jobs.pending(project, role_name)),
-                has_ci=bool(ci_failures),
-                goal_changed=bool(goal_changed),
-                inbox_changed=bool(inbox_changed),
-                operator_woke=bool(operator_woke),
-                wait_expired=bool(prior_wait_expired),
-                progress_self_admits=bool(progress_self_admits),
-            ))
-            if _dispatch.skipped == "unchanged":
-                return {"skipped": "unchanged", "snapshot": snapshot["id"],
-                        "code_digest": snapshot["code_digest"]}
+            if event_trigger or role.on_change:
+                dispatch_state = self._dispatch_state(project, role_name, role, event_trigger=event_trigger)
+                if dispatch_state.get("skip"):
+                    return dispatch_state["skip"]
+            admission_elapsed = self._admit(project, role_name, role, stack, wait=retry_busy)
+            dispatch_state = self._dispatch_state(project, role_name, role, event_trigger=event_trigger)
+            if dispatch_state.get("skip"):
+                return dispatch_state["skip"]
+            snapshot = dispatch_state['snapshot']
+            sources = dispatch_state['sources']
+            terminal_events = dispatch_state['terminal_events']
+            terminal_page = dispatch_state['terminal_page']
+            wait_events = dispatch_state['wait_events']
+            obligations = dispatch_state['obligations']
+            ci_present = dispatch_state['ci_present']
+            ci_failures = dispatch_state['ci_failures']
+            prior_wait_expired = dispatch_state['prior_wait_expired']
+            decision_events = dispatch_state['decision_events']
+            _dispatch = dispatch_state['_dispatch']
             # Pre-execution selection probe: evaluate before allocating a run
             # directory so unchanged waits coalesce onto one audit run
             # instead of one directory per idle poll. A changed wait reason
