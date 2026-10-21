@@ -25,30 +25,21 @@ runtime code. A fourth engine needs, in this order:
    and completion/evidence shape. `doctor` and `check-cli` derive probe commands,
    required flags and expected exports from this file (`adapter_contract()`), and
    declared exports must appear in the launcher `--check-contract` report; drift
-   fails instead of passing silently. The probe's child is bounded
-   host-relatively: it is measured once under the ceiling and the probe that
-   follows is held to twelve times this host's measured start-up, at least
-   60 s and at most 150 s -- the same floor, multiplier, child ceiling and
-   measuring ceiling the launcher harness uses for the identical child, so
-   the product and the harness never hold two answers for one child's
-   start-up (ADR-042). The measurement joins this host's record of the
-   largest start-up cost it has seen for that engine, so the runtime, the
-   doctor and the contract check hold the identical child to one bound, and
-   the cost the probe reports is the cost that bound was derived from: the
-   pair satisfies the rule the product reports, and the bound it reports is
-   the bound the child was held to. A child that answered is measured by its
-   answer, whatever that answer was: the launcher harness measures the
-   identical child by its first answer, which is a refusal, so a child that
-   failed is measured and bounded like any other answered child, never with
-   the ceiling that measured it. A child that outlives its bound, or that was killed before it
-   could report, is reported as a bound refusal that names its own outcome --
-   a child a signal stopped is named by that signal -- never as a missing
-   capability; `doctor` and `check-cli` share that one classification, so a
-   child reads the same way wherever it is probed. The same host-relative
-   bound governs the runtime's own handshake with that child: the driver
-   waits for the child's first answer under the bound this host's record
-   requires, and a child that does not answer is refused by the bound it was
-   held to, so the product never holds one child to two bounds.
+   fails instead of passing silently. A one-shot probe is first measured from
+   process spawn through exit under a 150 s ceiling, then run under the per-engine
+   bound: 12× the largest recorded interval, with a 60 s floor and 150 s ceiling.
+   A completed refusal contributes a measurement; a measuring run that does not
+   complete leaves the floor in place. The record can also contain a managed
+   runtime's spawn-to-first-protocol-response interval, so the probe and runtime
+   endpoints are not equivalent and the larger interval supplies the bound.
+   Managed Pi, Claude and Codex use that bound for their initial handshake;
+   Codex's later app-server RPCs retain their 30 s cap. A new managed driver
+   should start its timer before child launch, apply the bound only to the
+   initial handshake, and record the first protocol response even when it is
+   refused. `pi-durable` runtime startup remains on its existing
+   transport-deadline path. A stopped probe is
+   not evidence of a missing capability: product-selected stop reasons remain
+   primary, with a termination signal as secondary detail (ADR-042).
 2. `src/mizu/<engine>.py`: trusted argv builder, isolated per-run config,
    event parser, `requires_sandbox = True`, no new host authority.
 3. `command_for` entry plus `engines.NAME.command` trusted argv config.

@@ -4,6 +4,7 @@ import io
 import json
 import os
 import sys
+import time
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -14,6 +15,7 @@ from mizu.codex import CodexDriver, TokenUsage
 from mizu.config import load
 from mizu.drivers import admit_invocation, command_for, driver_for
 from mizu.engine_config import effective, session_record, save_session
+from mizu.engine_channel import Channel
 from mizu.errors import ConfigError, Denied, LimitExceeded, ProtocolError, ModelFailure
 from mizu.fs import mkdir, read_json, write_json
 from mizu.mcp_proxy import forward, load_bridge, serve
@@ -161,6 +163,93 @@ class SyntheticEngineTests(Fixture):
             self.assertIsNone(missing.finished)
             self.assertEqual(result['request_unit'],unit)
             self.assertEqual(missing.request_deadlines, {})
+
+    def test_host_relative_bound_is_only_for_initial_engine_startup(self):
+        original_receive = Channel.receive
+        for engine in ('claude', 'codex'):
+            with self.subTest(engine=engine):
+                observed = []
+                def capture(channel, *args, **kwargs):
+                    until = kwargs.get('until')
+                    if until is not None:
+                        observed.append((kwargs.get('bound'), until - time.monotonic()))
+                    return original_receive(channel, *args, **kwargs)
+                with unittest.mock.patch(f'mizu.{engine}.startup_bound', return_value=60), \
+                     unittest.mock.patch.object(Channel, 'receive', new=capture):
+                    self.execute(engine)
+                self.assertTrue(observed)
+                # The first protocol response uses the measured 60 s host bound.
+                self.assertEqual(observed[0][0], 60)
+                self.assertGreater(observed[0][1], 0)
+                self.assertLessEqual(observed[0][1], 60)
+                if engine == 'claude':
+                    self.assertEqual(len(observed), 1)
+                else:
+                    # Codex's subsequent app-server RPCs keep their existing
+                    # 30 s cap instead of inheriting the startup bound.
+                    self.assertGreater(len(observed), 1)
+                    for bound, remaining in observed[1:]:
+                        self.assertIsNone(bound)
+                        self.assertGreater(remaining, 0)
+                        self.assertLessEqual(remaining, 30)
+
+    def test_answered_startup_refusals_are_recorded_before_classification(self):
+        for engine, scenario in (('claude', 'ready-error'), ('codex', 'initialize-error')):
+            with self.subTest(engine=engine):
+                with unittest.mock.patch(f'mizu.{engine}.startup_bound', return_value=60), \
+                     unittest.mock.patch(f'mizu.{engine}.record_startup') as record:
+                    with self.assertRaises(ProtocolError):
+                        self.execute(engine, scenario)
+                record.assert_called_once()
+                self.assertEqual(record.call_args.args[1], engine)
+
+    def test_pi_records_a_refused_first_state_answer(self):
+        ctx = self.context('consult')
+        profile = ctx.role.profile
+        raw = {**self.config.profiles[profile], 'engine': 'pi', 'provider': 'custom',
+               'options': {}, 'session': 'ephemeral'}
+        engines = {**self.config.engines, 'pi': {**self.config.engines['pi'],
+            'command': (sys.executable, str(ROOT/'tests/fake_pi.py'),
+                        '--fake-scenario', 'refused-state')}}
+        config = dataclasses.replace(self.config, profiles={**self.config.profiles, profile: raw},
+                                     engines=engines)
+        ctx.config = config
+        with unittest.mock.patch('mizu.pi.startup_bound', return_value=60), \
+             unittest.mock.patch('mizu.pi.record_startup') as record:
+            with self.assertRaisesRegex(ProtocolError, 'handshake failed'):
+                PiDriver(config).execute(ctx, 'synthetic prompt')
+        record.assert_called_once()
+        self.assertEqual(record.call_args.args[1], 'pi')
+
+    def test_a_startup_bound_refusal_names_the_bound_it_was_held_to(self):
+        # A child that never answers its initial handshake is refused by the
+        # bound it was held to, so the refusal names the bound rather than
+        # the engine. Its silence contributes no start-up sample: only an
+        # answer is a measurement.
+        for engine, scenario in (('claude', 'no-ready'), ('codex', 'no-initialize')):
+            with self.subTest(engine=engine):
+                with unittest.mock.patch(f'mizu.{engine}.startup_bound', return_value=2), \
+                     unittest.mock.patch(f'mizu.{engine}.record_startup') as record:
+                    with self.assertRaisesRegex(ProtocolError, 'exceeded its 2 s bound'):
+                        self.execute(engine, scenario)
+                record.assert_not_called()
+
+    def test_pi_startup_bound_refusal_names_the_bound_it_was_held_to(self):
+        ctx = self.context('consult')
+        profile = ctx.role.profile
+        raw = {**self.config.profiles[profile], 'engine': 'pi', 'provider': 'custom',
+               'options': {}, 'session': 'ephemeral'}
+        engines = {**self.config.engines, 'pi': {**self.config.engines['pi'],
+            'command': (sys.executable, str(ROOT/'tests/fake_pi.py'),
+                        '--fake-scenario', 'silent-state')}}
+        config = dataclasses.replace(self.config, profiles={**self.config.profiles, profile: raw},
+                                     engines=engines)
+        ctx.config = config
+        with unittest.mock.patch('mizu.pi.startup_bound', return_value=2), \
+             unittest.mock.patch('mizu.pi.record_startup') as record:
+            with self.assertRaisesRegex(ProtocolError, 'exceeded its 2 s bound'):
+                PiDriver(config).execute(ctx, 'synthetic prompt')
+        record.assert_not_called()
 
     def test_claude_and_codex_resume_a_work_capable_no_tool_followup(self):
         from mizu.runtime import Engine

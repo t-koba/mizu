@@ -53,31 +53,31 @@ class PiDriver:
                     on_close=context.cancel_operations) as bridge:
             env = environment(extra={"MIZU_BRIDGE_CONFIG": str(bridge.config_file)})
             env.update(credentials(self.config.file.parent / "credentials.env"))
-            channel = Channel(context, self.argv(context.role, context.run_dir, profile, context.goal_digest), env, cwd, "pi")
+            bound = startup_bound(self.config, 'pi')
             spawned = time.monotonic()
+            channel = Channel(context, self.argv(context.role, context.run_dir, profile, context.goal_digest), env, cwd, "pi")
             try:
-                # The child's start-up is held to this host's own bound: the
-                # largest start-up cost this host has measured for this
-                # engine, scaled with the shared floor and ceiling. A fixed
-                # 30 s bound sat below what a loaded host needs, so the
-                # child was killed for time and the run failed without
-                # naming the host's own cost.
-                bound = startup_bound(self.config, 'pi')
+                # The runtime handshake uses this host's per-engine bound;
+                # the timer starts before child launch and ends at its first
+                # state response. Probe process-exit samples use a different
+                # endpoint, and the shared record keeps the larger interval.
                 # SDK emits its startup events after binding all extension handlers.
                 channel.send({"id": "state", "type": "get_state"})
                 while True:
                     event = channel.receive(until=spawned+bound, bound=bound)
                     if event.get("id") != "state":
                         continue
+                    # Runtime startup is measured through this first state
+                    # response, including refusals. Probe paths measure
+                    # through process exit; the shared record keeps the
+                    # larger interval.
+                    record_startup(self.config, 'pi', time.monotonic() - spawned)
                     if not event.get("success") or not context.hello.is_set():
                         raise ProtocolError("Pi managed SDK handshake failed")
                     actual = event.get("data", {}).get("model") or {}
                     if actual.get("id") != model["model"] or actual.get("provider") != model["provider"]:
                         raise ProtocolError("Pi selected a different model/provider")
                     session_file = event.get("data", {}).get("sessionFile")
-                    # What this host spent starting this child joins the
-                    # record the next start-up bound is derived from.
-                    record_startup(self.config, 'pi', time.monotonic() - spawned)
                     break
                 channel.send({"id": "work", "type": "prompt", "message": prompt})
                 while True:

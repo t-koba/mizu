@@ -77,28 +77,18 @@ def container_runtime(config: Config) -> dict:
             "host_unprivileged": True, "runtime_rootless": "not_verified"}
 
 
-#: Host-relative bound for one adapter child. The launcher and the app-server
-#: probe are plain children of this process and their start-up is dominated by
-#: loading their SDK, so a fixed number cannot say how long they may take: on
-#: a loaded host the child needs longer than the bound it was given, it is
-#: killed before it can report, and the caller reads an empty refusal instead
-#: of the child's answer. The bound is this host's own measured start-up cost,
-#: scaled, with a floor and a ceiling -- the same shape, floor and ceiling the
-#: launcher harness uses for the identical child, so the product and the
-#: harness never hold two answers for one child's start-up.
+#: Classify completed, refused and stopped one-shot adapter probes. Probe
+#: timing is measured through process exit; managed runtimes measure their
+#: initial protocol response instead, and the host record keeps the larger
+#: per-engine interval.
 def probe_outcome(reason, exit_code, detail, label: str, bound: int | None = None) -> None:
     """One classification for every probe the product runs.
 
-    A probe that was killed, timed out or stopped never said what it holds,
-    so its silence is not a missing capability: the reason, the exit code and
-    the stderr are named instead, and the two remedies -- provision the
-    dependency, or give this host more room -- stay distinguishable. The
-    contract check and the doctor share this rule, so a child reads the same
-    way wherever it is probed.
-
-    A child that a signal stopped is the reachable shape of that silence:
-    the process reports it as exited with the signal's number as its exit
-    code, so the exit code below zero is what names the kill.
+    A probe that did not complete never reported its capabilities. The
+    contract check and doctor share this classification. A timeout names the
+    applied bound; an external signal kill names the signal. If the product
+    chose a stop reason first, that reason stays primary and a termination
+    signal is secondary detail.
     """
     if reason == "exited" and exit_code is not None and exit_code >= 0:
         return
@@ -107,25 +97,23 @@ def probe_outcome(reason, exit_code, detail, label: str, bound: int | None = Non
         raise ConfigError(f"{label} exceeded its {bound} s bound (timeout) and was stopped "
                           "before it could report"
                           + (f": {text[-1000:]}" if text else ""))
-    if exit_code is not None and exit_code < 0:
+    if reason in ("exited", "killed") and exit_code is not None and exit_code < 0:
         # A child a signal stopped never said what it holds, so its silence
         # is not a missing capability: the signal that stopped it is named
         # instead, so the operator is not sent to install the dependency.
         raise ConfigError(f"{label} was killed by signal {-exit_code} before it could report"
                           + (f": {text[-1000:]}" if text else ""))
+    # The product decided this outcome itself and then stopped the child, so
+    # the reason is the cause and the signal is only a fact about how the
+    # child was stopped: one cause reads the same way on every host.
+    stopped = f"; stopped by signal {-exit_code}" if exit_code is not None and exit_code < 0 else ""
     raise ConfigError(f"{label} did not complete ({reason}) and was stopped "
-                      "before it could report"
+                      "before it could report" + stopped
                       + (f": {text[-1000:]}" if text else ""))
 
 
 def probe_label(engine: str | None) -> str:
-    """The name one probe child is given by every surface that probes it.
-
-    The doctor and the contract check hold the identical child to the
-    identical bound, so a refusal names the identical child: the name is
-    derived from the engine here, once, instead of written out per call
-    site where two surfaces could drift apart.
-    """
+    """Return the shared engine-specific label for a one-shot probe."""
     if engine == "codex":
         return "Codex app-server stdio probe"
     if engine:
@@ -134,38 +122,28 @@ def probe_label(engine: str | None) -> str:
 
 
 def adapter_probe(config, engine, command, *, maximum: int, label: str):
-    """Run one adapter child under this host's bound and name its outcome.
+    """Measure a completed one-shot command, then run it under the bound.
 
-    The child is measured once under the ceiling and the probe that follows
-    is held to the bound that measurement requires: the same order, and the
-    same shape, the launcher harness uses for the identical child. A child
-    that answered is measured by its answer, whatever that answer was: the
-    launcher harness measures the identical child by its first answer, which
-    is a refusal, so the two surfaces never hold two answers for one
-    child's start-up. A child that does not answer inside the bound is a
-    bound refusal with its own reason, never a missing capability: it was
-    stopped before it could report, so nothing is known about the
-    capabilities it holds.
+    The measuring run spans process spawn through exit and is capped at 150 s.
+    Any completed exit contributes a sample, including a nonzero exit; a
+    measuring run that cannot complete leaves the 60 s floor in place. The
+    shared record may also contain a runtime's spawn-to-first-response sample,
+    so these are distinct endpoints and the larger interval supplies the
+    conservative per-engine bound. A probe stopped before reporting is not
+    evidence that a capability is missing.
 
-    Returns the probe's result and the bound the child was held to, so the
-    evidence names the bound that was applied.
+    Returns the probe result and applied bound for its evidence.
     """
     measured = run(command, timeout=ADAPTER_STARTUP_MEASURE_CEILING_SECONDS, maximum=maximum)
     if measured.reason == "exited" and measured.exit_code is not None and measured.exit_code >= 0:
-        # The child answered, and an answer is a measurement even when the
-        # answer was a failure: the launcher harness measures the identical
-        # child by its first answer, which is a refusal. The measurement
-        # joins this host's record for the engine, so the bound is the one
-        # every later start of that engine's child uses -- the runtime and
-        # the doctor never hold two answers for one child's start-up -- and
-        # the cost published beside it is the cost that bound was derived
-        # from, so the published pair is checkable against the rule it
-        # reports.
+        # This completed probe contributes its full process-exit interval.
+        # The record retains the largest interval for this engine, including
+        # any runtime first-response sample, and the reported pair follows
+        # from that record.
         cost, bound = observed_startup(config, engine, measured.seconds)
     else:
-        # The measurement could not be taken: an unmeasured cost keeps the
-        # floor, the same answer the launcher harness gives for the identical
-        # child, and no cost is published for a child that did not answer.
+        # The measuring command did not complete within its ceiling. No
+        # sample is recorded, so the probe uses the configured floor.
         bound = ADAPTER_STARTUP_FLOOR_SECONDS
         cost = None
     result = run(command, timeout=bound, maximum=maximum)

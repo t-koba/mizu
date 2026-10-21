@@ -47,6 +47,13 @@ bridge("_hello", {})
 for raw in sys.stdin.buffer:
     command = json.loads(raw)
     if command["type"] == "get_state":
+        if scenario == "silent-state":
+            # The child never answers its first state request.
+            continue
+        if scenario == "refused-state":
+            emit({"type": "response", "id": command["id"], "success": False,
+                  "error": "synthetic refusal"})
+            continue
         emit({"type": "response", "id": command["id"], "success": True,
               "data": {"sessionFile": str(Path(effective["sessionDir"]) / "fake.jsonl"), "model": {"provider": effective["provider"], "id": "wrong" if scenario == "wrong-model" else effective["model"]}}})
     elif command["type"] == "prompt":

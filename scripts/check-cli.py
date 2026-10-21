@@ -47,11 +47,9 @@ class ProbeTimeout(ConfigError):
 def bound_refusal(exc, bound, engine=None):
     """The shared classification of a child that did not answer.
 
-    The doctor and this check probe the identical child under the identical
-    bound, so the refusal is produced by the one rule both surfaces use and
-    only its type stays local to the script. The child's own outcome -- the
-    reason, the exit code and the stderr it produced -- is what the
-    classification names.
+    The doctor and this check share probe classification and engine labels.
+    The reason, exit code and stderr are preserved without treating a stopped
+    child as evidence of a missing capability.
     """
     detail = getattr(exc, "stderr", None)
     if isinstance(detail, bytes):
@@ -71,10 +69,9 @@ def bound_refusal(exc, bound, engine=None):
 def host_config():
     """The operator's configuration, when this host's shared record is readable.
 
-    The bound for one adapter child is this host's own answer, recorded per
-    engine under the shared data directory, so the contract check and the
-    doctor hold the identical child to one bound. A configuration that cannot
-    be read leaves the check with the bound its own measurement requires.
+    The per-engine record is shared by the check and doctor. A configuration
+    that cannot be read leaves the check with the bound its own measurement
+    requires.
     """
     try:
         return load(default_config_file())
@@ -85,23 +82,13 @@ def host_config():
 def run_probe(command, engine=None, config=None):
     """Run one adapter child under this host's bound.
 
-    Returns (result, cost_seconds, bound_seconds). The child is measured
-    once under the measuring ceiling and the probe that follows is held to
-    the bound this host's record requires for that engine -- the same record
-    the doctor writes and the runtime reads, so the two surfaces hold the
-    identical child to one bound. The cost published is the one the bound was
-    derived from, so the pair can be checked against the rule the product
-    reports. A configuration that cannot be read leaves the check with the
-    bound its own measurement requires.
-
-    A child that answered is measured by its answer, whatever that answer
-    was: the launcher harness measures the identical child by its first
-    answer, which is a refusal, so a failure is never a second answer for
-    one child's start-up.
-
-    A child that outlives the bound is a bound refusal, never a missing
-    capability: it was stopped before it could report, so nothing is known
-    about the capabilities it holds.
+    Returns (result, cost_seconds, bound_seconds). The measuring run spans
+    process spawn through exit and is capped at 150 s; any completed exit,
+    including nonzero, contributes a sample. The per-engine record may also
+    contain a runtime spawn-to-first-response interval. Those endpoints differ,
+    and the larger recorded interval supplies the conservative bound. If the
+    measurement does not complete, this check uses the 60 s floor. A child
+    stopped before reporting is not evidence of a missing capability.
     """
     started = time.monotonic()
     try:
@@ -111,20 +98,14 @@ def run_probe(command, engine=None, config=None):
         measured = None
     startup = round(time.monotonic() - started, 3)
     if measured is not None and measured.returncode is not None and measured.returncode >= 0:
-        # The child answered, and an answer is a measurement even when the
-        # answer was a failure: the launcher harness measures the identical
-        # child by its first answer, which is a refusal. The cost joins this
-        # host's record for the engine, so the bound published for the
-        # identical child is the bound the launcher harness holds it to, and
-        # the cost published beside it is the cost that bound was derived
-        # from.
+        # A completed command contributes its full spawn-to-exit interval;
+        # the shared record retains the largest per-engine interval.
         if config is None and engine is not None:
             config = host_config()
         cost, bound = observed_startup(config, engine, startup)
     else:
-        # The measurement could not be taken: an unmeasured cost keeps the
-        # floor, the same answer the launcher harness gives for the identical
-        # child, and the probe that follows is held to it.
+        # The measuring command did not complete within its ceiling. No
+        # sample is recorded, so the probe uses the configured floor.
         bound = ADAPTER_STARTUP_FLOOR_SECONDS
         cost = None
     try:

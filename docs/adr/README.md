@@ -480,72 +480,35 @@ matching results, not a coalescing of equivalent in-flight checks, and a
 preserved build artifact is not validation evidence. The capability is
 opt-in per role, so a role without it keeps the synchronous behaviour.
 
-## ADR-042 — The adapter probe is bounded host-relatively, and a bound refusal is not a missing capability
-The adapter launcher and the app-server probe are plain children of this
-process, and their start-up is dominated by loading their SDK. A fixed number
-of seconds cannot say how long they may take: on a loaded host the child
-needs longer than the bound it was given, it is killed before it can report,
-and the caller reads an empty refusal. The doctor reported that refusal as a
-missing SDK capability, and the installed-adapter contract check let the
-timeout escape as an unhandled error.
+## ADR-042 — Adapter startup is bounded by host-relative evidence
 
-The bound is this host's own measured start-up cost: twelve times the measured
-cost, at least 60 s and at most 150 s, the same shape the launcher harness
-uses for the identical child -- the same floor, the same multiplier, the same
-child ceiling and the same ceiling on the measuring spawn, so the two surfaces
-never derive two different bounds for one child's start-up. The measured cost
-is only known once the child has answered, so the child is measured once under
-that measuring ceiling and the probe that follows is held to the bound the
-measurement requires.
+A single fixed timeout can refuse a managed adapter that is still loading its
+SDK. Use a per-engine host record and derive the bound as twelve times the
+largest recorded interval, with a 60 s floor and 150 s ceiling. If no probe
+measurement completes, the floor remains the fallback. Completed refusals are
+measurements too; a timeout with no answer is not.
 
-The measurement joins this host's record of the largest start-up cost it has
-seen for that engine, so the runtime, the doctor and the installed-adapter
-contract check hold the identical child to one bound: the runtime starts that
-child later, without measuring it again, and reads the same record, and the
-contract check reads it too. The published cost is the one the bound was
-derived from, so the pair the operator reads satisfies the rule the product
-reports.
+The measurement endpoints are deliberately distinct. `doctor` and
+`check-cli` run a one-shot probe and measure from process spawn through process
+exit, then run the probe under the derived bound. Managed runtime startup
+records the interval from child spawn to its first protocol response: Pi's
+first `get_state` response, Claude's first `ready` event, and Codex's matching
+`initialize` response. A refusal response is recorded before it is classified;
+a child that never responds contributes no runtime sample. The shared record
+keeps the largest interval for that engine, so probe and runtime timing are
+not represented as the same measurement.
 
-A measurement that cannot be taken leaves the floor in place, the same answer
-the launcher harness gives for the identical child: a child that has not
-answered cannot claim a wider bound, so the probe that follows is held to the
-floor and the child's own outcome is named. The doctor and the installed-
-adapter contract check answer that way too, so neither surface refuses a
-check that the harness would still run.
+The runtime bound applies only to the initial startup/initialize exchange.
+Codex app-server RPCs after `initialize` keep their existing 30 s response cap.
+`pi-durable` runtime startup remains governed by its existing transport deadline
+and does not consume this managed-handshake record. Its one-shot doctor/check
+probe is still bounded as a probe, not as a runtime handshake.
 
-An answered child is a measurement on every path, including a failure. The
-launcher harness measures the identical child by its first answer, which is
-a refusal, so a child that answered has told the host what its start-up
-costs. The doctor and the installed-adapter contract check answered a child
-that failed with the measuring ceiling instead: a second answer for one
-child's start-up, and a published pair that could contradict the published
-rule, because the cost was the child's own sample while the bound was the
-ceiling. Both surfaces now measure the answer they got -- that cost joins
-the host's record, and the bound is the one that record derives -- so the
-bound the probe reports is the bound the child was held to, and the runtime,
-the doctor and the contract check hold the identical child to one bound on
-every path.
-
-The same bound governs the runtime's own handshake. The Pi driver starts the
-adapter child and waits for its first answer, and that wait was a fixed 30 s --
-below what a loaded host has been observed to need -- so the child was killed
-for time and the run failed without naming the host's own cost. The handshake
-is now held to the same host-relative bound, read from the same record, and a
-child that does not answer is refused by the bound it was held to. The doctor
-measures the cost the record keeps; the runtime starts the child and reads it.
-
-A child that does not answer inside the bound is a bound refusal with its own
-reason, never a missing capability: it was stopped before it could report, so
-nothing is known about the capabilities it holds. A child a signal stopped
-never said what it holds either, so the signal that stopped it is named and
-the operator is not sent to install a dependency the child never claimed to be
-missing. A child that answers and reports a missing export is still a missing
-capability, and the refusal names the reason the sandbox probe beside it names.
-
-The two surfaces that probe the identical child -- the doctor and the
-installed-adapter contract check -- classify its outcome by one rule and name
-it by one name, so a child that did not answer reads the same way wherever it
-is probed and neither surface can drift into a second answer for one child.
+A timed-out probe names the applied bound and is not reported as a missing
+capability. An external signal kill is identified as such; if the product
+selected a stop reason before terminating its child, that reason stays primary
+and the signal is secondary detail. `doctor` and `check-cli` share the same
+probe outcome classification and engine label.
 
 ## ADR-043 — A check job's container is protected by the runner's slot exclusion
 A check job's container carries the project's label like any other container,

@@ -215,6 +215,20 @@ class ProbeOutcomeTests(unittest.TestCase):
         self.assertIn("killed by signal 15", message)
         self.assertNotIn("missing", message)
 
+    def test_product_stop_reason_is_primary_and_signal_is_secondary(self):
+        for reason, code in (("output_limit", -15), ("cancelled", -15),
+                             ("input_error", 1), ("output_error", 1)):
+            with self.subTest(reason=reason, code=code):
+                with self.assertRaises(ConfigError) as caught:
+                    doctor.probe_outcome(reason, code, "detail", "Adapter contract probe")
+                message = str(caught.exception)
+                self.assertIn(f"({reason})", message)
+                self.assertNotIn("was killed by signal", message)
+                if code < 0:
+                    self.assertIn("stopped by signal 15", message)
+                else:
+                    self.assertNotIn("signal", message)
+
     def test_a_child_that_answered_keeps_its_exit_code(self):
         # A child that completed said what it holds; its exit code is the
         # content judgement and stays with the caller.

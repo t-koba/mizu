@@ -72,8 +72,14 @@ insights/searchの一覧はoffset/limit（filesと同じ型・上限）を受理
 `engine_channel.Channel` は起動、有限 JSONL の送信、イベント受信、停止、証跡保存を
 共通化します。1 run の元イベントは最大 4 MiB、stderr は最大 256 KiB、待機 queue
 は 128 件。partial input は再送せず delivery unknown として失敗します。
-handshake は 30 秒と run 期限の短い方。run の取消・期限・不正 JSON・上限超過・
-terminal 前の EOF は成功になりません。停止時は公開 interrupt を要求し、stdin を
+管理対象 Pi / Claude / Codex の初回 handshake は per-engine のホスト記録から得る
+bound（60 秒 floor、記録値の 12 倍、150 秒 ceiling）を使います。doctor / check-cli
+は one-shot probe の spawn から process exit までを測り、runtime は Pi の最初の state
+応答、Claude の最初の `ready` 応答、Codex の initialize 応答までを測ります。拒否応答も
+runtime 記録に含めますが、両者の測定区間が同一とは限りません。共有記録は大きい方を
+保持します。Codex の initialize 後の app-server RPC は既存の 30 秒上限を維持し、
+pi-durable runtime は startup 記録ではなく既存の transport deadline を使います。
+run の取消・期限・不正 JSON・上限超過・terminal 前の EOF は成功になりません。停止時は公開 interrupt を要求し、stdin を
 閉じ、process group を回収してから結果を返します。親の bridge は seal 以降の
 操作を拒否し、single-writer 公開は既存の verify と immutable snapshot 契約に従います。
 

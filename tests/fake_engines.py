@@ -43,7 +43,15 @@ if engine == 'claude':
     cfg = json.loads(Path(sys.argv[-1]).read_text())
     bridge = json.loads(Path(cfg['mcp_servers']['mizu']['env']['MIZU_BRIDGE_CONFIG']).read_text())
     forward(bridge, '_hello', {})
-    emit({'type': 'ready'})
+    if scenario == 'no-ready':
+        # The child never answers its initial handshake: the caller's bound
+        # is what ends the wait, and a silence is not an answer.
+        while True:
+            time.sleep(.05)
+    if scenario == 'ready-error':
+        emit({'type': 'error', 'stage': 'handshake', 'error': 'synthetic refusal'})
+    else:
+        emit({'type': 'ready'})
     query = json.loads(sys.stdin.readline())
     if scenario == 'stalled-request':
         stall()
@@ -63,7 +71,12 @@ else:
         message = json.loads(line)
         method, identifier = message.get('method'), message.get('id')
         if method == 'initialize':
-            emit({'id': identifier, 'result': {}})
+            if scenario == 'no-initialize':
+                continue
+            if scenario == 'initialize-error':
+                emit({'id': identifier, 'error': {'code': -32000, 'message': 'synthetic refusal'}})
+            else:
+                emit({'id': identifier, 'result': {}})
         elif method in ('thread/start', 'thread/resume'):
             params = message['params']
             resumed = method == 'thread/resume'

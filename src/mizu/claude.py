@@ -14,6 +14,7 @@ from .errors import ProtocolError, ModelFailure
 from .fs import mkdir, write_json
 from .process import environment
 from .protocol import tool_definitions
+from .startup import record_startup, startup_bound
 
 ROOT = Path(__file__).resolve().parents[2]
 TOKEN_FIELDS = ('inputTokens', 'outputTokens', 'cacheReadInputTokens', 'cacheCreationInputTokens')
@@ -111,11 +112,21 @@ class ClaudeDriver:
             write_json(file, {**settings, 'options': options, 'mcp_servers': servers, 'cwd': str(cwd),
                              'systemPrompt': role_policy_text(context.role),
                              'resume': saved['id'] if saved else None})
+            bound = startup_bound(self.config, 'claude')
+            spawned = time.monotonic()
             channel = Channel(context, [*self.config.command('claude'), str(ROOT/'adapters/claude/launcher.py'), str(file)],
                               environment(extra={'MIZU_BRIDGE_CONFIG': str(bridge.config_file)}), cwd, 'claude')
             result = None
             try:
-                ready = channel.receive(until=time.monotonic()+30)
+                # The runtime handshake uses this host's per-engine bound,
+                # derived from its largest recorded interval. See startup.py
+                # for how probe process-exit and runtime first-answer samples
+                # contribute distinct measurements to that record.
+                ready = channel.receive(until=spawned+bound, bound=bound)
+                # Runtime startup is measured through this first protocol
+                # response, including refusals. Probe paths measure through
+                # process exit; the shared record keeps the larger interval.
+                record_startup(self.config, 'claude', time.monotonic() - spawned)
                 if ready.get('type') != 'ready' or not context.hello.is_set():
                     raise ProtocolError('Claude SDK handshake failed: '+str(ready)[:4000])
                 admit_invocation(context, unit='query')

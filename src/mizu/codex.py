@@ -16,6 +16,7 @@ from .fs import mkdir, write_json
 from .process import environment
 from .pi import credentials
 from .protocol import tool_definitions
+from .startup import record_startup, startup_bound
 
 
 def auth_source():
@@ -138,6 +139,11 @@ class CodexDriver:
                 if not value:
                     raise ConfigError('Configured provider environment variable is unset: '+name)
                 native_env[name] = value
+            # The initial initialize response uses this host's per-engine
+            # bound. Probe process-exit and runtime first-response samples are
+            # distinct intervals; startup.py keeps the larger observed value.
+            startup_bound_seconds = startup_bound(self.config, 'codex')
+            spawned = time.monotonic()
             channel = Channel(context, [*self.config.command('codex'), 'app-server', '--listen', 'stdio://'],
                               environment(extra=native_env), cwd, 'codex')
 
@@ -160,12 +166,23 @@ class CodexDriver:
                 sequence += 1
                 wanted = sequence
                 channel.send({'id': wanted, 'method': method, 'params': params})
-                handshake_deadline = time.monotonic()+30
+                # The host-relative bound applies to process startup only;
+                # later app-server RPCs keep their existing 30 s response cap.
+                request_bound = startup_bound_seconds if method == 'initialize' else 30
+                handshake_deadline = (spawned+request_bound if method == 'initialize'
+                                      else time.monotonic()+request_bound)
                 while True:
-                    event = channel.receive(until=handshake_deadline)
+                    event = channel.receive(until=handshake_deadline,
+                                            bound=startup_bound_seconds if method == 'initialize' else None)
                     if 'method' in event and 'id' in event:
                         server_request(event)
                     elif event.get('id') == wanted:
+                        if method == 'initialize':
+                            # Runtime startup is measured through this first
+                            # initialize response, including refusals. Probe
+                            # paths measure through process exit; the shared
+                            # record keeps the larger interval.
+                            record_startup(self.config, 'codex', time.monotonic() - spawned)
                         if 'error' in event:
                             error = event['error']
                             if method == 'turn/start' and isinstance(error, dict):
