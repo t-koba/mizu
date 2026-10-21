@@ -301,7 +301,8 @@ def admission(config, resources=(), *, wait=False, stop=None, check=None):
     """Admit one work unit; lend nothing and never preempt an active driver.
 
     Pending capacity is derived from parallel_runs (one waiter per slot).
-    Overflow and invalid state are immediate Busy. Waiting has no deadline; poll at
+    Overflow and invalid state are immediate Busy. The operator selects the
+    admission_wait_seconds deadline (0 means none); poll at
     idle_seconds with no role/workspace/slot locks; stop wakes the wait. check
     revalidates normal authority/budget before each attempt and at dispatch,
     outside the queue transaction. Only Busy contention retries. Success
@@ -313,6 +314,8 @@ def admission(config, resources=(), *, wait=False, stop=None, check=None):
     """
     stop = stop if stop is not None else threading.Event()
     admission_started = time.monotonic()
+    window = config.limits.admission_wait_seconds
+    deadline = admission_started + window if wait and window else None
     queue = _Queue(config, resources)
     try:
         while True:
@@ -320,6 +323,8 @@ def admission(config, resources=(), *, wait=False, stop=None, check=None):
                 raise Busy("Run stopped before execution admission")
             if check is not None:
                 check()
+            if deadline is not None and time.monotonic() >= deadline:
+                raise Busy("Execution admission wait expired")
             try:
                 attempt = queue.attempt(enqueue=wait)
             except (_Full, _Invalid) as exc:
@@ -327,7 +332,9 @@ def admission(config, resources=(), *, wait=False, stop=None, check=None):
             except Busy:
                 if not wait:
                     raise
-                stop.wait(config.limits.idle_seconds)
+                remaining = (max(0.0, deadline - time.monotonic())
+                             if deadline is not None else config.limits.idle_seconds)
+                stop.wait(min(config.limits.idle_seconds, remaining))
                 continue
             # The successful transaction already retired the pending ticket.
             with attempt:
@@ -335,6 +342,8 @@ def admission(config, resources=(), *, wait=False, stop=None, check=None):
                     raise Busy("Run stopped before execution admission")
                 if check is not None:
                     check()
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise Busy("Execution admission wait expired")
                 yield max(0.0, time.monotonic() - admission_started)
             return
     finally:

@@ -50,7 +50,7 @@ class BusyRetryTests(Fixture):
         self.assertEqual(outcome["result"]["status"], "completed")
 
     def test_retry_wait_outlives_provider_recovery_window(self):
-        self._retune(idle_seconds=1, busy_retry_seconds=0)
+        self._retune(idle_seconds=1, busy_retry_seconds=0, admission_wait_seconds=0)
         self._run_queued(stop_after_wait=False)
 
     def _run_queued(self, *, stop_after_wait):
@@ -94,11 +94,11 @@ class BusyRetryTests(Fixture):
         self.assertLess(time.monotonic() - start, 5)
 
     def test_stop_cancels_wait_even_without_recovery_window(self):
-        self._retune(idle_seconds=1, busy_retry_seconds=0)
+        self._retune(idle_seconds=1, busy_retry_seconds=0, admission_wait_seconds=0)
         self._run_queued(stop_after_wait=True)
 
     def test_cli_run_waits_even_without_recovery_window(self):
-        self._retune(idle_seconds=1, busy_retry_seconds=0)
+        self._retune(idle_seconds=1, busy_retry_seconds=0, admission_wait_seconds=0)
         args = parser().parse_args(["--config", str(self.file), "run", "sample", "--role", "worker"])
         held = lock(self.project.root / "locks/workspace.lock")
         held.__enter__()

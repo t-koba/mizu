@@ -17,6 +17,19 @@ def _strip_line(text: str, needle: str) -> str:
 
 
 class IncludeTests(Fixture):
+    def test_execution_admission_wait_is_independent_of_provider_recovery(self):
+        self.assertEqual(self.config.limits.admission_wait_seconds, 300)
+        text = self.file.read_text()
+        for value in (0, 17, 86400):
+            self.file.write_text(text.replace('admission_wait_seconds = 300', f'admission_wait_seconds = {value}'))
+            config = load(self.file)
+            self.assertEqual(config.limits.admission_wait_seconds, value)
+            self.assertEqual(config.limits.busy_retry_seconds, 300)
+        for value in ('-1', '86401', 'true', '0.5'):
+            self.file.write_text(text.replace('admission_wait_seconds = 300', f'admission_wait_seconds = {value}'))
+            with self.assertRaises(ConfigError):
+                load(self.file)
+
     def test_consult_fanout_bound_is_independent_of_caller_slots(self):
         base = self.file.read_text()
         self.assertIn("parallel_runs = 4", base)

@@ -305,10 +305,10 @@ class Limits:
     check_pending: int = 32
     parallel_runs: int = 4
     parallel_consults: int = 2
-    #: Bounded FIFO admission wait for one-shot `mizu run`; pending capacity
-    #: is derived from parallel_runs (one waiter per slot). Overflow defers
-    #: immediately. 0 disables waiting; fail-fast callers cannot bypass the
-    #: queue. Draining, paused and unarmed projects never wait.
+    #: Operator-selected one-shot execution admission wait; 0 waits until
+    #: dispatch or cancellation. Non-waiting callers still fail fast.
+    admission_wait_seconds: int = 300
+    #: Separate timed provider-selection recovery window; 0 disables it.
     busy_retry_seconds: int = 300
     #: Explicit drain yields persistent, non-ephemeral units at safe request boundaries.
     drain_yield: bool = True
@@ -716,6 +716,7 @@ def load(file: Path) -> Config:
                      "maximum_wait_seconds": (1, MAX_WAIT_SECONDS),
                      "daily_requests": (0, 100000), "shared_daily_requests": (0, 100000), "max_failures": (0, 1073741824),
                      "busy_retry_seconds": (0, 86400),
+                     "admission_wait_seconds": (0, 86400),
                      "no_progress_continuations": (0, 100),
                      "no_progress_recovery_after": (1, 100),
                      "no_progress_backoff_seconds": (0, 86400),

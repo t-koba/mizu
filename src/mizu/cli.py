@@ -248,8 +248,8 @@ def _cmd_run(config, project, args):
     previous = {sig: signal.signal(sig, lambda s, f: stop.set()) for sig in watched}
     try:
         # One-shot dispatch (the unit platform schedulers invoke for
-        # interval/calendar roles) stays queued until capacity is available
-        # or admission is cancelled; the daemon keeps its
+        # interval/calendar roles) follows the configured admission wait,
+        # independently of provider recovery; the daemon keeps its
         # own defer-and-repoll loop and never waits here.
         return Engine(config, stop=stop).run(project, role, attributes=_attribute_input(getattr(args, "attributes", None)),
                                              retry_busy=True, event_trigger=getattr(args, "event", False))

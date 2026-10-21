@@ -73,7 +73,7 @@ class QueueTests(Fixture):
         self.messages = []
 
     def tune(self, **changes):
-        limits = dict(parallel_runs=2, idle_seconds=0.02, busy_retry_seconds=15)
+        limits = dict(parallel_runs=2, idle_seconds=0.02, busy_retry_seconds=15, admission_wait_seconds=0)
         limits.update(changes)
         self.config = dataclasses.replace(self.config, limits=dataclasses.replace(self.config.limits, **limits))
 
@@ -428,6 +428,13 @@ class QueueTests(Fixture):
         self.assertFalse(thread.is_alive())
         self.assertEqual(outcome, ['admitted'])
         self.assertEqual(self.tickets(), [])
+
+    def test_configured_deadline_retires_ticket_without_dispatch(self):
+        self.tune(admission_wait_seconds=0.06)
+        with self.raw_slots():
+            with self.assertRaisesRegex(Busy, 'admission wait expired'), admission(self.config, wait=True):
+                self.fail('deadline admitted without capacity')
+            self.assertEqual(self.tickets(), [])
 
     def test_wait_fails_fast_on_corrupt_queue(self):
         write_json(self.config.data / 'slots/queue.json', {'version': 99, 'tickets': []})
