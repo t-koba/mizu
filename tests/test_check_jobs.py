@@ -450,3 +450,23 @@ class SharingTests(JobTests):
         write_json(directory/'job.json',raw);write_json(directory/'result.json',{'passed':True})
         self.assertFalse(check_jobs.result(ctx,job['id'])['accepted_for_current_source'])
         self.assertIsNone(ctx.verification)
+
+    def test_handle_and_path_metadata_representations_need_not_match(self):
+        import os
+        from types import SimpleNamespace
+        dep=self.root/'dependency';dep.write_text('one')
+        self.config=dataclasses.replace(self.config,sandbox=dataclasses.replace(self.config.sandbox,mounts=({'source':str(dep),'target':'/dep'},)))
+        self.project.config=self.config
+        original=os.fstat
+        def handle_stat(fd):
+            value=original(fd)
+            fields={name:getattr(value,name) for name in dir(value) if name.startswith('st_')}
+            fields['st_ctime_ns']+=1
+            return SimpleNamespace(**fields)
+        with patch('mizu.check_jobs.os.fstat',side_effect=handle_stat):
+            before=check_jobs.environment(self.project)
+            self.assertIsNotNone(before)
+            dep.write_text('two')
+            after=check_jobs.environment(self.project)
+            self.assertIsNotNone(after)
+            self.assertNotEqual(before,after)

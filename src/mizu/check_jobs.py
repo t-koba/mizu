@@ -110,9 +110,16 @@ def environment(project):
                             content = old['digest']
                         else:
                             with path.open('rb') as handle:
-                                if stamp(os.fstat(handle.fileno())) != tuple(identity):
-                                    return None
+                                # Path and handle stat fields need not have identical
+                                # representations on Windows. Compare like with like,
+                                # and bind the open handle to the current named file.
+                                opened = stamp(os.fstat(handle.fileno()))
+                                with path.open('rb') as named:
+                                    if not os.path.sameopenfile(handle.fileno(), named.fileno()):
+                                        return None
                                 content = hashlib.file_digest(handle, 'sha256').hexdigest()
+                                if stamp(os.fstat(handle.fileno())) != opened:
+                                    return None
                         value = {'stat': identity, 'digest': content}
                     elif stat.S_ISLNK(st.st_mode):
                         target = os.readlink(path)
