@@ -203,8 +203,9 @@ A role wall of `0` is not an infinite model request: all four managed engines
 remain host-bounded per logical request. Pi adapters report admission and
 completion even without usage; progress, usage, heartbeat, and duplicate
 admission/completion never renew a request timer. An engine stalled before or
-between logical requests is also bounded by `model_request_seconds` (startup
-handshakes retain their separate 30-second bounds). An admitted Pi tool keeps
+between logical requests is also bounded by `model_request_seconds` (the managed
+Pi, Claude and Codex start-up handshakes retain their separate host-relative
+per-engine bound, and pi-durable keeps its own transport deadline). An admitted Pi tool keeps
 its own command/adapter bounds, not the between-request stall timer.
 Pi-durable's process is polled against these host deadlines; no launcher-wide global timer truncates an
 admitted join. Timer values remain positive finite numbers on the bridge;
