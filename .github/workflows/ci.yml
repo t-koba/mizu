@@ -32,11 +32,11 @@ jobs:
         # Offline runners do not provision the operator-owned Pi SDKs, so the
         # SDK, durable, and reasoning-replay gates are explicitly waived here;
         # the authoritative network-enabled job below provisions both adapters.
-        run: python scripts/check.py --fail-fast --report private-validation/offline.json --allow-not-run node-durable-contract-tests,node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests
+        run: python scripts/check.py --report private-validation/offline.json --allow-not-run node-durable-contract-tests,node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests --fail-fast
       - name: Offline core and transport contracts with timings
         if: runner.os == 'Windows' && matrix.python == '3.13'
         # Collect per-test timing only on the target Windows timeout job.
-        run: python scripts/check.py --fail-fast --report private-validation/offline.json --test-timings private-validation/windows-test-timings.json --allow-not-run node-durable-contract-tests,node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests
+        run: python scripts/check.py --report private-validation/offline.json --test-timings private-validation/windows-test-timings.json --allow-not-run node-durable-contract-tests,node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests --fail-fast
       - name: Core installer and CLI lifecycle
         if: runner.os == 'Linux' && matrix.python == '3.13'
         # Reuse the full source gate above via an explicit content-bound
@@ -86,4 +86,4 @@ jobs:
         run: npm ci --engine-strict --no-audit --no-fund --ignore-scripts
         working-directory: adapters/pi-durable
       - name: Unwaived offline and durable contracts
-        run: python scripts/check.py --fail-fast --report private-validation/durable.json
+        run: python scripts/check.py --report private-validation/durable.json --fail-fast
