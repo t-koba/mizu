@@ -87,8 +87,8 @@ def validate_reused_source_checks(report, *, expected_sha: str):
 
     The report must be the versioned offline receipt produced by
     scripts/check.py on this exact source tree, interpreter, and platform,
-    with ok true, complete required results, and exactly the core-only
-    staging waiver set. Anything else raises Denied; the caller still keeps
+    with ok true, complete required results, and no waivers outside the core-only
+    staging waiver set. Every not_run result must be explicitly waived. Anything else raises Denied; the caller still keeps
     the mandatory staged-manifest equality check.
     """
     if not isinstance(report, dict):
@@ -113,7 +113,11 @@ def validate_reused_source_checks(report, *, expected_sha: str):
     if not isinstance(entries, list) or not entries:
         raise Denied("Reused source report is incomplete: missing check results")
     expected_waivers = set(staging_not_run_checks(core_only=True).split(","))
-    if report.get("allowed_not_run") != sorted(expected_waivers):
+    declared_waivers = report.get("allowed_not_run")
+    if (not isinstance(declared_waivers, list)
+            or any(not isinstance(name, str) for name in declared_waivers)
+            or declared_waivers != sorted(set(declared_waivers))
+            or not set(declared_waivers) <= expected_waivers):
         raise Denied("Reused source report has an unexpected allowed_not_run set")
     if not isinstance(report.get("bash_available"), bool):
         raise Denied("Reused source report is missing its functional Bash status")
@@ -128,7 +132,7 @@ def validate_reused_source_checks(report, *, expected_sha: str):
         if name in by_name:
             raise Denied(f"Reused source report contains a duplicate check: {name}")
         by_name[name] = status
-        if status == "not_run" and name not in expected_waivers:
+        if status == "not_run" and name not in declared_waivers:
             if name != "shell-syntax" or report["bash_available"]:
                 raise Denied(f"Reused source report contains an unsupported not_run check: {name}")
     required = set(REQUIRED_REUSED_GATE_NAMES)
@@ -440,7 +444,7 @@ def main():
     p.add_argument("--reuse-source-checks", type=Path, default=None,
                    help="Reuse an explicit prior offline source-gate report (core-only only); "
                         "the report must bind to this exact source manifest, Python, OS, schema, "
-                        "passing result, and core-only waiver set")
+                        "passing result, and only explicitly declared core-only waivers")
     p.add_argument("--allow-install-scripts", action="store_true", help="Permit dependency lifecycle scripts under npm's own policy after reviewing the lock")
     p.add_argument("--allow-mode-change", action="store_true", help="Permit promotion across core-only/pi modes after review")
     group = p.add_mutually_exclusive_group()

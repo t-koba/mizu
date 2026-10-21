@@ -52,8 +52,10 @@ schema, `ok: true`, passing `python-syntax`, `python-unit-and-contract-tests`,
 `node-transport-and-extension-tests`, `source-manifest-stable`, and the source
 tree's JavaScript/shell syntax checks. All three Pi SDK gates must be present,
 with either `pass` or an allowed `not_run` result: a real SDK pass is accepted.
-The requested `allowed_not_run` must exactly equal the sorted
-`staging_not_run_checks(core_only=True)` waiver set, even when SDK gates pass.
+The requested `allowed_not_run` must be sorted, unique and contain only names
+from `staging_not_run_checks(core_only=True)`. Every skipped SDK gate must be
+explicitly declared; a fully passing report with no waivers can be reused
+without repeating its checks.
 The current Node version and functional Bash availability must also match the
 report. No other `not_run` is accepted except generic `shell-syntax` when the
 report records no functional Bash. Duplicate check names are rejected. Explicit

@@ -1533,7 +1533,7 @@ class ReusedSourceReportTests(unittest.TestCase):
             with self.assertRaises(INSTALLER.Denied):
                 INSTALLER.validate_reused_source_checks(report, expected_sha=sha)
 
-    def test_exact_requested_waiver_set_required(self):
+    def test_undeclared_or_malformed_waivers_rejected(self):
         report = self.valid_report()
         expected = report["allowed_not_run"]
         for allowed in (None, [], expected[:-1], expected + ["other"],
@@ -1541,6 +1541,27 @@ class ReusedSourceReportTests(unittest.TestCase):
             with self.subTest(allowed=allowed), self.assertRaises(INSTALLER.Denied):
                 INSTALLER.validate_reused_source_checks(dict(report, allowed_not_run=allowed),
                                                         expected_sha=report["source_sha256"])
+
+    def test_fully_passing_unwaived_report_can_be_reused(self):
+        report = self.valid_report()
+        report['allowed_not_run'] = []
+        report['checks'] = [{**e, 'status': 'pass'} if e['name'] in INSTALLER.SDK_WAIVABLE_GATE_NAMES else e
+                            for e in report['checks']]
+        self.assertEqual(INSTALLER.validate_reused_source_checks(report, expected_sha=report['source_sha256']),
+                         report['checks'])
+
+    def test_partial_waivers_require_all_other_sdk_gates_to_pass(self):
+        report = self.valid_report()
+        waived = report['allowed_not_run'][0]
+        report['allowed_not_run'] = [waived]
+        report['checks'] = [{**e, 'status': 'pass'}
+                           if e['name'] in INSTALLER.SDK_WAIVABLE_GATE_NAMES and e['name'] != waived else e
+                           for e in report['checks']]
+        self.assertEqual(INSTALLER.validate_reused_source_checks(report, expected_sha=report['source_sha256']),
+                         report['checks'])
+        report['allowed_not_run'] = []
+        with self.assertRaises(INSTALLER.Denied):
+            INSTALLER.validate_reused_source_checks(report, expected_sha=report['source_sha256'])
 
     def test_passing_sdk_gates_accepted_with_same_requested_waivers(self):
         report = self.valid_report()
