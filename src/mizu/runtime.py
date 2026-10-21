@@ -85,6 +85,7 @@ INSIGHT_RETRIEVAL_LIMIT = 1000
 #: Fixed memory bounds for run-local pre-send admission identities.
 MAX_ENGINE_TOOL_INVOCATIONS = 4096
 MAX_ENGINE_TOOL_ID = 256
+MAX_READ_IDENTITIES = 1024
 #: Bounded serialized size of the work items a CI request covers.
 MAX_COVERED_BYTES = 2048
 
@@ -440,6 +441,7 @@ class Context:
         self.turn_continuation = False
         self.admission_error: str | None = None
         self.admission_exception: MizuError | None = None
+        self.read_content_ids: dict[str, str] = {}
         self.admission_wait = False
         # Selector failover identity for durable submissions. Retries and
         # recovery of this candidate keep the same ordinal; only a proven
@@ -959,7 +961,7 @@ class Context:
         offset, limit = args.get("offset", 0), args.get("limit", READ_PAGE_CHARS)
         expected = args.get("content_id")
         if offset and expected is None:
-            raise Denied("Read continuation requires content_id")
+            expected = self.read_content_ids.get(path)
         if expected is not None and (not isinstance(expected, str) or not DIGEST.fullmatch(expected)):
             raise Denied("Invalid read content_id")
         ref = _vcs.split_ref_path(path)
@@ -1004,6 +1006,9 @@ class Context:
         content_id = digest(data)
         if expected is not None and expected != content_id:
             raise Denied("Read file changed since the previous page")
+        if path not in self.read_content_ids and len(self.read_content_ids) >= MAX_READ_IDENTITIES:
+            raise LimitExceeded("Read identity retention bound exceeded")
+        self.read_content_ids[path] = content_id
         end = min(len(text), offset + limit)
         return {"path": path, "text": text[offset:end], "content_id": content_id,
                 "offset": offset, "next_offset": end if end < len(text) else None,

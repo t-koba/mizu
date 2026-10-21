@@ -55,6 +55,16 @@ class SnapshotTests(Fixture):
             initialize(config, "failed", self.root / "source", self.goal, ["worker"], [])
         self.assertFalse((self.config.data / "projects/failed").exists())
 
+    def test_read_identity_capacity_preserves_existing_pins(self):
+        ctx = self.context()
+        (ctx.workspace/'one.txt').write_text('first text')
+        (ctx.workspace/'two.txt').write_text('second text')
+        with patch('mizu.runtime.MAX_READ_IDENTITIES', 1):
+            first = ctx._op_read({'path':'one.txt', 'limit': 2})
+            with self.assertRaises(LimitExceeded):
+                ctx._op_read({'path':'two.txt'})
+            self.assertEqual(ctx._op_read({'path':'one.txt','offset':2})['content_id'], first['content_id'])
+
     def test_read_pages_large_files_pins_content_and_bounds_responses(self):
         from mizu.fs import canonical, digest, MAX_FRAME, PREVIEW_BYTES, READ_PAGE_CHARS
         from mizu.protocol import DEFINITIONS, validate
@@ -76,13 +86,27 @@ class SnapshotTests(Fixture):
             pages.append(result["text"])
             offset = result["next_offset"]
         self.assertEqual("".join(pages), raw.decode("utf-8", "replace"))
-        with self.assertRaises(Denied):
-            ctx._op_read({"path": "large.txt", "offset": READ_PAGE_CHARS})
+        implicit = ctx._op_read({"path": "large.txt", "offset": READ_PAGE_CHARS})
+        self.assertEqual(implicit["content_id"], first["content_id"])
+        self.assertEqual(implicit["text"], raw.decode("utf-8", "replace")[READ_PAGE_CHARS:READ_PAGE_CHARS*2])
         changed = raw[:-1] + b"!"
         (ctx.workspace / "large.txt").write_bytes(changed)
         with self.assertRaisesRegex(Denied, "changed since the previous page"):
             ctx._op_read({"path": "large.txt", "content_id": first["content_id"],
                           "offset": READ_PAGE_CHARS})
+        with self.assertRaisesRegex(Denied, "changed since the previous page"):
+            ctx._op_read({"path": "large.txt", "offset": READ_PAGE_CHARS})
+        independent = self.context()._op_read({"path": "large.txt", "offset": READ_PAGE_CHARS})
+        self.assertEqual(independent['content_id'], digest(changed))
+        with self.assertRaisesRegex(Denied, "changed since the previous page"):
+            self.context()._op_read({"path": "large.txt", "offset": READ_PAGE_CHARS,
+                                     "content_id": first['content_id']})
+        (ctx.workspace / "other.txt").write_bytes(raw)
+        other = ctx._op_read({"path": "other.txt", "offset": READ_PAGE_CHARS})
+        self.assertEqual(other['content_id'], digest(raw))
+        refreshed = ctx._op_read({"path": "large.txt"})
+        self.assertNotEqual(refreshed['content_id'], first['content_id'])
+        self.assertEqual(ctx._op_read({"path": "large.txt", "offset": READ_PAGE_CHARS})['content_id'], refreshed['content_id'])
         limited = self.context()
         limited.config = dataclasses.replace(
             limited.config,

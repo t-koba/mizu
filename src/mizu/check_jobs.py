@@ -337,10 +337,18 @@ def result(context, job_id):
 
 
 
-def logs(context, job_id, evidence_id, *, offset=0, limit=8192, content_id=None):
+def logs(context, job_id, evidence_id=None, *, offset=0, limit=8192, content_id=None):
     job = read(context.project, job_id)
     if context.role.name not in (job['role'], job.get('producer_role')):
         raise Denied('Check job belongs to another role')
+    if evidence_id is None:
+        directory = root(context.project) / job.get('shared_job', job_id) / 'commands'
+        candidates = sorted(p.stem for p in directory.glob('*.json')
+                            if re.fullmatch(r'[a-f0-9]{32}', p.stem) and p.is_file() and not p.is_symlink())[:32]
+        return {'trust': 'recorded-local-untrusted', 'status': job['status'],
+                'commands': [{'evidence_id': identifier,
+                              'request': {'action': 'logs', 'id': job_id, 'evidence_id': identifier}}
+                             for identifier in candidates]}
     if not isinstance(evidence_id, str) or not re.fullmatch(r'[a-f0-9]{32}', evidence_id):
         raise Denied('Invalid command evidence ID')
     if type(offset) is not int or type(limit) is not int or offset < 0 or not 1 <= limit <= 8192:

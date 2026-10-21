@@ -1102,3 +1102,5 @@ Thinking and effort values belong to each engine's native options. Codex custom
 providers use native model_providers; Claude provider endpoints use explicit SDK
 configuration. No common provider or effort allowlist is imposed. Consultation
 and smoke never reuse persistent sessions.
+
+Workspace read pagination retains at most 1024 path-to-content identities in one work unit. The first read of a path in a unit may start at any offset and establishes its pin. Later offset continuations may omit `content_id` to use that same retained identity. An explicit identity is required to demand continuity across units; a first read in another unit is a new independent read. Every page still hashes the current safe-read bytes and refuses a changed file. Reading offset zero starts a new version. Reaching the identity bound refuses a new path without evicting existing pins. Identities grant no file access and are discarded with the unit.

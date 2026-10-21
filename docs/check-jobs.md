@@ -151,3 +151,5 @@ obsolete work by source age or guesses its relevance.
 For a timed external wait, writable roles can use `finish` with `outcome=wait`
 and `wait_seconds`; the existing persisted wake deadline releases the unit and
 workspace rather than holding a command open.
+
+For `check_job` action `logs`, omitting `evidence_id` returns an index of up to 32 available recorded command IDs and ready-to-use `logs` requests for that same owned subscription. It lists only regular, nonsymlink UUID command records in the physical job's evidence directory, including when the subscription shares execution. No completion, acknowledgement or passing acceptance is inferred. Supplying an ID retains the existing paged, content-pinned evidence read and ownership checks.

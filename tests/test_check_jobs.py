@@ -57,6 +57,20 @@ class JobTests(Fixture):
         self.run_job()
         self.assertEqual(check_jobs.pending(self.project, 'worker')[0]['id'], job['id'])
         self.assertFalse(check_jobs.pending(self.project, 'reviewer'))
+    def test_logs_without_command_id_lists_only_owned_recorded_evidence(self):
+        ctx, job = self.submit()
+        directory = check_jobs.root(self.project)/job['id']/'commands'
+        write_json(directory/('a'*32+'.json'), {'stdout': 'recorded output'})
+        write_json(directory/'not-evidence.json', {'secret': 'not exposed'})
+        (directory/('b'*32+'.json')).symlink_to(directory/('a'*32+'.json'))
+        listing = check_jobs.logs(ctx, job['id'])
+        self.assertEqual([c['evidence_id'] for c in listing['commands']], ['a'*32])
+        request = listing['commands'][0]['request']
+        self.assertIn('recorded output', ctx._op_check_job(request)['text'])
+        with self.assertRaises(Denied):
+            check_jobs.logs(self.context('reviewer'), job['id'])
+        self.assertFalse(check_jobs.read(self.project, job['id'])['acknowledged'])
+
     def test_model_slot_not_needed_and_job_cleanup_identity_is_separate(self):
         ctx, job = self.submit()
         # Runner doesn't acquire the role or live workspace exclusion.
@@ -416,6 +430,9 @@ class SharingTests(JobTests):
         check_jobs.run_one(self.project, threading.Event(), sandbox_factory=Joining)
         self.assertEqual(len(FakeSandbox.calls),1)
         self.assertIn('shared output',check_jobs.logs(reader,joined[0]['id'],'a'*32)['text'])
+        request = check_jobs.logs(reader, joined[0]['id'])['commands'][0]['request']
+        self.assertEqual(request['id'], joined[0]['id'])
+        self.assertIn('shared output', reader._op_check_job(request)['text'])
 
     def test_changed_dependencies_refuse_queued_job_and_new_submission_is_distinct(self):
         dependency=self.root/'dependency'; dependency.mkdir(); file=dependency/'version'; file.write_text('one')
