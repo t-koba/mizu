@@ -416,3 +416,11 @@ class SharingTests(JobTests):
         before=check_jobs.environment(self.project);self.assertIsNotNone(before)
         (dep/'data').write_text('two')
         self.assertNotEqual(before,check_jobs.environment(self.project))
+
+    def test_reaped_consumed_wait_does_not_block_future_work(self):
+        import shutil
+        ctx,job=self.submit();check_jobs.set_wait(self.project,'worker',job['id'])
+        self.run_job();check_jobs.result(ctx,job['id'])
+        check_jobs.acknowledge(self.project,'worker',ctx.check_results_read)
+        shutil.rmtree(check_jobs.root(self.project)/job['id'])
+        self.assertFalse(check_jobs.waiting(self.project,'worker'))

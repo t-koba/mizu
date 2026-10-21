@@ -543,7 +543,11 @@ def waiting(project, role):
     record = read_json(root(project) / (role + '.wait.json'), {})
     if not record or record.get('inputs') != wait_signature(project):
         return False
-    return read(project, record['id'])['status'] in ('queued', 'running')
+    try:
+        return read(project, record['id'])['status'] in ('queued', 'running')
+    except Denied:
+        # Consumed evidence may be reaped; its stale wait is no longer pending.
+        return False
 
 
 def quarantine(project, job, slot, error):
