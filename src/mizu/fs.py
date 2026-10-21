@@ -403,7 +403,7 @@ _LOCAL_GUARD = threading.Lock()
 _LOCAL_LOCKS: dict[str, threading.Lock] = {}
 #: Blocking acquire bound so a re-entrant blocking request fails as Busy
 #: instead of hanging the daemon thread forever. Fixed liveness bound
-#: (same 30 s as platform.lock_fd on Windows); see ADR-026.
+#: (same 30 s as platform.lock_fd on every platform); see ADR-026.
 _LOCAL_BLOCKING_TIMEOUT = 30.0
 
 
@@ -429,7 +429,13 @@ def _acquire_local(key: str, *, blocking: bool) -> threading.Lock:
 
 @contextlib.contextmanager
 def lock(path: Path, *, blocking: bool = True) -> Iterator[None]:
-    """Kernel releases the lock on death. Never unlink a lock inode."""
+    """Kernel releases the lock on death. Never unlink a lock inode.
+
+    Both halves of the acquire are bounded: the intra-process guard waits
+    at most ``_LOCAL_BLOCKING_TIMEOUT`` and the cross-process (kernel)
+    acquire at most ``platform.LOCK_TIMEOUT``. Contention fails as Busy
+    instead of hanging the caller (ADR-026).
+    """
     mkdir(path.parent)
     try:
         local = _acquire_local(_local_key(path), blocking=blocking)

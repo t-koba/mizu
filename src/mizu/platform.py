@@ -14,10 +14,12 @@ plus thin per-platform text emitters in services.py.
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
 import socketserver as _socketserver
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 SYSTEM = {"linux": "linux", "darwin": "macos"}.get(sys.platform, "windows" if os.name == "nt" else sys.platform)
@@ -144,10 +146,13 @@ def secure_chmod(path: Path, mode: int) -> None:
     os.chmod(path, mode)
 
 
-#: Windows blocking-lock retry bound (fixed liveness bound per ADR-026,
-#: not a knob): mirrors fs._LOCAL_BLOCKING_TIMEOUT so a contended
-#: blocking acquire fails as Busy instead of hanging the daemon thread.
-WINDOWS_LOCK_TIMEOUT = 30.0
+#: Blocking-lock acquire bound for every platform (fixed liveness bound per
+#: ADR-026, not a knob): mirrors fs._LOCAL_BLOCKING_TIMEOUT so a contended
+#: blocking acquire fails as Busy instead of hanging the daemon thread. The
+#: bound covers the cross-process (kernel) acquire as well as the
+#: intra-process guard, so the two paths cannot disagree about how long a
+#: caller may wait.
+LOCK_TIMEOUT = 30.0
 
 
 def lock_fd(fd: int, *, blocking: bool = True) -> bool:
@@ -155,19 +160,39 @@ def lock_fd(fd: int, *, blocking: bool = True) -> bool:
 
     Uses fcntl.flock on POSIX, msvcrt.locking on Windows. Raises Busy-style
     BlockingIOError on contention so callers map it once.
+
+    Bounds: a blocking acquire waits at most ``LOCK_TIMEOUT`` seconds on
+    every platform, so contention fails as Busy instead of hanging the
+    caller. Non-blocking acquires never wait. Trust: the kernel advisory
+    lock, released when the process dies. Retry/cancellation: none; the
+    caller decides whether to retry. Evidence: the lock file itself.
+    Failure: contention raises BlockingIOError; a platform without an
+    advisory locking primitive raises OSError rather than pretending.
     """
     if _fcntl is not None:
-        flags = _fcntl.LOCK_EX | (0 if blocking else _fcntl.LOCK_NB)
-        _fcntl.flock(fd, flags)
+        if blocking:
+            # flock() would block without a bound, so the blocking contract
+            # is served by a bounded non-blocking retry loop: the same shape
+            # the Windows path uses, and the same bound on both.
+            deadline = time.monotonic() + LOCK_TIMEOUT
+            while True:
+                try:
+                    _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+                    return True
+                except OSError as exc:
+                    if exc.errno not in (errno.EACCES, errno.EAGAIN):
+                        raise
+                    if time.monotonic() >= deadline:
+                        raise BlockingIOError("Lock contention") from None
+                    time.sleep(0.05)
+        _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
         return True
     if _msvcrt is not None:
         # LK_NBLCK is non-blocking; emulate blocking with a short retry loop
         # so the blocking=True contract holds for local development.
-        import time
-
         mode = _msvcrt.LK_NBLCK  # type: ignore[attr-defined]
         if blocking:
-            deadline = time.monotonic() + WINDOWS_LOCK_TIMEOUT
+            deadline = time.monotonic() + LOCK_TIMEOUT
             while True:
                 try:
                     _msvcrt.locking(fd, mode, 1)  # type: ignore[attr-defined]

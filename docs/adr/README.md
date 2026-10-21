@@ -167,9 +167,10 @@ framing/memory bounds, sandbox floors, and liveness bounds stay fixed in code.
 
 ## ADR-026 — In-process lock guard with a fixed 30 s liveness bound
 `fs.lock` serializes lock files within the process with a per-path guard keyed by canonical
-path, plus a fixed 30 s blocking-acquire bound shared with Windows `lock_fd`. Contention fails
-as `Busy` instead of hanging the daemon; the bound is not an operator knob
-(`fs.py` `_LOCAL_BLOCKING_TIMEOUT`, same 30 s as platform `lock_fd`).
+path, and every blocking acquire is bounded at 30 s: the intra-process guard by
+`fs.py` `_LOCAL_BLOCKING_TIMEOUT` and the cross-process (kernel) acquire by `platform.py`
+`LOCK_TIMEOUT`, on POSIX and Windows alike. Contention fails as `Busy` instead of hanging the
+daemon; the bound is not an operator knob.
 
 ## ADR-027 — Composed role policies from ordered Markdown parts
 A role's `policy` accepts one path or an ordered array of paths, composed in order as the
