@@ -190,8 +190,14 @@ carries failure details, output tails or diagnostics; do not substitute the gene
 sets no timeout policy. The Windows scope is 50 minutes with a 1800 s child
 cap. The modeled setup/child/later-check/cleanup/suffix path is 2646 s,
 leaving 354 s inside the job; this arithmetic is a contract, not a worst-case
-runtime claim. The 2026-10-21 Windows/3.13 run completed 2233 of about 2265
-tests in 1447 s and reached the previous 1450 s child cap without a reported
+runtime claim. The POSIX matrix scope is 35 minutes with a 1000 s child cap
+and a 1846 s modeled path, and the authoritative `durable-contract` scope is
+45 minutes, holding the POSIX path plus the two pinned-adapter provisioning
+steps at the product's own 300 s per-adapter bound. Every scope that encloses
+the gate holds the gate's modeled path, so a bounded run reports its own
+outcome instead of being cut off by the enclosing scope; the installer
+staging call holds the Windows path for the same reason. The 2026-10-21
+Windows/3.13 run completed 2233 of about 2265 tests in 1447 s and reached the previous 1450 s child cap without a reported
 test failure, so the child bound covers the suite's measured cost with margin.
 If the bounded run stalls again, use its partial per-test artifact to identify
 the unfinished test; timing samples are not bounds.

@@ -61,14 +61,60 @@ class CheckTimeoutTests(unittest.TestCase):
         self.assertEqual(CHECK._unittest_timeout_seconds('posix'), 1000)
         self.assertEqual(CHECK.DEFAULT_CHECK_TIMEOUT_SECONDS, 600)
         workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
-        self.assertIn("timeout-minutes: ${{ matrix.os == 'windows-latest' && 50 || 20 }}", workflow)
+        self.assertIn("timeout-minutes: ${{ matrix.os == 'windows-latest' && 50 || 35 }}", workflow)
         # Exercise the 60-second setup case, one later execute timeout, both
         # bounded cleanup waits, process-group termination (1 s grace + 5 s
         # reap), and the suffix/receipt reserve: 2646 s total, leaving 354 s.
-        required = (60 + child_timeout + CHECK.DEFAULT_CHECK_TIMEOUT_SECONDS
-                    + 2 * CHECK.PROCESS_CLEANUP_TIMEOUT_SECONDS + 6 + 120)
+        required = CHECK.modelled_gate_seconds(child_timeout)
         self.assertEqual(required, 2646)
         self.assertGreaterEqual(50 * 60, required)
+
+    def test_matrix_job_scopes_hold_the_modelled_gate_path(self):
+        # A job scope that is shorter than the gate's own modelled path kills
+        # a healthy run before the gate can report its bounded outcome, so
+        # the enclosing scope must never be the tighter bound.
+        workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
+        match = re.search(r"timeout-minutes: \$\{\{ matrix\.os == 'windows-latest' && (\d+) \|\| (\d+) \}\}",
+                          workflow)
+        self.assertIsNotNone(match)
+        windows_minutes, posix_minutes = int(match.group(1)), int(match.group(2))
+        self.assertGreaterEqual(windows_minutes * 60,
+                                CHECK.modelled_gate_seconds(CHECK._unittest_timeout_seconds('nt')))
+        self.assertGreaterEqual(posix_minutes * 60,
+                                CHECK.modelled_gate_seconds(CHECK._unittest_timeout_seconds('posix')))
+
+    def test_posix_job_scope_covers_the_modelled_gate_path(self):
+        # The POSIX matrix cell runs the same gate with the 1000-second child:
+        # 60 s setup + 1000 s child + one 600 s later check + bounded cleanup
+        # + suffix/receipt reserve = 1846 s, which the 35-minute scope holds.
+        required = CHECK.modelled_gate_seconds(CHECK._unittest_timeout_seconds('posix'))
+        self.assertEqual(required, 1846)
+        workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
+        self.assertIn("timeout-minutes: ${{ matrix.os == 'windows-latest' && 50 || 35 }}", workflow)
+        self.assertGreaterEqual(35 * 60, required)
+
+    def test_durable_contract_job_scope_covers_the_modelled_gate_path(self):
+        # The authoritative job runs the whole gate on a POSIX host after
+        # provisioning two pinned adapters, so its scope holds the modelled
+        # path plus both provisioning steps at the product's own per-adapter
+        # provisioning bound.
+        required = CHECK.modelled_gate_seconds(CHECK._unittest_timeout_seconds('posix'))
+        provisioning = 2 * CHECK.NPM_PROVISION_TIMEOUT_SECONDS
+        workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
+        match = re.search(r'durable-contract:.*?timeout-minutes: (\d+)', workflow, re.S)
+        self.assertIsNotNone(match)
+        self.assertGreaterEqual(int(match.group(1)) * 60, required + provisioning)
+
+    def test_installer_staging_gate_outlives_the_modelled_windows_path(self):
+        # The staged gate runs the same child; a staging timeout shorter than
+        # the gate's modelled Windows path would cut the gate off before its
+        # bounded cleanup and receipt.
+        source = (ROOT / 'scripts' / 'install.py').read_text(encoding='utf-8')
+        match = re.search(r'"scripts/check\.py".*?timeout=(\d+)', source, re.S)
+        self.assertIsNotNone(match)
+        required = CHECK.modelled_gate_seconds(CHECK._unittest_timeout_seconds('nt'))
+        self.assertEqual(required, 2646)
+        self.assertGreaterEqual(int(match.group(1)), required)
 
     def test_windows_child_bound_covers_the_measured_suite_cost(self):
         # The 2026-10-21 Windows/3.13 timing artifact measured the suite's
@@ -979,7 +1025,7 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
         # Timing stays diagnostic; the 50-minute/1800-second scope is
         # enforced while the always-uploaded artifact preserves partial progress.
         self.assertIn('1800-second child', workflow)
-        self.assertIn("timeout-minutes: ${{ matrix.os == 'windows-latest' && 50 || 20 }}", workflow)
+        self.assertIn("timeout-minutes: ${{ matrix.os == 'windows-latest' && 50 || 35 }}", workflow)
         self.assertEqual(CHECK._unittest_timeout_seconds('nt'), 1800)
 
     def test_offline_steps_run_exactly_once_per_matrix_cell(self):
@@ -1262,10 +1308,10 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
 
     def test_matrix_scope_timeouts_gates_and_jobs_preserved(self):
         workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
-        # The 3x4 matrix, timeouts, installer step, and durable job are unchanged.
+        # The 3x4 matrix, timeouts, installer step, and durable job are preserved.
         self.assertIn('os: [ubuntu-24.04, macos-latest, windows-latest]', workflow)
         self.assertIn('python: ["3.11", "3.12", "3.13", "3.14"]', workflow)
-        self.assertIn("timeout-minutes: ${{ matrix.os == 'windows-latest' && 50 || 20 }}", workflow)
+        self.assertIn("timeout-minutes: ${{ matrix.os == 'windows-latest' && 50 || 35 }}", workflow)
         self.assertIn('run: python scripts/check.py --report private-validation/offline.json', workflow)
         self.assertIn('--allow-not-run node-durable-contract-tests,node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests', workflow)
         self.assertIn("- name: Core installer and CLI lifecycle\n        if: runner.os == 'Linux' && matrix.python == '3.13'", workflow)

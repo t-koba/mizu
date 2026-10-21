@@ -78,6 +78,26 @@ def _allow_list(value: str) -> frozenset:
 
 DEFAULT_CHECK_TIMEOUT_SECONDS = 600
 PROCESS_CLEANUP_TIMEOUT_SECONDS = 30
+#: Seconds budgeted for the environment setup that precedes the suite child
+#: (interpreter start, preflight probes, dependency resolution).
+SETUP_RESERVE_SECONDS = 60
+#: Seconds budgeted for the process-group cleanup that follows a bounded
+#: child: two bounded waits plus the termination grace and the reap.
+CLEANUP_RESERVE_SECONDS = 2 * PROCESS_CLEANUP_TIMEOUT_SECONDS + 6
+#: Seconds budgeted for the receipt write and the trailing summary.
+RECEIPT_RESERVE_SECONDS = 120
+
+
+def modelled_gate_seconds(child_timeout: int) -> int:
+    """Return the seconds a bounded gate run needs from setup to receipt.
+
+    Every outer scope that encloses the gate (a CI job, the installer
+    staging call) must hold this path. A scope shorter than the path cuts
+    off a healthy run before the gate can report its own bounded outcome,
+    so the enclosing scope must never be the tighter bound.
+    """
+    return (SETUP_RESERVE_SECONDS + child_timeout + DEFAULT_CHECK_TIMEOUT_SECONDS
+            + CLEANUP_RESERVE_SECONDS + RECEIPT_RESERVE_SECONDS)
 
 
 def _unittest_timeout_seconds(platform: str | None = None) -> int:
@@ -563,9 +583,11 @@ def main():
     checks = []
     counts = {}
     env = {**os.environ, 'PYTHONDONTWRITEBYTECODE': '1', 'PYTHONFAULTHANDLER': '1'}
-    # The offline suite is process-spawn heavy. Keep the 50-minute Windows job
-    # scope; budget for 60 s setup, the 1800 s child, one 600 s later check,
-    # bounded process cleanup, and a 120 s suffix/receipt reserve.
+    # The offline suite is process-spawn heavy. Every outer scope that
+    # encloses this gate holds the modelled path (setup, the child, one later
+    # check, bounded process cleanup, and the suffix/receipt reserve), so a
+    # bounded run reports its own outcome instead of being cut off by the
+    # enclosing scope. `modelled_gate_seconds` states that path.
     # A contract test keeps the full budget relationship explicit. Step output
     # streams live (merged in order) so a hung step leaves
     # the last-running test visible, and a step timeout

@@ -16,8 +16,11 @@ jobs:
     # The Windows suite costs about 1475 s on a slow runner: the 2026-10-21
     # Windows/3.13 run completed 2233 of about 2265 tests at the previous
     # 1450-second child cap with no test failure. Keep a 50-minute Windows
-    # scope around its 1800-second child.
-    timeout-minutes: ${{ matrix.os == 'windows-latest' && 50 || 20 }}
+    # scope around its 1800-second child, and a 35-minute POSIX scope around
+    # its 1000-second child: each scope holds the modelled
+    # setup/child/later-check/cleanup/suffix path, so the gate reports its
+    # own bounded outcome instead of being cut off by the job scope.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 50 || 35 }}
     strategy:
       fail-fast: false
       matrix:
@@ -71,7 +74,11 @@ jobs:
     # fallbacks for environments that cannot provision; their receipts record
     # the waiver, and promotion still requires this job green.
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # The authoritative scope holds the POSIX modelled gate path (1846 s) plus
+    # the two pinned-adapter provisioning steps at the product's own 300 s
+    # per-adapter bound, so this job cannot kill the gate before the gate
+    # reaches its own bound.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
