@@ -11,17 +11,16 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT/'src'))
 from mizu.config import load
-from mizu.doctor import (ADAPTER_STARTUP_CEILING_SECONDS,
-                         ADAPTER_STARTUP_FLOOR_SECONDS,
+from mizu.doctor import (ADAPTER_STARTUP_FLOOR_SECONDS,
                          ADAPTER_STARTUP_MEASURE_CEILING_SECONDS,
-                         adapter_startup_bound,
                          probe_label,
                          probe_outcome,
+                         startup_evidence,
                          help_has_flag)
 from mizu.engine_config import adapter_contract
 from mizu.errors import ConfigError
 from mizu.platform import default_config_file
-from mizu.startup import measured_startup, record_startup, startup_bound
+from mizu.startup import observed_startup
 
 
 def probe(engine, prefix):
@@ -95,6 +94,11 @@ def run_probe(command, engine=None, config=None):
     reports. A configuration that cannot be read leaves the check with the
     bound its own measurement requires.
 
+    A child that answered is measured by its answer, whatever that answer
+    was: the launcher harness measures the identical child by its first
+    answer, which is a refusal, so a failure is never a second answer for
+    one child's start-up.
+
     A child that outlives the bound is a bound refusal, never a missing
     capability: it was stopped before it could report, so nothing is known
     about the capabilities it holds.
@@ -104,38 +108,25 @@ def run_probe(command, engine=None, config=None):
         measured = subprocess.run(command, capture_output=True, text=True,
                                   timeout=ADAPTER_STARTUP_MEASURE_CEILING_SECONDS)
     except subprocess.TimeoutExpired:
+        measured = None
+    startup = round(time.monotonic() - started, 3)
+    if measured is not None and measured.returncode is not None and measured.returncode >= 0:
+        # The child answered, and an answer is a measurement even when the
+        # answer was a failure: the launcher harness measures the identical
+        # child by its first answer, which is a refusal. The cost joins this
+        # host's record for the engine, so the bound published for the
+        # identical child is the bound the launcher harness holds it to, and
+        # the cost published beside it is the cost that bound was derived
+        # from.
+        if config is None and engine is not None:
+            config = host_config()
+        cost, bound = observed_startup(config, engine, startup)
+    else:
         # The measurement could not be taken: an unmeasured cost keeps the
         # floor, the same answer the launcher harness gives for the identical
         # child, and the probe that follows is held to it.
-        measured = None
-    startup = round(time.monotonic() - started, 3)
-    if measured is not None and measured.returncode != 0:
-        # The child answered and reported a failure: that answer is the
-        # probe's answer, and the bound it was held to is the ceiling.
-        return measured, startup, ADAPTER_STARTUP_CEILING_SECONDS
-    if measured is None:
         bound = ADAPTER_STARTUP_FLOOR_SECONDS
         cost = None
-    elif config is None and engine is not None:
-        config = host_config()
-        if config is not None:
-            record_startup(config, engine, startup)
-            bound = startup_bound(config, engine)
-            cost = measured_startup(config, engine)
-            if cost is None:
-                cost = startup
-        else:
-            bound = adapter_startup_bound(startup)
-            cost = startup
-    elif config is not None and engine is not None:
-        record_startup(config, engine, startup)
-        bound = startup_bound(config, engine)
-        cost = measured_startup(config, engine)
-        if cost is None:
-            cost = startup
-    else:
-        bound = adapter_startup_bound(startup)
-        cost = startup
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=bound)
     except subprocess.TimeoutExpired as exc:
@@ -146,7 +137,7 @@ def run_probe(command, engine=None, config=None):
 def probe_engine(engine, command, expected, config=None):
     """Probe one installed adapter and return its check record."""
     try:
-        result, startup, bound = run_probe(command, engine=engine, config=config)
+        result, cost, bound = run_probe(command, engine=engine, config=config)
     except (ProbeTimeout, ConfigError) as exc:
         return {'engine': engine, 'status': 'fail', 'reason': str(exc)}
     if result.returncode is not None and result.returncode < 0:
@@ -176,8 +167,10 @@ def probe_engine(engine, command, expected, config=None):
                     'reason': 'Isolated SDK interpreter not configured'}
         success = result.returncode == 0 and not missing
         evidence = {'exports': sorted(set(verified)), 'missing': missing}
-    evidence['startup_seconds'] = startup
-    evidence['host_relative_bound_seconds'] = bound
+    # The cost published is the one the bound was derived from, and the
+    # shape of that evidence is the doctor's, so one child reads the same
+    # way wherever it is probed.
+    evidence.update(startup_evidence(cost, bound))
     return {'engine': engine, 'status': 'pass' if success else 'fail',
             'exit_code': result.returncode,
             'request_unit': adapter_contract(engine)['request_unit'], 'contract': evidence}

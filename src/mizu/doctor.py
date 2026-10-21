@@ -18,10 +18,14 @@ from .fs import digest, mkdir, read_json
 from .pi import credentials
 from .process import run, stop_note
 from .sandbox import CHECKPOINT_ANNOTATION, CHECKPOINT_INSPECT_MAXIMUM, Sandbox, ensure_single, inspect_text_has_valueless_env, inspect_text_is_checkpoint, runtime_base, runtime_env
+# The host-relative bound's shape and the record it is derived from are
+# re-exported here: the installed-adapter contract check and the
+# regressions read the one shape from the product, so no surface keeps a
+# second copy of it.
 from .startup import (ADAPTER_STARTUP_CEILING_SECONDS, ADAPTER_STARTUP_FLOOR_SECONDS,
                       ADAPTER_STARTUP_MEASURE_CEILING_SECONDS, ADAPTER_STARTUP_MULTIPLIER,
-                      adapter_startup_bound, measured_startup, record_startup,
-                      startup_bound)
+                      adapter_startup_bound, measured_startup, observed_startup,
+                      record_startup, startup_bound)
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -135,31 +139,29 @@ def adapter_probe(config, engine, command, *, maximum: int, label: str):
     The child is measured once under the ceiling and the probe that follows
     is held to the bound that measurement requires: the same order, and the
     same shape, the launcher harness uses for the identical child. A child
-    that does not answer inside the bound is a bound refusal with its own
-    reason, never a missing capability: it was stopped before it could
-    report, so nothing is known about the capabilities it holds.
+    that answered is measured by its answer, whatever that answer was: the
+    launcher harness measures the identical child by its first answer, which
+    is a refusal, so the two surfaces never hold two answers for one
+    child's start-up. A child that does not answer inside the bound is a
+    bound refusal with its own reason, never a missing capability: it was
+    stopped before it could report, so nothing is known about the
+    capabilities it holds.
 
     Returns the probe's result and the bound the child was held to, so the
     evidence names the bound that was applied.
     """
     measured = run(command, timeout=ADAPTER_STARTUP_MEASURE_CEILING_SECONDS, maximum=maximum)
     if measured.reason == "exited" and measured.exit_code is not None and measured.exit_code >= 0:
-        if measured.exit_code != 0:
-            # The child answered and reported a failure: that answer is the
-            # probe's answer, and the bound it was held to is the ceiling.
-            return measured, ADAPTER_STARTUP_CEILING_SECONDS, measured.seconds
-        # The measurement joins this host's record for the engine, so the
-        # bound is the one every later start of that engine's child uses: the
-        # runtime and the doctor never hold two answers for one child's
-        # start-up.
-        record_startup(config, engine, measured.seconds)
-        bound = startup_bound(config, engine)
-        # The cost the bound was derived from is this host's record for the
-        # engine, not this run's sample: the published pair is then checkable
-        # against the rule it reports.
-        cost = measured_startup(config, engine)
-        if cost is None:
-            cost = measured.seconds
+        # The child answered, and an answer is a measurement even when the
+        # answer was a failure: the launcher harness measures the identical
+        # child by its first answer, which is a refusal. The measurement
+        # joins this host's record for the engine, so the bound is the one
+        # every later start of that engine's child uses -- the runtime and
+        # the doctor never hold two answers for one child's start-up -- and
+        # the cost published beside it is the cost that bound was derived
+        # from, so the published pair is checkable against the rule it
+        # reports.
+        cost, bound = observed_startup(config, engine, measured.seconds)
     else:
         # The measurement could not be taken: an unmeasured cost keeps the
         # floor, the same answer the launcher harness gives for the identical

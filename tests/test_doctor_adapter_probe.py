@@ -404,5 +404,126 @@ class SharedProbeClassificationTests(unittest.TestCase):
         self.assertEqual(doctor.probe_label(None), "Adapter contract probe")
 
 
+class AnsweredChildIsAMeasurementTests(unittest.TestCase):
+    """One answer for the identical child's start-up, failure or not.
+
+    The launcher harness measures the identical child by its first answer,
+    which is a refusal, so an answer is a measurement whatever it said. The
+    doctor and the contract check answered a child that failed with the
+    measuring ceiling instead: a second answer for one child's start-up,
+    and a published pair that could contradict the published rule. Both
+    surfaces now measure the answer they got and publish the bound the
+    host's record derives for the identical child.
+    """
+
+    def setUp(self):
+        self.original = doctor.run
+        self.addCleanup(setattr, doctor, "run", self.original)
+        self.module = load_check_cli()
+
+    def failing_child(self, seen=None):
+        def fake_run(argv, **kwargs):
+            if seen is not None:
+                seen.append(kwargs.get("timeout"))
+            return Result(1, "", "boom", "exited", 0.5)
+        return fake_run
+
+    def test_the_doctor_measures_a_child_that_answered_with_a_failure(self):
+        seen = []
+        doctor.run = self.failing_child(seen)
+        config = config_for()
+        result, bound, cost = doctor.adapter_probe(config, "pi",
+                                                   ["node", "launcher.mjs", "--check-contract"],
+                                                   maximum=8192, label="probe")
+        # The measurement carried the measuring ceiling; the probe that
+        # follows is held to the bound the host's record derives, never to
+        # the ceiling that measured the answer.
+        self.assertEqual(seen[0], doctor.ADAPTER_STARTUP_MEASURE_CEILING_SECONDS)
+        self.assertEqual(seen[1], doctor.ADAPTER_STARTUP_FLOOR_SECONDS)
+        self.assertEqual(bound, doctor.ADAPTER_STARTUP_FLOOR_SECONDS)
+        self.assertEqual(cost, 0.5)
+        # The published pair satisfies the published rule.
+        self.assertEqual(doctor.adapter_startup_bound(cost), bound)
+        # The runtime starts the identical child later and reads the same
+        # record: one answer for one child's start-up.
+        self.assertEqual(doctor.startup_bound(config, "pi"), bound)
+        # The child's own answer is unchanged.
+        self.assertEqual(result.exit_code, 1)
+
+    def test_the_failing_child_keeps_its_own_answer(self):
+        doctor.run = self.failing_child()
+        with self.assertRaises(ConfigError) as caught:
+            doctor.engine_contract(config_for(), "pi")
+        # The bound does not change what the child said: a child that
+        # answered and reported a failure is still the child's own answer.
+        self.assertIn("SDK capabilities missing", str(caught.exception))
+
+    def test_the_contract_check_measures_a_child_that_answered_with_a_failure(self):
+        seen = []
+
+        def fake_run(command, **kwargs):
+            seen.append(kwargs.get("timeout"))
+            return subprocess.CompletedProcess(command, 1, "", "boom")
+
+        original = self.module.subprocess.run
+        self.module.subprocess.run = fake_run
+        self.addCleanup(setattr, self.module.subprocess, "run", original)
+        with tempfile.TemporaryDirectory() as td:
+            config = SimpleNamespace(data=Path(td))
+            record = self.module.probe_engine("pi", ["node", "launcher.mjs"],
+                                              ["ModelRuntime"], config=config)
+            self.assertEqual(record["status"], "fail")
+            # The measurement carried the measuring ceiling; the probe that
+            # follows is held to the bound the host's record derives.
+            self.assertEqual(seen[0], self.module.ADAPTER_STARTUP_MEASURE_CEILING_SECONDS)
+            self.assertEqual(seen[1], doctor.ADAPTER_STARTUP_FLOOR_SECONDS)
+            contract = record["contract"]
+            self.assertEqual(contract["host_relative_bound_seconds"],
+                             doctor.ADAPTER_STARTUP_FLOOR_SECONDS)
+            # The published cost is the one the bound was derived from, so
+            # the published pair satisfies the rule the product reports.
+            self.assertEqual(doctor.adapter_startup_bound(contract["startup_seconds"]),
+                             contract["host_relative_bound_seconds"])
+            # The runtime reads the same record for the identical child.
+            self.assertEqual(doctor.startup_bound(config, "pi"),
+                             contract["host_relative_bound_seconds"])
+
+    def test_the_contract_check_publishes_the_recorded_cost(self):
+        # The host's record holds a larger cost from an earlier, slower run:
+        # the published cost is the one the published bound was derived
+        # from, not this run's sample.
+        with tempfile.TemporaryDirectory() as td:
+            config = SimpleNamespace(data=Path(td))
+            doctor.record_startup(config, "pi", 20.0)
+
+            def fake_run(command, **kwargs):
+                return subprocess.CompletedProcess(command, 0,
+                                                   json.dumps({"exports": ["ModelRuntime"]}), "")
+
+            original = self.module.subprocess.run
+            self.module.subprocess.run = fake_run
+            self.addCleanup(setattr, self.module.subprocess, "run", original)
+            record = self.module.probe_engine("pi", ["node", "launcher.mjs"],
+                                              ["ModelRuntime"], config=config)
+            contract = record["contract"]
+            self.assertEqual(record["status"], "pass")
+            self.assertEqual(contract["startup_seconds"], 20.0)
+            self.assertEqual(contract["host_relative_bound_seconds"], 150)
+
+    def test_a_child_that_did_not_answer_publishes_no_cost(self):
+        def fake_run(command, **kwargs):
+            raise subprocess.TimeoutExpired(cmd=command, timeout=kwargs.get("timeout"))
+
+        original = self.module.subprocess.run
+        self.module.subprocess.run = fake_run
+        self.addCleanup(setattr, self.module.subprocess, "run", original)
+        record = self.module.probe_engine("pi", ["node", "launcher.mjs"], ["ModelRuntime"])
+        # The child did not answer, so no cost is published for it: the
+        # refusal names the bound it was held to.
+        self.assertEqual(record["status"], "fail")
+        self.assertIn("bound", record["reason"])
+        self.assertNotIn("contract", record)
+
+
 if __name__ == "__main__":
     unittest.main()

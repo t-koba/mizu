@@ -513,6 +513,19 @@ floor and the child's own outcome is named. The doctor and the installed-
 adapter contract check answer that way too, so neither surface refuses a
 check that the harness would still run.
 
+An answered child is a measurement on every path, including a failure. The
+launcher harness measures the identical child by its first answer, which is
+a refusal, so a child that answered has told the host what its start-up
+costs. The doctor and the installed-adapter contract check answered a child
+that failed with the measuring ceiling instead: a second answer for one
+child's start-up, and a published pair that could contradict the published
+rule, because the cost was the child's own sample while the bound was the
+ceiling. Both surfaces now measure the answer they got -- that cost joins
+the host's record, and the bound is the one that record derives -- so the
+bound the probe reports is the bound the child was held to, and the runtime,
+the doctor and the contract check hold the identical child to one bound on
+every path.
+
 The same bound governs the runtime's own handshake. The Pi driver starts the
 adapter child and waits for its first answer, and that wait was a fixed 30 s --
 below what a loaded host has been observed to need -- so the child was killed

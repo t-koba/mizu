@@ -36,7 +36,11 @@ runtime code. A fourth engine needs, in this order:
    doctor and the contract check hold the identical child to one bound, and
    the cost the probe reports is the cost that bound was derived from: the
    pair satisfies the rule the product reports, and the bound it reports is
-   the bound the child was held to. A child that outlives its bound, or that was killed before it
+   the bound the child was held to. A child that answered is measured by its
+   answer, whatever that answer was: the launcher harness measures the
+   identical child by its first answer, which is a refusal, so a child that
+   failed is measured and bounded like any other answered child, never with
+   the ceiling that measured it. A child that outlives its bound, or that was killed before it
    could report, is reported as a bound refusal that names its own outcome --
    a child a signal stopped is named by that signal -- never as a missing
    capability; `doctor` and `check-cli` share that one classification, so a

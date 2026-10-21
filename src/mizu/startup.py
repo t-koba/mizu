@@ -125,3 +125,28 @@ def record_startup(config, engine: str, seconds) -> None:
 def startup_bound(config, engine: str) -> int:
     """The bound this host applies to one engine's child start-up."""
     return adapter_startup_bound(measured_startup(config, engine))
+
+
+def observed_startup(config, engine: str, seconds) -> tuple:
+    """The cost and the bound one observed start-up answers with.
+
+    One rule for every surface that starts an engine's child: an observed
+    cost joins this host's record for that engine, the bound is the one
+    that record derives, and the cost returned beside the bound is the
+    cost the bound was derived from, so the published pair satisfies the
+    published rule.
+
+    An answered child is a measurement even when its answer was a failure:
+    the launcher harness measures the identical child by its first answer,
+    which is a refusal, so a surface that treats a failure as an
+    unmeasured child holds two answers for one child's start-up. A cost
+    that cannot be recorded -- no configuration, or no engine name --
+    keeps the local measurement and the bound that measurement requires.
+    """
+    if config is None or not isinstance(engine, str) or not ENGINE_NAME.fullmatch(engine):
+        return float(seconds), adapter_startup_bound(seconds)
+    record_startup(config, engine, seconds)
+    cost = measured_startup(config, engine)
+    if cost is None:
+        cost = float(seconds)
+    return cost, startup_bound(config, engine)
