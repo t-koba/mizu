@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 from test_selection import SelectionFixture, specification
-from mizu.admission import admission
+from mizu.admission import _Queue, admission
 from mizu.budget import Budget
 from mizu.cli import execute, parser
 from mizu.drivers import admit_invocation
@@ -116,7 +116,7 @@ class RecoveryProbeTests(SelectionFixture):
         self.assertEqual(read_json(self.store.path)['version'], 2)
         self.assertEqual(self.store.read()['blocks'], legacy['blocks'])
 
-    def test_fail_fast_probe_cannot_bypass_a_pending_caller(self):
+    def test_fail_fast_probe_skips_a_resource_blocked_caller(self):
         action = self.setup_probe()
         stop = threading.Event()
         config = dataclasses.replace(self.config, limits=dataclasses.replace(
@@ -138,15 +138,32 @@ class RecoveryProbeTests(SelectionFixture):
                         self.fail("caller did not enqueue")
                     time.sleep(0.01)
                 result, driver = self.service(config=config)
-                self.assertEqual(result['status'], 'deferred')
-                self.assertEqual(result['reason'], 'locks_unavailable')
-                self.assertEqual(driver.calls, [])
-                self.assertTrue(active(self.contribution(action), 1011))
+                self.assertEqual(result['status'], 'success')
+                self.assertEqual(len(driver.calls), 1)
+                self.assertEqual(self.contribution(action)['status'], 'recovered')
+                self.assertTrue(thread.is_alive())
+                self.assertEqual(len(read_json(config.data / 'slots/queue.json')['tickets']), 1)
         finally:
             stop.set()
             thread.join(5)
         self.assertFalse(thread.is_alive())
         self.assertEqual(read_json(config.data / "slots/queue.json")["tickets"], [])
+
+    def test_fail_fast_probe_cannot_bypass_a_ready_caller(self):
+        action = self.setup_probe()
+        head = _Queue(self.config, ())
+        try:
+            # A live, ready ticket kept between attempts without a sleep race.
+            with lock(self.config.data / 'slots/queue.lock', blocking=False):
+                head._enqueue([])
+            result, driver = self.service()
+            self.assertEqual(result['status'], 'deferred')
+            self.assertEqual(result['reason'], 'locks_unavailable')
+            self.assertEqual(driver.calls, [])
+            self.assertTrue(active(self.contribution(action), 1011))
+        finally:
+            head.close()
+        self.assertEqual(read_json(self.config.data / 'slots/queue.json')['tickets'], [])
 
     def test_paid_success_has_no_work_unit_side_effects(self):
         action = self.setup_probe()
