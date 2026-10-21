@@ -13,8 +13,11 @@ jobs:
     # Portable development plane: offline unit/contract checks on all three OSes.
     # Native service operation, live inference and OCI isolation are never asserted here.
     runs-on: ${{ matrix.os }}
-    # Keep the original 40-minute Windows scope around its 1450-second child.
-    timeout-minutes: ${{ matrix.os == 'windows-latest' && 40 || 20 }}
+    # The Windows suite costs about 1475 s on a slow runner: the 2026-10-21
+    # Windows/3.13 run completed 2233 of about 2265 tests at the previous
+    # 1450-second child cap with no test failure. Keep a 50-minute Windows
+    # scope around its 1800-second child.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 50 || 20 }}
     strategy:
       fail-fast: false
       matrix:

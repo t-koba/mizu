@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -56,18 +57,38 @@ class InstallerStagingWaiverTests(unittest.TestCase):
 class CheckTimeoutTests(unittest.TestCase):
     def test_windows_budget_covers_setup_child_timeout_and_receipt_path(self):
         child_timeout = CHECK._unittest_timeout_seconds('nt')
-        self.assertEqual(child_timeout, 1450)
+        self.assertEqual(child_timeout, 1800)
         self.assertEqual(CHECK._unittest_timeout_seconds('posix'), 1000)
         self.assertEqual(CHECK.DEFAULT_CHECK_TIMEOUT_SECONDS, 600)
         workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
-        self.assertIn("timeout-minutes: ${{ matrix.os == 'windows-latest' && 40 || 20 }}", workflow)
+        self.assertIn("timeout-minutes: ${{ matrix.os == 'windows-latest' && 50 || 20 }}", workflow)
         # Exercise the 60-second setup case, one later execute timeout, both
         # bounded cleanup waits, process-group termination (1 s grace + 5 s
-        # reap), and the suffix/receipt reserve: 2296 s total, leaving 104 s.
+        # reap), and the suffix/receipt reserve: 2646 s total, leaving 354 s.
         required = (60 + child_timeout + CHECK.DEFAULT_CHECK_TIMEOUT_SECONDS
                     + 2 * CHECK.PROCESS_CLEANUP_TIMEOUT_SECONDS + 6 + 120)
-        self.assertEqual(required, 2296)
-        self.assertGreaterEqual(40 * 60, required)
+        self.assertEqual(required, 2646)
+        self.assertGreaterEqual(50 * 60, required)
+
+    def test_windows_child_bound_covers_the_measured_suite_cost(self):
+        # The 2026-10-21 Windows/3.13 timing artifact measured the suite's
+        # cost on a slow runner: 2233 of about 2265 tests completed in 1447 s
+        # of test time and the run was cut off at the previous 1450 s cap with
+        # no test failure, so the whole suite needs about 1475 s there. The
+        # bound must cover that measured cost with headroom for growth, or the
+        # gate fails a green suite.
+        measured_suite_seconds = 1475
+        headroom = CHECK._unittest_timeout_seconds('nt') - measured_suite_seconds
+        self.assertGreaterEqual(headroom, 300)
+
+    def test_installer_staging_gate_outlives_the_windows_child_bound(self):
+        # The staged gate runs the same child; a staging timeout that does not
+        # outlive the child's own Windows bound would cut the gate off before
+        # its bounded cleanup and receipt.
+        source = (ROOT / 'scripts' / 'install.py').read_text(encoding='utf-8')
+        match = re.search(r'"scripts/check\.py".*?timeout=(\d+)', source, re.S)
+        self.assertIsNotNone(match)
+        self.assertGreater(int(match.group(1)), CHECK._unittest_timeout_seconds('nt'))
 
     def test_ci_provisions_both_pi_adapters_for_unwaived_contract_gates(self):
         workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
@@ -955,11 +976,11 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
         # Do not upload offline reports, which may contain diagnostics.
         self.assertNotIn('path: private-validation/offline.json', workflow)
         self.assertNotIn('path: private-validation/durable.json', workflow)
-        # Timing stays diagnostic; the original 40-minute/1450-second scope is
+        # Timing stays diagnostic; the 50-minute/1800-second scope is
         # enforced while the always-uploaded artifact preserves partial progress.
-        self.assertIn('1450', workflow)
-        self.assertIn("timeout-minutes: ${{ matrix.os == 'windows-latest' && 40 || 20 }}", workflow)
-        self.assertEqual(CHECK._unittest_timeout_seconds('nt'), 1450)
+        self.assertIn('1800-second child', workflow)
+        self.assertIn("timeout-minutes: ${{ matrix.os == 'windows-latest' && 50 || 20 }}", workflow)
+        self.assertEqual(CHECK._unittest_timeout_seconds('nt'), 1800)
 
     def test_offline_steps_run_exactly_once_per_matrix_cell(self):
         workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
@@ -1174,7 +1195,7 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
             {'name': 'python-unit-and-contract-tests', 'status': 'fail',
              'seconds': 12.5, 'exit_code': 1,
              'tests': {'run': 10, 'failed': 2, 'skipped': 1},
-             'details': 'timed out after 1450 s; secret output tail'},
+             'details': 'timed out after 1800 s; secret output tail'},
             {'name': 'javascript-syntax:adapters/pi/launcher.mjs', 'status': 'pass',
              'seconds': 0.4},
             {'name': 'node-transport-and-extension-tests', 'status': 'pass',
@@ -1244,7 +1265,7 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
         # The 3x4 matrix, timeouts, installer step, and durable job are unchanged.
         self.assertIn('os: [ubuntu-24.04, macos-latest, windows-latest]', workflow)
         self.assertIn('python: ["3.11", "3.12", "3.13", "3.14"]', workflow)
-        self.assertIn("timeout-minutes: ${{ matrix.os == 'windows-latest' && 40 || 20 }}", workflow)
+        self.assertIn("timeout-minutes: ${{ matrix.os == 'windows-latest' && 50 || 20 }}", workflow)
         self.assertIn('run: python scripts/check.py --report private-validation/offline.json', workflow)
         self.assertIn('--allow-not-run node-durable-contract-tests,node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests', workflow)
         self.assertIn("- name: Core installer and CLI lifecycle\n        if: runner.os == 'Linux' && matrix.python == '3.13'", workflow)
