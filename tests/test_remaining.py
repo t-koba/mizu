@@ -218,16 +218,21 @@ class RemainingTests(Fixture):
         from mizu.runtime import Engine
         from mizu.errors import Busy
         entered=threading.Event();release=threading.Event();errors=[]
-        def work(ctx,*_):entered.set();release.wait(2)
+        def work(ctx,*_):
+            entered.set()
+            # Hold the first writer until the competing admission is checked.
+            # The deadline bounds a broken test; it is not a scheduling assertion.
+            if not release.wait(30):
+                raise AssertionError("competing admission did not release the writer")
         driver=ScriptDriver(work)
         def first():
             try:Engine(self.config,driver=driver).run(self.project,'worker')
             except Exception as exc:errors.append(exc)
         thread=threading.Thread(target=first);thread.start()
         try:
-            self.assertTrue(entered.wait(1))
+            self.assertTrue(entered.wait(30), "writer did not reach its held section")
             with self.assertRaises(Busy):Engine(self.config,driver=driver).run(self.project,'worker')
-        finally:release.set();thread.join(3)
+        finally:release.set();thread.join(30)
         self.assertFalse(thread.is_alive());self.assertFalse(errors)
         self.assertEqual(len(driver.calls),1)
         self.assertEqual(self.project.snapshots.get()['run'],driver.calls[0][0].run_dir.name)
