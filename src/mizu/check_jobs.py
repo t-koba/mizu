@@ -231,10 +231,10 @@ def submit(context, script=None, *, kind="experiment", fresh=False):
     if capture['skipped']:
         raise Denied('Check job input is not representable')
     # Run-local identity remains the fallback when observed inputs cannot be shared.
-    env = environment(project) if not fresh else None
+    env = environment(project)
     shared_key = digest(canonical({'source': capture['code_digest'], 'execution': execution_key(context.config),
                                    'commands': commands, 'kind': 'verify' if script is None else kind,
-                                   'environment': env})) if env is not None else None
+                                   'environment': env})) if env is not None and not fresh else None
     identity = {'run': context.run_dir.name, 'source': capture['code_digest'],
                 'execution': execution_key(context.config), 'commands': commands,
                 'kind': 'verify' if script is None else kind, 'environment': env, 'fresh': fresh}
@@ -260,7 +260,8 @@ def submit(context, script=None, *, kind="experiment", fresh=False):
                    'kind': identity['kind'],
                    'code_digest': capture['code_digest'], 'execution': identity['execution'],
                    'commands': commands, 'status': 'queued', 'created_at': now(),
-                   'acknowledged': False, 'environment': env, 'shared_key': shared_key}
+                   'acknowledged': False, 'environment': env, 'shared_key': shared_key,
+                   'inputs_bound_required': context.config.sandbox.check_reuse}
             write_json(directory / 'job.json', job)
             os.utime(root(project), None)
         except BaseException:
@@ -302,11 +303,14 @@ def result(context, job_id):
             return output
         record = read_json(root(project) / job.get('shared_job', job_id) / 'result.json', {})
         output['result'] = record
+        if job['kind'] == 'verify' and job['status'] in ('completed', 'refused', 'interrupted', 'cleanup_failed'):
+            output['accepted_for_current_source'] = False
         if job['kind'] == 'verify' and job['status'] == 'completed' and record.get('passed'):
             capture = project.snapshots.capture_files(context.workspace)
             matches = (not capture['skipped'] and capture['code_digest'] == job['code_digest']
                        and execution_key(context.config) == job['execution']
                        and list(project.verify) == job['commands']
+                       and (not job.get('inputs_bound_required') or job.get('environment') is not None)
                        and (job.get('environment') is None or environment(project) == job['environment'])
                        and 'verify' in context.role.capabilities)
             output['accepted_for_current_source'] = matches
@@ -452,8 +456,10 @@ def _execute(project, job, stop, sandbox_factory):
         shutil.rmtree(directory / 'input', ignore_errors=True)
         os.utime(root(project), None)
         return summary(job)
-    if (job.get('environment') is not None and environment(project) != job['environment']) or job['execution'] != execution_key(project.config) or (job['kind'] == 'verify' and list(project.verify) != job['commands']):
-        job.update(status='refused', error='Execution configuration changed', finished_at=now())
+    if (job['kind'] == 'verify' and job.get('inputs_bound_required') and job.get('environment') is None) or (job.get('environment') is not None and environment(project) != job['environment']) or job['execution'] != execution_key(project.config) or (job['kind'] == 'verify' and list(project.verify) != job['commands']):
+        job.update(status='refused', error=('Dependency inputs could not be bound for reusable acceptance'
+                   if job.get('inputs_bound_required') and job.get('environment') is None
+                   else 'Execution configuration or dependency inputs changed'), finished_at=now())
         save_execution(project, job)
         shutil.rmtree(directory / 'input', ignore_errors=True)
         os.utime(root(project), None)

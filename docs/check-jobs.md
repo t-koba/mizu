@@ -111,8 +111,12 @@ are included. Changed dependencies invalidate the result even if source is
 unchanged. This assumes the operator-controlled host and its filesystem metadata
 are trusted, as do the existing sandbox and evidence stores. Unsupported special
 files, external symlinks, inaccessible or concurrently changing inputs disable
-sharing; they do not disable ordinary isolated checks. Network-dependent or
-unpinned-image checks also run independently.
+sharing. Custom isolated checks can still execute, but acceptance requested
+with sharing enabled is refused when dependency inputs cannot be bound; it never
+falls back to accepting unbound evidence. Disable check_reuse to use the original
+non-sharing execution semantics for such an environment. Network-dependent or
+unpinned-image inputs likewise cannot supply reusable acceptance. Fresh runs
+bypass earlier results but still validate their dependency inputs.
 
 Dependency traversal is bounded by `sandbox.check_input_files` (250000 entries)
 and `sandbox.check_input_bytes` (8 GiB of regular file contents), configurable

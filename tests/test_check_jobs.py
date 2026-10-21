@@ -392,11 +392,12 @@ class SharingTests(JobTests):
         self.assertFalse(check_jobs.result(ctx,job['id'])['accepted_for_current_source'])
         self.assertFalse(check_jobs.available(ctx))
 
-    def test_input_limits_disable_reuse_without_disabling_checks(self):
+    def test_input_limits_disable_reuse_without_disabling_custom_checks(self):
         dep=self.root/'dependency';dep.write_text('larger than bound')
         self.config=dataclasses.replace(self.config,sandbox=dataclasses.replace(self.config.sandbox,mounts=({'source':str(dep),'target':'/dep'},),check_input_bytes=1))
         self.project.config=self.config
-        self.submit();second=check_jobs.submit(self.context())
+        check_jobs.submit(self.context(), 'echo bounded')
+        second=check_jobs.submit(self.context(), 'echo bounded')
         self.assertNotIn('shared_job',second)
         self.assertEqual(self.run_job()['status'],'completed')
 
@@ -433,3 +434,19 @@ class SharingTests(JobTests):
         self.assertEqual(self.run_job()['status'],'completed')
         self.assertTrue(check_jobs.result(ctx,job['id'])['accepted_for_current_source'])
         self.assertFalse(check_jobs.available(ctx))  # Old dependency inputs were not bound.
+
+    def test_unavailable_dependency_identity_cannot_fall_back_to_acceptance(self):
+        with patch('mizu.check_jobs.environment',return_value=None):
+            ctx,job=self.submit()
+        self.assertEqual(self.run_job()['status'],'refused')
+        self.assertIsNone(ctx.verification)
+        self.assertFalse(FakeSandbox.calls)
+
+    def test_unbound_completed_record_is_not_accepted_under_sharing(self):
+        with patch('mizu.check_jobs.environment',return_value=None):
+            ctx,job=self.submit()
+        directory=check_jobs.root(self.project)/job['id']
+        raw=read_json(directory/'job.json');raw.update(status='completed',passed=True)
+        write_json(directory/'job.json',raw);write_json(directory/'result.json',{'passed':True})
+        self.assertFalse(check_jobs.result(ctx,job['id'])['accepted_for_current_source'])
+        self.assertIsNone(ctx.verification)
