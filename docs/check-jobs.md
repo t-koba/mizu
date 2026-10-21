@@ -145,7 +145,9 @@ are omitted from the default prompt's outstanding-check projection.
 wait conflicts are validated before sealing. A successful, unbounded finish
 releases those subscriptions using normal cancellation: other subscribers keep
 the execution alive, and only an execution with no remaining consumer is
-cancelled. It never selects obsolete work by source age or guesses its relevance.
+cancelled. Those explicitly released subscriptions are acknowledged in the same
+finish so their cancellation does not wake another model unit. It never selects
+obsolete work by source age or guesses its relevance.
 For a timed external wait, writable roles can use `finish` with `outcome=wait`
 and `wait_seconds`; the existing persisted wake deadline releases the unit and
 workspace rather than holding a command open.

@@ -4208,10 +4208,12 @@ class Engine:
                     result["wrap_up"] = {"bound": context.bound_hit}
                 write_json(run_dir / "result.json", result)
                 if finished.get("outcome") != "bounded" and not context.bound_hit:
-                    with contextlib.suppress(OSError, ValueError, Denied):
-                        check_jobs.acknowledge(project, role_name, getattr(context, "check_results_read", set()))
-                    for job_id in finished.get("release_checks", []):
+                    released = set(finished.get("release_checks", []))
+                    for job_id in released:
                         check_jobs.cancel(context, job_id)
+                    with contextlib.suppress(OSError, ValueError, Denied):
+                        check_jobs.acknowledge(project, role_name,
+                                               set(getattr(context, "check_results_read", set())) | released)
                 if not finished.get("wait_for_check"):
                     write_json(project.root / "observed" / f"{role_name}.json",
                                {"snapshot": snapshot["id"], "code_digest": snapshot["code_digest"]})

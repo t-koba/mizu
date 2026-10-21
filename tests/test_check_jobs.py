@@ -188,7 +188,25 @@ class JobTests(Fixture):
                             'release_checks': [obsolete['id']]})
         Engine(self.config, driver=ScriptDriver(act)).run(self.project, 'worker')
         self.assertEqual(check_jobs.read(self.project, obsolete['id'])['status'], 'cancelled')
+        self.assertTrue(check_jobs.read(self.project, obsolete['id'])['acknowledged'])
+        self.assertEqual(check_jobs.pending(self.project, 'worker'), [])
         self.assertTrue(check_jobs.waiting(self.project, 'worker'))
+
+    def test_retention_preserves_released_physical_job_until_runner_finishes(self):
+        from mizu.errors import Busy
+        ctx, job = self.submit()
+        path = check_jobs.root(self.project) / job['id'] / 'job.json'
+        record = read_json(path); record['status'] = 'running'; write_json(path, record)
+        check_jobs.cancel(ctx, job['id'])
+        check_jobs.acknowledge(self.project, 'worker', {job['id']})
+        with patch('pathlib.Path.glob', return_value=[path] * 1024):
+            with self.assertRaises(Busy):
+                check_jobs._make_room(self.project)
+        self.assertTrue(path.exists())
+        record = read_json(path); record['status'] = 'cancelled'; write_json(path, record)
+        with patch('pathlib.Path.glob', return_value=[path] * 1024):
+            check_jobs._make_room(self.project)
+        self.assertFalse(path.exists())
 
     def test_finish_refuses_releasing_other_role_or_waited_check(self):
         _, job = self.submit()

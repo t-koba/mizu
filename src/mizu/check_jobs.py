@@ -207,7 +207,12 @@ def _make_room(project, *, protect=frozenset()):
     referenced = {read_json(p, {}).get('shared_job') for p in records}
     for old in records:
         value = read_json(old, {})
-        if value.get('acknowledged') and value.get('id') not in protect and value.get('id') not in referenced and read(project, value['id']).get('status') not in ('queued', 'running'):
+        # A detached subscription is cancelled immediately; its physical runner
+        # may still own the frozen inputs until it observes cancellation.
+        executing = not value.get('shared_job') and value.get('status') in ('queued', 'running')
+        if (value.get('acknowledged') and not executing
+                and value.get('id') not in protect and value.get('id') not in referenced
+                and read(project, value['id']).get('status') not in ('queued', 'running')):
             shutil.rmtree(old.parent)
             return
     raise Busy('Retained check evidence is full; inspect and acknowledge results')
