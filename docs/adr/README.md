@@ -54,8 +54,9 @@ timeout and no shell; the host fetches upstream refs and injects them read-only.
 
 ## ADR-009 — VCS publish behind recorded human approval, read/publish split
 `vcs_read` cannot publish; `vcs_publish` needs an accepted `GO <branch>` insight carrying
-the exact `code_digest`. Stale digests are refused; CI failures become deduplicated insights
-keyed by branch, sha, and check.
+the exact `code_digest`. Stale digests are refused. CI status uses the dedicated bounded cache and
+SHA/check/run-aware wake path; receipt-pinned CI waits deliver success or failure.
+CI results do not create duplicate insight decisions.
 
 ## ADR-010 — Config `include` of shared TOML fragments
 A root-only `include` array merges shared fragments before validation, giving one reviewed

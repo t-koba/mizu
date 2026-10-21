@@ -416,6 +416,7 @@ class RetireLiveRefTests(Fixture):
         self.assertTrue(out["retired"])
 
     def test_ci_records_never_block(self):
-        vcs.record_ci_result(self.project, branch="mizu/x-1", sha=SHA_A,
-                             check="unit", state="failure")
+        self.project.insights.submit(source="vcs", title="Historical CI failure",
+                                     body="An old per-check observation", base_snapshot=None,
+                                     insight_id="ci-" + "a" * 32)
         self.assertEqual(vcs.live_proposal_refs(self.project, "mizu/x-1"), [])

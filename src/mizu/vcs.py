@@ -1650,52 +1650,6 @@ def dispose_via(settings: dict, op: str, proposal_id: str, expected_sha,
             "target": target, "state": state, "trust": "external-untrusted"}
 
 
-def ci_insight_id(branch: str, sha: str, check: str) -> str:
-    """Derive a stable, deduplicating insight ID for a CI failure."""
-    from .fs import digest as _digest, canonical as _canonical
-    check_branch(branch)
-    if not isinstance(sha, str) or not _SHA.fullmatch(sha):
-        raise Denied("Invalid VCS sha for CI insight")
-    if not isinstance(check, str) or not check or len(check) > 256 or "\n" in check or "\x00" in check:
-        raise Denied("Invalid CI check name")
-    return "ci-" + _digest(_canonical({"branch": branch, "sha": sha, "check": check}))[:32]
-
-
-def record_ci_result(project, *, branch: str, sha: str, check: str,
-                     state: str, url: str = "", run: str | None = None,
-                     origin: str | None = None) -> dict:
-    """Record a CI failure as an insight; deduplicate repeats, ignore passes.
-
-    Schema: ``state`` is ``"failure"`` (record) or anything else
-    (ignored). ``url`` is an optional bounded log link, validated but not
-    stored: the persisted body covers only branch/sha/check so repeats with
-    a varying per-run log URL resubmit identical content and return the
-    existing record. ``origin`` is an opaque trusted-caller label stored
-    alongside the ``vcs`` authority; it never affects approval, routing,
-    or dedup (the first-stored origin/run is preserved on repeats).
-    Bounds: title <= 200 chars, body within the insight
-    byte limit. Trust: adapter-derived facts labeled external-untrusted in
-    the body; the stable ID lets repeats return the existing record instead
-    of spamming the inbox. The latest log URL stays available via
-    ``vcs_read`` ``status``. Failure: ``Denied`` on bad names, bad URLs or
-    bad origins; adapter content never raises beyond validation.
-    """
-    if state != "failure":
-        return {"recorded": False, "state": state}
-    if not isinstance(url, str) or len(url) > 4096 or "\x00" in url or "\n" in url:
-        raise Denied("Invalid CI log URL")
-    insight_id = ci_insight_id(branch, sha, check)
-    title = f"CI {check} failed on {branch}"
-    if len(title) > 200:
-        title = title[:200]
-    body = (f"CI check '{check}' failed on branch '{branch}' at {sha}.\n"
-            f"trust: external-untrusted\n")
-    record = project.insights.submit(source="vcs", title=title, body=body,
-                                     base_snapshot=None, run=run, origin=origin,
-                                     insight_id=insight_id)
-    return {"recorded": True, "id": record["id"], "title": title}
-
-
 #: At most eight workflows per CI request.
 MAX_CI_WORKFLOWS = 8
 #: A reported check cannot have run for longer than a week.

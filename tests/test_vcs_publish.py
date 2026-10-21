@@ -186,21 +186,6 @@ class VcsPublishTests(PublishFixture):
         ok = dataclasses.replace(base, capabilities=("files", "read", "finish", "vcs_read"))
         check_consult_role("consult", ok)
 
-    def test_ci_failure_deduplicated(self):
-        sha = "a" * 40
-        first = vcs.record_ci_result(self.project, branch="main", sha=sha,
-                                     check="unit", state="failure", url="https://x/log")
-        second = vcs.record_ci_result(self.project, branch="main", sha=sha,
-                                      check="unit", state="failure", url="https://x/log")
-        self.assertTrue(first["recorded"])
-        self.assertEqual(first["id"], second["id"])
-        pending = [i for i in self.project.insights.list(pending=True, limit=1000)
-                   if i["id"] == first["id"]]
-        self.assertEqual(len(pending), 1)
-        ignored = vcs.record_ci_result(self.project, branch="main", sha=sha,
-                                       check="unit", state="success")
-        self.assertFalse(ignored["recorded"])
-
 
 if __name__ == "__main__":
     raise SystemExit(unittest.main())

@@ -61,7 +61,7 @@ class CiStatusTests(Fixture):
                 {"checks": [{"check": "unit", "state": "success", "sha": SHA_A,
                              "url": "https://ci/run/1\r\x1b[8m"}]})
 
-    def test_poll_records_failure_dedupes_and_ignores_pass(self):
+    def test_poll_caches_failures_without_creating_insights(self):
         payload = {"checks": [{"check": "unit", "state": "failure", "sha": SHA_A,
                                "url": "https://x/log"}]}
         config = dataclasses.replace(self.config, vcs=adapter_settings(status_code(payload)))
@@ -73,7 +73,8 @@ class CiStatusTests(Fixture):
         self.assertEqual(first["event"], "ci_poll")
         self.assertEqual(first["failures"], 1)
         self.assertFalse(first["ci_failures_may_be_truncated"])
-        self.assertEqual(len(first["recorded"]), 1)
+        self.assertNotIn("recorded", first)
+        self.assertEqual(self.project.insights.list(pending=False), [])
         # Not due: no second adapter call.
         calls = []
         def counting(settings, op, params):
@@ -83,14 +84,13 @@ class CiStatusTests(Fixture):
                           branches=["main"], reader=counting)
         self.assertIsNone(skipped)
         self.assertEqual(calls, [])
-        # Due again: same failure deduplicates to the same insight id.
+        # A repeat leaves inbox generations unchanged; the cache stays red.
+        generation = self.project.insights.generation()
         second = poll_ci(config, self.project, state, now=15.0, interval=15.0,
                          branches=["main"])
         self.assertTrue(second["ok"])
-        self.assertEqual(second["recorded"][0]["id"], first["recorded"][0]["id"])
-        pending = [i for i in self.project.insights.list(pending=True, limit=1000)
-                   if i["id"] == first["recorded"][0]["id"]]
-        self.assertEqual(len(pending), 1)
+        self.assertEqual(state["failures"], {"main": [{"sha": SHA_A, "check": "unit"}]})
+        self.assertEqual(self.project.insights.generation(), generation)
         # Success-only status records nothing but still polls ok.
         ok_payload = {"checks": [{"check": "unit", "state": "success", "sha": SHA_A}]}
         config2 = dataclasses.replace(self.config, vcs=adapter_settings(status_code(ok_payload)))
@@ -98,51 +98,11 @@ class CiStatusTests(Fixture):
                         branches=["main"])
         self.assertTrue(third["ok"])
         self.assertEqual(third["failures"], 0)
-        self.assertEqual(third["recorded"], [])
+        self.assertEqual(self.project.insights.list(pending=False), [])
         # Polling never publishes a snapshot.
         self.assertEqual(self.project.snapshots.get()["id"], before)
 
-    def test_varying_log_url_dedupes_and_poll_stays_ok(self):
-        # Repeats with a different per-run log URL must return the existing
-        # record (stable branch/sha/check body) instead of raising Denied,
-        # and a due poll with the new URL must stay ok.
-        first = vcs.record_ci_result(self.project, branch="main", sha=SHA_A,
-                                     check="unit", state="failure",
-                                     url="https://ci/run/1")
-        self.assertTrue(first["recorded"])
-        second = vcs.record_ci_result(self.project, branch="main", sha=SHA_A,
-                                      check="unit", state="failure",
-                                      url="https://ci/run/2")
-        self.assertEqual(second["id"], first["id"])
-        stored = self.project.insights.read(first["id"])
-        self.assertNotIn("https://ci/run", stored["body"])
-        # Due poll emitting the second URL for the same failure stays ok.
-        payload = {"checks": [{"check": "unit", "state": "failure", "sha": SHA_A,
-                               "url": "https://ci/run/2"}]}
-        config = dataclasses.replace(self.config, vcs=adapter_settings(status_code(payload)))
-        state = {}
-        event = poll_ci(config, self.project, state, now=0.0, interval=15.0,
-                        branches=["main"])
-        self.assertTrue(event["ok"])
-        self.assertEqual(event["failures"], 1)
-        self.assertEqual(event["recorded"][0]["id"], first["id"])
 
-    def test_varying_origin_and_run_dedupe_preserving_first(self):
-        first = vcs.record_ci_result(self.project, branch="main", sha=SHA_A,
-                                     check="unit", state="failure",
-                                     url="https://ci/run/1", origin="adapter:A",
-                                     run="run-1")
-        self.assertTrue(first["recorded"])
-        stored = self.project.insights.read(first["id"])
-        self.assertEqual(stored["origin"], "adapter:A")
-        second = vcs.record_ci_result(self.project, branch="main", sha=SHA_A,
-                                      check="unit", state="failure",
-                                      url="https://ci/run/2", origin="adapter:B",
-                                      run="run-2")
-        self.assertEqual(second["id"], first["id"])
-        kept = self.project.insights.read(first["id"])
-        self.assertEqual(kept["origin"], "adapter:A")
-        self.assertEqual(kept["run"], "run-1")
 
     def test_poll_disabled_adapter_never_polls(self):
         state = {}
@@ -241,11 +201,8 @@ class CiStickyRedTests(Fixture):
                    {"last_poll": 0.0, "failures": state.get("failures")})
         self.assertEqual(current_ci_failures(self.project),
                          [{"branch": "mizu", "sha": SHA_A, "check": "perf audit"}])
-        # Parking the insight as noise must not park the red head.
-        record = self.project.insights.read(event["recorded"][0]["id"])
-        self.project.insights.decide(record["id"], "defer", "noise",
-                                     "awaiting CI re-run", run="test-run",
-                                     expected_rev=record["rev"])
+        # A red head wakes the writer with no insight or decision at all.
+        self.assertEqual(self.project.insights.list(pending=False), [])
         parked = self.project.snapshots.get()
         self.assertTrue(current_ci_failures(self.project))
         self.assertTrue(should_run(self.project, parked, current_time=time.time()))
@@ -622,28 +579,18 @@ class CiRunIdentityTests(Fixture):
                 {"checks": [{"check": "unit", "state": "failure",
                              "sha": SHA_A, "run": "ok", "bogus": 1}]})
 
-    def test_poller_stores_run_and_passes_it_to_record(self):
+    def test_poller_stores_run_in_dedicated_ci_cache(self):
         import dataclasses
         from mizu import vcs as vcs_mod
         from mizu.runtime import current_ci_failures, poll_ci
         payload = {"checks": [{"check": "unit", "state": "failure",
                                "sha": SHA_A, "run": "run-1"}]}
         config = dataclasses.replace(self.config, vcs=adapter_settings(status_code(payload)))
-        seen = []
-        real_record = vcs_mod.record_ci_result
-
-        def wrapped(project, **kwargs):
-            seen.append(kwargs.get("run"))
-            return real_record(project, **kwargs)
-        vcs_mod.record_ci_result = wrapped
-        try:
-            state: dict = {}
-            event = poll_ci(config, self.project, state, now=0.0, interval=15.0,
-                            branches=["main"])
-        finally:
-            vcs_mod.record_ci_result = real_record
+        state: dict = {}
+        event = poll_ci(config, self.project, state, now=0.0, interval=15.0,
+                        branches=["main"])
         self.assertTrue(event["ok"])
-        self.assertEqual(seen, ["run-1"])
+        self.assertEqual(self.project.insights.list(pending=False), [])
         # Failures cache carries the identity.
         self.assertEqual(state["failures"],
                          {"main": [{"sha": SHA_A, "check": "unit", "run": "run-1"}]})
@@ -653,19 +600,14 @@ class CiRunIdentityTests(Fixture):
         self.assertEqual(current_ci_failures(self.project),
                          [{"branch": "main", "sha": SHA_A, "check": "unit",
                            "run": "run-1"}])
-        # Re-poll with a new run keeps the same insight (provenance only,
-        # first-stored preserved) while the cache advances.
-        stored = self.project.insights.read(event["recorded"][0]["id"])
-        self.assertEqual(stored["run"], "run-1")
+        # A rerun advances the dedicated wake identity without an insight.
         payload2 = {"checks": [{"check": "unit", "state": "failure",
                                 "sha": SHA_A, "run": "run-2"}]}
         config2 = dataclasses.replace(self.config, vcs=adapter_settings(status_code(payload2)))
         event2 = poll_ci(config2, self.project, state, now=15.0, interval=15.0,
                          branches=["main"])
         self.assertTrue(event2["ok"])
-        self.assertEqual(event2["recorded"][0]["id"], event["recorded"][0]["id"])
-        kept = self.project.insights.read(event["recorded"][0]["id"])
-        self.assertEqual(kept["run"], "run-1")
+        self.assertEqual(self.project.insights.list(pending=False), [])
         self.assertEqual(state["failures"],
                          {"main": [{"sha": SHA_A, "check": "unit", "run": "run-2"}]})
 
@@ -1107,12 +1049,12 @@ class CiNondeterminismTests(Fixture):
         poll = next(event for event in events if event["event"] == "ci_poll")
         self.assertTrue(poll["ok"])
         self.assertEqual(poll["failures"], 1)
-        self.assertEqual(len(poll["recorded"]), 1)  # Passes create no insight.
+        self.assertEqual(self.project.insights.list(pending=False), [])
         row, = current_ci_failures(self.project)
         self.assertEqual(row, {"branch": "failed", "sha": SHA_A, "check": "unit",
                                "nondeterministic": True, "passed_on": "passed"})
         self.assertEqual(wake_ci_failures(self.project, config), [row])
-        self.assertEqual(self.project.insights.list(pending=True, limit=1000)[0]["source"], "vcs")
+        self.assertEqual(self.project.insights.list(pending=True), [])
 
     def test_cross_poll_success_survives_refresh_and_project_persistence(self):
         from mizu import vcs

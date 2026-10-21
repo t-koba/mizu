@@ -2846,7 +2846,7 @@ def capped_vcs_settings(settings: dict, cap: int) -> dict:
 
 def poll_ci(config, project, state: dict, *, now: float, interval: float,
             branches=None, reader=None) -> dict | None:
-    """Best-effort periodic CI polling: status per branch, failures to insights.
+    """Best-effort periodic CI polling into the dedicated CI notification cache.
 
     Schema: ``branches=None`` derives from injected upstream refs
     (``vcs.list_refs``): all of them when they fit ``poll_max_branches``,
@@ -2856,12 +2856,12 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
     event dict or ``None`` when skipped (disabled or not due). Bounds: one
     adapter call per branch per due poll under the adapter timeout; status
     checks capped at 1024 rows each. Trust: host side only; adapter facts
-    stay external-untrusted, ``failure`` states are recorded via
-    ``vcs.record_ci_result`` (stable dedup IDs), and bounded ``success``
-    evidence is cached without creating insights.
+    stay external-untrusted. Bounded failure and success facts are cached for
+    dedicated CI wake selection and prompts; neither creates insights.
+    Receipt-pinned CI wait delivery is independent of this branch-head cache.
     Retry/cancellation: no retry; ``last_poll`` and the rotation cursor
     advance even on failure so one bad adapter cannot busy-loop or pin the
-    window. Evidence: the event names ok/recorded branches/counts/total or
+    window. Evidence: the event names ok/branches/counts/total or
     error; this helper never publishes a snapshot. Failure: ``Denied``,
     ``OSError`` and ``ValueError`` become ``ok=False`` events, never raised.
     """
@@ -2898,7 +2898,6 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
         else:
             targets = [_vcs.check_branch(b) for b in branches]
             branches_total = len(targets)
-        recorded: list[dict] = []
         failures = 0
         check_rows_dropped = False
         success_tick: dict = {}
@@ -2921,19 +2920,12 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
                     continue
                 if entry.get("state") != "failure":
                     continue
-                receipt = _vcs.record_ci_result(
-                    project, branch=branch, sha=entry["sha"],
-                    check=entry["check"], state="failure",
-                    url=entry.get("url", ""), run=entry.get("run"))
                 failures += 1
                 tick_row = {"sha": entry["sha"], "check": entry["check"]}
                 tick_run = _valid_ci_run(entry.get("run"))
                 if tick_run is not None:
                     tick_row["run"] = tick_run
                 rows.append(tick_row)
-                if receipt.get("recorded"):
-                    recorded.append({"id": receipt["id"], "branch": branch,
-                                     "check": entry["check"]})
             if len(rows) > MAX_CI_CHECKS_PER_BRANCH:
                 check_rows_dropped = True
             tick[branch] = rows[:MAX_CI_CHECKS_PER_BRANCH]
@@ -2983,7 +2975,7 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
         state["last_ok"] = now
         return {"event": "ci_poll", "ok": True, "branches": list(targets),
                 "branches_total": branches_total,
-                "failures": failures, "recorded": recorded,
+                "failures": failures,
                 "ci_failures_may_be_truncated": bool(
                     check_rows_dropped or failure_branches_pruned),
                 "trust": "external-untrusted", "time": now_iso()}
