@@ -103,11 +103,12 @@ def modelled_gate_seconds(child_timeout: int) -> int:
 def core_cell_scope_seconds(child_timeout: int, staging_timeout: int) -> int:
     """Return the seconds the core CI cell needs from its first step to its last.
 
-    The cell that installs runs the gate twice: the source gate, and the
-    installer's staged gate, which the idempotence reinstall runs without the
-    source receipt. The cell's scope must hold the source gate's path plus
-    the installer's bounded staging call, so the job never cuts off a healthy
-    run before the gate reports its own bounded outcome.
+    The cell that installs runs the gate once: the installer reuses the
+    source gate's receipt, and the idempotence reinstall finds the release
+    the cell already staged, so neither install runs a second gate. The
+    cell's scope still holds the source gate's path plus the installer's own
+    bounded staging call, so the job never cuts off a healthy run before the
+    gate reports its own bounded outcome.
     """
     return modelled_gate_seconds(child_timeout) + staging_timeout
 

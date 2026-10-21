@@ -85,12 +85,12 @@ class CheckTimeoutTests(unittest.TestCase):
         self.assertGreaterEqual(scopes['posix'] * 60,
                                 CHECK.modelled_gate_seconds(CHECK._unittest_timeout_seconds('posix')))
 
-    def test_core_installer_cell_scope_holds_both_gate_paths(self):
-        # The Linux cell runs the gate twice: the source gate, and the
-        # installer's staged gate, which the idempotence reinstall runs
-        # without the source receipt. The cell's scope must hold the source
-        # gate's bounded path plus the installer's own bounded staging call,
-        # or the job cuts a healthy run off before the gate reports.
+    def test_core_installer_cell_scope_holds_the_gate_path_and_the_installers_call(self):
+        # The Linux cell runs the gate once: the installer reuses the source
+        # gate's receipt and the idempotence reinstall finds the release the
+        # cell already staged. Its scope must still hold the source gate's
+        # bounded path plus the installer's own bounded staging call, so the
+        # job cannot cut a healthy run off while the installer works.
         scopes = self._core_cell_scopes()
         staging = self._installer_staging_timeout()
         required = CHECK.core_cell_scope_seconds(CHECK._unittest_timeout_seconds('posix'), staging)
@@ -1929,6 +1929,38 @@ class ReusedSourceReportTests(unittest.TestCase):
         self.assertEqual(receipt["checks_provenance"], "reused-source-gate")
         self.assertEqual(receipt["checks"], report["checks"])
         self.assertEqual(receipt["validation"], "local-install-checks-passed")
+
+    def test_reinstall_of_an_existing_release_runs_no_second_gate(self):
+        # The CI cell that installs runs the installer twice: the install and
+        # the idempotence reinstall. The reinstall finds the release the
+        # first install staged and does not stage again, so that cell runs
+        # the gate once.
+        import argparse
+        manifest = {"a.py": {"sha256": "0" * 64, "executable": False}}
+        args = argparse.Namespace(core_only=True, reuse_source_checks=None,
+                                  prefix=Path(tempfile.mkdtemp()),
+                                  bin_dir=Path(tempfile.mkdtemp()),
+                                  config=Path(tempfile.mkdtemp()) / "config.toml",
+                                  allow_install_scripts=False, stage_only=True,
+                                  activate=False, allow_mode_change=False)
+        for directory in (args.prefix, args.bin_dir, args.config.parent):
+            self.addCleanup(shutil.rmtree, directory)
+        calls = []
+
+        def fake_command(argv, *, cwd=None, timeout=None):
+            calls.append(list(map(str, argv)))
+            (Path(cwd) / "installation-checks.json").write_text(
+                json.dumps({"checks": self.valid_report()["checks"]}), encoding="utf-8")
+
+        with mock.patch.object(INSTALLER._platform, "is_root", return_value=False), \
+                mock.patch.object(INSTALLER, "source_manifest", return_value=manifest), \
+                mock.patch.object(INSTALLER, "source_files", return_value=[]), \
+                mock.patch.object(INSTALLER, "command", side_effect=fake_command):
+            first = INSTALLER.stage(args)
+            second = INSTALLER.stage(args)
+        self.assertEqual(first["release"], second["release"])
+        gates = [call for call in calls if any("scripts/check.py" in part for part in call)]
+        self.assertEqual(len(gates), 1, "the reinstall must not run a second gate")
 
     def test_ci_passes_prior_report_explicitly_and_default_stays_staged(self):
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")

@@ -194,10 +194,13 @@ runtime claim. The POSIX matrix scope is 35 minutes with a 1000 s child cap
 and a 1846 s modeled path, and the authoritative `durable-contract` scope is
 45 minutes, holding the POSIX path plus the two pinned-adapter provisioning
 steps at the product's own 300 s per-adapter bound. The Linux/Python 3.13
-cell also installs, and the installer's staged gate runs the whole gate a
-second time, so that cell's scope is 80 minutes: the source gate's modeled
-path (1846 s) plus the installer's own bounded staging call (2700 s) is
-4546 s, leaving 254 s inside the job. Every scope that encloses
+cell also installs. That cell runs the gate once: the installer reuses the
+source gate's receipt, and the idempotence reinstall finds the release the
+cell already staged, so neither install runs a second gate. Its scope is
+still 80 minutes, holding the source gate's modeled path (1846 s) plus the
+installer's own bounded staging call (2700 s) = 4546 s, leaving 254 s inside
+the job, so the cell is not cut off while the installer works whether or not
+an install reaches its staged gate. Every scope that encloses
 the gate holds the gate's modeled path, so a bounded run reports its own
 outcome instead of being cut off by the enclosing scope; the installer
 staging call holds the Windows path for the same reason. The 2026-10-21

@@ -20,9 +20,13 @@ jobs:
     # around its 1000-second child: each scope holds the modelled
     # setup/child/later-check/cleanup/suffix path, so the gate reports its
     # own bounded outcome instead of being cut off by the job scope.
-    # The Linux/Python 3.13 cell also installs, and the installer's staged
-    # gate runs the whole gate a second time, so that cell holds the source
-    # gate's path plus the installer's own bounded staging call.
+    # The Linux/Python 3.13 cell also installs. That cell runs the gate
+    # once: the installer reuses the source gate's receipt, and the
+    # idempotence reinstall finds the release the cell already staged, so
+    # neither install runs a second gate. The cell's scope still holds the
+    # source gate's path plus the installer's own bounded staging call, so
+    # the cell is not cut off while the installer works, whether or not an
+    # install reaches its staged gate.
     timeout-minutes: ${{ matrix.os == 'windows-latest' && 50 || (matrix.os == 'ubuntu-24.04' && matrix.python == '3.13' && 80 || 35) }}
     strategy:
       fail-fast: false

@@ -411,6 +411,9 @@ def stage(args):
                         # The staging call holds the gate's modelled path (2646 s on
                         # Windows, the largest), and the core CI cell that installs
                         # holds this bound together with the source gate's own path.
+                        # The CI cell reaches this call only when no source receipt
+                        # is reused; with the receipt it stages from the source
+                        # gate and runs no gate of its own.
                         cwd=temporary, timeout=2700)
                 staged_report = read_json(temporary / "installation-checks.json")
                 check_entries = staged_report["checks"]
