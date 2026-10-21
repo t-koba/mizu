@@ -408,7 +408,10 @@ def stage(args):
                 # the Pi SDK contract gate against the adapter it just provisioned.
                 command([sys.executable, "scripts/check.py", "--report", "installation-checks.json",
                          "--allow-not-run", staging_not_run_checks(core_only=args.core_only)],
-                        cwd=temporary, timeout=2700)  # Enclose the gate's modelled Windows path (2646 s).
+                        # The staging call holds the gate's modelled path (2646 s on
+                        # Windows, the largest), and the core CI cell that installs
+                        # holds this bound together with the source gate's own path.
+                        cwd=temporary, timeout=2700)
                 staged_report = read_json(temporary / "installation-checks.json")
                 check_entries = staged_report["checks"]
                 checks_provenance = "staged-gate"

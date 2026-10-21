@@ -32,6 +32,12 @@ CHECK = load_script('check')
 CHILD = load_script('check_unittest')
 INSTALLER = load_script('install')
 
+#: The core job's per-cell scope expression, in the order the expression
+#: names them: the Windows cell, the Linux cell that also installs, and the
+#: default POSIX cell.
+CORE_SCOPE_EXPRESSION = ("timeout-minutes: ${{ matrix.os == 'windows-latest' && 50 || "
+                         "(matrix.os == 'ubuntu-24.04' && matrix.python == '3.13' && 80 || 35) }}")
+
 
 def write_adapter(base: Path, deps, installed: dict):
     (base).mkdir(parents=True, exist_ok=True)
@@ -61,7 +67,7 @@ class CheckTimeoutTests(unittest.TestCase):
         self.assertEqual(CHECK._unittest_timeout_seconds('posix'), 1000)
         self.assertEqual(CHECK.DEFAULT_CHECK_TIMEOUT_SECONDS, 600)
         workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
-        self.assertIn("timeout-minutes: ${{ matrix.os == 'windows-latest' && 50 || 35 }}", workflow)
+        self.assertIn(CORE_SCOPE_EXPRESSION, workflow)
         # Exercise the 60-second setup case, one later execute timeout, both
         # bounded cleanup waits, process-group termination (1 s grace + 5 s
         # reap), and the suffix/receipt reserve: 2646 s total, leaving 354 s.
@@ -73,15 +79,44 @@ class CheckTimeoutTests(unittest.TestCase):
         # A job scope that is shorter than the gate's own modelled path kills
         # a healthy run before the gate can report its bounded outcome, so
         # the enclosing scope must never be the tighter bound.
-        workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
-        match = re.search(r"timeout-minutes: \$\{\{ matrix\.os == 'windows-latest' && (\d+) \|\| (\d+) \}\}",
-                          workflow)
-        self.assertIsNotNone(match)
-        windows_minutes, posix_minutes = int(match.group(1)), int(match.group(2))
-        self.assertGreaterEqual(windows_minutes * 60,
+        scopes = self._core_cell_scopes()
+        self.assertGreaterEqual(scopes['windows'] * 60,
                                 CHECK.modelled_gate_seconds(CHECK._unittest_timeout_seconds('nt')))
-        self.assertGreaterEqual(posix_minutes * 60,
+        self.assertGreaterEqual(scopes['posix'] * 60,
                                 CHECK.modelled_gate_seconds(CHECK._unittest_timeout_seconds('posix')))
+
+    def test_core_installer_cell_scope_holds_both_gate_paths(self):
+        # The Linux cell runs the gate twice: the source gate, and the
+        # installer's staged gate, which the idempotence reinstall runs
+        # without the source receipt. The cell's scope must hold the source
+        # gate's bounded path plus the installer's own bounded staging call,
+        # or the job cuts a healthy run off before the gate reports.
+        scopes = self._core_cell_scopes()
+        staging = self._installer_staging_timeout()
+        required = CHECK.core_cell_scope_seconds(CHECK._unittest_timeout_seconds('posix'), staging)
+        self.assertEqual(required, 1846 + 2700)
+        self.assertGreaterEqual(scopes['linux_installer'] * 60, required)
+
+    def _core_cell_scopes(self) -> dict:
+        """Read the core job's per-cell scopes from the workflow.
+
+        The expression names the Windows cell, the Linux cell that also
+        installs, and the default POSIX cell, in that order.
+        """
+        workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
+        self.assertIn(CORE_SCOPE_EXPRESSION, workflow)
+        match = re.search(r'timeout-minutes: \$\{\{ (.+) \}\}', workflow)
+        self.assertIsNotNone(match)
+        minutes = [int(value) for value in re.findall(r'(?:&&|\|\|) (\d+)', match.group(1))]
+        self.assertEqual(len(minutes), 3)
+        return {'windows': minutes[0], 'linux_installer': minutes[1], 'posix': minutes[2]}
+
+    def _installer_staging_timeout(self) -> int:
+        """Read the installer's own bound on the staged gate it runs."""
+        source = (ROOT / 'scripts' / 'install.py').read_text(encoding='utf-8')
+        match = re.search(r'"scripts/check\.py".*?timeout=(\d+)', source, re.S)
+        self.assertIsNotNone(match)
+        return int(match.group(1))
 
     def test_posix_job_scope_covers_the_modelled_gate_path(self):
         # The POSIX matrix cell runs the same gate with the 1000-second child:
@@ -90,7 +125,7 @@ class CheckTimeoutTests(unittest.TestCase):
         required = CHECK.modelled_gate_seconds(CHECK._unittest_timeout_seconds('posix'))
         self.assertEqual(required, 1846)
         workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
-        self.assertIn("timeout-minutes: ${{ matrix.os == 'windows-latest' && 50 || 35 }}", workflow)
+        self.assertIn(CORE_SCOPE_EXPRESSION, workflow)
         self.assertGreaterEqual(35 * 60, required)
 
     def test_durable_contract_job_scope_covers_the_modelled_gate_path(self):
@@ -1025,7 +1060,7 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
         # Timing stays diagnostic; the 50-minute/1800-second scope is
         # enforced while the always-uploaded artifact preserves partial progress.
         self.assertIn('1800-second child', workflow)
-        self.assertIn("timeout-minutes: ${{ matrix.os == 'windows-latest' && 50 || 35 }}", workflow)
+        self.assertIn(CORE_SCOPE_EXPRESSION, workflow)
         self.assertEqual(CHECK._unittest_timeout_seconds('nt'), 1800)
 
     def test_offline_steps_run_exactly_once_per_matrix_cell(self):
@@ -1311,7 +1346,7 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
         # The 3x4 matrix, timeouts, installer step, and durable job are preserved.
         self.assertIn('os: [ubuntu-24.04, macos-latest, windows-latest]', workflow)
         self.assertIn('python: ["3.11", "3.12", "3.13", "3.14"]', workflow)
-        self.assertIn("timeout-minutes: ${{ matrix.os == 'windows-latest' && 50 || 35 }}", workflow)
+        self.assertIn(CORE_SCOPE_EXPRESSION, workflow)
         self.assertIn('run: python scripts/check.py --report private-validation/offline.json', workflow)
         self.assertIn('--allow-not-run node-durable-contract-tests,node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests', workflow)
         self.assertIn("- name: Core installer and CLI lifecycle\n        if: runner.os == 'Linux' && matrix.python == '3.13'", workflow)
