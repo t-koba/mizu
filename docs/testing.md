@@ -187,24 +187,42 @@ carries failure details, output tails or diagnostics; do not substitute the gene
 `offline.json` receipt. Only the Windows-latest/Python 3.13 CI step supplies
 `--test-timings`; CI uploads only this dedicated file for that job (`actions/upload-artifact` v4.6.2, 7-day retention,
 `if: always()` with missing-file tolerance). It records diagnostic evidence; it
-sets no timeout policy. The Windows scope is 50 minutes with a 1800 s child
-cap. The modeled setup/child/later-check/cleanup/suffix path is 2646 s,
+sets no timeout policy. The Windows scope is 60 minutes with a 1800 s child
+cap. The modeled setup/child/later-phase/cleanup/suffix path is 3246 s,
 leaving 354 s inside the job; this arithmetic is a contract, not a worst-case
-runtime claim. The POSIX matrix scope is 35 minutes with a 1000 s child cap
-and a 1846 s modeled path, and the authoritative `durable-contract` scope is
-45 minutes, holding the POSIX path plus the two pinned-adapter provisioning
+runtime claim. The POSIX matrix scope is 45 minutes with a 1000 s child cap
+and a 2446 s modeled path, and the authoritative `durable-contract` scope is
+55 minutes, holding the POSIX path plus the two pinned-adapter provisioning
 steps at the product's own 300 s per-adapter bound. The Linux/Python 3.13
 cell also installs. That cell runs the gate once: the installer reuses the
 source gate's receipt, and the idempotence reinstall finds the release the
 cell already staged, so neither install runs a second gate. Its scope is
-still 80 minutes, holding the source gate's modeled path (1846 s) plus the
-installer's own bounded staging call (2700 s) = 4546 s, leaving 254 s inside
+still 100 minutes, holding the source gate's modeled path (2446 s) plus the
+installer's own bounded staging call (3300 s) = 5746 s, leaving 254 s inside
 the job, so the cell is not cut off while the installer works whether or not
 an install reaches its staged gate. Every scope that encloses
 the gate holds the gate's modeled path, so a bounded run reports its own
 outcome instead of being cut off by the enclosing scope; the installer
-staging call holds the Windows path for the same reason. The 2026-10-21
-Windows/3.13 run completed 2233 of about 2265 tests in 1447 s and reached the previous 1450 s child cap without a reported
+staging call holds the Windows path for the same reason.
+
+The later phase is bounded as a whole, not per child. It runs one child per
+check: the transport suite, every SDK contract suite that is not waived, one
+syntax check per JavaScript file, and one per shell wrapper -- nine children
+on Windows, sixteen in a POSIX matrix cell, nineteen in the durable job. A
+budget per child would make the gate's own path grow with the number of
+checked files, so the phase carries one 1200 s budget that every child
+shares: a child takes at most its own 600 s bound and what is left of the
+phase, with its own cleanup reserved inside that remainder. The budget
+covers the measured healthy phase with wide margin -- about 4 s for the
+sixteen children of a POSIX cell, and about 103 s for the nineteen children
+of the durable job, whose three SDK contract suites measured 5.6 s, 75.5 s
+and 18.1 s on the development host -- and it holds two children's full
+bounds, so one hung child still leaves every remaining child a run. A child
+the phase can no longer afford is recorded as a failure with the reason
+`later-phase-budget-exhausted`; it is never skipped silently, and the
+receipt records the phase's own child count, budget, and consumed time.
+The 2026-10-21 Windows/3.13 run completed 2233 of about 2265 tests in
+1447 s and reached the previous 1450 s child cap without a reported
 test failure, so the child bound covers the suite's measured cost with margin.
 If the bounded run stalls again, use its partial per-test artifact to identify
 the unfinished test; timing samples are not bounds.

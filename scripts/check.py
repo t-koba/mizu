@@ -86,6 +86,111 @@ SETUP_RESERVE_SECONDS = 60
 CLEANUP_RESERVE_SECONDS = 2 * PROCESS_CLEANUP_TIMEOUT_SECONDS + 6
 #: Seconds budgeted for the receipt write and the trailing summary.
 RECEIPT_RESERVE_SECONDS = 120
+#: The SDK contract suites the later phase runs when their pinned
+#: dependencies are ready, and the adapters each suite needs. Every suite is
+#: one child of the later phase, and a waived suite runs none.
+SDK_GATE_ADAPTERS = {
+    'node-durable-contract-tests': ('pi-durable',),
+    'node-pi-sdk-contract-tests': ('pi',),
+    'node-pi-reasoning-replay-tests': ('pi', 'pi-durable'),
+}
+#: The SDK contract suite names, in the order the gate runs them.
+SDK_GATE_NAMES = tuple(SDK_GATE_ADAPTERS)
+#: The wall-clock budget the gate may spend on the checks that follow the
+#: Python suite. The later phase runs one child per check: the transport
+#: and SDK contract suites, one syntax check per JavaScript file, one per
+#: shell wrapper -- sixteen children in a POSIX matrix cell, nine on
+#: Windows, nineteen in the durable job. A budget per child would make the
+#: gate's own path grow with the number of checked files, so the phase is
+#: bounded as a whole and every enclosing scope holds one phase budget.
+#: The budget covers the measured healthy phase with wide margin: about 4 s
+#: for the sixteen children of a POSIX matrix cell, and about 103 s for the
+#: nineteen children of the durable job (its three SDK contract suites
+#: measured 5.6 s, 75.5 s and 18.1 s on the development host). The budget
+#: also holds two children's full bounds, so one hung child still leaves
+#: every remaining child its own run.
+LATER_PHASE_BUDGET_SECONDS = 1200
+
+
+class LaterPhase:
+    """The wall-clock budget shared by the checks that follow the suite.
+
+    The phase is bounded as a whole: every child takes at most the phase's
+    remaining time and its own per-child bound, so the number of children
+    cannot multiply the gate's path. A child the phase can no longer afford
+    is recorded as a failure, never skipped silently.
+    """
+
+    def __init__(self, budget: int | None = None):
+        self.budget = LATER_PHASE_BUDGET_SECONDS if budget is None else int(budget)
+        self.consumed = 0.0
+        self.children = 0
+
+    def remaining(self) -> float:
+        """The seconds the phase may still spend on its children."""
+        return self.budget - self.consumed
+
+    def consume(self, seconds: float) -> None:
+        """Charge one child's own elapsed time, its cleanup included."""
+        self.consumed += max(0.0, float(seconds))
+
+    def timeout_for(self, cap: int) -> int | None:
+        """The bound for the next child, or None when the phase is spent.
+
+        Each child's own cleanup is reserved inside the phase, so the phase
+        never exceeds its budget: a child is bounded by the remaining time
+        minus that reserve.
+        """
+        remaining = self.remaining()
+        if remaining <= CLEANUP_RESERVE_SECONDS:
+            return None
+        return max(0, min(int(cap), int(remaining - CLEANUP_RESERVE_SECONDS)))
+
+
+def phase_exhausted_entry(name: str, budget: int) -> dict:
+    """The receipt entry for a later-phase child the phase could not run.
+
+    A check that never ran is a failure: the phase is spent, so the child
+    reported no outcome of its own.
+    """
+    return {'name': name, 'status': 'fail', 'exit_code': None,
+            'reason': 'later-phase-budget-exhausted',
+            'details': f'the later phase has no budget left for this check '
+                       f'(its {budget} s budget is spent)'}
+
+
+def javascript_sources(root: Path | None = None) -> list:
+    """The JavaScript files the gate syntax-checks, in the order it runs them."""
+    root = ROOT if root is None else root
+    return sorted([*(root / 'adapters/pi').glob('*.mjs'),
+                   *(root / 'adapters/pi-durable').glob('*.mjs'),
+                   *(root / 'scripts').glob('*.mjs')])
+
+
+def shell_sources(root: Path | None = None) -> list:
+    """The shell wrappers the gate syntax-checks, in the order it runs them."""
+    root = ROOT if root is None else root
+    return sorted((root / 'scripts').glob('*.sh'))
+
+
+def later_phase_child_count(*, platform: str | None = None, sdk_suites: int = 0,
+                             root: Path | None = None) -> int:
+    """The number of children the later phase runs in one configuration.
+
+    The later phase runs the transport suite, every SDK contract suite that
+    is not waived (`sdk_suites` of them: the matrix cells waive all three
+    and the durable job runs all of them), one syntax check per JavaScript
+    file, and one per shell wrapper on a POSIX host with a functional bash.
+    This count is what the phase budget has to cover: a budget per child
+    would make the gate's own path grow with the number of checked files,
+    and every enclosing scope with it.
+    """
+    platform = os.name if platform is None else platform
+    root = ROOT if root is None else root
+    count = 1 + sdk_suites + len(javascript_sources(root))
+    if platform == 'posix':
+        count += len(shell_sources(root))
+    return count
 
 
 def modelled_gate_seconds(child_timeout: int) -> int:
@@ -95,8 +200,12 @@ def modelled_gate_seconds(child_timeout: int) -> int:
     staging call) must hold this path. A scope shorter than the path cuts
     off a healthy run before the gate can report its own bounded outcome,
     so the enclosing scope must never be the tighter bound.
+
+    The later phase is bounded as a whole (LATER_PHASE_BUDGET_SECONDS), not
+    per child: the phase runs one child per check, so a per-child term would
+    make this path grow with the number of checked files.
     """
-    return (SETUP_RESERVE_SECONDS + child_timeout + DEFAULT_CHECK_TIMEOUT_SECONDS
+    return (SETUP_RESERVE_SECONDS + child_timeout + LATER_PHASE_BUDGET_SECONDS
             + CLEANUP_RESERVE_SECONDS + RECEIPT_RESERVE_SECONDS)
 
 
@@ -560,12 +669,9 @@ def provision_targets(allowed_not_run) -> set:
     installs only for a suite that will actually run.
     """
     wanted = set()
-    if 'node-durable-contract-tests' not in allowed_not_run:
-        wanted.add('pi-durable')
-    if 'node-pi-sdk-contract-tests' not in allowed_not_run:
-        wanted.add('pi')
-    if 'node-pi-reasoning-replay-tests' not in allowed_not_run:
-        wanted.update(('pi', 'pi-durable'))
+    for name, adapters in SDK_GATE_ADAPTERS.items():
+        if name not in allowed_not_run:
+            wanted.update(adapters)
     return wanted
 
 
@@ -595,19 +701,33 @@ def main():
         return 1
     checks = []
     counts = {}
+    phase = LaterPhase()
     env = {**os.environ, 'PYTHONDONTWRITEBYTECODE': '1', 'PYTHONFAULTHANDLER': '1'}
     # The offline suite is process-spawn heavy. Every outer scope that
-    # encloses this gate holds the modelled path (setup, the child, one later
-    # check, bounded process cleanup, and the suffix/receipt reserve), so a
-    # bounded run reports its own outcome instead of being cut off by the
-    # enclosing scope. `modelled_gate_seconds` states that path.
+    # encloses this gate holds the modelled path (setup, the child, the
+    # bounded later phase, bounded process cleanup, and the suffix/receipt
+    # reserve), so a bounded run reports its own outcome instead of being cut
+    # off by the enclosing scope. `modelled_gate_seconds` states that path.
+    # The later phase is bounded as a whole (one budget for every check that
+    # follows the Python suite), so the number of checked files cannot grow
+    # the gate's path.
     # A contract test keeps the full budget relationship explicit. Step output
     # streams live (merged in order) so a hung step leaves
     # the last-running test visible, and a step timeout
     # is recorded as a structured failure with the partial output counted
     # instead of crashing the gate before the receipt is written.
     def execute(name, command, *, count=None, failure_summary=None,
-                timeout=DEFAULT_CHECK_TIMEOUT_SECONDS):
+                timeout=DEFAULT_CHECK_TIMEOUT_SECONDS, later_phase=False):
+        if later_phase:
+            allowed = phase.timeout_for(timeout)
+            phase.children += 1
+            if allowed is None:
+                entry = phase_exhausted_entry(name, phase.budget)
+                checks.append(entry)
+                print(f'== {name} == (not run: the later phase has no budget left)',
+                      flush=True)
+                return time.monotonic()
+            timeout = allowed
         started = time.monotonic()
         print(f'== {name} ==', flush=True)
         chunks: list[str] = []
@@ -662,6 +782,10 @@ def main():
             else:
                 exit_code = stopped
             reader.join(timeout=PROCESS_CLEANUP_TIMEOUT_SECONDS)
+        finished_at = time.monotonic()
+        if later_phase:
+            # The phase pays for the child's own runtime and its cleanup.
+            phase.consume(finished_at - started)
         if reader.is_alive():
             status = 'fail'
             details = f'{details}; output reader did not stop'.lstrip('; ')
@@ -722,7 +846,7 @@ def main():
     # unfinished test as the last timestamped line in the live log.
     # The 2026-10-21 Windows/Python 3.13 run completed 2233 of about 2265
     # tests in 1447 s and reached the previous 1450 s child cap with no
-    # reported test failure, so the bound is now 1800 s inside a 50-minute
+    # reported test failure, so the bound is now 1800 s inside a 60-minute
     # job. The opt-in per-test timing artifact retains partial progress on
     # timeout for diagnosis. Samples remain diagnostic, not bounds; POSIX
     # retains its 1000 s child cap.
@@ -799,7 +923,7 @@ def main():
                        'details': 'no functional bash; shell wrappers are POSIX-only'})
     if shutil.which('node'):
         execute('node-transport-and-extension-tests', ['node', '--test', 'tests/bridge.test.mjs'],
-                count=node_counts)
+                count=node_counts, later_phase=True)
         adapters = {'pi': ROOT / 'adapters/pi', 'pi-durable': ROOT / 'adapters/pi-durable'}
         verdicts = {name: pi_sdk_deps_status(path) for name, path in adapters.items()}
         # The pinned SDK is provisioned outside git, so a frozen source copy
@@ -813,35 +937,37 @@ def main():
                     print('== provisioned ' + str(adapters[name])
                           + ' pinned dependencies from the offline npm cache ==')
                 verdicts[name] = (state, details)
+        durable_name, pi_sdk_name, replay_name = SDK_GATE_NAMES
         durable_state, durable_details = verdicts['pi-durable']
         if durable_state == 'ready':
-            execute('node-durable-contract-tests', ['node', '--test', 'tests/durable.test.mjs'],
-                    count=node_counts)
+            execute(durable_name, ['node', '--test', 'tests/durable.test.mjs'],
+                    count=node_counts, later_phase=True)
         else:
-            checks.append(sdk_gate_entry(durable_state, durable_details, allowed_not_run))
-        pi_sdk_name = 'node-pi-sdk-contract-tests'
+            checks.append(sdk_gate_entry(durable_state, durable_details, allowed_not_run,
+                                         name=durable_name))
         pi_sdk_state, pi_sdk_details = verdicts['pi']
         if pi_sdk_state == 'ready':
-            execute(pi_sdk_name, ['node', 'scripts/check-pi-sdk.mjs'])
+            execute(pi_sdk_name, ['node', 'scripts/check-pi-sdk.mjs'], later_phase=True)
         else:
             checks.append(sdk_gate_entry(pi_sdk_state, pi_sdk_details, allowed_not_run,
                                          name=pi_sdk_name))
         # This gate uses both real installed SDKs, not the fake-RPC bridge.
-        replay_name = 'node-pi-reasoning-replay-tests'
         replay_deps = [(adapter, *verdicts[adapter]) for adapter in ('pi', 'pi-durable')]
         if all(state == 'ready' for _, state, _ in replay_deps):
-            execute(replay_name, ['node', '--test', 'tests/pi-reasoning.test.mjs'], count=node_counts)
+            execute(replay_name, ['node', '--test', 'tests/pi-reasoning.test.mjs'],
+                    count=node_counts, later_phase=True)
         else:
             state = ('mismatch' if any(s == 'mismatch' for _, s, _ in replay_deps)
                      else 'partial' if any(s == 'partial' for _, s, _ in replay_deps)
                      else 'absent')
             details = '; '.join(f'{adapter}: {detail}' for adapter, s, detail in replay_deps if s != 'ready')
             checks.append(sdk_gate_entry(state, details, allowed_not_run, name=replay_name))
-        for path in sorted([*(ROOT / 'adapters/pi').glob('*.mjs'), *(ROOT / 'adapters/pi-durable').glob('*.mjs'), *(ROOT / 'scripts').glob('*.mjs')]):
-            execute('javascript-syntax:' + path.relative_to(ROOT).as_posix(), ['node', '--check', str(path)])
+        for path in javascript_sources():
+            execute('javascript-syntax:' + path.relative_to(ROOT).as_posix(),
+                    ['node', '--check', str(path)], later_phase=True)
     if has_bash:
-        for path in sorted((ROOT / 'scripts').glob('*.sh')):
-            execute('shell-syntax:' + path.name, ['bash', '-n', str(path)])
+        for path in shell_sources():
+            execute('shell-syntax:' + path.name, ['bash', '-n', str(path)], later_phase=True)
     try:
         source_stable = source_sha == source_manifest_sha(ROOT)
         stable_details = 'source manifest unchanged' if source_stable else 'source changed during validation'
@@ -865,6 +991,9 @@ def main():
                'node_version': checked_node_version,
                'ok': all(c['status'] != 'fail' for c in checks),
                'checks': checks, 'counts': counts, 'python': sys.version.split()[0], 'os': sys.platform,
+               'later_phase': {'children': phase.children,
+                               'budget_seconds': phase.budget,
+                               'consumed_seconds': round(phase.consumed, 3)},
                'not_run': ['installed-Pi', 'rootless-Podman', 'live-provider', '24-hour-soak', 'cross-distribution-deployment']}
     if args.report:
         args.report.parent.mkdir(parents=True, exist_ok=True)

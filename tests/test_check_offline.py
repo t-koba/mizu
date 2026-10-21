@@ -35,8 +35,8 @@ INSTALLER = load_script('install')
 #: The core job's per-cell scope expression, in the order the expression
 #: names them: the Windows cell, the Linux cell that also installs, and the
 #: default POSIX cell.
-CORE_SCOPE_EXPRESSION = ("timeout-minutes: ${{ matrix.os == 'windows-latest' && 50 || "
-                         "(matrix.os == 'ubuntu-24.04' && matrix.python == '3.13' && 80 || 35) }}")
+CORE_SCOPE_EXPRESSION = ("timeout-minutes: ${{ matrix.os == 'windows-latest' && 60 || "
+                         "(matrix.os == 'ubuntu-24.04' && matrix.python == '3.13' && 100 || 45) }}")
 
 
 def write_adapter(base: Path, deps, installed: dict):
@@ -68,12 +68,12 @@ class CheckTimeoutTests(unittest.TestCase):
         self.assertEqual(CHECK.DEFAULT_CHECK_TIMEOUT_SECONDS, 600)
         workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
         self.assertIn(CORE_SCOPE_EXPRESSION, workflow)
-        # Exercise the 60-second setup case, one later execute timeout, both
+        # Exercise the 60-second setup case, the bounded later phase, both
         # bounded cleanup waits, process-group termination (1 s grace + 5 s
-        # reap), and the suffix/receipt reserve: 2646 s total, leaving 354 s.
+        # reap), and the suffix/receipt reserve: 3246 s total, leaving 354 s.
         required = CHECK.modelled_gate_seconds(child_timeout)
-        self.assertEqual(required, 2646)
-        self.assertGreaterEqual(50 * 60, required)
+        self.assertEqual(required, 3246)
+        self.assertGreaterEqual(60 * 60, required)
 
     def test_matrix_job_scopes_hold_the_modelled_gate_path(self):
         # A job scope that is shorter than the gate's own modelled path kills
@@ -94,8 +94,115 @@ class CheckTimeoutTests(unittest.TestCase):
         scopes = self._core_cell_scopes()
         staging = self._installer_staging_timeout()
         required = CHECK.core_cell_scope_seconds(CHECK._unittest_timeout_seconds('posix'), staging)
-        self.assertEqual(required, 1846 + 2700)
+        self.assertEqual(required, 2446 + 3300)
         self.assertGreaterEqual(scopes['linux_installer'] * 60, required)
+
+    def test_later_phase_counts_the_children_the_gate_actually_runs(self):
+        # The later phase runs one child per check: the transport suite,
+        # every SDK contract suite that is not waived, one syntax check per
+        # JavaScript file, and one per shell wrapper on a POSIX host. The
+        # account of the product's own CI is these counts, so they are
+        # pinned here: a changed file set must change this account.
+        self.assertEqual(CHECK.later_phase_child_count(platform='posix'), 16)
+        self.assertEqual(CHECK.later_phase_child_count(platform='nt'), 9)
+        self.assertEqual(len(CHECK.SDK_GATE_NAMES), 3)
+        self.assertEqual(CHECK.later_phase_child_count(
+            platform='posix', sdk_suites=len(CHECK.SDK_GATE_NAMES)), 19)
+        self.assertEqual(len(CHECK.javascript_sources()), 8)
+        self.assertEqual(len(CHECK.shell_sources()), 7)
+
+    def test_later_phase_is_bounded_as_a_whole_not_per_child(self):
+        # The model must hold the phase's own budget, not one child's: the
+        # phase runs one child per check, so a per-child term would make
+        # every enclosing scope grow with the number of checked files.
+        self.assertEqual(CHECK.LATER_PHASE_BUDGET_SECONDS, 1200)
+        modelled = (CHECK.SETUP_RESERVE_SECONDS + 1000
+                    + CHECK.LATER_PHASE_BUDGET_SECONDS
+                    + CHECK.CLEANUP_RESERVE_SECONDS + CHECK.RECEIPT_RESERVE_SECONDS)
+        self.assertEqual(CHECK.modelled_gate_seconds(1000), modelled)
+        per_child = (CHECK.SETUP_RESERVE_SECONDS + 1000
+                     + CHECK.DEFAULT_CHECK_TIMEOUT_SECONDS
+                     + CHECK.CLEANUP_RESERVE_SECONDS + CHECK.RECEIPT_RESERVE_SECONDS)
+        self.assertNotEqual(CHECK.modelled_gate_seconds(1000), per_child)
+        # The budget holds two children's full bounds, so one hung child
+        # still leaves every remaining child its own run.
+        self.assertGreaterEqual(CHECK.LATER_PHASE_BUDGET_SECONDS,
+                                 2 * CHECK.DEFAULT_CHECK_TIMEOUT_SECONDS)
+
+    def test_later_phase_reserves_each_child_cleanup(self):
+        phase = CHECK.LaterPhase(budget=1000)
+        self.assertEqual(phase.timeout_for(600), 600)
+        self.assertEqual(phase.timeout_for(5000),
+                         1000 - CHECK.CLEANUP_RESERVE_SECONDS)
+        # A child the phase can no longer afford is refused, never skipped.
+        phase.consume(1000)
+        self.assertIsNone(phase.timeout_for(600))
+        entry = CHECK.phase_exhausted_entry('javascript-syntax:scripts/check-pi-sdk.mjs',
+                                            phase.budget)
+        self.assertEqual(entry['status'], 'fail')
+        self.assertIsNone(entry['exit_code'])
+        self.assertEqual(entry['reason'], 'later-phase-budget-exhausted')
+        self.assertIn('1000', entry['details'])
+
+    def test_gate_refuses_the_later_phase_it_cannot_afford(self):
+        # The gate itself, end to end: with the phase budget spent, every
+        # later child is refused and recorded as a failure with the reason,
+        # and none of them runs.
+        if not shutil.which('node'):
+            self.skipTest('node is required for the later phase')
+        with tempfile.TemporaryDirectory() as temporary:
+            report = Path(temporary) / 'offline.json'
+            wrapper = Path(temporary) / 'gate.py'
+            waivers = ('node-durable-contract-tests,node-pi-sdk-contract-tests,'
+                       'node-pi-reasoning-replay-tests')
+            wrapper.write_text(
+                'import importlib.util, sys\n'
+                f'spec = importlib.util.spec_from_file_location("check", {str(ROOT / "scripts" / "check.py")!r})\n'
+                'module = importlib.util.module_from_spec(spec)\n'
+                'spec.loader.exec_module(module)\n'
+                'module.LATER_PHASE_BUDGET_SECONDS = 1\n'
+                'module._unittest_timeout_seconds = lambda platform=None: 1\n'
+                f'sys.argv = ["check.py", "--report", {str(report)!r}, "--allow-not-run", {waivers!r}]\n'
+                'sys.exit(module.main())\n', encoding='utf-8')
+            completed = subprocess.run([sys.executable, str(wrapper)], cwd=ROOT,
+                                       capture_output=True, text=True, timeout=300)
+            self.assertEqual(completed.returncode, 1)
+            receipt = json.loads(report.read_text(encoding='utf-8'))
+        refused = [entry for entry in receipt['checks']
+                   if entry.get('reason') == 'later-phase-budget-exhausted']
+        self.assertTrue(refused)
+        self.assertTrue(all(entry['status'] == 'fail' for entry in refused))
+        self.assertFalse(receipt['ok'])
+        # The phase's own evidence matches the children it refused.
+        self.assertEqual(receipt['later_phase']['children'], len(refused))
+        self.assertEqual(receipt['later_phase']['budget_seconds'], 1)
+        self.assertEqual(receipt['later_phase']['consumed_seconds'], 0.0)
+        # Every later child the gate would run in this configuration is
+        # refused, and nothing else is: the transport suite, one syntax
+        # check per JavaScript file, and one per shell wrapper where the
+        # gate finds a functional bash. A refused child is never a passed
+        # one.
+        expected = {'node-transport-and-extension-tests'}
+        expected.update('javascript-syntax:' + path.relative_to(ROOT).as_posix()
+                        for path in CHECK.javascript_sources())
+        if os.name == 'posix' and CHECK.bash_available():
+            expected.update('shell-syntax:' + path.name for path in CHECK.shell_sources())
+        # An SDK contract suite is a child of the phase only where its
+        # pinned dependencies are ready: the matrix cells have none, the
+        # durable job has all of them.
+        durable_name, pi_sdk_name, replay_name = CHECK.SDK_GATE_NAMES
+        durable_state, _ = CHECK.pi_sdk_deps_status(ROOT / 'adapters' / 'pi-durable')
+        pi_state, _ = CHECK.pi_sdk_deps_status(ROOT / 'adapters' / 'pi')
+        if durable_state == 'ready':
+            expected.add(durable_name)
+        if pi_state == 'ready':
+            expected.add(pi_sdk_name)
+        if pi_state == 'ready' and durable_state == 'ready':
+            expected.add(replay_name)
+        self.assertEqual({entry['name'] for entry in refused}, expected)
+        passed = {entry['name'] for entry in receipt['checks']
+                  if entry['status'] == 'pass'}
+        self.assertFalse(passed & expected)
 
     def _core_cell_scopes(self) -> dict:
         """Read the core job's per-cell scopes from the workflow.
@@ -120,13 +227,14 @@ class CheckTimeoutTests(unittest.TestCase):
 
     def test_posix_job_scope_covers_the_modelled_gate_path(self):
         # The POSIX matrix cell runs the same gate with the 1000-second child:
-        # 60 s setup + 1000 s child + one 600 s later check + bounded cleanup
-        # + suffix/receipt reserve = 1846 s, which the 35-minute scope holds.
+        # 60 s setup + 1000 s child + the bounded later phase + bounded
+        # cleanup + suffix/receipt reserve = 2446 s, which the 45-minute scope
+        # holds.
         required = CHECK.modelled_gate_seconds(CHECK._unittest_timeout_seconds('posix'))
-        self.assertEqual(required, 1846)
+        self.assertEqual(required, 2446)
         workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
         self.assertIn(CORE_SCOPE_EXPRESSION, workflow)
-        self.assertGreaterEqual(35 * 60, required)
+        self.assertGreaterEqual(45 * 60, required)
 
     def test_durable_contract_job_scope_covers_the_modelled_gate_path(self):
         # The authoritative job runs the whole gate on a POSIX host after
@@ -148,7 +256,7 @@ class CheckTimeoutTests(unittest.TestCase):
         match = re.search(r'"scripts/check\.py".*?timeout=(\d+)', source, re.S)
         self.assertIsNotNone(match)
         required = CHECK.modelled_gate_seconds(CHECK._unittest_timeout_seconds('nt'))
-        self.assertEqual(required, 2646)
+        self.assertEqual(required, 3246)
         self.assertGreaterEqual(int(match.group(1)), required)
 
     def test_windows_child_bound_covers_the_measured_suite_cost(self):
@@ -1057,7 +1165,7 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
         # Do not upload offline reports, which may contain diagnostics.
         self.assertNotIn('path: private-validation/offline.json', workflow)
         self.assertNotIn('path: private-validation/durable.json', workflow)
-        # Timing stays diagnostic; the 50-minute/1800-second scope is
+        # Timing stays diagnostic; the 60-minute/1800-second scope is
         # enforced while the always-uploaded artifact preserves partial progress.
         self.assertIn('1800-second child', workflow)
         self.assertIn(CORE_SCOPE_EXPRESSION, workflow)
