@@ -1,4 +1,10 @@
-"""Local cross-process FIFO admission, separate from active execution locks."""
+"""Local cross-process FIFO admission, separate from active execution locks.
+
+The queue orders the admissions; a role's exclusion is a different thing, and
+its path is defined here because the admission is what takes it. A live
+invocation holds its role's exclusion for the whole run, so the kernel
+releases it exactly when the invocation ends.
+"""
 from __future__ import annotations
 
 import contextlib
@@ -8,10 +14,82 @@ import stat
 import threading
 import time
 import uuid
+from collections.abc import Sequence
 from pathlib import Path
 
-from .errors import Busy
+from .errors import Busy, Denied
 from .fs import ID, canonical, lock, write_json
+
+
+def role_exclusion(project: Path, role: str) -> Path:
+    """Return the lock a live invocation of ``role`` holds for its whole run.
+
+    Every caller that must exclude a live role takes this path, so the
+    exclusion the invocation holds and the exclusion another caller avoids
+    cannot drift apart.
+
+    Bounds: one project root, one role name. Trust: local state. Failure:
+    never raises.
+    """
+    return project / "locks" / f"run-{role}.lock"
+
+
+def check_slot_exclusion(project: Path, slot: int) -> Path:
+    """Return the lock the check runner holds while it occupies ``slot``.
+
+    A check job's container belongs to the runner, not to a role, so the
+    runner holds the exclusion of the compute slot it occupies. A sweep
+    finds that exclusion held and refuses, and a runner cannot start a job
+    inside a sweep's own window. The set is bounded by the number of
+    compute slots, so it never grows with the number of jobs a project has
+    run.
+
+    Bounds: one project root, one slot index. Trust: local state. Failure:
+    never raises.
+    """
+    return role_exclusion(project, f'check-slot-{slot}')
+
+
+def check_slot_exclusions(project: Path, slots: int) -> list[Path]:
+    """Return every compute slot exclusion a project-wide sweep must hold.
+
+    The named slots are always included, whether or not a runner has
+    occupied them yet, so a runner that starts inside a sweep's window
+    cannot start at all.
+
+    Bounds: one project root, one bounded slot count. Trust: local state.
+    Failure: never raises.
+    """
+    return [check_slot_exclusion(project, slot) for slot in range(max(0, slots))]
+
+
+def role_exclusions(project: Path, roles: Sequence[str] = ()) -> list[Path]:
+    """Return every role exclusion the project must exclude.
+
+    The named roles are always included, whether or not they have ever run,
+    and so is every exclusion that already exists in the project: the
+    existence of a lock file is not a liveness fact, because the file
+    appears when a role takes its exclusion, and a delegated child's role
+    need not be enabled for the project. The set must name both, or a role
+    that has not run yet would be unprotected.
+
+    Bounds: one project root, one bounded directory listing, one path per
+    role. Trust: local state. Failure: an unreadable locks directory is
+    refused, because an empty set would exclude nothing.
+    """
+    directory = project / "locks"
+    found = {role_exclusion(project, role) for role in roles}
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                name = entry.name
+                if name.startswith("run-") and name.endswith(".lock") and ID.fullmatch(name[4:-5]):
+                    found.add(directory / name)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise Denied("Role exclusions are unreadable") from exc
+    return sorted(found)
 
 
 class _Full(Busy):

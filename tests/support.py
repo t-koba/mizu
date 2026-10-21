@@ -3,15 +3,32 @@ import dataclasses
 import json
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 from mizu.cli import configure
+from mizu.errors import Denied
 from mizu.config import load
 from mizu.fs import mkdir
+from mizu.process import run
 from mizu.project import initialize
 from mizu.runtime import Context
+
+
+def host_child_cost() -> float:
+    """Return this host's measured cost of starting and reaping a child.
+
+    The deadline tests check promptness: the call must end because the
+    configured bound ended it, not because the wall clock ran out. A fixed
+    number of seconds cannot say that on an unknown host, so the test
+    measures what this host spends on a trivial child of the same
+    interpreter and scales its bound with that measurement.
+    """
+    started = time.monotonic()
+    run([sys.executable, "-c", "pass"], timeout=60, maximum=1024)
+    return time.monotonic() - started
 
 
 class Fixture(unittest.TestCase):
@@ -81,7 +98,17 @@ class ScriptDriver:
         if self.callback:
             self.callback(context, prompt, profile)
         if context.finished is None:
-            context.handle("finish", {"outcome": "wait", "summary": "One observed result", "state": "Next step is explicit."})
+            try:
+                context.handle("finish", {"outcome": "wait", "summary": "One observed result", "state": "Next step is explicit."})
+            except Denied:
+                # The engine returns a refused seal as a tool result and lets
+                # the unit wrap up under the bound it reached; the double
+                # does the same for a reached bound, so a bound is not an
+                # unhandled error here. Every other refusal — an empty
+                # summary, an unknown profile, a missing state, an
+                # unrepresentable workspace — still fails the test loudly.
+                if context.bound_hit is None:
+                    raise
         if not context.operations_stopped.is_set():
             for attempt, sequence in tuple(context.request_deadlines):
                 if attempt == context.execution_attempt:

@@ -19,13 +19,24 @@ commands and configured execution environment match. A queued, interrupted,
 refused, failed or source-mismatched result cannot authorize completion.
 
 When only that job remains, finish with `outcome=wait, wait_for_check=<id>`.
-The work unit ends and returns its model slot and workspace lock. The daemon
-will not spend repeated model turns waiting on the same job. New publication,
+The work unit ends and returns its model slot and workspace lock. The wait
+holds the role for as long as the wait the unit sealed with: the configured
+`limits.default_wait_seconds`, or the `wait_seconds` the unit chose, capped
+by `limits.maximum_wait_seconds`. The hold ends there even when the job
+never finishes, so a check that never runs delays a role instead of stopping
+it, and the recorded `wake_at` is the truth. Inside one bound the daemon
+does not spend repeated model turns waiting on the same job. New publication,
 inbox generation or explicit operator wake makes the prior waiting decision
 stale; the role may reconsider independent work. A completed job itself admits
 the role even when source code has not changed. Result delivery is acknowledged
 only after a consuming work unit has durably completed, not on a possibly lost
 tool response. Read-only service triggers watch the persisted queue.
+
+The hold is named, never silent. The waiting unit's record carries
+`waiting_for_check` with the job and the second the hold ends, and
+`mizu status` lists every role the queue holds under `check_waits` with the
+same job, its status and its bound. A wait record that carries no bound
+holds nothing, so unreadable state never stops a role.
 
 `mizu check-jobs PROJECT` drains up to `limits.check_pending` terminal jobs per invocation without a model, releasing admission between jobs. It returns immediately on idle, compute contention, cancellation, pause or cleanup failure; it never sleeps between queued jobs. Each result remains in its own durable record. The CLI response adds `processed`, the number of terminal jobs handled. On
 Linux, service generation creates a dedicated checks service, path notification
@@ -59,7 +70,12 @@ compute slot. It is never silently turned into success or replayed as though its
 side effects were known. Resubmission in a new unit can retry; same-unit same-input
 submission is idempotent. The requester can end without stopping the job; a job's
 container label differs from the requesting role so normal role cleanup does not
-remove it. Pause/drain prevents new jobs; stopping the runner cancels its current
+remove it. The runner holds the exclusion of the compute slot it occupies while
+a job runs in it, so a project-wide sweep refuses instead of removing a running
+job's container, and a runner cannot start a job inside a sweep's own window.
+That set is bounded by the number of compute slots, so it never grows with the
+number of jobs: the runner's own cleanup takes the exclusion of the slot it
+occupies, so no exclusion file is left behind for the job. Pause/drain prevents new jobs; stopping the runner cancels its current
 bounded command. Changed config or revoked grants refuses queued execution.
 
 This opt-in mechanism changes no role policy, priorities or scheduling decisions.

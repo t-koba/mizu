@@ -73,15 +73,36 @@ On Windows without bash: run `python scripts/install.py --core-only ...` and tes
 
 The gate installs the pinned dependencies itself when they are absent: it runs
 `npm ci --offline --engine-strict --no-audit --no-fund --ignore-scripts` with
-`npm_config_offline=true`, so the install resolves from the operator's offline
-npm cache and never reaches the network. A frozen source copy -- the input of
-a check job -- carries no `node_modules`, so without this the SDK gates fail
-closed on absent dependencies and the acceptance command has to be waived. The
-install happens only for a gate that will actually run (a waived gate needs no
-dependencies) and only when the dependencies are absent: an installed version
-that differs from the pin is a contract violation, never reinstalled over. A
-missing npm, a missing lockfile, a failed install or an elapsed 300 s bound
-leaves the gate's verdict unchanged and names npm's own output.
+`npm_config_offline=true`, so the install never reaches the network. A frozen
+source copy -- the input of a check job -- carries no `node_modules`, so
+without this the SDK gates fail closed on absent dependencies and the
+acceptance command has to be waived. The install happens only for a gate that
+will actually run (a waived gate needs no dependencies) and only over an
+adapter that holds no installed dependencies at all: `npm ci` is the clean
+install and replaces the whole tree, so it never runs over a tree the operator
+provisioned. An adapter that holds some of the pinned packages is left exactly
+as it is and fails closed, naming the packages that are missing; an installed
+version that differs from the pin is a contract violation, never reinstalled
+over. A missing npm, a missing lockfile, a failed install or an elapsed 300 s
+bound leaves the gate's verdict unchanged and the previous installation
+untouched, and names npm's own output.
+
+The install resolves from npm's own cache, as selected by `npm_config_cache`
+(npm's default is `~/.npm`). That cache is the mechanism's input and must hold
+the tarballs of the committed lockfile; a cache that does not hold them fails
+the install with npm's own `ENOTCACHED`. A sandboxed check needs the cache
+visible inside the sandbox: mount the cache directory and name it in the
+environment, for example:
+
+```toml
+[[sandbox.mounts]]
+source = "/srv/npm-cache"
+target = "/npm-cache"
+
+[sandbox.env]
+npm_config_cache = "/npm-cache"
+```
+
 `python3 scripts/check.py --no-provision` reports absent dependencies instead
 of installing them. Podman and systemd validations only run on Linux.
 

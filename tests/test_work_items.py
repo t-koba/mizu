@@ -400,6 +400,59 @@ class WorkItemTests(Fixture):
                 self.change("done", snapshot_id=sid)
         self.assertFalse(self.directory.exists())
 
+    def test_done_binds_the_published_tree_that_carries_the_delivery(self):
+        self.change("doing", reason="Start the work item")
+        snapshot = self.snapshot("valid")
+        presented = self.project.snapshots.capture_files(self.project.workspace)["code_digest"]
+        completed = self.change("done", expected_rev=2, snapshot_id=snapshot["id"], reason="Verified")
+        self.assertEqual(completed["delivered_tree"], presented)
+        self.assertEqual(completed["delivered_tree"], snapshot["code_digest"])
+        self.assertEqual(self.store.get(self.item_id)["delivered_tree"], presented)
+
+    def test_done_refuses_a_snapshot_whose_tree_lacks_the_delivery(self):
+        self.change("doing", reason="Start the work item")
+        snapshot = self.snapshot("valid")
+        # The workspace moves on: the published tree no longer carries the delivery.
+        (self.project.workspace / "app.py").write_bytes(b"VALUE = 3\n")
+        with self.assertRaises(Denied):
+            self.change("done", expected_rev=2, snapshot_id=snapshot["id"])
+        self.assertEqual(self.store.get(self.item_id)["status"], "doing")
+        self.assertEqual(sorted(p.name for p in self.directory.iterdir()), ["2.json"])
+
+    def test_done_accepts_an_older_published_snapshot_carrying_the_same_tree(self):
+        self.change("doing", reason="Start the work item")
+        older = self.snapshot("valid")
+        newer = self.snapshot("valid")
+        self.assertEqual(older["code_digest"], newer["code_digest"])
+        self.assertNotEqual(older["id"], newer["id"])
+        completed = self.change("done", expected_rev=2, snapshot_id=older["id"])
+        self.assertEqual(completed["delivered_tree"], older["code_digest"])
+
+    def test_done_refuses_a_closure_without_a_derivable_delivery_tree(self):
+        store = WorkItems(self.project.root, self.project.snapshots, self.project.insights)
+        snapshot = self.snapshot("valid")
+        with self.assertRaises(Denied):
+            store.transition(self.item_id, expected_rev=1, status="done", actor="worker",
+                             snapshot_id=snapshot["id"])
+        self.assertFalse(self.directory.exists())
+
+    def test_done_record_must_name_the_tree_its_snapshot_carries(self):
+        snapshot = self.snapshot("valid")
+        completed = self.change("done", snapshot_id=snapshot["id"])
+        path = self.directory / "2.json"
+        tampered = copy.deepcopy(completed)
+        tampered["delivered_tree"] = "a" * 64
+        write_json(path, tampered)
+        with self.assertRaises(Denied):
+            self.store.get(self.item_id)
+        # A record written before the claim existed stays readable history.
+        legacy = copy.deepcopy(completed)
+        del legacy["delivered_tree"]
+        write_json(path, legacy)
+        self.assertIsNone(self.store.get(self.item_id).get("delivered_tree"))
+        row = self.store.page_closed_readonly(limit=10)["items"][0]
+        self.assertIsNone(row["delivered_tree"])
+
     def test_done_requires_retained_history_not_just_an_existing_manifest(self):
         old = self.snapshot("valid")
         self.project.snapshots.history_index = 1

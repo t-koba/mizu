@@ -154,12 +154,33 @@ The recorded requests are visible per day. `vcs_read` with the `ci_requests` op
 lists the project's recorded CI requests from local durable evidence, grouped
 by UTC day: each day row counts the requests made on that day and names the
 work items they covered, next to the request's own identity, workflows and
-provider run identities. The listing is a bounded page (`total`, `truncated`
+provider run identities. A request is dated by its dispatch: the day it was
+made is the day the provider was asked, and a later answer never moves it, so
+the day comes from the dispatch marker whether the request is resolved or
+not. A request whose outcome is unknown is listed too,
+marked `unresolved`: the dispatch marker proves the request reached the
+provider, so a CI run may have been spent, and the request is never retried
+blindly. An outcome record that cannot be read is such an unknown outcome:
+it is never returned unvalidated, and it never hides the request, which stays
+listed as `unresolved` with no provider run. The listing is a bounded page
+(`total`, `truncated`
 and `scan_stopped`, as the publication listing is), an unreadable or invalid
-record is skipped rather than returned unvalidated, and no provider is
-contacted. The derived job time of a run is not part of this view: it needs
+record is skipped rather than returned unvalidated, a dispatch whose marker
+cannot be validated is not listed at all, and no provider is contacted. The derived job time of a run is not part of this view: it needs
 the check instants in the status rows, and a provider that reports none leaves
 it empty.
+
+A run's own record names the CI requests that run made. The run record
+carries `ci_requests`: the entries for the requests, each with the request
+identity, the UTC day it was made, its workflows, the work items it covered
+and whether it is `resolved` or still `unresolved`, plus the total number of
+requests the run made. A request is named from the moment it is dispatched,
+because a CI run may have been spent from there on, and a later failure
+cannot drop it. The day it was made is the day it was dispatched, and the
+answer that arrives later does not move it. The list holds at
+most 16 entries and the total is reported beside it, so a truncated list is
+visible rather than silent. A replay of an already recorded request made no
+new run, so it adds nothing to the list.
 
 A CI request may cover work items. `vcs_request` takes an optional `covered`
 list of at most 16 entries, each naming a work item, the revision it is

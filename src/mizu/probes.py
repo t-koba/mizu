@@ -10,6 +10,7 @@ import time
 import uuid
 from pathlib import Path
 
+from .admission import role_exclusion
 from .budget import Budget
 from .config import Role, load, role_requests_per_run, role_tools_per_run
 from .drivers import driver_for
@@ -363,7 +364,7 @@ def _service(config, store, identity, stop, resolve, reload_config, at, clock):
                         return result
 
             with contextlib.ExitStack() as stack:
-                stack.enter_context(lock(project.root / 'locks' / ('run-' + c['role'] + '.lock'), blocking=False))
+                stack.enter_context(lock(role_exclusion(project.root, c['role']), blocking=False))
                 writer_locked = current.roles[c['role']].workspace == 'write'
                 if writer_locked:
                     stack.enter_context(lock(project.root / 'locks' / 'workspace.lock', blocking=False))

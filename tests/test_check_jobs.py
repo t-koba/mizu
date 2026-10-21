@@ -1,10 +1,14 @@
 import dataclasses
 import threading
+import time
 from unittest.mock import patch
 from support import Fixture
 from mizu import check_jobs
+from mizu.admission import check_slot_exclusion
 from mizu.errors import Denied
-from mizu.fs import lock, read_json, write_json
+from mizu.fs import held, lock, read_json, write_json
+from mizu.process import Result
+from mizu.sandbox import cleanup
 
 class FakeSandbox:
     calls = []
@@ -307,6 +311,58 @@ class JobTests(Fixture):
         self.assertTrue(check_jobs.waiting(self.project, 'worker'))
         self.project.set_control(wake_generation='new-independent-work')
         self.assertFalse(check_jobs.waiting(self.project, 'worker'))
+    def test_check_wait_holds_the_role_only_until_its_bound(self):
+        from support import ScriptDriver
+        from mizu.runtime import Engine, should_run
+        def act(ctx, *_):
+            job = ctx._op_verify({})
+            ctx._op_finish({'outcome': 'wait', 'summary': 'Waiting for frozen check',
+                            'state': 'Independent work complete', 'wait_for_check': job['id'],
+                            'wait_seconds': 60})
+        result = Engine(self.config, driver=ScriptDriver(act)).run(self.project, 'worker')
+        self.assertEqual(result['status'], 'waiting')
+        # The unit names the deferral it leaves behind and the bound that ends it.
+        self.assertEqual(result['waiting_for_check']['id'], result['finish']['wait_for_check'])
+        # The bound is the wait the unit sealed with, not the configured
+        # default: the recorded wake_at is the truth the operator reads.
+        self.assertAlmostEqual(result['waiting_for_check']['wait_until'],
+                               time.time() + 60, delta=1)
+        self.assertNotAlmostEqual(result['waiting_for_check']['wait_until'],
+                                   time.time() + self.config.limits.default_wait_seconds,
+                                   delta=1)
+        self.assertTrue(check_jobs.waiting(self.project, 'worker'))
+        snapshot = self.project.snapshots.get()
+        self.assertFalse(should_run(self.project, snapshot, role_name='worker'))
+        # The bound passes while the job is still queued: the wait holds the
+        # role no longer, so the ordinary wait expiry can admit it.
+        path = check_jobs.root(self.project) / 'worker.wait.json'
+        record = read_json(path)
+        record['wait_until'] = time.time() - 1
+        write_json(path, record)
+        self.assertFalse(check_jobs.waiting(self.project, 'worker'))
+        self.assertTrue(should_run(self.project, snapshot, current_time=snapshot['wake_at'] + 1,
+                                   role_name='worker'))
+    def test_operator_status_names_the_check_wait_and_its_bound(self):
+        ctx, job = self.submit()
+        check_jobs.set_wait(self.project, 'worker', job['id'])
+        held = self.project.status()['check_waits']
+        self.assertEqual(held['worker']['id'], job['id'])
+        self.assertEqual(held['worker']['status'], 'queued')
+        # A deferral recorded without a bound of its own carries the
+        # configured default, so a recorded hold is never unbounded.
+        self.assertAlmostEqual(held['worker']['wait_until'],
+                               time.time() + self.config.limits.default_wait_seconds,
+                               delta=1)
+        path = check_jobs.root(self.project) / 'worker.wait.json'
+        record = read_json(path)
+        record['wait_until'] = time.time() - 1
+        write_json(path, record)
+        self.assertEqual(self.project.status()['check_waits'], {})
+    def test_check_wait_without_a_bound_holds_nothing(self):
+        ctx, job = self.submit()
+        write_json(check_jobs.root(self.project) / 'worker.wait.json',
+                   {'id': job['id'], 'inputs': check_jobs.wait_signature(self.project)})
+        self.assertFalse(check_jobs.waiting(self.project, 'worker'))
     def test_failed_check_does_not_supply_acceptance(self):
         ctx, job = self.submit()
         class Failed(FakeSandbox):
@@ -383,6 +439,25 @@ class JobTests(Fixture):
         with patch('mizu.check_jobs.cleanup'):
             self.assertEqual(check_jobs.recover(self.project)['recovered'], [job['id']])
         self.assertFalse(fault.exists())
+
+    def test_a_refused_recovery_reports_the_job_and_keeps_the_reservation(self):
+        ctx, job = self.submit()
+        class Broken(FakeSandbox):
+            def execute(self, *args, **kwargs):
+                raise Denied('Container cleanup failed')
+        with patch('mizu.check_jobs.cleanup', side_effect=Denied('still running')):
+            result = check_jobs.run_one(self.project, threading.Event(), sandbox_factory=Broken)
+            self.assertEqual(result['status'], 'cleanup_failed')
+        fault = self.config.data / 'check-slots/0.fault.json'
+        self.assertTrue(fault.exists())
+        # A live invocation holds the slot's exclusion, so the recovery's
+        # sweep is refused: the operator is told which job it could not
+        # clean, and the reservation stays in place.
+        with lock(check_slot_exclusion(self.project.root, 0)):
+            recovered = check_jobs.recover(self.project)
+        self.assertEqual(recovered['refused'], [job['id']])
+        self.assertEqual(recovered['recovered'], [])
+        self.assertTrue(fault.exists())
 
     def test_completed_jobs_release_their_private_build_trees(self):
         ctx, job = self.submit()
@@ -656,3 +731,133 @@ class SharingTests(JobTests):
             after=check_jobs.environment(self.project)
             self.assertIsNotNone(after)
             self.assertNotEqual(before,after)
+
+
+class SweepProtectionTests(Fixture):
+    """A sweep never removes the container of a running check job.
+
+    The container runtime is mocked, so no container is created, listed or
+    removed on the host; only the argv the sweep would issue is observed.
+    """
+
+    def setUp(self):
+        super().setUp()
+        roles = {k: dataclasses.replace(v, capabilities=(*v.capabilities, "check_job")) for k, v in self.config.roles.items()}
+        self.config = dataclasses.replace(self.config, roles=roles)
+        self.project.config = self.config
+        FakeSandbox.calls = []
+
+    def _runtime(self, calls):
+        def fake(argv, **_):
+            calls.append(list(argv))
+            if "rm" in argv:
+                return Result(0, "", "", "exited", 0.0)
+            return Result(0, "abc123 def456\n", "", "exited", 0.0)
+        return fake
+
+    def _removals(self, calls):
+        return [argv for argv in calls if "rm" in argv]
+
+    def test_a_sweep_refuses_while_a_check_job_runs(self):
+        ctx = self.context()
+        check_jobs.submit(ctx)
+        calls = []
+        seen = {}
+        runtime = self._runtime(calls)
+        project_root = self.project.root
+        config = self.config
+        exclusion = check_slot_exclusion(project_root, 0)
+
+        class Sweeping(FakeSandbox):
+            def execute(self, workspace, script, **kwargs):
+                # The sweep runs while the job's own container is live.
+                seen['held'] = held(exclusion)
+                with patch("mizu.sandbox.run", side_effect=runtime):
+                    seen['sweep'] = cleanup(config, project_root, None)
+                return super().execute(workspace, script, **kwargs)
+
+        result = check_jobs.run_one(self.project, threading.Event(), sandbox_factory=Sweeping)
+        self.assertEqual(result['status'], 'completed')
+        self.assertTrue(seen['held'])
+        self.assertEqual(seen['sweep'], {"removed": 0, "skipped": "role-active"})
+        self.assertEqual(self._removals(calls), [])
+
+    def test_a_sweep_removes_leftovers_once_the_job_ended(self):
+        ctx = self.context()
+        check_jobs.submit(ctx)
+        check_jobs.run_one(self.project, threading.Event(), sandbox_factory=FakeSandbox)
+        calls = []
+        with patch("mizu.sandbox.run", side_effect=self._runtime(calls)):
+            result = cleanup(self.config, self.project.root, None)
+        self.assertEqual(result, {"removed": 2})
+        self.assertEqual(len(self._removals(calls)), 1)
+
+    def test_the_runner_removes_its_own_container_after_a_failure(self):
+        ctx = self.context()
+        check_jobs.submit(ctx)
+        calls = []
+
+        class Broken(FakeSandbox):
+            def execute(self, *args, **kwargs):
+                raise Denied('Container cleanup failed')
+
+        with patch("mizu.sandbox.run", side_effect=self._runtime(calls)):
+            result = check_jobs.run_one(self.project, threading.Event(), sandbox_factory=Broken)
+        self.assertEqual(result['status'], 'interrupted')
+        self.assertEqual(len(self._removals(calls)), 1)
+
+    def test_a_job_does_not_start_while_the_runner_slot_is_held(self):
+        ctx = self.context()
+        job = check_jobs.submit(ctx)
+        with lock(check_slot_exclusion(self.project.root, 0), blocking=False):
+            result = check_jobs.run_one(self.project, threading.Event(), sandbox_factory=FakeSandbox)
+        self.assertEqual(result['status'], 'busy')
+        self.assertFalse(FakeSandbox.calls)
+        self.assertEqual(check_jobs.read(self.project, job['id'])['status'], 'queued')
+
+    def test_a_failed_job_leaves_no_exclusion_of_its_own(self):
+        # One exclusion file per job would live as long as the project, and
+        # every sweep would have to open all of them.
+        ctx = self.context()
+        check_jobs.submit(ctx)
+        calls = []
+
+        class Broken(FakeSandbox):
+            def execute(self, *args, **kwargs):
+                raise Denied('Container cleanup failed')
+
+        with patch("mizu.sandbox.run", side_effect=self._runtime(calls)):
+            result = check_jobs.run_one(self.project, threading.Event(), sandbox_factory=Broken)
+        self.assertEqual(result['status'], 'interrupted')
+        self.assertEqual(self._exclusions(), [])
+
+    def test_the_recovery_leaves_no_exclusion_of_its_own(self):
+        ctx = self.context()
+        job = check_jobs.submit(ctx)
+        fault = self.config.data / 'check-slots/0.fault.json'
+        fault.parent.mkdir(parents=True, exist_ok=True)
+        write_json(fault, {'project': self.project.name, 'id': job['id']})
+        calls = []
+        with patch("mizu.sandbox.run", side_effect=self._runtime(calls)):
+            result = check_jobs.recover(self.project)
+        self.assertEqual(result['recovered'], [job['id']])
+        self.assertEqual(self._exclusions(), [])
+
+    def _exclusions(self):
+        """The check exclusions that are not one of the compute slots."""
+        locks = self.project.root / 'locks'
+        found = sorted(path.name for path in locks.glob('run-check-*.lock'))
+        return [name for name in found if not name.startswith('run-check-slot-')]
+
+    def test_a_project_does_not_accumulate_one_exclusion_per_job(self):
+        # The sweep takes every exclusion that exists, so a project that
+        # keeps one file per job would eventually fail to sweep at all. The
+        # runner's exclusions are bounded by the number of compute slots.
+        ctx = self.context()
+        for _ in range(3):
+            check_jobs.submit(self.context())
+            check_jobs.run_one(self.project, threading.Event(), sandbox_factory=FakeSandbox)
+        locks = self.project.root / 'locks'
+        found = [path.name for path in locks.glob('run-check-*.lock')]
+        self.assertLessEqual(len(found), self.config.limits.parallel_checks)
+        self.assertEqual(self._exclusions(), [])

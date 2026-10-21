@@ -82,7 +82,7 @@ def admit_invocation(context, *, unit: str) -> dict:
     context.enter_deadline_wrap_up()
     context.enter_drain_wrap_up()
     if context.bound_hit == "drain" and not context.wrap_up_attempted:
-        raise DeadlineWrapUp(context._bound_message())
+        context.drain_refusal(context._bound_message())
     over = context.bound_hit in ("deadline", "drain") or context.request_count >= role_requests_per_run(context.config, context.spend_role or context.role)
     if over and getattr(context, 'recovery_probe', False):
         context.bound_hit = 'requests'

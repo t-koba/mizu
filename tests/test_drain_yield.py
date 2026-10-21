@@ -101,7 +101,7 @@ class DrainYieldTests(Fixture):
                         self.received = 0
                     def send(self, event):
                         return None
-                    def receive(self, until=None):
+                    def receive(self, until=None, bound=None):
                         self.received += 1
                         if self.received == 1:
                             self.context.handle("_hello", {})

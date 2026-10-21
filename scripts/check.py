@@ -57,14 +57,15 @@ def bash_available() -> bool:
 def sdk_gate_entry(state, details, allowed, *, name='node-durable-contract-tests') -> dict | None:
     """Map an SDK preflight state to its named gate entry (pure, no I/O).
 
-    `ready` returns None: the caller runs the suite. `absent` fails closed
-    unless the suite was explicitly waived, in which case it is recorded
-    not_run with the waiver noted. `mismatch` always fails: wrong versions
-    are a contract violation, not missing provisioning.
+    `ready` returns None: the caller runs the suite. `absent` and `partial`
+    fail closed unless the suite was explicitly waived, in which case it is
+    recorded not_run with the waiver noted: both are environment states, not
+    contract violations. `mismatch` always fails: wrong versions are a
+    contract violation, not missing provisioning.
     """
     if state == 'ready':
         return None
-    if state == 'absent' and name in allowed:
+    if state in ('absent', 'partial') and name in allowed:
         return {'name': name, 'status': 'not_run',
                 'details': details + ' (explicitly waived via --allow-not-run)'}
     return {'name': name, 'status': 'fail', 'details': details}
@@ -361,17 +362,29 @@ def write_timings_artifact(path: Path, *, tests: list, status: str, exit_code: i
         pass
 
 
+#: The input the offline install consumes: npm's own cache, as selected by
+#: `npm_config_cache` (npm's default is `~/.npm`). The install never reaches
+#: the network, so a cache that does not hold the pinned tarballs fails it.
+NPM_CACHE_INPUT = "npm_config_cache (npm's cache directory, ~/.npm by default)"
+
+
 def pi_sdk_deps_status(adapter: Path) -> tuple:
     """Check pinned adapter dependencies are installed at pinned versions.
 
     SDK contract suites import operator-verified Pi dependencies, provisioned
     outside the offline test runner and never vendored into git.
     Returns ("ready", "") when every pinned dependency resolves at its pinned
-    version, ("absent", reason) when nothing usable is installed, and
-    ("mismatch", reason) when the manifest is unreadable or an installed
-    version differs from the pin. Absent inputs are environment provisioning
-    and fail closed unless explicitly waived via --allow-not-run; a version
-    mismatch always fails like any contract violation.
+    version, ("absent", reason) when the adapter holds no installed
+    dependencies at all, ("partial", reason) when it holds some of the pinned
+    dependencies but not all, and ("mismatch", reason) when the manifest is
+    unreadable or an installed version differs from the pin.
+
+    Only ("absent") is installable. The clean install replaces the whole
+    dependency tree, so it never runs over a tree that holds anything the
+    operator provisioned: a partial tree fails closed and names the packages
+    that are missing, and a version mismatch fails like any contract
+    violation. Absent inputs are environment provisioning and fail closed
+    unless explicitly waived via --allow-not-run.
     """
     try:
         manifest = json.loads((adapter / "package.json").read_text(encoding="utf-8"))
@@ -381,16 +394,28 @@ def pi_sdk_deps_status(adapter: Path) -> tuple:
     if not isinstance(pinned, dict) or not pinned:
         return ("mismatch", "pinned dependency manifest holds no dependencies")
     modules = adapter / "node_modules"
+    if not modules.exists():
+        return ("absent", ", ".join(f"{name}@{version}" for name, version in pinned.items())
+                          + " are not installed; provision them from the operator's "
+                            "offline npm cache before running the durable contract suite")
+    missing = []
+    mismatched = []
     for name, version in pinned.items():
         try:
             found = json.loads((modules / name / "package.json").read_text(encoding="utf-8")).get("version")
         except (OSError, ValueError, AttributeError):
             found = None
         if found is None:
-            return ("absent", f"{name}@{version} is not installed; provision the pinned Pi "
-                              "dependencies via the offline npm cache before running the durable contract suite")
-        if not isinstance(version, str) or found != version:
-            return ("mismatch", f"{name} installed at {found}, pinned at {version}")
+            missing.append(f"{name}@{version}")
+        elif not isinstance(version, str) or found != version:
+            mismatched.append(f"{name} installed at {found}, pinned at {version}")
+    if mismatched:
+        return ("mismatch", "; ".join(mismatched))
+    if missing:
+        return ("partial", "the pinned dependencies are partially installed: "
+                           + ", ".join(missing) + " are missing. The installed tree is "
+                           "left alone, so provision the adapter's own tree (npm ci in "
+                           "the adapter directory) before running the durable contract suite")
     return ("ready", "")
 
 
@@ -419,23 +444,32 @@ def provision_pinned_dependencies(adapter: Path, *, timeout: int = NPM_PROVISION
     network, the committed lockfile pins every version, and dependency
     lifecycle scripts stay denied.
 
+    The clean install replaces the whole dependency tree, so it runs only
+    over an adapter that holds no installed dependencies at all. A tree that
+    holds some of the pinned packages is left exactly as it is and fails
+    closed, so a failed install never destroys what the operator provisioned.
+
     Schema: the same shape as `pi_sdk_deps_status` -- ("ready", detail),
-    ("absent", reason) or ("mismatch", reason). Bounds: one install per
-    adapter, bounded by `timeout`. Trust: the operator's local npm cache and
-    the repository's own lockfile. Retry: none; the gate records the
-    outcome. Evidence: the gate's own stdout names the provisioned adapter.
-    Failure: an absent npm, a missing lockfile, a failed install or an
-    elapsed bound leaves the previous verdict and names npm's own output; an
-    installed version that differs from the pin is never reinstalled, because
-    wrong versions are a contract violation rather than missing provisioning.
+    ("absent", reason), ("partial", reason) or ("mismatch", reason). Bounds:
+    one install per adapter, bounded by `timeout`. Trust: the operator's
+    local npm cache and the repository's own lockfile. Retry: none; the gate
+    records the outcome. Evidence: the gate's own stdout names the
+    provisioned adapter. Failure: an absent npm, a missing lockfile, a
+    failed install or an elapsed bound leaves the previous verdict and the
+    previous installation untouched, and names npm's own output and the cache
+    it resolves from; an installed version that differs from the pin is
+    never reinstalled, because wrong versions are a contract violation
+    rather than missing provisioning.
     """
     state, details = pi_sdk_deps_status(adapter)
     if state != 'absent':
-        # Installed dependencies are left alone, and a version that differs
-        # from the pin is a contract violation the gate must not paper over.
+        # Installed dependencies are left alone: a partial tree is the
+        # operator's own, and a version that differs from the pin is a
+        # contract violation the gate must not paper over.
         return state, details
     if not shutil.which('npm'):
-        return state, details + '; npm is not available to provision the pinned dependencies'
+        return (state, details + '; npm is not available to provision the pinned dependencies'
+                + ' (the install resolves from ' + NPM_CACHE_INPUT + ')')
     if not (adapter / 'package-lock.json').is_file():
         return state, details + '; no package-lock.json to install the pinned dependencies from'
     env = {**os.environ, 'npm_config_offline': 'true'}
@@ -460,7 +494,9 @@ def provision_pinned_dependencies(adapter: Path, *, timeout: int = NPM_PROVISION
             reason = reasons[-1]
         else:
             reason = f'exit {installed.returncode}'
-        return state, details + '; the offline install failed: ' + reason[:400]
+        return (state, details + '; the offline install failed: ' + reason[:400]
+                + ' (the install resolves from ' + NPM_CACHE_INPUT
+                + ', which must hold the pinned tarballs)')
     final, final_details = pi_sdk_deps_status(adapter)
     if final == 'ready':
         return 'ready', 'provisioned from the offline npm cache'
@@ -719,7 +755,9 @@ def main():
         if all(state == 'ready' for _, state, _ in replay_deps):
             execute(replay_name, ['node', '--test', 'tests/pi-reasoning.test.mjs'], count=node_counts)
         else:
-            state = 'mismatch' if any(s == 'mismatch' for _, s, _ in replay_deps) else 'absent'
+            state = ('mismatch' if any(s == 'mismatch' for _, s, _ in replay_deps)
+                     else 'partial' if any(s == 'partial' for _, s, _ in replay_deps)
+                     else 'absent')
             details = '; '.join(f'{adapter}: {detail}' for adapter, s, detail in replay_deps if s != 'ready')
             checks.append(sdk_gate_entry(state, details, allowed_not_run, name=replay_name))
         for path in sorted([*(ROOT / 'adapters/pi').glob('*.mjs'), *(ROOT / 'adapters/pi-durable').glob('*.mjs'), *(ROOT / 'scripts').glob('*.mjs')]):

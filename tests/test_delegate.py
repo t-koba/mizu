@@ -4,7 +4,9 @@ import json
 import unittest
 from support import Fixture, ScriptDriver
 from mizu.errors import ConfigError, Denied, LimitExceeded, RunDeadlineExceeded
-from mizu.fs import read_json
+from mizu.admission import role_exclusion
+from mizu.drivers import admit_invocation
+from mizu.fs import held, lock, read_json
 from mizu.runtime import Engine, check_delegate_role
 
 
@@ -17,6 +19,55 @@ def _configured(fixture):
     roles["helper"] = dataclasses.replace(
         searcher, name="helper", capabilities=("files", "read", "finish"))
     return dataclasses.replace(fixture.config, roles=roles)
+
+
+class _AdmitDriver:
+    """A driver shaped like the Claude and Codex adapters.
+
+    Those adapters admit the invocation through the shared admission path
+    and do not seal on their own, so the boundary under test is the one
+    every engine crosses after a turn.
+    """
+
+    requires_sandbox = False
+
+    def __init__(self, callback=None):
+        self.callback = callback
+
+    def execute(self, context, prompt, profile=None):
+        admit_invocation(context, unit="query")
+        if self.callback:
+            self.callback(context, prompt, profile)
+        # The adapters end their request when the turn ends; the double does
+        # the same, so a turn does not leave a request deadline behind.
+        context.clear_request_deadlines()
+        return {"requests": context.request_count, "profile": profile or context.role.profile}
+
+
+class _PollDriver:
+    """A driver shaped like the Pi engine's transport poll.
+
+    The Pi engine admits each provider request behind a bridge and then
+    polls the transport between requests, so a child can meet the drain
+    at that poll rather than at an admission.
+    """
+
+    requires_sandbox = False
+
+    def __init__(self, callback=None):
+        self.callback = callback
+        self.admissions = {}
+
+    def execute(self, context, prompt, profile=None):
+        role = context.role.name
+        self.admissions[role] = self.admissions.get(role, 0) + 1
+        admit_invocation(context, unit="query")
+        if self.callback:
+            self.callback(context, prompt, profile)
+        # The request finished, so the engine polls the transport again.
+        context.clear_request_deadlines()
+        context.check_deadlines(wrap_up=True)
+        return {"requests": context.request_count, "profile": profile or context.role.profile}
 
 
 class DelegateTests(Fixture):
@@ -276,6 +327,164 @@ class DelegateTests(Fixture):
         result = Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
         self.assertEqual(result["status"], "completed")
         self.assertIn("nested refused", result["finish"]["summary"])
+
+    def test_the_delegated_child_holds_its_role_exclusion(self):
+        config = _configured(self)
+        seen = {}
+        exclusion = role_exclusion(self.project.root, "helper")
+
+        def callback(ctx, prompt, profile):
+            if ctx.role.name == "worker":
+                response = ctx.handle("delegate", {"role": "helper", "task": "List the workspace"})
+                seen["answer"] = response["answer"]
+                ctx.handle("finish", {"outcome": "continue", "summary": "child ran",
+                                      "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+            else:
+                # The child is an invocation of its own role: it holds that
+                # role's exclusion while it runs, so a sibling cleanup
+                # cannot remove the containers it is using.
+                seen["held"] = held(exclusion)
+                ctx.handle("finish", {"outcome": "continue", "summary": "child ran",
+                                      "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+
+        result = Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
+        self.assertEqual(result["status"], "completed")
+        self.assertTrue(seen["held"])
+        # The exclusion is released with the child, so the role is free again.
+        self.assertFalse(held(exclusion))
+
+    def test_delegation_to_an_active_role_is_refused(self):
+        config = _configured(self)
+        engine = Engine(config, driver=ScriptDriver())
+        with lock(role_exclusion(self.project.root, "helper"), blocking=False):
+            with self.assertRaises(Denied):
+                self.admitted_call(engine, "delegate", {"role": "helper", "task": "t"})
+
+    def test_a_delegated_child_stops_when_the_project_drains(self):
+        config = _configured(self)
+        seen = {"delegated": False}
+
+        def callback(ctx, prompt, profile):
+            if ctx.role.name == "worker":
+                if not seen["delegated"]:
+                    seen["delegated"] = True
+                    self.project.set_control(draining=True, reason="Operator requested project drain")
+                    response = ctx.handle("delegate", {"role": "helper", "task": "List the workspace"})
+                    seen["response"] = response
+                try:
+                    ctx.handle("finish", {"outcome": "continue", "summary": "child stopped",
+                                          "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+                except Denied as exc:
+                    # The drain bound reached the caller too: the seal waits
+                    # for the reduced-grant wrap-up the engine would drive.
+                    seen["seal_refused"] = str(exc)
+            else:
+                ctx.handle("finish", {"outcome": "continue", "summary": "child ran",
+                                      "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+
+        result = Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
+        # The child stops at its safe boundary and says so, so the draining
+        # parent is not held by a child that cannot finish.
+        self.assertEqual(seen["response"]["status"], "interrupted")
+        self.assertIn("Drain bound refused", seen["response"]["error"])
+        # The caller seals under the drain bound, and the exact outcome is
+        # the drain-bound one rather than any other completion.
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["wrap_up"]["bound"], "drain")
+
+    def test_a_delegated_child_stops_on_the_claude_style_admission_path(self):
+        config = _configured(self)
+        seen = {"delegated": False}
+
+        def callback(ctx, prompt, profile):
+            if ctx.role.name == "worker":
+                if not seen["delegated"]:
+                    seen["delegated"] = True
+                    self.project.set_control(draining=True, reason="Operator requested project drain")
+                    response = ctx.handle("delegate", {"role": "helper", "task": "List the workspace"})
+                    seen["response"] = response
+                try:
+                    ctx.handle("finish", {"outcome": "continue", "summary": "child stopped",
+                                          "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+                except Denied as exc:
+                    seen["seal_refused"] = str(exc)
+            else:
+                seen["child_ran"] = True
+                ctx.handle("finish", {"outcome": "continue", "summary": "child ran",
+                                      "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+
+        result = Engine(config, driver=_AdmitDriver(callback)).run(self.project, "worker")
+        # The same rule holds on the path the Claude and Codex adapters use:
+        # the child is stopped before its first turn and reports the stop.
+        self.assertEqual(seen["response"]["status"], "interrupted")
+        self.assertIn("Drain bound refused", seen["response"]["error"])
+        self.assertNotIn("child_ran", seen)
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["wrap_up"]["bound"], "drain")
+
+    def test_a_delegated_child_stops_on_the_pi_style_transport_poll(self):
+        config = _configured(self)
+        seen = {"delegated": False}
+        driver = _PollDriver()
+
+        def callback(ctx, prompt, profile):
+            if ctx.role.name == "worker":
+                if not seen["delegated"]:
+                    seen["delegated"] = True
+                    response = ctx.handle("delegate", {"role": "helper", "task": "List the workspace"})
+                    seen["response"] = response
+                try:
+                    ctx.handle("finish", {"outcome": "continue", "summary": "child stopped",
+                                          "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+                except Denied as exc:
+                    seen["seal_refused"] = str(exc)
+            else:
+                # The drain arrives while the child is between provider
+                # requests, so the transport poll is the crossing it meets.
+                self.project.set_control(draining=True, reason="Operator requested project drain")
+
+        driver.callback = callback
+        result = Engine(config, driver=driver).run(self.project, "worker")
+        # The same rule holds at the transport poll: the child stops there
+        # and reports the interruption to its caller.
+        self.assertEqual(seen["response"]["status"], "interrupted")
+        self.assertIn("Drain bound refused", seen["response"]["error"])
+        # The child took no wrap-up turn: a child that cannot finish is not
+        # allowed to spend the caller's grant on one.
+        self.assertEqual(driver.admissions.get("helper"), 1)
+        # The caller seals under the drain bound, as on every other path.
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["wrap_up"]["bound"], "drain")
+
+    def test_a_stopped_child_keeps_the_work_it_already_did(self):
+        config = _configured(self)
+        seen = {"delegated": False}
+        marker = self.project.workspace / "child-work.txt"
+
+        def callback(ctx, prompt, profile):
+            if ctx.role.name == "worker":
+                if not seen["delegated"]:
+                    seen["delegated"] = True
+                    response = ctx.handle("delegate", {"role": "helper", "task": "Do the work"})
+                    seen["response"] = response
+                try:
+                    ctx.handle("finish", {"outcome": "continue", "summary": "child stopped",
+                                          "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+                except Denied as exc:
+                    seen["seal_refused"] = str(exc)
+            else:
+                # The child works in the caller's live workspace, and the
+                # drain arrives while it works: the child stops at the next
+                # boundary and the work it did stays.
+                marker.write_text("child work")
+                self.project.set_control(draining=True, reason="Operator requested project drain")
+
+        result = Engine(config, driver=_AdmitDriver(callback)).run(self.project, "worker")
+        self.assertEqual(seen["response"]["status"], "interrupted")
+        self.assertIn("Drain bound refused", seen["response"]["error"])
+        self.assertEqual(marker.read_text(), "child work")
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["wrap_up"]["bound"], "drain")
 
     def test_delegation_error_returns_result(self):
         config = _configured(self)

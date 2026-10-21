@@ -13,11 +13,13 @@ import os
 import re
 import dataclasses
 import shutil
+import time
 import uuid
 from pathlib import Path
+from .admission import check_slot_exclusion
 from .errors import Busy, Denied
 from .fs import text_preview, canonical, digest, lock, mkdir, now, read_json, write_json, DIGEST
-from .sandbox import Sandbox, cleanup
+from .sandbox import Sandbox, cleanup, cleanup_refused
 
 
 def execution_key(config):
@@ -33,6 +35,15 @@ def execution_key(config):
 
 def root(project):
     return project.root / 'check-jobs'
+
+
+def job_role(job_id):
+    """The container role a job owns.
+
+    The role names the job's own containers, so ordinary role cleanup never
+    touches them and one job's cleanup never touches another's.
+    """
+    return 'check-' + job_id[:24]
 
 
 def raw_read(project, job_id):
@@ -457,9 +468,15 @@ def run_one(project, stop, *, sandbox_factory=Sandbox):
                 break
             else:
                 return {'status': 'busy'}
+            try:
+                stack.enter_context(lock(check_slot_exclusion(project.root, slot), blocking=False))
+            except Busy:
+                blocked = True
+                continue
             if job['status'] == 'running':
                 try:
-                    cleanup(project.config, project.root, 'check-' + job['id'][:24])
+                    cleanup(project.config, project.root, job_role(job['id']),
+                            owner=True, exclusion=check_slot_exclusion(project.root, slot))
                 except Exception as exc:
                     return quarantine(project, job, slot, str(exc))
                 job.update(status='interrupted', error='Runner exited before recording completion', finished_at=now())
@@ -467,7 +484,7 @@ def run_one(project, stop, *, sandbox_factory=Sandbox):
                 shutil.rmtree(path.parent / 'input', ignore_errors=True)
                 os.utime(root(project), None)
                 return summary(job)
-            result = _execute(project, job, stop, sandbox_factory)
+            result = _execute(project, job, stop, sandbox_factory, slot)
             if result['status'] == 'cleanup_failed':
                 return quarantine(project, read(project, job['id']), slot, result.get('error', 'Cleanup failed'))
             return result
@@ -491,7 +508,7 @@ def run_pending(project, stop, *, sandbox_factory=Sandbox):
     return {**result, 'processed': processed}
 
 
-def _execute(project, job, stop, sandbox_factory):
+def _execute(project, job, stop, sandbox_factory, slot):
     directory = root(project) / job['id']
     path = directory / 'job.json'
     role = project.config.roles.get(job.get('producer_role', job['role']))
@@ -521,7 +538,7 @@ def _execute(project, job, stop, sandbox_factory):
     save_execution(project, job)
     # A job-specific container role prevents ordinary role cleanup from deleting
     # a check after the requesting model unit has ended.
-    sandbox = sandbox_factory(project.config, project.root, 'check-' + job['id'][:24], directory,
+    sandbox = sandbox_factory(project.config, project.root, job_role(job['id']), directory,
                               cancel=lambda: stop.is_set() or (directory / 'cancel.json').exists())
     workspace = directory / 'input'
     try:
@@ -561,8 +578,14 @@ def _execute(project, job, stop, sandbox_factory):
     except Exception as exc:
         job.update(status='interrupted', error=str(exc)[:512], finished_at=now())
         try:
-            cleanup(project.config, project.root, 'check-' + job['id'][:24])
+            # The runner holds the exclusion of the slot it occupies, so
+            # its own cleanup takes that exclusion and leaves no exclusion
+            # file of the job's own behind.
+            cleanup(project.config, project.root, job_role(job['id']),
+                    owner=True, exclusion=check_slot_exclusion(project.root, slot))
         except Exception as cleanup_exc:
+            # The cleanup failed, so the container may still be running:
+            # the job is recorded as needing recovery, never as finished.
             job.update(status='cleanup_failed', error=('Container cleanup requires recovery: ' + str(cleanup_exc))[:512])
     save_execution(project, job)
     if job['status'] != 'cleanup_failed':
@@ -588,16 +611,73 @@ def wait_signature(project):
             'inbox': project.insights.generation()}
 
 
-def set_wait(project, role, job_id, *, continuation=None):
+def set_wait(project, role, job_id, wait_until=None, *, continuation=None):
+    """Record the role's deferral on one job and the bound that ends it.
+
+    Schema: ``check-jobs/<role>.wait.json`` carries the job id, the wait
+    signature and ``wait_until``, the epoch second at which the deferral
+    ends. Bounds: one record per role and one job per record; the bound is
+    a single number. Trust: local recorded state. Failure: a job that
+    belongs to another role is refused; a bound that is not a positive
+    number is refused. The bound defaults to the project's configured
+    default wait, so a recorded deferral is never unbounded.
+    """
     job = read(project, job_id)
     if job['role'] != role:
         raise Denied('Check wait belongs to another role')
-    record = {'id': job_id, 'inputs': wait_signature(project)}
+    if wait_until is None:
+        wait_until = time.time() + project.config.limits.default_wait_seconds
+    if type(wait_until) not in (int, float) or wait_until <= 0:
+        raise Denied('Invalid check wait bound')
+    record = {'id': job_id, 'inputs': wait_signature(project), 'wait_until': float(wait_until)}
     if continuation is not None:
         record['continuation'] = {k: continuation[k] for k in ('run', 'snapshot', 'code_digest', 'summary', 'state') if k in continuation}
     write_json(root(project) / (role + '.wait.json'), record)
+    return record
 
 
+def deferral(project, role):
+    """The role's live deferral on one check job, with the bound that ends it.
+
+    Schema: ``{"id", "wait_until", "status"}`` for the job that holds the
+    role now, or ``None`` when no deferral holds it. Bounds: one record per
+    role, one job per record, one scalar bound. Trust: local recorded state;
+    the job record is the authority for the job's status. Failure: a
+    missing, malformed, stale or elapsed record holds nothing, so the role
+    is admitted rather than held by state nobody can read. A deferral ends
+    when the job reaches a terminal status, when the recorded inputs go
+    stale, or when its bound passes, whichever comes first.
+    """
+    try:
+        if role not in project.config.roles or "check_job" not in project.config.roles[role].capabilities:
+            return None
+        record = read_json(root(project) / (role + '.wait.json'), {})
+        if not isinstance(record, dict) or record.get('inputs') != wait_signature(project):
+            return None
+        deadline = record.get('wait_until')
+        if type(deadline) not in (int, float) or deadline <= 0 or time.time() >= deadline:
+            # The bound that ended the unit's wait ended this deferral too.
+            return None
+        job_id = record.get('id')
+        status = read(project, job_id)['status']
+    except (Denied, OSError, ValueError, KeyError, TypeError):
+        # Consumed evidence may be reaped; its stale wait is no longer pending.
+        return None
+    if status not in ('queued', 'running'):
+        return None
+    return {'id': job_id, 'wait_until': float(deadline), 'status': status}
+
+
+def deferrals(project):
+    """Every role the check queue holds now, with the bound that ends it."""
+    held = {}
+    for name, role in project.config.roles.items():
+        if "check_job" not in role.capabilities:
+            continue
+        hold = deferral(project, name)
+        if hold is not None:
+            held[name] = hold
+    return held
 def clear_wait(project, role):
     (root(project) / (role + '.wait.json')).unlink(missing_ok=True)
 
@@ -629,16 +709,8 @@ def continuation(project, role, snapshot):
 
 
 def waiting(project, role):
-    if role not in project.config.roles or "check_job" not in project.config.roles[role].capabilities:
-        return False
-    record = read_json(root(project) / (role + '.wait.json'), {})
-    if not record or record.get('inputs') != wait_signature(project):
-        return False
-    try:
-        return read(project, record['id'])['status'] in ('queued', 'running')
-    except Denied:
-        # Consumed evidence may be reaped; its stale wait is no longer pending.
-        return False
+    """True while a check job holds the role."""
+    return deferral(project, role) is not None
 
 
 def quarantine(project, job, slot, error):
@@ -653,6 +725,7 @@ def quarantine(project, job, slot, error):
 def recover(project):
     """Bounded operator recovery; never clear a reserved slot before cleanup."""
     recovered = []
+    refused = []
     for slot in range(project.config.limits.parallel_checks):
         fault = project.config.data / 'check-slots' / f'{slot}.fault.json'
         record = read_json(fault, {})
@@ -663,11 +736,20 @@ def recover(project):
             if record.get('project') != project.name:
                 continue
             job = read(project, record['id'])
-            cleanup(project.config, project.root, 'check-' + job['id'][:24])
+            # The recovery takes the exclusion of the slot it is clearing,
+            # so a sweep refuses while it removes the container and no
+            # exclusion file of the job's own is left behind.
+            removed = cleanup(project.config, project.root, job_role(job['id']),
+                             exclusion=check_slot_exclusion(project.root, slot))
+            if cleanup_refused(removed):
+                # The container is still there, so the slot stays reserved
+                # and the operator is told the recovery did not happen.
+                refused.append(job['id'])
+                continue
             job.update(status='interrupted', error='Cleanup recovered; previous execution did not complete', finished_at=now())
             save_execution(project, job)
             fault.unlink()
             shutil.rmtree(root(project) / job['id'] / 'input', ignore_errors=True)
             os.utime(root(project), None)
             recovered.append(job['id'])
-    return {'recovered': recovered}
+    return {'recovered': recovered, 'refused': refused}

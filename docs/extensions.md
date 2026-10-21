@@ -25,7 +25,26 @@ runtime code. A fourth engine needs, in this order:
    and completion/evidence shape. `doctor` and `check-cli` derive probe commands,
    required flags and expected exports from this file (`adapter_contract()`), and
    declared exports must appear in the launcher `--check-contract` report; drift
-   fails instead of passing silently.
+   fails instead of passing silently. The probe's child is bounded
+   host-relatively: it is measured once under the ceiling and the probe that
+   follows is held to twelve times this host's measured start-up, at least
+   60 s and at most 150 s -- the same floor, multiplier, child ceiling and
+   measuring ceiling the launcher harness uses for the identical child, so
+   the product and the harness never hold two answers for one child's
+   start-up (ADR-042). The measurement joins this host's record of the
+   largest start-up cost it has seen for that engine, so the runtime, the
+   doctor and the contract check hold the identical child to one bound, and
+   the cost the probe reports is the cost that bound was derived from: the
+   pair satisfies the rule the product reports, and the bound it reports is
+   the bound the child was held to. A child that outlives its bound, or that was killed before it
+   could report, is reported as a bound refusal that names its own outcome --
+   a child a signal stopped is named by that signal -- never as a missing
+   capability; `doctor` and `check-cli` share that one classification, so a
+   child reads the same way wherever it is probed. The same host-relative
+   bound governs the runtime's own handshake with that child: the driver
+   waits for the child's first answer under the bound this host's record
+   requires, and a child that does not answer is refused by the bound it was
+   held to, so the product never holds one child to two bounds.
 2. `src/mizu/<engine>.py`: trusted argv builder, isolated per-run config,
    event parser, `requires_sandbox = True`, no new host authority.
 3. `command_for` entry plus `engines.NAME.command` trusted argv config.

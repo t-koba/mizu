@@ -15,6 +15,7 @@ from .errors import ConfigError, DeadlineWrapUp, ProtocolError, ModelFailure
 from .fs import atomic_write, mkdir, write_json
 from .process import environment
 from .protocol import tool_definitions
+from .startup import record_startup, startup_bound
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -43,9 +44,9 @@ class PiDriver:
         write_json(context.run_dir / "pi-effective.json", {**settings, "mcp_servers": connected_servers(context, settings),
                    "agentDir": str(agent_dir), "cwd": str(cwd), "sessionDir": str(path.parent),
                    "resume": saved["id"] if saved else None, "systemPrompt": policy})
-        started = time.monotonic()
         session_file = None
         observed = []
+        started = time.monotonic()
         context.model_evidence = {"profile": profile, **model, "engine": "pi", "requests": 0,
                                   "request_unit": "model_request", "usage": [], "usage_known": False}
         with Bridge(context.handle, tool_definitions(context.role.capabilities), timeout=self.config.limits.model_request_seconds,
@@ -53,11 +54,19 @@ class PiDriver:
             env = environment(extra={"MIZU_BRIDGE_CONFIG": str(bridge.config_file)})
             env.update(credentials(self.config.file.parent / "credentials.env"))
             channel = Channel(context, self.argv(context.role, context.run_dir, profile, context.goal_digest), env, cwd, "pi")
+            spawned = time.monotonic()
             try:
+                # The child's start-up is held to this host's own bound: the
+                # largest start-up cost this host has measured for this
+                # engine, scaled with the shared floor and ceiling. A fixed
+                # 30 s bound sat below what a loaded host needs, so the
+                # child was killed for time and the run failed without
+                # naming the host's own cost.
+                bound = startup_bound(self.config, 'pi')
                 # SDK emits its startup events after binding all extension handlers.
                 channel.send({"id": "state", "type": "get_state"})
                 while True:
-                    event = channel.receive(until=started+30)
+                    event = channel.receive(until=spawned+bound, bound=bound)
                     if event.get("id") != "state":
                         continue
                     if not event.get("success") or not context.hello.is_set():
@@ -66,6 +75,9 @@ class PiDriver:
                     if actual.get("id") != model["model"] or actual.get("provider") != model["provider"]:
                         raise ProtocolError("Pi selected a different model/provider")
                     session_file = event.get("data", {}).get("sessionFile")
+                    # What this host spent starting this child joins the
+                    # record the next start-up bound is derived from.
+                    record_startup(self.config, 'pi', time.monotonic() - spawned)
                     break
                 channel.send({"id": "work", "type": "prompt", "message": prompt})
                 while True:
@@ -92,6 +104,11 @@ class PiDriver:
                                 # branch, so it is never reported as a drain.
                                 if (getattr(context, "drain_admission_refused", False)
                                         and context.bound_hit == "drain" and not context.wrap_up_attempted):
+                                    if getattr(context, "delegated_child", False):
+                                        # A delegated child has no session to
+                                        # wrap up: it stops here and reports
+                                        # the interruption to its caller.
+                                        context.drain_refusal(context._bound_message())
                                     raise DeadlineWrapUp(context._bound_message())
                                 raise ModelFailure("pi", kind="error", message=message.get("errorMessage", "error"))
                             if message.get("stopReason") == "aborted":

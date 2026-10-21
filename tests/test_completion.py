@@ -14,7 +14,7 @@ import sys
 import time
 from unittest.mock import patch
 
-from support import Fixture, ROOT, ScriptDriver
+from support import Fixture, ROOT, ScriptDriver, host_child_cost
 from mizu.errors import Denied, ConfigError, Busy
 from mizu.fs import atomic_write, read_json, write_json, page, MAX_FRAME, relative_parts
 from mizu.runtime import Engine
@@ -247,10 +247,16 @@ class CompletionTests(Fixture):
 
 class BoundaryTests(Fixture):
     def test_stdin_deadline_is_enforced(self):
+        cost=host_child_cost()
         started=time.monotonic()
         result=run([sys.executable,"-c","import time; time.sleep(5)"], timeout=.05, maximum=1024, input_data=b"x"*1048576)
         self.assertEqual(result.reason,"timeout")
-        self.assertLess(time.monotonic()-started, .75)
+        # The fifty-millisecond stdin deadline ended the call, not the child's
+        # five-second sleep. The bound is this host's own measured cost of a
+        # child, plus that deadline, plus a one-second margin: the margin
+        # stays far below the sleep, so a late enforcement still fails the
+        # assertion, and a slow host does not fail it either.
+        self.assertLess(time.monotonic()-started, cost+.05+1)
 
     def test_combined_output_is_bounded(self):
         result=run([sys.executable,"-c","import os; os.write(1,b'a'*65536); os.write(2,b'b'*65536)"],timeout=5,maximum=4096)

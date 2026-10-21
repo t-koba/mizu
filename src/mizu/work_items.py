@@ -31,7 +31,12 @@ from .work_item_seed import (DESCRIPTION_UNSET, ITEM_ID, SEED_FIELDS, make_seed,
 
 MAX_REVISIONS = 256  # Includes the immutable seed at revision 1.
 STATUSES = ("open", "doing", "blocked", "done", "dropped")
-EVENT_FIELDS = SEED_FIELDS | {"actor", "transition", "reason", "wait", "snapshot_id", "verification"}
+#: Records written before the delivery claim existed keep the older field
+#: set. They stay readable history; a closure written now always carries the
+#: claim, and the ledger refuses one that cannot state it.
+LEGACY_EVENT_FIELDS = SEED_FIELDS | {"actor", "transition", "reason", "wait", "snapshot_id",
+                                    "verification"}
+EVENT_FIELDS = LEGACY_EVENT_FIELDS | {"delivered_tree"}
 MAX_PROJECTION_BYTES = PREVIEW_BYTES + 256
 MAX_OPEN_PAGE_ROWS = 100
 MAX_OPEN_CURSOR_CHARS = 128
@@ -128,9 +133,12 @@ def _directory(path: Path) -> bool:
 
 
 class WorkItems:
-    def __init__(self, root: Path, snapshots, insights, *, vcs=None):
+    def __init__(self, root: Path, snapshots, insights, *, vcs=None, workspace=None):
         self.root, self.snapshots, self.insights = root, snapshots, insights
         self.vcs = vcs or {}
+        #: Workspace whose presented tree carries a delivery. Without it the
+        #: ledger cannot state a delivery tree, and a closure fails closed.
+        self.workspace = workspace
 
     def _read(self, name: str) -> dict:
         try:
@@ -873,8 +881,35 @@ class WorkItems:
             raise Denied("Invalid normalized work-item wait")
         return normalized
 
+    def _presented_tree(self) -> str:
+        """Return the digest of the tree the workspace currently presents.
+
+        A delivery lands in the workspace, so the tree that carries it is the
+        workspace capture. The ledger derives that tree here instead of
+        trusting a caller's claim, and a closure may only bind the published
+        tree that equals it. An ancestor of the presented tree carries an
+        older state, so binding one would name a tree the delivery never
+        reached.
+
+        Failure: ``Denied`` when the workspace or its capture is unavailable;
+        the closure then states no delivery tree and fails closed.
+        """
+        if self.workspace is None:
+            raise Denied("Completion requires a derivable delivery tree")
+        try:
+            captured = self.snapshots.capture_files(self.workspace)
+        except (OSError, Denied, LimitExceeded) as exc:
+            raise Denied("Completion requires a derivable delivery tree") from exc
+        presented = captured.get("code_digest")
+        if not isinstance(presented, str) or not DIGEST.fullmatch(presented):
+            raise Denied("Completion requires a derivable delivery tree")
+        return presented
+
     def _validate_transition(self, previous: dict, record: dict) -> None:
-        if set(record) != (EVENT_FIELDS | ({"description"} if "description" in previous else set())):
+        fields = set(record)
+        allowed = (EVENT_FIELDS | ({"description"} if "description" in previous else set()),
+                   LEGACY_EVENT_FIELDS | ({"description"} if "description" in previous else set()))
+        if fields not in allowed:
             raise Denied("Invalid work-item transition fields")
         actor = identifier(record["actor"])
         validate_origin(record["origin"])
@@ -914,7 +949,13 @@ class WorkItems:
                     or stored_verification.get("passed") is not True
                     or stored_verification.get("code_digest") != snapshot.get("code_digest")):
                 raise Denied("Completion evidence does not match its verified snapshot")
-        elif record["snapshot_id"] is not None or record["verification"] is not None:
+            # A closure states the tree that carries its delivery. A record
+            # written before the claim existed stays readable history; a
+            # closure that states a tree its snapshot does not carry fails.
+            if "delivered_tree" in record and record["delivered_tree"] != snapshot.get("code_digest"):
+                raise Denied("Completion does not name the tree that carries the delivery")
+        elif (record["snapshot_id"] is not None or record["verification"] is not None
+                or record.get("delivered_tree") is not None):
             raise Denied("Only completed work items carry snapshot evidence")
 
     def _iter_chain(self, item_id: str, *, seed_event: dict | None = None,
@@ -1105,6 +1146,7 @@ class WorkItems:
                 status["wait"] = item["wait"]
             elif item["status"] == "done":
                 status["snapshot_id"] = item["snapshot_id"]
+                status["delivered_tree"] = item.get("delivered_tree")
             if len(canonical(status)) > 4096:
                 raise LimitExceeded("Submitter work-item status exceeds byte bound")
             return status
@@ -1353,10 +1395,15 @@ class WorkItems:
             row["reason_preview"] = preview
             row["reason_truncated"] = clipped
         row["snapshot_id"] = item.get("snapshot_id")
+        row["delivered_tree"] = item.get("delivered_tree")
         if item["status"] == "done":
             if not isinstance(row["snapshot_id"], str) or not DIGEST.fullmatch(row["snapshot_id"]):
                 raise Denied("Closed done item lacks snapshot evidence")
-        elif row["snapshot_id"] is not None:
+            if row["delivered_tree"] is not None and (
+                    not isinstance(row["delivered_tree"], str)
+                    or not DIGEST.fullmatch(row["delivered_tree"])):
+                raise Denied("Closed done item carries an invalid delivery tree")
+        elif row["snapshot_id"] is not None or row["delivered_tree"] is not None:
             raise Denied("Only completed work items carry snapshot evidence")
         if len(canonical(row)) > MAX_CLOSED_ROW_BYTES:
             raise LimitExceeded("Closed work-item page row exceeds byte bound")
@@ -1479,8 +1526,11 @@ class WorkItems:
         rows but still reports the total. Each row carries ``id``, ``title``,
         ``status`` (``done`` or ``dropped``), ``origin``, ``rev``,
         ``updated_at``, ``actor``, a bounded ``reason_preview`` with
-        ``reason_truncated`` when a reason is stored, and ``snapshot_id``
-        (the verified snapshot for ``done``, null for ``dropped``). Rows are
+        ``reason_truncated`` when a reason is stored, ``snapshot_id``
+        (the verified snapshot for ``done``, null for ``dropped``) and
+        ``delivered_tree`` (the digest of the tree that carries the delivery,
+        null for ``dropped`` and for records written before the claim
+        existed). Rows are
         at most 8192 canonical bytes and the complete response at most 1 MiB.
         Drop-only legacy sidecars without a seed remain in the legacy audit,
         not here. Validated temporaries are ignored, never deleted; anything
@@ -1495,11 +1545,19 @@ class WorkItems:
         Actor is trusted caller attribution, not authorization. Done validates an
         exact retained published snapshot and its embedded stored verification;
         that evidence is copied so later history retention cannot erase it.
-        All validation precedes the exclusive atomic write. Stale CAS writes
-        nothing; cancellation/process death releases the shared project lock.
+        The ledger derives the tree the workspace presents and binds the
+        snapshot that carries it, so a closure cannot name a published tree the
+        delivery never reached. All validation precedes the exclusive atomic
+        write. Stale CAS writes nothing; cancellation/process death releases
+        the shared project lock.
         """
         if type(expected_rev) is not int or expected_rev < 1:
             raise Denied("Expected revision must be a positive integer")
+        presented = None
+        if status == "done" and snapshot_id is not None:
+            # Derived before the lock: the capture reads the workspace, and no
+            # shared state changes while it runs.
+            presented = self._presented_tree()
         with lock(self.root / "locks" / "insights.lock"):
             history_revisions = self._recover_temporary_writes(item_id)
             current = self._get(item_id, history_revisions=history_revisions)
@@ -1517,6 +1575,7 @@ class WorkItems:
                 else:
                     registered = self.insights._normalize_wait(wait, "defer")
             verification = None
+            delivered_tree = None
             if snapshot_id is not None:
                 if status != "done":
                     raise Denied("Only completed work items carry snapshot evidence")
@@ -1528,13 +1587,18 @@ class WorkItems:
                 if (not isinstance(verification, dict) or verification.get("passed") is not True
                         or verification.get("code_digest") != snapshot["code_digest"]):
                     raise Denied("Completion snapshot must have passing digest-bound verification")
+                # The delivery lives in the workspace, so the snapshot that
+                # carries it is the one whose tree the workspace presents.
+                delivered_tree = presented
+                if delivered_tree != snapshot.get("code_digest"):
+                    raise Denied("Completion must bind the published tree that carries the delivery")
             record = {**current, "rev": current["rev"] + 1, "status": status,
                       "updated_at": now(), "actor": actor,
                       "transition": {"from": current["status"], "to": status},
                       "holder": actor if status == "doing" else
                           (current["holder"] or actor) if status == "blocked" else None,
                       "reason": reason, "wait": registered, "snapshot_id": snapshot_id,
-                      "verification": verification}
+                      "verification": verification, "delivered_tree": delivered_tree}
             self._validate_transition(current, record)
             if len(canonical(record)) > PREVIEW_BYTES:
                 raise LimitExceeded("Work-item event exceeds byte bound")

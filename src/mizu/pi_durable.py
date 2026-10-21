@@ -31,7 +31,7 @@ from .pi_durable_store import (BACKENDS, RESUME_MODES, complete_run, complete_tu
                                begin_run, check_grant, grant_digest, load_run,
                                open_store, project_context, prune, prune_generations,
                                record_turn, retention_candidates, store_path_for)
-from .process import environment, run
+from .process import environment, run, stop_note
 from .protocol import tool_definitions
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -53,6 +53,20 @@ COMPACTION_FIELDS = {
     "durable_compaction_keep_recent_tokens": "keepRecentTokens",
     "durable_compaction_background_tokens": "backgroundTokens",
 }
+
+
+def _stop_detail(result) -> str:
+    """The host stop fault recorded beside a decided transport outcome.
+
+    Every refusal the driver raises from a decided outcome carries it, so
+    one host condition is never hidden by the reason that interrupted the
+    run. It is empty for a run whose stop was clean, so a refusal can name
+    the fault without changing the detail it reports for any other reason.
+    The survivors are read tolerantly: the driver accepts any result-shaped
+    object.
+    """
+    note = stop_note(result) if getattr(result, "survivors", ()) else ""
+    return f" ({note})" if note else ""
 
 
 def durable_options(settings: dict) -> dict:
@@ -385,15 +399,39 @@ class PiDurableDriver:
             # A normal error result is not a deadline merely because its parse
             # or local cleanup finishes after the wall.
             if result.reason in ("timeout", "cancelled"):
-                context.check_deadlines()
+                try:
+                    context.check_deadlines()
+                except (Cancelled, LimitExceeded) as exc:
+                    # The host's own bound is the accurate cause, but
+                    # the run recorded a stop fault beside it: a pipe
+                    # thread that outlived the stop bound is why the
+                    # run's output could not be trusted, and a bare
+                    # bound would hide it. The refusal keeps its kind,
+                    # so the recorded bound does not change.
+                    raise type(exc)(str(exc) + _stop_detail(result)) from exc
+            # Every refusal raised from a decided transport outcome names
+            # the host stop fault the run recorded beside it: a pipe thread
+            # that outlived the stop bound is why the run's own output could
+            # not be trusted, and the reason alone hides it.
             if context.host_cancelled() or result.reason == "cancelled":
-                raise Cancelled("Durable run cancelled")
+                raise Cancelled("Durable run cancelled" + _stop_detail(result))
             if result.reason == "timeout":
-                raise LimitExceeded("Durable run exceeded its deadline")
+                raise LimitExceeded("Durable run exceeded its deadline"
+                                    + _stop_detail(result))
             if result.reason == "output_limit":
-                raise ProtocolError("Durable result exceeded its bound")
+                raise ProtocolError("Durable result exceeded its bound"
+                                    + _stop_detail(result))
             if result.reason == "input_error" or result.reason == "output_error":
-                raise ProtocolError(f"Durable transport failed: {result.reason}")
+                raise ProtocolError(f"Durable transport failed: {result.reason}"
+                                    + _stop_detail(result))
+            if getattr(result, 'survivors', ()):
+                # A pipe thread that outlived the stop bound leaves the
+                # run's output possibly incomplete, so it is never parsed as
+                # a successful result; the reason the run decided is kept
+                # beside it. The survivors are read tolerantly: the driver
+                # accepts any result-shaped object.
+                raise ProtocolError(f"Durable transport failed: {result.reason}"
+                                    + _stop_detail(result))
             if result.exit_code != 0:
                 tail = (result.stderr or result.stdout or "").strip()[-2000:]
                 raise ModelFailure("pi-durable", kind="launcher", message=tail or "launcher failed")
@@ -569,7 +607,7 @@ def interpret_result(reported, context, model, thinking_level) -> None:
                 raise RequestYieldExceeded("Request wrap-up allowance exhausted")
         if context.bound_hit == "drain":
             if not context.wrap_up_attempted:
-                raise DeadlineWrapUp(context._bound_message())
+                context.drain_refusal(context._bound_message())
             if requests_used >= requests_limit:
                 raise DrainYieldExceeded("Drain wrap-up request allowance exhausted")
         if context.bound_hit == "deadline" and requests_used >= requests_limit:

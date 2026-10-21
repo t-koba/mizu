@@ -637,7 +637,7 @@ def connected_servers(context, settings):
 def stop_engine_containers(context):
     """Reap only this run's explicit stdio MCP containers, before finalization."""
     from .errors import Denied
-    from .process import run
+    from .process import run, stop_note
     from .sandbox import remove_argv, remove_leftover, runtime_env
     errors = []
     for name in getattr(context, 'engine_containers', []):
@@ -647,7 +647,7 @@ def stop_engine_containers(context):
             error = remove_leftover(context.config, name, env)
         else:
             result = run(argv, timeout=15, maximum=8192, env=env)
-            error = result.stderr if result.exit_code else None
+            error = stop_note(result) or (result.stderr if result.exit_code else None)
         if error:
             errors.append(error)
     if errors:

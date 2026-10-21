@@ -162,11 +162,14 @@ This applies only to positive normal terminal results: Pi `agent_settled`, Claud
 query `result`, Codex `turn/completed` with `completed`, and pi-durable `done`. A
 pi-durable `unanswered` settlement remains a provider/model failure. Transport,
 protocol, storage, cancellation, and final verification/publication failures are
-not converted into missing-finish retries. Deadline wrap-up stays separate and
-keeps its existing bounded no-seal outcome. On exhausted follow-ups,
-`[limits].missing_finish_counts_as_failure` defaults to `true`; setting it false
-only suppresses this outcome's failure-brake increment and does not mark the run
-completed or alter selector failure accounting.
+not converted into missing-finish retries. Every durable transport refusal names the
+host stop fault the run recorded beside the outcome it reports, so a run whose
+pipe threads outlived the stop bound is never reported as a deadline, a
+cancellation, or a transport error alone.
+Deadline wrap-up stays separate and keeps its existing bounded no-seal outcome.
+On exhausted follow-ups, `[limits].missing_finish_counts_as_failure` defaults to
+`true`; setting it false only suppresses this outcome's failure-brake increment
+and does not mark the run completed or alter selector failure accounting.
 
 ## Role walls and request deadlines
 

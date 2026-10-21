@@ -329,9 +329,15 @@ measure.
 The per-day view that groups those seconds by day is decided here and is not
 built yet, because the provider's status rows carry no check instants; the
 cost-visibility work item owns it. The requests a unit spent are already
-visible per day, through the local listing of the recorded requests, but the
-run records that show the requests per unit and per day are still owed by the
-same item. The seconds view will count a re-run again, because a re-run spends
+visible per day, through the local listing of the recorded requests, and a
+run's own record names the requests that run made, with their identity, their
+day, the work items they covered and whether each one is still unresolved. A
+request is dated by its dispatch, the day the provider was asked and a CI run
+may have been spent; a later answer never moves it. A dispatch whose outcome
+is unknown is named rather than hidden, because a CI run may have been spent,
+and an outcome record that cannot be read leaves the request named as
+unresolved rather than hiding it. The seconds view will count a re-run again,
+because a re-run spends
 runner time, and it is never presented as a saving. Until then no document may
 describe such a view as existing behaviour.
 
@@ -341,3 +347,237 @@ the whole status response rather than silently dropping one row. A provider
 can report a longer span (a self-hosted agent whose job timeout is
 unlimited), so the bound refuses values a provider may produce; it is a
 product rule, not a claim about every platform.
+
+## ADR-038 — A closure names the tree that carries its delivery
+A work item was closed against any retained published snapshot with a passing
+verification, so the evidence could speak for a tree the delivery never
+reached: the closure named one tree and the reason named another. The ledger
+now derives the tree the workspace presents and binds the closure to the
+published snapshot that carries it, so the record states the delivery tree
+instead of asserting it in prose. The caller supplies nothing new: the
+delivery tree is derived, the writer's operation keeps its parameters, and a
+closure whose tree cannot be derived fails closed.
+
+An older published snapshot that carries the same tree is still a valid
+binding. An ancestor with a different tree is not, and the reason is what the
+ledger can establish rather than what the tree happens to be: the delivery
+happened at an unknown point in the workspace's history, so the only tree the
+ledger can show contains the delivery is the one the workspace presents.
+Binding an older tree would be a guess about where the delivery happened, so
+the closure names the tree it can prove and the evidence is that tree's own
+verification.
+
+The consequence is a closure window, and it belongs to the rule rather than to
+an operator's convenience: the tree a closure names is the tree the workspace
+presents when the closure is made, so that tree must be published and verified
+first. A delivery made in an earlier unit is therefore closed against the
+current tree, which contains it, and a verification that has not passed blocks
+the closure until it has. The writer waits a unit for the publication rather
+than binding a tree that does not carry the delivery.
+
+The claim is the binding, not a copy of it: the record's copied verification
+carries the bound snapshot's code digest, and that digest is the tree the
+closure names. The record repeats it in `delivered_tree`, which also marks the
+closure as one made under this guard; a record written before the claim
+existed states no tree and stays readable history. The product's own write and
+restore paths never rewrite a record's fields, so the claim cannot be lost by
+them; an operator's repair that rewrites records must preserve the field,
+because the ledger keeps no era marker that could tell a rewritten record from
+a legacy one.
+
+The guard is a property of the ledger that accepts the closure, not of the
+published tree: a deployment that does not carry this tree accepts closures
+without the claim, and the records it writes state no tree. The published tree
+carries the mechanism; the operator's deployment puts it in force.
+
+## ADR-039 — The container sweep runs under the role's admission exclusion
+A role invocation holds its role's exclusion for its whole run, so the
+kernel releases that lock exactly when the invocation ends, whether it
+finished, failed or was killed. The service cleanup that removes leftover
+labelled containers took no such lock, so a sibling service's stop cleanup
+could remove the containers of an invocation that was still running. The
+sweep now runs under that exclusion: the invocation that owns the role
+sweeps its own leftovers, and any other sweep is refused while the role is
+live and reports the refusal instead of removing anything. Once the owner
+exits, the next sweep removes the orphans. A delegated child is an
+invocation of its own role and takes that role's exclusion for its whole
+life, so a role runs once at a time in a project, delegated children
+included, and a delegation to a role that is active is refused. A host-side
+workaround that holds the same lock around the cleanup command must be
+removed when this ships: two holders of one inode would keep the sweep from
+ever removing an orphan.
+
+The exclusion has one definition, in the module that admits invocations, and
+every caller takes that path: the invocation, the sweep, the delegated
+child, the storage maintenance and the recovery probe. A sweep that
+protected a different file than the invocation holds would leave the defect
+in place with a green suite, so the paths are shared rather than written
+out, and a regression runs a live invocation and shows that the sweep finds
+its exclusion.
+
+A project-wide sweep excludes every configured role together with every
+exclusion that exists in the project, and both are needed. The existence
+of a lock file is not a liveness fact: the file appears when a role takes
+its exclusion and is never unlinked, so a role that has not run yet has
+none. The configured set is what closes the window: the set is read before
+the container listing, so a role that starts inside that window would
+otherwise be unprotected — but a delegation only names a configured role,
+so holding every configured role's exclusion keeps any role from starting
+inside the sweep's own window, including a delegated child whose role the
+project does not enable. The storage maintenance takes the same set, so a
+delegated child is excluded from maintenance as well.
+
+## ADR-040 — A delegated child stops when the project drains
+A drain stops new runs and moves a persistent session to a reduced-grant
+wrap-up, but an ephemeral delegated child had no such move: it kept running
+until its own deadline while its parent waited for it, so the draining
+parent could not finish either. A delegated child now stops at the same
+safe boundary the drain wrap-up uses. No request is admitted after the
+drain, no in-flight work is discarded, the work the child already did
+stays in the caller's workspace, and the child reports the interruption
+to its caller, which then seals under the drain bound. The outcome is
+truthful rather than silent, and a draining parent is no longer held by a
+child that cannot finish.
+
+One rule holds for every engine. The admission paths differ — the Pi
+handshake, the shared admission the Claude and Codex adapters use, and the
+durable launcher's reported bound — so the refusal the drain bound requires
+at an admission boundary lives in one place, and each path asks for it. A
+delegated child is stopped by all of them; a unit with a session to preserve
+wraps up under the reduced grant as before.
+
+The Pi engine crosses the drain boundary from two places, not one: its
+request admission and the transport poll it makes between provider
+requests. A child that meets the drain between two requests is stopped at
+that poll too, by the same refusal, so the child's outcome does not depend
+on which crossing noticed the drain.
+
+The child's refusal is the shared handshake's own text, the one the durable
+launcher classifies as the drain bound. A refusal it does not recognise is a
+provider failure, so a child's stop would be recorded as a launcher failure
+instead of the bound the drain is; the host therefore classifies the child's
+stop itself, before the adapter's error mapping can turn it into a wrap-up.
+One vocabulary, one rule, every engine.
+
+## ADR-041 — A long check runs as a job, and the unit does other work while it runs
+A verification, an experiment or a read-only command blocked the worker for
+its whole duration, so the unit could not read the ledger, look at
+evidence or research while the check ran, and a check that outlived the
+unit's budget was lost with it. With the `check_job` capability, those
+calls return a job instead of a result: the job runs against a frozen copy
+of the source in a bounded runner that takes compute slots independently of
+model admission, and the unit continues with work that does not depend on
+the check. A result is imported only while it still matches the current
+source digest, the configured commands and the environment, so a source
+change cannot inherit a passing result. The unit ends with `outcome=wait`
+and `wait_for_check`, and the job's completion resumes it.
+
+The boundary is explicit. Writable execution stays synchronous, because it
+writes the live tree its caller owns. A job's result is evidence for that
+job's own inputs only: it is not a general cross-role discovery of
+matching results, not a coalescing of equivalent in-flight checks, and a
+preserved build artifact is not validation evidence. The capability is
+opt-in per role, so a role without it keeps the synchronous behaviour.
+
+## ADR-042 — The adapter probe is bounded host-relatively, and a bound refusal is not a missing capability
+The adapter launcher and the app-server probe are plain children of this
+process, and their start-up is dominated by loading their SDK. A fixed number
+of seconds cannot say how long they may take: on a loaded host the child
+needs longer than the bound it was given, it is killed before it can report,
+and the caller reads an empty refusal. The doctor reported that refusal as a
+missing SDK capability, and the installed-adapter contract check let the
+timeout escape as an unhandled error.
+
+The bound is this host's own measured start-up cost: twelve times the measured
+cost, at least 60 s and at most 150 s, the same shape the launcher harness
+uses for the identical child -- the same floor, the same multiplier, the same
+child ceiling and the same ceiling on the measuring spawn, so the two surfaces
+never derive two different bounds for one child's start-up. The measured cost
+is only known once the child has answered, so the child is measured once under
+that measuring ceiling and the probe that follows is held to the bound the
+measurement requires.
+
+The measurement joins this host's record of the largest start-up cost it has
+seen for that engine, so the runtime, the doctor and the installed-adapter
+contract check hold the identical child to one bound: the runtime starts that
+child later, without measuring it again, and reads the same record, and the
+contract check reads it too. The published cost is the one the bound was
+derived from, so the pair the operator reads satisfies the rule the product
+reports.
+
+The same bound governs the runtime's own handshake. The Pi driver starts the
+adapter child and waits for its first answer, and that wait was a fixed 30 s --
+below what a loaded host has been observed to need -- so the child was killed
+for time and the run failed without naming the host's own cost. The handshake
+is now held to the same host-relative bound, read from the same record, and a
+child that does not answer is refused by the bound it was held to. The doctor
+measures the cost the record keeps; the runtime starts the child and reads it.
+
+A child that does not answer inside the bound is a bound refusal with its own
+reason, never a missing capability: it was stopped before it could report, so
+nothing is known about the capabilities it holds. A child a signal stopped
+never said what it holds either, so the signal that stopped it is named and
+the operator is not sent to install a dependency the child never claimed to be
+missing. A child that answers and reports a missing export is still a missing
+capability, and the refusal names the reason the sandbox probe beside it names.
+
+## ADR-043 — A check job's container is protected by the runner's slot exclusion
+A check job's container carries the project's label like any other container,
+so a project-wide sweep enumerated it and removed it while the job was still
+running: the command was killed under the job, the work was lost, and the
+sweep reported a removal. A role's containers are protected because the
+invocation holds that role's exclusion while it runs, and a check job had no
+such exclusion: it belongs to the runner, not to a role.
+
+The runner now holds the exclusion of the compute slot it occupies while a job
+runs in it, and the sweep holds every compute slot exclusion. The sweep
+therefore refuses while a check job runs, exactly as it refuses while a live
+role runs, and a runner cannot start a job inside the sweep's own window
+because the slot it would occupy is already held. The exclusion set is
+bounded by the number of compute slots, so it never grows with the number of
+jobs a project has run: a project that kept one file per job would make the
+sweep and the storage maintenance open an unbounded number of locks and fail
+outright.
+
+The exclusion has one definition, in the module that admits invocations, and
+the sweep takes the same paths the runner holds. The runner's own cleanup of
+a job's container takes that same exclusion, which it already holds, so it
+contends with nothing and leaves no exclusion of the job's own behind: the
+file per job that every sweep would otherwise have to open stays absent.
+
+A cleanup that fails keeps the compute slot reserved for operator recovery
+instead of reporting a job as interrupted with its container still running: the
+job is recorded as `cleanup_failed` and the slot's fault file is left for the
+operator's recovery. A cleanup that is refused -- a live invocation holds the
+slot's exclusion -- is read as a refusal rather than a removal, and the
+operator's recovery reports the jobs it could not clean in `refused` and leaves
+their reservation in place. The runner holds the exclusion of the slot it
+occupies, so its own cleanup is never refused: it either removes the container
+or fails, and a failure is the reservation.
+
+## ADR-044 — A check wait holds a role only until its bound, and the operator sees it
+A unit that sealed `outcome=wait, wait_for_check=<id>` deferred its role
+until the job finished, and nothing else ended that deferral: the job's
+completion, a new publication, an inbox generation, an operator wake. A
+check that never ran, because the runner was not installed or the job sat
+queued behind a paused project, held the role out of every later unit
+indefinitely, and nothing named the hold. The unit's own wait bound was
+recorded and ignored, so the operator read a `wake_at` that the product
+never honoured.
+
+The wait is now a bounded deferral. The unit's own wait bound — the
+`wait_seconds` it sealed with, itself the configured default wait capped by
+the configured maximum — ends the deferral, so a check that never finishes
+delays a role instead of stopping it, and the recorded `wake_at` is the
+truth. The bound is the unit's own, not a new knob: the wait a role already
+declares is the wait a check wait may hold it for.
+
+The deferral is named rather than silent. The deferral itself is recorded
+once, in the check-jobs wait store, which is the store the engine consults
+before it admits a role; the waiting unit's record carries `waiting_for_check`
+with the job and the second the hold ends, the refusal that keeps the role
+out names the job and that second, and `mizu status` lists every role the
+queue holds under `check_waits` with its job, its status and its bound. The
+last two are views of that one record, not records of their own. A wait
+record that carries no bound holds nothing, so unreadable state never stops a
+role, and a hold ends as soon as its job reaches a terminal status.

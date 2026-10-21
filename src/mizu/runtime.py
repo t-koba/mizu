@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import platform as _platform
-from .admission import admission
+from .admission import admission, role_exclusion
 from . import check_jobs
 from . import ci_waits, dispatch_evidence, work_item_events
 from .budget import Budget
@@ -388,6 +388,8 @@ class Context:
         self._activity_max_requests = 0
         self._activity_reaped_requests = 0
         self.request_failure_pending = False
+        # The CI requests this run made, for the run's own record.
+        self.ci_requests: list = []
         self.transport_idle_deadline = started + config.limits.model_request_seconds
         # Never hold mutex in transport polling: handle holds it while joining.
         self.joins_idle = threading.Event()
@@ -503,7 +505,9 @@ class Context:
         # Transport polling must never wait on a dispatch/join holding mutex.
         # Recheck under the admission mutex so a new request cannot race the
         # safe-boundary decision. Once latched, _budget refuses ordinary work.
-        if not self.config.limits.drain_yield or self.ephemeral:
+        if not self.config.limits.drain_yield:
+            return
+        if self.ephemeral and not getattr(self, "delegated_child", False):
             return
         if not self.mutex.acquire(blocking=False):
             return
@@ -514,11 +518,41 @@ class Context:
                     or not self.joins_idle.is_set()
                     or not self.project.control().get("draining")):
                 return
+            if getattr(self, "delegated_child", False):
+                # A delegated child has no session to preserve. It stops at
+                # this safe boundary and tells its caller, so a draining
+                # parent is not held by a child that cannot finish.
+                self.bound_hit = "drain"
+                return
             from .engine_config import effective
             if effective(self.config, self.role, self.role.profile).get("session") == "persistent":
                 self.bound_hit = "drain"
         finally:
             self.mutex.release()
+
+    #: The refusal the shared handshake carries when a drain bound refuses a
+    #: provider request. The durable launcher classifies this exact text, so a
+    #: delegated child's stop is the drain bound on every engine.
+    DRAIN_REQUEST_REFUSED = "Drain bound refused the provider request"
+
+    def drain_refusal(self, message: str):
+        """Raise the refusal the drain bound requires at this boundary.
+
+        A delegated child has no session to wrap up: it stops at the safe
+        boundary and reports the interruption to its caller, so a draining
+        parent is not held by a child that cannot finish. Every engine's
+        admission path uses this, so one drain rule holds for all of them.
+
+        Bounds: one message. Trust: the project's own drain state. Failure:
+        raises ``Cancelled`` for a delegated child and ``DeadlineWrapUp``
+        otherwise.
+        """
+        if getattr(self, "delegated_child", False):
+            self.drain_admission_refused = True
+            # The same text the adapters classify: a refusal the launcher
+            # does not recognise is a provider failure, not the drain bound.
+            raise Cancelled(self.DRAIN_REQUEST_REFUSED)
+        raise DeadlineWrapUp(message)
 
     def _activity_bucket(self) -> str:
         if self._activity_join is not None:
@@ -596,6 +630,40 @@ class Context:
                     "open_model_requests": len(self.request_deadlines),
                     "reaped_model_requests": self._activity_reaped_requests}
 
+    def record_ci_request(self, request_id, date, workflows, covered, *, state="unresolved"):
+        """Record one CI request this run made, for the run's own record.
+
+        Schema: one entry per request, ``{"request_id", "date", "workflows",
+        "covered", "state"}``; the date is the UTC day the request was made
+        and the state is ``unresolved`` while only the dispatch is known and
+        ``resolved`` once the outcome is durable. A request is recorded when
+        it is dispatched, because from that moment the run may have spent a
+        CI run; the same request is updated, not repeated, when its outcome
+        arrives. The day a request was made is fixed at the dispatch and
+        never moves: a later answer does not move the request to the day it
+        was answered, so an update keeps the day that was recorded first.
+        The list is bounded: at most 16 entries are kept and the count of all
+        requests is reported beside them, so a truncated list is visible.
+        """
+        with self.mutex:
+            entry = {"request_id": request_id, "date": date,
+                     "workflows": list(workflows), "covered": list(covered),
+                     "state": state}
+            for existing in self.ci_requests:
+                if existing["request_id"] == request_id:
+                    # The day is the day the request was made, and it was
+                    # fixed when the dispatch was recorded. Keeping it here
+                    # makes it impossible for a later update to move it.
+                    existing.update({**entry, "date": existing["date"]})
+                    return
+            self.ci_requests.append(entry)
+
+    def ci_request_summary(self) -> dict:
+        """The CI requests this run made, bounded for the run record."""
+        with self.mutex:
+            entries = list(self.ci_requests)
+        return {"requests": entries[-16:], "total": len(entries)}
+
     def clear_request_deadlines(self):
         with self.mutex:
             if self.request_deadlines:
@@ -650,7 +718,10 @@ class Context:
         if wrap_up:
             self.enter_drain_wrap_up()
             if self.bound_hit == "drain" and not self.wrap_up_attempted and self.finished is None:
-                raise DeadlineWrapUp(self._bound_message())
+                # The transport poll is a drain crossing like any other: the
+                # same refusal, so a delegated child stops here instead of
+                # taking a wrap-up turn it cannot finish.
+                self.drain_refusal(self._bound_message())
 
     def transport_deadline(self):
         self.check_deadlines(wrap_up=True)
@@ -795,7 +866,7 @@ class Context:
                     # naming the request budget. This is not a daily-budget
                     # rejection or an admitted request.
                     self.drain_admission_refused = True
-                    raise DeadlineWrapUp("Drain bound refused the provider request")
+                    self.drain_refusal("Drain bound refused the provider request")
                 try:
                     sequence = arguments.get("sequence")
                     if type(sequence) is not int or sequence < 1:
@@ -1615,22 +1686,40 @@ class Context:
         # coverage that cannot take the wait never spends a run.
         self._coverage_state(covered, identity, register=False)
 
+        dispatched_at = now()
+        covered_records = [entry["record"] for entry in covered]
+        covered_ids = [entry["id"] for entry in covered]
+
         def before_invoke():
+            # The dispatch marker is the point of no return: from here the run
+            # may have spent a CI run, so the run's own record names the
+            # request now, and no later failure can drop it.
             requests.mark_dispatch(identity, {
                 "request_id": identity, "publication_id": receipt["publication_id"],
-                "sha": sha, "workflows": workflows, "dispatched_at": now()})
+                "sha": sha, "workflows": workflows, "dispatched_at": dispatched_at,
+                "covered": covered_records})
+            self.record_ci_request(identity, dispatched_at[:10], workflows,
+                                   covered_ids, state="unresolved")
 
         runs = _vcs.request_runs_via(self.config.vcs, sha, workflows,
                                      cancel=self.tools_cancelled, before_invoke=before_invoke)
         record = {"request_id": identity, "publication_id": receipt["publication_id"],
                   "sha": sha, "workflows": workflows, "runs": runs, "requested_at": now(),
-                  "covered": [entry["record"] for entry in covered]}
+                  "covered": covered_records}
         requests.record_outcome(identity, record)
+        # The outcome is durable, so the request is resolved. The run's own
+        # record names the requests it made, so the CI a unit spent is visible
+        # per unit and not only in the project-level listing. This happens
+        # before the waits are registered: the run was spent, so the evidence
+        # of the request must survive a failure there. The day is the day the
+        # request was made, not the day the answer arrived: the provider was
+        # asked at the dispatch, and that is the moment a CI run may have
+        # been spent.
+        self.record_ci_request(identity, dispatched_at[:10], workflows,
+                               covered_ids, state="resolved")
         evidence_id, evidence = self._new_invocation_evidence("vcs-request")
         write_json(self.run_dir / evidence,
                    {**record, "trust": "external-untrusted", "evidence_id": evidence_id})
-        # The outcome is durable before the waits are registered: the run was
-        # spent, so the evidence of the request must survive a failure here.
         coverage = self._coverage_state(covered, identity, register=True)
         return {**record, "replayed": False, "coverage": coverage}
 
@@ -2029,6 +2118,14 @@ class Context:
         "research_read": _op_research_read, "research": _op_research,
         "finish": _op_finish,
     }
+
+
+def _epoch_text(epoch) -> str:
+    """Name an epoch second in UTC, so a bound reads as a time."""
+    try:
+        return dt.datetime.fromtimestamp(float(epoch), dt.timezone.utc).isoformat(timespec="seconds")
+    except (OSError, OverflowError, TypeError, ValueError):
+        return str(epoch)
 
 
 def refresh_upstream(config, project) -> dict:
@@ -3431,7 +3528,7 @@ class Engine:
                 if context.finished is None:
                     context.enter_drain_wrap_up()
                     if context.bound_hit == "drain" and not context.wrap_up_attempted:
-                        raise DeadlineWrapUp(context._bound_message())
+                        context.drain_refusal(context._bound_message())
             except DeadlineWrapUp:
                 if context.finished is not None:
                     raise
@@ -3614,7 +3711,7 @@ class Engine:
     def _admit(self, project: Project, role_name: str, role: Role, stack: contextlib.ExitStack,
                *, wait: bool) -> float:
         """Hold dispatch locks after FIFO admission and return its elapsed time."""
-        resources = [project.root / "locks" / f"run-{role_name}.lock"]
+        resources = [role_exclusion(project.root, role_name)]
         if role.workspace == "write":
             resources.append(project.root / "locks" / "workspace.lock")
         return stack.enter_context(admission(self.config, resources, wait=wait, stop=self.stop,
@@ -3775,8 +3872,12 @@ class Engine:
             except (MizuError, OSError, ValueError):
                 pass
         with contextlib.ExitStack() as stack:
-            if "check_job" in role.capabilities and check_jobs.waiting(project, role_name):
-                raise Busy("Waiting for sandbox check completion; no model slot acquired")
+            if "check_job" in role.capabilities:
+                hold = check_jobs.deferral(project, role_name)
+                if hold is not None:
+                    raise Busy("Waiting for sandbox check " + hold["id"]
+                               + " until " + _epoch_text(hold["wait_until"])
+                               + "; no model slot acquired")
             self._check_admission(project)
             project.insights.ingest_editor(keep_days=project.config.limits.retention_days)
             if event_trigger or role.on_change:
@@ -3927,7 +4028,7 @@ class Engine:
                 driver = self.resolve(role.profile)
                 if getattr(driver, "requires_sandbox", True) and any(c in role.capabilities for c in ("exec", "experiment", "verify")):
                     container_runtime(self.config)
-                    cleanup(self.config, project.root, role_name)
+                    cleanup(self.config, project.root, role_name, owner=True)
                 workspace = project.workspace
                 if role.workspace != "write":
                     workspace = run_dir / "input"
@@ -4063,7 +4164,7 @@ class Engine:
                                 if getattr(driver, "requires_sandbox", True) and any(
                                         c in role.capabilities for c in ("exec", "experiment", "verify")):
                                     container_runtime(self.config)
-                                    cleanup(self.config, project.root, role_name)
+                                    cleanup(self.config, project.root, role_name, owner=True)
                                 continue
                         fallback_attempt += 1
                         if fallback_attempt >= max_selection_attempts:
@@ -4135,7 +4236,7 @@ class Engine:
                         if getattr(driver, "requires_sandbox", True) and any(
                                 c in role.capabilities for c in ("exec", "experiment", "verify")):
                             container_runtime(self.config)
-                            cleanup(self.config, project.root, role_name)
+                            cleanup(self.config, project.root, role_name, owner=True)
                         continue
                     except LimitExceeded as exc:
                         # A per-run spend bound with no finish sealed gets one
@@ -4169,7 +4270,7 @@ class Engine:
                             if getattr(driver, "requires_sandbox", True) and any(
                                     c in context.role.capabilities for c in ("exec", "experiment", "verify")):
                                 container_runtime(self.config)
-                                cleanup(self.config, project.root, role_name)
+                                cleanup(self.config, project.root, role_name, owner=True)
                             requests_left, tools_left = context._wrap_up_remaining()
                             notice = (f"Per-run {context.bound_hit} budget exhausted with no finish "
                                       f"sealed. Wrap-up only: seal with finish (recorded as a bounded "
@@ -4195,6 +4296,16 @@ class Engine:
                         raise DrainYieldExceeded("Drain-bounded run ended without finish")
                     raise Denied("Missing finish intent")
                 finished = context.finished
+                check_wait = None
+                if finished.get("wait_for_check"):
+                    # The unit's own wait bound ends the deferral: a check
+                    # wait holds the role for as long as the wait it sealed
+                    # with, never longer, so it cannot outlive the bound the
+                    # operator configured for that wait.
+                    check_wait = {"id": finished["wait_for_check"],
+                                  "wait_until": time.time() + float(
+                                      finished.get("wait_seconds")
+                                      or self.config.limits.default_wait_seconds)}
                 if role.workspace == "write":
                     captured = project.snapshots.capture_files(workspace)
                     verification = context.verification
@@ -4227,6 +4338,7 @@ class Engine:
                 result = {"run": run_id, "role": role_name, "status": "prepared", "finished_at": now(),
                           "finish": finished, "model": model_result, "snapshot": snapshot["id"],
                           "activity": context.activity_summary(),
+                          "ci_requests": context.ci_request_summary(),
                           **({"selection": decision} if decision else {})}
                 write_json(run_dir / "result.json", result)
                 if role.workspace == "write":
@@ -4262,8 +4374,9 @@ class Engine:
                         write_prompt_state(session_dir, snapshot=snapshot["id"],
                                            inbox_generation=context.inbox_seen)
                 result["status"] = "waiting" if finished.get("wait_for_check") else "completed"
-                if finished.get("wait_for_check"):
+                if check_wait is not None:
                     result["next_evaluation_at"] = time.time() + self.config.limits.idle_seconds
+                    result["waiting_for_check"] = check_wait
                 if getattr(context, "wrap_up_attempted", False):
                     result["wrap_up"] = {"bound": context.bound_hit}
                 write_json(run_dir / "result.json", result)
@@ -4291,8 +4404,8 @@ class Engine:
                     if finished.get("outcome") != "bounded" and not context.bound_hit:
                         with contextlib.suppress(OSError, ValueError, TypeError, AttributeError, Denied):
                             ci_waits.acknowledge(project.work_items, role_name, context.wait_events)
-                if finished.get("wait_for_check"):
-                    check_jobs.set_wait(project, role_name, finished["wait_for_check"], continuation={
+                if check_wait is not None:
+                    check_jobs.set_wait(project, role_name, check_wait["id"], check_wait["wait_until"], continuation={
                         "run": run_id, "snapshot": snapshot["id"], "code_digest": snapshot["code_digest"],
                         "summary": finished["summary"], "state": finished.get("state", "")})
                 else:
@@ -4365,6 +4478,8 @@ class Engine:
                              "publication": publication,
                              "durability": "unconfirmed" if isinstance(exc, OSError) or publication == "unknown" or _platform.IS_WINDOWS else "confirmed",
                              **({"activity": context.activity_summary()} if context is not None else {}),
+                             **({"ci_requests": context.ci_request_summary()}
+                                if context is not None else {}),
                              **({"selection": decision} if decision else {}),
                              **({"model_failure": exc.evidence} if isinstance(exc, ModelFailure) else {}),
                              **({"selection_action": handled} if handled else {}),
@@ -4562,6 +4677,17 @@ class Engine:
         run_dir = parent.project.root / "runs" / uuid.uuid4().hex
         ctx = None
         profile = ""
+        # The child is an invocation of its own role, so it takes that role's
+        # exclusion for its whole life: a sibling cleanup cannot remove the
+        # child's containers while it runs, and a role runs once at a time in
+        # a project, delegated children included.
+        guard = contextlib.ExitStack()
+        try:
+            guard.enter_context(lock(role_exclusion(parent.project.root, role_name),
+                                     blocking=False))
+        except Busy as exc:
+            guard.close()
+            raise Denied("The delegate role is active; delegation needs the role free") from exc
         try:
             mkdir(run_dir)
             if role.selector:
@@ -4587,7 +4713,7 @@ class Engine:
             if getattr(driver, "requires_sandbox", True) and any(
                     c in role.capabilities for c in ("exec", "experiment", "verify")):
                 container_runtime(self.config)
-                cleanup(self.config, parent.project.root, role_name)
+                cleanup(self.config, parent.project.root, role_name, owner=True)
             ctx = Context(self.config, parent.project, role,
                           run_dir, snap, parent.workspace, stop=parent.stop, goal=parent.goal)
             ctx.ephemeral = True
@@ -4628,7 +4754,8 @@ class Engine:
                       "role": role.name, "status": "completed", "finished_at": now(),
                       "profile": profile, "snapshot": snap["id"],
                       "answer": ctx.finished["summary"], "model": model,
-                      "activity": ctx.activity_summary()}
+                      "activity": ctx.activity_summary(),
+                      "ci_requests": ctx.ci_request_summary()}
             result["check_jobs"] = [j for j in check_jobs.list_jobs(parent.project, parent.role.name) if j["run"] == run_dir.name]
             write_json(run_dir / "delegation.json", result)
             record = {"task": task, "role": role.name, "run": run_dir.name,
@@ -4642,6 +4769,7 @@ class Engine:
                       "finished_at": now(), "profile": profile, "snapshot": snap["id"], "error": str(exc)}
             if ctx is not None:
                 result["activity"] = ctx.activity_summary()
+                result["ci_requests"] = ctx.ci_request_summary()
                 if hasattr(ctx, "model_evidence"):
                     result["model"] = ctx.model_evidence
             try:
@@ -4651,6 +4779,7 @@ class Engine:
                 pass
             return result
         finally:
+            guard.close()
             if ctx is not None:
                 ctx.closed = True
 

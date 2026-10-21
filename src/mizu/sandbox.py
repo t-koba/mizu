@@ -13,6 +13,7 @@ host. The host side speaks generic OCI CLI (`podman` or `docker` via
 """
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import os
@@ -21,10 +22,11 @@ from collections.abc import Callable
 from pathlib import Path
 
 from . import platform as _platform
+from .admission import check_slot_exclusions, role_exclusion, role_exclusions
 from .config import Config
-from .errors import ConfigError, Denied
-from .fs import DIGEST, SCRIPT_MAX, digest, mkdir, now, write_json
-from .process import Result, environment, run
+from .errors import Busy, ConfigError, Denied
+from .fs import DIGEST, SCRIPT_MAX, digest, held, lock, mkdir, now, write_json
+from .process import Result, environment, run, stop_note
 from .web import Web
 
 #: Single-mode cgroup parents already prepared in this process.
@@ -207,13 +209,13 @@ def remove_leftover(config: Config, name: str, env: dict[str, str]) -> str | Non
     listed = run([*runtime_base(config), "ps", "--all", "--filter", f"name={name}",
                   "--format", "{{.ID}}"], timeout=15, maximum=8192, env=env)
     if listed.exit_code != 0:
-        return listed.stderr
+        return stop_note(listed) or listed.stderr
     if not listed.stdout.split():
         return None
     removed = run([*runtime_base(config), "rm", "--force", name],
                   timeout=15, maximum=8192, env=env)
     if removed.exit_code != 0:
-        return removed.stderr
+        return stop_note(removed) or removed.stderr
     return None
 
 
@@ -416,7 +418,8 @@ class Sandbox:
             if ignored is not None:
                 cleanup = run(ignored, timeout=15, maximum=8192, env=env)
                 if cleanup.exit_code != 0:
-                    record["cleanup_error"] = cleanup.stderr
+                    # The removal did not succeed, so it is never read as done.
+                    record["cleanup_error"] = stop_note(cleanup) or cleanup.stderr
             else:
                 error = remove_leftover(self.config, name, env)
                 if error:
@@ -428,7 +431,91 @@ class Sandbox:
         return record
 
 
-def cleanup(config: Config, project: Path, role: str | None = None) -> dict:
+def cleanup_refused(result: dict) -> bool:
+    """True when a cleanup result reports a refusal rather than a removal.
+
+    A refusal leaves every container alone and names the reason; a removal
+    counts the containers it removed. Callers that must know whether the
+    containers are gone read the refusal here, so the shape has one
+    definition.
+
+    Bounds: one result mapping, one boolean. Trust: the cleanup result
+    itself. Failure: never raises; a result that is not a mapping reads as
+    no refusal.
+    """
+    return isinstance(result, dict) and result.get('removed') == 0 and 'skipped' in result
+
+
+def cleanup(config: Config, project: Path, role: str | None = None, *,
+            owner: bool = False, exclusion: Path | None = None) -> dict:
+    """Remove leftover labelled containers, never a live role's.
+
+    Schema: ``{"removed": <count>}`` after a sweep, or
+    ``{"removed": 0, "skipped": "role-active"}`` when the sweep was refused
+    because a role's exclusion is held by a live invocation. Bounds: the
+    container ids come from the runtime's own listing. Trust: the runtime's
+    labels and the kernel lock, never model input. Retry/cancellation: the
+    sweep is idempotent and re-runnable; a refusal changes nothing.
+    Evidence: the removed count, or the reason the sweep was skipped.
+    Failure: an unreadable listing, an unreadable set of exclusions or a
+    failed removal raises ``Denied``.
+
+    The enumeration and the removal run under the role's exclusion, so a
+    sibling service's stop cleanup cannot remove the containers of an
+    invocation that is still running. A role-scoped sweep excludes that
+    role; a project-wide sweep excludes every configured role together with
+    every exclusion that exists in the project. The configured set is what
+    closes the window: a role that has not run yet has no file, and a
+    delegated child's role need not be enabled for the project, but a
+    delegation only names a configured role, so holding every configured
+    role's exclusion keeps a role from starting inside the sweep's own
+    window. The check runner's compute slots are excluded the same way: the
+    runner holds the exclusion of the slot it occupies while a job runs in
+    it, so the sweep refuses while a check job runs, and a runner cannot
+    start a job inside the sweep's window. That set is bounded by the
+    number of compute slots, so it never grows with the number of jobs.
+    The invocation that owns a role passes ``owner=True``
+    and sweeps its own leftovers without contending with itself; any other
+    sweep takes the exclusions instead, and a sweep that cannot take one
+    leaves the containers alone and reports the skip. Once the owner exits,
+    the next sweep removes the orphans.
+
+    ``exclusion`` names the exclusion the caller wants the sweep to hold,
+    for a caller whose own exclusion is bounded and must not leave one
+    file per unit behind: the check runner passes the exclusion of the
+    compute slot it occupies, which it already holds, so its own cleanup
+    contends with nothing and creates no exclusion of the job's own.
+    """
+    if exclusion is not None:
+        # The caller names the exclusion it holds or wants to take, so a
+        # holder of a bounded exclusion can sweep its own containers
+        # without leaving one exclusion file per job behind.
+        exclusions = [exclusion]
+    elif role is not None:
+        exclusions = [role_exclusion(project, role)]
+    else:
+        # The check runner holds the exclusion of the compute slot it
+        # occupies while a job runs in it, so a project-wide sweep refuses
+        # while a check job runs and a runner cannot start one inside the
+        # sweep's own window. The same path is never taken twice: a sweep
+        # that held one exclusion twice would read its own hold as another
+        # holder's.
+        exclusions = list(dict.fromkeys(
+            role_exclusions(project, tuple(config.roles))
+            + check_slot_exclusions(project, config.limits.parallel_checks)))
+    if owner and exclusions and all(held(path) for path in exclusions):
+        return _remove_containers(config, project, role)
+    try:
+        with contextlib.ExitStack() as stack:
+            for path in exclusions:
+                stack.enter_context(lock(path, blocking=False))
+            return _remove_containers(config, project, role)
+    except Busy:
+        return {"removed": 0, "skipped": "role-active"}
+
+
+def _remove_containers(config: Config, project: Path, role: str | None) -> dict:
+    """Remove the project's labelled containers, one role or all of them."""
     label = digest(str(project).encode())[:24]
     env = runtime_env(config)
     argv = [*runtime_base(config), "ps", "--all", "--filter", f"label=io.mizu.project={label}"]
@@ -436,7 +523,7 @@ def cleanup(config: Config, project: Path, role: str | None = None) -> dict:
         argv.extend(["--filter", f"label=io.mizu.role={role}"])
     result = run([*argv, "--format", "{{.ID}}"], timeout=15, maximum=65536, env=env)
     if result.exit_code != 0:
-        raise Denied(f"Cannot inspect leftover containers: {result.stderr}")
+        raise Denied(f"Cannot inspect leftover containers: {stop_note(result) or result.stderr}")
     ids = result.stdout.split()
     for cid in ids:
         if not all(c in "0123456789abcdef" for c in cid):
@@ -444,5 +531,5 @@ def cleanup(config: Config, project: Path, role: str | None = None) -> dict:
     if ids:
         result = run([*runtime_base(config), "rm", "--force", *ids], timeout=30, maximum=65536, env=env)
         if result.exit_code != 0:
-            raise Denied(f"Container cleanup failed: {result.stderr}")
+            raise Denied(f"Container cleanup failed: {stop_note(result) or result.stderr}")
     return {"removed": len(ids)}

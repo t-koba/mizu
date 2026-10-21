@@ -6,15 +6,16 @@ import dataclasses
 import json
 import sys
 import uuid
+from unittest.mock import patch
 
-from support import Fixture
+from support import Fixture, ScriptDriver
 from mizu.ci_requests import CiRequests, request_id
-from mizu.errors import Denied
+from mizu.errors import Denied, LimitExceeded
 from mizu.fs import mkdir, read_json
 from mizu.protocol import tool_definitions
 from mizu.project import Project
 from mizu.publication import Publication
-from mizu.runtime import Context
+from mizu.runtime import Context, Engine
 
 SHA = "a" * 40
 OTHER_SHA = "b" * 40
@@ -275,6 +276,24 @@ class CiRequestTests(Fixture):
         self.assertEqual(sorted(again["coverage"]["waiting"]),
                          sorted([first["id"], second["id"]]))
 
+    def test_the_run_record_names_the_requests_it_made(self):
+        ctx = self.context(runs(), poll_enabled=True)
+        covered = self.covered_item()
+        out = self.request_covered(ctx, [covered])
+        summary = ctx.ci_request_summary()
+        self.assertEqual(summary["total"], 1)
+        entry = summary["requests"][0]
+        self.assertEqual(entry["request_id"], out["request_id"])
+        # The day is the day the request was made: the dispatch.
+        marker = CiRequests(self.project.root).dispatched(out["request_id"])
+        self.assertEqual(entry["date"], marker["dispatched_at"][:10])
+        self.assertEqual(entry["workflows"], ["ci"])
+        self.assertEqual(entry["covered"], [covered["id"]])
+        # A replay of the recorded request made no new run, so the run's
+        # record does not count it twice.
+        self.request_covered(ctx, [covered])
+        self.assertEqual(ctx.ci_request_summary()["total"], 1)
+
     def test_the_daily_listing_groups_the_recorded_requests(self):
         ctx = self.context(runs(), poll_enabled=True)
         covered = self.covered_item()
@@ -284,9 +303,10 @@ class CiRequestTests(Fixture):
         self.assertFalse(listing["truncated"])
         self.assertFalse(listing["scan_stopped"])
         identity = request_id(self.receipt["publication_id"], SHA, ["ci"])
-        record = CiRequests(self.project.root).outcome(identity)
+        marker = CiRequests(self.project.root).dispatched(identity)
         day = listing["days"][0]
-        self.assertEqual(day["date"], record["requested_at"][:10])
+        # The day is the day the request was made: the dispatch.
+        self.assertEqual(day["date"], marker["dispatched_at"][:10])
         self.assertEqual(day["requests"], 1)
         self.assertEqual(day["covered_items"], 1)
         item = day["items"][0]
@@ -296,15 +316,22 @@ class CiRequestTests(Fixture):
         self.assertEqual(item["runs"][0]["run_id"], "run-1")
         self.assertEqual(item["covered"], [{"id": covered["id"], "rev": covered["rev"]}])
 
-    def test_the_daily_listing_skips_an_invalid_record(self):
+    def test_the_daily_listing_names_a_dispatch_whose_outcome_names_another_request(self):
         ctx = self.context(runs(), poll_enabled=True)
         self.request_covered(ctx, [])
         identity = request_id(self.receipt["publication_id"], SHA, ["ci"])
         path = CiRequests(self.project.root).root / f"{identity}.request.json"
         path.write_text("{\"request_id\": \"other\"}", encoding="utf-8")
+        # A readable outcome that names another request is never returned
+        # unvalidated, and it is not a reason to hide the request: the
+        # dispatch marker proves the provider was asked, so a CI run may
+        # have been spent and the request is listed as unresolved.
         listing = CiRequests(self.project.root).daily()
-        self.assertEqual(listing["total"], 0)
-        self.assertEqual(listing["days"], [])
+        self.assertEqual(listing["total"], 1)
+        item = listing["days"][0]["items"][0]
+        self.assertEqual(item["request_id"], identity)
+        self.assertEqual(item["state"], "unresolved")
+        self.assertEqual(item["runs"], [])
 
     def test_the_daily_listing_skips_a_damaged_record_beside_a_valid_one(self):
         ctx = self.context(runs(), poll_enabled=True)
@@ -318,6 +345,201 @@ class CiRequestTests(Fixture):
         listing = store.daily()
         self.assertEqual(listing["total"], 1)
         self.assertEqual(listing["days"][0]["items"][0]["request_id"], identity)
+
+    def test_a_request_is_dated_by_the_day_it_was_dispatched(self):
+        # The provider is asked at 23:59Z on one day and answers at 00:01Z on
+        # the next. The request was made on the first day, so both views
+        # count it there.
+        dispatch = "2026-10-20T23:59:00+00:00"
+        answer = "2026-10-21T00:01:00+00:00"
+        state = {"dispatched": False}
+        original = CiRequests.mark_dispatch
+
+        def mark_dispatch(store, identity, record):
+            state["dispatched"] = True
+            return original(store, identity, record)
+
+        def clock():
+            return answer if state["dispatched"] else dispatch
+
+        ctx = self.context(runs(), poll_enabled=True)
+        with patch("mizu.runtime.now", clock), \
+                patch.object(CiRequests, "mark_dispatch", mark_dispatch):
+            out = self.request(ctx)
+        # The answer really did arrive on the next day.
+        self.assertEqual(out["requested_at"], answer)
+        identity = request_id(self.receipt["publication_id"], SHA, ["ci"])
+        marker = CiRequests(self.project.root).dispatched(identity)
+        self.assertEqual(marker["dispatched_at"], dispatch)
+        # The run's own record names the day the request was made.
+        summary = ctx.ci_request_summary()
+        self.assertEqual(summary["total"], 1)
+        self.assertEqual(summary["requests"][0]["state"], "resolved")
+        self.assertEqual(summary["requests"][0]["date"], "2026-10-20")
+        # The per-day listing counts it on the same day.
+        listing = CiRequests(self.project.root).daily()
+        self.assertEqual(listing["total"], 1)
+        self.assertEqual(listing["days"][0]["date"], "2026-10-20")
+        self.assertEqual(listing["days"][0]["requests"], 1)
+        self.assertEqual(listing["days"][0]["items"][0]["state"], "resolved")
+
+    def test_the_daily_listing_names_a_dispatch_whose_outcome_is_invalid(self):
+        ctx = self.context(runs(), poll_enabled=True)
+        self.request_covered(ctx, [])
+        store = CiRequests(self.project.root)
+        identity = request_id(self.receipt["publication_id"], SHA, ["ci"])
+        path = store.root / f"{identity}.request.json"
+        path.write_text("[]", encoding="utf-8")
+        # The invalid outcome is never returned unvalidated.
+        with self.assertRaises(Denied):
+            store.outcome(identity)
+        # The dispatch marker still proves the request reached the provider,
+        # so it is listed as unresolved rather than hidden.
+        listing = store.daily()
+        self.assertEqual(listing["total"], 1)
+        item = listing["days"][0]["items"][0]
+        self.assertEqual(item["request_id"], identity)
+        self.assertEqual(item["state"], "unresolved")
+        self.assertEqual(item["runs"], [])
+        # The refusal path agrees with the listing: the request is not
+        # retried blindly, so no second CI run is spent.
+        with self.assertRaises(Denied):
+            self.request(self.context(runs(), poll_enabled=True))
+
+    def test_the_daily_listing_names_a_dispatch_whose_outcome_is_oversized(self):
+        ctx = self.context(runs(), poll_enabled=True)
+        self.request_covered(ctx, [])
+        store = CiRequests(self.project.root)
+        identity = request_id(self.receipt["publication_id"], SHA, ["ci"])
+        path = store.root / f"{identity}.request.json"
+        path.write_text(json.dumps({"request_id": identity, "pad": "x" * 9000}),
+                        encoding="utf-8")
+        # The oversized outcome is never returned unvalidated.
+        with self.assertRaises(LimitExceeded):
+            store.outcome(identity)
+        # The dispatch marker still proves the request reached the provider,
+        # so it is listed as unresolved rather than hidden.
+        listing = store.daily()
+        self.assertEqual(listing["total"], 1)
+        item = listing["days"][0]["items"][0]
+        self.assertEqual(item["request_id"], identity)
+        self.assertEqual(item["state"], "unresolved")
+        self.assertEqual(item["runs"], [])
+
+    def test_the_daily_listing_does_not_name_a_dispatch_whose_marker_is_invalid(self):
+        # A marker that cannot be validated has no instant to date the
+        # request by, so the request is not listed at all.
+        store = CiRequests(self.project.root)
+        identity = request_id(self.receipt["publication_id"], SHA, ["ci"])
+        store.mark_dispatch(identity, {"request_id": identity,
+                                       "publication_id": "e" * 64, "sha": SHA,
+                                       "workflows": ["ci"],
+                                       "dispatched_at": "not-an-instant"})
+        listing = store.daily()
+        self.assertEqual(listing["total"], 0)
+        self.assertEqual(listing["days"], [])
+
+    def test_the_run_record_file_names_the_requests_it_made(self):
+        config = dataclasses.replace(self.config, vcs=adapter_settings(runs()))
+        role = dataclasses.replace(
+            config.roles["worker"],
+            capabilities=tuple([*config.roles["worker"].capabilities, "vcs_request"]))
+        config = dataclasses.replace(config, roles={**config.roles, "worker": role})
+        def work(ctx, *_):
+            ctx.handle("vcs_request", {"publication_id": self.receipt["publication_id"],
+                                       "workflows": ["ci"]})
+        result = Engine(config, driver=ScriptDriver(work)).run(self.project, "worker")
+        record = read_json(self.project.root / "runs" / result["run"] / "result.json")
+        self.assertEqual(record["ci_requests"]["total"], 1)
+        entry = record["ci_requests"]["requests"][0]
+        self.assertEqual(entry["request_id"],
+                         request_id(self.receipt["publication_id"], SHA, ["ci"]))
+        self.assertEqual(entry["state"], "resolved")
+        self.assertEqual(entry["workflows"], ["ci"])
+
+    def test_the_interrupted_run_record_names_the_requests_it_made(self):
+        config = dataclasses.replace(self.config, vcs=adapter_settings(runs()))
+        role = dataclasses.replace(
+            config.roles["worker"],
+            capabilities=tuple([*config.roles["worker"].capabilities, "vcs_request"]))
+        config = dataclasses.replace(config, roles={**config.roles, "worker": role})
+        def work(ctx, *_):
+            ctx.handle("vcs_request", {"publication_id": self.receipt["publication_id"],
+                                       "workflows": ["ci"]})
+            raise RuntimeError("the unit failed after spending a CI run")
+        with self.assertRaises(RuntimeError):
+            Engine(config, driver=ScriptDriver(work)).run(self.project, "worker")
+        run_dirs = self.project.root / "runs"
+        interrupted = [path for path in run_dirs.iterdir()
+                       if path.is_dir() and (path / "error.json").is_file()]
+        self.assertEqual(len(interrupted), 1)
+        record = read_json(interrupted[0] / "error.json")
+        self.assertEqual(record["ci_requests"]["total"], 1)
+        self.assertEqual(record["ci_requests"]["requests"][0]["state"], "resolved")
+
+    def test_a_spent_request_stays_named_when_the_wait_registration_fails(self):
+        ctx = self.context(runs(), poll_enabled=True)
+        covered = self.covered_item()
+        identity = request_id(self.receipt["publication_id"], SHA, ["ci"])
+        with patch.object(self.project.work_items, "transition",
+                          side_effect=Denied("Work item changed; re-read before transitioning")):
+            with self.assertRaises(Denied):
+                self.request_covered(ctx, [covered])
+        # The run was spent and the outcome is durable, so the request stays
+        # named even though the wait registration failed afterwards.
+        self.assertIsNotNone(CiRequests(self.project.root).outcome(identity))
+        summary = ctx.ci_request_summary()
+        self.assertEqual(summary["total"], 1)
+        entry = summary["requests"][0]
+        self.assertEqual(entry["request_id"], identity)
+        self.assertEqual(entry["covered"], [covered["id"]])
+        self.assertEqual(entry["state"], "resolved")
+
+    def test_an_unresolved_dispatch_is_named_in_the_run_record_and_the_day_listing(self):
+        # The provider answers with a run bound to another commit, so the
+        # request is refused after it was dispatched: a CI run may have been
+        # spent and its result is unknown.
+        ctx = self.context(runs(head_sha=OTHER_SHA))
+        identity = request_id(self.receipt["publication_id"], SHA, ["ci"])
+        with self.assertRaises(Denied):
+            self.request(ctx)
+        summary = ctx.ci_request_summary()
+        self.assertEqual(summary["total"], 1)
+        self.assertEqual(summary["requests"][0]["request_id"], identity)
+        self.assertEqual(summary["requests"][0]["state"], "unresolved")
+        listing = CiRequests(self.project.root).daily()
+        self.assertEqual(listing["total"], 1)
+        item = listing["days"][0]["items"][0]
+        self.assertEqual(item["request_id"], identity)
+        self.assertEqual(item["state"], "unresolved")
+        self.assertEqual(item["runs"], [])
+
+    def test_the_delegation_failure_record_names_the_requests_it_made(self):
+        # A delegation that fails writes the child's own record; it names the
+        # same CI request summary the completed delegation record carries.
+        config = dataclasses.replace(self.config, vcs=adapter_settings(runs()))
+        roles = dict(config.roles)
+        roles["worker"] = dataclasses.replace(
+            roles["worker"],
+            capabilities=tuple([*roles["worker"].capabilities, "delegate", "vcs_request"]))
+        roles["helper"] = dataclasses.replace(
+            roles["searcher"], name="helper", capabilities=("files", "read", "finish"))
+        config = dataclasses.replace(config, roles=roles)
+        def work(ctx, *_):
+            if ctx.role.name == "helper":
+                raise RuntimeError("the child failed")
+            ctx.handle("delegate", {"role": "helper", "task": "spend a CI run"})
+        result = Engine(config, driver=ScriptDriver(work)).run(self.project, "worker")
+        run_dirs = self.project.root / "runs"
+        children = [path for path in run_dirs.iterdir()
+                    if path.is_dir() and (path / "error.json").is_file()]
+        self.assertEqual(len(children), 1)
+        record = read_json(children[0] / "error.json")
+        # The failed child's record carries the same CI request summary the
+        # completed delegation record carries. A delegation child may not hold
+        # the CI request capability, so the summary is empty.
+        self.assertIn("ci_requests", record)
+        self.assertEqual(record["ci_requests"]["total"], 0)
 
     def test_the_daily_listing_op_reads_local_evidence_only(self):
         ctx = self.context(runs(), poll_enabled=True, add=("vcs_read",))

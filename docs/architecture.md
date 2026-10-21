@@ -338,9 +338,14 @@ regular `.new-<8-char>` atomic-write leftovers; an uncommitted temporary is
 never promoted, and a post-link alias
 is removed only when it matches one committed revision, direct creation record,
 or legacy sidecar inode. Unknown names and unsafe
-links still fail closed. Completion reads revalidate the cited manifest and
-require its stored passing verification to match the copied evidence, without
-requiring the snapshot to remain in the moving publication history. Lock/I/O
+links still fail closed. Completion reads revalidate the cited manifest, require
+it to remain in the retained published history, and require its stored passing
+verification to match the copied evidence. A completion also states the tree
+that carries the delivery: the ledger derives the tree the workspace presents
+from the snapshot store's own capture, the bound snapshot must be the published
+snapshot that carries that tree, and a tree that cannot be derived is refused.
+The record keeps that tree in its `delivered_tree` field; a record written
+before the claim existed states no tree and stays readable history. Lock/I/O
 failures propagate; cancellation/process death releases the kernel lock.
 
 The separately granted `work_items_create` operation calls
@@ -502,7 +507,11 @@ name and accepts no model-supplied actor. It returns the store's bounded record
 and preserves store errors. A stale CAS refuses without writing: re-read the
 fresh work-item projection and use its revision before retrying. `done` is
 accepted only for retained published snapshot history with passing verification
-bound to that snapshot's code digest; use a snapshot ID carrying that evidence.
+bound to that snapshot's code digest, and only for the published snapshot that
+carries the tree the workspace presents: the ledger derives that tree itself, so
+use a snapshot ID of the published tree that carries the delivery. A snapshot
+carrying another tree is refused, and so is a closure made while the tree
+cannot be derived.
 `dropped` requires a reason, and a `blocked` transition may include the same
 structured wait schema and normalization semantics as `decide`, or a
 work-item-only `{kind:"ci", publication_id, checks}` wait. Existing wait kinds

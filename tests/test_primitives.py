@@ -13,7 +13,7 @@ import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
-from support import Fixture, ROOT
+from support import Fixture, ROOT, host_child_cost
 from mizu.budget import Budget
 from mizu.config import load
 from mizu.errors import Busy, ConfigError, Denied, LimitExceeded
@@ -775,10 +775,16 @@ class ProcessTests(unittest.TestCase):
         self.assertLessEqual(len(result.stdout) + len(result.stderr), 1000)
 
     def test_timeout(self):
+        cost = host_child_cost()
         start = time.monotonic()
         result = run([sys.executable, "-c", "import time; time.sleep(20)"], timeout=.15, maximum=1000)
         self.assertEqual(result.reason, "timeout")
-        self.assertLess(time.monotonic() - start, 3)
+        # The hundred-and-fifty-millisecond timeout ended the call, not the
+        # child's twenty-second sleep. The bound is this host's own measured
+        # cost of a child, plus that timeout, plus a one-second margin: the
+        # margin stays far below the sleep, so a late enforcement still
+        # fails the assertion, and a slow host does not fail it either.
+        self.assertLess(time.monotonic() - start, cost+.15+1)
 
     def test_cancellation(self):
         result = run([sys.executable, "-c", "import time; time.sleep(20)"], timeout=5, maximum=100, cancel=lambda: True)

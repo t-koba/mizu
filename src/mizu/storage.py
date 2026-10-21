@@ -23,6 +23,7 @@ import tomllib
 import uuid
 from pathlib import Path
 
+from .admission import role_exclusions
 from .config import keys, strings
 from .errors import Denied, LimitExceeded
 from .fs import (DIGEST, PREVIEW_BYTES, atomic_write, canonical, digest,
@@ -47,8 +48,8 @@ def quiescent(project: Project):
         raise Denied("Pause the project before storage maintenance")
     with contextlib.ExitStack() as stack:
         stack.enter_context(lock(project.root / "locks" / "workspace.lock", blocking=False))
-        for role in sorted(project.roles):
-            stack.enter_context(lock(project.root / "locks" / f"run-{role}.lock", blocking=False))
+        for path in role_exclusions(project.root, tuple(project.config.roles)):
+            stack.enter_context(lock(path, blocking=False))
         stack.enter_context(lock(project.root / "locks" / "editor-ingest.lock", blocking=False))
         stack.enter_context(lock(project.root / "locks" / "insights.lock", blocking=False))
         yield

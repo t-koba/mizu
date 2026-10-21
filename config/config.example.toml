@@ -44,10 +44,15 @@ maximum_wait_seconds = 86400
 max_failures = 3
 parallel_runs = 4           # Active slot cap and derived pending FIFO cap (one waiter per slot).
 parallel_consults = 2
+parallel_checks = 2            # Shared compute slots for asynchronous sandbox checks, independent of model admission (1-64).
+check_pending = 32             # Unfinished check jobs retained per project (1-1024); a submission beyond it is refused.
 busy_retry_seconds = 300      # One-shot FIFO admission deadline (0 fails fast); queue overflow defers immediately.
 drain_yield = true             # Persistent, non-ephemeral units wrap up at a safe request boundary on explicit drain.
 missing_finish_followups = 1   # Extra bounded turns after a normal terminal return without mizu_finish (0-3).
 missing_finish_counts_as_failure = true # Exhaustion increments the failure brake by default.
+missing_finish_recovery_after = 2 # Consecutive missing-finish failures before a persistent session is rotated (1-100; default 2, below max_failures).
+role_state_bytes = 8192        # Maximum canonical JSON bytes of one role's current research state record (1024-65536; default 8192).
+role_state_prompt_bytes = 4096 # Maximum bytes of a role's own research state injected into its prompt (1-65536; default 4096).
 output_bytes = 262144
 file_bytes = 8388608
 snapshot_bytes = 268435456
@@ -75,6 +80,10 @@ network = "none"                  # Policy-selected container network. `none` pr
 memory_mb = 2048
 cpus = 2
 pids = 256
+check_cache_paths = []         # Top-level artifact directories preserved between check jobs (for example target); the live writer tree is never touched.
+check_reuse = false            # Share matching check executions and evidence across roles (docs/check-jobs.md).
+check_input_files = 250000    # Bound on the dependency inputs one check may compare for reuse (1-1099511627776).
+check_input_bytes = 8589934592 # Bound on the bytes of those inputs (1-1099511627776).
 temporary_mb = 256
 file_mb = 128                     # Per-file limit, NOT a whole-workspace disk quota.
 selinux_label = true              # Linux-only :z relabeling of dedicated mounts.
@@ -228,6 +237,7 @@ profile = "primary"
 # At most 16 files, each at most 64 KiB, 256 KiB total; missing/oversize fails.
 policy = ["policies/shared.md", "policies/worker.md"]
 workspace = "write"
+# Grant "check_job" to run acceptance checks asynchronously, so a long check does not block the unit (docs/check-jobs.md).
 capabilities = ["files", "read", "diff", "exec", "experiment", "verify", "fetch", "search", "insights", "decide", "consult", "work_items_read", "work_items_create", "work_items_transition", "work_items_legacy_read", "work_items_reconcile", "finish"]
 daemon = true
 # Per-role per-run spend override (optional, same range as [limits]; unset keeps the project value).

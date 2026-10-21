@@ -1,10 +1,12 @@
 """Local completion checks; no provider, container or native service claim."""
+import contextlib
 import json
 import os
 from pathlib import Path
 import signal
 import subprocess
 import sys
+import threading
 import time
 from unittest.mock import patch
 from types import SimpleNamespace
@@ -20,15 +22,28 @@ class RemainingTests(Fixture):
         if os.name != 'posix':
             self.skipTest('POSIX detached process group; Windows uses a Job')
         pid_file=self.root/'descendant.pid'
-        code="import subprocess,sys; from pathlib import Path; p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(10)'],start_new_session=True); Path(sys.argv[1]).write_text(str(p.pid))"
-        outer="from mizu.process import run; import sys; print(run([sys.executable,'-c',sys.argv[1],sys.argv[2]],timeout=.5,maximum=1024))"
+        # The descendant holds the pipe for 30 seconds, the run gives up after
+        # 5, and the outer call must return well inside the hold. The margins
+        # only have to keep the two bounds apart: a slow runner's launch of the
+        # descendant must not decide the outcome. The descendant writes its
+        # pid as soon as it is running, so the file is a ready handshake:
+        # without it the child never started, and the child's own exit status
+        # and output say why.
+        code="import subprocess,sys; from pathlib import Path; p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'],start_new_session=True); Path(sys.argv[1]).write_text(str(p.pid))"
+        outer="from mizu.process import run; import sys; print(run([sys.executable,'-c',sys.argv[1],sys.argv[2]],timeout=5,maximum=1024))"
         try:
             started=time.monotonic()
             result=subprocess.run([sys.executable,'-c',outer,code,str(pid_file)],
-                env={**os.environ,'PYTHONPATH':str(Path(__file__).resolve().parents[1]/'src')},capture_output=True,text=True,timeout=2)
-            self.assertTrue(pid_file.exists())
-            self.assertIn("reason='timeout'",result.stdout)
-            self.assertLess(time.monotonic()-started,1.5)
+                env={**os.environ,'PYTHONPATH':str(Path(__file__).resolve().parents[1]/'src')},capture_output=True,text=True,timeout=15)
+            # A failure here must say which hypothesis it was: the child
+            # never became ready, or the run did not return the timeout.
+            self.assertTrue(pid_file.exists(),
+                f"descendant never became ready: exit={result.returncode} "
+                f"stdout={result.stdout!r} stderr={result.stderr!r}")
+            self.assertIn("reason='timeout'",result.stdout,
+                f"run did not report the timeout: exit={result.returncode} "
+                f"stdout={result.stdout!r} stderr={result.stderr!r}")
+            self.assertLess(time.monotonic()-started,12)
         finally:
             if pid_file.exists():
                 try:os.kill(int(pid_file.read_text()),signal.SIGKILL)
@@ -46,6 +61,144 @@ class RemainingTests(Fixture):
     def test_input_failure_cannot_return_success(self):
         result=run([sys.executable,'-c','import os,time; os.close(0); time.sleep(.1)'],timeout=2,maximum=1024,input_data=b'x'*1048576)
         self.assertEqual(result.reason,'input_error')
+
+    def test_input_failure_survives_a_late_io_thread(self):
+        from mizu import process
+        original=process._input_thread
+        def late(stream,data,stop,errors,close=False):
+            writer=original(stream,data,stop,errors,close=close)
+            def linger():
+                writer.join()
+                time.sleep(.6)
+            thread=threading.Thread(target=linger,daemon=True,name='mizu-input')
+            thread.start()
+            return thread
+        with patch.object(process,'_input_thread',late):
+            result=process.run([sys.executable,'-c','import os,time; os.close(0); time.sleep(.1)'],
+                               timeout=2,maximum=1024,input_data=b'x'*1048576)
+        self.assertEqual(result.reason,'input_error')
+
+    def test_stop_uses_one_ceiling_and_reports_a_survivor(self):
+        from mizu.process import _stop_io
+        def linger():
+            time.sleep(.6)
+        thread=threading.Thread(target=linger,daemon=True)
+        thread.start()
+        self.assertEqual(_stop_io(threading.Event(),(thread,),ceiling=2.0),[])
+        self.assertFalse(thread.is_alive())
+        # A survivor is named, not raised: the stop reports which thread
+        # outlived the bound, so a fault is told from a slow thread.
+        thread=threading.Thread(target=linger,daemon=True, name='mizu-input')
+        thread.start()
+        self.assertEqual(_stop_io(threading.Event(),(thread,),ceiling=.05),['mizu-input'])
+
+    def test_the_stop_waits_once_for_every_thread(self):
+        from mizu.process import _stop_io
+        def linger():
+            time.sleep(30)
+        threads=[threading.Thread(target=linger,daemon=True,name=f"mizu-{index}") for index in range(3)]
+        for thread in threads:
+            thread.start()
+        started=time.monotonic()
+        survivors=_stop_io(threading.Event(),tuple(threads),ceiling=1.0)
+        elapsed=time.monotonic()-started
+        # One ceiling for the whole stop: the three threads that outlive it
+        # are all named, and the wait is that one ceiling, not one per
+        # thread. A per-thread wait would take three times as long.
+        self.assertEqual(survivors,['mizu-0','mizu-1','mizu-2'])
+        self.assertLess(elapsed,2.0)
+
+    def test_a_stopped_sibling_is_never_named_a_survivor(self):
+        from mizu.process import _stop_io
+        def linger():
+            time.sleep(30)
+        def finish():
+            return None
+        lingerer=threading.Thread(target=linger,daemon=True,name='mizu-linger')
+        sibling=threading.Thread(target=finish,daemon=True,name='mizu-sibling')
+        lingerer.start()
+        sibling.start()
+        sibling.join()
+        survivors=_stop_io(threading.Event(),(lingerer,sibling),ceiling=.05)
+        # Only the thread that outlived the bound is named.
+        self.assertEqual(survivors,['mizu-linger'])
+
+    def test_the_timeout_path_keeps_its_outcome_and_names_the_survivor(self):
+        from mizu import process
+        original=process._input_thread
+        def late(stream,data,stop,errors,close=False):
+            writer=original(stream,data,stop,errors,close=close)
+            def linger():
+                writer.join()
+                time.sleep(30)
+            thread=threading.Thread(target=linger,daemon=True,name='mizu-input')
+            thread.start()
+            return thread
+        started=time.monotonic()
+        with patch.object(process,'_input_thread',late), \
+             patch.object(process,'STOP_IO_TIMEOUT_SECONDS',.2):
+            result=process.run([sys.executable,'-c','import time; time.sleep(30)'],
+                               timeout=.05,maximum=1024,input_data=b'x'*1048576)
+        # The deadline expired, so the run decided "timeout"; the host
+        # fault that followed is recorded with it, never raised in its
+        # place, and the stop waited its own bound rather than the
+        # exhausted deadline.
+        self.assertEqual(result.reason,'timeout')
+        self.assertEqual(result.survivors,('mizu-input',))
+        self.assertLess(time.monotonic()-started,3)
+
+    def test_a_clean_exit_reports_no_survivors(self):
+        from mizu import process
+        result=run([sys.executable,'-c','print("ok")'],timeout=5,maximum=1024)
+        # "exited" is reported only after every pipe thread stopped, so the
+        # output is complete and there is no thread left to name. The
+        # decision is the run's own, not a reason invented after the stop.
+        self.assertEqual(result.reason,'exited')
+        self.assertEqual(result.survivors,())
+        self.assertEqual(result.stdout,'ok\n')
+        # The reason that used to stand for this state is gone: the
+        # outcome and the survivors are the evidence of a stopped run.
+        self.assertFalse(hasattr(process,'STOP_SURVIVOR_REASON'))
+
+    def test_a_decided_failure_keeps_its_reason_with_the_survivors(self):
+        from mizu import process
+        with patch.object(process,'_stop_io',return_value=['mizu-input']):
+            result=process.run([sys.executable,'-c','import os,time; os.close(0); time.sleep(.1)'],
+                               timeout=2,maximum=1024,input_data=b'x'*1048576)
+        # The reason the run had already decided is kept; the survivors
+        # are recorded beside it.
+        self.assertEqual(result.reason,'input_error')
+        self.assertEqual(result.survivors,('mizu-input',))
+
+    def test_the_stop_fault_does_not_replace_the_exception_in_flight(self):
+        from mizu import process
+        from mizu.errors import LimitExceeded
+        original=process._input_thread
+        def late(stream,data,stop,errors,close=False):
+            writer=original(stream,data,stop,errors,close=close)
+            def linger():
+                writer.join()
+                time.sleep(30)
+            thread=threading.Thread(target=linger,daemon=True,name='mizu-input')
+            thread.start()
+            return thread
+        child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'],
+                               stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        try:
+            with patch.object(process,'_input_thread',late), \
+                 patch.object(process,'STOP_IO_TIMEOUT_SECONDS',.2):
+                with self.assertRaises(LimitExceeded) as caught:
+                    process.send_bounded(child,b'x'*4096,deadline=time.monotonic()+.05,
+                                         cancel=lambda: False)
+            # The exception that was already propagating survives; the stop
+            # fault is attached to it instead of replacing it.
+            notes=getattr(caught.exception,'__notes__',[])
+            self.assertTrue(any('Pipe operation did not stop' in note for note in notes),notes)
+        finally:
+            child.kill()
+            child.wait(timeout=10)
+            with contextlib.suppress(OSError, ValueError):
+                child.stdin.close()
 
     def test_received_usage_survives_event_log_failure(self):
         from test_drivers import SyntheticEngineTests

@@ -24,6 +24,101 @@ import { AssistantEntry, BACKGROUND_CONTEXT, Harness, Type, createModels, create
 
 const context = BACKGROUND_CONTEXT;
 
+// The launcher is a child of this process and its start-up is dominated by
+// importing the Pi SDK, so a fixed number of milliseconds cannot say how
+// long it may take: on a loaded host the launcher needs longer than the
+// bound it was given, the child is killed before it can report, and the
+// test reads an empty refusal or a null exit code instead of the
+// launcher's answer. The bound is therefore this host's own measured
+// start-up cost, scaled, with a floor and a ceiling that stays far below
+// the check phase's own budget (600 s).
+// Measured on this host: the launcher's start-up cost was 3.2-4.3 s idle
+// and 8.9-44.5 s under 32-way load, a spread of about 14x. A floor of
+// 30 s and a multiplier of 8 sat below that spread, so a child that
+// needed 44.5 s was still killed before it could report. The floor now
+// sits above the worst observed case with margin, and the multiplier
+// scales a loaded sample well past it.
+const LAUNCHER_OBSERVED_WORST_STARTUP_MS = 44500;
+const LAUNCHER_OBSERVED_MARGIN_MS = 10000;
+// The floor this host needed before: kept only so the regression can say
+// that the old value was below the host's need.
+const LAUNCHER_LEGACY_STARTUP_FLOOR_MS = 30000;
+const LAUNCHER_STARTUP_FLOOR_MS = 60000;
+const LAUNCHER_STARTUP_MULTIPLIER = 12;
+const LAUNCHER_CHILD_CEILING_MS = 150000;
+const LAUNCHER_TEST_MARGIN_MS = 15000;
+// The measuring spawn carries its own ceiling: a host that cannot answer
+// it leaves the floor in place instead of hanging the phase. It is the
+// child's own ceiling, so the product and the harness measure the
+// identical child under one ceiling and never derive two different
+// bounds for one child's start-up.
+const LAUNCHER_MEASURE_CEILING_MS = 150000;
+const CHECK_PHASE_BUDGET_MS = 600000;
+
+function launcherChildTimeoutMs(measuredStartupMs) {
+  if (measuredStartupMs === null || !Number.isFinite(measuredStartupMs)) return LAUNCHER_STARTUP_FLOOR_MS;
+  return Math.min(LAUNCHER_CHILD_CEILING_MS,
+    Math.max(LAUNCHER_STARTUP_FLOOR_MS, Math.ceil(measuredStartupMs * LAUNCHER_STARTUP_MULTIPLIER)));
+}
+
+const launcherPath = () => joinPath(dirname(fileURLToPath(import.meta.url)), '..', 'adapters', 'pi-durable', 'launcher.mjs');
+
+function launcherEnv(directory, bridgePath) {
+  const env = { PATH: process.env.PATH ?? '', HOME: directory, USERPROFILE: directory,
+    TMP: directory, TEMP: directory, MIZU_BRIDGE_CONFIG: bridgePath };
+  for (const name of ['SystemRoot', 'WINDIR']) {
+    if (process.env[name]) env[name] = process.env[name];
+  }
+  return env;
+}
+
+// A provider without configured credentials: the launcher refuses it by
+// name, which is the launcher's first answer and its own start-up cost.
+function writeNoAuthConfig(directory, requestId) {
+  const bridgePath = join(directory, 'bridge.json');
+  const configPath = join(directory, 'effective.json');
+  writeFileSync(bridgePath, JSON.stringify({ transport: 'tcp', host: '127.0.0.1', port: 1,
+    timeout_ms: 2000, token: 'local-test', joined_operations: [] }));
+  writeFileSync(configPath, JSON.stringify({ provider: 'openai', model: 'gpt-4o-mini',
+    instructions: 'test', store: join(directory, 'store.sqlite'), requestId,
+    prompt: 'test', cwd: directory, authPath: join(directory, 'auth.json'),
+    modelsPath: join(directory, 'models.json'),
+    tools: [{ name: 'finish', description: 'Seal', operation: 'finish',
+      inputSchema: { type: 'object', properties: {}, required: [] } }] }));
+  return { bridgePath, configPath };
+}
+
+async function measureLauncherStartupMs() {
+  const directory = await mkdtemp(join(tmpdir(), 'mizu-durable-startup-'));
+  try {
+    const { bridgePath, configPath } = writeNoAuthConfig(directory, 'offline-startup');
+    const started = Date.now();
+    const child = spawn(process.execPath, [launcherPath(), configPath], {
+      cwd: dirname(launcherPath()), env: launcherEnv(directory, bridgePath),
+      stdio: ['ignore', 'pipe', 'pipe'], timeout: LAUNCHER_MEASURE_CEILING_MS });
+    child.stdout?.resume();
+    child.stderr?.resume();
+    const code = await new Promise((resolve) => {
+      child.once('error', () => resolve(null));
+      child.once('close', (exitCode) => resolve(exitCode));
+    });
+    // The refusal is the launcher's first answer: it exits 1 by design.
+    // Anything else means the measurement could not be taken.
+    if (code !== 1) return null;
+    const elapsed = Date.now() - started;
+    return Number.isFinite(elapsed) && elapsed > 0 ? elapsed : null;
+  } catch {
+    return null;
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+// Measured once per file: the bounds below are this host's own.
+const launcherMeasuredStartupMs = await measureLauncherStartupMs();
+const LAUNCHER_CHILD_TIMEOUT_MS = launcherChildTimeoutMs(launcherMeasuredStartupMs);
+const LAUNCHER_TEST_TIMEOUT_MS = LAUNCHER_CHILD_TIMEOUT_MS + LAUNCHER_TEST_MARGIN_MS;
+
 function backend(directory) {
   const models = createModels();
   const faux = fauxProvider({ provider: 'test-only', models: [{ id: 'model', contextWindow: 32768, maxTokens: 1024 }] });
@@ -617,25 +712,63 @@ test('the durable auth gate accepts a provider authenticated by an environment k
     /Provider auth is not configured for test-only/);
 });
 
-test('the durable launcher refuses a provider without configured auth', { timeout: 10000 }, async () => {
+test('the launcher child bounds follow this host cost', () => {
+  // The bound is this host's measured start-up cost, scaled. A fixed
+  // number of milliseconds cannot say how long the launcher may take:
+  // the old fixed bound killed the child before it could report, and the
+  // test then read an empty refusal instead of the launcher's answer.
+  assert.equal(launcherChildTimeoutMs(null), LAUNCHER_STARTUP_FLOOR_MS);
+  assert.equal(launcherChildTimeoutMs(0), LAUNCHER_STARTUP_FLOOR_MS);
+  assert.equal(launcherChildTimeoutMs(10000), 10000 * LAUNCHER_STARTUP_MULTIPLIER);
+  assert.equal(launcherChildTimeoutMs(1000000), LAUNCHER_CHILD_CEILING_MS);
+  assert.equal(LAUNCHER_CHILD_TIMEOUT_MS, launcherChildTimeoutMs(launcherMeasuredStartupMs));
+  assert.ok(LAUNCHER_CHILD_TIMEOUT_MS >= LAUNCHER_STARTUP_FLOOR_MS);
+  assert.ok(LAUNCHER_CHILD_TIMEOUT_MS <= LAUNCHER_CHILD_CEILING_MS);
+  assert.ok(LAUNCHER_TEST_TIMEOUT_MS > LAUNCHER_CHILD_TIMEOUT_MS);
+  // The launcher's own bridge bound still decides its bridge work; the
+  // child's bound only decides when a child that never answers is killed.
+  assert.ok(LAUNCHER_TEST_TIMEOUT_MS < CHECK_PHASE_BUDGET_MS);
+});
+
+test('the launcher child bound stays above this host observed cost', () => {
+  // Measured on this host: the launcher's start-up cost was 3.2-4.3 s idle
+  // and 8.9-44.5 s under 32-way load. A bound below that need kills the
+  // child before it can report, and the test then reads the empty refusal
+  // or the null exit code it was meant to detect.
+  assert.ok(LAUNCHER_OBSERVED_WORST_STARTUP_MS > 0);
+  // The floor sits above the worst observed case, with margin.
+  assert.ok(LAUNCHER_STARTUP_FLOOR_MS
+    >= LAUNCHER_OBSERVED_WORST_STARTUP_MS + LAUNCHER_OBSERVED_MARGIN_MS);
+  // The previous floor was below the host's need, which is how a child
+  // could still be killed before it reported.
+  assert.ok(LAUNCHER_LEGACY_STARTUP_FLOOR_MS
+    < LAUNCHER_OBSERVED_WORST_STARTUP_MS + LAUNCHER_OBSERVED_MARGIN_MS);
+  // A loaded sample scales well past the observed worst case.
+  assert.ok(LAUNCHER_STARTUP_MULTIPLIER * LAUNCHER_OBSERVED_WORST_STARTUP_MS
+    > LAUNCHER_OBSERVED_WORST_STARTUP_MS + LAUNCHER_OBSERVED_MARGIN_MS);
+  // The bound derived from that sample, and the one this host measured,
+  // both stay between the floor and the ceiling.
+  const loaded = launcherChildTimeoutMs(LAUNCHER_OBSERVED_WORST_STARTUP_MS);
+  assert.ok(loaded >= LAUNCHER_STARTUP_FLOOR_MS);
+  assert.ok(loaded <= LAUNCHER_CHILD_CEILING_MS);
+  assert.ok(LAUNCHER_CHILD_TIMEOUT_MS >= LAUNCHER_STARTUP_FLOOR_MS);
+  assert.ok(LAUNCHER_CHILD_TIMEOUT_MS <= LAUNCHER_CHILD_CEILING_MS);
+  // The phase's own budget holds when the ceiling applies: one measuring
+  // spawn and the two test spawns, each with the test's own margin.
+  assert.ok(LAUNCHER_MEASURE_CEILING_MS + 2 * LAUNCHER_TEST_TIMEOUT_MS
+    <= CHECK_PHASE_BUDGET_MS);
+});
+
+test('the durable launcher refuses a provider without configured auth', { timeout: LAUNCHER_TEST_TIMEOUT_MS }, async () => {
   const directory = await mkdtemp(join(tmpdir(), 'mizu-durable-noauth-'));
   try {
-    const bridgePath = join(directory, 'bridge.json');
-    const configPath = join(directory, 'effective.json');
-    writeFileSync(bridgePath, JSON.stringify({ transport: 'tcp', host: '127.0.0.1', port: 1,
-      timeout_ms: 2000, token: 'local-test', joined_operations: [] }));
     // No login store and no environment key: the provider has no auth.
-    writeFileSync(configPath, JSON.stringify({ provider: 'openai', model: 'gpt-4o-mini',
-      instructions: 'test', store: join(directory, 'store.sqlite'), requestId: 'offline-test',
-      prompt: 'test', cwd: directory, authPath: join(directory, 'auth.json'),
-      modelsPath: join(directory, 'models.json'),
-      tools: [{ name: 'finish', description: 'Seal', operation: 'finish',
-        inputSchema: { type: 'object', properties: {}, required: [] } }] }));
-    const launcher = joinPath(dirname(fileURLToPath(import.meta.url)), '..', 'adapters', 'pi-durable', 'launcher.mjs');
-    const childEnv = { PATH: process.env.PATH ?? '', HOME: directory, USERPROFILE: directory,
-      TMP: directory, TEMP: directory, MIZU_BRIDGE_CONFIG: bridgePath };
+    const { bridgePath, configPath } = writeNoAuthConfig(directory, 'offline-test');
+    const launcher = launcherPath();
+    const childEnv = launcherEnv(directory, bridgePath);
     const child = spawn(process.execPath, [launcher, configPath], {
-      cwd: dirname(launcher), env: childEnv, stdio: ['ignore', 'pipe', 'pipe'], timeout: 8000 });
+      cwd: dirname(launcher), env: childEnv, stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: LAUNCHER_CHILD_TIMEOUT_MS });
     let stderr = '';
     child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
     const { code } = await new Promise((resolve, reject) => {
@@ -649,7 +782,7 @@ test('the durable launcher refuses a provider without configured auth', { timeou
   }
 });
 
-test('launcher settles a model-admission failure from its process entrypoint', { timeout: 10000 }, async () => {
+test('launcher settles a model-admission failure from its process entrypoint', { timeout: LAUNCHER_TEST_TIMEOUT_MS }, async () => {
   const directory = await mkdtemp(join(tmpdir(), 'mizu-durable-launcher-error-'));
   const operations = [];
   const server = createServer(socket => {
@@ -690,7 +823,8 @@ test('launcher settles a model-admission failure from its process entrypoint', {
       if (process.env[name]) childEnv[name] = process.env[name];
     }
     const child = spawn(process.execPath, [launcher, configPath], {
-      cwd: dirname(launcher), env: childEnv, stdio: ['ignore', 'pipe', 'pipe'], timeout: 8000,
+      cwd: dirname(launcher), env: childEnv, stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: LAUNCHER_CHILD_TIMEOUT_MS,
     });
     let stdout = '';
     let stderr = '';

@@ -217,6 +217,18 @@ class PiSdkDepsProbeTests(unittest.TestCase):
             self.assertEqual(state, "absent")
             self.assertIn("left-pad@1.3.0", details)
 
+    def test_partial_when_the_tree_holds_some_pinned_packages(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            adapter = write_adapter(Path(td), {"left-pad": "1.3.0", "right-pad": "2.0.0"},
+                                    {"right-pad": "2.0.0"})
+            state, details = CHECK.pi_sdk_deps_status(adapter)
+            # A tree that holds some of the pinned packages is not absent:
+            # the clean install would delete what the operator provisioned.
+            self.assertEqual(state, "partial")
+            self.assertIn("left-pad@1.3.0", details)
+            self.assertNotIn("right-pad", details)
+
     def test_mismatch_when_version_differs(self):
         import tempfile
         with tempfile.TemporaryDirectory() as td:
@@ -1346,6 +1358,34 @@ class PinnedDependencyProvisionTests(unittest.TestCase):
             self.assertEqual(state, 'absent')
             self.assertIn('exceeded its 7 s bound', details)
 
+    def test_a_partially_installed_adapter_is_never_reinstalled(self):
+        with tempfile.TemporaryDirectory() as td:
+            adapter = self.adapter(Path(td))
+            # The operator's tree holds something: the clean install would
+            # delete it, so the gate must not run at all.
+            present = adapter / 'node_modules' / 'other'
+            present.mkdir(parents=True)
+            (present / 'package.json').write_text(json.dumps({'version': '1.0.0'}),
+                                                   encoding='utf-8')
+            with mock.patch.object(CHECK.subprocess, 'run', self.fake_npm()):
+                state, details = CHECK.provision_pinned_dependencies(adapter)
+            self.assertEqual(state, 'partial')
+            self.assertIn('left-pad@1.3.0', details)
+            self.assertEqual(self.calls, [])
+            # The operator's tree is exactly as it was.
+            self.assertTrue((present / 'package.json').exists())
+
+    def test_the_failed_install_names_the_cache_it_resolves_from(self):
+        with tempfile.TemporaryDirectory() as td:
+            adapter = self.adapter(Path(td))
+            failure = 'npm error code ENOTCACHED\n'
+            with mock.patch.object(CHECK.subprocess, 'run',
+                                   self.fake_npm(returncode=1, stderr=failure)):
+                state, details = CHECK.provision_pinned_dependencies(adapter)
+            self.assertEqual(state, 'absent')
+            # The input the mechanism consumes is named, not just npm's error.
+            self.assertIn('npm_config_cache', details)
+
     def test_provision_targets_follow_the_gates_that_will_run(self):
         # A waived gate needs no dependencies, but another running gate may
         # still need the same adapter: the replay gate uses both.
@@ -1410,6 +1450,13 @@ class SdkGateEntryTests(unittest.TestCase):
         entry = CHECK.sdk_gate_entry("absent", "left-pad@1.3.0 is not installed", frozenset({self.NAME}))
         self.assertEqual(entry["status"], "not_run")
         self.assertIn("waived", entry["details"])
+
+    def test_a_partial_tree_fails_closed_and_waives_like_an_absent_one(self):
+        entry = CHECK.sdk_gate_entry("partial", "left-pad@1.3.0 is missing", frozenset())
+        self.assertEqual(entry["status"], "fail")
+        self.assertIn("missing", entry["details"])
+        entry = CHECK.sdk_gate_entry("partial", "left-pad@1.3.0 is missing", frozenset({self.NAME}))
+        self.assertEqual(entry["status"], "not_run")
 
     def test_mismatch_fails_even_when_waived(self):
         entry = CHECK.sdk_gate_entry("mismatch", "left-pad installed at 9.9.9", frozenset({self.NAME}))

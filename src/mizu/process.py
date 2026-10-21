@@ -5,6 +5,7 @@ import contextlib
 import dataclasses
 import os
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -16,6 +17,11 @@ from . import platform as _platform
 ADAPTER_DIAGNOSTIC_BYTES_DEFAULT = 2048
 #: Fixed mechanism ceiling for a single model-visible adapter diagnostic.
 ADAPTER_DIAGNOSTIC_BYTES_MAX = 8192
+#: Ceiling for the whole I/O stop: one bound for every stopped thread.
+#: Fixed in code, never a knob and never the caller's remaining deadline:
+#: that deadline is exhausted exactly on the timeout path, where the stop
+#: still has to hold.
+STOP_IO_TIMEOUT_SECONDS = 5.0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -25,6 +31,10 @@ class Result:
     stderr: str
     reason: str
     seconds: float
+    #: The threads that outlived the stop bound, named; empty when the
+    #: stop was clean. It is the last field so existing positional
+    #: construction keeps working.
+    survivors: tuple[str, ...] = ()
 
 
 def adapter_failure_diagnostic(result: Result, *, source: str, maximum_bytes: int) -> str:
@@ -48,6 +58,19 @@ def adapter_failure_diagnostic(result: Result, *, source: str, maximum_bytes: in
         return ""
     tail = f"; tail capped at {limit} bytes" if truncated else ""
     return f"\nAdapter stderr (external-untrusted; {source}{tail}):\n{excerpt}"
+
+
+def stop_note(result: Result) -> str:
+    """Return a bounded note naming the threads that outlived the stop bound.
+
+    It is empty for a run whose stop was clean, so a caller can use it as
+    the detail of a failure without changing the detail it reports for
+    any other reason.
+    """
+    if not result.survivors:
+        return ""
+    named = ", ".join(result.survivors[:8])
+    return f"pipe threads outlived the stop bound: {named}"
 
 
 def _text(raw: bytearray) -> str:
@@ -105,16 +128,47 @@ def _input_thread(stream, data: bytes, stop: threading.Event, errors: list,
     return thread
 
 
-def _stop_io(stop: threading.Event, threads) -> None:
+class PipeStopFailure(OSError):
+    """A pipe thread outlived the stop bound: a host fault, reported.
+
+    It carries the operation it interrupted and the threads that outlived
+    the bound. When an exception is already propagating, the fault is
+    attached to it as a note instead of replacing it, so the reason the
+    operation failed survives the host fault.
+    """
+
+    def __init__(self, message: str, *, reason: str, survivors: tuple[str, ...]):
+        super().__init__(message)
+        self.reason = reason
+        self.survivors = survivors
+
+
+def _stop_io(stop: threading.Event, threads, *, ceiling: float | None = None) -> list[str]:
+    """Stop owned I/O threads and name the ones that survive the bound.
+
+    The wait is one ceiling for the whole stop, not a bound per thread and
+    not the caller's remaining deadline: the deadline is exhausted exactly
+    on the timeout path, where the stop still has to hold, and a per-thread
+    wait would stack into a delay of the whole operation. It is a bound, not
+    a delay: it ends as soon as every thread has stopped. Polling reads and
+    nonblocking writes exit promptly once the stop is set, but a loaded host
+    may schedule them late.
+    """
+    limit = STOP_IO_TIMEOUT_SECONDS if ceiling is None else ceiling
     stop.set()
     for thread in threads:
         _platform.cancel_pipe_io(thread)
     # Polling reads/nonblocking writes exit promptly; Windows synchronous
     # writes are cancelled before closing descriptors. No buffered pipe locks.
+    deadline = time.monotonic() + limit
+    survivors = []
     for thread in threads:
-        thread.join(timeout=.2)
+        thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        # A thread that had already finished is not a survivor: only one
+        # that is still running when the shared bound expires is named.
         if thread.is_alive():
-            raise OSError("Pipe operation did not stop after cancellation")
+            survivors.append(thread.name)
+    return survivors
 
 
 def send_bounded(process, data: bytes, *, deadline: float, cancel: Callable[[], bool]) -> None:
@@ -145,7 +199,19 @@ def send_bounded(process, data: bytes, *, deadline: float, cancel: Callable[[], 
         terminate(process, grace=0)
         raise
     finally:
-        _stop_io(stop, (thread,))
+        survivors = _stop_io(stop, (thread,))
+        if survivors:
+            fault = PipeStopFailure(
+                "Pipe operation did not stop after cancellation (input send): "
+                + ", ".join(survivors),
+                reason="input send", survivors=tuple(survivors))
+            pending = sys.exc_info()[1]
+            if pending is None:
+                raise fault
+            # An exception is already propagating: the stop fault is
+            # attached to it, never raised in its place, so the reason the
+            # send failed survives the host fault.
+            pending.add_note(str(fault))
 
 
 def run(argv: Sequence[str], *, timeout: float | Callable[[], float | None], maximum: int,
@@ -161,6 +227,14 @@ def run(argv: Sequence[str], *, timeout: float | Callable[[], float | None], max
     descendants retain pipe handles. POSIX signals the original process group;
     containment of escaped descendants requires the configured OCI boundary.
     Windows uses the kill-on-close Job and cancellable synchronous writes.
+
+    The decided outcome is returned, never raised away. A run reports
+    "exited" only when the child has exited and every pipe thread has
+    already stopped, so its output is complete and a caller may read it
+    as a finished run. A decided failure keeps its own reason and records
+    the threads that outlived the stop bound in Result.survivors, so a
+    host fault is visible beside the outcome it interrupted. Only a run
+    that decided no outcome at all (a launch that failed) raises.
     """
     started = time.monotonic()
     if cancel():
@@ -240,10 +314,14 @@ def run(argv: Sequence[str], *, timeout: float | Callable[[], float | None], max
         stop.set()
         terminate(process, grace=0)
         try:
-            _stop_io(stop, threads)
+            survivors = _stop_io(stop, threads)
         finally:
             for stream in (process.stdin, process.stdout, process.stderr):
                 if stream and not stream.closed:
                     stream.close()
+    # The reason the run decided is kept, and the threads that outlived the
+    # stop bound are recorded beside it. A run that reports "exited" reached
+    # that decision only after every pipe thread had stopped, so the stop
+    # finds no survivor on that path and the output is complete.
     return Result(process.returncode, _text(output["stdout"]), _text(output["stderr"]), reason,
-                  round(time.monotonic()-started, 3))
+                  round(time.monotonic()-started, 3), tuple(survivors))

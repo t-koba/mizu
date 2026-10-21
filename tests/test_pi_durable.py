@@ -1489,5 +1489,112 @@ class RotationTransitionTests(unittest.TestCase):
             self.assertFalse((directory / "session.json").exists())
 
 
+class TransportRefusalTests(Fixture):
+    """A refused durable transport names the host fault beside the reason."""
+
+    def _refusal(self, result, expected=LimitExceeded):
+        from unittest import mock
+        from mizu.engine_config import effective
+        context = self.context()
+        driver = pi_durable.PiDurableDriver(self.config)
+        profile = "primary"
+        settings = effective(self.config, context.role, profile)
+        model = self.config.model(profile)
+        with mock.patch.object(pi_durable, "Bridge") as bridge_cls, \
+                mock.patch.object(pi_durable, "run", return_value=result):
+            bridge_cls.return_value.__enter__.return_value.config_file = str(
+                context.run_dir / "bridge.json")
+            with self.assertRaises(expected) as raised:
+                driver._run_once(context, settings, model, "hello", profile,
+                                 "run-key", context.run_dir / "store.sqlite")
+        return raised.exception
+
+    def test_a_timeout_refusal_names_the_stop_fault(self):
+        from mizu.process import Result
+        refusal = self._refusal(Result(None, "", "", "timeout", 0.0, ("mizu-output",)))
+        # The deadline is named, and the host fault the run recorded beside
+        # it is named too: a refusal that reports only the deadline hides
+        # the pipe thread that outlived the stop bound.
+        self.assertIn("Durable run exceeded its deadline", str(refusal))
+        self.assertIn("outlived the stop bound", str(refusal))
+        self.assertIn("mizu-output", str(refusal))
+
+    def test_a_bound_error_after_a_transport_timeout_names_the_stop_fault(self):
+        import time
+        from unittest import mock
+        from mizu.engine_config import effective
+        from mizu.errors import RunDeadlineExceeded
+        from mizu.process import Result
+        context = self.context()
+        driver = pi_durable.PiDurableDriver(self.config)
+        profile = "primary"
+        settings = effective(self.config, context.role, profile)
+        model = self.config.model(profile)
+        result = Result(None, "", "", "timeout", 0.0, ("mizu-output",))
+
+        def consume_wall(*args, **kwargs):
+            # The transport run consumed the unit's remaining wall, so the
+            # host's own bound is what ends the unit.
+            context.deadline = time.monotonic() - 1
+            return result
+
+        with mock.patch.object(pi_durable, "Bridge") as bridge_cls, \
+                mock.patch.object(pi_durable, "run", side_effect=consume_wall):
+            bridge_cls.return_value.__enter__.return_value.config_file = str(
+                context.run_dir / "bridge.json")
+            with self.assertRaises(RunDeadlineExceeded) as raised:
+                driver._run_once(context, settings, model, "hello", profile,
+                                 "run-key", context.run_dir / "store.sqlite")
+        # The bound is the cause and the fault the run recorded beside it is
+        # named too: a bare deadline would hide the pipe thread that
+        # outlived the stop bound, which is the case the rule exists for.
+        self.assertIn("Whole-unit wall deadline exhausted", str(raised.exception))
+        self.assertIn("outlived the stop bound", str(raised.exception))
+        self.assertIn("mizu-output", str(raised.exception))
+
+    def test_a_clean_timeout_refusal_names_only_the_deadline(self):
+        from mizu.process import Result
+        refusal = self._refusal(Result(None, "", "", "timeout", 0.0, ()))
+        # A run whose stop was clean has no fault to name, so its refusal
+        # keeps exactly the reason it reported before.
+        self.assertEqual(str(refusal), "Durable run exceeded its deadline")
+
+    def test_a_cancelled_refusal_names_the_stop_fault(self):
+        from mizu.errors import Cancelled
+        from mizu.process import Result
+        refusal = self._refusal(Result(None, "", "", "cancelled", 0.0, ("mizu-output",)),
+                                Cancelled)
+        # A cancellation that left a pipe thread alive hides the fault, so
+        # the refusal names the fault beside the reason it reports.
+        self.assertIn("Durable run cancelled", str(refusal))
+        self.assertIn("outlived the stop bound", str(refusal))
+        self.assertIn("mizu-output", str(refusal))
+
+    def test_a_clean_cancelled_refusal_names_only_the_cancellation(self):
+        from mizu.errors import Cancelled
+        from mizu.process import Result
+        refusal = self._refusal(Result(None, "", "", "cancelled", 0.0, ()), Cancelled)
+        # A run whose stop was clean has no fault to name, so its refusal
+        # keeps exactly the reason it reported before.
+        self.assertEqual(str(refusal), "Durable run cancelled")
+
+    def test_an_output_bound_refusal_names_the_stop_fault(self):
+        from mizu.process import Result
+        refusal = self._refusal(Result(None, "", "", "output_limit", 0.0, ("mizu-output",)),
+                                ProtocolError)
+        # The bound and the host fault beside it are both named: a refused
+        # output is untrustworthy for a reason the bound alone does not say.
+        self.assertIn("Durable result exceeded its bound", str(refusal))
+        self.assertIn("outlived the stop bound", str(refusal))
+
+    def test_a_transport_error_refusal_names_the_stop_fault(self):
+        from mizu.process import Result
+        refusal = self._refusal(Result(None, "", "", "input_error", 0.0, ("mizu-output",)),
+                                ProtocolError)
+        # The transport reason and the host fault beside it are both named.
+        self.assertIn("Durable transport failed: input_error", str(refusal))
+        self.assertIn("outlived the stop bound", str(refusal))
+
+
 if __name__ == "__main__":
     unittest.main()

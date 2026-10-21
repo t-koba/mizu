@@ -1,11 +1,12 @@
 """Branch lifecycle classification plus owned-branch retirement. Offline only."""
 import dataclasses
 import json
+import os
 import sys
 import unittest
 import uuid
 
-from support import Fixture
+from support import Fixture, ROOT, host_child_cost
 from mizu import vcs
 from mizu.errors import ConfigError, Denied
 from mizu.fs import mkdir
@@ -14,8 +15,57 @@ from mizu.runtime import Context, check_consult_role
 SHA_A = "a" * 40
 SHA_B = "b" * 40
 
+#: The provider is a plain child of this interpreter, so this host's own
+#: cost of starting one says how long the provider may take to answer. A
+#: fixed number of seconds cannot say that: on a loaded host the provider
+#: needs longer than the grant it was given, the product refuses with a
+#: timeout, and the refusal no longer names the blockers the provider
+#: reported.
+PROVIDER_TIMEOUT_FLOOR_SECONDS = 30.0
+PROVIDER_TIMEOUT_MULTIPLIER = 8.0
+#: The ceiling keeps a provider that never answers from eating the check
+#: phase's own budget, and stays far below it.
+PROVIDER_TIMEOUT_CEILING_SECONDS = 120.0
+#: How many times this host's child cost is sampled: the grant has to
+#: cover the sample this host was slowest at.
+PROVIDER_COST_SAMPLES = 3
 
-def adapter_settings(code, timeout=5, maximum=524288):
+
+def provider_timeout_seconds(cost: float) -> float:
+    """Return the provider's grant for a host that costs ``cost`` seconds."""
+    return min(PROVIDER_TIMEOUT_CEILING_SECONDS,
+               max(PROVIDER_TIMEOUT_FLOOR_SECONDS, cost * PROVIDER_TIMEOUT_MULTIPLIER))
+
+
+_provider_cost = None
+
+
+def provider_child_cost() -> float:
+    """Return this host's measured cost of the provider child.
+
+    Measured once per run, at the slowest of several samples: the grant
+    has to cover the sample this host was slowest at.
+    """
+    global _provider_cost
+    if _provider_cost is None:
+        _provider_cost = max(host_child_cost() for _ in range(PROVIDER_COST_SAMPLES))
+    return _provider_cost
+
+
+def check_phase_budget_seconds() -> float:
+    """Return the check phase's own budget: the bound every grant stays under."""
+    sys.path.insert(0, str(ROOT / "scripts"))
+    try:
+        import check
+        return float(check.DEFAULT_CHECK_TIMEOUT_SECONDS)
+    finally:
+        sys.path.remove(str(ROOT / "scripts"))
+
+
+def adapter_settings(code, timeout=None, maximum=524288):
+    """Grant the provider child the time this host needs to answer it."""
+    if timeout is None:
+        timeout = provider_timeout_seconds(provider_child_cost())
     return {"command": [sys.executable, "-c", code],
             "timeout_seconds": timeout, "max_bytes": maximum}
 
@@ -150,6 +200,17 @@ class RetireGrantTests(Fixture):
             vcs.retire_via(grant_settings(template % (SHA_A, True)),
                            "mizu/x-1", SHA_A)
 
+    def test_provider_timeout_refused(self):
+        # The product's own timeout refusal keeps its coverage here: a
+        # provider that never answers is refused as a timeout, and the
+        # refusal says so instead of naming blockers it never reported.
+        # The bound is deliberately short: this test guards the refusal,
+        # not the provider's speed.
+        settings = grant_settings("import time; time.sleep(30)")
+        settings["timeout_seconds"] = 1
+        with self.assertRaisesRegex(Denied, "Configured VCS program timed out"):
+            vcs.retire_via(settings, "mizu/x-1", SHA_A)
+
     def test_missing_or_malformed_affirmation_refused(self):
         # A provider that cannot affirm the atomic live-ref check fails
         # closed: the old echo shape without live_refs no longer retires.
@@ -166,6 +227,46 @@ class RetireGrantTests(Fixture):
             with self.assertRaisesRegex(Denied, "live proposal references",
                                         msg=repr(refs)):
                 vcs.retire_via(grant_settings(code), "mizu/x-1", SHA_A)
+
+
+class ProviderGrantBoundTests(Fixture):
+    """The provider's grant follows this host, not a fixed number of seconds."""
+
+    def test_grant_uses_this_host_measured_cost(self):
+        # The grant the provider runs under is this host's own measured
+        # cost of that child, scaled. A fixed number of seconds is not:
+        # on a loaded host the provider needs longer than the grant it
+        # was given, and the refusal stops naming the blockers.
+        settings = grant_settings(RETIRE_OK)
+        cost = provider_child_cost()
+        self.assertEqual(settings["timeout_seconds"], provider_timeout_seconds(cost))
+        self.assertGreater(settings["timeout_seconds"], cost)
+        self.assertGreaterEqual(settings["timeout_seconds"], PROVIDER_TIMEOUT_FLOOR_SECONDS)
+
+    def test_grant_scales_with_the_measured_cost(self):
+        # The shape of the derivation, independent of this host: a host
+        # that costs more gets a wider grant, an unknown cost falls back
+        # to the floor, and no grant reaches the check phase's own budget.
+        self.assertEqual(provider_timeout_seconds(0.0), PROVIDER_TIMEOUT_FLOOR_SECONDS)
+        self.assertEqual(provider_timeout_seconds(10.0), 10.0 * PROVIDER_TIMEOUT_MULTIPLIER)
+        self.assertEqual(provider_timeout_seconds(1000.0), PROVIDER_TIMEOUT_CEILING_SECONDS)
+        self.assertLess(provider_timeout_seconds(1.0), provider_timeout_seconds(10.0))
+        self.assertLess(PROVIDER_TIMEOUT_CEILING_SECONDS, check_phase_budget_seconds() / 2)
+
+    @unittest.skipUnless(os.environ.get("MIZU_SLOW_PROVIDER"),
+                         "opt-in: a provider that answers after the legacy fixed grant")
+    def test_refusal_names_the_blockers_of_a_slow_provider(self):
+        # The property is the content of the refusal, not the provider's
+        # speed: a provider that answers after the legacy fixed grant
+        # still names its blockers. Kept out of the default suite path:
+        # it waits for the slow provider on every run it is enabled for.
+        delay = 6.0
+        code = ("import time,sys,json; time.sleep(%r); "
+                "print(json.dumps({'branch': 'mizu/x-1', 'sha': %r, "
+                "'deleted': True, 'live_refs': ['forge:owner/repo#7']}))"
+                % (delay, SHA_A))
+        with self.assertRaisesRegex(Denied, "forge:owner/repo#7"):
+            vcs.retire_via(grant_settings(code), "mizu/x-1", SHA_A)
 
 
 class RetireOpTests(Fixture):

@@ -25,6 +25,7 @@ RECORD_BYTES = 8192
 REQUEST_SCAN_LIMIT = 10000
 REQUEST_RECORD_LIMIT = 1000
 REQUEST_FILE = re.compile(r"([0-9a-f]{64})\.request\.json\Z")
+DISPATCH_FILE = re.compile(r"([0-9a-f]{64})\.dispatch\.json\Z")
 
 
 def request_id(publication_id: str, sha: str, workflows: list[str]) -> str:
@@ -92,14 +93,23 @@ class CiRequests:
         "truncated": bool, "scan_stopped": bool}``. A day row counts the
         requests made on that UTC day and names the work items they covered,
         so the CI a unit spent is visible per day next to the requests
-        themselves. The rows are chronological and the page holds at most
-        ``limit`` requests.
+        themselves. A request is dated by its dispatch: the day it was made
+        is the day the provider was asked, and a later answer never moves it,
+        so the day comes from the dispatch marker in both states. Each item
+        names the request, its workflows, the provider runs it produced and
+        whether the request is ``resolved`` or still ``unresolved``: a
+        dispatch whose outcome is unknown may have spent a CI run, so it is
+        listed rather than hidden, and an outcome that cannot be read is
+        such an unknown outcome, not a reason to hide the request. The rows
+        are chronological and the page holds at most ``limit`` requests.
         Bounds: at most 100 requests per page, at most 10000 directory
         entries read and at most 1000 candidate records validated.
         Trust: locally recorded evidence; an unreadable, oversized or
-        invalid record is skipped rather than returned unvalidated, and it
-        never denies the valid records beside it. Failure: ``Denied`` on an
-        invalid limit; a missing directory lists nothing.
+        invalid outcome record is never returned unvalidated and it never
+        denies the valid records beside it, and a dispatch whose marker
+        cannot be validated is not listed at all, because it has no instant
+        to be dated by. Failure: ``Denied`` on an invalid limit; a missing
+        directory lists nothing.
         """
         if type(limit) is not int or not 1 <= limit <= 100:
             raise Denied("Invalid CI request listing limit")
@@ -113,23 +123,45 @@ class CiRequests:
         seen = set()
         scan_stopped = len(names) > REQUEST_SCAN_LIMIT
         for name in names[:REQUEST_SCAN_LIMIT]:
-            match = REQUEST_FILE.fullmatch(name)
+            match = REQUEST_FILE.fullmatch(name) or DISPATCH_FILE.fullmatch(name)
             if match is None or match.group(1) in seen:
                 continue
             seen.add(match.group(1))
             if len(seen) > REQUEST_RECORD_LIMIT:
                 scan_stopped = True
                 break
+            identity = match.group(1)
             try:
-                record = self._read(match.group(1), "request")
+                record = self._read(identity, "request")
             except (Denied, LimitExceeded, OSError):
-                # An unreadable, oversized or invalid record is never listed
-                # unvalidated, and it never denies the records beside it.
+                # An unreadable, oversized or invalid outcome is never listed
+                # unvalidated, and it never denies the records beside it. It
+                # is also no reason to hide the request: the dispatch marker
+                # below still proves it reached the provider.
+                record = None
+            try:
+                marker = self._read(identity, "dispatch")
+            except (Denied, LimitExceeded, OSError):
+                marker = None
+            marker_row = None if marker is None else _unresolved_summary(marker, identity)
+            if marker_row is None:
+                # Without a valid dispatch marker there is no evidence that a
+                # CI run may have been spent, and no instant to date the
+                # request by, so the request is not listed at all.
                 continue
             if record is None:
+                # No usable outcome: the request was dispatched and its result
+                # is unknown, so it may have spent a CI run. The dispatch
+                # marker is the evidence that names it.
+                rows.append(marker_row)
                 continue
-            row = _summary(record, match.group(1))
+            row = _summary(record, identity, marker_row)
             if row is None:
+                # A readable outcome that cannot be validated is an unknown
+                # outcome, not an absent request: the dispatch marker already
+                # in hand proves the provider was asked, so the request is
+                # listed as unresolved rather than hidden.
+                rows.append(marker_row)
                 continue
             rows.append(row)
         rows.sort(key=lambda row: (row["date"], row["request_id"]))
@@ -145,18 +177,27 @@ class CiRequests:
             day["covered_items"] += len(row["covered"])
             day["items"].append({key: row[key] for key in
                                  ("request_id", "publication_id", "sha", "workflows",
-                                  "runs", "covered")})
+                                  "runs", "covered", "state")})
         return {"days": days, "total": len(rows), "truncated": len(rows) > len(page),
                 "scan_stopped": scan_stopped}
 
 
-def _summary(record: dict, identity: str) -> dict | None:
-    """One request record as a day row, or None when it cannot be trusted."""
+def _summary(record: dict, identity: str, marker: dict) -> dict | None:
+    """One request record with its dispatch marker, as a day row.
+
+    The day is the day the request was made: the dispatch marker's instant,
+    the moment the provider was asked and a CI run may have been spent. The
+    outcome record carries the completion instant, which dates nothing, so
+    the marker dates the row while the outcome record supplies the provider
+    runs and the state. ``marker`` is the validated marker row.
+    """
     fields = {"request_id", "publication_id", "sha", "workflows", "runs", "requested_at"}
     if not fields <= set(record) or set(record) - (fields | {"covered"}):
         return None
     if record["request_id"] != identity:
         return None
+    # The completion instant is still validated, so a record that cannot be
+    # trusted is not listed. It does not date the row: the marker does.
     requested = record["requested_at"]
     if not isinstance(requested, str) or len(requested) > 64:
         return None
@@ -190,7 +231,54 @@ def _summary(record: dict, identity: str) -> dict | None:
                 or type(entry.get("rev")) is not int or entry["rev"] < 1):
             return None
         items.append({"id": entry["id"], "rev": entry["rev"]})
-    return {"date": moment.astimezone(dt.timezone.utc).date().isoformat(),
+    return {"date": marker["date"],
             "request_id": identity, "publication_id": record["publication_id"],
             "sha": record["sha"], "workflows": list(workflows), "runs": runs,
-            "covered": items}
+            "covered": items, "state": "resolved"}
+
+
+def _unresolved_summary(record: dict, identity: str) -> dict | None:
+    """One dispatch marker without an outcome, as a day row, or None.
+
+    The dispatch marker proves the request reached the provider; its result
+    is unknown, so the row names no provider run and says so.
+    """
+    fields = {"request_id", "publication_id", "sha", "workflows", "dispatched_at"}
+    if not fields <= set(record) or set(record) - (fields | {"covered"}):
+        return None
+    if record["request_id"] != identity:
+        return None
+    dispatched = record["dispatched_at"]
+    if not isinstance(dispatched, str) or len(dispatched) > 64:
+        return None
+    try:
+        moment = dt.datetime.fromisoformat(dispatched)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        return None
+    if not isinstance(record["publication_id"], str) or len(record["publication_id"]) != 64:
+        return None
+    if not isinstance(record["sha"], str) or not 40 <= len(record["sha"]) <= 64:
+        return None
+    workflows = record["workflows"]
+    if (not isinstance(workflows, list) or len(workflows) > 8
+            or any(not isinstance(name, str) or not name or len(name) > 128
+                   for name in workflows)):
+        return None
+    covered = record.get("covered", [])
+    if not isinstance(covered, list) or len(covered) > 16:
+        return None
+    items = []
+    for entry in covered:
+        if (not isinstance(entry, dict)
+                or set(entry) - {"id", "rev", "kind", "publication_id", "branch",
+                                 "sha", "checks"}
+                or not isinstance(entry.get("id"), str) or not entry["id"]
+                or type(entry.get("rev")) is not int or entry["rev"] < 1):
+            return None
+        items.append({"id": entry["id"], "rev": entry["rev"]})
+    return {"date": moment.astimezone(dt.timezone.utc).date().isoformat(),
+            "request_id": identity, "publication_id": record["publication_id"],
+            "sha": record["sha"], "workflows": list(workflows), "runs": [],
+            "covered": items, "state": "unresolved"}

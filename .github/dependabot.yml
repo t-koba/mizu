@@ -4,8 +4,12 @@ updates:
     directory: /
     schedule:
       interval: monthly
-  # Track both Pi adapters weekly. Dependabot's documented cross-directory
-  # grouping is per dependency name; a release-wide batch is a separate policy.
+  # The product pins one Pi release across both adapters: every
+  # @earendil-works package must move together, and dependabot's documented
+  # cross-directory grouping is per dependency name, so a bot-managed bump
+  # can only propose a branch that violates the product's own invariant.
+  # The product's adoption path owns the pin; dependabot is told to leave
+  # those packages alone rather than to spend a full matrix on a red branch.
   - package-ecosystem: npm
     directories:
       - /adapters/pi
@@ -13,8 +17,5 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 3
-    groups:
-      pi-runtime:
-        patterns:
-          - "@earendil-works/*"
-        group-by: dependency-name
+    ignore:
+      - dependency-name: "@earendil-works/*"

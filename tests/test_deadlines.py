@@ -7,7 +7,7 @@ import threading
 import time
 from unittest.mock import patch
 
-from support import Fixture, ScriptDriver, ROOT
+from support import Fixture, ScriptDriver, ROOT, host_child_cost
 from mizu.bridge import Bridge
 from mizu.claude import ClaudeDriver
 from mizu.codex import CodexDriver
@@ -164,12 +164,20 @@ class DeadlineTests(Fixture):
                 ctx = self.context()
                 ctx.handle("_budget", {"sequence": 1})
                 channel = Channel(ctx, [sys.executable, "-c", code], environment(), ctx.workspace, "fake")
+                cost = host_child_cost()
                 started = time.monotonic()
                 try:
                     with self.assertRaisesRegex(LimitExceeded, "Logical model request"):
                         while True:
                             channel.receive()
-                    self.assertLess(time.monotonic() - started, 3)
+                    # The one-second request bound ends the call; the bound
+                    # here says it was not the wall that ended it. It is
+                    # this host's own measured cost of a child, plus that
+                    # request bound, plus a one-second margin: the margin
+                    # stays far below the minute-long transport idle
+                    # bound, so a late enforcement still fails the
+                    # assertion, and a loaded host does not fail it.
+                    self.assertLess(time.monotonic() - started, cost+1+1)
                 finally:
                     channel.close()
                 self.assertIsNotNone(channel.process.poll())
@@ -178,11 +186,18 @@ class DeadlineTests(Fixture):
         self.configure_wall(0, request=1)
         ctx = self.context()
         ctx.handle("_budget", {"sequence": 1})
+        cost = host_child_cost()
         started = time.monotonic()
         with self.assertRaisesRegex(LimitExceeded, "Logical model request"):
             run([sys.executable, "-c", "import time; time.sleep(60)"],
                 timeout=ctx.transport_deadline, maximum=1000, cancel=ctx.host_cancelled)
-        self.assertLess(time.monotonic() - started, 3)
+        # The one-second request bound ends the call; the bound here says it
+        # was not the wall that ended it. It is this host's own measured
+        # cost of a child, plus that request bound, plus a one-second
+        # margin: the margin stays far below the minute-long transport
+        # idle bound, so a late enforcement still fails the assertion, and a
+        # loaded host does not fail it.
+        self.assertLess(time.monotonic() - started, cost+1+1)
 
     def test_durable_driver_multiple_requests_have_no_launcher_wide_timer(self):
         self.configure_wall(0, request=900)
@@ -801,6 +816,7 @@ class DeadlineTests(Fixture):
                 # that starts only after admit_invocation.
                 ctx.transport_idle_deadline = time.monotonic() + 60
                 driver = ClaudeDriver(config) if engine == "claude" else CodexDriver(config)
+                cost = host_child_cost()
                 started = time.monotonic()
                 with patch.dict("os.environ", {"CODEX_AUTH_FILE": str(self.root / "absent")}), \
                      self.assertRaisesRegex(LimitExceeded, "Logical model request"):
@@ -808,4 +824,22 @@ class DeadlineTests(Fixture):
                 self.assertIsNone(ctx.deadline)
                 self.assertEqual(ctx.request_count, 1)
                 self.assertIsNone(ctx.finished)
-                self.assertLess(time.monotonic() - started, 5)
+                # The one-second request bound ends the call while the
+                # transport idle bound is a minute away, so this bound only
+                # says which bound ended it. It is measured from the moment
+                # the request bound started: the engine handshake before it
+                # is not governed by that bound, and it took 1.9 seconds on
+                # an idle host and 9.2 on a loaded one, so including it
+                # would need a margin that no longer detects a late
+                # enforcement. The bound is this host's own measured cost of
+                # a child, plus that request bound, plus a three-second
+                # margin: the margin covers the engine teardown's own one
+                # second termination grace and stays far below the
+                # minute-long transport idle bound, so a late enforcement
+                # still fails the assertion and a loaded host does not.
+                request_bound=self.config.limits.model_request_seconds
+                self.assertTrue(ctx.request_deadlines)
+                admitted=min(ctx.request_deadlines.values())-request_bound
+                self.assertLess(time.monotonic()-admitted, cost+request_bound+3,
+                                f"the request bound ended the call {time.monotonic()-admitted:.3f}s "
+                                f"after it started; the whole call took {time.monotonic()-started:.3f}s")

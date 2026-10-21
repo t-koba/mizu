@@ -132,10 +132,14 @@ class Channel:
             self.context.check_deadlines(wrap_up=True)
             raise
 
-    def receive(self, until=None):
+    def receive(self, until=None, bound=None):
         while True:
             self.context.check_deadlines(wrap_up=True)
             if self.context.joins_idle.is_set() and until is not None and time.monotonic() >= until:
+                # The bound that ended the wait is named: a child that was
+                # stopped for time never said the engine was unusable.
+                if bound:
+                    raise ProtocolError('Engine handshake exceeded its %d s bound' % bound)
                 raise ProtocolError('Engine handshake timed out')
             try:
                 item = self.records.get(timeout=.1)

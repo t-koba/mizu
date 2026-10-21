@@ -14,7 +14,7 @@ from .config import Config, keys, strings
 from .errors import ConfigError, Denied, LimitExceeded
 from .fs import atomic_write, identifier, lock, mkdir, now, read_json, safe_read, sync_dir, write_json
 from .insights import Insights
-from .process import environment, run
+from .process import environment, run, stop_note
 from .snapshot import (no_progress_recovery_due, open_store,
                        progress_disposition, progress_projection)
 from .work_items import WorkItems
@@ -81,7 +81,10 @@ class Project:
                                  work_item_intent_default=config.insight_decisions["work_item_intent_default"],
                                  work_item_intent_by_source=config.insight_decisions["work_item_intent_by_source"])
         self.insights.snapshots = self.snapshots
-        self.work_items = WorkItems(self.root, self.snapshots, self.insights, vcs=config.vcs)
+        # The workspace lets the ledger derive the tree a delivery lands in, so
+        # a closure binds the published tree that carries it.
+        self.work_items = WorkItems(self.root, self.snapshots, self.insights, vcs=config.vcs,
+                                    workspace=self.workspace)
         self.insights.work_items = self.work_items
         from .role_state import RoleStateStore
         self.role_state = RoleStateStore(self.root / "role-state",
@@ -134,6 +137,7 @@ class Project:
         return reset
 
     def status(self) -> dict:
+        from .check_jobs import deferrals
         from .selection import project_status
         snapshot = self.snapshots.get()
         budget = Budget(self.config.data / "budget", self.config.limits.daily_requests,
@@ -165,6 +169,8 @@ class Project:
                                           "no_progress_count": progress_count,
                                           "after": self.config.limits.no_progress_recovery_after}},
                 "goal_digest": snapshot.get("goal_digest"), "wake_at": snapshot.get("wake_at"),
+                # A role the check queue holds now, with the bound that ends it.
+                "check_waits": deferrals(self),
                 "selection": project_status(self.config, self),
                 "health": {p.stem: read_json(p) for p in (self.root / "health").glob("*.json") if not p.is_symlink()},
                 "active": {p.stem: read_json(p) for p in (self.root / "active").glob("*.json") if not p.is_symlink()},
@@ -218,9 +224,11 @@ def git_env() -> dict[str, str]:
 def config_managed_repo(workspace: Path, env: dict[str, str]) -> None:
     for key, value in (("user.name", "Mizu"), ("user.email", "automation@localhost"),
                        ("core.hooksPath", os.devnull)):
-        if run(["git", "-C", str(workspace), "config", key, value],
-               timeout=15, maximum=8192, env=env).exit_code != 0:
-            raise Denied("Cannot configure managed repository")
+        configured = run(["git", "-C", str(workspace), "config", key, value],
+                         timeout=15, maximum=8192, env=env)
+        if configured.exit_code != 0:
+            raise Denied("Cannot configure managed repository"
+                         + (": " + stop_note(configured) if stop_note(configured) else ""))
 
 
 def _import_git_tree(source: Path, workspace: Path, env: dict[str, str]) -> None:
@@ -233,14 +241,16 @@ def _import_git_tree(source: Path, workspace: Path, env: dict[str, str]) -> None
                  # Only emptiness matters; truncation preserves truthiness.
                  timeout=30, maximum=65536, env=env)
     if status.exit_code != 0 or status.stdout.strip():
-        raise Denied("Git import requires a clean source tree; commit or make a separate plain-directory export first")
+        # An incomplete status output cannot prove the tree is clean.
+        raise Denied("Git import requires a clean source tree; commit or make a separate plain-directory export first"
+                     + (": " + stop_note(status) if stop_note(status) else ""))
     result = run(["git", "-c", "safe.bareRepository=explicit", "-c", "core.fsmonitor=false",
                   "-c", f"core.hooksPath={os.devnull}",
                   "clone", "--no-local",
                   "--no-hardlinks", "--", str(source), str(workspace)],
                  timeout=300, maximum=1048576, env=env)
     if result.exit_code != 0:
-        raise Denied(f"Repository import failed: {result.stderr}")
+        raise Denied(f"Repository import failed: {stop_note(result) or result.stderr}")
     run(["git", "-C", str(workspace), "remote", "remove", "origin"],
         timeout=15, maximum=8192, env=env)
     config_managed_repo(workspace, env)

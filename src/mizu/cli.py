@@ -51,7 +51,7 @@ def parser() -> argparse.ArgumentParser:
     for name in ("run", "daemon", "cleanup"):
         p = sub.add_parser(name, help={"run": "Run one work unit (single JSON to stdout)",
                                        "daemon": "Poll and run; streams JSON Lines per unit (result objects and run_deferred events)",
-                                       "cleanup": "Remove leftover labelled containers"}[name])
+                                       "cleanup": "Remove leftover labelled containers; a running role's are left alone"}[name])
         p.add_argument("project", help="Managed project name")
         # No role-name assumption: omitted --role resolves to the single
         # configured role, else requires explicit.

@@ -389,6 +389,8 @@ class ContextTests(Fixture):
                                                           "snapshot_id": snapshot["id"]})
         self.assertEqual(completed["snapshot_id"], snapshot["id"])
         self.assertEqual(completed["verification"], verification)
+        # The delivery tree is derived by the ledger, never supplied by the caller.
+        self.assertEqual(completed["delivered_tree"], captured["code_digest"])
 
     def test_work_items_read_protocol_grant_paging_and_observation(self):
         from mizu.config import CAPABILITIES

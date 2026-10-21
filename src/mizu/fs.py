@@ -461,6 +461,22 @@ def lock(path: Path, *, blocking: bool = True) -> Iterator[None]:
         local.release()
 
 
+def held(path: Path) -> bool:
+    """True when this process holds ``path``'s lock right now.
+
+    The in-process guard is taken before the kernel lock and released after
+    it, so a held guard means this process owns the kernel lock too. The
+    answer is about ownership, not contention: a caller that already owns an
+    exclusion must not read its own lock as another holder's.
+
+    Bounds: one path, one boolean. Trust: local process state. Failure:
+    never raises; an unreadable path reads as not held.
+    """
+    with _LOCAL_GUARD:
+        local = _LOCAL_LOCKS.get(_local_key(path))
+    return local is not None and local.locked()
+
+
 def publish_pointer(root: Path, pointer: dict, *, name: str = "latest.json") -> None:
     """Move a latest pointer only after the entry is complete.
 
