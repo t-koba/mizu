@@ -129,3 +129,23 @@ Python contract failure immediately instead of spending minutes running the
 rest of a failing suite. The option is off by default, preserves sanitized
 failure evidence, and never makes a failed or partial run reusable as a passing
 gate. With no failure, the entire suite still runs.
+
+
+When a unit finishes while waiting for a check, already-read terminal results
+are acknowledged even if another check remains outstanding. The next prompt
+carries `check_continuation`: the prior role's summary/state, source identity,
+`same_code`, and the awaited check's current status. This is bounded prior-role
+report data (4000 characters per text field), not validation evidence. A changed
+source is explicit and never inherits acceptance. A normal finish clears this
+continuation; bounded or failed units do not acknowledge unfinished delivery.
+Acknowledged historical results remain available through `check_job list` but
+are omitted from the default prompt's outstanding-check projection.
+
+`finish.release_checks` accepts at most 32 owned check IDs. All ownership and
+wait conflicts are validated before sealing. A successful, unbounded finish
+releases those subscriptions using normal cancellation: other subscribers keep
+the execution alive, and only an execution with no remaining consumer is
+cancelled. It never selects obsolete work by source age or guesses its relevance.
+For a timed external wait, writable roles can use `finish` with `outcome=wait`
+and `wait_seconds`; the existing persisted wake deadline releases the unit and
+workspace rather than holding a command open.

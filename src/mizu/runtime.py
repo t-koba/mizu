@@ -1939,8 +1939,17 @@ class Context:
             if 'check_job' not in self.role.capabilities or args['outcome'] != 'wait':
                 raise Denied('Check wait requires check_job and outcome=wait')
             job = check_jobs.read(self.project, args['wait_for_check'])
-            if self.role.name not in (job['role'], job.get('producer_role')):
+            if self.role.name != job['role']:
                 raise Denied('Check wait belongs to another role')
+        releases = args.get('release_checks', [])
+        if releases:
+            if 'check_job' not in self.role.capabilities:
+                raise Denied('Releasing checks requires check_job')
+            if args.get('wait_for_check') in releases:
+                raise Denied('Cannot wait for a released check')
+            for job_id in releases:
+                if check_jobs.read(self.project, job_id)['role'] != self.role.name:
+                    raise Denied('Check release belongs to another role')
         from .routing import check_recommendation
         profile, reason = check_recommendation(args.get("next_profile"), args.get("next_reason"))
         if profile is not None and profile not in self.config.profiles:
@@ -3162,7 +3171,8 @@ def prompt_for(context: Context) -> str:
                        "decision_task": _decision_task(context),
                        "wait_events": list(getattr(context, "wait_events", []) or []),
                        "obligations": list(getattr(context, "obligations", []) or []),
-                       "check_jobs": (check_jobs.list_jobs(context.project, context.role.name) if "check_job" in caps else []),
+                       "check_jobs": (check_jobs.list_jobs(context.project, context.role.name, include_acknowledged=False) if "check_job" in caps else []),
+                       "check_continuation": check_jobs.continuation(context.project, context.role.name, context.snapshot),
                        "shared_checks": (check_jobs.available(context, validate=False) if "check_job" in caps else []),
                        "acceptance_commands": acceptance,
                        "research_state": _prompt_research_state(context),
@@ -3238,7 +3248,8 @@ def prompt_delta_for(context: Context, pending: list) -> str:
                        "research_state": _prompt_research_state(context),
                        "capture_limit": _prompt_capture_limit(context),
                        "workspace": "/workspace", "workspace_mode": context.role.workspace,
-                       "check_jobs": (check_jobs.list_jobs(context.project, context.role.name) if "check_job" in caps else []),
+                       "check_jobs": (check_jobs.list_jobs(context.project, context.role.name, include_acknowledged=False) if "check_job" in caps else []),
+                       "check_continuation": check_jobs.continuation(context.project, context.role.name, context.snapshot),
                        "shared_checks": (check_jobs.available(context, validate=False) if "check_job" in caps else []),
                        "acceptance_commands": acceptance,
                        "ci_branch": ((context.config.vcs.get("ci_branch") or None)
@@ -4196,9 +4207,11 @@ class Engine:
                 if getattr(context, "wrap_up_attempted", False):
                     result["wrap_up"] = {"bound": context.bound_hit}
                 write_json(run_dir / "result.json", result)
-                if finished.get("outcome") != "bounded" and not finished.get("wait_for_check"):
+                if finished.get("outcome") != "bounded" and not context.bound_hit:
                     with contextlib.suppress(OSError, ValueError, Denied):
                         check_jobs.acknowledge(project, role_name, getattr(context, "check_results_read", set()))
+                    for job_id in finished.get("release_checks", []):
+                        check_jobs.cancel(context, job_id)
                 if not finished.get("wait_for_check"):
                     write_json(project.root / "observed" / f"{role_name}.json",
                                {"snapshot": snapshot["id"], "code_digest": snapshot["code_digest"]})
@@ -4217,7 +4230,12 @@ class Engine:
                         with contextlib.suppress(OSError, ValueError, TypeError, AttributeError, Denied):
                             ci_waits.acknowledge(project.work_items, role_name, context.wait_events)
                 if finished.get("wait_for_check"):
-                    check_jobs.set_wait(project, role_name, finished["wait_for_check"])
+                    check_jobs.set_wait(project, role_name, finished["wait_for_check"], continuation={
+                        "run": run_id, "snapshot": snapshot["id"], "code_digest": snapshot["code_digest"],
+                        "summary": finished["summary"], "state": finished.get("state", "")})
+                else:
+                    with contextlib.suppress(OSError):
+                        check_jobs.clear_wait(project, role_name)
                 write_json(project.root / "health" / f"{role_name}.json",
                            {"consecutive_failures": 0, "consecutive_missing_finish": 0,
                             "last_run": run_id, "updated_at": now()})

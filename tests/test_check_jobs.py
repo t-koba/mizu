@@ -129,6 +129,78 @@ class JobTests(Fixture):
         self.run_job()
         self.assertFalse(check_jobs.waiting(self.project, 'worker'))
         self.assertTrue(should_run(self.project, self.project.snapshots.get(), role_name='worker'))
+    def test_waiting_for_next_check_acknowledges_consumed_result_and_carries_report(self):
+        from support import ScriptDriver
+        from mizu.runtime import Engine, prompt_for
+        _, first = self.submit()
+        self.run_job()
+        def act(ctx, *_):
+            ctx._op_check_job({'action': 'result', 'id': first['id']})
+            next_job = ctx._op_check_job({'action': 'start', 'script': 'echo next'})
+            ctx._op_finish({'outcome': 'wait', 'summary': 'Reviewed source; only next evidence remains',
+                            'state': 'Continue from the check result', 'wait_for_check': next_job['id']})
+        result = Engine(self.config, driver=ScriptDriver(act)).run(self.project, 'worker')
+        self.assertEqual(check_jobs.pending(self.project, 'worker'), [])
+        self.assertTrue(check_jobs.read(self.project, first['id'])['acknowledged'])
+        self.assertNotIn(first['id'], [j['id'] for j in check_jobs.list_jobs(self.project, 'worker', include_acknowledged=False)])
+        report = check_jobs.continuation(self.project, 'worker', self.project.snapshots.get())
+        self.assertEqual(report['run'], result['run'])
+        self.assertTrue(report['same_code'])
+        self.assertEqual(report['summary'], 'Reviewed source; only next evidence remains')
+        changed = dict(self.project.snapshots.get(), code_digest='f' * 64)
+        self.assertFalse(check_jobs.continuation(self.project, 'worker', changed)['same_code'])
+        self.assertIsNone(check_jobs.continuation(self.project, 'reviewer', changed))
+        check_jobs.clear_wait(self.project, 'worker')
+        self.assertIsNone(check_jobs.continuation(self.project, 'worker', changed))
+
+    def test_timed_wait_releases_admission_and_workspace(self):
+        from support import ScriptDriver
+        from mizu.runtime import Engine, should_run
+        def act(ctx, *_):
+            ctx._op_finish({'outcome': 'wait', 'summary': 'External condition pending',
+                            'state': 'Resume when due', 'wait_seconds': 420})
+        Engine(self.config, driver=ScriptDriver(act)).run(self.project, 'worker')
+        self.assertFalse(should_run(self.project, self.project.snapshots.get(), role_name='worker'))
+        with lock(self.project.root/'locks/workspace.lock', blocking=False), \
+                lock(self.project.root/'locks/run-worker.lock', blocking=False), \
+                lock(self.config.data/'slots/0.lock', blocking=False):
+            pass
+
+    def test_bounded_finish_keeps_result_unacknowledged(self):
+        from support import ScriptDriver
+        from mizu.runtime import Engine
+        _, job = self.submit(); self.run_job()
+        def act(ctx, *_):
+            ctx._op_check_job({'action': 'result', 'id': job['id']})
+            ctx.bound_hit = 'requests'
+            ctx._op_finish({'outcome': 'continue', 'summary': 'Bound reached', 'state': 'Unfinished work'})
+        Engine(self.config, driver=ScriptDriver(act)).run(self.project, 'worker')
+        self.assertFalse(check_jobs.read(self.project, job['id'])['acknowledged'])
+
+    def test_finish_releases_only_explicit_owned_checks(self):
+        from support import ScriptDriver
+        from mizu.runtime import Engine
+        _, obsolete = self.submit()
+        def act(ctx, *_):
+            retained = ctx._op_check_job({'action': 'start', 'script': 'echo retained'})
+            ctx._op_finish({'outcome': 'wait', 'summary': 'Retain only the needed check',
+                            'state': 'Waiting', 'wait_for_check': retained['id'],
+                            'release_checks': [obsolete['id']]})
+        Engine(self.config, driver=ScriptDriver(act)).run(self.project, 'worker')
+        self.assertEqual(check_jobs.read(self.project, obsolete['id'])['status'], 'cancelled')
+        self.assertTrue(check_jobs.waiting(self.project, 'worker'))
+
+    def test_finish_refuses_releasing_other_role_or_waited_check(self):
+        _, job = self.submit()
+        reader = self.context('reviewer')
+        with self.assertRaises(Denied):
+            reader._op_finish({'outcome': 'wait', 'summary': 'Invalid release', 'release_checks': [job['id']]})
+        ctx = self.context()
+        with self.assertRaises(Denied):
+            ctx._op_finish({'outcome': 'wait', 'state': 'Wait', 'summary': 'Contradictory wait',
+                            'release_checks': [job['id']], 'wait_for_check': job['id']})
+        self.assertEqual(check_jobs.read(self.project, job['id'])['status'], 'queued')
+
     def test_new_operator_input_interrupts_check_only_wait(self):
         ctx, job = self.submit()
         check_jobs.set_wait(self.project, 'worker', job['id'])
@@ -261,6 +333,17 @@ class SharingTests(JobTests):
         super().setUp()
         self.config = dataclasses.replace(self.config, sandbox=dataclasses.replace(self.config.sandbox, check_reuse=True))
         self.project.config = self.config
+
+    def test_producer_cannot_release_or_wait_on_another_subscription(self):
+        producer, original = self.submit()
+        reader = self.context('reviewer')
+        subscription = check_jobs.join(reader, original['id'])
+        with self.assertRaises(Denied):
+            check_jobs.cancel(producer, subscription['id'])
+        with self.assertRaises(Denied):
+            producer._op_finish({'outcome': 'wait', 'state': 'Waiting', 'summary': 'Wrong subscription',
+                                 'wait_for_check': subscription['id']})
+        self.assertEqual(check_jobs.read(self.project, subscription['id'])['status'], 'queued')
 
     def test_two_roles_share_execution_and_ack_independently(self):
         ctx, first = self.submit()

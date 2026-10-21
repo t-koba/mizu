@@ -293,9 +293,10 @@ def pending(project, role):
             and not j.get('acknowledged')][:32]
 
 
-def list_jobs(project, role):
+def list_jobs(project, role, *, include_acknowledged=True):
     jobs = [summary(j) for p in root(project).glob('*/job.json')
-            if isinstance((j := read(project, p.parent.name)), dict) and j.get('role') == role]
+            if isinstance((j := read(project, p.parent.name)), dict) and j.get('role') == role
+            and (include_acknowledged or not j.get('acknowledged'))]
     return sorted(jobs, key=lambda j: j['created_at'], reverse=True)[:32]
 
 
@@ -357,7 +358,7 @@ def cancel(context, job_id):
     project = context.project
     with lock(project.root / 'locks/check-jobs.lock'):
         job = read(project, job_id)
-        if context.role.name not in (job['role'], job.get('producer_role')):
+        if context.role.name != job['role']:
             raise Denied('Check job belongs to another role')
         if job['status'] not in ('queued', 'running'):
             return summary(job)
@@ -548,11 +549,44 @@ def wait_signature(project):
             'inbox': project.insights.generation()}
 
 
-def set_wait(project, role, job_id):
+def set_wait(project, role, job_id, *, continuation=None):
     job = read(project, job_id)
     if job['role'] != role:
         raise Denied('Check wait belongs to another role')
-    write_json(root(project) / (role + '.wait.json'), {'id': job_id, 'inputs': wait_signature(project)})
+    record = {'id': job_id, 'inputs': wait_signature(project)}
+    if continuation is not None:
+        record['continuation'] = {k: continuation[k] for k in ('run', 'snapshot', 'code_digest', 'summary', 'state') if k in continuation}
+    write_json(root(project) / (role + '.wait.json'), record)
+
+
+def clear_wait(project, role):
+    (root(project) / (role + '.wait.json')).unlink(missing_ok=True)
+
+
+def continuation(project, role, snapshot):
+    """Bounded prior-role report for a check-wait continuation, never evidence.
+
+    Available only to the owning role with check_job. Source changes are
+    explicit: the prior report cannot certify the current code or acceptance.
+    """
+    if role not in project.config.roles or 'check_job' not in project.config.roles[role].capabilities:
+        return None
+    record = read_json(root(project) / (role + '.wait.json'), {})
+    report = record.get('continuation')
+    if not isinstance(report, dict) or not isinstance(report.get('run'), str):
+        return None
+    try:
+        job = read(project, record['id'])
+    except (Denied, KeyError):
+        return None
+    if job.get('role') != role:
+        return None
+    return {'trust': 'prior-role-report', 'run': report['run'],
+            'snapshot': report.get('snapshot'), 'code_digest': report.get('code_digest'),
+            'same_code': report.get('code_digest') == snapshot.get('code_digest'),
+            'summary': text_preview(str(report.get('summary', '')), 4000)[0],
+            'state': text_preview(str(report.get('state', '')), 4000)[0],
+            'check': summary(job)}
 
 
 def waiting(project, role):
