@@ -380,6 +380,39 @@ class QueueTests(Fixture):
                 with self.raw_slots(), lock(role_lock, blocking=False), lock(workspace_lock, blocking=False):
                     pass
 
+    def test_blocked_full_queue_does_not_prevent_ready_dispatch(self):
+        # One pending place is full, but its owner cannot use the free slot.
+        # Exercise daemon/fail-fast and retrying dispatch without timing races.
+        self.tune(parallel_runs=1)
+        for blocked in ('run-worker.lock', 'workspace.lock'):
+            for wait in (False, True):
+                with self.subTest(blocked=blocked, wait=wait):
+                    resources = (self.project.root / 'locks/run-worker.lock',
+                                 self.project.root / 'locks/workspace.lock')
+                    head = _Queue(self.config, resources)
+                    try:
+                        with lock(self.project.root / 'locks' / blocked, blocking=False):
+                            with self.assertRaises(Busy):
+                                head.attempt(enqueue=True)
+                            before = self.tickets()
+                            self.assertEqual(len(before), 1)
+                            with admission(self.config,
+                                           (self.project.root / 'locks/run-reporter.lock',),
+                                           wait=wait):
+                                self.assertEqual(self.tickets(), before)
+                                with self.assertRaises(Busy), self.raw_slots():
+                                    pass
+                            self.assertEqual(self.tickets(), before)
+                        # Once ready, the older waiter retains priority.
+                        with self.assertRaises(Busy), admission(self.config, wait=False):
+                            pass
+                        with head.attempt(enqueue=True):
+                            self.assertEqual(self.tickets(), [])
+                    finally:
+                        head.close()
+                    with self.raw_slots():
+                        pass
+
     def test_timeout_stop_and_callback_cancellation_remove_tickets(self):
         with self.raw_slots():
             self.tune(busy_retry_seconds=0.12)

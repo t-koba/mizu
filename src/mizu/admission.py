@@ -162,27 +162,23 @@ class _Queue:
     def attempt(self, *, enqueue):
         """Return a held ExitStack, or Busy with no dispatch locks held.
 
-        Queued callers may skip older resource-blocked tickets, retaining their
+        All callers may skip older resource-blocked tickets, retaining their
         original place. They never skip a ready ticket. Fail-fast callers do
-        not enqueue or bypass *any* live ticket (including recovery probes).
+        not enqueue. A pending place is needed only if dispatch cannot proceed.
         """
         with lock(self.root / "queue.lock", blocking=False):
             tickets = self._read()
-            if tickets and self.alive is None:
-                if not enqueue:
-                    raise Busy("Older execution admissions are pending")
-                self._enqueue(tickets)
-            for ticket in tickets:
-                if ticket["id"] == self.identity:
-                    break
-                try:
-                    with contextlib.ExitStack() as probe:
-                        self._resources(probe, ticket["resources"])
-                except Busy:
-                    continue  # No slot acquired; resource-blocked head cannot deadlock the queue.
-                raise Busy("Older execution admission is ready")
             attempt = contextlib.ExitStack()
             try:
+                for ticket in tickets:
+                    if ticket["id"] == self.identity:
+                        break
+                    try:
+                        with contextlib.ExitStack() as probe:
+                            self._resources(probe, ticket["resources"])
+                    except Busy:
+                        continue
+                    raise Busy("Older execution admission is ready")
                 self._resources(attempt, self.resources)
                 self._slots(attempt)
                 if self.alive is not None:

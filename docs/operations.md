@@ -70,7 +70,7 @@ rem 4役編成の場合のみ同名の追加タスクを登録
 schtasks /Query /FO LIST | findstr mizu-
 ```
 
-`mizu daemon` コマンドは、単一の JSON ではなく JSON Lines（改行区切りの JSON）形式でイベントを出力します。タスク実行が完了するごとに結果オブジェクトを1行出力し、実行が延期された場合は `{"event": "run_deferred", "error": <string>, "time": <ISO-8601>}` を1行出力します。一方、単発実行の `mizu run` コマンドは単一の JSON オブジェクトを出力します。実行枠・ロック待ち（`Busy`）の場合、`mizu run` は `limits.busy_retry_seconds`（既定 300 秒、0 で無効）の範囲で空きを待ってから実行し、期限切れ、または待機キュー満杯で `Busy` を返します（待機上限は `parallel_runs` と同数。drain・pause・unarmed 時は待機しません）。独立プロセス間でも FIFO で受け付け、role/workspace ロックで進めないチケットは順位を保ったままスキップします。即時実行は既存チケットを追い越しません。`daemon` は従来どおり即時 `run_deferred` として次回ポーリングで再試行します。
+`mizu daemon` コマンドは、単一の JSON ではなく JSON Lines（改行区切りの JSON）形式でイベントを出力します。タスク実行が完了するごとに結果オブジェクトを1行出力し、実行が延期された場合は `{"event": "run_deferred", "error": <string>, "time": <ISO-8601>}` を1行出力します。一方、単発実行の `mizu run` コマンドは単一の JSON オブジェクトを出力します。実行枠・ロック待ち（`Busy`）の場合、`mizu run` は `limits.busy_retry_seconds`（既定 300 秒、0 で無効）の範囲で空きを待ってから実行し、期限切れ、または待機キュー満杯で `Busy` を返します（待機上限は `parallel_runs` と同数。drain・pause・unarmed 時は待機しません）。独立プロセス間でも FIFO で受け付け、role/workspace ロックで進めないチケットは順位を保ったままスキップします。即時実行もロック待ちのチケットをスキップしますが、実行可能な先行チケットは追い越しません。待機キューが満杯でも、即時に実行可能なら空き枠を利用します。`daemon` は従来どおり即時 `run_deferred` として次回ポーリングで再試行します。
 
 SSH ログインセッションの切断後も systemd のユーザーマネージャーを常駐させる必要がある場合は、管理者権限で linger を有効化します。
 
