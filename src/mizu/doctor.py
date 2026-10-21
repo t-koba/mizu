@@ -262,6 +262,32 @@ def sandbox_image(config: Config) -> str:
     return config.sandbox.image
 
 
+def node_capability(config: Config) -> str:
+    """The Node module and stream capabilities the SDK needs, from the child.
+
+    The child that answers decides its own outcome: a child a signal
+    stopped never said a capability was missing, and a child that merely
+    outlived its bound never answered at all, so the shared classification
+    names that outcome instead of a missing dependency. The two remedies
+    stay distinguishable: provision Node, or give this host more room.
+
+    The probe is a module-level check of its own, like the container
+    runtime and the sandbox image, so every capability message the doctor
+    publishes is reachable and can be regression-tested on its own.
+    """
+    result = run([*config.command('pi'), "--input-type=module", "-e",
+                  "import {createRequire} from 'node:module'; import {ReadableStream} from 'node:stream/web'; if(typeof createRequire!=='function'||typeof ReadableStream!=='function')process.exit(1); console.log('module and stream capabilities available')"], timeout=10, maximum=1024)
+    probe_outcome(result.reason, result.exit_code,
+                  stop_note(result) or result.stderr, "Node capability probe", 10)
+    if result.exit_code:
+        # The child answered and reported a failure: name the failure it
+        # reported, not a capability it never claimed to be missing.
+        raise ConfigError('Required Node module/stream capabilities missing'
+                          + (' (exit %s)' % result.exit_code)
+                          + (': ' + stop_note(result) if stop_note(result) else ''))
+    return result.stdout.strip()
+
+
 def check(config: Config, *, sandbox: bool = False) -> dict:
     checks = []
     def checked(name, function):
@@ -280,21 +306,9 @@ def check(config: Config, *, sandbox: bool = False) -> dict:
     checked("budget file", lambda: budget_file(config))
     checked("service units", lambda: service_units())
     checked("proposal stores", lambda: proposal_stores(config))
-    def node():
-        result = run([*config.command('pi'), "--input-type=module", "-e",
-                      "import {createRequire} from 'node:module'; import {ReadableStream} from 'node:stream/web'; if(typeof createRequire!=='function'||typeof ReadableStream!=='function')process.exit(1); console.log('module and stream capabilities available')"], timeout=10, maximum=1024)
-        probe_outcome(result.reason, result.exit_code,
-                      stop_note(result) or result.stderr, "Node capability probe", 10)
-        if result.exit_code:
-            # The child answered and reported a failure: name the failure it
-            # reported, not a capability it never claimed to be missing.
-            raise ConfigError('Required Node module/stream capabilities missing'
-                              + (' (exit %s)' % result.exit_code)
-                              + (': ' + stop_note(result) if stop_note(result) else ''))
-        return result.stdout.strip()
     engines = {config.engine(p) for p in config.profiles}
     if "pi" in engines or "pi-durable" in engines:
-        checked("node", node)
+        checked("node", lambda: node_capability(config))
     for engine in ("pi", "pi-durable", "codex", "claude"):
         if engine in engines:
             checked(f"{engine} adapter", lambda engine=engine: engine_contract(config, engine))
