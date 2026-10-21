@@ -1,6 +1,7 @@
 import re
 import threading
 import time
+from unittest.mock import patch
 from support import Fixture, ScriptDriver
 from mizu.cli import parser, execute
 from mizu.config import load
@@ -48,16 +49,40 @@ class BusyRetryTests(Fixture):
         self.assertFalse(worker.is_alive())
         self.assertEqual(outcome["result"]["status"], "completed")
 
-    def test_retry_window_expires_as_busy(self):
-        self._retune(idle_seconds=1, busy_retry_seconds=2)
-        start = time.monotonic()
+    def test_retry_wait_outlives_provider_recovery_window(self):
+        self._retune(idle_seconds=1, busy_retry_seconds=0)
+        self._run_queued(stop_after_wait=False)
+
+    def _run_queued(self, *, stop_after_wait):
+        stop = threading.Event()
+        outcome = []
+        engine = Engine(self.config, driver=ScriptDriver(), stop=stop)
+        def run():
+            try:
+                outcome.append(engine.run(self.project, "worker", retry_busy=True))
+            except BaseException as exc:
+                outcome.append(exc)
         with lock(self.project.root / "locks/workspace.lock"):
-            with self.assertRaises(Busy):
-                Engine(self.config, driver=ScriptDriver()).run(
-                    self.project, "worker", retry_busy=True)
-        elapsed = time.monotonic() - start
-        self.assertGreaterEqual(elapsed, 1.5)
-        self.assertLess(elapsed, 30)
+            worker = threading.Thread(target=run)
+            worker.start()
+            try:
+                time.sleep(0.15)
+                self.assertTrue(worker.is_alive())
+                self.assertEqual(outcome, [])
+                if stop_after_wait:
+                    stop.set()
+            finally:
+                if stop_after_wait:
+                    worker.join(5)
+        worker.join(10)
+        if worker.is_alive():
+            stop.set()
+            worker.join(5)
+        self.assertFalse(worker.is_alive())
+        if stop_after_wait:
+            self.assertIsInstance(outcome[0], Busy)
+        else:
+            self.assertEqual(outcome[0]["status"], "completed")
 
     def test_draining_never_waits(self):
         self._retune(idle_seconds=1, busy_retry_seconds=30)
@@ -68,24 +93,21 @@ class BusyRetryTests(Fixture):
                 self.project, "worker", retry_busy=True)
         self.assertLess(time.monotonic() - start, 5)
 
-    def test_zero_window_disables_wait(self):
+    def test_stop_cancels_wait_even_without_recovery_window(self):
         self._retune(idle_seconds=1, busy_retry_seconds=0)
-        start = time.monotonic()
-        with lock(self.project.root / "locks/workspace.lock"):
-            with self.assertRaises(Busy):
-                Engine(self.config, driver=ScriptDriver()).run(
-                    self.project, "worker", retry_busy=True)
-        self.assertLess(time.monotonic() - start, 5)
+        self._run_queued(stop_after_wait=True)
 
-    def test_cli_run_waits_within_window(self):
-        # One-shot dispatch (what timers invoke) waits instead of dropping
-        # the unit at once; expiry still surfaces the same Busy error.
-        self._retune(idle_seconds=1, busy_retry_seconds=2)
+    def test_cli_run_waits_even_without_recovery_window(self):
+        self._retune(idle_seconds=1, busy_retry_seconds=0)
         args = parser().parse_args(["--config", str(self.file), "run", "sample", "--role", "worker"])
-        start = time.monotonic()
-        with lock(self.project.root / "locks/workspace.lock"):
-            with self.assertRaises(Busy):
-                execute(args)
-        elapsed = time.monotonic() - start
-        self.assertGreaterEqual(elapsed, 1.5)
-        self.assertLess(elapsed, 30)
+        held = lock(self.project.root / "locks/workspace.lock")
+        held.__enter__()
+        timer = threading.Timer(0.15, held.__exit__, args=(None, None, None))
+        timer.start()
+        try:
+            started = time.monotonic()
+            with patch("mizu.runtime.Engine", side_effect=lambda config, stop: Engine(config, stop=stop, driver=ScriptDriver())):
+                self.assertEqual(execute(args)["status"], "completed")
+            self.assertGreaterEqual(time.monotonic() - started, 0.1)
+        finally:
+            timer.join(5)

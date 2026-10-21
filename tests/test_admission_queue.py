@@ -413,14 +413,29 @@ class QueueTests(Fixture):
                     with self.raw_slots():
                         pass
 
-    def test_timeout_stop_and_callback_cancellation_remove_tickets(self):
+    def test_wait_keeps_its_ticket_beyond_old_deadline_and_dispatches(self):
+        self.tune(busy_retry_seconds=0.01)
         with self.raw_slots():
-            self.tune(busy_retry_seconds=0.12)
-            started = time.monotonic()
-            with self.assertRaises(Busy), admission(self.config, wait=True):
-                pass
-            self.assertGreaterEqual(time.monotonic() - started, 0.1)
-            self.assertEqual(self.tickets(), [])
+            thread, stop, outcome = self.queued_waiter()
+            original = self.tickets()
+            # Advance only admission's clock; the real test stays bounded.
+            with patch('mizu.admission.time.monotonic', return_value=time.monotonic() + 86400):
+                time.sleep(0.08)
+                self.assertTrue(thread.is_alive())
+                self.assertEqual(outcome, [])
+                self.assertEqual(self.tickets(), original)
+        thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(outcome, ['admitted'])
+        self.assertEqual(self.tickets(), [])
+
+    def test_wait_fails_fast_on_corrupt_queue(self):
+        write_json(self.config.data / 'slots/queue.json', {'version': 99, 'tickets': []})
+        with self.assertRaisesRegex(Busy, 'queue is invalid'), admission(self.config, wait=True):
+            self.fail('corrupt state admitted')
+
+    def test_stop_and_callback_cancellation_remove_tickets(self):
+        with self.raw_slots():
             self.tune(idle_seconds=30, busy_retry_seconds=15)
             thread, stop, outcome = self.queued_waiter()
             stop.set()

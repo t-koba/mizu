@@ -92,6 +92,10 @@ def role_exclusions(project: Path, roles: Sequence[str] = ()) -> list[Path]:
     return sorted(found)
 
 
+class _Invalid(Busy):
+    """Invalid coordination state cannot be resolved by waiting for capacity."""
+
+
 class _Full(Busy):
     """Queue overflow is a deferral, not another wait for a pending place."""
 
@@ -169,11 +173,11 @@ class _Queue:
                 os.close(fd)
             state = json.loads(raw)
         except (OSError, ValueError, RecursionError):
-            raise Busy("Execution admission queue is unreadable") from None
+            raise _Invalid("Execution admission queue is unreadable") from None
         if (not isinstance(state, dict) or set(state) != {"version", "tickets"}
                 or type(state["version"]) is not int or state["version"] != 1
                 or not isinstance(state["tickets"], list) or len(state["tickets"]) > self.capacity):
-            raise Busy("Execution admission queue is invalid")
+            raise _Invalid("Execution admission queue is invalid")
         tickets = state["tickets"]
         owners, identities = set(), set()
         for ticket in tickets:
@@ -184,7 +188,7 @@ class _Queue:
                     or not isinstance(ticket["resources"], list) or len(ticket["resources"]) > 2
                     or any(not self._valid_resource(p) for p in ticket["resources"])
                     or ticket["owner"] in owners or ticket["id"] in identities):
-                raise Busy("Execution admission queue is invalid")
+                raise _Invalid("Execution admission queue is invalid")
             owners.add(ticket["owner"])
             identities.add(ticket["id"])
         live = []
@@ -297,40 +301,33 @@ def admission(config, resources=(), *, wait=False, stop=None, check=None):
     """Admit one work unit; lend nothing and never preempt an active driver.
 
     Pending capacity is derived from parallel_runs (one waiter per slot).
-    Overflow is immediate Busy. Retry waits use busy_retry_seconds, polling at
+    Overflow and invalid state are immediate Busy. Waiting has no deadline; poll at
     idle_seconds with no role/workspace/slot locks; stop wakes the wait. check
     revalidates normal authority/budget before each attempt and at dispatch,
     outside the queue transaction. Only Busy contention retries. Success
     removes the ticket and releases its pending lock in one transaction;
-    timeout, cancellation and other errors invalidate it in finally.
+    cancellation and other errors invalidate it in finally.
     Dead/stale entries are reaped by the next transaction. Active slot lock
     files remain the independent hard cap. Queue/slot files live under data/slots;
     lock inodes are never unlinked. Invalid state fails closed with Busy.
     """
     stop = stop if stop is not None else threading.Event()
-    window = max(0, config.limits.busy_retry_seconds) if wait else 0
     admission_started = time.monotonic()
-    deadline = admission_started + window
     queue = _Queue(config, resources)
-    retrying = False
     try:
         while True:
             if stop.is_set():
                 raise Busy("Run stopped before execution admission")
             if check is not None:
                 check()
-            if retrying and time.monotonic() >= deadline:
-                raise Busy("Execution admission wait expired")
             try:
-                attempt = queue.attempt(enqueue=window > 0)
-            except _Full as exc:
+                attempt = queue.attempt(enqueue=wait)
+            except (_Full, _Invalid) as exc:
                 raise Busy(str(exc)) from None
             except Busy:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
+                if not wait:
                     raise
-                stop.wait(min(config.limits.idle_seconds, remaining))
-                retrying = True
+                stop.wait(config.limits.idle_seconds)
                 continue
             # The successful transaction already retired the pending ticket.
             with attempt:
@@ -338,8 +335,6 @@ def admission(config, resources=(), *, wait=False, stop=None, check=None):
                     raise Busy("Run stopped before execution admission")
                 if check is not None:
                     check()
-                if retrying and time.monotonic() >= deadline:
-                    raise Busy("Execution admission wait expired")
                 yield max(0.0, time.monotonic() - admission_started)
             return
     finally:
