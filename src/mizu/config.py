@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from .errors import ConfigError
 from .fs import ID
 from .process import ADAPTER_DIAGNOSTIC_BYTES_DEFAULT, ADAPTER_DIAGNOSTIC_BYTES_MAX
-CAPABILITIES = frozenset({"diff", "files", "read", "exec", "experiment", "verify", "fetch", "probe",
+CAPABILITIES = frozenset({"diff", "files", "read", "exec", "experiment", "verify", "check_job", "fetch", "probe",
                           "search", "insights", "decide", "submit_insight", "revise_insight", "withdraw_insight", "withdraw_decided", "attach_evidence", "consult", "delegate",
                           "report", "finish", "sync", "vcs_read", "vcs_publish",
                           "vcs_retire", "vcs_dispose", "vcs_request", "research_read", "research",
@@ -301,6 +301,8 @@ class Limits:
     default_wait_seconds: int = 1800
     maximum_wait_seconds: int = 86400
     max_failures: int = 3
+    parallel_checks: int = 2
+    check_pending: int = 32
     parallel_runs: int = 4
     parallel_consults: int = 2
     #: Bounded FIFO admission wait for one-shot `mizu run`; pending capacity
@@ -694,7 +696,7 @@ def load(file: Path) -> Config:
     # memory/files/prompts. Defaults are TOML-overridable fallbacks.
     # daily_requests 0 disables (fail-closed); max_failures 0 disables the
     # auto-pause brake only (budgets/deadlines still bound spend and time).
-    _LIMIT_RANGES = {"history_index": (8, 1000000), "prompt_snapshots": (1, 64),
+    _LIMIT_RANGES = {"parallel_checks": (1, 64), "check_pending": (1, 1024), "history_index": (8, 1000000), "prompt_snapshots": (1, 64),
                      "delegate_wrap_up_requests": (0, 2),
                      "delegate_wrap_up_tools": (0, 4),
                      "insight_cursor_ttl_seconds": (60, 604800),

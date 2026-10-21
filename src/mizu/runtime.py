@@ -21,6 +21,7 @@ from pathlib import Path
 
 from . import platform as _platform
 from .admission import admission
+from . import check_jobs
 from . import ci_waits, dispatch_evidence, work_item_events
 from .budget import Budget
 from .config import (MAX_CI_WAKE_EXTRA_BRANCHES, Config, Role, load,
@@ -1109,6 +1110,8 @@ class Context:
         return self._read_retained_evidence("experiments", args)
 
     def _op_exec_experiment(self, op: str, args: dict) -> dict:
+        if "check_job" in self.role.capabilities and "source_receipt" not in args and (op == "experiment" or self.role.workspace == "read"):
+            return check_jobs.submit(self, args["script"], kind=op)
         if self.role.workspace == "none":
             raise Denied("This role has no workspace")
         source = {"source_receipt": args["source_receipt"]} if "source_receipt" in args else {}
@@ -1126,7 +1129,21 @@ class Context:
         response['evidence'] = ('experiments/' if op == 'experiment' else 'commands/')+result['id']+'.json'
         return response
 
+    def _op_check_job(self, args: dict) -> dict:
+        action = args['action']
+        if action == 'start':
+            return check_jobs.submit(self, args.get('script'))
+        if action == 'list':
+            return {'jobs': check_jobs.list_jobs(self.project, self.role.name)}
+        if not args.get('id'):
+            raise Denied('Check result requires id')
+        if action == 'cancel':
+            return check_jobs.cancel(self, args['id'])
+        return check_jobs.result(self, args['id'])
+
     def _op_verify(self, args: dict) -> dict:
+        if "check_job" in self.role.capabilities:
+            return check_jobs.submit(self)
         if not self.project.verify:
             raise Denied("No operator acceptance commands are configured")
         before = self.project.snapshots.capture_files(self.workspace)
@@ -1914,6 +1931,12 @@ class Context:
     def _op_finish(self, args: dict) -> dict:
         if not args["summary"].strip():
             raise Denied("A nonempty work summary is required")
+        if args.get('wait_for_check'):
+            if 'check_job' not in self.role.capabilities or args['outcome'] != 'wait':
+                raise Denied('Check wait requires check_job and outcome=wait')
+            job = check_jobs.read(self.project, args['wait_for_check'])
+            if self.role.name not in (job['role'], job.get('producer_role')):
+                raise Denied('Check wait belongs to another role')
         from .routing import check_recommendation
         profile, reason = check_recommendation(args.get("next_profile"), args.get("next_reason"))
         if profile is not None and profile not in self.config.profiles:
@@ -1963,7 +1986,7 @@ class Context:
         "diff": _op_diff, "files": _op_files, "read": _op_read,
         "command_evidence_read": _op_command_evidence_read,
         "experiment_evidence_read": _op_experiment_evidence_read,
-        "exec": _op_exec, "experiment": _op_experiment, "verify": _op_verify,
+        "exec": _op_exec, "experiment": _op_experiment, "verify": _op_verify, "check_job": _op_check_job,
         "fetch": _op_fetch, "probe": _op_probe, "search": _op_search, "insights": _op_insights,
         "work_items_read": _op_work_items_read,
         "work_items_legacy_read": _op_work_items_legacy_read,
@@ -3135,6 +3158,7 @@ def prompt_for(context: Context) -> str:
                        "decision_task": _decision_task(context),
                        "wait_events": list(getattr(context, "wait_events", []) or []),
                        "obligations": list(getattr(context, "obligations", []) or []),
+                       "check_jobs": (check_jobs.list_jobs(context.project, context.role.name) if "check_job" in caps else []),
                        "acceptance_commands": acceptance,
                        "research_state": _prompt_research_state(context),
                        "capture_limit": _prompt_capture_limit(context),
@@ -3209,6 +3233,7 @@ def prompt_delta_for(context: Context, pending: list) -> str:
                        "research_state": _prompt_research_state(context),
                        "capture_limit": _prompt_capture_limit(context),
                        "workspace": "/workspace", "workspace_mode": context.role.workspace,
+                       "check_jobs": (check_jobs.list_jobs(context.project, context.role.name) if "check_job" in caps else []),
                        "acceptance_commands": acceptance,
                        "ci_branch": ((context.config.vcs.get("ci_branch") or None)
                                      if "vcs_read" in caps else None),
@@ -3602,6 +3627,8 @@ class Engine:
             except (MizuError, OSError, ValueError):
                 pass
         with contextlib.ExitStack() as stack:
+            if "check_job" in role.capabilities and check_jobs.waiting(project, role_name):
+                raise Busy("Waiting for sandbox check completion; no model slot acquired")
             admission_elapsed = self._admit(project, role_name, role, stack, wait=retry_busy)
             project.insights.ingest_editor(keep_days=project.config.limits.retention_days)
             snapshot = project.snapshots.get()
@@ -3653,7 +3680,7 @@ class Engine:
                     ready_work=ready_work,
                     has_decision=bool(substantive_events),
                     has_work_item=bool(terminal_events),
-                    has_wait=bool(wait_events),
+                    has_wait=bool(wait_events or check_jobs.pending(project, role_name)),
                     has_ci=bool(ci_failures),
                 ))
                 if event_gate.skipped == "no-event":
@@ -3683,7 +3710,7 @@ class Engine:
                 ready_work=ready_work,
                 has_decision=bool(substantive_events),
                 has_work_item=bool(terminal_events),
-                has_wait=bool(wait_events),
+                has_wait=bool(wait_events or check_jobs.pending(project, role_name)),
                 has_ci=bool(ci_failures),
                 goal_changed=bool(goal_changed),
                 inbox_changed=bool(inbox_changed),
@@ -4157,26 +4184,32 @@ class Engine:
                         from .engine_config import write_prompt_state
                         write_prompt_state(session_dir, snapshot=snapshot["id"],
                                            inbox_generation=context.inbox_seen)
-                result["status"] = "completed"
+                result["status"] = "waiting" if finished.get("wait_for_check") else "completed"
                 if getattr(context, "wrap_up_attempted", False):
                     result["wrap_up"] = {"bound": context.bound_hit}
                 write_json(run_dir / "result.json", result)
-                write_json(project.root / "observed" / f"{role_name}.json",
-                           {"snapshot": snapshot["id"], "code_digest": snapshot["code_digest"]})
-                if context.decision_events:
+                if finished.get("outcome") != "bounded" and not finished.get("wait_for_check"):
+                    with contextlib.suppress(OSError, ValueError, Denied):
+                        check_jobs.acknowledge(project, role_name, getattr(context, "check_results_read", set()))
+                if not finished.get("wait_for_check"):
+                    write_json(project.root / "observed" / f"{role_name}.json",
+                               {"snapshot": snapshot["id"], "code_digest": snapshot["code_digest"]})
+                if context.decision_events and not finished.get("wait_for_check"):
                     with contextlib.suppress(OSError, ValueError, TypeError, AttributeError, Denied):
                         project.insights.acknowledge_decisions(
                             role_name, context.decision_events,
                             sources=getattr(role, "decision_sources", "own") or "own")
-                if context.work_item_events and finished.get("outcome") != "bounded" and not context.bound_hit:
+                if context.work_item_events and not finished.get("wait_for_check") and finished.get("outcome") != "bounded" and not context.bound_hit:
                     with contextlib.suppress(OSError, ValueError, TypeError, AttributeError, Denied):
                         work_item_events.acknowledge(project.work_items, role_name, context.work_item_events)
-                if context.wait_events:
+                if context.wait_events and not finished.get("wait_for_check"):
                     with contextlib.suppress(OSError, ValueError, TypeError, AttributeError, Denied):
                         project.insights.consume_waits(role_name, context.wait_events)
                     if finished.get("outcome") != "bounded" and not context.bound_hit:
                         with contextlib.suppress(OSError, ValueError, TypeError, AttributeError, Denied):
                             ci_waits.acknowledge(project.work_items, role_name, context.wait_events)
+                if finished.get("wait_for_check"):
+                    check_jobs.set_wait(project, role_name, finished["wait_for_check"])
                 write_json(project.root / "health" / f"{role_name}.json",
                            {"consecutive_failures": 0, "consecutive_missing_finish": 0,
                             "last_run": run_id, "updated_at": now()})
@@ -4506,9 +4539,11 @@ class Engine:
                       "profile": profile, "snapshot": snap["id"],
                       "answer": ctx.finished["summary"], "model": model,
                       "activity": ctx.activity_summary()}
+            result["check_jobs"] = [j for j in check_jobs.list_jobs(parent.project, parent.role.name) if j["run"] == run_dir.name]
             write_json(run_dir / "delegation.json", result)
             record = {"task": task, "role": role.name, "run": run_dir.name,
-                      "snapshot": snap["id"], "profile": profile, "answer": ctx.finished["summary"]}
+                      "snapshot": snap["id"], "profile": profile, "answer": ctx.finished["summary"],
+                      "check_jobs": result["check_jobs"]}
             write_json(parent.run_dir / "delegations" / f"{uuid.uuid4().hex}.json", record)
             return record
         except Exception as exc:
@@ -4576,6 +4611,8 @@ def _role_events_due(project: Project, snapshot: dict, role_name=None) -> bool:
             if name in project.config.roles and project.config.roles[name].workspace == "write"]
         for name in names:
             try:
+                if "check_job" in project.config.roles[name].capabilities and check_jobs.pending(project, name):
+                    return True
                 terminal_triggers = project.config.roles[name].work_item_events
                 if terminal_triggers and work_item_events.pending(
                         project.work_items, name, terminal_triggers,
@@ -4662,6 +4699,8 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
     """
     current_time = time.time() if current_time is None else current_time
     control = project.control()
+    if role_name is not None and check_jobs.waiting(project, role_name):
+        return False
     facts = _scheduling.DaemonFacts(
         armed=bool(control.get("armed")),
         paused=bool(control.get("paused")),
@@ -4684,7 +4723,7 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
                 name for name in project.roles
                 if project.config.roles[name].workspace == "write"]
             try:
-                value = any(ci_waits.pending(project.work_items, name, limit=1) for name in names)
+                value = any(check_jobs.pending(project, name) or ci_waits.pending(project.work_items, name, limit=1) for name in names)
             except (Denied, LimitExceeded, OSError, ValueError):
                 value = False
         elif needed == "outcome":

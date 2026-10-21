@@ -115,10 +115,12 @@ def event_watches(config: Config, project: Project) -> dict[str, list[str]]:
         role = config.roles[name]
         if role.daemon:
             continue
-        if not (role.decision_events or role.work_item_events) and not (
+        if not (role.decision_events or role.work_item_events or "check_job" in role.capabilities) and not (
                 role.workspace == "write" and (role.interval_seconds or role.calendar)):
             continue
         watches[name] = [str(project.root / "decision-history"), str(project.root / "waits")]
+        if "check_job" in role.capabilities:
+            watches[name].append(str(project.root / "check-jobs"))
         if role.work_item_events:
             # Terminal appends and successful receipt batches touch this parent
             # as a non-authoritative hint; nested item/receipt writes are not
@@ -152,6 +154,22 @@ def _render_systemd(config: Config, project: Project, executable: Path) -> dict[
             timer.extend(f"OnCalendar=*-*-* {t}:00" + ("" if config.timezone == "local" else " " + config.timezone) for t in role.calendar)
         timer.extend(["", "[Install]", "WantedBy=timers.target"])
         result[base + ".timer"] = "\n".join(timer) + "\n"
+    if any("check_job" in config.roles[name].capabilities for name in project.roles):
+        base = f"mizu-{len(project.name)}-{project.name}-checks"
+        argv = [str(executable.resolve()), "--config", str(config.file), "check-jobs", project.name]
+        result[base + ".service"] = "\n".join([
+            "[Unit]", f"Description=Mizu {project.name} sandbox checks", "StartLimitIntervalSec=0",
+            "", "[Service]", "Type=oneshot", "UMask=0077", "Delegate=yes", "KillMode=control-group",
+            "TimeoutStartSec=0", f"TimeoutStopSec={STOP_SEC}",
+            "ExecStart=" + " ".join(map(quote, argv)), ""])
+        result[base + ".path"] = "\n".join([
+            "[Unit]", f"Description=Mizu {project.name} check queue notification", "", "[Path]",
+            f"PathChanged={project.root / 'check-jobs'}", f"Unit={base}.service", "",
+            "[Install]", "WantedBy=default.target", ""])
+        result[base + ".timer"] = "\n".join([
+            "[Unit]", f"Description=Mizu {project.name} unfinished check recovery", "", "[Timer]",
+            "OnBootSec=30s", "OnUnitInactiveSec=30s", f"Unit={base}.service", "",
+            "[Install]", "WantedBy=timers.target", ""])
     # One event-trigger path for every watched role (scheduled or event-only):
     # a trigger with nothing due exits cheaply via --event, so sharing the
     # rendering cannot miss a later fix in one copy.

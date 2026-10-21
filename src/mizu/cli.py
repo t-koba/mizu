@@ -60,6 +60,9 @@ def parser() -> argparse.ArgumentParser:
             p.add_argument("--attributes", type=Path, help="Operator JSON attributes for this execution")
             p.add_argument("--event", action="store_true",
                            help="Event-triggered dispatch: exit without model use unless a subscribed decision or due wait is pending")
+    p = sub.add_parser("check-jobs", help="Execute one queued frozen-input sandbox check; no model")
+    p.add_argument("project")
+    p.add_argument("--recover", action="store_true", help="Recover quarantined compute slots only after container cleanup")
     p = sub.add_parser("session", help="Manage persistent engine sessions; no inference")
     session = p.add_subparsers(dest="session_command", required=True)
     p = session.add_parser("reset", help="Delete one role's persistent sessions and durable stores for a fresh conversation")
@@ -448,9 +451,25 @@ def _cmd_work_items(config, project, args):
             "event_delivery": progress(project.work_items, roles)}
 
 
+def _cmd_check_jobs(config, project, args):
+    if _platform.is_root():
+        raise Denied("Never run sandbox jobs as root")
+    from .check_jobs import run_one, recover
+    if args.recover:
+        return recover(project)
+    stop = threading.Event()
+    previous = {sig: signal.signal(sig, lambda s, f: stop.set()) for sig in (signal.SIGTERM, signal.SIGINT)}
+    try:
+        return run_one(project, stop)
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
 _PROJECT_COMMANDS = {
     "status": _cmd_status, "arm": _cmd_arm, "disarm": _cmd_disarm,
     "pause": _cmd_pause, "resume": _cmd_resume, "wake": _cmd_wake, "drain": _cmd_drain,
+    "check-jobs": _cmd_check_jobs,
     "run": _cmd_run, "daemon": _cmd_daemon, "cleanup": _cmd_cleanup,
     "insight": _cmd_insight, "service": _cmd_service, "report": _cmd_report,
     "usage": _cmd_usage, "backup": _cmd_backup,
