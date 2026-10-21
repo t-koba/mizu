@@ -177,6 +177,12 @@ def run_one(project, stop, *, sandbox_factory=Sandbox):
     if shutil.disk_usage(project.root).free < project.config.limits.free_disk_mb * 1048576:
         return {'status': 'disk-reserve'}
     with contextlib.ExitStack() as stack:
+        # Cache ownership is acquired before compute admission: waiting for an
+        # artifact must never consume a scarce execution slot.
+        try:
+            stack.enter_context(lock(project.root / 'locks/check-cache.lock', blocking=False))
+        except Busy:
+            return {'status': 'busy'}
         for slot in range(project.config.limits.parallel_checks):
             if (project.config.data / 'check-slots' / f'{slot}.fault.json').exists():
                 continue
@@ -209,6 +215,7 @@ def run_one(project, stop, *, sandbox_factory=Sandbox):
                     return quarantine(project, job, slot, str(exc))
                 job.update(status='interrupted', error='Runner exited before recording completion', finished_at=now())
                 write_json(path, job)
+                shutil.rmtree(path.parent / 'input', ignore_errors=True)
                 os.utime(root(project), None)
                 return summary(job)
             result = _execute(project, job, stop, sandbox_factory)
@@ -227,16 +234,19 @@ def _execute(project, job, stop, sandbox_factory):
             or job['kind'] not in role.capabilities):
         job.update(status='refused', error='Check authority withdrawn', finished_at=now())
         write_json(path, job)
+        shutil.rmtree(directory / 'input', ignore_errors=True)
         os.utime(root(project), None)
         return summary(job)
     if job['execution'] != execution_key(project.config) or (job['kind'] == 'verify' and list(project.verify) != job['commands']):
         job.update(status='refused', error='Execution configuration changed', finished_at=now())
         write_json(path, job)
+        shutil.rmtree(directory / 'input', ignore_errors=True)
         os.utime(root(project), None)
         return summary(job)
     if (directory / 'cancel.json').exists():
         job.update(status='cancelled', finished_at=now())
         write_json(path, job)
+        shutil.rmtree(directory / 'input', ignore_errors=True)
         os.utime(root(project), None)
         return summary(job)
     job.update(status='running', started_at=now())
@@ -250,6 +260,16 @@ def _execute(project, job, stop, sandbox_factory):
         before = project.snapshots.capture_files(workspace)
         if before['code_digest'] != job['code_digest'] or before['skipped']:
             raise Denied('Check job source changed before execution')
+        cache = project.root / 'check-cache' / job['execution']
+        cache_names = project.config.sandbox.check_cache_paths if job['kind'] == 'verify' else ()
+        for name in cache_names:
+            if not project.snapshots.excluded(name) or (workspace / name).exists():
+                raise Denied('Build cache must be excluded from source: ' + name)
+            previous = cache / name
+            if previous.exists() or previous.is_symlink():
+                if previous.is_symlink() or not previous.is_dir():
+                    raise Denied('Build cache is not a directory')
+                previous.replace(workspace / name)
         results = []
         for command in job['commands']:
             if stop.is_set():
@@ -276,6 +296,17 @@ def _execute(project, job, stop, sandbox_factory):
         except Exception as cleanup_exc:
             job.update(status='cleanup_failed', error=('Container cleanup requires recovery: ' + str(cleanup_exc))[:512])
     write_json(path, job)
+    if job['status'] != 'cleanup_failed':
+        # Move only configured, snapshot-excluded build trees after sandbox
+        # cleanup. They are compiler inputs, never evidence of a passing check.
+        if job['status'] == 'completed' and job['kind'] == 'verify':
+            cache = project.root / 'check-cache' / job['execution']
+            mkdir(cache)
+            for name in project.config.sandbox.check_cache_paths:
+                artifact = workspace / name
+                if project.snapshots.excluded(name) and artifact.is_dir() and not artifact.is_symlink():
+                    artifact.replace(cache / name)
+        shutil.rmtree(directory / 'input', ignore_errors=True)
     os.utime(root(project), None)
     return summary(job)
 
@@ -330,6 +361,7 @@ def recover(project):
             job.update(status='interrupted', error='Cleanup recovered; previous execution did not complete', finished_at=now())
             write_json(root(project) / job['id'] / 'job.json', job)
             fault.unlink()
+            shutil.rmtree(root(project) / job['id'] / 'input', ignore_errors=True)
             os.utime(root(project), None)
             recovered.append(job['id'])
     return {'recovered': recovered}

@@ -36,9 +36,19 @@ separate from model admission. `limits.check_pending` (default 32, range 1–102
 bounds unfinished jobs per project. At most 32 acceptance commands belong to one
 job. At 1024 retained records, an acknowledged job is evicted before accepting
 another; if none can be evicted the submission is refused. Frozen source obeys
-the existing snapshot size/file/exclusion bounds. This does not provide an
-incremental compiler cache or cross-role result reuse: neither arbitrary shell
-text nor a mutable mount path is a sufficient immutable input identity.
+the existing snapshot size/file/exclusion bounds. Private source/build trees are
+removed after terminal execution; only bounded evidence is retained. Cleanup
+failures retain the tree until operator recovery confirms container removal. Operators may configure `sandbox.check_cache_paths = ["target"]` to preserve
+incremental compiler artifacts for acceptance jobs. Entries are unique top-level
+directory names and must be excluded from the source snapshot. One project cache
+owner moves these directories into the frozen workspace and back after clean
+completion; waiting for ownership consumes no compute slot. The live writer's
+build tree is never accessed. Environment changes select a separate cache, and
+interrupted jobs discard their private artifacts. Cache storage requires ordinary
+operator disk maintenance and remains subject to the free-space admission reserve.
+Artifacts never substitute for execution or passing evidence. Cross-role result
+reuse is not inferred: neither arbitrary shell text nor a mutable mount path is
+a sufficient immutable input identity.
 
 Job ownership is a host file lock. A crashed runner's unfinished record is
 interrupted and its job-specific containers are cleaned before releasing the

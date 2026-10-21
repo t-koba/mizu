@@ -210,3 +210,32 @@ class JobTests(Fixture):
         with patch('mizu.check_jobs.cleanup'):
             self.assertEqual(check_jobs.recover(self.project)['recovered'], [job['id']])
         self.assertFalse(fault.exists())
+
+    def test_completed_jobs_release_their_private_build_trees(self):
+        ctx, job = self.submit()
+        directory = check_jobs.root(self.project) / job['id']
+        self.assertTrue((directory / 'input').exists())
+        self.run_job()
+        self.assertFalse((directory / 'input').exists())
+        self.assertTrue((directory / 'result.json').exists())
+        self.assertTrue(check_jobs.result(ctx, job['id'])['accepted_for_current_source'])
+
+    def test_build_artifacts_reused_without_acceptance_reuse(self):
+        self.config = dataclasses.replace(self.config, exclude=(*self.config.exclude, 'target'), sandbox=dataclasses.replace(self.config.sandbox, check_cache_paths=('target',)))
+        self.project.config = self.config
+        self.project.snapshots.excludes = self.config.exclude
+        observed = []
+        class Compiler(FakeSandbox):
+            def execute(inner, workspace, script, **kwargs):
+                artifact = workspace / 'target/object'
+                observed.append(artifact.exists())
+                artifact.parent.mkdir(exist_ok=True)
+                artifact.write_text('compiled')
+                return super().execute(workspace, script, **kwargs)
+        ctx, first = self.submit()
+        check_jobs.run_one(self.project, threading.Event(), sandbox_factory=Compiler)
+        later = self.context()
+        check_jobs.submit(later)
+        check_jobs.run_one(self.project, threading.Event(), sandbox_factory=Compiler)
+        self.assertEqual(observed, [False, True])
+        self.assertFalse((ctx.workspace / 'target').exists())
