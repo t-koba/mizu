@@ -81,6 +81,11 @@ class DelegateTests(Fixture):
 
         def callback(ctx, prompt, profile):
             if ctx.role.name == "worker":
+                if ctx.wrap_up_attempted:
+                    seen["root_requests"] = ctx.wrap_up_requests
+                    ctx.handle("finish", {"outcome": "continue", "summary": "parent seals",
+                                          "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+                    return
                 ctx.handle("delegate", {"role": "helper", "task": "spend"})
                 seen["bound"] = ctx.bound_hit
                 seen["child_requests"] = ctx.delegated_wrap_up_requests
@@ -93,7 +98,6 @@ class DelegateTests(Fixture):
                 # ScriptDriver's request reaches the normal cap; these two
                 # admitted requests use the delegated-child share.
                 ctx.handle("_budget", {"sequence": 2})
-                ctx.handle("_budget", {"sequence": 3})
                 seen["child_bound"] = ctx.bound_hit
                 ctx.handle("finish", {"outcome": "continue", "summary": "child seals",
                                       "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
@@ -115,6 +119,11 @@ class DelegateTests(Fixture):
 
         def callback(ctx, prompt, profile):
             if ctx.role.name == "worker":
+                if ctx.wrap_up_attempted:
+                    seen["root_requests_after_seal_request"] = ctx.wrap_up_requests
+                    ctx.handle("finish", {"outcome": "continue", "summary": "root sealed",
+                                          "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+                    return
                 responses = [ctx.handle("delegate", {"role": "helper", "task": str(i)})
                              for i in range(3)]
                 seen["parent_bound"] = ctx.bound_hit
@@ -195,7 +204,6 @@ class DelegateTests(Fixture):
         def callback(ctx, prompt, profile):
             if ctx.role.name != "worker":
                 ctx.handle("_budget", {"sequence": 2})
-                ctx.handle("_budget", {"sequence": 3})
                 ctx.handle("finish", {"outcome": "continue", "summary": "child sealed",
                                       "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
                 return

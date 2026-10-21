@@ -10,6 +10,7 @@ from .bridge import Bridge
 from .config import Config, Role, role_policy_text
 from .engine_channel import Channel
 from .engine_config import effective, connected_servers, session_record, save_session, session_token_total, MAX_SESSION_TOKENS
+from .errors import RequestYieldExceeded
 from .errors import ConfigError, DeadlineWrapUp, ProtocolError, ModelFailure
 from .fs import atomic_write, mkdir, write_json
 from .process import environment
@@ -77,6 +78,12 @@ class PiDriver:
                         message = event.get("message", {})
                         if message.get("role") == "assistant":
                             if message.get("stopReason") == "error":
+                                if getattr(context, "request_bound_exhausted", False):
+                                    raise RequestYieldExceeded("Request wrap-up allowance exhausted")
+                                if (getattr(context, "request_admission_refused", False)
+                                        and context.bound_hit == "requests" and not context.wrap_up_attempted
+                                        and not context.request_deadlines):
+                                    raise DeadlineWrapUp(context._bound_message())
                                 # A drain that refused the request is the
                                 # drain bound, not a provider failure: the unit
                                 # gets its wrap-up and records its finish, like
@@ -110,7 +117,7 @@ class PiDriver:
                 # bridge, so the host can cross the drain boundary from either
                 # that admission or transport polling. Preserve the active
                 # conversation before Engine starts its reduced-grant turn.
-                if (context.bound_hit == "drain" and not context.wrap_up_attempted
+                if (context.bound_hit in ("drain", "requests") and not context.wrap_up_attempted
                         and isinstance(session_file, str) and session_file):
                     save_session(path, session_file, {"tokens": _cumulative_tokens(saved, context)})
                 raise

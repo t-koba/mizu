@@ -42,6 +42,10 @@ class DeadlineWrapUp(LimitExceeded):
     """Enter the existing wrap-up allowance before the wall expires."""
 
 
+class RequestYieldExceeded(LimitExceeded):
+    """Local request wrap-up exhausted; preserve work without counting a fault."""
+
+
 class DrainYieldExceeded(LimitExceeded):
     """Explicit drain wrap-up ended without a seal; bounded, not a fault."""
 
@@ -57,7 +61,7 @@ class InfraExceeded(LimitExceeded):
     admission handling still catches it, while the consecutive-failure
     brake can distinguish it from model/local bound faults by type alone
     (no message parsing). Only budget/disk guards raise this; engine
-    deadlines, event-stream bounds, RPC deadlines, per-run tool/request
+    deadlines, event-stream bounds, RPC deadlines, per-run tool
     bounds, file-count/snapshot bounds stay plain ``LimitExceeded`` and
     still count toward the brake.
     """

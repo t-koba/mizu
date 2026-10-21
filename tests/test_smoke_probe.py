@@ -131,7 +131,12 @@ class SmokeProbeTests(Fixture):
             self.config.limits, requests_per_run=2, tools_per_run=5))
         ctx2.handle("_budget", {"sequence": 1})
         ctx2.handle("_budget", {"sequence": 2})
-        # Over-budget requests draw the fixed wrap-up allowance (3) before
+        from mizu.errors import DeadlineWrapUp
+        with self.assertRaises(DeadlineWrapUp):
+            ctx2.handle("_budget", {"sequence": 3})
+        self.assertEqual(ctx2.wrap_up_requests, 0)
+        ctx2.wrap_up_attempted = True
+        # Reduced-grant requests draw the fixed wrap-up allowance (3) before
         # the bound refuses again.
         ctx2.handle("_budget", {"sequence": 3})
         ctx2.handle("_budget", {"sequence": 4})

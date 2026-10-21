@@ -30,6 +30,7 @@ from .config import (MAX_CI_WAKE_EXTRA_BRANCHES, Config, Role, load,
                      role_wrap_up_requests, role_wrap_up_tools)
 from .doctor import container_runtime
 from .drivers import driver_for
+from .errors import RequestYieldExceeded
 from .errors import (AuthorityGrantMismatch, Busy, Cancelled, CaptureLimitExceeded,
                       ConfigError, Denied, InfraExceeded, LimitExceeded, RunDeadlineExceeded,
                       DeadlineWrapUp, DrainYieldExceeded, MissingFinish, MizuError, ModelFailure,
@@ -797,13 +798,19 @@ class Context:
                     if sequence_key not in self.request_sequences:
                         over = self.bound_hit in ("deadline", "drain") or self.request_count >= role_requests_per_run(
                             self.config, self.spend_role or self.role)
+                        if (over and self.bound_hit in (None, "requests")
+                                and not self.wrap_up_attempted):
+                            self.bound_hit = "requests"
+                            self.request_admission_refused = True
+                            raise DeadlineWrapUp("Per-run provider request budget exhausted")
                         requests_used, requests_limit = self._wrap_up_request_used_limit()
                         if over and requests_used >= requests_limit:
                             if self.bound_hit == "drain":
                                 raise DrainYieldExceeded("Drain wrap-up request allowance exhausted")
                             if self.bound_hit == "deadline":
                                 raise RunDeadlineExceeded("Deadline wrap-up request allowance exhausted")
-                            raise LimitExceeded("Per-run provider request budget exhausted")
+                            self.request_bound_exhausted = True
+                            raise RequestYieldExceeded("Per-run provider request budget exhausted")
                         try:
                             Budget(self.config.data / "budget", self.config.limits.daily_requests,
                                    self.config.limits.retention_days,
@@ -3372,13 +3379,14 @@ class Engine:
                 context.turn_authority_role = authority
                 context.turn_continuation = True
                 previous_session_capabilities = context.session_identity_capabilities
-                if context.bound_hit == "drain":
+                if context.bound_hit in ("drain", "requests"):
                     context.session_identity_capabilities = authority.capabilities
                 try:
                     context.role = dataclasses.replace(authority,
                         capabilities=tuple(c for c in authority.capabilities if c in WRAP_UP_OPS),
                         engine_tools=(), selector="")
                     context.operations_stopped.clear()
+                    context.admission_error = None
                     context.clear_request_deadlines()  # The failed transport was reaped, not renewed.
                     context.transport_idle_deadline = time.monotonic() + context.config.limits.model_request_seconds
                     context.execution_attempt += 1
@@ -3396,6 +3404,8 @@ class Engine:
                 # The reserved deadline transition (or an already-used wrap-up)
                 # is authoritative; a missing finish there follows its existing
                 # bounded/failure behavior, not this separate policy.
+                if context.wrap_up_attempted and context.bound_hit == "requests":
+                    raise RequestYieldExceeded("Request wrap-up ended without a seal")
                 if context.wrap_up_attempted or context.bound_hit == "deadline" or context.wall_expired():
                     if context.wall_expired() or context.bound_hit == "deadline":
                         context.missing_finish_evidence = {
@@ -4172,13 +4182,13 @@ class Engine:
                             "last_run": run_id, "updated_at": now()})
                 return result
             except BaseException as exc:
-                if (isinstance(exc, (RunDeadlineExceeded, DrainYieldExceeded, AuthorityGrantMismatch))
+                if (isinstance(exc, (RunDeadlineExceeded, DrainYieldExceeded, RequestYieldExceeded, AuthorityGrantMismatch))
                         and context is not None
                         and context.finished is None and not context.host_cancelled()):
                     result = {"run": run_id, "role": role_name, "status": "bounded",
                               "bound": ("drain" if isinstance(exc, DrainYieldExceeded)
                                         else ("authority" if isinstance(exc, AuthorityGrantMismatch)
-                                              else "deadline")),
+                                              else ("requests" if isinstance(exc, RequestYieldExceeded) else "deadline"))),
                               "finished_at": now(), "error": str(exc),
                               "publication": "not_published", "snapshot": snapshot["id"],
                               "code_digest": snapshot["code_digest"],

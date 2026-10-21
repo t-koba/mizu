@@ -24,6 +24,7 @@ from .drivers import EVENT_RECORD_BYTES
 from .engine_config import (MAX_SESSION_TOKENS, adapter_digest, effective,
                              save_session, session_generation, session_record,
                              session_token_total)
+from .errors import RequestYieldExceeded
 from .errors import Cancelled, ConfigError, LimitExceeded, ProtocolError, ModelFailure, RunDeadlineExceeded, DeadlineWrapUp, DrainYieldExceeded
 from .fs import atomic_write, canonical, digest, mkdir, write_json
 from .pi_durable_store import (BACKENDS, RESUME_MODES, complete_run, complete_turn,
@@ -561,6 +562,11 @@ def interpret_result(reported, context, model, thinking_level) -> None:
         context.bound_hit = "drain" if reported.get("status") == "drain" else (
             context.bound_hit or "requests")
         requests_used, requests_limit = context._wrap_up_request_used_limit()
+        if context.bound_hit == "requests" and getattr(context, "request_admission_refused", False):
+            if not context.wrap_up_attempted:
+                raise DeadlineWrapUp(context._bound_message())
+            if getattr(context, "request_bound_exhausted", False):
+                raise RequestYieldExceeded("Request wrap-up allowance exhausted")
         if context.bound_hit == "drain":
             if not context.wrap_up_attempted:
                 raise DeadlineWrapUp(context._bound_message())

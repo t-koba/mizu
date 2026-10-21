@@ -574,6 +574,11 @@ class PerRoleSpendTests(Fixture):
         ctx.role = config.roles["worker"]
         ctx.handle("_hello", {})
         ctx.handle("_budget", {"sequence": 1})
+        from mizu.errors import DeadlineWrapUp
+        with self.assertRaises(DeadlineWrapUp):
+            ctx.handle("_budget", {"sequence": 2})
+        self.assertEqual(ctx.wrap_up_requests, 0)
+        ctx.wrap_up_attempted = True
         # One wrap-up request fits the per-role override (1); the next refuses.
         ctx.handle("_budget", {"sequence": 2})
         self.assertEqual(ctx.bound_hit, "requests")
@@ -626,7 +631,12 @@ class PerRoleSpendTests(Fixture):
         ctx2.role = config.roles["worker"]
         ctx2.handle("_hello", {})
         ctx2.handle("_budget", {"sequence": 1})
-        # The first requests over the bound draw the wrap-up allowance (3);
+        from mizu.errors import DeadlineWrapUp
+        with self.assertRaises(DeadlineWrapUp):
+            ctx2.handle("_budget", {"sequence": 2})
+        self.assertEqual(ctx2.wrap_up_requests, 0)
+        ctx2.wrap_up_attempted = True
+        # The reduced-grant requests draw the wrap-up allowance (3);
         # the fourth over-budget request refuses.
         for sequence in (2, 3, 4):
             ctx2.handle("_budget", {"sequence": sequence})
