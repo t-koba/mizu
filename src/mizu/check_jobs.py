@@ -93,6 +93,7 @@ def submit(context, script=None, *, kind="experiment"):
                    'commands': commands, 'status': 'queued', 'created_at': now(),
                    'acknowledged': False}
             write_json(directory / 'job.json', job)
+            os.utime(root(project), None)
         except BaseException:
             shutil.rmtree(directory, ignore_errors=True)
             raise

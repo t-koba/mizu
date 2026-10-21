@@ -121,6 +121,7 @@ class JobTests(Fixture):
                             'state': 'Independent work complete', 'wait_for_check': job['id']})
         result = Engine(self.config, driver=ScriptDriver(act)).run(self.project, 'worker')
         self.assertEqual(result['status'], 'waiting')
+        self.assertIsInstance(result['next_evaluation_at'], (int, float))
         self.assertFalse((self.project.root / 'observed/worker.json').exists())
         self.assertTrue(check_jobs.waiting(self.project, 'worker'))
         self.assertFalse(should_run(self.project, self.project.snapshots.get(), role_name='worker'))

@@ -4187,6 +4187,8 @@ class Engine:
                         write_prompt_state(session_dir, snapshot=snapshot["id"],
                                            inbox_generation=context.inbox_seen)
                 result["status"] = "waiting" if finished.get("wait_for_check") else "completed"
+                if finished.get("wait_for_check"):
+                    result["next_evaluation_at"] = time.time() + self.config.limits.idle_seconds
                 if getattr(context, "wrap_up_attempted", False):
                     result["wrap_up"] = {"bound": context.bound_hit}
                 write_json(run_dir / "result.json", result)
