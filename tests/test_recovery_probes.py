@@ -119,9 +119,24 @@ class RecoveryProbeTests(SelectionFixture):
     def test_fail_fast_probe_skips_a_resource_blocked_caller(self):
         action = self.setup_probe()
         stop = threading.Event()
+        queued = threading.Event()
+        release_waiter = threading.Event()
         config = dataclasses.replace(self.config, limits=dataclasses.replace(
             self.config.limits, idle_seconds=0.02))
         resource = self.project.root / "locks/run-pending.lock"
+        original_attempt = _Queue.attempt
+
+        def attempt(queue, *, enqueue):
+            try:
+                return original_attempt(queue, enqueue=enqueue)
+            finally:
+                if threading.current_thread() is thread and queue.alive is not None:
+                    # The queue transaction has ended. Keep the live blocked
+                    # ticket, but avoid racing the probe's fail-fast queue lock
+                    # against unrelated waiter polling (especially on Windows).
+                    queued.set()
+                    release_waiter.wait()
+
         def wait():
             try:
                 with admission(config, (resource,), wait=True, stop=stop):
@@ -130,21 +145,18 @@ class RecoveryProbeTests(SelectionFixture):
                 pass
         thread = threading.Thread(target=wait)
         try:
-            with lock(resource, blocking=False):
+            with patch.object(_Queue, "attempt", attempt), lock(resource, blocking=False):
                 thread.start()
-                deadline = time.monotonic() + 5
-                while not read_json(config.data / "slots/queue.json", {}).get("tickets"):
-                    if time.monotonic() >= deadline:
-                        self.fail("caller did not enqueue")
-                    time.sleep(0.01)
+                self.assertTrue(queued.wait(5), "caller did not enqueue")
                 result, driver = self.service(config=config)
-                self.assertEqual(result['status'], 'success')
+                self.assertEqual(result['status'], 'success', result)
                 self.assertEqual(len(driver.calls), 1)
                 self.assertEqual(self.contribution(action)['status'], 'recovered')
                 self.assertTrue(thread.is_alive())
                 self.assertEqual(len(read_json(config.data / 'slots/queue.json')['tickets']), 1)
         finally:
             stop.set()
+            release_waiter.set()
             thread.join(5)
         self.assertFalse(thread.is_alive())
         self.assertEqual(read_json(config.data / "slots/queue.json")["tickets"], [])
