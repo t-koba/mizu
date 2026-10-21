@@ -4,6 +4,7 @@ from __future__ import annotations
 import datetime as dt
 import difflib
 import fnmatch
+from functools import lru_cache
 import itertools
 import os
 import re
@@ -19,6 +20,14 @@ from .vcs import REF_PREFIX
 
 
 _CURRENT_PARENT = object()
+
+
+@lru_cache(maxsize=16)
+def _exclude_matcher(excludes):
+    # Combine the exact fnmatchcase translations once per policy, not once per
+    # path component and pattern. The bounded cache holds no workspace names.
+    return re.compile("|".join(fnmatch.translate(p) for p in excludes)).match if excludes else lambda _: False
+
 
 PROGRESS_SIGNALS = ("tool", "code", "state", "decision", "insight", "input")
 _PROGRESS_TIMESTAMP = re.compile(
@@ -229,8 +238,8 @@ class Snapshots:
         parts = name.split("/")
         if len(parts) >= len(REF_PREFIX) and tuple(parts[:len(REF_PREFIX)]) == REF_PREFIX:
             return True
-        return any(fnmatch.fnmatchcase(part, pattern)
-                   for part in name.split("/") for pattern in self.excludes)
+        match = _exclude_matcher(tuple(self.excludes))
+        return any(match(part) for part in parts)
 
     def check_bounds(self, workspace: Path) -> None:
         """Fail with the offending paths when the workspace cannot be captured.

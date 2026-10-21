@@ -51,7 +51,7 @@ class EventEvidenceTests(Fixture):
         channel.raw = bytearray()
         channel.retained_bytes = channel.dropped_bytes = 0
         channel.truncated = False
-        with patch("mizu.engine_channel.platform.read_pipe", side_effect=[*blocks, b""]):
+        with patch("mizu.engine_channel.platform.wait_pipe", return_value=True), patch("mizu.engine_channel.platform.read_pipe", side_effect=[*blocks, b""]):
             channel._read(object(), True)
         items = []
         while not channel.records.empty():
@@ -65,7 +65,7 @@ class EventEvidenceTests(Fixture):
         marker = b"FINAL FAILURE: provider exited\n"
         payload = b"o" * DIAGNOSTICS_TAIL_BYTES + b"new log\n" + marker
         blocks = self._chunks(payload)
-        with patch("mizu.engine_channel.platform.read_pipe", side_effect=[*blocks, b""]):
+        with patch("mizu.engine_channel.platform.wait_pipe", return_value=True), patch("mizu.engine_channel.platform.read_pipe", side_effect=[*blocks, b""]):
             channel._read(object(), False)
 
         retained = bytes(channel.diagnostics)

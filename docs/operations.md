@@ -609,3 +609,15 @@ A crash can leave `started` without an end; later observations may still exist i
 and do not retry, cancel or change model execution; evidence can consequently be
 missing or stale and is not an audit-completeness guarantee. Scheduling remains
 FIFO with unchanged slot/role/workspace locking, provider TTL and session policy.
+
+### 監視処理の資源使用
+
+POSIX のエンジン出力は pipe readiness で待機し、入力がない間の読み取りを
+繰り返しません。出力・EOF・既存のレコード上限は従来どおり処理します。
+汎用子プロセスの終了・出力エラーは監視を起こし、停止権限・動的期限は
+最大50ミリ秒周期で再確認します。pipe 待機は100ミリ秒以下で解除可能で、
+Windows の匿名 pipe は既存の PeekNamedPipe 経路を使います。
+イベント証跡の公開は保持済みバッファから直接行い、同量の bytes コピーを
+作りません。保持上限・切り詰めの記録・原子的公開は変更しません。
+スナップショットの除外照合は同じ fnmatchcase パターンを結合した式を
+最大16ポリシー分だけ保持し、パス名や検証結果をキャッシュしません。

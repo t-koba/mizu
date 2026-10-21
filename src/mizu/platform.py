@@ -392,6 +392,23 @@ def prepare_pipe(stream) -> None:
         os.set_blocking(stream.fileno(), False)
 
 
+def wait_pipe(stream, stop, timeout=.1) -> bool:
+    """Wait for POSIX pipe readiness without idle read polling.
+
+    Windows anonymous pipes keep their existing nonblocking PeekNamedPipe path.
+    The bounded POSIX wait lets cancellation join readers before fd teardown.
+    EOF is readable, so consumers still drain and detect closed transports.
+    """
+    if stop.is_set():
+        return False
+    if IS_POSIX:
+        import select
+        poller = select.poll()
+        poller.register(stream, select.POLLIN)
+        return bool(poller.poll(timeout * 1000))
+    return True
+
+
 def read_pipe(stream, maximum: int) -> bytes:
     """Read available raw pipe bytes, b'' on EOF, BlockingIOError if idle."""
     if IS_WINDOWS:

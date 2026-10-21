@@ -174,12 +174,15 @@ def run(argv: Sequence[str], *, timeout: float | Callable[[], float | None], max
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
                              **_platform.popen_kwargs())
     stop, truncated = threading.Event(), threading.Event()
+    changed = threading.Event()
     output_lock = threading.Lock()
     errors = []
     def pump(stream, key):
         _platform.prepare_pipe(stream)
         try:
             while not stop.is_set():
+                if not _platform.wait_pipe(stream, stop):
+                    continue
                 try:
                     chunk = _platform.read_pipe(stream, 65536)
                 except BlockingIOError:
@@ -196,6 +199,8 @@ def run(argv: Sequence[str], *, timeout: float | Callable[[], float | None], max
         except (OSError, ValueError) as exc:
             if not stop.is_set():
                 errors.append(exc)
+        finally:
+            changed.set()
     readers = [threading.Thread(target=pump, args=(process.stdout, "stdout"), daemon=True, name="mizu-output"),
                threading.Thread(target=pump, args=(process.stderr, "stderr"), daemon=True, name="mizu-output")]
     for reader in readers:
@@ -227,7 +232,10 @@ def run(argv: Sequence[str], *, timeout: float | Callable[[], float | None], max
                 elif input_errors or errors:
                     reason = "input_error" if input_errors else "output_error"
                 break
-            stop.wait(.01 if deadline is None else min(.01, max(0, deadline-time.monotonic())))
+            # I/O completion wakes immediately; idle authority/deadline checks
+            # remain bounded at 50 ms without 100 control-file reads per second.
+            changed.wait(.05 if deadline is None else min(.05, max(0, deadline-time.monotonic())))
+            changed.clear()
     finally:
         stop.set()
         terminate(process, grace=0)

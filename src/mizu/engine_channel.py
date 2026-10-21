@@ -68,6 +68,8 @@ class Channel:
         pending = bytearray()
         try:
             while not self.stop.is_set():
+                if not platform.wait_pipe(stream, self.stop):
+                    continue
                 try:
                     block = platform.read_pipe(stream, 65536)
                 except BlockingIOError:
@@ -161,7 +163,7 @@ class Channel:
             stream.close()
         from .engine_config import stop_engine_containers
         try:
-            atomic_write(self.context.run_dir / (self.label+'-events.jsonl'), bytes(self.raw))
+            atomic_write(self.context.run_dir / (self.label+'-events.jsonl'), memoryview(self.raw))
             atomic_write(self.context.run_dir / 'diagnostics.txt', bytes(self.diagnostics))
             if self.truncated:
                 atomic_write(self.context.run_dir / (self.label+'-events-truncated.json'),
