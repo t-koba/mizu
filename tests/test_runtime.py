@@ -849,6 +849,31 @@ class PromptProjectionTests(Fixture):
         self.assertIn(record["activity"], {"tool:read", "other"})
         self.assertIn("activity_since", record)
 
+    def test_child_activity_is_published_without_overwriting_role_owner(self):
+        from mizu.fs import read_json, write_json
+        ctx = self.context("worker")
+        ctx.parent_run = "parent-run"
+        active = ctx.project.root / "active" / "worker.json"
+        owner = {"run": "other-run", "role": "worker"}
+        write_json(active, owner)
+        ctx._activity_change(lambda: setattr(ctx, "_activity_operation", "read"))
+        child = read_json(ctx.run_dir / "activity.json")
+        self.assertEqual(child["schema"], 1)
+        self.assertEqual(child["parent_run"], "parent-run")
+        self.assertEqual(child["run"], ctx.run_dir.name)
+        self.assertEqual(child["activity"], "tool:read")
+        self.assertEqual(read_json(active), owner)
+
+    def test_activity_gauge_matches_parent_record(self):
+        from mizu.fs import read_json, write_json
+        ctx = self.context("worker")
+        active = ctx.project.root / "active" / "worker.json"
+        write_json(active, {"run": ctx.run_dir.name, "role": "worker"})
+        ctx._activity_change(lambda: setattr(ctx, "_activity_operation", "verify"))
+        gauge = read_json(ctx.run_dir / "activity.json")
+        for key in ("activity", "activity_since", "activity_seconds", "activity_total_seconds"):
+            self.assertEqual(gauge[key], read_json(active)[key])
+
     def test_active_record_ignores_superseded_run_and_explain_tolerates_legacy(self):
         from mizu.fs import read_json, write_json
         from mizu.explain import explain
