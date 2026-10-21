@@ -429,6 +429,29 @@ class QueueTests(Fixture):
         self.assertEqual(outcome, ['admitted'])
         self.assertEqual(self.tickets(), [])
 
+    def test_enqueue_time_metadata_is_bounded_and_aware(self):
+        candidate = _Queue(self.config, ())
+        for value in (None, 0, True, '', 'not-a-time', '2026-01-01T01:02:03', 'x' * 33):
+            with self.subTest(value=value):
+                candidate._write([{'id': 'f' * 32, 'owner': 0, 'resources': [], 'enqueued_at': value}])
+                with self.assertRaisesRegex(Busy, 'queue is invalid'):
+                    candidate._read()
+
+    def test_enqueue_time_is_recorded_once_and_survives_queue_updates(self):
+        with self.raw_slots():
+            with patch('mizu.admission.now', return_value='2026-01-01T01:02:03+00:00'):
+                first, _, first_result = self.queued_waiter()
+            original = self.tickets()[0]
+            self.assertEqual(original['enqueued_at'], '2026-01-01T01:02:03+00:00')
+            with patch('mizu.admission.now', return_value='2026-01-01T04:05:06+00:00'):
+                second, _, second_result = self.queued_waiter()
+            rows = self.tickets()
+            self.assertEqual(rows[0], original)
+            self.assertEqual(rows[1]['enqueued_at'], '2026-01-01T04:05:06+00:00')
+        first.join(5); second.join(5)
+        self.assertEqual(first_result, ['admitted'])
+        self.assertEqual(second_result, ['admitted'])
+
     def test_configured_deadline_retires_ticket_without_dispatch(self):
         self.tune(admission_wait_seconds=0.06)
         with self.raw_slots():
@@ -766,7 +789,8 @@ class QueueTests(Fixture):
         candidate = _Queue(self.config, ())
         project, role = 'a' * 63, 'b' * 63
         resources = [f'{project}/locks/run-{role}.lock', f'{project}/locks/workspace.lock']
-        tickets = [{'id': f'{i:032x}', 'owner': i, 'resources': resources}
+        tickets = [{'id': f'{i:032x}', 'owner': i, 'resources': resources,
+                    'enqueued_at': '2099-01-01T00:00:00.000000+00:00'}
                    for i in range(candidate.capacity)]
         candidate._write(tickets)
         self.assertLessEqual((candidate.root / 'queue.json').stat().st_size, candidate.state_bytes)

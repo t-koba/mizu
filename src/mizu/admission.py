@@ -16,9 +16,10 @@ import time
 import uuid
 from collections.abc import Sequence
 from pathlib import Path
+from datetime import datetime
 
 from .errors import Busy, Denied
-from .fs import ID, canonical, lock, write_json
+from .fs import ID, canonical, lock, now, write_json
 
 
 def role_exclusion(project: Path, role: str) -> Path:
@@ -105,6 +106,9 @@ class _Queue:
 
     State is local coordination data: version 1, tickets in arrival order, each
     with a hex id, pending-lock index and zero to two project-relative lock paths.
+    New tickets record enqueued_at as bounded, aware ISO-8601 display metadata;
+    it never affects ordering, cancellation or kernel-lock liveness. Older
+    tickets without that metadata retain their unknown start time.
     No Context, provider state, PID, clock lease or cache prediction is stored.
     Kernel locks make dead owners reclaimable without PID-reuse/TTL guesses.
     All dispatch locks are nonblocking, including the short queue transaction.
@@ -124,7 +128,8 @@ class _Queue:
         # The per-ticket newline covers the comma separating list entries.
         longest = f"{'a' * 63}/locks/run-{'a' * 63}.lock"
         self.state_bytes = len(canonical({"version": 1, "tickets": []})) + self.capacity * len(canonical(
-            {"id": "f" * 32, "owner": self.capacity - 1, "resources": [longest, longest]}))
+            {"id": "f" * 32, "owner": self.capacity - 1, "resources": [longest, longest],
+             "enqueued_at": "2099-01-01T00:00:00.000000+00:00"}))
         self.identity = uuid.uuid4().hex
         self.alive = None
 
@@ -141,6 +146,15 @@ class _Queue:
         name = parts[2]
         return name == "workspace.lock" or (name.startswith("run-") and name.endswith(".lock")
                                             and ID.fullmatch(name[4:-5]) is not None)
+
+    @staticmethod
+    def _valid_enqueued_at(value):
+        if not isinstance(value, str) or len(value) > 32:
+            return False
+        try:
+            return datetime.fromisoformat(value).tzinfo is not None
+        except ValueError:
+            return False
 
     def _read(self):
         try:
@@ -181,13 +195,15 @@ class _Queue:
         tickets = state["tickets"]
         owners, identities = set(), set()
         for ticket in tickets:
-            if (not isinstance(ticket, dict) or set(ticket) != {"id", "owner", "resources"}
+            if (not isinstance(ticket, dict) or set(ticket) not in ({"id", "owner", "resources"},
+                                                                   {"id", "owner", "resources", "enqueued_at"})
                     or not isinstance(ticket["id"], str) or len(ticket["id"]) != 32
                     or any(c not in "0123456789abcdef" for c in ticket["id"])
                     or type(ticket["owner"]) is not int or not 0 <= ticket["owner"] < self.capacity
                     or not isinstance(ticket["resources"], list) or len(ticket["resources"]) > 2
                     or any(not self._valid_resource(p) for p in ticket["resources"])
-                    or ticket["owner"] in owners or ticket["id"] in identities):
+                    or ticket["owner"] in owners or ticket["id"] in identities
+                    or ("enqueued_at" in ticket and not self._valid_enqueued_at(ticket["enqueued_at"]))):
                 raise _Invalid("Execution admission queue is invalid")
             owners.add(ticket["owner"])
             identities.add(ticket["id"])
@@ -222,7 +238,7 @@ class _Queue:
                 continue
             self.alive = manager
             tickets.append({"id": self.identity, "owner": owner,
-                            "resources": list(self.resources)})
+                            "resources": list(self.resources), "enqueued_at": now()})
             self._write(tickets)
             return
         raise _Full("Execution admission queue is full")
