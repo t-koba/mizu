@@ -78,12 +78,13 @@ source copy -- the input of a check job -- carries no `node_modules`, so
 without this the SDK gates fail closed on absent dependencies and the
 acceptance command has to be waived. The install happens only for a gate that
 will actually run (a waived gate needs no dependencies) and only over an
-adapter that holds no installed dependencies at all: `npm ci` is the clean
-install and replaces the whole tree, so it never runs over a tree the operator
+adapter that has no dependency tree at all: `npm ci` is the clean install and
+replaces the whole tree, so it never runs over a tree the operator
 provisioned. An adapter that holds some of the pinned packages is left exactly
-as it is and fails closed, naming the packages that are missing; an installed
-version that differs from the pin is a contract violation, never reinstalled
-over. A missing npm, a missing lockfile, a failed install or an elapsed 300 s
+as it is and fails closed, naming the packages that are missing; an adapter
+that holds none of them is absent, and the install does not run over the tree
+it has either. An installed version that differs from the pin is a contract
+violation, never reinstalled over. A missing npm, a missing lockfile, a failed install or an elapsed 300 s
 bound leaves the gate's verdict unchanged and the previous installation
 untouched, and names npm's own output.
 
@@ -104,7 +105,13 @@ npm_config_cache = "/npm-cache"
 ```
 
 `python3 scripts/check.py --no-provision` reports absent dependencies instead
-of installing them. Podman and systemd validations only run on Linux.
+of installing them.
+
+The receipt names each child's own outcome. A child that was stopped for time
+reported no exit code of its own, so the receipt carries no exit code for it
+and records the reason instead; a suite that reported no summary carries no
+test count rather than a count of zero. Podman and systemd validations only
+run on Linux.
 
 Offline tests require no API credentials, internet access, or running container daemons. The CI matrix targets Python 3.11–3.14; the recorded local result is Linux 3.14.
 
