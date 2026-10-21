@@ -439,6 +439,7 @@ class Context:
         self.turn_authority_role = None
         self.turn_continuation = False
         self.admission_error: str | None = None
+        self.admission_exception: MizuError | None = None
         self.admission_wait = False
         # Selector failover identity for durable submissions. Retries and
         # recovery of this candidate keep the same ordinal; only a proven
@@ -846,9 +847,13 @@ class Context:
                         if hasattr(self, "model_evidence"):
                             self.model_evidence.update(requests=self.request_count, requests_known=True, admission_status="accepted")
                         write_json(self.run_dir / "admission.json", {"requests": self.request_count})
+                    self.admission_error = None
+                    self.admission_exception = None
+                    self.admission_wait = False
                     return {"admitted": True}
                 except MizuError as exc:
                     self.admission_error = str(exc)
+                    self.admission_exception = exc
                     raise
             if self.bound_hit == "drain" and not self.wrap_up_attempted:
                 # Fence this transport after latching the boundary. Even a
@@ -3383,6 +3388,19 @@ class Engine:
             return self.driver
         return driver_for(self.config, profile, self._drivers)
 
+    def _dispatch(self, context: Context, driver, prompt: str, **kwargs) -> dict:
+        # Retain host exception identity across an adapter's error event. Model
+        # text can neither fabricate a local bound nor change its accounting.
+        context.admission_error = None
+        context.admission_exception = None
+        context.admission_wait = False
+        try:
+            return dispatch_evidence.execute(context, driver, prompt, **kwargs)
+        except ModelFailure as exc:
+            if isinstance(context.admission_exception, MizuError):
+                raise context.admission_exception from exc
+            raise
+
     def _execute(self, context: Context, driver, prompt: str, **kwargs) -> dict:
         """Preserve a durable host seal and recover only normal unsealed returns.
 
@@ -3402,7 +3420,7 @@ class Engine:
             context.clear_request_deadlines()
             context.transport_idle_deadline = time.monotonic() + context.config.limits.model_request_seconds
             try:
-                model_result = dispatch_evidence.execute(context, driver, prompt, **kwargs)
+                model_result = self._dispatch(context, driver, prompt, **kwargs)
                 if context.finished is None:
                     context.enter_drain_wrap_up()
                     if context.bound_hit == "drain" and not context.wrap_up_attempted:
@@ -3429,10 +3447,11 @@ class Engine:
                         engine_tools=(), selector="")
                     context.operations_stopped.clear()
                     context.admission_error = None
+                    context.admission_exception = None
                     context.clear_request_deadlines()  # The failed transport was reaped, not renewed.
                     context.transport_idle_deadline = time.monotonic() + context.config.limits.model_request_seconds
                     context.execution_attempt += 1
-                    model_result = dispatch_evidence.execute(context, driver, context._bound_message() + "\n\n" + prompt, **kwargs)
+                    model_result = self._dispatch(context, driver, context._bound_message() + "\n\n" + prompt, **kwargs)
                 finally:
                     context.turn_authority_role = previous_authority
                     context.turn_continuation = previous_continuation
@@ -3506,7 +3525,7 @@ class Engine:
                     context.operations_stopped.clear()
                     context.transport_idle_deadline = time.monotonic() + context.config.limits.model_request_seconds
                     try:
-                        model_result = dispatch_evidence.execute(context, driver, followup_prompt, **kwargs)
+                        model_result = self._dispatch(context, driver, followup_prompt, **kwargs)
                     finally:
                         context.role = base_role
                         context.turn_authority_role = previous_authority
@@ -4558,6 +4577,8 @@ class Engine:
                 parent.admission_wait = parent.admission_wait or ctx.admission_wait
                 if ctx.admission_error:
                     parent.admission_error = ctx.admission_error
+                    if ctx.bound_hit != "deadline":
+                        parent.admission_exception = ctx.admission_exception
             if ctx.host_cancelled() or (ctx.finished is None and ctx.cancelled()):
                 raise Cancelled("Delegation cancelled before completion")
             if ctx.finished is None:
