@@ -67,7 +67,21 @@ staged tree. Never substitute the general `offline.json` receipt implicitly;
 the CI core-installer step passes the prior report path explicitly, while a
 plain local `./scripts/test-install.sh` still executes the staged gate.
 
-On Windows without bash: run `python scripts/install.py --core-only ...` and test via `bin\mizu.cmd`. Missing bash marks shell-syntax checks as `not_run`; missing Node fails the suite. The Pi SDK, durable-contract, and reasoning-replay gates need the pinned adapter dependencies: absent dependencies fail closed with the provisioning remedy unless their exact gate is explicitly waived; a version mismatch always fails. Installer staging records mode-specific `not_run` waivers: core-only stages waive the Pi SDK, durable-contract, and replay gates because neither adapter is provisioned; full Pi stages run the Pi SDK contract gate against the installed `adapters/pi` and waive only durable-contract and replay, because `pi-durable` is not installed. The required `durable-contract` CI job provisions both pinned adapters from committed lockfiles in a network-enabled setup step, then runs all gates unwaived and offline; the CI matrix and installer-staging waivers are scoped fallbacks, not substitutes for that authoritative job. Podman and systemd validations only run on Linux.
+On Windows without bash: run `python scripts/install.py --core-only ...` and test via `bin\mizu.cmd`. Missing bash marks shell-syntax checks as `not_run`; missing Node fails the suite. The Pi SDK, durable-contract, and reasoning-replay gates need the pinned adapter dependencies: absent dependencies fail closed with the provisioning remedy unless their exact gate is explicitly waived; a version mismatch always fails. Installer staging records mode-specific `not_run` waivers: core-only stages waive the Pi SDK, durable-contract, and replay gates because neither adapter is provisioned; full Pi stages run the Pi SDK contract gate against the installed `adapters/pi` and waive only durable-contract and replay, because `pi-durable` is not installed. The required `durable-contract` CI job provisions both pinned adapters from committed lockfiles in a network-enabled setup step, then runs all gates unwaived and offline; the CI matrix and installer-staging waivers are scoped fallbacks, not substitutes for that authoritative job.
+
+The gate installs the pinned dependencies itself when they are absent: it runs
+`npm ci --offline --engine-strict --no-audit --no-fund --ignore-scripts` with
+`npm_config_offline=true`, so the install resolves from the operator's offline
+npm cache and never reaches the network. A frozen source copy -- the input of
+a check job -- carries no `node_modules`, so without this the SDK gates fail
+closed on absent dependencies and the acceptance command has to be waived. The
+install happens only for a gate that will actually run (a waived gate needs no
+dependencies) and only when the dependencies are absent: an installed version
+that differs from the pin is a contract violation, never reinstalled over. A
+missing npm, a missing lockfile, a failed install or an elapsed 300 s bound
+leaves the gate's verdict unchanged and names npm's own output.
+`python3 scripts/check.py --no-provision` reports absent dependencies instead
+of installing them. Podman and systemd validations only run on Linux.
 
 Offline tests require no API credentials, internet access, or running container daemons. The CI matrix targets Python 3.11–3.14; the recorded local result is Linux 3.14.
 

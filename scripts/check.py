@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run network-free quality gates. Missing required tools fail; absent
-operator-provisioned adapter dependencies fail unless explicitly waived with
+operator-provisioned adapter dependencies are installed from the offline npm
+cache when one is available and fail unless explicitly waived with
 --allow-not-run, so the receipt never passes silently without coverage."""
 from __future__ import annotations
 import argparse
@@ -393,6 +394,95 @@ def pi_sdk_deps_status(adapter: Path) -> tuple:
     return ("ready", "")
 
 
+#: Bound for one offline dependency install. The pinned tree is a few hundred
+#: megabytes of packages resolved from a local cache; the bound is generous
+#: enough for a loaded host and short enough to fail inside the gate's own
+#: budget.
+NPM_PROVISION_TIMEOUT_SECONDS = 300
+
+#: The install command. `npm ci` installs exactly the committed lockfile,
+#: `--offline` (with `npm_config_offline`) keeps npm away from the network,
+#: and `--ignore-scripts` keeps the installer's default-deny lifecycle
+#: posture.
+NPM_PROVISION_COMMAND = ('npm', 'ci', '--offline', '--engine-strict',
+                          '--no-audit', '--no-fund', '--ignore-scripts')
+
+
+def provision_pinned_dependencies(adapter: Path, *, timeout: int = NPM_PROVISION_TIMEOUT_SECONDS) -> tuple:
+    """Install one adapter's pinned dependencies from the offline npm cache.
+
+    The pinned SDK is provisioned outside git, so a frozen source copy -- the
+    input of a check job -- carries no `node_modules` and the SDK gates fail
+    closed on absent dependencies. The operator's offline npm cache is the
+    same source the installer and CI use, so the gate installs the pinned
+    tree itself before the contract suites run: npm never reaches the
+    network, the committed lockfile pins every version, and dependency
+    lifecycle scripts stay denied.
+
+    Schema: the same shape as `pi_sdk_deps_status` -- ("ready", detail),
+    ("absent", reason) or ("mismatch", reason). Bounds: one install per
+    adapter, bounded by `timeout`. Trust: the operator's local npm cache and
+    the repository's own lockfile. Retry: none; the gate records the
+    outcome. Evidence: the gate's own stdout names the provisioned adapter.
+    Failure: an absent npm, a missing lockfile, a failed install or an
+    elapsed bound leaves the previous verdict and names npm's own output; an
+    installed version that differs from the pin is never reinstalled, because
+    wrong versions are a contract violation rather than missing provisioning.
+    """
+    state, details = pi_sdk_deps_status(adapter)
+    if state != 'absent':
+        # Installed dependencies are left alone, and a version that differs
+        # from the pin is a contract violation the gate must not paper over.
+        return state, details
+    if not shutil.which('npm'):
+        return state, details + '; npm is not available to provision the pinned dependencies'
+    if not (adapter / 'package-lock.json').is_file():
+        return state, details + '; no package-lock.json to install the pinned dependencies from'
+    env = {**os.environ, 'npm_config_offline': 'true'}
+    try:
+        installed = subprocess.run(list(NPM_PROVISION_COMMAND), cwd=str(adapter), env=env,
+                                   capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return state, details + f'; the offline install exceeded its {timeout} s bound'
+    except (OSError, ValueError) as exc:
+        return state, details + f'; the offline install could not start: {exc}'
+    if installed.returncode != 0:
+        lines = [line.strip() for line in (installed.stderr or installed.stdout or '').splitlines()
+                 if line.strip()]
+        # npm's pointer to its own log file is not a reason: it is dropped
+        # so the gate names the cause (a cache miss, a tar or disk error)
+        # rather than the log path.
+        reasons = [line for line in lines if 'A complete log' not in line]
+        errors = [line for line in reasons if line.startswith('npm error')]
+        if errors:
+            reason = '; '.join(errors[:2])
+        elif reasons:
+            reason = reasons[-1]
+        else:
+            reason = f'exit {installed.returncode}'
+        return state, details + '; the offline install failed: ' + reason[:400]
+    final, final_details = pi_sdk_deps_status(adapter)
+    if final == 'ready':
+        return 'ready', 'provisioned from the offline npm cache'
+    return final, final_details or (details + '; the offline install left the pinned dependencies absent')
+
+
+def provision_targets(allowed_not_run) -> set:
+    """The adapters whose pinned dependencies this run needs.
+
+    A waived gate runs no suite, so it needs no dependencies: the gate
+    installs only for a suite that will actually run.
+    """
+    wanted = set()
+    if 'node-durable-contract-tests' not in allowed_not_run:
+        wanted.add('pi-durable')
+    if 'node-pi-sdk-contract-tests' not in allowed_not_run:
+        wanted.add('pi')
+    if 'node-pi-reasoning-replay-tests' not in allowed_not_run:
+        wanted.update(('pi', 'pi-durable'))
+    return wanted
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--fail-fast', action='store_true',
@@ -400,6 +490,9 @@ def main():
     parser.add_argument('--report', type=Path, help='Write a portable JSON validation receipt')
     parser.add_argument('--test-timings', type=Path,
                         help='Write best-effort sanitized per-test timing evidence to this path')
+    parser.add_argument('--no-provision', action='store_true',
+                        help='Do not install the pinned adapter dependencies from the offline npm '
+                             'cache; report absent dependencies instead')
     parser.add_argument('--allow-not-run', default='',
                         help='Comma-separated check names explicitly permitted to stay not_run '
                              '(e.g. node-pi-sdk-contract-tests or '
@@ -594,14 +687,27 @@ def main():
     if shutil.which('node'):
         execute('node-transport-and-extension-tests', ['node', '--test', 'tests/bridge.test.mjs'],
                 count=node_counts)
-        durable_state, durable_details = pi_sdk_deps_status(ROOT / 'adapters/pi-durable')
+        adapters = {'pi': ROOT / 'adapters/pi', 'pi-durable': ROOT / 'adapters/pi-durable'}
+        verdicts = {name: pi_sdk_deps_status(path) for name, path in adapters.items()}
+        # The pinned SDK is provisioned outside git, so a frozen source copy
+        # carries none of it. Install it from the operator's offline npm cache
+        # before the suites that need it, and only for a suite that will
+        # actually run: a waived gate needs no dependencies.
+        if not args.no_provision:
+            for name in sorted(provision_targets(allowed_not_run)):
+                state, details = provision_pinned_dependencies(adapters[name])
+                if state == 'ready' and verdicts[name][0] != 'ready':
+                    print('== provisioned ' + str(adapters[name])
+                          + ' pinned dependencies from the offline npm cache ==')
+                verdicts[name] = (state, details)
+        durable_state, durable_details = verdicts['pi-durable']
         if durable_state == 'ready':
             execute('node-durable-contract-tests', ['node', '--test', 'tests/durable.test.mjs'],
                     count=node_counts)
         else:
             checks.append(sdk_gate_entry(durable_state, durable_details, allowed_not_run))
         pi_sdk_name = 'node-pi-sdk-contract-tests'
-        pi_sdk_state, pi_sdk_details = pi_sdk_deps_status(ROOT / 'adapters/pi')
+        pi_sdk_state, pi_sdk_details = verdicts['pi']
         if pi_sdk_state == 'ready':
             execute(pi_sdk_name, ['node', 'scripts/check-pi-sdk.mjs'])
         else:
@@ -609,8 +715,7 @@ def main():
                                          name=pi_sdk_name))
         # This gate uses both real installed SDKs, not the fake-RPC bridge.
         replay_name = 'node-pi-reasoning-replay-tests'
-        replay_deps = [(adapter, *pi_sdk_deps_status(ROOT / 'adapters' / adapter))
-                       for adapter in ('pi', 'pi-durable')]
+        replay_deps = [(adapter, *verdicts[adapter]) for adapter in ('pi', 'pi-durable')]
         if all(state == 'ready' for _, state, _ in replay_deps):
             execute(replay_name, ['node', '--test', 'tests/pi-reasoning.test.mjs'], count=node_counts)
         else:

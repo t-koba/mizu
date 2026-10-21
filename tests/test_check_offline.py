@@ -1233,6 +1233,157 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
         self.assertIn('run: python scripts/check.py --report private-validation/durable.json', workflow)
 
 
+class PinnedDependencyProvisionTests(unittest.TestCase):
+    """The gate installs the pinned SDK from the offline npm cache."""
+
+    def setUp(self):
+        self.calls = []
+
+    def fake_npm(self, *, returncode=0, stderr='', installed=None, timeout=False):
+        def run(argv, **kwargs):
+            self.calls.append({'argv': list(argv), 'env': dict(kwargs.get('env') or {}),
+                               'cwd': kwargs.get('cwd')})
+            if timeout:
+                raise subprocess.TimeoutExpired(argv, kwargs.get('timeout', 0))
+            if returncode == 0 and installed:
+                target = Path(kwargs['cwd']) / 'node_modules'
+                for name, version in installed.items():
+                    package = target / name
+                    package.mkdir(parents=True, exist_ok=True)
+                    (package / 'package.json').write_text(json.dumps({'version': version}),
+                                                         encoding='utf-8')
+            return subprocess.CompletedProcess(argv, returncode, '', stderr)
+        return run
+
+    def adapter(self, base: Path, *, installed=None, lockfile=True):
+        adapter = write_adapter(base, {"left-pad": "1.3.0"}, installed or {})
+        if lockfile:
+            (adapter / 'package-lock.json').write_text(json.dumps({"lockfileVersion": 3}),
+                                                        encoding='utf-8')
+        return adapter
+
+    def test_absent_dependencies_are_installed_offline_and_become_ready(self):
+        with tempfile.TemporaryDirectory() as td:
+            adapter = self.adapter(Path(td))
+            with mock.patch.object(CHECK.subprocess, 'run',
+                                   self.fake_npm(installed={'left-pad': '1.3.0'})):
+                state, details = CHECK.provision_pinned_dependencies(adapter)
+            self.assertEqual(state, 'ready')
+            self.assertIn('offline npm cache', details)
+            self.assertEqual(len(self.calls), 1)
+            call = self.calls[0]
+            self.assertIn('--offline', call['argv'])
+            self.assertIn('--ignore-scripts', call['argv'])
+            self.assertEqual(call['env'].get('npm_config_offline'), 'true')
+            self.assertEqual(call['cwd'], str(adapter))
+
+    def test_installed_dependencies_are_never_reinstalled(self):
+        with tempfile.TemporaryDirectory() as td:
+            adapter = self.adapter(Path(td), installed={'left-pad': '1.3.0'})
+            with mock.patch.object(CHECK.subprocess, 'run', self.fake_npm()):
+                state, details = CHECK.provision_pinned_dependencies(adapter)
+            self.assertEqual((state, details), ('ready', ''))
+            self.assertEqual(self.calls, [])
+
+    def test_version_mismatch_is_a_contract_violation_and_is_never_reinstalled(self):
+        with tempfile.TemporaryDirectory() as td:
+            adapter = self.adapter(Path(td), installed={'left-pad': '9.9.9'})
+            with mock.patch.object(CHECK.subprocess, 'run', self.fake_npm()):
+                state, _ = CHECK.provision_pinned_dependencies(adapter)
+            self.assertEqual(state, 'mismatch')
+            self.assertEqual(self.calls, [])
+
+    def test_absent_npm_keeps_the_absent_verdict(self):
+        with tempfile.TemporaryDirectory() as td:
+            adapter = self.adapter(Path(td))
+            with mock.patch.object(CHECK.shutil, 'which', lambda name: None):
+                state, details = CHECK.provision_pinned_dependencies(adapter)
+            self.assertEqual(state, 'absent')
+            self.assertIn('npm is not available', details)
+            self.assertEqual(self.calls, [])
+
+    def test_failed_install_keeps_the_absent_verdict_with_npm_output(self):
+        with tempfile.TemporaryDirectory() as td:
+            adapter = self.adapter(Path(td))
+            failure = 'npm error code ENOTCACHED\nnpm error A complete log of this run can be found in: /tmp/log\n'
+            with mock.patch.object(CHECK.subprocess, 'run',
+                                   self.fake_npm(returncode=1, stderr=failure)):
+                state, details = CHECK.provision_pinned_dependencies(adapter)
+            self.assertEqual(state, 'absent')
+            self.assertIn('the offline install failed', details)
+            self.assertIn('ENOTCACHED', details)
+            self.assertNotIn('A complete log', details)
+
+    def test_failed_install_names_the_cause_behind_npm_log_pointer(self):
+        # npm's pointer to its own log file is not a reason: the gate must
+        # name the cause (here a tar/disk error) instead of the log path.
+        with tempfile.TemporaryDirectory() as td:
+            adapter = self.adapter(Path(td))
+            failure = ('npm warn tar TAR_ENTRY_ERROR ENOSPC: no space left on device\n'
+                       'npm error A complete log of this run can be found in: /tmp/log\n')
+            with mock.patch.object(CHECK.subprocess, 'run',
+                                   self.fake_npm(returncode=1, stderr=failure)):
+                state, details = CHECK.provision_pinned_dependencies(adapter)
+            self.assertEqual(state, 'absent')
+            self.assertIn('the offline install failed', details)
+            self.assertIn('ENOSPC', details)
+            self.assertNotIn('A complete log', details)
+
+    def test_missing_lockfile_keeps_the_absent_verdict(self):
+        with tempfile.TemporaryDirectory() as td:
+            adapter = self.adapter(Path(td), lockfile=False)
+            with mock.patch.object(CHECK.subprocess, 'run', self.fake_npm()):
+                state, details = CHECK.provision_pinned_dependencies(adapter)
+            self.assertEqual(state, 'absent')
+            self.assertIn('no package-lock.json', details)
+            self.assertEqual(self.calls, [])
+
+    def test_elapsed_install_bound_keeps_the_absent_verdict(self):
+        with tempfile.TemporaryDirectory() as td:
+            adapter = self.adapter(Path(td))
+            with mock.patch.object(CHECK.subprocess, 'run', self.fake_npm(timeout=True)):
+                state, details = CHECK.provision_pinned_dependencies(adapter, timeout=7)
+            self.assertEqual(state, 'absent')
+            self.assertIn('exceeded its 7 s bound', details)
+
+    def test_provision_targets_follow_the_gates_that_will_run(self):
+        # A waived gate needs no dependencies, but another running gate may
+        # still need the same adapter: the replay gate uses both.
+        self.assertEqual(CHECK.provision_targets(frozenset()), {'pi', 'pi-durable'})
+        self.assertEqual(CHECK.provision_targets(frozenset({'node-durable-contract-tests'})),
+                         {'pi', 'pi-durable'})
+        self.assertEqual(CHECK.provision_targets(frozenset({'node-pi-sdk-contract-tests'})),
+                         {'pi', 'pi-durable'})
+        self.assertEqual(CHECK.provision_targets(frozenset({'node-pi-reasoning-replay-tests'})),
+                         {'pi', 'pi-durable'})
+        self.assertEqual(CHECK.provision_targets(frozenset({'node-durable-contract-tests',
+                                                            'node-pi-reasoning-replay-tests'})),
+                         {'pi'})
+        self.assertEqual(CHECK.provision_targets(frozenset({'node-pi-sdk-contract-tests',
+                                                            'node-pi-reasoning-replay-tests'})),
+                         {'pi-durable'})
+        self.assertEqual(CHECK.provision_targets(frozenset({'node-durable-contract-tests',
+                                                            'node-pi-sdk-contract-tests',
+                                                            'node-pi-reasoning-replay-tests'})),
+                         set())
+
+    def test_real_offline_cache_provisions_the_pinned_adapter(self):
+        # Environment-coupled by nature: where the operator mounted an
+        # offline npm cache the install must succeed without the network;
+        # elsewhere it skips instead of failing the suite for provisioning.
+        cache = os.environ.get('npm_config_cache')
+        if not cache or not Path(cache).is_dir() or not shutil.which('npm'):
+            self.skipTest('no offline npm cache here')
+        with tempfile.TemporaryDirectory() as td:
+            adapter = self.adapter(Path(td))
+            shutil.copy(ROOT / 'adapters/pi/package.json', adapter / 'package.json')
+            shutil.copy(ROOT / 'adapters/pi/package-lock.json', adapter / 'package-lock.json')
+            state, details = CHECK.provision_pinned_dependencies(adapter, timeout=900)
+            if state == 'absent':
+                self.skipTest(f"offline cache could not provision the pinned SDK: {details}")
+            self.assertEqual(state, 'ready')
+
+
 class SdkGateEntryTests(unittest.TestCase):
     NAME = 'node-durable-contract-tests'
 
