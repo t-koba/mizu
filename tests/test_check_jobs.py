@@ -239,3 +239,16 @@ class JobTests(Fixture):
         check_jobs.run_one(self.project, threading.Event(), sandbox_factory=Compiler)
         self.assertEqual(observed, [False, True])
         self.assertFalse((ctx.workspace / 'target').exists())
+
+    def test_command_logs_are_paged_and_owner_bound(self):
+        ctx, job = self.submit()
+        path = check_jobs.root(self.project) / job['id'] / 'commands' / ('a'*32 + '.json')
+        write_json(path, {'stdout': 'details' * 2000})
+        first = ctx._op_check_job({'action': 'logs', 'id': job['id'], 'evidence_id': 'a'*32, 'limit': 20})
+        second = check_jobs.logs(ctx, job['id'], 'a'*32, offset=20, limit=20, content_id=first['content_id'])
+        self.assertEqual(second['offset'], 20)
+        with self.assertRaises(Denied):
+            check_jobs.logs(self.context('reviewer'), job['id'], 'a'*32)
+        write_json(path, {'stdout': 'changed'})
+        with self.assertRaises(Denied):
+            check_jobs.logs(ctx, job['id'], 'a'*32, content_id=first['content_id'])

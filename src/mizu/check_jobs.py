@@ -8,6 +8,7 @@ claimed against the current source and execution configuration.
 from __future__ import annotations
 import contextlib
 import os
+import re
 import dataclasses
 import shutil
 import uuid
@@ -142,6 +143,29 @@ def result(context, job_id):
         consumed.add(job_id)
         context.check_results_read = consumed
         return output
+
+
+
+def logs(context, job_id, evidence_id, *, offset=0, limit=8192, content_id=None):
+    job = read(context.project, job_id)
+    if context.role.name not in (job['role'], job.get('producer_role')):
+        raise Denied('Check job belongs to another role')
+    if not isinstance(evidence_id, str) or not re.fullmatch(r'[a-f0-9]{32}', evidence_id):
+        raise Denied('Invalid command evidence ID')
+    if type(offset) is not int or type(limit) is not int or offset < 0 or not 1 <= limit <= 8192:
+        raise Denied('Invalid evidence page')
+    path = root(context.project) / job_id / 'commands' / (evidence_id + '.json')
+    if not path.is_file() or path.is_symlink() or path.stat().st_size > context.config.limits.output_bytes * 8 + 1048576:
+        raise Denied('Command evidence unavailable')
+    data = path.read_bytes()
+    identity = digest(data)
+    if content_id is not None and content_id != identity:
+        raise Denied('Command evidence changed')
+    text = data.decode('utf-8')
+    end = min(len(text), offset + limit)
+    return {'trust': 'recorded-local-untrusted', 'text': text[offset:end],
+            'content_id': identity, 'offset': offset,
+            'next_offset': end if end < len(text) else None}
 
 
 def cancel(context, job_id):

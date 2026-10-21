@@ -1137,6 +1137,8 @@ class Context:
             return {'jobs': check_jobs.list_jobs(self.project, self.role.name)}
         if not args.get('id'):
             raise Denied('Check result requires id')
+        if action == 'logs':
+            return check_jobs.logs(self, args['id'], args.get('evidence_id'), offset=args.get('offset', 0), limit=args.get('limit', 8192), content_id=args.get('content_id'))
         if action == 'cancel':
             return check_jobs.cancel(self, args['id'])
         return check_jobs.result(self, args['id'])

@@ -10,7 +10,10 @@ to a workspace that the caller can continue modifying.
 The role can continue independent work, inspect `check_job` with `action=list`,
 request cancellation with `action=cancel,id=<full digest>`,
 and retrieve a completion with `action=result,id=<full digest>`. Results carry
-bounded output previews and paths to complete recorded command evidence. A
+bounded output previews and paths to complete recorded command evidence. Use
+`action=logs,id=<job>,evidence_id=<command>,offset=0,limit=8192` for full
+recorded output; continue with `content_id` and `next_offset`. Pages are capped
+at 8192 characters and changed records are refused. Logs remain untrusted data. A
 passing acceptance result is imported only when current source, acceptance
 commands and configured execution environment match. A queued, interrupted,
 refused, failed or source-mismatched result cannot authorize completion.
