@@ -251,6 +251,49 @@ class SyntheticEngineTests(Fixture):
                 PiDriver(config).execute(ctx, 'synthetic prompt')
         record.assert_not_called()
 
+    def test_the_durable_runtime_keeps_its_transport_deadline_path(self):
+        # ADR-042: the durable runtime keeps its own transport-deadline path
+        # and does not consume the managed start-up record. The record holds
+        # a spawn-to-first-answer interval, and the durable child answers
+        # with a whole submission, so its interval is not a start-up
+        # measurement; its deadline stays the transport deadline.
+        import inspect
+        import types
+        from mizu import pi_durable
+        from mizu.startup import record_path
+        source = inspect.getsource(pi_durable)
+        for name in ('startup_bound', 'record_startup', 'adapter-startup'):
+            self.assertFalse(name in source,
+                             'the durable runtime must not use the managed start-up record: '+name)
+        profile = 'durable'
+        self.config.profiles[profile] = {**self.config.profiles['primary'], 'engine': 'pi-durable'}
+        ctx = self.context('worker')
+        ctx.handle('_hello', {})
+        ctx.handle('_budget', {'sequence': 1})
+        ctx.handle('finish', {'outcome': 'wait', 'summary': 'One observed result',
+                              'state': 'Next step is explicit.'})
+        settings = effective(self.config, ctx.role, profile)
+        model = self.config.model(profile)
+        reported = {'durable_result': True, 'status': 'done', 'finish_called': True,
+                    'requests': 1, 'usage': {'input': 1, 'output': 1}}
+        fake = types.SimpleNamespace(reason='exited', exit_code=0,
+                                     stdout=json.dumps(reported), stderr='')
+        seen = {}
+
+        def fake_run(*args, timeout=None, **kwargs):
+            seen['timeout'] = timeout
+            return fake
+
+        with unittest.mock.patch.object(pi_durable, 'Bridge') as bridge_cls, \
+             unittest.mock.patch.object(pi_durable, 'run', side_effect=fake_run):
+            bridge_cls.return_value.__enter__.return_value.config_file = str(ctx.run_dir/'bridge.json')
+            pi_durable.PiDurableDriver(self.config)._run_once(
+                ctx, settings, model, 'hello', profile, 'run-key', Path('/tmp/store.sqlite'))
+        # The durable child is held to the transport deadline, and the
+        # shared start-up record is not written by it.
+        self.assertTrue(callable(seen.get('timeout')))
+        self.assertFalse(record_path(self.config).exists())
+
     def test_claude_and_codex_resume_a_work_capable_no_tool_followup(self):
         from mizu.runtime import Engine
         for engine in ('claude', 'codex'):
