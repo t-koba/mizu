@@ -1472,7 +1472,7 @@ class PromptOrderTests(Fixture):
                           "workspace", "workspace_mode", "pending_insights",
                           "open_insights", "open_work_items",
                           "decision_events", "decision_task", "wait_events", "obligations",
-                          "check_jobs", "acceptance_commands", "research_state", "capture_limit",
+                          "check_jobs", "shared_checks", "acceptance_commands", "research_state", "capture_limit",
                           "ci_branch", "ci_failures", "ci_failures_may_be_truncated",
                           "previous_report", "ready_work", "run", "now", "timezone"])
         self.assertEqual(
@@ -1480,6 +1480,6 @@ class PromptOrderTests(Fixture):
             ["unit", "goal_digest", "published_snapshot", "snapshot_delta",
              "pending_insights", "open_insights", "open_work_items", "decision_events", "decision_task", "wait_events", "obligations",
              "research_state", "capture_limit", "workspace", "workspace_mode",
-             "check_jobs", "acceptance_commands", "ci_branch", "ci_failures",
+             "check_jobs", "shared_checks", "acceptance_commands", "ci_branch", "ci_failures",
              "ci_failures_may_be_truncated", "previous_report",
              "ready_work", "run", "now", "timezone"])

@@ -253,3 +253,166 @@ class JobTests(Fixture):
         write_json(path, {'stdout': 'changed'})
         with self.assertRaises(Denied):
             check_jobs.logs(ctx, job['id'], 'a'*32, content_id=first['content_id'])
+
+
+class SharingTests(JobTests):
+    # Sharing is opt-in; retain the original no-sharing suite above.
+    def setUp(self):
+        super().setUp()
+        self.config = dataclasses.replace(self.config, sandbox=dataclasses.replace(self.config.sandbox, check_reuse=True))
+        self.project.config = self.config
+
+    def test_two_roles_share_execution_and_ack_independently(self):
+        ctx, first = self.submit()
+        reader = self.context('reviewer')
+        self.assertEqual(check_jobs.available(reader)[0]['id'], first['id'])
+        second = check_jobs.join(reader, first['id'])
+        check_jobs.set_wait(self.project, 'reviewer', second['id'])
+        self.assertTrue(check_jobs.waiting(self.project, 'reviewer'))
+        self.run_job(); self.run_job()
+        self.assertEqual(len(FakeSandbox.calls), 1)
+        self.assertFalse(check_jobs.waiting(self.project, 'reviewer'))
+        result = check_jobs.result(reader, second['id'])
+        self.assertTrue(result['result']['passed'])
+        self.assertFalse(result['accepted_for_current_source'])  # No verify grant.
+        check_jobs.acknowledge(self.project, 'reviewer', reader.check_results_read)
+        self.assertFalse(check_jobs.pending(self.project, 'reviewer'))
+        self.assertTrue(check_jobs.pending(self.project, 'worker'))
+
+    def test_matching_later_verify_imports_shared_success_without_execution(self):
+        ctx, first = self.submit(); self.run_job()
+        later = self.context(); second = check_jobs.submit(later)
+        self.assertEqual(second['shared_job'], first['id'])
+        self.assertTrue(check_jobs.result(later, second['id'])['accepted_for_current_source'])
+        self.run_job()
+        self.assertEqual(len(FakeSandbox.calls), 1)
+
+    def test_cancellation_does_not_cancel_other_subscriber(self):
+        ctx, first = self.submit()
+        reader = self.context('reviewer'); second = check_jobs.join(reader, first['id'])
+        check_jobs.cancel(ctx, first['id'])
+        self.assertEqual(check_jobs.read(self.project, first['id'])['status'], 'cancelled')
+        self.assertFalse((check_jobs.root(self.project)/first['id']/'cancel.json').exists())
+        self.run_job()
+        self.assertEqual(check_jobs.result(reader, second['id'])['status'], 'completed')
+        self.assertEqual(check_jobs.read(self.project, first['id'])['status'], 'cancelled')
+
+    def test_last_subscriber_cancellation_stops_execution(self):
+        ctx, first = self.submit(); reader = self.context('reviewer')
+        second = check_jobs.join(reader, first['id'])
+        check_jobs.cancel(reader, second['id']); check_jobs.cancel(ctx, first['id'])
+        self.run_job()
+        self.assertFalse(FakeSandbox.calls)
+        self.assertEqual(check_jobs.read(self.project, second['id'])['status'], 'cancelled')
+
+    def test_running_check_can_be_joined_and_logs_are_shared(self):
+        ctx, first = self.submit(); reader = self.context('reviewer'); joined = []
+        class Joining(FakeSandbox):
+            def execute(inner, workspace, script, **kwargs):
+                joined.append(check_jobs.join(reader, first['id']))
+                write_json(check_jobs.root(self.project)/first['id']/'commands'/('a'*32+'.json'), {'stdout':'shared output'})
+                return super().execute(workspace, script, **kwargs)
+        check_jobs.run_one(self.project, threading.Event(), sandbox_factory=Joining)
+        self.assertEqual(len(FakeSandbox.calls),1)
+        self.assertIn('shared output',check_jobs.logs(reader,joined[0]['id'],'a'*32)['text'])
+
+    def test_changed_dependencies_refuse_queued_job_and_new_submission_is_distinct(self):
+        dependency=self.root/'dependency'; dependency.mkdir(); file=dependency/'version'; file.write_text('one')
+        self.config=dataclasses.replace(self.config,sandbox=dataclasses.replace(self.config.sandbox,mounts=({'source':str(dependency),'target':'/dependency'},)))
+        self.project.config=self.config
+        ctx,first=self.submit(); file.write_text('two')
+        self.assertEqual(self.run_job()['status'],'refused')
+        later=check_jobs.submit(self.context());self.assertNotIn('shared_job',later)
+        self.assertNotEqual(first['id'],later['id'])
+
+    def test_dependency_change_during_execution_cannot_pass_or_be_reused(self):
+        dependency=self.root/'version'; dependency.write_text('one')
+        self.config=dataclasses.replace(self.config,sandbox=dataclasses.replace(self.config.sandbox,mounts=({'source':str(dependency),'target':'/dependency'},)))
+        self.project.config=self.config
+        ctx,first=self.submit()
+        class Changing(FakeSandbox):
+            def execute(inner,*args,**kwargs):
+                dependency.write_text('two')
+                return super().execute(*args,**kwargs)
+        check_jobs.run_one(self.project,threading.Event(),sandbox_factory=Changing)
+        self.assertFalse(check_jobs.result(ctx,first['id'])['result']['passed'])
+        self.assertNotIn('shared_job',check_jobs.submit(self.context()))
+
+    def test_changed_source_commands_or_environment_do_not_share(self):
+        ctx,first=self.submit()
+        (ctx.workspace/'app.py').write_text('VALUE=4')
+        self.assertNotIn('shared_job',check_jobs.submit(self.context()))
+        self.config=dataclasses.replace(self.config,sandbox=dataclasses.replace(self.config.sandbox,env={'EXAMPLE':'changed'}))
+        self.project.config=self.config
+        self.assertNotIn('shared_job',check_jobs.submit(self.context()))
+
+    def test_network_input_disables_reuse(self):
+        self.config=dataclasses.replace(self.config,sandbox=dataclasses.replace(self.config.sandbox,network='bridge'))
+        self.project.config=self.config
+        self.submit(); later=check_jobs.submit(self.context())
+        self.assertNotIn('shared_job',later)
+
+    # Under explicit reuse the second identical acceptance uses evidence rather
+    # than invoking the compiler. Artifact reuse is covered by JobTests.
+    def test_build_artifacts_reused_without_acceptance_reuse(self):
+        self.test_matching_later_verify_imports_shared_success_without_execution()
+
+    def test_concurrent_submissions_execute_once(self):
+        from concurrent.futures import ThreadPoolExecutor
+        contexts=[self.context(),self.context()]
+        with ThreadPoolExecutor(2) as pool:
+            jobs=list(pool.map(check_jobs.submit,contexts))
+        self.assertEqual(sum('shared_job' not in j for j in jobs),1)
+        self.run_job();self.run_job()
+        self.assertEqual(len(FakeSandbox.calls),1)
+
+    def test_running_cancellation_preserves_other_subscription(self):
+        ctx,first=self.submit();reader=self.context('reviewer')
+        second=check_jobs.join(reader,first['id'])
+        class Cancelling(FakeSandbox):
+            def execute(inner,*args,**kwargs):
+                check_jobs.cancel(ctx,first['id'])
+                return super().execute(*args,**kwargs)
+        check_jobs.run_one(self.project,threading.Event(),sandbox_factory=Cancelling)
+        self.assertEqual(check_jobs.read(self.project,first['id'])['status'],'cancelled')
+        self.assertTrue(check_jobs.result(reader,second['id'])['result']['passed'])
+
+    def test_shared_ack_does_not_leave_same_role_duplicate_delivery(self):
+        ctx,first=self.submit();self.run_job()
+        later=self.context();second=check_jobs.submit(later)
+        check_jobs.result(later,second['id'])
+        check_jobs.acknowledge(self.project,'worker',later.check_results_read)
+        self.assertFalse(check_jobs.pending(self.project,'worker'))
+
+    def test_changed_mount_after_completion_cannot_authorize_acceptance(self):
+        dep=self.root/'dependency';dep.write_text('one')
+        self.config=dataclasses.replace(self.config,sandbox=dataclasses.replace(self.config.sandbox,mounts=({'source':str(dep),'target':'/dep'},)))
+        self.project.config=self.config
+        ctx,job=self.submit();self.run_job();dep.write_text('two')
+        self.assertFalse(check_jobs.result(ctx,job['id'])['accepted_for_current_source'])
+        self.assertFalse(check_jobs.available(ctx))
+
+    def test_input_limits_disable_reuse_without_disabling_checks(self):
+        dep=self.root/'dependency';dep.write_text('larger than bound')
+        self.config=dataclasses.replace(self.config,sandbox=dataclasses.replace(self.config.sandbox,mounts=({'source':str(dep),'target':'/dep'},),check_input_bytes=1))
+        self.project.config=self.config
+        self.submit();second=check_jobs.submit(self.context())
+        self.assertNotIn('shared_job',second)
+        self.assertEqual(self.run_job()['status'],'completed')
+
+    def test_fresh_check_bypasses_completed_evidence(self):
+        self.submit();self.run_job()
+        fresh=check_jobs.submit(self.context(),fresh=True)
+        self.assertNotIn('shared_job',fresh)
+        self.run_job();self.assertEqual(len(FakeSandbox.calls),2)
+
+    def test_internal_dependency_symlink_is_bound_to_its_target(self):
+        import os
+        dep=self.root/'deps';dep.mkdir();(dep/'data').write_text('one')
+        try:os.symlink('data',dep/'link')
+        except OSError:self.skipTest('Symlinks unavailable')
+        self.config=dataclasses.replace(self.config,sandbox=dataclasses.replace(self.config.sandbox,mounts=({'source':str(dep),'target':'/dep'},)))
+        self.project.config=self.config
+        before=check_jobs.environment(self.project);self.assertIsNotNone(before)
+        (dep/'data').write_text('two')
+        self.assertNotEqual(before,check_jobs.environment(self.project))

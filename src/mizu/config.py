@@ -393,6 +393,9 @@ class Sandbox:
     cpus: int = 2
     pids: int = 256
     check_cache_paths: tuple[str, ...] = ()
+    check_reuse: bool = False
+    check_input_files: int = 250000
+    check_input_bytes: int = 8589934592
     temporary_mb: int = 256
     file_mb: int = 128
     selinux_label: bool = True
@@ -757,6 +760,10 @@ def load(file: Path) -> Config:
     if not entrypoint.startswith("/") or re.search(r"\s", entrypoint) or "\x00" in entrypoint:
         raise ConfigError("sandbox.entrypoint must be an absolute container path without whitespace")
     sb["entrypoint"] = entrypoint
+    for key in ("check_input_files", "check_input_bytes"):
+        if key in sb:
+            number(sb[key], "sandbox." + key, 1, 1099511627776)
+    sb["check_reuse"] = boolean(sb.get("check_reuse", False), "sandbox.check_reuse")
     cache_paths = strings(sb.get("check_cache_paths", []), "sandbox.check_cache_paths")
     if any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", p) for p in cache_paths) or len(set(cache_paths)) != len(cache_paths):
         raise ConfigError("sandbox.check_cache_paths must be unique top-level artifact directories")

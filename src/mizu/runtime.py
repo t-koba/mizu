@@ -1132,11 +1132,13 @@ class Context:
     def _op_check_job(self, args: dict) -> dict:
         action = args['action']
         if action == 'start':
-            return check_jobs.submit(self, args.get('script'))
+            return check_jobs.submit(self, args.get('script'), fresh=args.get('fresh', False))
         if action == 'list':
-            return {'jobs': check_jobs.list_jobs(self.project, self.role.name)}
+            return {'jobs': check_jobs.list_jobs(self.project, self.role.name), 'available': check_jobs.available(self)}
         if not args.get('id'):
             raise Denied('Check result requires id')
+        if action == 'join':
+            return check_jobs.join(self, args['id'])
         if action == 'logs':
             return check_jobs.logs(self, args['id'], args.get('evidence_id'), offset=args.get('offset', 0), limit=args.get('limit', 8192), content_id=args.get('content_id'))
         if action == 'cancel':
@@ -3161,6 +3163,7 @@ def prompt_for(context: Context) -> str:
                        "wait_events": list(getattr(context, "wait_events", []) or []),
                        "obligations": list(getattr(context, "obligations", []) or []),
                        "check_jobs": (check_jobs.list_jobs(context.project, context.role.name) if "check_job" in caps else []),
+                       "shared_checks": (check_jobs.available(context, validate=False) if "check_job" in caps else []),
                        "acceptance_commands": acceptance,
                        "research_state": _prompt_research_state(context),
                        "capture_limit": _prompt_capture_limit(context),
@@ -3236,6 +3239,7 @@ def prompt_delta_for(context: Context, pending: list) -> str:
                        "capture_limit": _prompt_capture_limit(context),
                        "workspace": "/workspace", "workspace_mode": context.role.workspace,
                        "check_jobs": (check_jobs.list_jobs(context.project, context.role.name) if "check_job" in caps else []),
+                       "shared_checks": (check_jobs.available(context, validate=False) if "check_job" in caps else []),
                        "acceptance_commands": acceptance,
                        "ci_branch": ((context.config.vcs.get("ci_branch") or None)
                                      if "vcs_read" in caps else None),

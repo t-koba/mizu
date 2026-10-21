@@ -50,8 +50,8 @@ build tree is never accessed. Environment changes select a separate cache, and
 interrupted jobs discard their private artifacts. Cache storage requires ordinary
 operator disk maintenance and remains subject to the free-space admission reserve.
 Artifacts never substitute for execution or passing evidence. Cross-role result
-reuse is not inferred: neither arbitrary shell text nor a mutable mount path is
-a sufficient immutable input identity.
+reuse requires the explicit sharing configuration and input checks described
+below; shell text or a mutable mount path alone is insufficient.
 
 Job ownership is a host file lock. A crashed runner's unfinished record is
 interrupted and its job-specific containers are cleaned before releasing the
@@ -75,3 +75,47 @@ If container removal fails, the compute slot is quarantined rather than silently
 reused while an orphan may still consume resources. `mizu check-jobs PROJECT
 --recover` clears that reservation only after successful cleanup; the old job
 remains interrupted, never passed.
+
+## Sharing execution and recorded results
+
+`sandbox.check_reuse = true` explicitly enables project-local sharing. It is
+false by default. Matching source bytes, exact command list and execution kind,
+sandbox configuration and observed dependency inputs share one queued/running
+execution or a completed passing result. Failures and interruptions are not
+cached for new units. `check_job action=start fresh=true` requests a fresh run
+when remeasurement is needed (for example time-sensitive or nondeterministic
+checks). Retrying the same request within a unit remains idempotent.
+
+The prompt exposes `shared_checks` candidates without expensive dependency
+traversal; these are not yet accepted evidence. `check_job action=list` validates
+and lists compatible candidates with command previews. `action=join,id=<id>`
+creates a role-owned subscription after validating current inputs. A reviewer
+can inspect a worker's verification without obtaining the `verify` execution
+grant. Importing acceptance still requires that grant and a current source,
+command and environment match. Command logs retain their original evidence ID.
+
+Every subscription has its own ID, wait notification, cancellation and durable
+acknowledgement. Cancelling one subscription does not cancel another role's
+check; execution is cancelled when the last subscriber leaves. Consuming a
+result acknowledges equivalent subscriptions only for the consuming role.
+Evidence is retained while any subscription references it; the existing 1024
+record bound includes subscriptions and fails closed when nothing can be
+reaped. Subscriptions consume no compute slot or private source/build tree.
+
+Reuse requires a digest-pinned image and disabled container networking. Read-only
+mounts are fingerprinted by content and filesystem identity at submission,
+before execution, after execution and before acceptance/reuse. File hashes are
+cached against device, inode, mode, size, mtime and ctime on POSIX; other systems
+rehash file bytes. Directory identities and internal relative symlink targets
+are included. Changed dependencies invalidate the result even if source is
+unchanged. This assumes the operator-controlled host and its filesystem metadata
+are trusted, as do the existing sandbox and evidence stores. Unsupported special
+files, external symlinks, inaccessible or concurrently changing inputs disable
+sharing; they do not disable ordinary isolated checks. Network-dependent or
+unpinned-image checks also run independently.
+
+Dependency traversal is bounded by `sandbox.check_input_files` (250000 entries)
+and `sandbox.check_input_bytes` (8 GiB of regular file contents), configurable
+positive integers up to 1 TiB. Exceeding a bound disables sharing. Warm matching
+uses cached content hashes but still checks filesystem identities. Neither build
+artifacts nor command text alone can establish passed validation.
