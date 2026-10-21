@@ -506,6 +506,13 @@ contract check reads it too. The published cost is the one the bound was
 derived from, so the pair the operator reads satisfies the rule the product
 reports.
 
+A measurement that cannot be taken leaves the floor in place, the same answer
+the launcher harness gives for the identical child: a child that has not
+answered cannot claim a wider bound, so the probe that follows is held to the
+floor and the child's own outcome is named. The doctor and the installed-
+adapter contract check answer that way too, so neither surface refuses a
+check that the harness would still run.
+
 The same bound governs the runtime's own handshake. The Pi driver starts the
 adapter child and waits for its first answer, and that wait was a fixed 30 s --
 below what a loaded host has been observed to need -- so the child was killed

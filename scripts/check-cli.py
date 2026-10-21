@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT/'src'))
 from mizu.config import load
 from mizu.doctor import (ADAPTER_STARTUP_CEILING_SECONDS,
+                         ADAPTER_STARTUP_FLOOR_SECONDS,
                          ADAPTER_STARTUP_MEASURE_CEILING_SECONDS,
                          adapter_startup_bound,
                          probe_label,
@@ -102,16 +103,31 @@ def run_probe(command, engine=None, config=None):
     try:
         measured = subprocess.run(command, capture_output=True, text=True,
                                   timeout=ADAPTER_STARTUP_MEASURE_CEILING_SECONDS)
-    except subprocess.TimeoutExpired as exc:
-        bound_refusal(exc, ADAPTER_STARTUP_MEASURE_CEILING_SECONDS, engine)
+    except subprocess.TimeoutExpired:
+        # The measurement could not be taken: an unmeasured cost keeps the
+        # floor, the same answer the launcher harness gives for the identical
+        # child, and the probe that follows is held to it.
+        measured = None
     startup = round(time.monotonic() - started, 3)
-    if measured.returncode != 0:
+    if measured is not None and measured.returncode != 0:
         # The child answered and reported a failure: that answer is the
         # probe's answer, and the bound it was held to is the ceiling.
         return measured, startup, ADAPTER_STARTUP_CEILING_SECONDS
-    if config is None and engine is not None:
+    if measured is None:
+        bound = ADAPTER_STARTUP_FLOOR_SECONDS
+        cost = None
+    elif config is None and engine is not None:
         config = host_config()
-    if config is not None and engine is not None:
+        if config is not None:
+            record_startup(config, engine, startup)
+            bound = startup_bound(config, engine)
+            cost = measured_startup(config, engine)
+            if cost is None:
+                cost = startup
+        else:
+            bound = adapter_startup_bound(startup)
+            cost = startup
+    elif config is not None and engine is not None:
         record_startup(config, engine, startup)
         bound = startup_bound(config, engine)
         cost = measured_startup(config, engine)

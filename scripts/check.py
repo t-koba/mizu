@@ -394,12 +394,9 @@ def pi_sdk_deps_status(adapter: Path) -> tuple:
     if not isinstance(pinned, dict) or not pinned:
         return ("mismatch", "pinned dependency manifest holds no dependencies")
     modules = adapter / "node_modules"
-    if not modules.exists():
-        return ("absent", ", ".join(f"{name}@{version}" for name, version in pinned.items())
-                          + " are not installed; provision them from the operator's "
-                            "offline npm cache before running the durable contract suite")
     missing = []
     mismatched = []
+    present = 0
     for name, version in pinned.items():
         try:
             found = json.loads((modules / name / "package.json").read_text(encoding="utf-8")).get("version")
@@ -407,16 +404,22 @@ def pi_sdk_deps_status(adapter: Path) -> tuple:
             found = None
         if found is None:
             missing.append(f"{name}@{version}")
-        elif not isinstance(version, str) or found != version:
+            continue
+        present += 1
+        if not isinstance(version, str) or found != version:
             mismatched.append(f"{name} installed at {found}, pinned at {version}")
     if mismatched:
         return ("mismatch", "; ".join(mismatched))
-    if missing:
+    if not missing:
+        return ("ready", "")
+    if present:
         return ("partial", "the pinned dependencies are partially installed: "
                            + ", ".join(missing) + " are missing. The installed tree is "
                            "left alone, so provision the adapter's own tree (npm ci in "
                            "the adapter directory) before running the durable contract suite")
-    return ("ready", "")
+    return ("absent", ", ".join(missing) + " are not installed; provision them from the "
+                                       "operator's offline npm cache before running the "
+                                       "durable contract suite")
 
 
 #: Bound for one offline dependency install. The pinned tree is a few hundred
@@ -467,6 +470,13 @@ def provision_pinned_dependencies(adapter: Path, *, timeout: int = NPM_PROVISION
         # operator's own, and a version that differs from the pin is a
         # contract violation the gate must not paper over.
         return state, details
+    if (adapter / 'node_modules').exists():
+        # The clean install replaces the whole dependency tree, so it never
+        # runs over a tree the operator provisioned, even one that holds none
+        # of the pinned packages.
+        return (state, details + '; a dependency tree is present, so the clean install '
+                                 'would replace it; provision the adapter\'s own tree '
+                                 '(npm ci in the adapter directory)')
     if not shutil.which('npm'):
         return (state, details + '; npm is not available to provision the pinned dependencies'
                 + ' (the install resolves from ' + NPM_CACHE_INPUT + ')')
@@ -576,6 +586,7 @@ def main():
                     chunks.append(line)
                 sys.stdout.flush()
         status, exit_code, details = 'pass', 0, ''
+        timed_out = False
         process = spawn(command, cwd=ROOT, env=env, stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT, text=True, bufsize=1, **popen_kwargs())
         reader = threading.Thread(target=pump, args=(process.stdout,), daemon=True)
@@ -585,6 +596,7 @@ def main():
                 exit_code = process.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 status = 'fail'
+                timed_out = True
                 # Unittest diagnostics come only from structured metadata,
                 # even on timeout. Other steps retain their raw output tail;
                 # live timestamped progress still locates an unfinished test.
@@ -598,7 +610,15 @@ def main():
             # stdout. End the whole group/job before waiting for EOF, without
             # Popen.__exit__ closing a buffered stream under a blocked reader.
             terminate_process(process)
-            exit_code = process.wait(timeout=PROCESS_CLEANUP_TIMEOUT_SECONDS)
+            stopped = process.wait(timeout=PROCESS_CLEANUP_TIMEOUT_SECONDS)
+            if timed_out:
+                # The child was stopped for time and never reported an exit
+                # code of its own: the code the platform reports for a killed
+                # child says nothing about the suite, so the receipt names
+                # the outcome instead.
+                exit_code = None
+            else:
+                exit_code = stopped
             reader.join(timeout=PROCESS_CLEANUP_TIMEOUT_SECONDS)
         if reader.is_alive():
             status = 'fail'
@@ -614,12 +634,18 @@ def main():
             details = f'{details}; {summary}' if details else summary
         entry = {'name': name, 'status': status,
                  'seconds': round(time.monotonic() - started, 3), 'exit_code': exit_code}
+        if timed_out:
+            entry['reason'] = 'timeout'
         if details:
             entry['details'] = details
         if count is not None:
+            # A child that was stopped for time may have reported no
+            # summary, and a suite that reported none has no counts: the
+            # receipt carries no test count rather than a count of zero.
             found = count(text)
-            entry['tests'] = found
-            counts[name] = found
+            if found is not None:
+                entry['tests'] = found
+                counts[name] = found
         checks.append(entry)
         return ended_at
     # AST checks avoid leaving bytecode inside an immutable source release.
@@ -630,18 +656,26 @@ def main():
     def unittest_counts(output):
         import re
         ran = re.search(r'^Ran (\d+) tests?', output, re.M)
+        if not ran:
+            # The child reported no summary, so it has no counts.
+            return None
         failed = re.search(r'^FAILED', output, re.M)
         numbers = re.findall(r'(?:failures|errors)=(\d+)', output)
-        return {'run': int(ran.group(1)) if ran else 0,
+        skipped = re.search(r'skipped=(\d+)', output)
+        return {'run': int(ran.group(1)),
                 'failed': sum(map(int, numbers)) if failed else 0,
-                'skipped': int(re.search(r'skipped=(\d+)', output).group(1)) if re.search(r'skipped=(\d+)', output) else 0}
+                'skipped': int(skipped.group(1)) if skipped else 0}
     def node_counts(output):
         import re
         passed = re.search(r'^# tests (\d+)', output, re.M)
+        if not passed:
+            # The child reported no summary, so it has no counts.
+            return None
         failed = re.search(r'^# fail (\d+)', output, re.M)
-        return {'run': int(passed.group(1)) if passed else 0,
+        skipped = re.search(r'^# skipped (\d+)', output, re.M)
+        return {'run': int(passed.group(1)),
                 'failed': int(failed.group(1)) if failed else 0,
-                'skipped': int(re.search(r'^# skipped (\d+)', output, re.M).group(1)) if re.search(r'^# skipped (\d+)', output, re.M) else 0}
+                'skipped': int(skipped.group(1)) if skipped else 0}
     # Timestamped verbose progress: on a timeout the killed step leaves the
     # unfinished test as the last timestamped line in the live log.
     # A historical Windows/Python 3.13 run was still in test_vcs_ci when the

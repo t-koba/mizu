@@ -143,24 +143,29 @@ def adapter_probe(config, engine, command, *, maximum: int, label: str):
     evidence names the bound that was applied.
     """
     measured = run(command, timeout=ADAPTER_STARTUP_MEASURE_CEILING_SECONDS, maximum=maximum)
-    probe_outcome(measured.reason, measured.exit_code,
-                  stop_note(measured) or measured.stderr, label,
-                  ADAPTER_STARTUP_MEASURE_CEILING_SECONDS)
-    if measured.exit_code != 0:
-        # The child answered and reported a failure: that answer is the
-        # probe's answer, and the bound it was held to is the ceiling.
-        return measured, ADAPTER_STARTUP_CEILING_SECONDS, measured.seconds
-    # The measurement joins this host's record for the engine, so the bound
-    # is the one every later start of that engine's child uses: the runtime
-    # and the doctor never hold two answers for one child's start-up.
-    record_startup(config, engine, measured.seconds)
-    bound = startup_bound(config, engine)
-    # The cost the bound was derived from is this host's record for the
-    # engine, not this run's sample: the published pair is then checkable
-    # against the rule it reports.
-    cost = measured_startup(config, engine)
-    if cost is None:
-        cost = measured.seconds
+    if measured.reason == "exited" and measured.exit_code is not None and measured.exit_code >= 0:
+        if measured.exit_code != 0:
+            # The child answered and reported a failure: that answer is the
+            # probe's answer, and the bound it was held to is the ceiling.
+            return measured, ADAPTER_STARTUP_CEILING_SECONDS, measured.seconds
+        # The measurement joins this host's record for the engine, so the
+        # bound is the one every later start of that engine's child uses: the
+        # runtime and the doctor never hold two answers for one child's
+        # start-up.
+        record_startup(config, engine, measured.seconds)
+        bound = startup_bound(config, engine)
+        # The cost the bound was derived from is this host's record for the
+        # engine, not this run's sample: the published pair is then checkable
+        # against the rule it reports.
+        cost = measured_startup(config, engine)
+        if cost is None:
+            cost = measured.seconds
+    else:
+        # The measurement could not be taken: an unmeasured cost keeps the
+        # floor, the same answer the launcher harness gives for the identical
+        # child, and no cost is published for a child that did not answer.
+        bound = ADAPTER_STARTUP_FLOOR_SECONDS
+        cost = None
     result = run(command, timeout=bound, maximum=maximum)
     probe_outcome(result.reason, result.exit_code,
                   stop_note(result) or result.stderr, label, bound)
@@ -172,8 +177,14 @@ def startup_evidence(cost, bound: int) -> dict:
 
     The cost is the one the bound was derived from, so the published pair
     satisfies the published rule: the bound is twelve times the cost, at
-    least the floor and at most the ceiling.
+    least the floor and at most the ceiling. A cost that could not be
+    measured is published as no cost at all: the bound is then the floor,
+    because a child that has not answered cannot claim a wider one.
     """
+    if cost is None:
+        return {"startup_seconds": None,
+                "host_relative_bound_seconds": bound,
+                "startup_unmeasured": True}
     return {"startup_seconds": round(float(cost), 3),
             "host_relative_bound_seconds": bound}
 

@@ -552,6 +552,14 @@ class UnittestFailureSummaryTests(unittest.TestCase):
                 timeout = CHECK._unittest_timeout_seconds()
                 self.assertEqual(budgets[0], timeout)
                 self.assertEqual(entry['tests'], {'run': 3, 'failed': 3, 'skipped': 1})
+                if timed_out:
+                    # The child was stopped for time: it reported no exit
+                    # code of its own, so the receipt names its outcome
+                    # rather than the platform's code for a killed child.
+                    self.assertIsNone(entry['exit_code'])
+                    self.assertEqual(entry['reason'], 'timeout')
+                else:
+                    self.assertEqual(entry['exit_code'], 1)
                 self.assertFalse(paths[0].parent.exists(), 'private sidecar directory must be cleaned')
                 self.assertEqual(len(paths), 1, 'local checks do not collect timing sidecars without opt-in')
                 self.assertFalse((Path(temporary) / 'private-validation'
@@ -1361,16 +1369,35 @@ class PinnedDependencyProvisionTests(unittest.TestCase):
     def test_a_partially_installed_adapter_is_never_reinstalled(self):
         with tempfile.TemporaryDirectory() as td:
             adapter = self.adapter(Path(td))
-            # The operator's tree holds something: the clean install would
-            # delete it, so the gate must not run at all.
+            # The operator's tree holds one of the pinned packages: the
+            # clean install would delete it, so the gate must not run at all.
+            present = adapter / 'node_modules' / 'left-pad'
+            present.mkdir(parents=True)
+            (present / 'package.json').write_text(json.dumps({'version': '1.3.0'}),
+                                                   encoding='utf-8')
+            other = adapter / 'node_modules' / 'other'
+            other.mkdir(parents=True)
+            (other / 'package.json').write_text(json.dumps({'version': '1.0.0'}),
+                                                encoding='utf-8')
+            with mock.patch.object(CHECK.subprocess, 'run', self.fake_npm()):
+                state, details = CHECK.provision_pinned_dependencies(adapter)
+            self.assertEqual(state, 'ready')
+            self.assertEqual(self.calls, [])
+
+    def test_an_adapter_that_holds_none_of_the_pinned_packages_is_refused(self):
+        with tempfile.TemporaryDirectory() as td:
+            adapter = self.adapter(Path(td))
+            # The tree holds nothing of the pinned set, so the verdict is
+            # absent, but the clean install would replace the tree the
+            # operator has, so it does not run.
             present = adapter / 'node_modules' / 'other'
             present.mkdir(parents=True)
             (present / 'package.json').write_text(json.dumps({'version': '1.0.0'}),
                                                    encoding='utf-8')
             with mock.patch.object(CHECK.subprocess, 'run', self.fake_npm()):
                 state, details = CHECK.provision_pinned_dependencies(adapter)
-            self.assertEqual(state, 'partial')
-            self.assertIn('left-pad@1.3.0', details)
+            self.assertEqual(state, 'absent')
+            self.assertIn('dependency tree is present', details)
             self.assertEqual(self.calls, [])
             # The operator's tree is exactly as it was.
             self.assertTrue((present / 'package.json').exists())

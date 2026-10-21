@@ -122,6 +122,31 @@ class AdapterProbeOutcomeTests(unittest.TestCase):
             self.probe_with(Result(0, report, "", "exited", 2.0))
         self.assertIn("missing exports", str(caught.exception))
 
+    def test_a_measurement_that_cannot_be_taken_keeps_the_floor(self):
+        seen = []
+        exports = adapter_contract("pi")["exports"]
+
+        def fake_run(argv, *, timeout, maximum, **kwargs):
+            seen.append(timeout)
+            if len(seen) == 1:
+                # The measurement could not be taken: the child did not
+                # answer inside the measuring ceiling.
+                return Result(None, "", "", "timeout", 150.0)
+            return Result(0, json.dumps({"exports": exports}), "", "exited", 2.0)
+
+        original = doctor.run
+        doctor.run = fake_run
+        self.addCleanup(setattr, doctor, "run", original)
+        details = doctor.engine_contract(config_for(), "pi")
+        # The floor answers for an unmeasured cost, the same answer the
+        # launcher harness gives for the identical child, and no cost is
+        # published for a child that did not answer.
+        self.assertEqual(seen[0], doctor.ADAPTER_STARTUP_MEASURE_CEILING_SECONDS)
+        self.assertEqual(seen[1], doctor.ADAPTER_STARTUP_FLOOR_SECONDS)
+        self.assertEqual(details["host_relative_bound_seconds"],
+                         doctor.ADAPTER_STARTUP_FLOOR_SECONDS)
+        self.assertIsNone(details["startup_seconds"])
+
     def test_a_passing_probe_reports_the_host_cost(self):
         exports = adapter_contract("pi")["exports"]
         report = json.dumps({"exports": exports})
@@ -327,7 +352,10 @@ class SharedProbeClassificationTests(unittest.TestCase):
         self.addCleanup(setattr, self.module.subprocess, "run", original)
         with self.assertRaises(self.module.ProbeTimeout) as caught:
             self.module.run_probe(["node", "launcher.mjs"], engine="pi")
-        bound = self.module.ADAPTER_STARTUP_MEASURE_CEILING_SECONDS
+        # The measurement could not be taken, so the floor answers for the
+        # identical child in both surfaces, exactly as the launcher harness
+        # answers for it.
+        bound = self.module.ADAPTER_STARTUP_FLOOR_SECONDS
         with self.assertRaises(ConfigError) as shared:
             doctor.probe_outcome("timeout", None, "", doctor.probe_label("pi"), bound)
         # The script keeps only the exception type; the classification and
@@ -335,6 +363,24 @@ class SharedProbeClassificationTests(unittest.TestCase):
         self.assertEqual(str(caught.exception), str(shared.exception))
         self.assertIn("pi adapter contract probe", str(caught.exception))
         self.assertNotIn("missing", str(caught.exception))
+
+    def test_the_contract_check_keeps_the_floor_when_the_measurement_cannot_be_taken(self):
+        seen = []
+
+        def fake_run(command, **kwargs):
+            seen.append(kwargs.get("timeout"))
+            raise subprocess.TimeoutExpired(cmd=command, timeout=kwargs.get("timeout"))
+
+        original = self.module.subprocess.run
+        self.module.subprocess.run = fake_run
+        self.addCleanup(setattr, self.module.subprocess, "run", original)
+        with self.assertRaises(self.module.ProbeTimeout) as caught:
+            self.module.run_probe(["node", "launcher.mjs"], engine="pi")
+        # The measurement could not be taken, so the floor is the bound the
+        # child is held to, the same answer the harness gives.
+        self.assertEqual(seen[0], self.module.ADAPTER_STARTUP_MEASURE_CEILING_SECONDS)
+        self.assertEqual(seen[1], self.module.ADAPTER_STARTUP_FLOOR_SECONDS)
+        self.assertIn("60 s bound", str(caught.exception))
 
     def test_a_killed_child_reads_the_same_way_in_both_surfaces(self):
         original = self.module.subprocess.run
