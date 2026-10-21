@@ -137,7 +137,9 @@ class RetireGrantTests(Fixture):
         # The fresh provider check is authoritative: reported live refs
         # block even with no recorded observation, and a contradictory
         # deleted:true alongside blockers is still refused.
-        template = ("import sys,json; "
+        # Consume the request before replying: otherwise early pipe closure
+        # races the writer and tests input_error instead of response validation.
+        template = ("import sys,json; json.load(sys.stdin); "
                     "print(json.dumps({'branch': 'mizu/x-1', "
                     "'sha': %r, 'deleted': %s, "
                     "'live_refs': ['forge:owner/repo#7']}))")
@@ -151,14 +153,14 @@ class RetireGrantTests(Fixture):
     def test_missing_or_malformed_affirmation_refused(self):
         # A provider that cannot affirm the atomic live-ref check fails
         # closed: the old echo shape without live_refs no longer retires.
-        no_key = ("import sys,json; "
+        no_key = ("import sys,json; json.load(sys.stdin); "
                   "print(json.dumps({'branch': 'mizu/x-1', 'sha': %r, "
                   "'deleted': True}))" % SHA_A)
         with self.assertRaisesRegex(Denied, "live proposal references"):
             vcs.retire_via(grant_settings(no_key), "mizu/x-1", SHA_A)
         for refs in ("forge:owner/repo#7", [None], [""], ["x" * 129],
                      ["ok", 7]):
-            code = ("import sys,json; "
+            code = ("import sys,json; json.load(sys.stdin); "
                     "print(json.dumps({'branch': 'mizu/x-1', 'sha': %r, "
                     "'deleted': True, 'live_refs': %r}))" % (SHA_A, refs))
             with self.assertRaisesRegex(Denied, "live proposal references",
