@@ -82,6 +82,74 @@ class JobTests(Fixture):
         with lock(self.config.data / 'check-slots/0.lock'), lock(self.config.data / 'check-slots/1.lock'):
             self.assertEqual(self.run_job()['status'], 'busy')
         self.assertFalse(FakeSandbox.calls)
+    def test_pending_response_exposes_owned_slot_releasing_continuation(self):
+        ctx, job = self.submit()
+        self.assertFalse(job['accepted_for_current_source'])
+        wait = job['wait']
+        self.assertEqual(wait['operation'], 'finish')
+        self.assertEqual(wait['arguments'], {'outcome': 'wait', 'wait_for_check': job['id']})
+        self.assertIsNone(ctx.finished)
+        ctx._op_finish({**wait['arguments'], 'summary': 'Independent work complete', 'state': 'Await frozen result'})
+        self.assertEqual(ctx.finished['wait_for_check'], job['id'])
+        self.run_job()
+        self.assertNotIn('wait', check_jobs.result(ctx, job['id']))
+
+    def test_cache_blocked_verification_does_not_block_independent_check(self):
+        self.project.config = dataclasses.replace(self.config,
+            sandbox=dataclasses.replace(self.config.sandbox, check_cache_paths=('target',)))
+        self.config = self.project.config
+        ctx, verification = self.submit()
+        read_job = check_jobs.submit(self.context('reviewer'), 'printf independent', kind='exec')
+        with lock(self.project.root / 'locks/check-cache.lock'):
+            result = self.run_job()
+            self.assertEqual(result['id'], read_job['id'])
+            self.assertEqual(result['status'], 'completed')
+            self.assertEqual(self.run_job()['status'], 'busy')
+            self.assertEqual(check_jobs.read(self.project, verification['id'])['status'], 'queued')
+        self.assertEqual(self.run_job()['id'], verification['id'])
+
+    def test_unrelated_checks_do_not_acquire_build_cache(self):
+        self.submit()
+        with lock(self.project.root / 'locks/check-cache.lock'):
+            self.assertEqual(self.run_job()['status'], 'completed')
+
+    def test_live_job_owner_does_not_block_later_check(self):
+        ctx, first = self.submit()
+        later = check_jobs.submit(self.context('reviewer'), 'printf later', kind='exec')
+        with lock(check_jobs.root(self.project) / first['id'] / 'owner.lock'):
+            result = self.run_job()
+        self.assertEqual(result['id'], later['id'])
+        self.assertEqual(check_jobs.read(self.project, first['id'])['status'], 'queued')
+
+    def test_runner_drains_multiple_checks_without_timer_gap(self):
+        self.submit()
+        check_jobs.submit(self.context('reviewer'), 'printf second', kind='exec')
+        result = check_jobs.run_pending(self.project, threading.Event(), sandbox_factory=FakeSandbox)
+        self.assertEqual(result['processed'], 2)
+        self.assertEqual(result['status'], 'idle')
+        self.assertEqual(len(FakeSandbox.calls), 2)
+
+    def test_batch_returns_on_contention_without_polling(self):
+        self.submit()
+        with lock(self.config.data / 'check-slots/0.lock'), lock(self.config.data / 'check-slots/1.lock'):
+            result = check_jobs.run_pending(self.project, threading.Event(), sandbox_factory=FakeSandbox)
+        self.assertEqual(result, {'status': 'busy', 'processed': 0})
+        self.assertFalse(FakeSandbox.calls)
+
+    def test_batch_stop_prevents_next_job(self):
+        self.submit()
+        check_jobs.submit(self.context('reviewer'), 'printf second', kind='exec')
+        stop = threading.Event()
+        class Stopping(FakeSandbox):
+            def execute(inner, *args, **kwargs):
+                result = super().execute(*args, **kwargs)
+                stop.set()
+                return result
+        result = check_jobs.run_pending(self.project, stop, sandbox_factory=Stopping)
+        self.assertEqual(result['processed'], 1)
+        self.assertEqual(result['status'], 'deferred')
+        self.assertEqual(len(FakeSandbox.calls), 1)
+
     def test_crashed_runner_is_not_success_or_automatic_reexecution(self):
         ctx, job = self.submit()
         path = check_jobs.root(self.project) / job['id'] / 'job.json'

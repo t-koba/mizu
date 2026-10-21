@@ -283,7 +283,12 @@ def submit(context, script=None, *, kind="experiment", fresh=False):
 
 
 def summary(job):
-    return {**{'command_count': len(job.get('commands', [])),
+    continuation = ({'wait': {'operation': 'finish',
+                             'arguments': {'outcome': 'wait', 'wait_for_check': job['id']},
+                             'supply': ['summary', 'state'],
+                             'resumes_on': 'check completion or new input'}}
+                    if job.get('status') in ('queued', 'running') else {})
+    return {**continuation, **({'accepted_for_current_source': False} if job.get('kind') == 'verify' and job.get('status') in ('queued', 'running') else {}), **{'command_count': len(job.get('commands', [])),
                'command_preview': [text_preview(c, 128)[0] for c in job.get('commands', [])[:4]]},
             **{k: job[k] for k in ('id', 'role', 'run', 'kind', 'code_digest', 'status',
                                'created_at', 'finished_at', 'passed', 'error', 'shared_job') if k in job}}
@@ -416,38 +421,42 @@ def run_one(project, stop, *, sandbox_factory=Sandbox):
         return {'status': 'deferred'}
     if shutil.disk_usage(project.root).free < project.config.limits.free_disk_mb * 1048576:
         return {'status': 'disk-reserve'}
-    with contextlib.ExitStack() as stack:
-        # Cache ownership is acquired before compute admission: waiting for an
-        # artifact must never consume a scarce execution slot.
-        try:
-            stack.enter_context(lock(project.root / 'locks/check-cache.lock', blocking=False))
-        except Busy:
-            return {'status': 'busy'}
-        for slot in range(project.config.limits.parallel_checks):
-            if (project.config.data / 'check-slots' / f'{slot}.fault.json').exists():
-                continue
+    blocked = False
+    paths = sorted(root(project).glob('*/job.json'),
+                   key=lambda p: read_json(p, {}).get('created_at', ''))
+    for path in paths:
+        job = read_json(path, {})
+        if job.get('shared_job') or job.get('status') not in ('queued', 'running'):
+            continue
+        # Acquire only the resources this job uses. A blocked cache owner or
+        # live job must not hold a compute slot or stop unrelated queued work.
+        with contextlib.ExitStack() as stack:
             try:
-                stack.enter_context(lock(project.config.data / 'check-slots' / f'{slot}.lock', blocking=False))
-                if (project.config.data / 'check-slots' / f'{slot}.fault.json').exists():
-                    stack.close()
+                stack.enter_context(lock(path.parent / 'owner.lock', blocking=False))
+                if job.get('kind') == 'verify' and project.config.sandbox.check_cache_paths:
+                    stack.enter_context(lock(project.root / 'locks/check-cache.lock', blocking=False))
+            except Busy:
+                blocked = True
+                continue
+            job = read_json(path, {})
+            if job.get('shared_job') or job.get('status') not in ('queued', 'running'):
+                continue
+            for slot in range(project.config.limits.parallel_checks):
+                fault = project.config.data / 'check-slots' / f'{slot}.fault.json'
+                if fault.exists():
                     continue
+                guard = lock(project.config.data / 'check-slots' / f'{slot}.lock', blocking=False)
+                try:
+                    guard.__enter__()
+                except Busy:
+                    continue
+                if fault.exists():
+                    guard.__exit__(None, None, None)
+                    continue
+                stack.callback(guard.__exit__, None, None, None)
                 break
-            except Busy:
-                continue
-        else:
-            return {'status': 'busy'}
-        for path in sorted(root(project).glob('*/job.json'), key=lambda p: read_json(p, {}).get('created_at', '')):
-            job = read_json(path, {})
-            if job.get('shared_job') or job.get('status') not in ('queued', 'running'):
-                continue
-            try:
-                owner = lock(path.parent / 'owner.lock', blocking=False)
-                stack.enter_context(owner)
-            except Busy:
-                continue
-            job = read_json(path, {})
-            if job.get('shared_job') or job.get('status') not in ('queued', 'running'):
-                return {'status': 'idle'}
+            else:
+                return {'status': 'busy'}
             if job['status'] == 'running':
                 try:
                     cleanup(project.config, project.root, 'check-' + job['id'][:24])
@@ -462,7 +471,24 @@ def run_one(project, stop, *, sandbox_factory=Sandbox):
             if result['status'] == 'cleanup_failed':
                 return quarantine(project, read(project, job['id']), slot, result.get('error', 'Cleanup failed'))
             return result
-    return {'status': 'idle'}
+    return {'status': 'busy' if blocked else 'idle'}
+
+
+def run_pending(project, stop, *, sandbox_factory=Sandbox):
+    """Drain a bounded batch, releasing admission between jobs.
+
+    At most check_pending (1–1024) terminal jobs are processed. No polling or
+    sleeping: idle, resource contention, pause, cancellation or cleanup failure
+    returns immediately to the operator's existing event/recovery trigger.
+    Each job retains its own durable result and frozen input checks.
+    """
+    processed = 0
+    for _ in range(project.config.limits.check_pending):
+        result = run_one(project, stop, sandbox_factory=sandbox_factory)
+        if result.get('status') not in ('completed', 'refused', 'cancelled', 'interrupted'):
+            break
+        processed += 1
+    return {**result, 'processed': processed}
 
 
 def _execute(project, job, stop, sandbox_factory):

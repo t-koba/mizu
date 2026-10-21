@@ -60,7 +60,7 @@ def parser() -> argparse.ArgumentParser:
             p.add_argument("--attributes", type=Path, help="Operator JSON attributes for this execution")
             p.add_argument("--event", action="store_true",
                            help="Event-triggered dispatch: exit without model use unless a subscribed decision or due wait is pending")
-    p = sub.add_parser("check-jobs", help="Execute one queued frozen-input sandbox check; no model")
+    p = sub.add_parser("check-jobs", help="Execute a bounded batch of frozen-input sandbox checks; no model")
     p.add_argument("project")
     p.add_argument("--recover", action="store_true", help="Recover quarantined compute slots only after container cleanup")
     p = sub.add_parser("session", help="Manage persistent engine sessions; no inference")
@@ -456,13 +456,13 @@ def _cmd_work_items(config, project, args):
 def _cmd_check_jobs(config, project, args):
     if _platform.is_root():
         raise Denied("Never run sandbox jobs as root")
-    from .check_jobs import run_one, recover
+    from .check_jobs import run_pending, recover
     if args.recover:
         return recover(project)
     stop = threading.Event()
     previous = {sig: signal.signal(sig, lambda s, f: stop.set()) for sig in (signal.SIGTERM, signal.SIGINT)}
     try:
-        return run_one(project, stop)
+        return run_pending(project, stop)
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)

@@ -27,7 +27,7 @@ the role even when source code has not changed. Result delivery is acknowledged
 only after a consuming work unit has durably completed, not on a possibly lost
 tool response. Read-only service triggers watch the persisted queue.
 
-`mizu check-jobs PROJECT` executes at most one pending job without a model. On
+`mizu check-jobs PROJECT` drains up to `limits.check_pending` terminal jobs per invocation without a model, releasing admission between jobs. It returns immediately on idle, compute contention, cancellation, pause or cleanup failure; it never sleeps between queued jobs. Each result remains in its own durable record. The CLI response adds `processed`, the number of terminal jobs handled. On
 Linux, service generation creates a dedicated checks service, path notification
 and a 30-second recovery timer when a project enables the capability. Install
 and enable those units before enabling model use of the capability. Other
@@ -43,7 +43,7 @@ the existing snapshot size/file/exclusion bounds. Private source/build trees are
 removed after terminal execution; only bounded evidence is retained. Cleanup
 failures retain the tree until operator recovery confirms container removal. Operators may configure `sandbox.check_cache_paths = ["target"]` to preserve
 incremental compiler artifacts for acceptance jobs. Entries are unique top-level
-directory names and must be excluded from the source snapshot. One project cache
+directory names and must be excluded from the source snapshot. Only verification jobs using configured cache directories take the project cache exclusion. Other checks can pass a cache-blocked verification without consuming that cache or bypassing the shared compute bound. One project cache
 owner moves these directories into the frozen workspace and back after clean
 completion; waiting for ownership consumes no compute slot. The live writer's
 build tree is never accessed. Environment changes select a separate cache, and
@@ -153,3 +153,11 @@ and `wait_seconds`; the existing persisted wake deadline releases the unit and
 workspace rather than holding a command open.
 
 For `check_job` action `logs`, omitting `evidence_id` returns an index of up to 32 available recorded command IDs and ready-to-use `logs` requests for that same owned subscription. It lists only regular, nonsymlink UUID command records in the physical job's evidence directory, including when the subscription shares execution. No completion, acknowledgement or passing acceptance is inferred. Supplying an ID retains the existing paged, content-pinned evidence read and ownership checks.
+
+Queued/running job responses include a `wait` continuation recipe: the `finish`
+operation and its `outcome=wait, wait_for_check=<owned id>` arguments, plus the
+summary/state fields the caller must supply. It neither seals a unit nor claims
+success. Continue independent work when available; invoking that finish returns
+the model slot and workspace lock and resumes on completion or new input. The
+recipe disappears on terminal results. Normal ownership and finish validation
+still apply.
