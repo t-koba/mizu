@@ -21,7 +21,12 @@ from .sandbox import Sandbox, cleanup
 
 
 def execution_key(config):
-    return digest(canonical({'sandbox': dataclasses.asdict(config.sandbox),
+    sandbox = dataclasses.asdict(config.sandbox)
+    # Sharing controls do not change command execution or compiler artifacts.
+    # Keep pre-sharing queued jobs and evidence valid across feature activation.
+    for key in ('check_reuse', 'check_input_files', 'check_input_bytes'):
+        sandbox.pop(key, None)
+    return digest(canonical({'sandbox': sandbox,
                              'command_seconds': config.limits.command_seconds,
                              'output_bytes': config.limits.output_bytes}))
 

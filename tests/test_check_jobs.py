@@ -424,3 +424,12 @@ class SharingTests(JobTests):
         check_jobs.acknowledge(self.project,'worker',ctx.check_results_read)
         shutil.rmtree(check_jobs.root(self.project)/job['id'])
         self.assertFalse(check_jobs.waiting(self.project,'worker'))
+
+    def test_enabling_sharing_keeps_existing_queued_execution_valid(self):
+        self.config=dataclasses.replace(self.config,sandbox=dataclasses.replace(self.config.sandbox,check_reuse=False))
+        self.project.config=self.config
+        ctx,job=self.submit()
+        self.project.config=dataclasses.replace(self.config,sandbox=dataclasses.replace(self.config.sandbox,check_reuse=True))
+        self.assertEqual(self.run_job()['status'],'completed')
+        self.assertTrue(check_jobs.result(ctx,job['id'])['accepted_for_current_source'])
+        self.assertFalse(check_jobs.available(ctx))  # Old dependency inputs were not bound.
