@@ -114,6 +114,21 @@ def probe_outcome(reason, exit_code, detail, label: str, bound: int | None = Non
                       + (f": {text[-1000:]}" if text else ""))
 
 
+def probe_label(engine: str | None) -> str:
+    """The name one probe child is given by every surface that probes it.
+
+    The doctor and the contract check hold the identical child to the
+    identical bound, so a refusal names the identical child: the name is
+    derived from the engine here, once, instead of written out per call
+    site where two surfaces could drift apart.
+    """
+    if engine == "codex":
+        return "Codex app-server stdio probe"
+    if engine:
+        return f"{engine} adapter contract probe"
+    return "Adapter contract probe"
+
+
 def adapter_probe(config, engine, command, *, maximum: int, label: str):
     """Run one adapter child under this host's bound and name its outcome.
 
@@ -171,7 +186,7 @@ def engine_contract(config: Config, engine: str) -> dict:
     if engine == "codex":
         result, bound, cost = adapter_probe(config, engine,
                                             [*command, contract["command"][0], "--help"],
-                                            maximum=262144, label="Codex app-server stdio probe")
+                                            maximum=262144, label=probe_label(engine))
         flags = list(contract["required_flags"])
         for item in contract.get("contracts", []):
             flags.extend(item["required_flags"])
@@ -184,7 +199,7 @@ def engine_contract(config: Config, engine: str) -> dict:
     launcher = ROOT / "adapters" / engine / contract["entrypoint"]
     result, bound, cost = adapter_probe(config, engine,
                                         [*command, str(launcher), "--check-contract"],
-                                        maximum=8192, label=f"{engine} adapter contract probe")
+                                        maximum=8192, label=probe_label(engine))
     if result.exit_code:
         raise ConfigError("Required engine SDK capabilities missing: "
                           + (stop_note(result) or result.stderr[-1000:]))

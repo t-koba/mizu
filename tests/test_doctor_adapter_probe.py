@@ -306,5 +306,57 @@ class CheckCliProbeTests(unittest.TestCase):
         self.assertNotIn("missing", record["reason"])
 
 
+class SharedProbeClassificationTests(unittest.TestCase):
+    """One classification and one child name for every surface that probes it.
+
+    The doctor and the contract check hold the identical child to the
+    identical bound, so a child that did not answer reads the same way
+    wherever it is probed: the refusal is produced by the one rule both
+    surfaces use, and the child is named by the one rule both surfaces use.
+    """
+
+    def setUp(self):
+        self.module = load_check_cli()
+
+    def test_the_refusal_is_the_shared_one(self):
+        def fake_run(command, **kwargs):
+            raise subprocess.TimeoutExpired(cmd=command, timeout=kwargs.get("timeout"))
+
+        original = self.module.subprocess.run
+        self.module.subprocess.run = fake_run
+        self.addCleanup(setattr, self.module.subprocess, "run", original)
+        with self.assertRaises(self.module.ProbeTimeout) as caught:
+            self.module.run_probe(["node", "launcher.mjs"], engine="pi")
+        bound = self.module.ADAPTER_STARTUP_MEASURE_CEILING_SECONDS
+        with self.assertRaises(ConfigError) as shared:
+            doctor.probe_outcome("timeout", None, "", doctor.probe_label("pi"), bound)
+        # The script keeps only the exception type; the classification and
+        # the child's name are the product's.
+        self.assertEqual(str(caught.exception), str(shared.exception))
+        self.assertIn("pi adapter contract probe", str(caught.exception))
+        self.assertNotIn("missing", str(caught.exception))
+
+    def test_a_killed_child_reads_the_same_way_in_both_surfaces(self):
+        original = self.module.subprocess.run
+        self.module.subprocess.run = lambda command, **kwargs: subprocess.CompletedProcess(command, -9, "", "")
+        self.addCleanup(setattr, self.module.subprocess, "run", original)
+        record = self.module.probe_engine("pi", ["node", "launcher.mjs"], ["ModelRuntime"])
+        original_run = doctor.run
+        self.addCleanup(setattr, doctor, "run", original_run)
+        doctor.run = lambda argv, **kwargs: Result(-9, "", "", "exited", 1.0)
+        with self.assertRaises(ConfigError) as shared:
+            doctor.engine_contract(config_for(), "pi")
+        self.assertEqual(record["reason"], str(shared.exception))
+        self.assertIn("killed", record["reason"])
+
+    def test_the_child_name_is_derived_once(self):
+        # The name is derived from the engine in the product, so the two
+        # surfaces cannot drift into two names for one child.
+        self.assertEqual(doctor.probe_label("codex"), "Codex app-server stdio probe")
+        self.assertEqual(doctor.probe_label("pi"), "pi adapter contract probe")
+        self.assertEqual(doctor.probe_label("pi-durable"), "pi-durable adapter contract probe")
+        self.assertEqual(doctor.probe_label(None), "Adapter contract probe")
+
+
 if __name__ == "__main__":
     unittest.main()

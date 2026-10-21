@@ -522,6 +522,11 @@ the operator is not sent to install a dependency the child never claimed to be
 missing. A child that answers and reports a missing export is still a missing
 capability, and the refusal names the reason the sandbox probe beside it names.
 
+The two surfaces that probe the identical child -- the doctor and the
+installed-adapter contract check -- classify its outcome by one rule and name
+it by one name, so a child that did not answer reads the same way wherever it
+is probed and neither surface can drift into a second answer for one child.
+
 ## ADR-043 — A check job's container is protected by the runner's slot exclusion
 A check job's container carries the project's label like any other container,
 so a project-wide sweep enumerated it and removed it while the job was still

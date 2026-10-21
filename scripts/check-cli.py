@@ -14,6 +14,7 @@ from mizu.config import load
 from mizu.doctor import (ADAPTER_STARTUP_CEILING_SECONDS,
                          ADAPTER_STARTUP_MEASURE_CEILING_SECONDS,
                          adapter_startup_bound,
+                         probe_label,
                          probe_outcome,
                          help_has_flag)
 from mizu.engine_config import adapter_contract
@@ -41,6 +42,30 @@ def probe(engine, prefix):
 
 class ProbeTimeout(ConfigError):
     """The adapter child outlived the host-relative probe bound."""
+
+
+def bound_refusal(exc, bound, engine=None):
+    """The shared classification of a child that did not answer.
+
+    The doctor and this check probe the identical child under the identical
+    bound, so the refusal is produced by the one rule both surfaces use and
+    only its type stays local to the script. The child's own outcome -- the
+    reason, the exit code and the stderr it produced -- is what the
+    classification names.
+    """
+    detail = getattr(exc, "stderr", None)
+    if isinstance(detail, bytes):
+        detail = detail.decode("utf-8", "replace")
+    label = probe_label(engine)
+    try:
+        probe_outcome("timeout", None, detail, label, bound)
+    except ConfigError as refusal:
+        raise ProbeTimeout(str(refusal)) from exc
+    else:
+        # The shared rule refuses a child that did not answer, so the
+        # classification is the whole message; the local type is the only
+        # part of the refusal that stays with the script.
+        raise ProbeTimeout(f"{label} did not complete before it could report")
 
 
 def host_config():
@@ -78,8 +103,7 @@ def run_probe(command, engine=None, config=None):
         measured = subprocess.run(command, capture_output=True, text=True,
                                   timeout=ADAPTER_STARTUP_MEASURE_CEILING_SECONDS)
     except subprocess.TimeoutExpired as exc:
-        raise ProbeTimeout('Adapter probe exceeded its %d s bound (timeout) and was stopped '
-                           'before it could report' % ADAPTER_STARTUP_MEASURE_CEILING_SECONDS) from exc
+        bound_refusal(exc, ADAPTER_STARTUP_MEASURE_CEILING_SECONDS, engine)
     startup = round(time.monotonic() - started, 3)
     if measured.returncode != 0:
         # The child answered and reported a failure: that answer is the
@@ -99,8 +123,7 @@ def run_probe(command, engine=None, config=None):
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=bound)
     except subprocess.TimeoutExpired as exc:
-        raise ProbeTimeout('Adapter probe exceeded its %d s bound (timeout) and was stopped '
-                           'before it could report' % bound) from exc
+        bound_refusal(exc, bound, engine)
     return result, cost, bound
 
 
@@ -117,7 +140,7 @@ def probe_engine(engine, command, expected, config=None):
             # The child's own outcome goes to the shared classification, so
             # the script and the doctor name a killed child the same way.
             probe_outcome('exited', result.returncode, result.stderr,
-                          'Adapter contract probe')
+                          probe_label(engine))
         except ConfigError as exc:
             return {'engine': engine, 'status': 'fail', 'reason': str(exc),
                     'exit_code': result.returncode}
