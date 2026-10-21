@@ -336,6 +336,15 @@ live pages and routine model context remain live-only.
 
 ### Work-item view (read-only)
 
+The CLI is the canonical task-list reader, including for dashboards. Within one
+invocation it reuses validated snapshots and task records across the open,
+closed and delivery sections. Serialized retained records are bounded to 48 MiB
+(with additional Python object overhead), and path validation retains at most
+8192 names. Eviction only causes another validated read. The next invocation
+reads again, so changes and corruption remain visible. No persistent cache,
+writer lock, recovery operation or release-specific alternate reader is used.
+
+
 ```sh
 mizu work-items demo
 mizu work-items demo --limit 25 --cursor '<next_cursor>' --closed 10

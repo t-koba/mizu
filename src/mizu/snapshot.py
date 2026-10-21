@@ -585,13 +585,18 @@ class Snapshots:
                 raise Denied("Invalid snapshot file metadata")
         return record
 
+    def _path_key(self, name):
+        relative_parts(name)
+        if self.excluded(name):
+            raise Denied("Snapshot contains an excluded path")
+        return name.casefold() if _platform.IS_WINDOWS else name
+
     def validate_paths(self, files):
         seen = set()
         for name in files:
-            relative_parts(name)
-            if self.excluded(name):
-                raise Denied("Snapshot contains an excluded path")
-            key = name.casefold() if _platform.IS_WINDOWS else name
+            if not isinstance(name, str):
+                relative_parts(name)
+            key = self._path_key(name)
             if key in seen:
                 raise Denied("Snapshot paths collide on this host")
             seen.add(key)

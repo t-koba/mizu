@@ -441,14 +441,16 @@ def _cmd_work_items(config, project, args):
     ``event_acknowledgements`` (not limited to summary ID samples). The project must already be
     opened read-only by the caller.
     """
-    open_page = project.work_items.page_open_readonly(
+    from .work_item_read_view import readonly_view
+    store = readonly_view(project.work_items)
+    open_page = store.page_open_readonly(
         cursor=args.cursor, limit=args.limit if args.limit is not None else 25)
     from .work_item_events import closed_page, progress
     roles = {name: config.roles[name] for name in project.roles}
-    closed = closed_page(project.work_items, roles,
+    closed = closed_page(store, roles,
                          limit=args.closed if args.closed is not None else 10)
     return {"open": open_page, "closed": closed,
-            "event_delivery": progress(project.work_items, roles)}
+            "event_delivery": progress(store, roles)}
 
 
 def _cmd_check_jobs(config, project, args):
