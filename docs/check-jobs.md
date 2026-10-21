@@ -123,3 +123,9 @@ and `sandbox.check_input_bytes` (8 GiB of regular file contents), configurable
 positive integers up to 1 TiB. Exceeding a bound disables sharing. Warm matching
 uses cached content hashes but still checks filesystem identities. Neither build
 artifacts nor command text alone can establish passed validation.
+
+Development and CI can use `python scripts/check.py --fail-fast` to report a
+Python contract failure immediately instead of spending minutes running the
+rest of a failing suite. The option is off by default, preserves sanitized
+failure evidence, and never makes a failed or partial run reusable as a passing
+gate. With no failure, the entire suite still runs.

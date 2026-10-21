@@ -1596,3 +1596,20 @@ class ReusedSourceReportTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class FailFastChildTests(unittest.TestCase):
+    def test_first_failure_stops_later_tests_and_retains_private_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);(root/'tests').mkdir()
+            (root/'tests/test_sample.py').write_text(
+                'import unittest\nfrom pathlib import Path\n'
+                'class Sample(unittest.TestCase):\n'
+                '    def test_a_fail(self): self.fail("fixture_secret")\n'
+                '    def test_b_later(self): Path("later").touch()\n',encoding='utf-8')
+            sidecar=root/'failures.jsonl'
+            child=subprocess.run([sys.executable,str(ROOT/'scripts/check_unittest.py'),str(sidecar),'--fail-fast'],cwd=root,capture_output=True,text=True,timeout=30)
+            self.assertEqual(child.returncode,1)
+            self.assertFalse((root/'later').exists())
+            self.assertIn('Ran 1 test',child.stderr)
+            self.assertNotIn('fixture_secret',child.stderr+sidecar.read_text())
+            self.assertIn('test_a_fail',sidecar.read_text())

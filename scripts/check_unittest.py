@@ -176,9 +176,11 @@ def main():
     # A script normally starts with scripts/ on sys.path; -m unittest starts
     # with the working directory. Preserve root-level test-helper imports.
     sys.path[0] = os.getcwd()
-    fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    timing_path = sys.argv[2] if len(sys.argv) > 2 else None
-    timing_origin = float(sys.argv[3]) if len(sys.argv) > 3 else None
+    fail_fast = '--fail-fast' in sys.argv[1:]
+    arguments = [arg for arg in sys.argv[1:] if arg != '--fail-fast']
+    fd = os.open(arguments[0], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    timing_path = arguments[1] if len(arguments) > 1 else None
+    timing_origin = float(arguments[2]) if len(arguments) > 2 else None
     with os.fdopen(fd, 'w', encoding='utf-8') as sidecar, ExitStack() as stack:
         timing = None
         if timing_path is not None:
@@ -202,7 +204,7 @@ def main():
                     timing_origin=timing_origin), **kwargs)
 
         unittest.main(module=None,
-                      argv=[sys.argv[0], 'discover', '-s', 'tests', '-v'],
+                      argv=[sys.argv[0], 'discover', '-s', 'tests', '-v'] + (['-f'] if fail_fast else []),
                       testRunner=Runner)
 
 

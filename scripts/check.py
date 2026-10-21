@@ -395,6 +395,8 @@ def pi_sdk_deps_status(adapter: Path) -> tuple:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--fail-fast', action='store_true',
+                        help='Stop the Python suite at its first failure; successful gates still run every test')
     parser.add_argument('--report', type=Path, help='Write a portable JSON validation receipt')
     parser.add_argument('--test-timings', type=Path,
                         help='Write best-effort sanitized per-test timing evidence to this path')
@@ -544,6 +546,8 @@ def main():
             timing_sidecar = Path(temporary) / 'timings.jsonl'
             timing_origin = time.monotonic()
             command.extend((str(timing_sidecar), str(timing_origin)))
+        if args.fail_fast:
+            command.append('--fail-fast')
         ended_at = execute('python-unit-and-contract-tests', command,
                 count=unittest_counts, failure_summary=lambda: unittest_failure_summary(sidecar),
                 timeout=_unittest_timeout_seconds())
