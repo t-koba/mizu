@@ -3698,7 +3698,13 @@ class Engine:
             ci_failures = _ci_due_for(project, self.config, role, _ci_snapshot_id, time.time())
         except Exception:
             ci_failures = []
-        ready_work = role.workspace == "write" and _has_ready_work(project)
+        # A check-result subscription is not a request to start unrelated
+        # project work. Explicit-only roles may resume their owned checks,
+        # but generic ledger readiness belongs to configured autonomous runs.
+        autonomous = bool(role.daemon or role.interval_seconds or role.calendar
+                          or role.decision_events or role.work_item_events)
+        ready_work = (role.workspace == "write" and (not event_trigger or autonomous)
+                      and _has_ready_work(project))
         if event_trigger:
             event_gate = _scheduling.evaluate(_scheduling.DispatchFacts(
                 event_trigger=True,

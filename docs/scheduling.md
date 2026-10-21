@@ -321,3 +321,9 @@ another run consumes its event; the locked recheck returns `skipped` in that
 case, preserving pending events until their actual consumer acknowledges them.
 A disappeared admission ticket by itself is not evidence of completed work:
 consult the command result (`skipped` or `Busy`) or the run's terminal receipt.
+
+A role with no daemon, interval/calendar, or decision/work-item subscription is
+explicit-run only. A `check_job` grant adds owned-result wakeups, not authority
+to start unrelated project ledger work on every shared check-directory change.
+Explicit invocations and actual owned-result continuations remain available;
+this distinction uses the existing scheduling configuration, not role names.
