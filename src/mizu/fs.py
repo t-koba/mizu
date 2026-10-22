@@ -29,6 +29,12 @@ READ_PAGE_CHARS = 8192
 #: MCP/socket LF framing bound shared by the bridge, the MCP proxy and the
 #: Editor capsule server (each rejects anything above it).
 MAX_FRAME = 1024 * 1024
+#: Workspace trees the product reserves for regenerable private evidence.
+#: They hold receipts that are regenerated on demand and never committed,
+#: so a capture leaves them out: the evidence never enters a published
+#: snapshot and never moves a tree's identity. The rule belongs to the
+#: product, so no operator configuration can reintroduce them.
+PRIVATE_EVIDENCE_TREES = frozenset({"private-validation"})
 #: Maximum JSON nesting depth accepted by loads_finite. This is a product
 #: rule, not an interpreter artifact: without it the accepted depth follows
 #: the runtime's recursion limit, so the same hostile frame is refused on one

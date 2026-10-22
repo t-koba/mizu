@@ -636,3 +636,25 @@ it, exactly as it would have subscribed to any other matching result.
 Nothing else changes. A failed, interrupted or changed-input result is still
 not shareable, the explicit way to ask for an independent rerun is preserved,
 and every input identity and evidence gate is unchanged.
+
+## ADR-047 — The capture leaves the reserved private evidence tree out
+The product writes regenerable receipts into `private-validation/`: the tree is
+ignored, never committed, and regenerated on demand. The distribution packager
+already left that tree out, but the snapshot capture did not, so a capture of
+this repository carried five private evidence files (a 122 KB child log and four
+receipts) and the tree's `code_digest` moved whenever a receipt was regenerated.
+A published snapshot could therefore carry the product's own private evidence,
+and the tree's identity depended on regenerable files.
+
+Two simpler routes were measured and rejected. Adding the name to the operator's
+`exclude` list makes every snapshot that already holds such a path unreadable
+(the path validator refuses an excluded path), so the fix would invalidate
+stored snapshots. Reporting the tree as a reserved path refuses a plain-directory
+import of any tree that contains it, which is an ordinary operator directory
+here, not a collision with a virtual ref.
+
+The capture therefore leaves the reserved tree out itself. One product-side
+constant names the reserved trees; the capture and the distribution packager
+share it, so the two cannot drift apart. The rule is not the operator's
+exclusion list, so it holds whatever the operator configured, and a snapshot
+that already holds such a path stays readable: the rule governs new captures.

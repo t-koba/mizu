@@ -15,7 +15,7 @@ from pathlib import Path
 from . import platform as _platform
 from .config import role_no_progress_backoff_seconds
 from .errors import CaptureLimitExceeded, Denied, LimitExceeded, SnapshotConflict
-from .fs import DIGEST, ID, PREVIEW_BYTES, atomic_write, canonical, digest, lock, mkdir, now, publish_pointer, read_json, safe_read, safe_read_info, write_json, relative_parts
+from .fs import DIGEST, ID, PREVIEW_BYTES, PRIVATE_EVIDENCE_TREES, atomic_write, canonical, digest, lock, mkdir, now, publish_pointer, read_json, safe_read, safe_read_info, write_json, relative_parts
 from .vcs import REF_PREFIX
 
 
@@ -229,6 +229,18 @@ class Snapshots:
         parts = name.split("/")
         return len(parts) >= len(REF_PREFIX) and tuple(parts[:len(REF_PREFIX)]) == REF_PREFIX
 
+    @staticmethod
+    def _private_evidence(name: str) -> bool:
+        """Whether a directory path is a tree reserved for private evidence.
+
+        The product reserves these names for regenerable, never-committed
+        receipts. A capture leaves the whole tree out, so a regenerated
+        receipt neither enters a published snapshot nor moves the tree's
+        identity. The rule belongs to the product, not to the operator's
+        exclusion list, so it holds whatever the operator configured.
+        """
+        return name.split("/")[-1] in PRIVATE_EVIDENCE_TREES
+
     def excluded(self, name: str) -> bool:
         # Legacy in-workspace upstream-ref subtree (pre-move): the store now
         # lives outside the working tree, so this only guards workspaces
@@ -283,7 +295,7 @@ class Snapshots:
                     else:
                         visible_dirs.append(d)
                     continue
-                if self.excluded(rel):
+                if self.excluded(rel) or self._private_evidence(rel):
                     continue
                 if stat.S_ISLNK(os.stat(d, dir_fd=directory_fd, follow_symlinks=False).st_mode):
                     skipped.append(rel)
@@ -322,7 +334,7 @@ class Snapshots:
                     else:
                         visible_dirs.append(d)
                     continue
-                if self.excluded(rel):
+                if self.excluded(rel) or self._private_evidence(rel):
                     continue
                 if full.is_symlink() or bool(getattr(full.lstat(), "st_file_attributes", 0) & 0x400):
                     skipped.append(rel)

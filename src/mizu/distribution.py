@@ -2,9 +2,11 @@
 import os
 from pathlib import Path
 
+from .fs import PRIVATE_EVIDENCE_TREES
+
 DIRECTORIES = frozenset({'src', 'adapters', 'bin', 'docs', 'examples', 'scripts', 'tests', 'policies', 'config', 'containers', '.github'})
 METADATA = frozenset({'README.md', 'Makefile', 'SECURITY.md', '.editorconfig', 'LICENSE', 'CHANGELOG.md', 'AGENTS.md', 'pyproject.toml', '.gitignore', 'DISTRIBUTION.json', 'MANIFEST.sha256'})
-EXCLUDED = frozenset({'.git', 'node_modules', '__pycache__', '.pytest_cache', '.ruff_cache', '.venv', 'dist', 'build', 'private-validation', '.DS_Store'})
+EXCLUDED = frozenset({'.git', 'node_modules', '__pycache__', '.pytest_cache', '.ruff_cache', '.venv', 'dist', 'build', '.DS_Store'}) | PRIVATE_EVIDENCE_TREES
 PRIVATE = frozenset({'credentials.env', 'config.local.toml', 'installation.json', 'source-manifest.json', 'installation-checks.json'})
 
 #: Versioned schema for the offline source-gate report reused by core-only
