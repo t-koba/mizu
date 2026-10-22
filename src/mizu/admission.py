@@ -187,6 +187,9 @@ def _read_state(root: Path, capacity: int, state_bytes: int) -> list:
     return tickets
 
 
+_PENDING_ADMISSIONS: dict[tuple[str, ...], tuple[str, object]] = {}
+
+
 class _Queue:
     """A bounded list under queue.lock; fixed pending locks prove liveness.
 
@@ -253,6 +256,7 @@ class _Queue:
             tickets.append({"id": self.identity, "owner": owner,
                             "resources": list(self.resources), "enqueued_at": now()})
             self._write(tickets)
+            _PENDING_ADMISSIONS[tuple(self.resources)] = (self.identity, manager)
             return
         raise _Full("Execution admission queue is full")
 
@@ -310,6 +314,10 @@ class _Queue:
     def _release_pending(self):
         if self.alive is not None:
             self.alive.__exit__(None, None, None)
+            key = tuple(self.resources)
+            entry = _PENDING_ADMISSIONS.get(key)
+            if entry is not None and entry[0] == self.identity:
+                del _PENDING_ADMISSIONS[key]
             self.alive = None
 
     def close(self):
@@ -377,7 +385,7 @@ def _state_bytes(capacity: int) -> int:
 
 
 @contextlib.contextmanager
-def admission(config, resources=(), *, wait=False, stop=None, check=None):
+def admission(config, resources=(), *, wait=False, enqueue=False, stop=None, check=None):
     """Admit one work unit; lend nothing and never preempt an active driver.
 
     Pending capacity is derived from parallel_runs (one waiter per slot).
@@ -404,6 +412,8 @@ def admission(config, resources=(), *, wait=False, stop=None, check=None):
     # refuse a run that never queued.
     deadline = None
     queue = _Queue(config, resources)
+    if not wait and enqueue:
+        _reuse_pending_admission(queue)
     try:
         while True:
             if stop.is_set():
@@ -413,7 +423,7 @@ def admission(config, resources=(), *, wait=False, stop=None, check=None):
             if deadline is not None and time.monotonic() >= deadline:
                 raise Busy("Execution admission wait expired")
             try:
-                attempt = queue.attempt(enqueue=wait)
+                attempt = queue.attempt(enqueue=bool(wait or enqueue))
             except (_Full, _Invalid) as exc:
                 raise Busy(str(exc)) from None
             except Busy:
@@ -437,4 +447,36 @@ def admission(config, resources=(), *, wait=False, stop=None, check=None):
                 yield max(0.0, time.monotonic() - admission_started)
             return
     finally:
-        queue.close()
+        key = tuple(queue.resources)
+        entry = _PENDING_ADMISSIONS.get(key)
+        keep_queued = (not wait and bool(enqueue) and not stop.is_set()
+                       and entry is not None and entry[0] == queue.identity
+                       and queue.alive is not None)
+        if keep_queued:
+            # A fail-fast daemon ticket keeps its pending place and lock alive
+            # for the next admission attempt; it is not a blocking wait.
+            pass
+        else:
+            queue.close()
+
+
+def _reuse_pending_admission(queue: "_Queue") -> None:
+    """Reuse a pending ticket this process already queued, if it is still live."""
+    key = tuple(queue.resources)
+    entry = _PENDING_ADMISSIONS.get(key)
+    if entry is None:
+        return
+    ticket_id, manager = entry
+    queue.identity = ticket_id
+    queue.alive = manager
+    try:
+        tickets = queue._read()
+    except Busy:
+        tickets = None
+    if tickets is not None and not any(
+            isinstance(t, dict) and t.get("id") == ticket_id for t in tickets):
+        with contextlib.suppress(Exception):
+            manager.__exit__(None, None, None)
+        del _PENDING_ADMISSIONS[key]
+        queue.identity = uuid.uuid4().hex
+        queue.alive = None

@@ -167,12 +167,14 @@ class QueueTests(Fixture):
                 process.join(5)
             process.close()
 
-    def waiter(self, *, resources=(), stop=None, check=None, config=None, capture_elapsed=False):
+    def waiter(self, *, resources=(), stop=None, check=None, config=None, capture_elapsed=False,
+               wait=True, enqueue=False):
         stop = stop if stop is not None else threading.Event()
         result = []
         def work():
             try:
-                with admission(config or self.config, resources, wait=True, stop=stop, check=check) as elapsed:
+                with admission(config or self.config, resources, wait=wait, enqueue=enqueue,
+                               stop=stop, check=check) as elapsed:
                     result.append(('admitted', elapsed) if capture_elapsed else 'admitted')
             except BaseException as exc:
                 result.append(exc)
@@ -596,6 +598,54 @@ class QueueTests(Fixture):
             with admission(self.config, wait=True, check=late_check):
                 pass
         self.assertEqual(self.tickets(), [])
+
+    def test_fail_fast_daemon_ticket_survives_continuous_one_shot_arrivals(self):
+        # A daemon worker that cannot dispatch enqueues one pending ticket and
+        # defers. Continuous one-shot arrivals queue behind it instead of
+        # pushing it out of reach, and retrying admission dispatches that same
+        # ticket once; no ticket is dispatched twice.
+        self.tune(parallel_runs=3, idle_seconds=0.01, admission_wait_seconds=1)
+        daemon_outcome = []
+        with self.raw_slots():
+            def first_daemon_attempt():
+                try:
+                    with admission(self.config, self.resources('worker'), wait=False, enqueue=True):
+                        daemon_outcome.append('admitted')
+                except BaseException as exc:
+                    daemon_outcome.append(exc)
+            thread = threading.Thread(target=first_daemon_attempt)
+            thread.start()
+            thread.join(5)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(len(daemon_outcome), 1)
+            self.assertIsInstance(daemon_outcome[0], Busy)
+            self.assertEqual(len(self.tickets(synchronized=True)), 1)
+            daemon_ticket = self.tickets(synchronized=True)[0]['id']
+
+            oneshots = []
+            for _ in range(2):
+                waiter_thread, stop, result = self.waiter(
+                    resources=self.resources('reporter'), wait=True, enqueue=False)
+                oneshots.append((waiter_thread, stop, result))
+                self.until(lambda: len(self.tickets(synchronized=True)) >= len(oneshots) + 1)
+
+        # The daemon ticket kept its place ahead of every one-shot arrival.
+        self.assertEqual(self.tickets(synchronized=True)[0]['id'], daemon_ticket)
+
+        # Retry the same daemon ticket; it is admitted without a second enqueue.
+        retry_outcome = []
+        with admission(self.config, self.resources('worker'), wait=False, enqueue=True):
+            retry_outcome.append('admitted')
+        self.assertEqual(retry_outcome, ['admitted'])
+
+        for waiter_thread, stop, result in oneshots:
+            waiter_thread.join(5)
+            self.assertFalse(waiter_thread.is_alive())
+            self.assertEqual(result, ['admitted'])
+
+        self.assertEqual(self.tickets(synchronized=True), [])
+        with self.raw_slots():
+            pass
 
     def test_wait_fails_fast_on_corrupt_queue(self):
         write_json(self.config.data / 'slots/queue.json', {'version': 99, 'tickets': []})
@@ -1024,7 +1074,7 @@ class QueueTests(Fixture):
                 role = self.config.roles[role_name]
                 seen = {}
 
-                def fake_admission(config, resources=(), *, wait=False, stop=None, check=None):
+                def fake_admission(config, resources=(), *, wait=False, enqueue=False, stop=None, check=None):
                     seen['resources'] = tuple(resources)
                     return contextlib.nullcontext(0.0)
 

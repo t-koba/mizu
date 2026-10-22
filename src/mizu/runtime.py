@@ -3704,12 +3704,13 @@ class Engine:
             raise InfraExceeded("Free disk space is below the configured reserve")
 
     def _admit(self, project: Project, role_name: str, role: Role, stack: contextlib.ExitStack,
-               *, wait: bool) -> float:
+               *, wait: bool, enqueue: bool = False) -> float:
         """Hold dispatch locks after FIFO admission and return its elapsed time."""
         resources = [role_exclusion(project.root, role_name)]
         if role.workspace == "write":
             resources.append(project.root / "locks" / "workspace.lock")
-        return stack.enter_context(admission(self.config, resources, wait=wait, stop=self.stop,
+        return stack.enter_context(admission(self.config, resources, wait=wait, enqueue=enqueue,
+                                             stop=self.stop,
                                              check=lambda: self._check_admission(project)))
 
     def _selection_retry_wait(self, context: Context, project: Project, stack: contextlib.ExitStack,
@@ -3848,7 +3849,7 @@ class Engine:
         return {'snapshot': snapshot, 'sources': sources, 'terminal_events': terminal_events, 'terminal_page': terminal_page, 'wait_events': wait_events, 'obligations': obligations, 'ci_present': ci_present, 'ci_failures': ci_failures, 'prior_wait_expired': prior_wait_expired, 'decision_events': decision_events, '_dispatch': _dispatch}
 
     def run(self, project: Project, role_name: str, *, attributes=None, retry_busy: bool = False,
-                event_trigger: bool = False, probes_serviced: bool = False) -> dict:
+                enqueue_busy: bool = False, event_trigger: bool = False, probes_serviced: bool = False) -> dict:
         if role_name not in project.roles:
             raise Denied("Role is not enabled for this project")
         role = self.config.roles[role_name]
@@ -3879,7 +3880,8 @@ class Engine:
                 dispatch_state = self._dispatch_state(project, role_name, role, event_trigger=event_trigger)
                 if dispatch_state.get("skip"):
                     return dispatch_state["skip"]
-            admission_elapsed = self._admit(project, role_name, role, stack, wait=retry_busy)
+            admission_elapsed = self._admit(project, role_name, role, stack, wait=retry_busy,
+                                                 enqueue=enqueue_busy)
             dispatch_state = self._dispatch_state(project, role_name, role, event_trigger=event_trigger)
             if dispatch_state.get("skip"):
                 return dispatch_state["skip"]
@@ -5128,7 +5130,8 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                     ready = should_run(project, project.snapshots.get(), role_name=role_name) if role.workspace == "write" else (
                         project.control().get("armed") and not project.control().get("paused") and not project.control().get("draining"))
                     if ready and time.monotonic() >= ordinary_after:
-                        result = Engine(config, stop=stop).run(project, role_name, probes_serviced=True)
+                        result = Engine(config, stop=stop).run(project, role_name, probes_serviced=True,
+                                        enqueue_busy=True)
                         print(json.dumps(result, ensure_ascii=False), flush=True)
                         delay = config.limits.cooldown_seconds if role.workspace == "write" else config.limits.idle_seconds
                         if result.get("status") in ("waiting", "deferred"):
