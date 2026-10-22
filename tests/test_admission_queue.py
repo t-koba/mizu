@@ -801,10 +801,20 @@ class QueueTests(Fixture):
         # The daemon ticket kept its place ahead of every one-shot arrival.
         self.assertEqual(self.tickets(synchronized=True)[0]['id'], daemon_ticket)
 
-        # Retry the same daemon ticket; it is admitted without a second enqueue.
+        # Retry the same fail-fast daemon ticket. Concurrent one-shot waiters
+        # may briefly hold queue.lock; that nonblocking Busy is expected, so
+        # retry only this lock-contention case within a bounded interval. Other
+        # Busy outcomes still fail the test.
         retry_outcome = []
-        with admission(self.config, self.resources('worker'), wait=False, enqueue=True):
-            retry_outcome.append('admitted')
+        deadline = time.monotonic() + 5
+        while not retry_outcome:
+            try:
+                with admission(self.config, self.resources('worker'), wait=False, enqueue=True):
+                    retry_outcome.append('admitted')
+            except Busy as exc:
+                if str(exc) != 'Already running: queue' or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.005)
         self.assertEqual(retry_outcome, ['admitted'])
 
         for waiter_thread, stop, result in oneshots:
