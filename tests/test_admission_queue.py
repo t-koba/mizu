@@ -88,6 +88,125 @@ class QueueTests(Fixture):
         limits.update(changes)
         self.config = dataclasses.replace(self.config, limits=dataclasses.replace(self.config.limits, **limits))
 
+    def test_shadow_queue_order_identity_bypass_and_unexamined_tail(self):
+        self.tune(parallel_runs=3)
+        current = (self.project.root / 'locks/run-reviewer.lock',)
+        head_resources = (self.project.root / 'locks/run-worker.lock',
+                          self.project.root / 'locks/workspace.lock')
+        tail_resources = (self.project.root / 'locks/run-reporter.lock',)
+        # Identical scans/lock outcomes with and without observation, including
+        # a partial resource acquisition before the head's Busy workspace.
+        for observe in (False, True):
+            rows = []
+            sink = rows.append if observe else None
+            with contextlib.closing(_Queue(self.config, head_resources)) as head, \
+                    contextlib.closing(_Queue(self.config, tail_resources)) as tail:
+                with lock(head_resources[1], blocking=False):
+                    with self.raw_slots():
+                        with self.assertRaises(Busy):
+                            head.attempt(enqueue=True)
+                        with self.assertRaises(Busy), admission(
+                                self.config, current, enqueue=True, observation_sink=sink):
+                            pass
+                        with self.assertRaises(Busy):
+                            tail.attempt(enqueue=True)
+                    before = self.tickets()
+                    order = [t['id'] for t in before]
+                    self.assertEqual(len(order), 3)
+                    self.assertEqual(rows, [])
+                    probes = []
+                    original = _Queue._resources
+                    def resources(queue_obj, stack, paths):
+                        probes.append(tuple(paths))
+                        return original(queue_obj, stack, paths)
+                    with patch.object(_Queue, '_resources', resources):
+                        with admission(self.config, current, enqueue=True,
+                                       observation_sink=sink) as elapsed:
+                            self.assertIsInstance(elapsed, float)
+                            self.assertEqual(self.tickets(), [before[0], before[2]])
+                            with self.assertRaises(Busy), lock(current[0], blocking=False):
+                                pass
+                            with self.assertRaises(Busy), self.raw_slots():
+                                pass
+                            # The bypass probe released the head's partial lock.
+                            with lock(head_resources[0], blocking=False):
+                                pass
+                            with head._pending(before[1]['owner']):
+                                pass  # Row retirement released its pending lock.
+                            for t in (before[0], before[2]):
+                                with self.assertRaises(Busy), head._pending(t['owner']):
+                                    pass
+                    self.assertEqual(probes, [head.resources, tuple(
+                        p.relative_to(self.config.data / 'projects').as_posix() for p in current)])
+                    if observe:
+                        self.assertEqual(rows, [{
+                            'admission_id': order[1], 'queued': True, 'fifo_position': 2,
+                            'live_ticket_ids': order, 'bypassed_busy_ticket_ids': [order[0]],
+                            'later_tickets_unexamined': 1, 'elapsed_seconds': elapsed,
+                            'affinity': None, 'affinity_reason': 'not_available_before_dispatch'}])
+                        raw = canonical(rows)
+                        for forbidden in (str(self.root).encode(), b'sample', b'resources',
+                                          b'prompt', b'payload', b'provider', b'session'):
+                            self.assertNotIn(forbidden, raw)
+                # The now-ready head still prevents an unqueued newcomer.
+                with self.assertRaises(Busy), admission(self.config, observation_sink=rows.append):
+                    pass
+                self.assertEqual(len(rows), int(observe))
+            with self.raw_slots(), lock(current[0], blocking=False):
+                pass
+
+    def test_shadow_unqueued_bypass_and_sink_failure_preserve_admission(self):
+        self.tune(parallel_runs=1)
+        resource = self.project.root / 'locks/run-worker.lock'
+        rows = []
+        with contextlib.closing(_Queue(self.config, (resource,))) as head:
+            with lock(resource, blocking=False):
+                with self.assertRaises(Busy):
+                    head.attempt(enqueue=True)
+                before = self.tickets()
+                with admission(self.config, observation_sink=rows.append) as elapsed:
+                    self.assertEqual(self.tickets(), before)
+                row, = rows
+                self.assertIsNone(row['fifo_position'])
+                self.assertFalse(row['queued'])
+                self.assertNotEqual(row['admission_id'], head.identity)
+                self.assertEqual(row['live_ticket_ids'], [head.identity])
+                self.assertEqual(row['bypassed_busy_ticket_ids'], [head.identity])
+                self.assertEqual(row['later_tickets_unexamined'], 0)
+                self.assertEqual(row['elapsed_seconds'], elapsed)
+                with admission(self.config, observation_sink=Mock(side_effect=OSError('sink failed'))):
+                    with self.assertRaises(Busy), self.raw_slots():
+                        pass
+                self.assertEqual(self.tickets(), before)
+            with self.raw_slots():
+                pass
+
+    def test_shadow_absent_for_uncontended_failed_and_cancelled_admission(self):
+        rows = []
+        with admission(self.config, observation_sink=rows.append):
+            pass
+        with self.raw_slots():
+            with self.assertRaises(Busy), admission(self.config, observation_sink=rows.append):
+                pass
+        stop = threading.Event()
+        stop.set()
+        with self.assertRaises(Busy), admission(self.config, stop=stop, observation_sink=rows.append):
+            pass
+        resource = self.project.root / 'locks/run-worker.lock'
+        with contextlib.closing(_Queue(self.config, (resource,))) as head:
+            with lock(resource, blocking=False):
+                with self.assertRaises(Busy):
+                    head.attempt(enqueue=True)
+                # A successful queue transaction is not enough: failed dispatch
+                # revalidation must not emit an admission observation.
+                check = Mock(side_effect=[None, Denied('revoked')])
+                with self.assertRaises(Denied), admission(
+                        self.config, check=check, observation_sink=rows.append):
+                    pass
+                with self.raw_slots():
+                    pass
+        self.assertEqual(rows, [])
+
     def child_deadline(self):
         """The deadline a test gives a spawned child to report.
 

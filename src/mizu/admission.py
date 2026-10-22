@@ -216,7 +216,7 @@ class _Queue:
     All dispatch locks are nonblocking, including the short queue transaction.
     """
 
-    def __init__(self, config, resources, *, reuse_pending=False):
+    def __init__(self, config, resources, *, reuse_pending=False, observe=False):
         self.root = config.data / "slots"
         self.capacity = config.limits.parallel_runs
         self.projects = config.data / "projects"
@@ -232,6 +232,8 @@ class _Queue:
         self.alive = None
         self.reuse_pending = bool(reuse_pending)
         self.pending_claim = None
+        self.observe = observe
+        self.observation = None
 
     def _pending_key(self):
         # Different Mizu state roots are independent admission domains even
@@ -353,6 +355,20 @@ class _Queue:
                     # Free the pending place in the same transaction as its
                     # row: no peer may observe a free row with a held lock.
                     self._release_pending()
+                # Shadow evidence only: use the scan just performed, never
+                # probe later tickets or take another lock to fill a view.
+                if self.observe and tickets:
+                    with contextlib.suppress(Exception):
+                        order = [t["id"] for t in tickets]
+                        position = order.index(self.identity) + 1 if self.identity in order else None
+                        self.observation = {
+                            "admission_id": self.identity, "queued": position is not None,
+                            "fifo_position": position, "live_ticket_ids": order,
+                            # On success every ticket before this request
+                            # reached the Busy branch of the existing scan.
+                            "bypassed_busy_ticket_ids": order[:position - 1] if position else order[:],
+                            "later_tickets_unexamined": len(order) - position if position else 0,
+                            "affinity": None, "affinity_reason": "not_available_before_dispatch"}
                 return attempt
             except Busy:
                 attempt.close()
@@ -445,7 +461,8 @@ def _state_bytes(capacity: int) -> int:
 
 
 @contextlib.contextmanager
-def admission(config, resources=(), *, wait=False, enqueue=False, stop=None, check=None):
+def admission(config, resources=(), *, wait=False, enqueue=False, stop=None, check=None,
+              observation_sink=None):
     """Admit one work unit; lend nothing and never preempt an active driver.
 
     Pending capacity is derived from parallel_runs (one waiter per slot).
@@ -462,6 +479,10 @@ def admission(config, resources=(), *, wait=False, enqueue=False, stop=None, che
     Dead/stale entries are reaped by the next transaction. Active slot lock
     files remain the independent hard cap. Queue/slot files live under data/slots;
     lock inodes are never unlinked. Invalid state fails closed with Busy.
+    Optional observation_sink receives one local dict only after successful
+    revalidation with live tickets. Its two id lists are bounded by parallel_runs;
+    it contains no paths/payloads, and later-ticket readiness remains unexamined.
+    Capture/sink exceptions are ignored; the yielded elapsed float is unchanged.
     """
     stop = stop if stop is not None else threading.Event()
     admission_started = time.monotonic()
@@ -471,7 +492,8 @@ def admission(config, resources=(), *, wait=False, enqueue=False, stop=None, che
     # to expire, and a revalidation that is slow on a loaded host must not
     # refuse a run that never queued.
     deadline = None
-    queue = _Queue(config, resources, reuse_pending=bool(not wait and enqueue))
+    queue = _Queue(config, resources, reuse_pending=bool(not wait and enqueue),
+                   observe=observation_sink is not None)
     if not wait and enqueue:
         _reuse_pending_admission(queue)
     try:
@@ -504,7 +526,11 @@ def admission(config, resources=(), *, wait=False, enqueue=False, stop=None, che
                     raise Busy("Run stopped before execution admission")
                 if check is not None:
                     check()
-                yield max(0.0, time.monotonic() - admission_started)
+                elapsed = max(0.0, time.monotonic() - admission_started)
+                if observation_sink is not None and queue.observation is not None:
+                    with contextlib.suppress(Exception):
+                        observation_sink({**queue.observation, "elapsed_seconds": elapsed})
+                yield elapsed
             return
     finally:
         with _PENDING_ADMISSIONS_LOCK:

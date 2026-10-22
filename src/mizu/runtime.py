@@ -38,7 +38,7 @@ from .errors import (AuthorityGrantMismatch, Busy, Cancelled, CaptureLimitExceed
                       ProtocolError)
 from .fs import (canonical, digest, lock, mkdir, now, read_json, relative_parts,
                    safe_read, safe_write, sync_dir, write_json, PREVIEW_BYTES, READ_PAGE_CHARS, page,
-                   text_preview, DIGEST)
+                   text_preview, DIGEST, ID)
 from .project import Project
 from .snapshot import (MAX_MISSING_FINISH_STREAK, PROGRESS_SIGNALS, missing_finish_recovery_due,
                        missing_finish_streak, no_progress_recovery_due,
@@ -82,6 +82,8 @@ INFRA_WAIT = (Busy, InfraExceeded)
 #: page limit, same bound as `mizu insight list`); prompt
 #: selection stays bounded by `[limits] pending_insights`.
 INSIGHT_RETRIEVAL_LIMIT = 1000
+#: Run-local shadow queue evidence retains the first few contended admissions.
+MAX_QUEUE_OBSERVATIONS = 8
 #: Fixed memory bounds for run-local pre-send admission identities.
 MAX_ENGINE_TOOL_INVOCATIONS = 4096
 MAX_ENGINE_TOOL_ID = 256
@@ -3747,14 +3749,31 @@ class Engine:
             raise InfraExceeded("Free disk space is below the configured reserve")
 
     def _admit(self, project: Project, role_name: str, role: Role, stack: contextlib.ExitStack,
-               *, wait: bool, enqueue: bool = False) -> float:
+               *, wait: bool, enqueue: bool = False, observation_sink=None) -> float:
         """Hold dispatch locks after FIFO admission and return its elapsed time."""
         resources = [role_exclusion(project.root, role_name)]
         if role.workspace == "write":
             resources.append(project.root / "locks" / "workspace.lock")
+        # Only fixed configuration is known before admission. A selector's
+        # eventual dispatch profile is not a hint about this queue transaction.
+        hints = {"profile": None, "engine": None,
+                 "profile_engine_reason": "selector_not_resolved_at_admission" if role.selector
+                                          else "configured_hint_unavailable"}
+        if observation_sink is not None and not role.selector:
+            with contextlib.suppress(Exception):
+                if isinstance(role.profile, str) and ID.fullmatch(role.profile):
+                    hints = {"profile": role.profile, "engine": self.config.engine(role.profile),
+                             "profile_engine_reason": None}
+        def observe(row):
+            observation_sink({**row, **hints})
+        admission_kwargs = {
+            "stop": self.stop,
+            "check": lambda: self._check_admission(project),
+        }
+        if observation_sink is not None:
+            admission_kwargs["observation_sink"] = observe
         return stack.enter_context(admission(self.config, resources, wait=wait, enqueue=enqueue,
-                                             stop=self.stop,
-                                             check=lambda: self._check_admission(project)))
+                                             **admission_kwargs))
 
     def _selection_retry_wait(self, context: Context, project: Project, stack: contextlib.ExitStack,
                               selection_role: Role, role_name: str, wait_seconds: float) -> None:
@@ -3783,7 +3802,8 @@ class Engine:
             if remaining <= 0:
                 break
             self.stop.wait(min(idle, remaining))
-        self._admit(project, role_name, selection_role, stack, wait=False)
+        self._admit(project, role_name, selection_role, stack, wait=False,
+                    observation_sink=getattr(context, "_admission_observation_sink", None))
         context._slot_lease = True
 
     def _dispatch_state(self, project, role_name, role, *, event_trigger):
@@ -3923,8 +3943,20 @@ class Engine:
                 dispatch_state = self._dispatch_state(project, role_name, role, event_trigger=event_trigger)
                 if dispatch_state.get("skip"):
                     return dispatch_state["skip"]
+            # Bounded run-local evidence, not a scheduling input. Keep the
+            # first eight contended admissions, count any further omissions.
+            queue_observations = {"version": 1, "observations": [], "omitted": 0}
+            started = None
+            def record_admission(row):
+                if len(queue_observations["observations"]) < MAX_QUEUE_OBSERVATIONS:
+                    queue_observations["observations"].append(row)
+                else:
+                    queue_observations["omitted"] += 1
+                if started is not None:
+                    started["queue_observations"] = queue_observations
+                    write_json(run_dir / "started.json", started)
             admission_elapsed = self._admit(project, role_name, role, stack, wait=retry_busy,
-                                                 enqueue=enqueue_busy)
+                                           enqueue=enqueue_busy, observation_sink=record_admission)
             dispatch_state = self._dispatch_state(project, role_name, role, event_trigger=event_trigger)
             if dispatch_state.get("skip"):
                 return dispatch_state["skip"]
@@ -3989,7 +4021,7 @@ class Engine:
                         write_ci_wake(project, role_name, _ci_wake_branches, ci_present, _ci_head, time.time())
                     except Exception:
                         pass
-                write_json(run_dir / "started.json", {"run": run_id, "role": role_name,
+                started = {"run": run_id, "role": role_name,
                             "snapshot": snapshot["id"], "started_at": now(),
                             "admission_elapsed_seconds": round(admission_elapsed, 6),
                             "admission": admission, "decision_events": len(decision_events),
@@ -3998,7 +4030,10 @@ class Engine:
                             "obligation_events": len(obligations),
                             "ci_failures": len(ci_present),
                             "config_sha256": digest(self.config.file.read_bytes()),
-                            "policy_sha256": digest(role_policy_bytes(role))})
+                            "policy_sha256": digest(role_policy_bytes(role))}
+                if queue_observations["observations"]:
+                    started["queue_observations"] = queue_observations
+                write_json(run_dir / "started.json", started)
                 if decision_events:
                     write_json(run_dir / "decision-events.json",
                                {"run": run_id, "role": role_name, "admission": admission,
@@ -4079,6 +4114,7 @@ class Engine:
                 context = Context(self.config, project, role, run_dir, snapshot, workspace,
                                   stop=self.stop, consult=self.consult, delegate=self.delegate)
                 context._slot_lease = True
+                context._admission_observation_sink = record_admission
                 context.ephemeral = self.ephemeral
                 context.decision_events = decision_events
                 context.work_item_events = terminal_events

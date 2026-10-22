@@ -348,3 +348,55 @@ explicit-run only. A `check_job` grant adds owned-result wakeups, not authority
 to start unrelated project ledger work on every shared check-directory change.
 Explicit invocations and actual owned-result continuations remain available;
 this distinction uses the existing scheduling configuration, not role names.
+
+## Local shadow queue observations
+
+Execution admission optionally supplies a best-effort local observation sink;
+its elapsed-float context-manager API and scheduling policy are unchanged.
+`Engine.run` retains these observations in `started.json` under
+`queue_observations = {version: 1, observations: [...], omitted: N}`. The run id
+in that file joins them to the later `dispatch-attempts.json` records in the
+same run directory. This is local evidence, not a public report or an ordering
+input. It does not add model calls or resource/slot lock probes.
+
+Each observation records facts from the live ticket snapshot used by the
+**successful queue transaction**, after stale tickets were reaped; it includes
+this admission's row when the request was queued:
+
+- `admission_id`: the current request's 32-hex identity (the reused ticket id
+  when it had a persistent row); `queued`: whether that row was present;
+  `fifo_position`: its one-based position, or null for an unqueued admission.
+- `live_ticket_ids`: the exact live FIFO id order, including this request if
+  queued. `bypassed_busy_ticket_ids`: only older tickets whose resource probes
+  actually raised Busy in the existing scan. On a successful scan all older
+  tickets were resource-blocked; otherwise a ready older ticket refuses entry.
+- `later_tickets_unexamined`: the number of later tickets whose resource
+  readiness was **not checked** (zero for an unqueued admission).
+- `elapsed_seconds`: the existing monotonic elapsed admission time, also
+  yielded to the caller; it is not a wall-clock instant or the age of a reused
+  ticket across previous fail-fast invocations.
+- `profile` and `engine`: fixed configured hints only for a role with no
+  selector. Otherwise both are null with `profile_engine_reason` set to
+  `selector_not_resolved_at_admission` (or `configured_hint_unavailable` when
+  a fixed hint cannot be read); the reason is null for known hints.
+- `affinity`: always null, with `affinity_reason` set to
+  `not_available_before_dispatch`. Admission does not know a local session or
+  cache-affinity identity, much less provider residency, warmth or TTL.
+
+The live order is **not a complete ready candidate/choice set**. Readiness of
+later tickets is unknown, and no other tickets' profiles or affinities are
+available from queue rows. Do not rank choices or attribute cache benefits from
+these observations alone.
+
+Bounds and failure behavior: each id list has at most `limits.parallel_runs`
+entries, each id is 32 hex characters, and all other fields are fixed-schema
+bounded scalars or fixed reasons. A run retains its first eight observed
+contended admissions (including later successful selection-retry re-admissions)
+and counts further omissions instead of growing a log. Uncontended admissions
+with no live tickets, unsuccessful/cancelled admissions and failed dispatch
+revalidations emit nothing. A successful unqueued bypass does emit evidence,
+with no queue position. Capture/sink failures do not refuse admission; missing
+or stale evidence is not proof of no contention. No resource/project paths,
+prompts, token payloads, native/provider session ids or arbitrary configuration
+are copied. Queue schema, ticket lifetime, pending reuse, FIFO and blocked-head
+bypass, lock order and cancellation remain unchanged.
