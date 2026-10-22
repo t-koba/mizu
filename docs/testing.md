@@ -244,6 +244,12 @@ test failure, and the 2026-10-21 POSIX run reached the previous 1000 s child
 cap with the suite still running and three load-sensitive assertions
 failing, so the child bound covers the suite's measured cost on both hosts
 with margin.
+A test that waits for a spawned child waits with one shared host-cost
+bound (60 s, with a 600 s backstop for the child's own release): the
+child is a fresh interpreter that re-imports the product's modules, so
+its start-up is the host's cost and not a bound the product sets. A
+short literal there let a loaded host report a healthy child as a
+failed test.
 If the bounded run stalls again, use its partial per-test artifact to identify
 the unfinished test; timing samples are not bounds.
 

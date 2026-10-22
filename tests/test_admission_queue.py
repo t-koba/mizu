@@ -25,6 +25,17 @@ from mizu.project import Project
 from mizu.runtime import Engine, slot
 
 
+#: The wait a test gives a spawned child. The child is a fresh interpreter
+#: that re-imports the product's modules, so its start-up is a host cost:
+#: the bound is generous enough for a loaded host and still detects a
+#: child that never reports.
+CHILD_WAIT_SECONDS = 60
+#: The backstop a child waits for the test's release. The test releases it
+#: only after its own waits, so this covers several of them; it fires only
+#: when the test has already failed.
+CHILD_RELEASE_SECONDS = 600
+
+
 def _process(file, capacity, number, release, stop, results, active, peak):
     """Exercise Engine's actual dispatch locks without launching a model."""
     try:
@@ -40,7 +51,7 @@ def _process(file, capacity, number, release, stop, results, active, peak):
                 peak.value = max(peak.value, active.value)
             results.put(('entered', number))
             try:
-                if not release.wait(20):
+                if not release.wait(CHILD_RELEASE_SECONDS):
                     raise RuntimeError('test release timed out')
             finally:
                 with active.get_lock():
@@ -77,12 +88,22 @@ class QueueTests(Fixture):
         limits.update(changes)
         self.config = dataclasses.replace(self.config, limits=dataclasses.replace(self.config.limits, **limits))
 
+    def child_deadline(self):
+        """The deadline a test gives a spawned child to report.
+
+        A spawned child is a fresh interpreter that re-imports the product's
+        modules, so its start-up is a host cost rather than a bound the
+        product sets. Every wait for a child uses this one deadline, so a
+        loaded host cannot turn a healthy child into a failed test.
+        """
+        return time.monotonic() + CHILD_WAIT_SECONDS
+
     def tickets(self, *, synchronized=False):
         path = self.config.data / 'slots/queue.json'
         if not synchronized:
             return read_json(path, {'tickets': []})['tickets']
         lock_path = self.config.data / 'slots/queue.lock'
-        deadline = time.monotonic() + 5
+        deadline = self.child_deadline()
         while True:
             try:
                 with lock(lock_path, blocking=False):
@@ -93,14 +114,14 @@ class QueueTests(Fixture):
                 time.sleep(0.005)
 
     def until(self, predicate):
-        deadline = time.monotonic() + 10
+        deadline = self.child_deadline()
         while not predicate():
             if time.monotonic() >= deadline:
                 self.fail('admission test synchronization timed out')
             time.sleep(0.01)
 
     def message(self, expected):
-        deadline = time.monotonic() + 10
+        deadline = self.child_deadline()
         while expected not in self.messages:
             self.messages.append(self.results.get(timeout=max(0.01, deadline - time.monotonic())))
         self.messages.remove(expected)
@@ -185,6 +206,16 @@ class QueueTests(Fixture):
             stack.close()
             raise
 
+    def test_the_child_report_wait_is_a_host_cost_bound(self):
+        # A spawned child is a fresh interpreter that re-imports the
+        # product's modules, so its start-up is a host cost. Every wait for
+        # a child uses one shared bound instead of a short literal that a
+        # loaded host can exceed, and the bound still detects a child that
+        # never reports.
+        self.assertGreaterEqual(CHILD_WAIT_SECONDS, 60)
+        self.assertGreater(self.child_deadline() - time.monotonic(), CHILD_WAIT_SECONDS - 1)
+        self.assertGreaterEqual(CHILD_RELEASE_SECONDS, CHILD_WAIT_SECONDS)
+
     def test_multiprocess_fifo_overflow_and_active_slot_cap(self):
         held = [contextlib.ExitStack() for _ in range(2)]
         with contextlib.ExitStack() as initial:
@@ -197,7 +228,7 @@ class QueueTests(Fixture):
             self.until(lambda: len(self.tickets(synchronized=True)) == 2)
             overflow, _, _ = self.process(2)
             self.message(('Busy', 2))
-            overflow.join(5)
+            overflow.join(CHILD_WAIT_SECONDS)
             self.assertEqual(len(self.tickets(synchronized=True)), 2)
             held[0].close()
             self.message(('entered', 0))
@@ -220,7 +251,7 @@ class QueueTests(Fixture):
             release_second.set()
             release_third.set()
             for process in (first, second, third):
-                process.join(5)
+                process.join(CHILD_WAIT_SECONDS)
                 self.assertFalse(process.is_alive())
                 self.assertEqual(process.exitcode, 0)
         self.assertEqual(self.tickets(synchronized=True), [])
@@ -270,13 +301,13 @@ class QueueTests(Fixture):
             self.until(lambda: len(self.tickets(synchronized=True)) == 1)
             old = self.tickets(synchronized=True)[0]['id']
             process.terminate()
-            process.join(5)
+            process.join(CHILD_WAIT_SECONDS)
             self.assertFalse(process.is_alive())
             replacement, release, _ = self.process(1)
             self.until(lambda: len(self.tickets(synchronized=True)) == 1 and self.tickets(synchronized=True)[0]['id'] != old)
         self.message(('entered', 1))
         release.set()
-        replacement.join(5)
+        replacement.join(CHILD_WAIT_SECONDS)
         self.assertFalse(replacement.is_alive())
         self.assertEqual(self.tickets(synchronized=True), [])
         self.assertEqual(len(list((self.config.data / 'slots').glob('pending-*.lock'))), 1)
