@@ -1445,22 +1445,20 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
         workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
         # Immutable v4.6.2 pin; short retention; always with missing-file tolerance.
         self.assertIn('actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02', workflow)
-        self.assertIn('name: Upload Windows per-test timings', workflow)
-        self.assertIn('--test-timings private-validation/windows-test-timings.json', workflow)
-        ordinary = workflow.split('name: Offline core and transport contracts', 1)[1].split(
-            '      - name: Offline core and transport contracts with timings', 1)[0]
-        self.assertNotIn('--test-timings', ordinary)
-        timed = workflow.split('name: Offline core and transport contracts with timings', 1)[1].split(
-            '      - name: Core installer', 1)[0]
-        self.assertIn("if: runner.os == 'Windows' && matrix.python == '3.13'", timed)
-        self.assertNotIn('test-timings-${{ matrix.os }}', workflow)
-        upload = workflow.split('name: Upload Windows per-test timings', 1)[1].split('  durable-contract:', 1)[0]
+        self.assertIn('name: Upload per-test timings', workflow)
+        self.assertIn('--test-timings private-validation/test-timings.json', workflow)
+        # Every cell collects the evidence, so each supported host's suite
+        # cost is measured where it runs.
+        self.assertEqual(workflow.count('--test-timings private-validation/test-timings.json'), 2)
+        # One artifact per cell, each named for its own cell.
+        self.assertIn('name: test-timings-${{ matrix.os }}-${{ matrix.python }}', workflow)
+        self.assertIn('name: test-timings-durable', workflow)
+        upload = workflow.split('name: Upload per-test timings', 1)[1].split('  durable-contract:', 1)[0]
         self.assertEqual([line.strip() for line in upload.splitlines() if line.strip().startswith('path:')],
-                         ['path: private-validation/windows-test-timings.json'])
-        self.assertIn('private-validation/windows-test-timings.json', workflow)
+                         ['path: private-validation/test-timings.json'])
         self.assertIn('retention-days: 7', workflow)
         self.assertIn('if-no-files-found: warn', workflow)
-        self.assertIn("if: always() && runner.os == 'Windows' && matrix.python == '3.13'", workflow)
+        self.assertIn('if: always()', workflow)
         # Do not upload offline reports, which may contain diagnostics.
         self.assertNotIn('path: private-validation/offline.json', workflow)
         self.assertNotIn('path: private-validation/durable.json', workflow)
@@ -1472,9 +1470,7 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
 
     def test_offline_steps_run_exactly_once_per_matrix_cell(self):
         workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
-        ordinary = workflow.split('name: Offline core and transport contracts', 1)[1].split(
-            '      - name: Offline core and transport contracts with timings', 1)[0]
-        timed = workflow.split('name: Offline core and transport contracts with timings', 1)[1].split(
+        gate = workflow.split('name: Offline core and transport contracts', 1)[1].split(
             '      - name: Core installer', 1)[0]
 
         def condition(section):
@@ -1484,37 +1480,12 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
                     return stripped[len('if: '):].strip()
             return None
 
-        def holds(expression, runner_os, matrix_python):
-            values = {'runner.os': runner_os, 'matrix.python': matrix_python}
-
-            def term(text):
-                left, _, right = text.strip().partition(' ')
-                operator, _, literal = right.partition(' ')
-                literal = literal.strip().strip('"').strip("'")
-                value = values[left.strip()]
-                return value != literal if operator == '!=' else value == literal
-
-            return any(all(term(part) for part in clause.split('&&'))
-                       for clause in expression.split('||'))
-
-        ordinary_if = condition(ordinary)
-        timed_if = condition(timed)
-        self.assertIsNotNone(ordinary_if)
-        self.assertIsNotNone(timed_if)
-        # The two offline steps are exact complements, so every matrix cell
-        # runs the gate once. Two runs on the Windows 3.13 cell would exceed
-        # that cell's job budget and lose the timing evidence it exists for.
-        # runner.os names the platform, not the matrix label.
-        cells = [(runner_os, matrix_python)
-                 for runner_os in ('Linux', 'macOS', 'Windows')
-                 for matrix_python in ('3.11', '3.12', '3.13', '3.14')]
-        for runner_os, matrix_python in cells:
-            with self.subTest(os=runner_os, python=matrix_python):
-                self.assertNotEqual(holds(ordinary_if, runner_os, matrix_python),
-                                    holds(timed_if, runner_os, matrix_python))
-        self.assertTrue(holds(timed_if, 'Windows', '3.13'))
-        self.assertFalse(holds(timed_if, 'Linux', '3.13'))
-        self.assertFalse(holds(timed_if, 'Windows', '3.12'))
+        # One gate step for every cell, so no cell runs the gate twice.
+        # Two runs on one cell would exceed that cell's job budget and
+        # lose the timing evidence it exists for.
+        self.assertIsNone(condition(gate))
+        self.assertEqual(workflow.count('name: Offline core and transport contracts'), 1)
+        self.assertIn('--test-timings private-validation/test-timings.json', gate)
 
     def test_timings_artifact_survives_timeout_with_only_evidence(self):
         raw = ('test_sample.SampleTests.test_slow ... ok\nRan 1 test in 0.1s\nOK\n')

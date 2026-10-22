@@ -46,15 +46,13 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Offline core and transport contracts
-        if: runner.os != 'Windows' || matrix.python != '3.13'
         # Offline runners do not provision the operator-owned Pi SDKs, so the
         # SDK, durable, and reasoning-replay gates are explicitly waived here;
         # the authoritative network-enabled job below provisions both adapters.
-        run: python scripts/check.py --report private-validation/offline.json --allow-not-run node-durable-contract-tests,node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests --fail-fast
-      - name: Offline core and transport contracts with timings
-        if: runner.os == 'Windows' && matrix.python == '3.13'
-        # Collect per-test timing only on the target Windows timeout job.
-        run: python scripts/check.py --report private-validation/offline.json --test-timings private-validation/windows-test-timings.json --allow-not-run node-durable-contract-tests,node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests --fail-fast
+        # Every cell collects the sanitized timing evidence, so each supported
+        # host's suite cost is published and the one shared child bound rests
+        # on measured costs rather than on a sibling host's measurement.
+        run: python scripts/check.py --report private-validation/offline.json --test-timings private-validation/test-timings.json --allow-not-run node-durable-contract-tests,node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests --fail-fast
       - name: Core installer and CLI lifecycle
         if: runner.os == 'Linux' && matrix.python == '3.13'
         # Reuse the full source gate above via an explicit content-bound
@@ -64,18 +62,20 @@ jobs:
       - name: Source distribution build
         if: runner.os == 'Linux' && matrix.python == '3.13'
         run: python scripts/package.py --output dist
-      - name: Upload Windows per-test timings
-        # Evidence only for the timeout review: the dedicated timings file
+      - name: Upload per-test timings
+        # Evidence only for the bound review: the dedicated timings file
         # holds sanitized test IDs plus durations/completion and minimal
         # runtime metadata. It never includes failure details or output tails;
         # do not upload offline.json, which can contain diagnostics. Always
         # runs (even on timeout) with missing-file tolerance so a killed
-        # child still reports its partial entry.
-        if: always() && runner.os == 'Windows' && matrix.python == '3.13'
+        # child still reports its partial entry. Every cell publishes its
+        # own artifact, so the shared child bound rests on each supported
+        # host's measured cost.
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: windows-test-timings
-          path: private-validation/windows-test-timings.json
+          name: test-timings-${{ matrix.os }}-${{ matrix.python }}
+          path: private-validation/test-timings.json
           retention-days: 7
           if-no-files-found: warn
   durable-contract:
@@ -108,4 +108,18 @@ jobs:
         run: npm ci --engine-strict --no-audit --no-fund --ignore-scripts
         working-directory: adapters/pi-durable
       - name: Unwaived offline and durable contracts
-        run: python scripts/check.py --report private-validation/durable.json --fail-fast
+        # The authoritative job publishes the same sanitized timing evidence
+        # as the matrix cells, so its suite cost is measured where the
+        # promotion gate is decided.
+        run: python scripts/check.py --report private-validation/durable.json --test-timings private-validation/test-timings.json --fail-fast
+      - name: Upload per-test timings
+        # Evidence only for the bound review: sanitized test IDs, durations
+        # and minimal runtime metadata, never failure details or output
+        # tails. Always runs (even on timeout) with missing-file tolerance.
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: test-timings-durable
+          path: private-validation/test-timings.json
+          retention-days: 7
+          if-no-files-found: warn

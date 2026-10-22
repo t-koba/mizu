@@ -173,12 +173,12 @@ To run the focused file suite on Windows:
 python -m unittest discover -s tests -p test_primitives.py -v
 ```
 
-### Windows per-test timing evidence
+### Per-test timing evidence
 
 Timing artifact emission is explicit, independent of `--report`:
 
 ```sh
-python scripts/check.py --test-timings private-validation/windows-test-timings.json
+python scripts/check.py --test-timings private-validation/test-timings.json
 ```
 
 Ordinary local `python3 scripts/check.py` creates no timing artifact. The child
@@ -202,10 +202,13 @@ The dedicated artifact contains only sanitized test IDs,
 `duration_seconds`/`completed` flags, and minimal runtime metadata (suite,
 versions, platform, child timeout, total suite elapsed time, gate status). It never
 carries failure details, output tails or diagnostics; do not substitute the general
-`offline.json` receipt. Only the Windows-latest/Python 3.13 CI step supplies
-`--test-timings`; CI uploads only this dedicated file for that job (`actions/upload-artifact` v4.6.2, 7-day retention,
-`if: always()` with missing-file tolerance). It records diagnostic evidence; it
-sets no timeout policy. One 1800 s child cap bounds the suite on every
+`offline.json` receipt. Every CI cell supplies `--test-timings` and uploads
+only this dedicated file, one artifact per cell (`actions/upload-artifact`
+v4.6.2, 7-day retention, `if: always()` with missing-file tolerance), and the
+authoritative `durable-contract` job publishes its own. Each supported host's
+suite cost is therefore measured where it runs, so the one shared child bound
+rests on measured costs rather than on a sibling host's measurement. It
+records diagnostic evidence; it sets no timeout policy. One 1800 s child cap bounds the suite on every
 platform: the suite costs about 923 s on the development host, about 1050 s
 on a loaded verification host (the 2026-10-21 run was still running when the
 previous 1000 s bound cut it off) and about 1475 s on a slow Windows runner,
