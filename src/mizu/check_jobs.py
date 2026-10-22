@@ -95,7 +95,11 @@ def save_execution(project, job):
     # Execution progress and subscription state have different writers.
     with lock(project.root / 'locks/check-jobs.lock'):
         latest = raw_read(project, job['id'])
-        for key in ('detached', 'acknowledged', 'replaced_by'):
+        # The purpose is stated on the record while the runner holds an
+        # older view of it, so the record's own label is merged here too;
+        # otherwise the write-back would drop it and the demand would stop
+        # matching the later request that replaces it.
+        for key in ('detached', 'acknowledged', 'replaced_by', 'purpose'):
             if key in latest:
                 job[key] = latest[key]
         write_json(root(project) / job['id'] / 'job.json', job)

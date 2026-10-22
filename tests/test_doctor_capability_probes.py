@@ -120,7 +120,17 @@ class CodexCapabilityProbeTests(unittest.TestCase):
         self.assertFalse(message.rstrip().endswith(":"))
         # The child never declared which flags it holds, so the message
         # does not claim that any of them are missing.
-        self.assertNotIn("--", message)
+        self.assertNotIn("--listen", message)
+
+    def test_a_child_that_answered_successfully_names_a_missing_flag(self):
+        # A child that answered successfully declared what it holds, so a
+        # required flag it did not declare is still named as missing. The
+        # failing side must not be the only side that names anything.
+        with self.assertRaises(ConfigError) as caught:
+            self.probe_with(Result(0, "app-server: no flags here", "", "exited", 1.0))
+        message = str(caught.exception)
+        self.assertIn("capability missing", message)
+        self.assertIn("--listen", message)
 
 
 class ContainerRuntimeProbeTests(Fixture):

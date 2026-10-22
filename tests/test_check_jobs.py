@@ -515,6 +515,28 @@ class PurposeTests(JobTests):
         self.assertEqual(record['replaced_by'], second['id'])
         self.assertEqual(check_jobs.read(self.project, second['id'])['purpose'], 'acceptance')
 
+    def test_a_purpose_stated_while_the_runner_holds_the_record_survives_its_write_back(self):
+        # The runner reads the record, and the purpose is stated on it
+        # afterwards. The runner's write-back must not drop that label, or
+        # the demand stops matching the later request that replaces it.
+        ctx = self.context()
+        first = check_jobs.submit(ctx, 'echo first', kind='experiment')
+        runner_view = dict(check_jobs.raw_read(self.project, first['id']))
+        runner_view['status'] = 'running'
+        # The same request is stated again with its purpose, which lands on
+        # the record while the runner holds its older view.
+        check_jobs.submit(ctx, 'echo first', kind='experiment', purpose='acceptance')
+        self.assertEqual(check_jobs.read(self.project, first['id'])['purpose'], 'acceptance')
+        check_jobs.save_execution(self.project, runner_view)
+        record = check_jobs.read(self.project, first['id'])
+        self.assertEqual(record['purpose'], 'acceptance')
+        self.assertEqual(record['status'], 'running')
+        # A later request with that purpose replaces the earlier demand.
+        second = check_jobs.submit(ctx, 'echo second', kind='experiment', purpose='acceptance')
+        record = check_jobs.read(self.project, first['id'])
+        self.assertEqual(record['status'], 'cancelled')
+        self.assertEqual(record['replaced_by'], second['id'])
+
     def test_replaced_job_frees_the_pending_capacity_it_held(self):
         self.config = dataclasses.replace(self.config,
                                           limits=dataclasses.replace(self.config.limits, check_pending=1))

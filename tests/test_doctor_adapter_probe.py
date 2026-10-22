@@ -548,6 +548,29 @@ class AnsweredChildIsAMeasurementTests(unittest.TestCase):
         self.assertEqual(contract["missing"], [])
         self.assertFalse(contract["reported"])
 
+    def test_the_contract_check_names_a_missing_export_of_a_successful_child(self):
+        # A child that answered successfully declared what it holds, so an
+        # export it did not declare is still named as missing. The failing
+        # side must not be the only side that names anything.
+        def fake_run(command, **kwargs):
+            return subprocess.CompletedProcess(
+                command, 0, json.dumps({"exports": ["ModelRuntime"]}), "")
+
+        original = self.module.subprocess.run
+        self.module.subprocess.run = fake_run
+        self.addCleanup(setattr, self.module.subprocess, "run", original)
+        with tempfile.TemporaryDirectory() as td:
+            record = self.module.probe_engine("pi", ["node", "launcher.mjs"],
+                                              ["ModelRuntime", "createAgentSession"],
+                                              config=SimpleNamespace(data=Path(td)))
+        self.assertEqual(record["status"], "fail")
+        contract = record["contract"]
+        # The export the child did not declare is named, and the receipt
+        # says the child reported, so the two cases read differently.
+        self.assertEqual(contract["missing"], ["createAgentSession"])
+        self.assertEqual(contract["exports"], ["ModelRuntime"])
+        self.assertTrue(contract["reported"])
+
     def test_the_contract_check_measures_a_child_that_answered_with_a_failure(self):
         seen = []
 
