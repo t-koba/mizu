@@ -431,6 +431,32 @@ class SharedProbeClassificationTests(unittest.TestCase):
         self.assertEqual(record["reason"], str(shared.exception))
         self.assertIn("killed", record["reason"])
 
+    def test_the_answered_failure_text_is_derived_once(self):
+        # The identical child that answered with a failure reads the same
+        # way wherever it is probed: one helper formats the answer, so the
+        # two surfaces cannot drift into two texts for one child.
+        def fake_run(command, **kwargs):
+            return subprocess.CompletedProcess(command, 1, "", "boom")
+
+        original = self.module.subprocess.run
+        self.module.subprocess.run = fake_run
+        self.addCleanup(setattr, self.module.subprocess, "run", original)
+        with tempfile.TemporaryDirectory() as td:
+            config = SimpleNamespace(data=Path(td))
+            record = self.module.probe_engine("pi", ["node", "launcher.mjs"],
+                                              ["ModelRuntime"], config=config)
+        original_run = doctor.run
+        self.addCleanup(setattr, doctor, "run", original_run)
+        doctor.run = lambda argv, **kwargs: Result(1, "", "boom", "exited", 1.0)
+        with self.assertRaises(ConfigError) as shared:
+            doctor.engine_contract(config_for(), "pi")
+        # The doctor's message names the same answer, under its own
+        # verdict, so the two surfaces share one text for one child.
+        self.assertTrue(str(shared.exception).endswith(record["reason"]),
+                        str(shared.exception))
+        self.assertIn("exit 1", record["reason"])
+        self.assertIn("boom", record["reason"])
+
     def test_the_child_name_is_derived_once(self):
         # The name is derived from the engine in the product, so the two
         # surfaces cannot drift into two names for one child.
@@ -516,6 +542,11 @@ class AnsweredChildIsAMeasurementTests(unittest.TestCase):
         self.assertEqual(record["status"], "fail")
         self.assertIn("exit 1", record["reason"])
         self.assertIn("boom", record["reason"])
+        # The child never declared which exports it holds, so the receipt
+        # does not claim that any of them are missing.
+        contract = record["contract"]
+        self.assertEqual(contract["missing"], [])
+        self.assertFalse(contract["reported"])
 
     def test_the_contract_check_measures_a_child_that_answered_with_a_failure(self):
         seen = []

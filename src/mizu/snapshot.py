@@ -16,6 +16,7 @@ from . import platform as _platform
 from .config import role_no_progress_backoff_seconds
 from .errors import CaptureLimitExceeded, Denied, LimitExceeded, SnapshotConflict
 from .fs import DIGEST, ID, PREVIEW_BYTES, PRIVATE_EVIDENCE_TREES, atomic_write, canonical, digest, lock, mkdir, now, publish_pointer, read_json, safe_read, safe_read_info, write_json, relative_parts
+from .startup import HOST_STATE_FILES
 from .vcs import REF_PREFIX
 
 
@@ -241,6 +242,19 @@ class Snapshots:
         """
         return name.split("/")[-1] in PRIVATE_EVIDENCE_TREES
 
+    @staticmethod
+    def _host_state(name: str) -> bool:
+        """Whether a workspace path is the product's own host state.
+
+        The per-engine start-up record and its lock hold one host's
+        measurements, not the product's source. A capture leaves them
+        out, so a published tree never carries a per-host record and a
+        regenerated measurement never moves the tree's identity. The rule
+        belongs to the product, so it holds whatever the operator
+        configured.
+        """
+        return name.rsplit("/", 1)[-1] in HOST_STATE_FILES
+
     def excluded(self, name: str) -> bool:
         # Legacy in-workspace upstream-ref subtree (pre-move): the store now
         # lives outside the working tree, so this only guards workspaces
@@ -307,7 +321,7 @@ class Snapshots:
                 if self._reserved_prefix(path):
                     reserved.append(path)
                     continue
-                if self.excluded(path):
+                if self.excluded(path) or self._host_state(path):
                     continue
                 info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
                 if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
@@ -346,7 +360,7 @@ class Snapshots:
                 if self._reserved_prefix(rel):
                     reserved.append(rel)
                     continue
-                if self.excluded(rel):
+                if self.excluded(rel) or self._host_state(rel):
                     continue
                 full = Path(directory) / name
                 try:

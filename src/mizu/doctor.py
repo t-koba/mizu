@@ -53,7 +53,9 @@ def container_runtime(config: Config) -> dict:
         # zero exit means the version output was read to its end. A child
         # that did not complete never said the runtime was missing, and a
         # child that answered names its own answer.
-        raise Denied("Container runtime failed: " + probe_answer(versioned))
+        raise Denied("Container runtime failed: "
+                     + probe_answer(versioned.exit_code, stop_note(versioned),
+                                    versioned.stderr))
     version = versioned.stdout.strip().splitlines()[0] if versioned.stdout.strip() else "unknown"
     if config.sandbox.mode == "single":
         # Constrained-host path: Linux user namespaces only.
@@ -65,7 +67,9 @@ def container_runtime(config: Config) -> dict:
         if evidence.exit_code != 0:
             # The helper that answered keeps its own answer, and the
             # message names it rather than ending with an empty detail.
-            raise Denied("Namespace helper failed: " + probe_answer(evidence))
+            raise Denied("Namespace helper failed: "
+                         + probe_answer(evidence.exit_code, stop_note(evidence),
+                                        evidence.stderr))
         lines = evidence.stdout.split()
         if len(lines) != 4 or lines[0] != "0" or lines[2] != "1" or lines[3] != "0":
             raise Denied("Single mode requires a single-ID namespace map, found: " + evidence.stdout.strip())
@@ -113,23 +117,25 @@ def probe_outcome(reason, exit_code, detail, label: str, bound: int | None = Non
                       + (f": {text[-1000:]}" if text else ""))
 
 
-def probe_answer(result) -> str:
+def probe_answer(exit_code, note: str, stderr: str) -> str:
     """The child's own answer when it answered and reported a failure.
 
     A child that completed is the only one that can have said what it
     holds, so its answer is its exit code, its stop fault and the text it
     produced. The capability message names that answer, so no message ends
     with an empty detail and the operator sees what the child said.
+
+    The parts are named one by one, so every surface that probes the
+    identical child formats the same answer the same way.
     """
     parts = []
-    if result.exit_code:
-        parts.append('exit %s' % result.exit_code)
-    note = stop_note(result)
+    if exit_code:
+        parts.append('exit %s' % exit_code)
     if note:
         parts.append(note)
-    stderr = (result.stderr or '').strip()
-    if stderr:
-        parts.append(stderr[-1000:])
+    text = (stderr or '').strip()
+    if text:
+        parts.append(text[-1000:])
     return ': '.join(parts) if parts else 'the child reported a failure'
 
 
@@ -213,11 +219,13 @@ def engine_contract(config: Config, engine: str) -> dict:
             flags.extend(item["required_flags"])
         missing = [flag for flag in dict.fromkeys(flags) if not help_has_flag(result.stdout, flag)]
         if result.exit_code or missing:
-            # The child's own outcome is named beside the missing flags, so
-            # the message never ends with an empty detail. A child that
-            # answered successfully reported no failure of its own.
-            detail = ", ".join(missing)
-            answer = probe_answer(result) if result.exit_code else ""
+            # A child that answered with a failure never declared which
+            # flags it holds, so the message names that answer instead of
+            # claiming that the flags are missing. A child that answered
+            # successfully reported no failure of its own.
+            answer = (probe_answer(result.exit_code, stop_note(result),
+                                   result.stderr) if result.exit_code else "")
+            detail = "" if result.exit_code else ", ".join(missing)
             raise ConfigError("Codex app-server stdio capability missing: "
                               + ": ".join(part for part in (detail, answer) if part))
         return {"request_unit": contract["request_unit"], "required_flags": sorted(set(flags)),
@@ -230,7 +238,8 @@ def engine_contract(config: Config, engine: str) -> dict:
         # The child answered and reported a failure, so its own answer is
         # named: the exit code, its stop fault and the text it produced.
         raise ConfigError("Required engine SDK capabilities missing: "
-                          + probe_answer(result))
+                          + probe_answer(result.exit_code, stop_note(result),
+                                         result.stderr))
     try:
         reported = json.loads(result.stdout.strip())
     except (json.JSONDecodeError, UnicodeError) as exc:
@@ -298,7 +307,8 @@ def node_capability(config: Config) -> str:
         # The child answered and reported a failure: name the failure it
         # reported, not a capability it never claimed to be missing.
         raise ConfigError('Required Node module/stream capabilities missing: '
-                          + probe_answer(result))
+                          + probe_answer(result.exit_code, stop_note(result),
+                                         result.stderr))
     return result.stdout.strip()
 
 

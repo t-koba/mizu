@@ -105,7 +105,7 @@ unit stopped, while `Now`/`Next` are short working notes, not a parallel backlog
 | `engines` | Named Pi/Codex/Claude environments: trusted `command` argv and private `directory` |
 | `timezone` | IANA zone for Linux calendar timers and the request-budget day; default UTC. macOS uses explicit local; Windows supports local and UTC (see completion-contracts.md) |
 | `consult_role` | Default answering role for consultation when the caller names none; unset fails closed (explicit roles required) |
-| `exclude` | Snapshot/import exclusion patterns; not a secret detection system. The product's reserved private evidence tree (`private-validation/`) is always left out of a capture, whatever this list holds |
+| `exclude` | Snapshot/import exclusion patterns; not a secret detection system. The product's reserved private evidence tree (`private-validation/`) is always left out of a capture, whatever this list holds. The product's own host state (the per-engine adapter start-up record `adapter-startup.json` and its lock) is left out for the same reason: it holds one host's measurements, not the product's source |
 | `include` | Shared TOML fragments merged before validation; duplicate keys are errors (see below) |
 
 The private evidence tree `private-validation/` holds receipts the product regenerates on demand and never commits (see [VALIDATION.md](VALIDATION.md)). A capture leaves that tree out, so a regenerated receipt never enters a published snapshot and never moves a tree's `code_digest`. The rule belongs to the product, so `exclude` cannot reintroduce it; a snapshot that already holds such a path stays readable.

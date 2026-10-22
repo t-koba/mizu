@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT/'src'))
 from mizu.config import load
 from mizu.doctor import (ADAPTER_STARTUP_FLOOR_SECONDS,
                          ADAPTER_STARTUP_MEASURE_CEILING_SECONDS,
+                         probe_answer,
                          probe_label,
                          probe_outcome,
                          startup_evidence,
@@ -134,29 +135,33 @@ def probe_engine(engine, command, expected, config=None):
         except ConfigError as exc:
             return {'engine': engine, 'status': 'fail', 'reason': str(exc),
                     'exit_code': result.returncode}
+    # A child that answered and reported a failure keeps its own answer, and
+    # the record names it. Such a child never declared which exports it
+    # holds, so the receipt does not claim that any of them are missing.
+    failed = bool(result.returncode)
     if engine == 'codex':
-        missing = [flag for flag in expected if not help_has_flag(result.stdout, flag)]
-        success = result.returncode == 0 and not missing
-        evidence = {'required_flags': expected, 'missing': missing}
+        missing = ([] if failed else
+                   [flag for flag in expected if not help_has_flag(result.stdout, flag)])
+        success = not failed and not missing
+        evidence = {'required_flags': expected, 'missing': missing,
+                    'reported': not failed}
     else:
         try:
             reported = json.loads(result.stdout.strip())
             verified = reported.get('exports', []) if isinstance(reported, dict) else []
         except (json.JSONDecodeError, UnicodeError):
             verified = []
-        missing = [name for name in expected if name not in verified]
-        if engine == 'claude' and result.returncode and 'No module named' in result.stdout+result.stderr:
+        if engine == 'claude' and failed and 'No module named' in result.stdout+result.stderr:
             return {'engine': engine, 'status': 'not_run',
                     'reason': 'Isolated SDK interpreter not configured'}
-        success = result.returncode == 0 and not missing
-        evidence = {'exports': sorted(set(verified)), 'missing': missing}
-    # A child that answered and reported a failure keeps its own answer, and
-    # the record names it, so the receipt never claims that the exports are
-    # missing when the child simply refused to report.
+        missing = ([] if failed else
+                   [name for name in expected if name not in verified])
+        success = not failed and not missing
+        evidence = {'exports': sorted(set(verified)), 'missing': missing,
+                    'reported': not failed}
     reason = None
-    if result.returncode:
-        detail = (result.stderr or '').strip()
-        reason = 'exit %s' % result.returncode + (': ' + detail[-1000:] if detail else '')
+    if failed:
+        reason = probe_answer(result.returncode, '', result.stderr)
     # The cost published is the one the bound was derived from, and the
     # shape of that evidence is the doctor's, so one child reads the same
     # way wherever it is probed.

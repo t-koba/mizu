@@ -10,6 +10,7 @@ as a missing capability, so the operator is not sent to install a
 dependency that is present.
 """
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,8 +25,14 @@ from mizu.process import Result
 
 
 def config_for(engine="pi"):
-    """A configuration with the command the probe starts and nothing else."""
-    return SimpleNamespace(command=lambda name: [engine], data=Path(ROOT))
+    """A configuration with the command the probe starts and nothing else.
+
+    The host's start-up record lives in the data directory, so the
+    configuration points it at a temporary directory: a probe never
+    writes host state into the product's source tree.
+    """
+    return SimpleNamespace(command=lambda name: [engine],
+                            data=Path(tempfile.mkdtemp(prefix="mizu-startup-")))
 
 
 class NodeCapabilityProbeTests(unittest.TestCase):
@@ -111,6 +118,9 @@ class CodexCapabilityProbeTests(unittest.TestCase):
         self.assertIn("exit 3", message)
         self.assertIn("app-server refused", message)
         self.assertFalse(message.rstrip().endswith(":"))
+        # The child never declared which flags it holds, so the message
+        # does not claim that any of them are missing.
+        self.assertNotIn("--", message)
 
 
 class ContainerRuntimeProbeTests(Fixture):

@@ -41,6 +41,14 @@ ENDPOINTS = (PROBE_ENDPOINT, RUNTIME_ENDPOINT)
 #: The per-host record of the largest start-up cost observed per engine.
 RECORD_NAME = 'adapter-startup.json'
 
+#: The record's write lock, named beside it.
+RECORD_LOCK_NAME = RECORD_NAME + '.lock'
+
+#: The product's own host-local state files. They hold one host's
+#: measurements, not the product's source, so a capture leaves them out
+#: and a commit never carries them.
+HOST_STATE_FILES = frozenset({RECORD_NAME, RECORD_LOCK_NAME})
+
 #: The record is one number, one endpoint and one timestamp per engine; it
 #: stays small.
 RECORD_MAX_BYTES = 8192

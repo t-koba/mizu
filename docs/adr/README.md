@@ -519,10 +519,13 @@ A timed-out probe names the applied bound and is not reported as a missing
 capability. An external signal kill is identified as such; if the product
 selected a stop reason before terminating its child, that reason stays primary
 and the signal is secondary detail. `doctor` and `check-cli` share the same
-probe outcome classification and engine label. A child that answered and
-reported a failure keeps its own answer, and the capability message names that
-answer -- its exit code and the text it produced -- so a message never ends
-with an empty detail and the operator sees what the child said.
+probe outcome classification, engine label and answered-failure text. A child
+that answered and reported a failure keeps its own answer, and the capability
+message names that answer -- its exit code and the text it produced -- so a
+message never ends with an empty detail and the operator sees what the child
+said. A child that answered with a failure never declared which exports it
+holds, so the contract receipt reports none of them missing and says that
+the child did not report.
 
 ## ADR-043 — A check job's container is protected by the runner's slot exclusion
 A check job's container carries the project's label like any other container,

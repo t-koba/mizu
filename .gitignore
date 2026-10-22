@@ -24,5 +24,10 @@ MANIFEST.sha256
 
 installation-checks.json
 
+# The per-host adapter start-up record and its lock are regenerable host
+# state, not product source; see src/mizu/startup.py.
+adapter-startup.json
+adapter-startup.json.lock
+
 /.mizu/
 /refs/
