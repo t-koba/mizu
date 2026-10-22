@@ -793,6 +793,76 @@ class UnittestFailureSummaryTests(unittest.TestCase):
                 self.assertIn('[+', output.getvalue(), 'live timestamped output is still relayed')
 
 
+class GateRelayBudgetTests(unittest.TestCase):
+    """The gate's own stdout stays inside the harness's command cap."""
+
+    def run_gate(self, raw: str):
+        with tempfile.TemporaryDirectory() as temporary:
+            report = Path(temporary) / 'report.json'
+
+            class FakeProcess:
+                def __init__(self, command, **kwargs):
+                    self.stdout = io.StringIO(raw)
+                    self.command = command
+                    self.path = Path(command[3])
+                    self.path.write_text(json.dumps({
+                        'kind': 'FAIL', 'test': 'tests.RealTests.test_real',
+                        'type': 'RuntimeError', 'path': 'tests/test_check_offline.py', 'line': 42,
+                    }) + '\n', encoding='utf-8')
+
+                def wait(self, timeout):
+                    return 1
+
+                def kill(self):
+                    pass
+
+            output = io.StringIO()
+            with mock.patch.object(CHECK.sys, 'argv', ['check.py', '--report', str(report)]), \
+                    mock.patch.object(CHECK, 'spawn', FakeProcess), \
+                    mock.patch.object(CHECK, 'popen_kwargs', return_value={}), \
+                    mock.patch.object(CHECK, 'terminate_process', return_value=None), \
+                    mock.patch.object(CHECK.shutil, 'which', return_value=None), \
+                    mock.patch.object(CHECK, 'bash_available', return_value=False), \
+                    mock.patch.object(CHECK.sys, 'stdout', output):
+                status = CHECK.main()
+            receipt = json.loads(report.read_text(encoding='utf-8'))
+            return status, output.getvalue(), receipt
+
+    def test_a_verbose_child_cannot_grow_the_gate_own_output(self):
+        # A suite that runs many tests writes one progress line per test.
+        # The harness captures a command's stdout and stderr under one
+        # documented cap, so a gate that relays every line is killed by its
+        # own harness before it can report its outcome.
+        from mizu.config import Limits
+        raw = ''.join(f'test_suite.test_case_{index:05d} ... ok\n' for index in range(8000))
+        raw += 'Ran 8000 tests in 1.0s\nFAILED (failures=1)\n'
+        status, stdout, receipt = self.run_gate(raw)
+        self.assertEqual(status, 1)
+        self.assertLess(len(stdout.encode('utf-8')), Limits().output_bytes,
+                        'the gate output must fit the documented per-command cap')
+        self.assertLessEqual(len(stdout.encode('utf-8')),
+                              CHECK.RELAY_BUDGET_BYTES + CHECK.RELAY_TAIL_BYTES + 30000,
+                              'the gate output is bounded by the shared relay budgets')
+        entry = next(c for c in receipt['checks'] if c['name'] == 'python-unit-and-contract-tests')
+        self.assertEqual(entry['status'], 'fail')
+        self.assertEqual(entry['tests'], {'run': 8000, 'failed': 1, 'skipped': 0})
+        self.assertIn('[+', stdout, 'live timestamped output is still relayed')
+        self.assertIn('relay budget spent', stdout)
+        self.assertIn('Ran 8000 tests', stdout,
+                      'the child summary stays visible in the step tail')
+
+    def test_the_relay_budget_is_shared_and_the_tail_is_bounded(self):
+        output = io.StringIO()
+        with mock.patch.object(CHECK.sys, 'stdout', output):
+            relay = CHECK.OutputRelay(budget=100, tail=20)
+            self.assertTrue(relay.live('a' * 50))
+            self.assertFalse(relay.live('b' * 60))
+            self.assertEqual(relay.tail('c' * 100), 'c' * 20)
+            # The tail budget is shared: a second step keeps nothing.
+            self.assertEqual(relay.tail('d' * 10), '')
+        self.assertEqual(output.getvalue(), 'a' * 50)
+
+
 class UnittestTimingEvidenceTests(unittest.TestCase):
     """Per-test runtime evidence only; never a timeout policy or gate."""
 

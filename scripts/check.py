@@ -2,7 +2,9 @@
 """Run network-free quality gates. Missing required tools fail; absent
 operator-provisioned adapter dependencies are installed from the offline npm
 cache when one is available and fail unless explicitly waived with
---allow-not-run, so the receipt never passes silently without coverage."""
+--allow-not-run, so the receipt never passes silently without coverage.
+The gate's own stdout is bounded: the relayed step output draws on one
+shared budget, so the output cannot grow with the number of tests."""
 from __future__ import annotations
 import argparse
 import ast
@@ -157,6 +159,56 @@ def phase_exhausted_entry(name: str, budget: int) -> dict:
             'reason': 'later-phase-budget-exhausted',
             'details': f'the later phase has no budget left for this check '
                        f'(its {budget} s budget is spent)'}
+
+
+#: The bytes the gate may relay from its steps to its own stdout. The
+#: harness captures a command's stdout and stderr under one documented cap
+#: (`limits.output_bytes`, 262144 bytes by default), so a gate whose output
+#: grows with the number of tests it runs is killed by its own harness
+#: before it can report its own outcome. One budget is shared by every step,
+#: exactly as the later phase shares one time budget, so the gate's output
+#: cannot grow with the size of the suite.
+RELAY_BUDGET_BYTES = 49152
+#: The bytes of a step's own output kept for the tail print once the relay
+#: budget no longer covers it. A child's summary and failure text sit at the
+#: end of its output, so the tail keeps them visible after the live relay is
+#: spent. This budget is shared as well, so the gate's stdout stays bounded
+#: however many steps it runs.
+RELAY_TAIL_BYTES = 16384
+
+
+class OutputRelay:
+    """The gate's own stdout budget for the step output it relays.
+
+    The relay is bounded as a whole: every step draws from one budget, so
+    the gate's output cannot grow with the number of tests a step runs. A
+    step whose share is spent keeps the tail of its own output visible: a
+    child's summary and failure text sit at the end of its output, and the
+    receipt keeps the structured outcome either way.
+    """
+
+    def __init__(self, budget: int = RELAY_BUDGET_BYTES, tail: int = RELAY_TAIL_BYTES):
+        self.budget = int(budget)
+        self.remaining = int(budget)
+        self.tail_remaining = int(tail)
+
+    def live(self, text: str) -> bool:
+        """Relay one line while the shared budget lasts."""
+        size = len(text.encode('utf-8', 'replace'))
+        if self.remaining < size:
+            self.remaining = 0
+            return False
+        self.remaining -= size
+        sys.stdout.write(text)
+        return True
+
+    def tail(self, text: str) -> str:
+        """Return the end of the text the shared tail budget still allows."""
+        data = text.encode('utf-8', 'replace')
+        if len(data) > self.tail_remaining:
+            data = data[len(data) - self.tail_remaining:]
+        self.tail_remaining -= len(data)
+        return data.decode('utf-8', 'replace')
 
 
 def javascript_sources(root: Path | None = None) -> list:
@@ -709,6 +761,7 @@ def main():
     checks = []
     counts = {}
     phase = LaterPhase()
+    relay = OutputRelay()
     env = {**os.environ, 'PYTHONDONTWRITEBYTECODE': '1', 'PYTHONFAULTHANDLER': '1'}
     # The offline suite is process-spawn heavy. Every outer scope that
     # encloses this gate holds the modelled path (setup, the child, the
@@ -738,6 +791,9 @@ def main():
         started = time.monotonic()
         print(f'== {name} ==', flush=True)
         chunks: list[str] = []
+        suppressed: list[str] = []
+        suppressed_bytes = 0
+        capped = False
         def pump(stream):
             # Relay each line immediately with its arrival time: the
             # parent flushes per line (never only at EOF) and every line
@@ -747,11 +803,27 @@ def main():
             # counts and receipts parse the raw child output.
             # Only the reader closes its stream: closing a buffered stream
             # from another thread can block on that thread's pending read.
+            # The relay draws on one shared budget, so a step that runs
+            # many tests cannot make the gate's own output grow without
+            # bound: the lines the budget no longer covers are kept for
+            # the step's tail instead of the gate's stdout.
+            nonlocal capped, suppressed_bytes
             with stream:
                 for line in stream:
                     elapsed = time.monotonic() - started
-                    sys.stdout.write(f'[+{elapsed:8.1f}s] {line}')
-                    sys.stdout.flush()
+                    if relay.live(f'[+{elapsed:8.1f}s] {line}'):
+                        sys.stdout.flush()
+                    else:
+                        if not capped:
+                            capped = True
+                            sys.stdout.write(f'[+{elapsed:8.1f}s] (relay budget spent; '
+                                             'the rest of this step is not relayed)\n')
+                            sys.stdout.flush()
+                        suppressed.append(line)
+                        suppressed_bytes += len(line.encode('utf-8', 'replace'))
+                        while suppressed_bytes > RELAY_TAIL_BYTES and len(suppressed) > 1:
+                            dropped = suppressed.pop(0)
+                            suppressed_bytes -= len(dropped.encode('utf-8', 'replace'))
                     chunks.append(line)
                 sys.stdout.flush()
         status, exit_code, details = 'pass', 0, ''
@@ -790,6 +862,20 @@ def main():
                 exit_code = stopped
             reader.join(timeout=PROCESS_CLEANUP_TIMEOUT_SECONDS)
         finished_at = time.monotonic()
+        if capped:
+            # The step's own tail carries what the relay budget no longer
+            # covers: a child's summary and failure text sit at the end of
+            # its output, so they stay visible after the live relay is
+            # spent. The receipt keeps the structured outcome either way.
+            tail_text = relay.tail(''.join(suppressed))
+            if tail_text:
+                sys.stdout.write(f'[+{time.monotonic() - started:8.1f}s] '
+                                 "(the live relay was capped; the step's last "
+                                 'bytes follow)\n')
+                sys.stdout.write(tail_text)
+                if not tail_text.endswith('\n'):
+                    sys.stdout.write('\n')
+                sys.stdout.flush()
         if later_phase:
             # The phase pays for the child's own runtime and its cleanup.
             phase.consume(finished_at - started)

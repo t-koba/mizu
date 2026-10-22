@@ -37,6 +37,17 @@ the CLI, functional `bash_available`, `ok`, and the full `checks` array). The
 source digest is captured before validation and compared again after all checks;
 `source-manifest-stable` must pass, otherwise the report fails. JavaScript
 syntax check names include source-relative paths to avoid basename collisions.
+
+The gate's own stdout is bounded. Every step's output is relayed live with
+its arrival time, but the relay draws on one shared budget (49 152 bytes)
+and keeps a bounded tail (16 384 bytes) of the lines that budget no longer
+covers, so the gate's output cannot grow with the number of tests the suite
+runs. A child's summary and failure text sit at the end of its output, so
+the tail keeps them visible, and the receipt keeps the structured outcome
+either way. The harness captures a command's stdout and stderr under one
+cap (`limits.output_bytes`, 262 144 bytes by default), so a gate whose
+output grew with the suite was killed by its own harness before it could
+report its own outcome.
 Core-only installation may reuse that receipt instead of running the nested
 staged gate a second time, only via an explicit handoff:
 
