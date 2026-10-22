@@ -187,23 +187,26 @@ carries failure details, output tails or diagnostics; do not substitute the gene
 `offline.json` receipt. Only the Windows-latest/Python 3.13 CI step supplies
 `--test-timings`; CI uploads only this dedicated file for that job (`actions/upload-artifact` v4.6.2, 7-day retention,
 `if: always()` with missing-file tolerance). It records diagnostic evidence; it
-sets no timeout policy. The Windows scope is 60 minutes with a 1800 s child
-cap. The modeled setup/child/later-phase/cleanup/suffix path is 3246 s,
-leaving 354 s inside the job; this arithmetic is a contract, not a worst-case
-runtime claim. The POSIX matrix scope is 45 minutes with a 1000 s child cap
-and a 2446 s modeled path, and the authoritative `durable-contract` scope is
-55 minutes, holding the POSIX path plus the two pinned-adapter provisioning
-steps at the product's own 300 s per-adapter bound. The Linux/Python 3.13
-cell also installs. That cell runs the gate once: the installer reuses the
-source gate's receipt, and the idempotence reinstall finds the release the
-cell already staged, so neither install runs a second gate. Its scope is
-still 100 minutes, holding the source gate's modeled path (2446 s) plus the
-installer's own bounded staging call (3300 s) = 5746 s, leaving 254 s inside
-the job, so the cell is not cut off while the installer works whether or not
-an install reaches its staged gate. Every scope that encloses
-the gate holds the gate's modeled path, so a bounded run reports its own
-outcome instead of being cut off by the enclosing scope; the installer
-staging call holds the Windows path for the same reason.
+sets no timeout policy. One 1800 s child cap bounds the suite on every
+platform: the suite costs about 923 s on the development host, about 1050 s
+on a loaded verification host (the 2026-10-21 run was still running when the
+previous 1000 s bound cut it off) and about 1475 s on a slow Windows runner,
+so the bound covers the slowest supported host with margin. The modeled
+setup/child/later-phase/cleanup/suffix path is 3246 s, leaving 354 s inside
+the 60-minute Windows and POSIX scopes; this arithmetic is a contract, not a
+worst-case runtime claim. The authoritative `durable-contract` scope is 70
+minutes, holding the modeled path plus the two pinned-adapter provisioning
+steps at the product's own 300 s per-adapter bound (3846 s). The
+Linux/Python 3.13 cell also installs. That cell runs the gate once: the
+installer reuses the source gate's receipt, and the idempotence reinstall
+finds the release the cell already staged, so neither install runs a second
+gate. Its scope is still 120 minutes, holding the source gate's modeled path
+(3246 s) plus the installer's own bounded staging call (3300 s) = 6546 s,
+leaving 654 s inside the job, so the cell is not cut off while the installer
+works whether or not an install reaches its staged gate. Every scope that
+encloses the gate holds the gate's modeled path, so a bounded run reports
+its own outcome instead of being cut off by the enclosing scope; the
+installer staging call holds the same path for the same reason.
 
 The later phase is bounded as a whole, not per child. It runs one child per
 check: the transport suite, every SDK contract suite that is not waived, one
@@ -223,7 +226,10 @@ the phase can no longer afford is recorded as a failure with the reason
 receipt records the phase's own child count, budget, and consumed time.
 The 2026-10-21 Windows/3.13 run completed 2233 of about 2265 tests in
 1447 s and reached the previous 1450 s child cap without a reported
-test failure, so the child bound covers the suite's measured cost with margin.
+test failure, and the 2026-10-21 POSIX run reached the previous 1000 s child
+cap with the suite still running and three load-sensitive assertions
+failing, so the child bound covers the suite's measured cost on both hosts
+with margin.
 If the bounded run stalls again, use its partial per-test artifact to identify
 the unfinished test; timing samples are not bounds.
 

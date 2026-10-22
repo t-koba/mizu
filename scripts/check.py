@@ -222,16 +222,23 @@ def core_cell_scope_seconds(child_timeout: int, staging_timeout: int) -> int:
     return modelled_gate_seconds(child_timeout) + staging_timeout
 
 
-def _unittest_timeout_seconds(platform: str | None = None) -> int:
-    """Bound the Windows suite so the gate finishes inside its job scope.
+#: The wall-clock bound the gate holds the Python suite child to. The suite
+#: costs about 923 s on the development host, about 1050 s on a loaded
+#: verification host (the 2026-10-21 run was still running when the previous
+#: 1000 s bound cut it off) and about 1475 s on a slow Windows runner. One
+#: bound covers the measured cost of the slowest supported host with margin,
+#: so the modelled path and every enclosing scope are the same everywhere.
+SUITE_CHILD_TIMEOUT_SECONDS = 1800
 
-    The Windows suite costs about 1475 s on a slow runner: the 2026-10-21
-    Windows/3.13 run completed 2233 of about 2265 tests in 1447 s and was cut
-    off at the previous 1450 s cap with no reported test failure. The 1800 s
-    bound covers that measured cost with margin; the job scope holds the full
-    modeled path. POSIX keeps its 1000 s bound.
+
+def _unittest_timeout_seconds() -> int:
+    """Bound the suite child so the gate finishes inside its job scope.
+
+    The platform does not change the bound: the suite's cost is a fact about
+    the host, and the slowest supported host sets one bound for all of them.
+    The job scope holds the full modelled path.
     """
-    return 1800 if (os.name if platform is None else platform) == 'nt' else 1000
+    return SUITE_CHILD_TIMEOUT_SECONDS
 
 
 def unittest_failure_summary(sidecar: Path) -> str:
@@ -844,12 +851,14 @@ def main():
                 'skipped': int(skipped.group(1)) if skipped else 0}
     # Timestamped verbose progress: on a timeout the killed step leaves the
     # unfinished test as the last timestamped line in the live log.
-    # The 2026-10-21 Windows/Python 3.13 run completed 2233 of about 2265
-    # tests in 1447 s and reached the previous 1450 s child cap with no
-    # reported test failure, so the bound is now 1800 s inside a 60-minute
-    # job. The opt-in per-test timing artifact retains partial progress on
-    # timeout for diagnosis. Samples remain diagnostic, not bounds; POSIX
-    # retains its 1000 s child cap.
+    # The suite costs about 1475 s on a slow Windows runner (the 2026-10-21
+    # Windows/Python 3.13 run completed 2233 of about 2265 tests in 1447 s
+    # and reached the previous 1450 s child cap with no reported test
+    # failure) and about 1050 s on a loaded POSIX host (the 2026-10-21 run
+    # reached the previous 1000 s child cap with the suite still running), so
+    # the bound is 1800 s on every platform inside a 60-minute job. The
+    # opt-in per-test timing artifact retains partial progress on timeout for
+    # diagnosis. Samples remain diagnostic, not bounds.
     # The child owns structured exception metadata. Its failure sidecar is private
     # and deleted even on timeout; no failure/timeout details parse raw output.
     # The timing sidecar is likewise private and run-local, flushed per test so

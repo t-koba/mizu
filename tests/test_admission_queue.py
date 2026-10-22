@@ -127,13 +127,16 @@ class QueueTests(Fixture):
         return process, release, stop
 
     def probe_queue_state(self):
+        # The probe child is a fresh interpreter, so its start-up is a host
+        # cost: the bound below is generous enough for a loaded host and
+        # still detects a queue state that blocks the open or the read.
         process = self.mp.Process(target=_probe_queue_state, args=(self.file, self.results))
         process.start()
         try:
-            process.join(10)
+            process.join(60)
             self.assertFalse(process.is_alive(), 'queue state open/read blocked')
             self.assertEqual(process.exitcode, 0)
-            return self.results.get(timeout=5)
+            return self.results.get(timeout=30)
         finally:
             if process.is_alive():
                 process.terminate()

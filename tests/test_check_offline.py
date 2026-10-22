@@ -36,7 +36,7 @@ INSTALLER = load_script('install')
 #: names them: the Windows cell, the Linux cell that also installs, and the
 #: default POSIX cell.
 CORE_SCOPE_EXPRESSION = ("timeout-minutes: ${{ matrix.os == 'windows-latest' && 60 || "
-                         "(matrix.os == 'ubuntu-24.04' && matrix.python == '3.13' && 100 || 45) }}")
+                         "(matrix.os == 'ubuntu-24.04' && matrix.python == '3.13' && 120 || 60) }}")
 
 
 def write_adapter(base: Path, deps, installed: dict):
@@ -61,10 +61,9 @@ class InstallerStagingWaiverTests(unittest.TestCase):
 
 
 class CheckTimeoutTests(unittest.TestCase):
-    def test_windows_budget_covers_setup_child_timeout_and_receipt_path(self):
-        child_timeout = CHECK._unittest_timeout_seconds('nt')
+    def test_suite_child_budget_covers_setup_child_timeout_and_receipt_path(self):
+        child_timeout = CHECK._unittest_timeout_seconds()
         self.assertEqual(child_timeout, 1800)
-        self.assertEqual(CHECK._unittest_timeout_seconds('posix'), 1000)
         self.assertEqual(CHECK.DEFAULT_CHECK_TIMEOUT_SECONDS, 600)
         workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
         self.assertIn(CORE_SCOPE_EXPRESSION, workflow)
@@ -81,9 +80,9 @@ class CheckTimeoutTests(unittest.TestCase):
         # the enclosing scope must never be the tighter bound.
         scopes = self._core_cell_scopes()
         self.assertGreaterEqual(scopes['windows'] * 60,
-                                CHECK.modelled_gate_seconds(CHECK._unittest_timeout_seconds('nt')))
+                                CHECK.modelled_gate_seconds(CHECK._unittest_timeout_seconds()))
         self.assertGreaterEqual(scopes['posix'] * 60,
-                                CHECK.modelled_gate_seconds(CHECK._unittest_timeout_seconds('posix')))
+                                CHECK.modelled_gate_seconds(CHECK._unittest_timeout_seconds()))
 
     def test_core_installer_cell_scope_holds_the_gate_path_and_the_installers_call(self):
         # The Linux cell runs the gate once: the installer reuses the source
@@ -93,8 +92,8 @@ class CheckTimeoutTests(unittest.TestCase):
         # job cannot cut a healthy run off while the installer works.
         scopes = self._core_cell_scopes()
         staging = self._installer_staging_timeout()
-        required = CHECK.core_cell_scope_seconds(CHECK._unittest_timeout_seconds('posix'), staging)
-        self.assertEqual(required, 2446 + 3300)
+        required = CHECK.core_cell_scope_seconds(CHECK._unittest_timeout_seconds(), staging)
+        self.assertEqual(required, 3246 + 3300)
         self.assertGreaterEqual(scopes['linux_installer'] * 60, required)
 
     def test_later_phase_counts_the_children_the_gate_actually_runs(self):
@@ -226,58 +225,60 @@ class CheckTimeoutTests(unittest.TestCase):
         return int(match.group(1))
 
     def test_posix_job_scope_covers_the_modelled_gate_path(self):
-        # The POSIX matrix cell runs the same gate with the 1000-second child:
-        # 60 s setup + 1000 s child + the bounded later phase + bounded
-        # cleanup + suffix/receipt reserve = 2446 s, which the 45-minute scope
+        # The POSIX matrix cell runs the same gate with the 1800-second child:
+        # 60 s setup + 1800 s child + the bounded later phase + bounded
+        # cleanup + suffix/receipt reserve = 3246 s, which the 60-minute scope
         # holds.
-        required = CHECK.modelled_gate_seconds(CHECK._unittest_timeout_seconds('posix'))
-        self.assertEqual(required, 2446)
+        required = CHECK.modelled_gate_seconds(CHECK._unittest_timeout_seconds())
+        self.assertEqual(required, 3246)
         workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
         self.assertIn(CORE_SCOPE_EXPRESSION, workflow)
-        self.assertGreaterEqual(45 * 60, required)
+        self.assertGreaterEqual(60 * 60, required)
 
     def test_durable_contract_job_scope_covers_the_modelled_gate_path(self):
         # The authoritative job runs the whole gate on a POSIX host after
         # provisioning two pinned adapters, so its scope holds the modelled
         # path plus both provisioning steps at the product's own per-adapter
         # provisioning bound.
-        required = CHECK.modelled_gate_seconds(CHECK._unittest_timeout_seconds('posix'))
+        required = CHECK.modelled_gate_seconds(CHECK._unittest_timeout_seconds())
         provisioning = 2 * CHECK.NPM_PROVISION_TIMEOUT_SECONDS
         workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
         match = re.search(r'durable-contract:.*?timeout-minutes: (\d+)', workflow, re.S)
         self.assertIsNotNone(match)
         self.assertGreaterEqual(int(match.group(1)) * 60, required + provisioning)
 
-    def test_installer_staging_gate_outlives_the_modelled_windows_path(self):
+    def test_installer_staging_gate_outlives_the_modelled_gate_path(self):
         # The staged gate runs the same child; a staging timeout shorter than
-        # the gate's modelled Windows path would cut the gate off before its
-        # bounded cleanup and receipt.
+        # the gate's modelled path would cut the gate off before its bounded
+        # cleanup and receipt.
         source = (ROOT / 'scripts' / 'install.py').read_text(encoding='utf-8')
         match = re.search(r'"scripts/check\.py".*?timeout=(\d+)', source, re.S)
         self.assertIsNotNone(match)
-        required = CHECK.modelled_gate_seconds(CHECK._unittest_timeout_seconds('nt'))
+        required = CHECK.modelled_gate_seconds(CHECK._unittest_timeout_seconds())
         self.assertEqual(required, 3246)
         self.assertGreaterEqual(int(match.group(1)), required)
 
-    def test_windows_child_bound_covers_the_measured_suite_cost(self):
+    def test_child_bound_covers_the_measured_suite_cost(self):
         # The 2026-10-21 Windows/3.13 timing artifact measured the suite's
         # cost on a slow runner: 2233 of about 2265 tests completed in 1447 s
         # of test time and the run was cut off at the previous 1450 s cap with
         # no test failure, so the whole suite needs about 1475 s there. The
-        # bound must cover that measured cost with headroom for growth, or the
-        # gate fails a green suite.
-        measured_suite_seconds = 1475
-        headroom = CHECK._unittest_timeout_seconds('nt') - measured_suite_seconds
-        self.assertGreaterEqual(headroom, 300)
+        # 2026-10-21 POSIX run reached the previous 1000 s cap with the suite
+        # still running, so a loaded POSIX host needs about 1050 s. The bound
+        # must cover that measured cost with headroom for growth, or the gate
+        # fails a green suite.
+        for measured_suite_seconds in (1475, 1050):
+            headroom = CHECK._unittest_timeout_seconds() - measured_suite_seconds
+            self.assertGreaterEqual(headroom, 300)
 
-    def test_installer_staging_gate_outlives_the_windows_child_bound(self):
+    def test_installer_staging_gate_outlives_the_suite_child_bound(self):
         # The staged gate runs the same child; a staging timeout that does not
-        # outlive the child's own Windows bound would cut the gate off before
-        # its bounded cleanup and receipt.
+        # outlive the child's own bound would cut the gate off before its
+        # bounded cleanup and receipt.
         source = (ROOT / 'scripts' / 'install.py').read_text(encoding='utf-8')
         match = re.search(r'"scripts/check\.py".*?timeout=(\d+)', source, re.S)
         self.assertIsNotNone(match)
-        self.assertGreater(int(match.group(1)), CHECK._unittest_timeout_seconds('nt'))
+        self.assertGreater(int(match.group(1)), CHECK._unittest_timeout_seconds())
 
     def test_ci_provisions_both_pi_adapters_for_unwaived_contract_gates(self):
         workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
@@ -362,20 +363,24 @@ class CheckTimeoutTests(unittest.TestCase):
                     mock.patch.object(CHECK.sys, 'argv', ['check.py', '--report', str(report)]), \
                     mock.patch.object(CHECK.sys, 'stdout', output), \
                     mock.patch.object(CHECK, 'spawn', side_effect=launch), \
-                    mock.patch.object(CHECK, '_unittest_timeout_seconds', return_value=3), \
+                    mock.patch.object(CHECK, '_unittest_timeout_seconds', return_value=30), \
                     mock.patch.object(CHECK, 'PROCESS_CLEANUP_TIMEOUT_SECONDS', 1), \
                     mock.patch.object(CHECK.shutil, 'which', return_value=None), \
                     mock.patch.object(CHECK, 'bash_available', return_value=False):
                 started = time.monotonic()
                 gate.start()
                 try:
-                    self.assertTrue(progress.wait(6), 'confirmed descendant progress must stream live')
+                    # The mocked child cap must outlast the descendant's own
+                    # start-up (the parent waits 20 s for it) on a loaded host,
+                    # so the live progress and the bounded cleanup are the
+                    # assertions, not the host's speed.
+                    self.assertTrue(progress.wait(45), 'confirmed descendant progress must stream live')
                     if timed_out:
                         self.assertTrue(gate.is_alive(), 'progress must arrive before the timeout')
-                    gate.join(timeout=9)
+                    gate.join(timeout=90)
                     elapsed = time.monotonic() - started
                     self.assertFalse(gate.is_alive(), 'gate blocked on inherited stdout')
-                    self.assertLess(elapsed, 14, '3 s child cap plus cleanup/startup margin')
+                    self.assertLess(elapsed, 120, '30 s child cap plus cleanup/startup margin')
                     self.assertFalse(errors, errors)
                     self.assertEqual(results, [1])  # node is deliberately unavailable
                     self.assertEqual(len(processes), 1)
@@ -388,7 +393,7 @@ class CheckTimeoutTests(unittest.TestCase):
                     if timed_out:
                         # Windows Job Object termination can report process exit
                         # status 0; the gate records timeout in status/details.
-                        self.assertIn('timed out after 3 s', entry['details'])
+                        self.assertIn('timed out after 30 s', entry['details'])
                         self.assertIn('unittest failure details unavailable', entry['details'])
                     else:
                         self.assertEqual(entry['exit_code'], 0)
@@ -1169,7 +1174,7 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
         # enforced while the always-uploaded artifact preserves partial progress.
         self.assertIn('1800-second child', workflow)
         self.assertIn(CORE_SCOPE_EXPRESSION, workflow)
-        self.assertEqual(CHECK._unittest_timeout_seconds('nt'), 1800)
+        self.assertEqual(CHECK._unittest_timeout_seconds(), 1800)
 
     def test_offline_steps_run_exactly_once_per_matrix_cell(self):
         workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')

@@ -409,8 +409,8 @@ def stage(args):
                 command([sys.executable, "scripts/check.py", "--report", "installation-checks.json",
                          "--allow-not-run", staging_not_run_checks(core_only=args.core_only)],
                         # The staging call holds the gate's modelled path (3246 s on
-                        # Windows, the largest), and the core CI cell that installs
-                        # holds this bound together with the source gate's own path.
+                        # every platform), and the core CI cell that installs holds
+                        # this bound together with the source gate's own path.
                         # The CI cell reaches this call only when no source receipt
                         # is reused; with the receipt it stages from the source
                         # gate and runs no gate of its own.

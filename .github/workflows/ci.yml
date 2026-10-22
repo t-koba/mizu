@@ -13,12 +13,14 @@ jobs:
     # Portable development plane: offline unit/contract checks on all three OSes.
     # Native service operation, live inference and OCI isolation are never asserted here.
     runs-on: ${{ matrix.os }}
-    # The Windows suite costs about 1475 s on a slow runner: the 2026-10-21
-    # Windows/3.13 run completed 2233 of about 2265 tests at the previous
-    # 1450-second child cap with no test failure. Keep a 60-minute Windows
-    # scope around its 1800-second child, and a 45-minute default POSIX scope
-    # around its 1000-second child: each scope holds the modelled
-    # setup/child/later-phase/cleanup/suffix path, so the gate reports its
+    # The suite costs about 923 s on the development host, about 1050 s on a
+    # loaded verification host (the 2026-10-21 run was still running when the
+    # previous 1000-second child bound cut it off) and about 1475 s on a slow
+    # Windows runner (the 2026-10-21 Windows/3.13 run completed 2233 of about
+    # 2265 tests at the previous 1450-second cap with no test failure). One
+    # 1800-second child bound covers the slowest supported host with margin,
+    # so every cell holds the same modelled setup/child/later-phase/cleanup/
+    # suffix path (3246 s) inside a 60-minute scope and the gate reports its
     # own bounded outcome instead of being cut off by the job scope. The
     # later phase runs one child per check (nine on Windows, sixteen in a
     # POSIX cell) and is bounded as a whole at 1200 s, so the number of
@@ -30,7 +32,7 @@ jobs:
     # source gate's path plus the installer's own bounded staging call, so
     # the cell is not cut off while the installer works, whether or not an
     # install reaches its staged gate.
-    timeout-minutes: ${{ matrix.os == 'windows-latest' && 60 || (matrix.os == 'ubuntu-24.04' && matrix.python == '3.13' && 100 || 45) }}
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 60 || (matrix.os == 'ubuntu-24.04' && matrix.python == '3.13' && 120 || 60) }}
     strategy:
       fail-fast: false
       matrix:
@@ -84,11 +86,11 @@ jobs:
     # fallbacks for environments that cannot provision; their receipts record
     # the waiver, and promotion still requires this job green.
     runs-on: ubuntu-24.04
-    # The authoritative scope holds the POSIX modelled gate path (2446 s) plus
-    # the two pinned-adapter provisioning steps at the product's own 300 s
-    # per-adapter bound, so this job cannot kill the gate before the gate
-    # reaches its own bound.
-    timeout-minutes: 55
+    # The authoritative scope holds the modelled gate path (3246 s) plus the
+    # two pinned-adapter provisioning steps at the product's own 300 s
+    # per-adapter bound (3846 s), so this job cannot kill the gate before the
+    # gate reaches its own bound.
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
