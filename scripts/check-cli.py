@@ -60,11 +60,6 @@ def bound_refusal(exc, bound, engine=None):
         probe_outcome("timeout", None, detail, label, bound)
     except ConfigError as refusal:
         raise ProbeTimeout(str(refusal)) from exc
-    else:
-        # The shared rule refuses a child that did not answer, so the
-        # classification is the whole message; the local type is the only
-        # part of the refusal that stays with the script.
-        raise ProbeTimeout(f"{label} did not complete before it could report")
 
 
 def host_config():
