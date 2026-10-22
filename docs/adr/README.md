@@ -598,6 +598,12 @@ inequality or from "newest snapshot wins"; there is no global queue-clearing
 daemon and no blanket latest-only rule. A purpose states an intention the
 caller already has.
 
+The pending cap is not weakened by the replacement. Only demand the queue
+still counts is credited: a job that was already replaced holds no capacity,
+so a second replacement cannot credit it again and let the queue grow past
+its cap while an earlier cancellation is still outstanding. An acceptance at a
+full queue is still refused.
+
 Everything else is preserved. A different purpose, or no purpose at all, keeps
 the earlier job. A shared execution keeps running for the consumers that
 remain, and only the last of them stops it. Another role's job and another

@@ -569,6 +569,39 @@ class PurposeTests(JobTests):
         self.assertEqual(read_json(directory / 'job.json')['status'], 'cancelled')
         self.assertFalse((directory / 'result.json').exists())
 
+    def test_replacement_does_not_credit_capacity_it_already_released(self):
+        # A job that was replaced while it was still running holds no
+        # capacity: crediting it again would let the queue grow past its cap
+        # while that earlier cancellation is still outstanding.
+        self.config = dataclasses.replace(self.config,
+                                          limits=dataclasses.replace(self.config.limits, check_pending=3))
+        self.project.config = self.config
+        ctx = self.context()
+        first = check_jobs.submit(ctx, 'echo first', kind='experiment', purpose='acceptance')
+        second = check_jobs.submit(ctx, 'echo second', kind='experiment', purpose='acceptance')
+        record = read_json(check_jobs.root(self.project) / first['id'] / 'job.json')
+        record['status'] = 'running'
+        record['detached'] = True
+        record['replaced_by'] = second['id']
+        write_json(check_jobs.root(self.project) / first['id'] / 'job.json', record)
+        other = check_jobs.submit(self.context('reviewer'), 'echo other', kind='exec')
+        self.assertEqual(check_jobs.read(self.project, other['id'])['status'], 'queued')
+        # The queue counts the successor and the other role's job, and the
+        # replaced job holds no capacity at all.
+        self.config = dataclasses.replace(self.config,
+                                          limits=dataclasses.replace(self.config.limits, check_pending=1))
+        self.project.config = self.config
+        with self.assertRaises(Busy):
+            check_jobs.submit(self.context(), 'echo third', kind='experiment', purpose='acceptance')
+
+    def test_acceptance_at_a_full_queue_is_refused(self):
+        self.config = dataclasses.replace(self.config,
+                                          limits=dataclasses.replace(self.config.limits, check_pending=1))
+        self.project.config = self.config
+        check_jobs.submit(self.context('reviewer'), 'echo other', kind='exec')
+        with self.assertRaises(Busy):
+            check_jobs.submit(self.context())
+
     def test_invalid_purpose_is_refused(self):
         ctx = self.context()
         for value in ('', '   ', 'a/b', 'a\\b', 'x' * 65, 'two\nlines', 7):

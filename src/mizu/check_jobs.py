@@ -314,10 +314,16 @@ def submit(context, script=None, *, kind="experiment", fresh=False, purpose=None
                     _retire_superseded(project, owner, purpose,
                                        keep={other['id'], job['id']}, replaced_by=job['id'])
                     return job
+        pending = _pending_jobs(project)
+        counted = {job['id'] for job in pending}
         superseded = _superseded(project, owner, purpose, keep={job_id})
-        # The replacement frees the capacity the superseded demand held, so
-        # the cap is counted against the queue that will remain.
-        unfinished = len(_pending_jobs(project)) - len([j for j in superseded if _withdrawable(project, j)])
+        # Only demand the queue still counts can be credited. A job that was
+        # already replaced holds no capacity, so crediting it a second time
+        # would let the queue grow past its cap while an earlier cancellation
+        # is still outstanding.
+        freed = [job for job in superseded
+                 if job['id'] in counted and _withdrawable(project, job)]
+        unfinished = len(pending) - len(freed)
         _make_room(project)
         if unfinished >= context.config.limits.check_pending:
             raise Busy('Check job queue is full')
