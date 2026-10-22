@@ -3,8 +3,9 @@
 operator-provisioned adapter dependencies are installed from the offline npm
 cache when one is available and fail unless explicitly waived with
 --allow-not-run, so the receipt never passes silently without coverage.
-The gate's own stdout is bounded: the relayed step output draws on one
-shared budget, so the output cannot grow with the number of tests."""
+The gate's complete stdout is byte-bounded, including progress, the printed
+receipt and its tail-visible failure summary, so it cannot grow with the
+number of checks or tests it runs."""
 from __future__ import annotations
 import argparse
 import ast
@@ -181,20 +182,60 @@ RELAY_BUDGET_BYTES = 49152
 #: spent. This budget is shared as well, so the gate's stdout stays bounded
 #: however many steps it runs.
 RELAY_TAIL_BYTES = 16384
-#: The bytes the gate may print from the receipt it writes. Each step's
-#: entry carries the tail of that step's own output, so the printed receipt
-#: grew with the number of failing steps. The harness captures a command's
-#: stdout and stderr under one documented cap (`limits.output_bytes`,
-#: 262144 bytes by default), so a gate whose output grows with its own
-#: failures is killed by its harness before it can report its outcome. One
-#: budget is shared by every step's free text, exactly as the relay shares
-#: one budget: the step names, statuses, exit codes and counts are never
-#: shortened, so the gate still names every step that failed.
-RECEIPT_DETAIL_BUDGET_BYTES = 16384
-#: The bytes the tail-visible failure summary may print. The summary
-#: repeats the failing steps' own output after the receipt, and draws on
-#: its own budget for the same reason.
-SUMMARY_DETAIL_BUDGET_BYTES = 8192
+#: The complete printed receipt view (structure and details) is bounded.
+#: The full check list remains in the optional --report file.
+RECEIPT_OUTPUT_BUDGET_BYTES = 16384
+#: The complete tail-visible summary, including its heading, every step name,
+#: status, newline and omission notice, is bounded in UTF-8 bytes.
+SUMMARY_OUTPUT_BUDGET_BYTES = 8192
+#: All stdout emitted before the final receipt and failure summary, including
+#: per-step headings and relay notices, is held to one shared byte budget.
+PROGRESS_OUTPUT_BUDGET_BYTES = 98304
+#: Fixed notes are reserved separately from the variable output budgets.
+FINAL_NOTICE_BUDGET_BYTES = 1024
+GATE_STDOUT_BUDGET_BYTES = (PROGRESS_OUTPUT_BUDGET_BYTES
+                             + RECEIPT_OUTPUT_BUDGET_BYTES + 1
+                             + SUMMARY_OUTPUT_BUDGET_BYTES
+                             + FINAL_NOTICE_BUDGET_BYTES)
+FAILURE_SUMMARY_HEADING = 'FAILED CHECKS SUMMARY (tail-visible):'
+
+
+class BoundedTextOutput:
+    """A UTF-8 byte-budgeted view of progress output.
+
+    The gate may run one check per source file, so even its headings and
+    per-child relay notices must share a fixed budget. The full structured
+    receipt is written separately before the bounded final view is printed.
+    """
+
+    def __init__(self, stream, budget: int = PROGRESS_OUTPUT_BUDGET_BYTES):
+        self.stream = stream
+        self.remaining = max(0, int(budget))
+        self.truncated = False
+        self.lock = threading.Lock()
+
+    def write(self, text: str) -> int:
+        if not isinstance(text, str):
+            text = str(text)
+        encoded = text.encode('utf-8', 'replace')
+        with self.lock:
+            if len(encoded) > self.remaining:
+                visible = encoded[:self.remaining].decode('utf-8', 'ignore')
+                if visible:
+                    self.stream.write(visible)
+                self.remaining = 0
+                self.truncated = True
+            elif encoded:
+                # Re-decode the encoded bytes so unusual surrogate code
+                # points cannot make the underlying stdout encoder fail.
+                self.stream.write(encoded.decode('utf-8', 'replace'))
+                self.remaining -= len(encoded)
+            elif text and self.remaining == 0:
+                self.truncated = True
+        return len(text)
+
+    def flush(self) -> None:
+        self.stream.flush()
 
 
 class OutputRelay:
@@ -203,8 +244,8 @@ class OutputRelay:
     The relay is bounded as a whole: every step draws from one budget, so
     the gate's output cannot grow with the number of tests a step runs. A
     step whose share is spent keeps the tail of its own output visible: a
-    child's summary and failure text sit at the end of its output, and the
-    receipt keeps the structured outcome either way.
+    child's summary and failure text sit at the end of its output. The bounded
+    receipt summarizes results; --report retains the complete structured view.
     """
 
     def __init__(self, budget: int = RELAY_BUDGET_BYTES, tail: int = RELAY_TAIL_BYTES):
@@ -231,63 +272,161 @@ class OutputRelay:
         return data.decode('utf-8', 'replace')
 
 
-def receipt_text(receipt: dict, budget: int = RECEIPT_DETAIL_BUDGET_BYTES) -> tuple[str, bool]:
-    """Return the receipt text the gate prints and whether it was shortened.
+def _compact_json_bytes(value) -> int:
+    return len(json.dumps(value, ensure_ascii=True, separators=(',', ':')).encode('utf-8'))
 
-    Every step's free text draws on one shared budget, so the number of
-    failing steps cannot grow the gate's own output past the harness's
-    command cap. The step names, statuses, exit codes and counts are kept
-    whole: the gate must always report which steps failed. The receipt
-    written by ``--report`` keeps the full text of every step.
+
+def _utf8_prefix(text: str, budget: int) -> str:
+    """Return a prefix no longer than budget UTF-8 bytes."""
+    if budget <= 0:
+        return ''
+    data = text.encode('utf-8', 'replace')
+    if len(data) <= budget:
+        return data.decode('utf-8', 'replace')
+    return data[:budget].decode('utf-8', 'ignore')
+
+
+def _utf8_tail(text: str, budget: int) -> str:
+    """Return a suffix no longer than budget UTF-8 bytes."""
+    if budget <= 0:
+        return ''
+    data = text.encode('utf-8', 'replace')
+    if len(data) <= budget:
+        return data.decode('utf-8', 'replace')
+    return data[-budget:].decode('utf-8', 'ignore')
+
+
+def receipt_text(receipt: dict, budget: int = RECEIPT_OUTPUT_BUDGET_BYTES) -> tuple[str, bool]:
+    """Return a byte-bounded, parseable receipt view and whether it was cut.
+
+    Small receipts keep the established pretty-printed form. A large receipt
+    gets a compact view that favors failure rows and reports omitted counts;
+    the full metadata, all rows and details remain in ``--report``. The view
+    uses the serialized UTF-8 byte size as its bound.
     """
-    text = json.dumps(receipt, indent=2)
-    if len(text.encode('utf-8')) <= budget:
-        return text, False
-    allowance = budget
-    while True:
+    if budget < 2:
+        raise ValueError('receipt budget must fit a JSON object')
+    full = json.dumps(receipt, indent=2)
+    if len(full.encode('utf-8')) <= budget:
+        return full, False
+    checks = receipt.get('checks', [])
+    if not isinstance(checks, list):
         checks = []
-        remaining = allowance
-        for entry in receipt.get('checks', []):
-            item = dict(entry)
-            detail = item.get('details')
-            if isinstance(detail, str) and detail:
-                allowed = max(0, min(len(detail), remaining))
-                if allowed:
-                    item['details'] = detail[:allowed]
-                else:
-                    item.pop('details', None)
-                remaining -= allowed
-            checks.append(item)
-        reduced = dict(receipt)
-        reduced['checks'] = checks
-        text = json.dumps(reduced, indent=2)
-        if len(text.encode('utf-8')) <= budget or allowance == 0:
-            return text, True
-        allowance //= 2
+    failed_count = sum(isinstance(entry, dict) and entry.get('status') == 'fail'
+                       for entry in checks)
+    fixed = ('suite', 'report_version', 'mizu_version', 'source_sha256',
+             'ok', 'python', 'os')
+    reduced = {key: receipt[key] for key in fixed if key in receipt}
+    reduced.update({'truncated': True, 'checks_total': len(checks),
+                    'failed_checks_total': failed_count,
+                    'checks_omitted': len(checks),
+                    'failed_checks_omitted': failed_count,
+                    'details_omitted': any(isinstance(entry, dict) and entry.get('details')
+                                           for entry in checks),
+                    'checks': []})
+    if _compact_json_bytes(reduced) > budget:
+        reduced = {'ok': bool(receipt.get('ok')), 'truncated': True,
+                   'checks_total': len(checks), 'failed_checks_total': failed_count,
+                   'checks_omitted': len(checks), 'failed_checks_omitted': failed_count,
+                   'details_omitted': bool(reduced['details_omitted']), 'checks': []}
+    if _compact_json_bytes(reduced) > budget:
+        raise ValueError('receipt budget too small for its omission summary')
+
+    def row(index):
+        entry = checks[index]
+        return {key: entry[key] for key in
+                ('name', 'status', 'exit_code', 'seconds', 'reason', 'tests')
+                if key in entry}
+
+    priority = sorted((index for index, entry in enumerate(checks)
+                       if isinstance(entry, dict)),
+                      key=lambda index: (checks[index].get('status') != 'fail', index))
+    selected = []
+    for index in priority:
+        indices = sorted(selected + [index])
+        rows = [row(row_index) for row_index in indices]
+        shown_failures = sum(checks[row_index].get('status') == 'fail'
+                             for row_index in indices)
+        candidate = dict(reduced, checks=rows,
+                         checks_omitted=len(checks) - len(indices),
+                         failed_checks_omitted=failed_count - shown_failures)
+        if _compact_json_bytes(candidate) <= budget:
+            selected.append(index)
+    selected.sort()
+    reduced['checks'] = [row(index) for index in selected]
+    reduced['checks_omitted'] = len(checks) - len(selected)
+    reduced['failed_checks_omitted'] = failed_count - sum(
+        checks[index].get('status') == 'fail' for index in selected)
+    text = json.dumps(reduced, ensure_ascii=True, separators=(',', ':'))
+    if len(text.encode('utf-8')) > budget:
+        raise ValueError('bounded receipt exceeded its byte budget')
+    return text, True
 
 
-def failure_summary_lines(checks: list, budget: int = SUMMARY_DETAIL_BUDGET_BYTES) -> list[str]:
-    """Return the tail-visible failure lines within one shared budget.
+def failure_summary_lines(checks: list, budget: int = SUMMARY_OUTPUT_BUDGET_BYTES) -> list[str]:
+    """Return the tail-visible summary within a total UTF-8 byte budget.
 
-    Every failing step is named with its exit code; only the free text
-    that repeats the receipt's own details draws on the budget, so the
-    number of failing steps cannot grow the gate's own output. The budget
-    is spent on the last failures first, because the summary is the view a
-    truncated log keeps.
+    ``budget`` includes the printed heading, line terminators, all names and
+    exit codes, detail text, and the omission marker. The newest failures are
+    selected first so a truncated log retains the most recent diagnosis.
     """
-    failing = [entry for entry in checks if entry.get('status') == 'fail']
-    details = [str(entry.get('details', '')).strip().replace('\n', ' | ')
-               for entry in failing]
-    allowances = [0] * len(failing)
-    remaining = budget
-    for index in range(len(failing) - 1, -1, -1):
-        allowed = max(0, min(len(details[index]), remaining, 1500))
-        allowances[index] = allowed
-        remaining -= allowed
-    lines = []
-    for entry, detail, allowed in zip(failing, details, allowances):
-        text = detail[-allowed:] if allowed else ''
-        lines.append(f"- {entry.get('name')}: exit={entry.get('exit_code', '?')} {text}".rstrip())
+    failing = [entry for entry in checks
+               if isinstance(entry, dict) and entry.get('status') == 'fail']
+    heading_bytes = len((FAILURE_SUMMARY_HEADING + '\n').encode('utf-8'))
+    if budget < heading_bytes:
+        raise ValueError('summary budget too small for its heading')
+    marker_reserve = min(128, max(0, budget - heading_bytes))
+    detail_reserve = min(4096, max(0, budget // 2))
+    remaining = budget - heading_bytes - marker_reserve - detail_reserve
+    selected = []
+    for entry in reversed(failing):
+        code = _utf8_prefix(str(entry.get('exit_code', '?')), 32) or '?'
+        available = remaining
+        # Keep a useful suffix of unusually long names rather than allowing
+        # one path to consume the entire summary.
+        original_name = str(entry.get('name', 'unknown check'))
+        name_budget = min(256, max(0, available - 16))
+        name = _utf8_prefix(original_name, name_budget)
+        if len(original_name.encode('utf-8', 'replace')) > len(name.encode('utf-8')) and name_budget >= 3:
+            name = _utf8_prefix(name, name_budget - 3) + '…'
+        prefix = f'- {name}: exit={code}'
+        prefix_bytes = len(prefix.encode('utf-8'))
+        if prefix_bytes + 1 > available:
+            break
+        selected.append([entry, prefix, ''])
+        remaining -= prefix_bytes + 1
+    omitted = len(failing) - len(selected)
+    # Allocate free text only after every selected check's name is secured.
+    for selected_index, (entry, prefix, _detail_text) in enumerate(selected):
+        detail = str(entry.get('details', '')).strip().replace('\n', ' | ')
+        if not detail:
+            continue
+        # The marker reserve is available only when no check was omitted.
+        marker_reserve_now = marker_reserve if omitted else 0
+        already = sum(len((p + (' ' + d if d else '') + '\n').encode('utf-8'))
+                      for _, p, d in selected)
+        free = budget - heading_bytes - marker_reserve_now - already
+        if free <= 1:
+            continue
+        allowance = min(1500, free - 1)
+        detail_bytes = len(detail.encode('utf-8', 'replace'))
+        if detail_bytes > allowance and allowance >= 3:
+            tail = '…' + _utf8_tail(detail, allowance - 3)
+        else:
+            tail = _utf8_tail(detail, allowance)
+        if tail:
+            selected[selected_index][2] = tail
+    lines = [prefix + ((' ' + detail) if detail else '')
+             for _entry, prefix, detail in reversed(selected)]
+    if omitted:
+        marker = f'- {omitted} earlier failing checks omitted; use --report for the full receipt.'
+        while lines and (sum(len((line + '\n').encode('utf-8')) for line in lines)
+                         + len((marker + '\n').encode('utf-8'))
+                         + heading_bytes > budget):
+            lines.pop(0)
+            omitted += 1
+            marker = f'- {omitted} earlier failing checks omitted; use --report for the full receipt.'
+        lines.insert(0, marker)
     return lines
 
 
@@ -838,6 +977,8 @@ def main():
     except (OSError, ValueError) as exc:
         print(f'source manifest is unreadable: {exc}', file=sys.stderr)
         return 1
+    progress_stream = BoundedTextOutput(sys.stdout)
+    sys.stdout = progress_stream
     checks = []
     counts = {}
     phase = LaterPhase()
@@ -1182,23 +1323,24 @@ def main():
     if args.report:
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(json.dumps(receipt, indent=2) + '\n')
+    progress_stream.flush()
+    sys.stdout = progress_stream.stream
+    if progress_stream.truncated:
+        print('note: progress output was shortened at the shared byte budget.')
     printed, shortened = receipt_text(receipt)
     print(printed)
     if shortened:
-        # The printed receipt is a bounded view of the receipt the gate
-        # wrote: the harness's own cap ends the gate's output, so the
-        # steps' own text is shortened to keep the outcome reportable.
-        # The step names, statuses and counts are complete.
-        where = f' The full receipt is at {args.report}.' if args.report else ''
-        print("note: the printed receipt shortens the steps' own output "
-              "to stay within the harness's output cap." + where,
-              flush=True)
+        if args.report:
+            detail_note = ' The full receipt was written to the --report path.'
+        else:
+            detail_note = ' Pass --report to write the full receipt.'
+        print("note: the printed receipt omits metadata, rows or details that do not fit its byte budget."
+              + detail_note, flush=True)
     if not receipt['ok']:
-        # Tail-visible diagnosis: the VCS log view truncates to the tail,
-        # which hides the failing entry at the head of the receipt checks
-        # array (verbose progress plus later suites bury it). Re-print each
-        # failure last so a timeout names the hanging test in the tail.
-        print('FAILED CHECKS SUMMARY (tail-visible):', flush=True)
+        # The heading and every line, including structural labels and names,
+        # share the summary's total byte budget. The complete check set remains
+        # in the full receipt written above when --report was requested.
+        print(FAILURE_SUMMARY_HEADING, flush=True)
         for line in failure_summary_lines(checks):
             print(line, flush=True)
     return 0 if receipt['ok'] else 1

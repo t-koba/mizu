@@ -922,26 +922,69 @@ class GateRelayBudgetTests(unittest.TestCase):
 
 
 class GateReceiptOutputBudgetTests(unittest.TestCase):
-    """The printed receipt and failure summary stay inside the cap."""
+    """The complete printed gate output stays under a byte budget."""
 
-    def failing_checks(self, count):
+    def failing_checks(self, count, *, detail='child output ' + 'x' * 2000):
         return [{'name': f'step-{index}', 'status': 'fail', 'exit_code': 1,
-                 'details': 'child output ' + 'x' * 2000}
+                 'details': detail}
                 for index in range(count)]
 
     def test_many_failing_steps_cannot_grow_the_printed_receipt(self):
-        # Each step's entry carries the tail of that step's own output, so
-        # a gate that prints the receipt whole grows with the number of
-        # failures and is killed by its own harness before it can report
-        # its outcome.
-        receipt = {'suite': 'offline', 'checks': self.failing_checks(120)}
+        receipt = {'suite': 'offline', 'ok': False,
+                   'checks': self.failing_checks(120)}
         text, shortened = CHECK.receipt_text(receipt)
+        parsed = json.loads(text)
         self.assertTrue(shortened)
         self.assertLessEqual(len(text.encode('utf-8')),
-                             CHECK.RECEIPT_DETAIL_BUDGET_BYTES)
+                             CHECK.RECEIPT_OUTPUT_BUDGET_BYTES)
+        self.assertTrue(parsed['truncated'])
+        self.assertEqual(parsed['checks_omitted'], 0)
+        self.assertEqual(parsed['failed_checks_omitted'], 0)
+        self.assertEqual(len(parsed['checks']), 120)
         for index in range(120):
-            self.assertIn(f'"step-{index}"', text,
-                          'every failing step is still named')
+            self.assertIn(f'"step-{index}"', text)
+
+    def test_thousands_of_multibyte_failures_are_byte_bounded_and_counted(self):
+        checks = self.failing_checks(3000, detail='日本語の詳細🧪' * 200)
+        for index, check in enumerate(checks):
+            check['name'] = f'失敗-{index}-日本語'
+        receipt = {'suite': 'offline', 'ok': False, 'checks': checks,
+                   'counts': {f'step-{index}': index for index in range(3000)}}
+        text, shortened = CHECK.receipt_text(receipt)
+        printed = json.loads(text)
+        self.assertTrue(shortened)
+        self.assertLessEqual(len(text.encode('utf-8')),
+                             CHECK.RECEIPT_OUTPUT_BUDGET_BYTES)
+        self.assertTrue(printed['truncated'])
+        self.assertEqual(printed['checks_total'], 3000)
+        self.assertEqual(printed['failed_checks_total'], 3000)
+        self.assertGreater(printed['checks_omitted'], 0)
+        self.assertEqual(printed['checks_omitted'], printed['failed_checks_omitted'])
+        self.assertLess(len(printed['checks']), len(checks))
+        self.assertEqual(len(checks), 3000, 'printing must not mutate the full receipt')
+        self.assertEqual(checks[-1]['details'], '日本語の詳細🧪' * 200)
+
+    def test_failure_summary_bounds_names_details_and_omission_notice_in_bytes(self):
+        checks = self.failing_checks(3000, detail='詳細🧪' * 1000)
+        lines = CHECK.failure_summary_lines(checks)
+        combined = CHECK.FAILURE_SUMMARY_HEADING + '\n' + '\n'.join(lines) + '\n'
+        self.assertLessEqual(len(combined.encode('utf-8')),
+                             CHECK.SUMMARY_OUTPUT_BUDGET_BYTES)
+        self.assertTrue(lines[0].startswith('- '))
+        self.assertIn('omitted', lines[0])
+        self.assertIn('step-2999', lines[-1])
+        self.assertIn('詳細', combined)
+
+    def test_summary_clips_long_multibyte_names_and_details_within_the_budget(self):
+        checks = self.failing_checks(1, detail='日本語🧪' * 5000)
+        checks[0]['name'] = '失敗名称' * 2000
+        lines = CHECK.failure_summary_lines(checks)
+        combined = CHECK.FAILURE_SUMMARY_HEADING + '\n' + '\n'.join(lines) + '\n'
+        self.assertLessEqual(len(combined.encode('utf-8')),
+                             CHECK.SUMMARY_OUTPUT_BUDGET_BYTES)
+        self.assertGreaterEqual(lines[-1].count('…'), 2,
+                                'both the clipped name and detail are marked')
+        self.assertIn('exit=1', combined)
 
     def test_a_short_receipt_is_printed_whole(self):
         receipt = {'suite': 'offline', 'checks': [{'name': 'a', 'status': 'pass'}]}
@@ -949,26 +992,99 @@ class GateReceiptOutputBudgetTests(unittest.TestCase):
         self.assertFalse(shortened)
         self.assertEqual(text, json.dumps(receipt, indent=2))
 
-    def test_the_failure_summary_names_every_failing_step(self):
+    def test_the_failure_summary_names_every_failing_step_that_fits(self):
         checks = self.failing_checks(120)
         lines = CHECK.failure_summary_lines(checks)
         self.assertEqual(len(lines), 120)
         self.assertIn('step-0', lines[0])
         self.assertIn('step-119', lines[-1])
-        # The summary is the view a truncated log keeps, so its budget is
-        # spent on the last failures first.
+        # The summary is the view a truncated log keeps, so its remaining
+        # text budget is spent on the latest failures first.
         self.assertIn('x' * 100, lines[-1])
         self.assertNotIn('child output', lines[0])
-        self.assertLessEqual(sum(len(line.encode('utf-8')) + 1 for line in lines),
-                             CHECK.SUMMARY_DETAIL_BUDGET_BYTES + 120 * 80)
+        combined = CHECK.FAILURE_SUMMARY_HEADING + '\n' + '\n'.join(lines) + '\n'
+        self.assertLessEqual(len(combined.encode('utf-8')),
+                             CHECK.SUMMARY_OUTPUT_BUDGET_BYTES)
 
-    def test_the_gate_output_budgets_stay_inside_the_harness_cap(self):
+    def test_progress_and_final_views_share_a_budget_below_the_harness_cap(self):
         from mizu.config import Limits
-        budgets = (CHECK.RELAY_BUDGET_BYTES + CHECK.RELAY_TAIL_BYTES
-                   + CHECK.RECEIPT_DETAIL_BUDGET_BYTES
-                   + CHECK.SUMMARY_DETAIL_BUDGET_BYTES)
-        self.assertLess(budgets, Limits().output_bytes,
-                        'the gate output budgets must fit the documented cap')
+        self.assertEqual(CHECK.GATE_STDOUT_BUDGET_BYTES,
+                         CHECK.PROGRESS_OUTPUT_BUDGET_BYTES
+                         + CHECK.RECEIPT_OUTPUT_BUDGET_BYTES + 1
+                         + CHECK.SUMMARY_OUTPUT_BUDGET_BYTES
+                         + CHECK.FINAL_NOTICE_BUDGET_BYTES)
+        self.assertLess(CHECK.GATE_STDOUT_BUDGET_BYTES, Limits().output_bytes)
+        stream = io.StringIO()
+        progress = CHECK.BoundedTextOutput(stream)
+        for index in range(10000):
+            progress.write(f'== synthetic-check-{index} ==\n')
+            progress.write(f'[+{index}.0s] child progress from check {index}\n')
+        progress.flush()
+        output = stream.getvalue()
+        if progress.truncated:
+            output += 'note: progress output was shortened at the shared byte budget.\n'
+        receipt = {'suite': 'offline', 'ok': False,
+                   'checks': self.failing_checks(3000, detail='failure🧪' * 500)}
+        receipt_view, shortened = CHECK.receipt_text(receipt)
+        output += receipt_view + '\n'
+        if shortened:
+            output += 'note: printed receipt was shortened. Pass --report for the full receipt.\n'
+        lines = CHECK.failure_summary_lines(receipt['checks'])
+        output += CHECK.FAILURE_SUMMARY_HEADING + '\n' + '\n'.join(lines) + '\n'
+        self.assertTrue(progress.truncated)
+        self.assertTrue(shortened)
+        self.assertLessEqual(len(output.encode('utf-8')),
+                             CHECK.GATE_STDOUT_BUDGET_BYTES)
+        self.assertLess(len(output.encode('utf-8')), Limits().output_bytes)
+
+    def test_main_writes_full_report_before_bounding_the_printed_receipt(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            report = Path(temporary) / 'full.json'
+            stdout = io.StringIO()
+            sources = [ROOT / 'adapters' / 'pi' / f'synthetic-{index}.mjs'
+                       for index in range(240)]
+
+            class FakeProcess:
+                def __init__(self, command, **kwargs):
+                    self.stdout = io.StringIO('synthetic failure\n')
+                    self.command = command
+
+                def wait(self, timeout):
+                    return 1
+
+                def kill(self):
+                    pass
+
+            bounded_output = CHECK.BoundedTextOutput
+            with mock.patch.object(CHECK.sys, 'argv', [
+                        'check.py', '--report', str(report), '--no-provision',
+                        '--allow-not-run', ','.join(CHECK.SDK_GATE_NAMES)]), \
+                    mock.patch.object(CHECK.sys, 'stdout', stdout), \
+                    mock.patch.object(CHECK, 'BoundedTextOutput',
+                                      side_effect=lambda stream: bounded_output(stream, budget=1024)), \
+                    mock.patch.object(CHECK, 'spawn', FakeProcess), \
+                    mock.patch.object(CHECK, 'popen_kwargs', return_value={}), \
+                    mock.patch.object(CHECK, 'terminate_process', return_value=None), \
+                    mock.patch.object(CHECK, 'javascript_sources', return_value=sources), \
+                    mock.patch.object(CHECK, 'shell_sources', return_value=[]), \
+                    mock.patch.object(CHECK, 'node_version', return_value='v0.test'), \
+                    mock.patch.object(CHECK, 'pi_sdk_deps_status', return_value=('absent', 'not installed')), \
+                    mock.patch.object(CHECK.shutil, 'which',
+                                      side_effect=lambda name: '/usr/bin/node' if name == 'node' else None), \
+                    mock.patch.object(CHECK, 'bash_available', return_value=False):
+                status = CHECK.main()
+            full = json.loads(report.read_text(encoding='utf-8'))
+            printed = stdout.getvalue()
+            self.assertEqual(status, 1)
+            self.assertEqual(len(full['checks']), 240 + 1 + 1 + 3 + 1 + 2)
+            self.assertTrue(any(entry.get('name') ==
+                                'javascript-syntax:adapters/pi/synthetic-239.mjs'
+                                for entry in full['checks']))
+            self.assertLess(len(printed.encode('utf-8')),
+                            CHECK.GATE_STDOUT_BUDGET_BYTES)
+            self.assertIn('progress output was shortened', printed)
+            self.assertIn('checks_omitted', printed)
+            self.assertIn('omits metadata, rows or details', printed)
 
 
 class UnittestTimingEvidenceTests(unittest.TestCase):

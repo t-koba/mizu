@@ -38,30 +38,23 @@ source digest is captured before validation and compared again after all checks;
 `source-manifest-stable` must pass, otherwise the report fails. JavaScript
 syntax check names include source-relative paths to avoid basename collisions.
 
-The gate's own stdout is bounded. Every step's output is relayed live with
-its arrival time, but the relay draws on one shared budget (49 152 bytes)
-and keeps a bounded tail (16 384 bytes) of the lines that budget no longer
-covers, so the gate's output cannot grow with the number of tests the suite
-runs. A child's summary and failure text sit at the end of its output, so
-the tail keeps them visible, and the receipt keeps the structured outcome
-either way. A step whose own output the capped relay hid (the steps that
-follow the one that spends the budget) carries the tail of its output in the
-receipt's `details`, so a failing step still names why it failed. The
-harness captures a command's stdout and stderr under one cap
-(`limits.output_bytes`, 262 144 bytes by default), so a gate whose output
-grew with the suite was killed by its own harness before it could report its
-own outcome.
+The gate's complete stdout is bounded by bytes, not by the number of checks.
+Progress output (step headings, relay text, tail output and notices) shares a
+96 KiB budget. The printed receipt uses at most 16 KiB, and the tail-visible
+failure summary (including its heading, names, exit codes, details and omission
+notice) uses at most 8 KiB. These budgets plus fixed notices stay below the
+harness's default `limits.output_bytes` cap of 262 144 bytes.
 
-The receipt the gate prints is bounded the same way. Its step entries carry
-the tail of each failing step's own output, so the printed receipt would
-grow with the number of failing steps; the steps' free text draws on one
-shared budget (16 384 bytes), and the tail-visible failure summary that
-follows it draws on its own (8 192 bytes), spent on the last failures first
-because the summary is the view a truncated log keeps. The step names, statuses, exit
-codes and counts are never shortened, so the gate always names every step
-that failed, and the receipt written by `--report` keeps the full text of
-every step. When the printed receipt is shortened, the gate says so on its
-own output.
+A receipt that fits is printed in full. When it does not, stdout uses a compact
+JSON view that prioritizes failures and explicitly counts total and omitted
+rows and failure rows. The compact view can omit auxiliary metadata and all
+free-form details; `details_omitted` names that loss. The tail-visible summary
+retains snippets for the latest failures first, trims names/details by UTF-8
+byte size, and states how many earlier failures did not fit. Use `--report` to
+retain the complete receipt, including all checks, metadata and unabridged
+details; that file is written before stdout is bounded. Without `--report`,
+the note identifies that option as the route to a full receipt.
+
 Core-only installation may reuse that receipt instead of running the nested
 staged gate a second time, only via an explicit handoff:
 
