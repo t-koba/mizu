@@ -623,13 +623,19 @@ bound. Symlinks are refused; malformed or unreadable files are counted as
 `cache_affinity.skipped_records` without failing the command. `total` counts
 eligible attempt rows in this scanned window; at most 200 are returned, with
 `truncated` marking omitted rows. Each row keeps only
-run id, role, execution-attempt index, start/end timestamps, engine, the local
+run id, role, execution-attempt index, start/end timestamps, engine, the dispatch
+`profile` (a nonempty string of at most 256 characters, otherwise null), a single
+`provider`/`model` pair, `model_attribution_unknown`, the local
 session key/generation and prompt mode when the key is a 64-character lowercase
 hex digest and the generation is a nonnegative exact integer (otherwise null),
 usage status, input/cache-read token counts, and `cache_read_share_of_input`
 (cache-read divided by input only when both are nonnegative exact integers, input
-is positive and cache-read does not exceed input; otherwise null). Native provider
-session identifiers and arbitrary usage payloads are never copied. Rows are ordered
+is positive and cache-read does not exceed input; otherwise null). Only a single
+known model is attributed: `provider`/`model` are copied only when the attempt
+reports exactly one valid pair (each a nonempty string of at most 256 characters)
+with `models_unknown` false and `models_truncated` false; otherwise both are null
+and `model_attribution_unknown` is true. Native provider
+session identifiers, arbitrary model lists, and arbitrary usage payloads are never copied. Rows are ordered
 most-recent-run first (newest attempt first within a run), capped at 200 rows with
 `total`/`truncated` marking the loss. This is observed cache-read share and local
 session grouping only, not proof of provider cache residency or TTL, and it does

@@ -208,8 +208,88 @@ class CacheAffinityTests(Fixture):
             self.assertNotIn("rotation", row)
         self.assertEqual(set(rows[0]),
                          {"run", "role", "execution_attempt", "started_at", "ended_at", "engine",
+                          "profile", "provider", "model", "model_attribution_unknown",
                           "session_key", "session_generation", "prompt_mode", "usage_status",
                           "input_tokens", "cache_read_tokens", "cache_read_share_of_input"})
+        for row in rows.values():
+            self.assertIsNone(row["profile"])
+            self.assertIsNone(row["provider"])
+            self.assertIsNone(row["model"])
+            self.assertTrue(row["model_attribution_unknown"])
+
+    def test_profile_and_single_model_attribution(self):
+        run_dir = self.write_usage_run("q" * 32)
+        known = self.attempt(0, extra={"profile": "primary",
+                                       "models": [{"provider": "acme", "model": "m1"}],
+                                       "models_unknown": False, "models_truncated": False})
+        missing = self.attempt(1)
+        bad_profile = self.attempt(2, extra={"profile": "",
+                                             "models": [{"provider": "acme", "model": "m1"}],
+                                             "models_unknown": False, "models_truncated": False})
+        long_profile = self.attempt(3, extra={"profile": "p" * 257,
+                                              "models": [{"provider": "acme", "model": "m1"}],
+                                              "models_unknown": False, "models_truncated": False})
+        malformed_pair = self.attempt(4, extra={"profile": "primary",
+                                                "models": [{"provider": "", "model": "m1"}],
+                                                "models_unknown": False, "models_truncated": False})
+        long_model = self.attempt(5, extra={"profile": "primary",
+                                            "models": [{"provider": "acme", "model": "m" * 257}],
+                                            "models_unknown": False, "models_truncated": False})
+        multiple = self.attempt(6, extra={"profile": "primary",
+                                          "models": [{"provider": "acme", "model": "m1"},
+                                                     {"provider": "acme", "model": "m2"}],
+                                          "models_unknown": False, "models_truncated": False})
+        unknown = self.attempt(7, extra={"profile": "primary",
+                                         "models": [{"provider": "acme", "model": "m1"}],
+                                         "models_unknown": True, "models_truncated": False})
+        truncated = self.attempt(8, extra={"profile": "primary",
+                                           "models": [{"provider": "acme", "model": "m1"}],
+                                           "models_unknown": False, "models_truncated": True})
+        missing_flags = self.attempt(9, extra={"profile": "primary",
+                                               "models": [{"provider": "acme", "model": "m1"}]})
+        nonbool_flags = self.attempt(10, extra={"profile": "primary",
+                                                "models": [{"provider": "acme", "model": "m1"}],
+                                                "models_unknown": 0, "models_truncated": 0})
+        leaky = self.attempt(11, extra={"profile": "primary",
+                                        "models": [{"provider": "acme", "model": "m1",
+                                                    "session_id": "native-1", "payload": {"x": 1}}],
+                                        "models_unknown": False, "models_truncated": False,
+                                        "provider_session": "s-1", "native_session_id": "n-1",
+                                        "payload": {"secret": 1}})
+        write_json(run_dir / "dispatch-attempts.json",
+                   {"schema": 1, "dropped_attempts": 0,
+                    "attempts": [known, missing, bad_profile, long_profile, malformed_pair,
+                                 long_model, multiple, unknown, truncated, missing_flags,
+                                 nonbool_flags, leaky]})
+        facts = summarize(self.project)
+        rows = {r["execution_attempt"]: r for r in facts["cache_affinity"]["attempts"]}
+        self.assertEqual((rows[0]["profile"], rows[0]["provider"], rows[0]["model"]),
+                         ("primary", "acme", "m1"))
+        self.assertFalse(rows[0]["model_attribution_unknown"])
+        for index in (1, 4, 5, 6, 7, 8, 9, 10):
+            with self.subTest(index=index):
+                self.assertIsNone(rows[index]["provider"])
+                self.assertIsNone(rows[index]["model"])
+                self.assertTrue(rows[index]["model_attribution_unknown"])
+        self.assertIsNone(rows[1]["profile"])
+        self.assertIsNone(rows[2]["profile"])
+        self.assertIsNone(rows[3]["profile"])
+        for index in (2, 3):
+            with self.subTest(index=index):
+                self.assertEqual((rows[index]["provider"], rows[index]["model"]),
+                                 ("acme", "m1"))
+                self.assertFalse(rows[index]["model_attribution_unknown"])
+        self.assertEqual(rows[11]["profile"], "primary")
+        self.assertEqual((rows[11]["provider"], rows[11]["model"]), ("acme", "m1"))
+        self.assertFalse(rows[11]["model_attribution_unknown"])
+        for row in rows.values():
+            self.assertNotIn("models", row)
+            self.assertNotIn("models_unknown", row)
+            self.assertNotIn("models_truncated", row)
+            self.assertNotIn("provider_session", row)
+            self.assertNotIn("native_session_id", row)
+            self.assertNotIn("session_id", row)
+            self.assertNotIn("payload", row)
 
     def test_bounded_truncated_most_recent_first(self):
         import os

@@ -111,7 +111,7 @@ def _dispatch_max_bytes() -> int:
 
 
 def _affinity_row(run_id: str, attempt: dict):
-    """Whitelisted shadow row; never copies native session IDs or payloads."""
+    """Whitelisted shadow row; never copies native session IDs, arbitrary model lists, or payloads."""
     role = attempt.get("role")
     role = role if isinstance(role, str) and 0 < len(role) <= 256 else "unknown"
     engine = attempt.get("engine")
@@ -128,6 +128,18 @@ def _affinity_row(run_id: str, attempt: dict):
                 and type(generation) is int and generation >= 0):
             session_key, session_generation = key, generation
             prompt_mode = mode if isinstance(mode, str) and 0 < len(mode) <= 256 else None
+    profile_raw = attempt.get("profile")
+    profile = profile_raw if isinstance(profile_raw, str) and 0 < len(profile_raw) <= 256 else None
+    provider = model = None
+    model_attribution_unknown = True
+    models = attempt.get("models")
+    if attempt.get("models_unknown") is False and attempt.get("models_truncated") is False:
+        if isinstance(models, list) and len(models) == 1 and isinstance(models[0], dict):
+            raw_provider, raw_model = models[0].get("provider"), models[0].get("model")
+            if (isinstance(raw_provider, str) and 0 < len(raw_provider) <= 256
+                    and isinstance(raw_model, str) and 0 < len(raw_model) <= 256):
+                provider, model = raw_provider, raw_model
+                model_attribution_unknown = False
     usage = attempt.get("usage")
     if isinstance(usage, dict):
         status = usage.get("status")
@@ -140,6 +152,8 @@ def _affinity_row(run_id: str, attempt: dict):
     return {"run": run_id, "role": role,
             "execution_attempt": attempt.get("execution_attempt"),
             "started_at": started, "ended_at": ended, "engine": engine,
+            "profile": profile, "provider": provider, "model": model,
+            "model_attribution_unknown": model_attribution_unknown,
             "session_key": session_key, "session_generation": session_generation,
             "prompt_mode": prompt_mode, "usage_status": usage_status,
             "input_tokens": input_tokens, "cache_read_tokens": cache_read,
