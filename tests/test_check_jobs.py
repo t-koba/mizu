@@ -5,7 +5,7 @@ from unittest.mock import patch
 from support import Fixture
 from mizu import check_jobs
 from mizu.admission import check_slot_exclusion
-from mizu.errors import Denied
+from mizu.errors import Busy, Denied
 from mizu.fs import held, lock, read_json, write_json
 from mizu.process import Result
 from mizu.sandbox import cleanup
@@ -502,12 +502,126 @@ class JobTests(Fixture):
             check_jobs.logs(ctx, job['id'], 'a'*32, content_id=first['content_id'])
 
 
-class SharingTests(JobTests):
+class PurposeTests(JobTests):
+    """A purpose names the caller's own demand, so a later request replaces it."""
+
+    def test_same_purpose_replaces_the_roles_earlier_job(self):
+        ctx = self.context()
+        first = check_jobs.submit(ctx, 'echo first', kind='experiment', purpose='acceptance')
+        second = check_jobs.submit(ctx, 'echo second', kind='experiment', purpose='acceptance')
+        self.assertNotEqual(first['id'], second['id'])
+        record = check_jobs.read(self.project, first['id'])
+        self.assertEqual(record['status'], 'cancelled')
+        self.assertEqual(record['replaced_by'], second['id'])
+        self.assertEqual(check_jobs.read(self.project, second['id'])['purpose'], 'acceptance')
+
+    def test_replaced_job_frees_the_pending_capacity_it_held(self):
+        self.config = dataclasses.replace(self.config,
+                                          limits=dataclasses.replace(self.config.limits, check_pending=1))
+        self.project.config = self.config
+        ctx = self.context()
+        check_jobs.submit(ctx, 'echo first', kind='experiment', purpose='acceptance')
+        with self.assertRaises(Busy):
+            check_jobs.submit(ctx, 'echo other', kind='experiment')
+        second = check_jobs.submit(ctx, 'echo second', kind='experiment', purpose='acceptance')
+        self.assertEqual(check_jobs.read(self.project, second['id'])['status'], 'queued')
+
+    def test_different_purpose_keeps_the_earlier_job(self):
+        ctx = self.context()
+        first = check_jobs.submit(ctx, 'echo first', kind='experiment', purpose='acceptance')
+        check_jobs.submit(ctx, 'echo second', kind='experiment', purpose='experiment')
+        record = check_jobs.read(self.project, first['id'])
+        self.assertEqual(record['status'], 'queued')
+        self.assertNotIn('replaced_by', record)
+
+    def test_another_roles_job_with_the_same_purpose_is_untouched(self):
+        worker = self.context()
+        first = check_jobs.submit(worker, 'echo first', kind='experiment', purpose='acceptance')
+        reviewer = self.context('reviewer')
+        check_jobs.submit(reviewer, 'echo second', kind='exec', purpose='acceptance')
+        record = check_jobs.read(self.project, first['id'])
+        self.assertEqual(record['status'], 'queued')
+        self.assertNotIn('replaced_by', record)
+
+    def test_purpose_cannot_retire_a_job_owned_by_another_role(self):
+        worker = self.context()
+        first = check_jobs.submit(worker, 'echo first', kind='experiment', purpose='acceptance')
+        reviewer = self.context('reviewer')
+        review = check_jobs.submit(reviewer, 'echo second', kind='exec', purpose='acceptance')
+        self.assertEqual(check_jobs.read(self.project, first['id'])['status'], 'queued')
+        check_jobs.submit(worker, 'echo third', kind='experiment', purpose='acceptance')
+        # The worker's own demand is replaced; the reviewer's is untouched.
+        self.assertEqual(check_jobs.read(self.project, review['id'])['status'], 'queued')
+        self.assertNotIn('replaced_by', check_jobs.read(self.project, review['id']))
+
+    def test_replaced_record_keeps_its_evidence_and_names_its_replacement(self):
+        ctx = self.context()
+        first = check_jobs.submit(ctx, 'echo first', kind='experiment', purpose='acceptance')
+        directory = check_jobs.root(self.project) / first['id']
+        self.assertTrue((directory / 'input').exists())
+        second = check_jobs.submit(ctx, 'echo second', kind='experiment', purpose='acceptance')
+        record = read_json(directory / 'job.json')
+        self.assertEqual(record['replaced_by'], second['id'])
+        self.assertEqual(record['code_digest'], first['code_digest'])
+        self.assertTrue((directory / 'input').exists())
+        # The replaced job never reaches the runner; its record stays readable.
+        self.run_job()
+        self.assertEqual(read_json(directory / 'job.json')['status'], 'cancelled')
+        self.assertFalse((directory / 'result.json').exists())
+
+    def test_invalid_purpose_is_refused(self):
+        ctx = self.context()
+        for value in ('', '   ', 'a/b', 'a\\b', 'x' * 65, 'two\nlines', 7):
+            with self.assertRaises(Denied):
+                check_jobs.submit(ctx, 'echo check', kind='experiment', purpose=value)
+        self.assertEqual(check_jobs.list_jobs(self.project, 'worker'), [])
+
+    def test_job_without_a_purpose_is_never_replaced(self):
+        ctx = self.context()
+        first = check_jobs.submit(ctx, 'echo first', kind='experiment')
+        check_jobs.submit(ctx, 'echo second', kind='experiment', purpose='acceptance')
+        record = check_jobs.read(self.project, first['id'])
+        self.assertEqual(record['status'], 'queued')
+        self.assertNotIn('replaced_by', record)
+
+    def test_tool_carries_the_purpose_and_refuses_an_invalid_one(self):
+        ctx = self.context()
+        job = ctx._op_check_job({'action': 'start', 'script': 'echo tool', 'purpose': 'acceptance'})
+        self.assertEqual(job['purpose'], 'acceptance')
+        with self.assertRaises(Denied):
+            ctx._op_check_job({'action': 'start', 'script': 'echo tool', 'purpose': 'bad/purpose'})
+
+
+class SharingTests(PurposeTests):
     # Sharing is opt-in; retain the original no-sharing suite above.
     def setUp(self):
         super().setUp()
         self.config = dataclasses.replace(self.config, sandbox=dataclasses.replace(self.config.sandbox, check_reuse=True))
         self.project.config = self.config
+
+    def test_purpose_replaces_the_roles_earlier_job_when_the_request_shares(self):
+        ctx = self.context()
+        first = check_jobs.submit(ctx, 'echo first', kind='experiment', purpose='acceptance')
+        later = self.context()
+        shared = check_jobs.submit(later, 'echo first', kind='experiment', purpose='acceptance')
+        self.assertEqual(shared['shared_job'], first['id'])
+        # The shared job is the surviving work, so it is never the replaced one.
+        self.assertEqual(check_jobs.read(self.project, first['id'])['status'], 'queued')
+        self.assertEqual(check_jobs.read(self.project, shared['id'])['purpose'], 'acceptance')
+
+    def test_replaced_job_keeps_running_for_another_consumer(self):
+        ctx = self.context()
+        first = check_jobs.submit(ctx, 'echo first', kind='experiment', purpose='acceptance')
+        reader = self.context('reviewer')
+        subscription = check_jobs.join(reader, first['id'])
+        second = check_jobs.submit(self.context(), 'echo second', kind='experiment', purpose='acceptance')
+        record = check_jobs.read(self.project, first['id'])
+        self.assertEqual(record['replaced_by'], second['id'])
+        # Another consumer still wants the execution, so the runner keeps it.
+        self.assertFalse((check_jobs.root(self.project) / first['id'] / 'cancel.json').exists())
+        for _ in range(3):
+            self.run_job()
+        self.assertEqual(check_jobs.result(reader, subscription['id'])['status'], 'completed')
 
     def test_producer_cannot_release_or_wait_on_another_subscription(self):
         producer, original = self.submit()

@@ -1215,7 +1215,8 @@ class Context:
     def _op_check_job(self, args: dict) -> dict:
         action = args['action']
         if action == 'start':
-            return check_jobs.submit(self, args.get('script'), fresh=args.get('fresh', False))
+            return check_jobs.submit(self, args.get('script'), fresh=args.get('fresh', False),
+                                     purpose=args.get('purpose'))
         if action == 'list':
             return {'jobs': check_jobs.list_jobs(self.project, self.role.name), 'available': check_jobs.available(self)}
         if not args.get('id'):

@@ -64,6 +64,16 @@ Artifacts never substitute for execution or passing evidence. Cross-role result
 reuse requires the explicit sharing configuration and input checks described
 below; shell text or a mutable mount path alone is insufficient.
 
+A request may name its own demand with an optional `purpose` (1-64
+printable characters, no path separators, no whitespace-only value). A later
+request with the same purpose from the same role replaces that role's earlier
+unfinished job for that purpose: the superseded job leaves the pending queue
+and the runner's time, its record names the job that replaced it, and its
+frozen input and recorded output are retained. A different purpose, or no
+purpose, keeps the earlier job. A purpose is the caller's own statement of
+intent, so it never retires another role's job or subscription, and it is
+never inferred from age, from a changed source digest or from "newest wins".
+
 Job ownership is a host file lock. A crashed runner's unfinished record is
 interrupted and its job-specific containers are cleaned before releasing the
 compute slot. It is never silently turned into success or replayed as though its

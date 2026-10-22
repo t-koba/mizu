@@ -571,3 +571,43 @@ queue holds under `check_waits` with its job, its status and its bound. The
 last two are views of that one record, not records of their own. A wait
 record that carries no bound holds nothing, so unreadable state never stops a
 role, and a hold ends as soon as its job reaches a terminal status.
+
+## ADR-045 — A check request names its own purpose, and a later request replaces it
+The check queue held demand records with immutable inputs and per-role
+ownership, but no relation between a check's purpose, its current target and a
+successor request. Replacing an acceptance target therefore relied on each
+owning role returning to discover and cancel its own old requests: an
+ephemeral consumer leaves demand behind, and one role cannot retire another
+role's subscription. The queue grew with the number of requests rather than
+with the number of demands.
+
+A check request may now carry an optional `purpose`: a bounded opaque label
+(1-64 printable characters, no path separators, no whitespace-only value) that
+names what the demand is for. When a request carrying a purpose is accepted,
+whether it queues a new physical job or subscribes to an existing compatible
+one, the mechanism retires the calling role's own earlier unfinished physical
+jobs that carry the same purpose. The retirement reuses the explicit cancel
+semantics: the superseded record is marked so it no longer demands execution,
+the physical runner is asked to cancel it only when no other consumer is
+interested in it, and the record keeps its directory, its frozen input and its
+command output. The superseded record names the job that replaced it, and the
+surviving record carries the purpose.
+
+Nothing is inferred. Obsolescence is never read from age, from source-digest
+inequality or from "newest snapshot wins"; there is no global queue-clearing
+daemon and no blanket latest-only rule. A purpose states an intention the
+caller already has.
+
+Everything else is preserved. A different purpose, or no purpose at all, keeps
+the earlier job. A shared execution keeps running for the consumers that
+remain, and only the last of them stops it. Another role's job and another
+role's subscription are never retired, and a purpose never claims another
+role's evidence: a role that does not own a job cannot retire it. The
+acceptance binding to the current code digest and environment, the role
+capability checks, the verify grant, the free-disk reserve, the retention
+bound and the pending cap are unchanged; a replaced job simply leaves the
+pending queue and the runner's time, which is what the replacement needs.
+
+The consequence is that a role can replace its own demand without waiting to
+rediscover it, and the capacity the obsolete demand held is available to the
+replacement that supersedes it.

@@ -46,6 +46,28 @@ def job_role(job_id):
     return 'check-' + job_id[:24]
 
 
+#: A purpose is a short opaque label: it names a demand, never a path.
+PURPOSE_MAX = 64
+
+
+def purpose_label(purpose):
+    """Validate the caller's own label for what a demand is for.
+
+    The label says only which of the caller's own demands a later request
+    replaces. It carries no authority: it never selects another role's
+    evidence, never shortens a bound and never makes a result acceptable.
+    """
+    if purpose is None:
+        return None
+    if not isinstance(purpose, str) or not 1 <= len(purpose) <= PURPOSE_MAX:
+        raise Denied('Invalid check job purpose')
+    if not purpose.strip() or not all(character.isprintable() for character in purpose):
+        raise Denied('Invalid check job purpose')
+    if '/' in purpose or '\\' in purpose:
+        raise Denied('Invalid check job purpose')
+    return purpose
+
+
 def raw_read(project, job_id):
     if not isinstance(job_id, str) or not DIGEST.fullmatch(job_id):
         raise Denied('Invalid check job ID')
@@ -73,7 +95,7 @@ def save_execution(project, job):
     # Execution progress and subscription state have different writers.
     with lock(project.root / 'locks/check-jobs.lock'):
         latest = raw_read(project, job['id'])
-        for key in ('detached', 'acknowledged'):
+        for key in ('detached', 'acknowledged', 'replaced_by'):
             if key in latest:
                 job[key] = latest[key]
         write_json(root(project) / job['id'] / 'job.json', job)
@@ -191,7 +213,7 @@ def join(context, job_id):
         return _subscribe(context, original)
 
 
-def _subscribe(context, original):
+def _subscribe(context, original, *, purpose=None):
     receiver = getattr(context, 'spend_role', None) if getattr(context, 'delegated_child', False) else None
     owner = receiver.name if receiver is not None else context.role.name
     if receiver is not None and 'check_job' not in receiver.capabilities:
@@ -206,6 +228,12 @@ def _subscribe(context, original):
     job = {**original, 'id': job_id, 'shared_job': original['id'], 'role': owner,
            'producer_role': context.role.name, 'run': context.run_dir.name,
            'created_at': now(), 'acknowledged': False}
+    # The subscription states the subscriber's own demand. The shared job
+    # keeps its own label, because a purpose never crosses a role boundary.
+    if purpose is None:
+        job.pop('purpose', None)
+    else:
+        job['purpose'] = purpose
     write_json(path, job)
     os.utime(root(context.project), None)
     return summary(read(context.project, job_id))
@@ -229,7 +257,7 @@ def _make_room(project, *, protect=frozenset()):
     raise Busy('Retained check evidence is full; inspect and acknowledge results')
 
 
-def submit(context, script=None, *, kind="experiment", fresh=False):
+def submit(context, script=None, *, kind="experiment", fresh=False, purpose=None):
     project = context.project
     receiver = getattr(context, 'spend_role', None) if getattr(context, 'delegated_child', False) else None
     owner = receiver.name if receiver is not None else context.role.name
@@ -248,6 +276,7 @@ def submit(context, script=None, *, kind="experiment", fresh=False):
         raise Denied('Custom check jobs require the corresponding sandbox capability')
     if script is None and 'verify' not in context.role.capabilities:
         raise Denied('Acceptance check jobs require verify capability')
+    purpose = purpose_label(purpose)
     if shutil.disk_usage(project.root).free < context.config.limits.free_disk_mb * 1048576:
         raise Busy('Free disk space is below the check input reserve')
     capture = project.snapshots.capture_files(context.workspace)
@@ -265,14 +294,25 @@ def submit(context, script=None, *, kind="experiment", fresh=False):
     directory = root(project) / job_id
     with lock(project.root / 'locks/check-jobs.lock'):
         if (directory / 'job.json').exists():
+            # The same request in the same unit is one demand: state its
+            # purpose and retire the role's other demand for that purpose.
+            _state_purpose(project, job_id, purpose)
+            _retire_superseded(project, owner, purpose, keep={job_id}, replaced_by=job_id)
             return summary(read(project, job_id))
         if shared_key is not None:
             for path in sorted(root(project).glob('*/job.json')):
                 other = read_json(path, {})
                 if other.get('shared_key') == shared_key and reusable(other) and not (path.parent / 'cancel.json').exists():
-                    return _subscribe(context, other)
-        unfinished = sum(1 for p in root(project).glob('*/job.json')
-                         if not read_json(p, {}).get('shared_job') and read_json(p, {}).get('status') in ('queued', 'running'))
+                    job = _subscribe(context, other, purpose=purpose)
+                    # The shared job is the surviving work, so it is never
+                    # the one this request replaces.
+                    _retire_superseded(project, owner, purpose,
+                                       keep={other['id'], job['id']}, replaced_by=job['id'])
+                    return job
+        superseded = _superseded(project, owner, purpose, keep={job_id})
+        # The replacement frees the capacity the superseded demand held, so
+        # the cap is counted against the queue that will remain.
+        unfinished = len(_pending_jobs(project)) - len([j for j in superseded if _withdrawable(project, j)])
         _make_room(project)
         if unfinished >= context.config.limits.check_pending:
             raise Busy('Check job queue is full')
@@ -285,12 +325,32 @@ def submit(context, script=None, *, kind="experiment", fresh=False):
                    'commands': commands, 'status': 'queued', 'created_at': now(),
                    'acknowledged': False, 'environment': env, 'shared_key': shared_key,
                    'inputs_bound_required': context.config.sandbox.check_reuse}
+            if purpose is not None:
+                job['purpose'] = purpose
             write_json(directory / 'job.json', job)
             os.utime(root(project), None)
         except BaseException:
             shutil.rmtree(directory, ignore_errors=True)
             raise
+        for record in superseded:
+            _withdraw_locked(project, record['id'], role=owner, replaced_by=job_id)
     return summary(job)
+
+
+def _withdrawable(project, job):
+    """Whether the record's demand ends when its owner replaces it.
+
+    A shared execution still runs for its remaining consumers, so it keeps
+    its place in the queue until the last consumer leaves.
+    """
+    records = [read_json(p, {}) for p in root(project).glob('*/job.json')]
+    return not _interest(records, job['id'], exclude_id=job['id'])
+
+
+def _retire_superseded(project, role, purpose, *, keep=frozenset(), replaced_by=None):
+    """Withdraw the calling role's own earlier demand for the same purpose."""
+    for record in _superseded(project, role, purpose, keep=keep):
+        _withdraw_locked(project, record['id'], role=role, replaced_by=replaced_by)
 
 
 def summary(job):
@@ -302,7 +362,8 @@ def summary(job):
     return {**continuation, **({'accepted_for_current_source': False} if job.get('kind') == 'verify' and job.get('status') in ('queued', 'running') else {}), **{'command_count': len(job.get('commands', [])),
                'command_preview': [text_preview(c, 128)[0] for c in job.get('commands', [])[:4]]},
             **{k: job[k] for k in ('id', 'role', 'run', 'kind', 'code_digest', 'status',
-                               'created_at', 'finished_at', 'passed', 'error', 'shared_job') if k in job}}
+                               'created_at', 'finished_at', 'passed', 'error', 'shared_job',
+                               'purpose', 'replaced_by') if k in job}}
 
 
 def pending(project, role):
@@ -383,24 +444,109 @@ def logs(context, job_id, evidence_id=None, *, offset=0, limit=8192, content_id=
             'next_offset': end if end < len(text) else None}
 
 
+def _interest(records, original_id, *, exclude_id=None):
+    """Whether any consumer other than ``exclude_id`` still wants the job."""
+    return any(not record.get('detached') and record.get('id') != exclude_id
+               and (record.get('id') == original_id or record.get('shared_job') == original_id)
+               for record in records)
+
+
+def _pending_jobs(project):
+    """Physical jobs that still demand execution, counted against the cap.
+
+    A job whose owner replaced it has no demand left, so it leaves the
+    queue. A shared execution still runs for its remaining consumers, so it
+    keeps its place until the last consumer leaves.
+    """
+    records = [read_json(p, {}) for p in root(project).glob('*/job.json')]
+    pending = []
+    for record in records:
+        if not isinstance(record, dict) or record.get('shared_job'):
+            continue
+        if record.get('status') not in ('queued', 'running'):
+            continue
+        if record.get('replaced_by') and not _interest(records, record['id'], exclude_id=record['id']):
+            continue
+        pending.append(record)
+    return pending
+
+
+def _superseded(project, role, purpose, *, keep=frozenset()):
+    """This role's own unfinished physical jobs that a same-purpose request replaces.
+
+    Only the calling role's own physical jobs are eligible: a subscription
+    belongs to its subscriber and another role's job is never this role's
+    demand to retire.
+    """
+    if purpose is None:
+        return []
+    found = []
+    for path in sorted(root(project).glob('*/job.json')):
+        record = read_json(path, {})
+        if not isinstance(record, dict) or record.get('shared_job'):
+            continue
+        if record.get('role') != role or record.get('purpose') != purpose:
+            continue
+        if record.get('id') in keep or record.get('status') not in ('queued', 'running'):
+            continue
+        found.append(record)
+    return found
+
+
+def _state_purpose(project, job_id, purpose):
+    """State the request's purpose on the record that satisfies it."""
+    if purpose is None:
+        return
+    raw = raw_read(project, job_id)
+    if raw.get('purpose') == purpose:
+        return
+    raw['purpose'] = purpose
+    write_json(root(project) / job_id / 'job.json', raw)
+
+
+def _withdraw_locked(project, job_id, *, role, replaced_by=None):
+    """Withdraw one owned job's demand to execute, and stop the runner if alone.
+
+    The caller holds the check-jobs lock; the lock is not re-entrant, so the
+    public cancel path and the replacement path both come through here
+    instead of calling each other.
+
+    The record keeps its directory, its frozen input and its command output:
+    only the demand to run is withdrawn. The physical runner is asked to
+    cancel the job only when no other consumer still wants it, so a shared
+    execution survives for the consumers that remain.
+    """
+    job = read(project, job_id)
+    if job.get('role') != role:
+        raise Denied('Check job belongs to another role')
+    if job['status'] not in ('queued', 'running'):
+        return summary(job)
+    original_id = job.get('shared_job', job_id)
+    raw = raw_read(project, job_id)
+    raw['detached'] = True
+    if replaced_by is not None:
+        # The owner replaced this demand on purpose: the record states what
+        # replaced it and raises no completion event of its own.
+        raw['replaced_by'] = replaced_by
+        raw['acknowledged'] = True
+    write_json(root(project) / job_id / 'job.json', raw)
+    records = [read_json(p, {}) for p in root(project).glob('*/job.json')]
+    interested = _interest(records, original_id, exclude_id=job_id)
+    if replaced_by is not None and not interested and raw.get('status') == 'queued':
+        # The replaced job never started: it leaves the queue at once, so the
+        # runner never spends a slot on it.
+        raw['status'] = 'cancelled'
+        write_json(root(project) / job_id / 'job.json', raw)
+    if not interested:
+        write_json(root(project) / original_id / 'cancel.json', {'requested_at': now()})
+    os.utime(root(project), None)
+    return {**summary(read(project, job_id)), 'cancel_requested': True}
+
+
 def cancel(context, job_id):
     project = context.project
     with lock(project.root / 'locks/check-jobs.lock'):
-        job = read(project, job_id)
-        if context.role.name != job['role']:
-            raise Denied('Check job belongs to another role')
-        if job['status'] not in ('queued', 'running'):
-            return summary(job)
-        original_id = job.get('shared_job', job_id)
-        raw = raw_read(project, job_id)
-        raw['detached'] = True
-        write_json(root(project) / job_id / 'job.json', raw)
-        subscribers = [read_json(p, {}) for p in root(project).glob('*/job.json')]
-        interested = any(not j.get('detached') and (j.get('id') == original_id or j.get('shared_job') == original_id) for j in subscribers)
-        if not interested:
-            write_json(root(project) / original_id / 'cancel.json', {'requested_at': now()})
-        os.utime(root(project), None)
-        return {**summary(read(project, job_id)), 'cancel_requested': True}
+        return _withdraw_locked(project, job_id, role=context.role.name)
 
 
 def acknowledge(project, role, ids):
