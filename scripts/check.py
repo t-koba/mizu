@@ -142,11 +142,17 @@ class LaterPhase:
         Each child's own cleanup is reserved inside the phase, so the phase
         never exceeds its budget: a child is bounded by the remaining time
         minus that reserve.
+
+        A child the phase can no longer afford is refused rather than
+        spawned with a zero-second bound: such a child would report a
+        plain timeout of its own, which reads as that check's failure
+        instead of the phase's exhausted budget.
         """
         remaining = self.remaining()
-        if remaining <= CLEANUP_RESERVE_SECONDS:
+        affordable = int(remaining - CLEANUP_RESERVE_SECONDS)
+        if affordable < 1:
             return None
-        return max(0, min(int(cap), int(remaining - CLEANUP_RESERVE_SECONDS)))
+        return min(int(cap), affordable)
 
 
 def phase_exhausted_entry(name: str, budget: int) -> dict:

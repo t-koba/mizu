@@ -143,6 +143,14 @@ class CheckTimeoutTests(unittest.TestCase):
         self.assertEqual(entry['reason'], 'later-phase-budget-exhausted')
         self.assertIn('1000', entry['details'])
 
+    def test_the_later_phase_refuses_a_child_it_cannot_afford(self):
+        # Half a second left in the phase: a child given that would be
+        # spawned with a zero-second bound and report a plain timeout, so
+        # the phase refuses the child and records its own reason.
+        phase = CHECK.LaterPhase(budget=1000)
+        phase.consume(1000 - CHECK.CLEANUP_RESERVE_SECONDS - 0.5)
+        self.assertIsNone(phase.timeout_for(600))
+
     def test_gate_refuses_the_later_phase_it_cannot_afford(self):
         # The gate itself, end to end: with the phase budget spent, every
         # later child is refused and recorded as a failure with the reason,
