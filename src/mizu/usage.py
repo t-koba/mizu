@@ -9,12 +9,18 @@ from __future__ import annotations
 
 import datetime as dt
 import heapq
+import re
 
+from .errors import MizuError
 from .fs import read_json
 
 MAX_RUNS_SCANNED = 5000
 MAX_RECENT_ENTRIES = 200
 MAX_UNKNOWN_KEYS = 20
+MAX_CACHE_AFFINITY_ROWS = 200
+MAX_CACHE_AFFINITY_RUNS = 200
+_SESSION_KEY_RE = re.compile(r"[0-9a-f]{64}\Z")
+_CACHE_STATUSES = ("known", "partial", "unknown")
 _FIELDS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "other_tokens")
 _KEYS = {
     "pi": {"input": "input_tokens", "output": "output_tokens", "cacheRead": "cache_read_tokens", "cacheWrite": "cache_write_tokens"},
@@ -84,6 +90,99 @@ def attempt_usage(observations: list, engine: str | None) -> dict:
                                "missing_or_unrecognized_fields" if known < len(_FIELDS) else None),
             "unrecognized_keys": sorted(unknown)[:MAX_UNKNOWN_KEYS]}
 
+
+def cache_read_share(input_tokens, cache_read_tokens):
+    """Observed cache-read share of input; null unless exactly computable."""
+    if type(input_tokens) is not int or type(cache_read_tokens) is not int:
+        return None
+    if input_tokens <= 0 or cache_read_tokens < 0 or cache_read_tokens > input_tokens:
+        return None
+    return cache_read_tokens / input_tokens
+
+
+def _dispatch_max_bytes() -> int:
+    try:
+        from .dispatch_evidence import MAX_BYTES as cap
+        if type(cap) is int and cap > 0:
+            return cap
+    except Exception:
+        pass
+    return 256 * 1024
+
+
+def _affinity_row(run_id: str, attempt: dict):
+    """Whitelisted shadow row; never copies native session IDs or payloads."""
+    role = attempt.get("role")
+    role = role if isinstance(role, str) and 0 < len(role) <= 256 else "unknown"
+    engine = attempt.get("engine")
+    engine = engine if isinstance(engine, str) and 0 < len(engine) <= 256 else None
+    started = attempt.get("started_at")
+    started = started if isinstance(started, str) and 0 < len(started) <= 64 else None
+    ended = attempt.get("ended_at")
+    ended = ended if isinstance(ended, str) and 0 < len(ended) <= 64 else None
+    session_key = session_generation = prompt_mode = None
+    session = attempt.get("session")
+    if isinstance(session, dict):
+        key, generation, mode = session.get("key"), session.get("generation"), session.get("prompt_mode")
+        if (isinstance(key, str) and _SESSION_KEY_RE.fullmatch(key)
+                and type(generation) is int and generation >= 0):
+            session_key, session_generation = key, generation
+            prompt_mode = mode if isinstance(mode, str) and 0 < len(mode) <= 256 else None
+    usage = attempt.get("usage")
+    if isinstance(usage, dict):
+        status = usage.get("status")
+        usage_status = status if status in _CACHE_STATUSES else "unknown"
+        raw_input, raw_cache = usage.get("input_tokens"), usage.get("cache_read_tokens")
+        input_tokens = raw_input if type(raw_input) is int and raw_input >= 0 else None
+        cache_read = raw_cache if type(raw_cache) is int and raw_cache >= 0 else None
+    else:
+        usage_status, input_tokens, cache_read = "unknown", None, None
+    return {"run": run_id, "role": role,
+            "execution_attempt": attempt.get("execution_attempt"),
+            "started_at": started, "ended_at": ended, "engine": engine,
+            "session_key": session_key, "session_generation": session_generation,
+            "prompt_mode": prompt_mode, "usage_status": usage_status,
+            "input_tokens": input_tokens, "cache_read_tokens": cache_read,
+            "cache_read_share_of_input": cache_read_share(input_tokens, cache_read)}
+
+
+def _collect_cache_affinity(candidates) -> dict:
+    """Recent shadow view over dispatch-attempts.json; read-only, bounded."""
+    cap = _dispatch_max_bytes()
+    rows: list = []
+    skipped = 0
+    run_window = candidates[:min(MAX_RUNS_SCANNED, MAX_CACHE_AFFINITY_RUNS)]
+    for run_dir in run_window:
+        target = run_dir / "dispatch-attempts.json"
+        try:
+            if target.is_symlink():
+                skipped += 1
+                continue
+            if not target.is_file():
+                continue
+            record = read_json(target, max_bytes=cap)
+            if not isinstance(record, dict):
+                skipped += 1
+                continue
+            attempts = record.get("attempts")
+            if not isinstance(attempts, list):
+                skipped += 1
+                continue
+            # File order is oldest-first; newest attempt first preserves
+            # most-recent-first ordering without extra timestamp reads.
+            for attempt in reversed(attempts):
+                if not isinstance(attempt, dict):
+                    continue
+                index = attempt.get("execution_attempt")
+                if type(index) is not int or index < 0:
+                    continue
+                rows.append(_affinity_row(run_dir.name, attempt))
+        except (OSError, ValueError, TypeError, AttributeError, MizuError):
+            skipped += 1
+    total = len(rows)
+    return {"attempts": rows[:MAX_CACHE_AFFINITY_ROWS], "total": total,
+            "truncated": total > MAX_CACHE_AFFINITY_ROWS, "skipped_records": skipped,
+            "runs_scanned": len(run_window), "runs_truncated": len(candidates) > len(run_window)}
 
 def record_time(value) -> float:
     """Aware ISO-8601 evidence time; malformed/naive values sort oldest."""
@@ -237,7 +336,9 @@ def summarize(project) -> dict:
     ordered = sorted(groups.values(), key=lambda g: (g["day"], g["provider"], g["model"]))
     totals = {field: sum(g[field] for g in ordered) for field in ("runs", "requests", *_FIELDS, "unknown_usage_runs", "unknown_request_runs")}
     totals.update(runs=run_count, unknown_usage_runs=unknown_usage_runs, unknown_request_runs=unknown_request_runs)
+    affinity = _collect_cache_affinity(candidates)
     return {"project": project.name, "groups": ordered, "totals": totals,
             "recent_entries": recent, "entries_truncated": entry_count > MAX_RECENT_ENTRIES,
             "scanned_records": scanned, "skipped_records": skipped, "unknown_shapes": unknown_shapes,
-            "truncated": truncated, "note": "Provider-reported amounts; cached fields may be subsets of input. Not a bill."}
+            "truncated": truncated, "cache_affinity": affinity,
+            "note": "Provider-reported amounts; cached fields may be subsets of input. Not a bill."}

@@ -615,6 +615,26 @@ and do not retry, cancel or change model execution; evidence can consequently be
 missing or stale and is not an audit-completeness guarantee. Scheduling remains
 FIFO with unchanged slot/role/workspace locking, provider TTL and session policy.
 
+`mizu usage` also exposes a read-only shadow view `cache_affinity` built only from
+those same `dispatch-attempts.json` files: at most the 200 most recently modified
+run directories are scanned (`runs_scanned`, with `runs_truncated` marking a
+larger candidate set), and each file is capped at the dispatch-evidence byte
+bound. Symlinks are refused; malformed or unreadable files are counted as
+`cache_affinity.skipped_records` without failing the command. `total` counts
+eligible attempt rows in this scanned window; at most 200 are returned, with
+`truncated` marking omitted rows. Each row keeps only
+run id, role, execution-attempt index, start/end timestamps, engine, the local
+session key/generation and prompt mode when the key is a 64-character lowercase
+hex digest and the generation is a nonnegative exact integer (otherwise null),
+usage status, input/cache-read token counts, and `cache_read_share_of_input`
+(cache-read divided by input only when both are nonnegative exact integers, input
+is positive and cache-read does not exceed input; otherwise null). Native provider
+session identifiers and arbitrary usage payloads are never copied. Rows are ordered
+most-recent-run first (newest attempt first within a run), capped at 200 rows with
+`total`/`truncated` marking the loss. This is observed cache-read share and local
+session grouping only, not proof of provider cache residency or TTL, and it does
+not affect scheduling.
+
 ### 監視処理の資源使用
 
 POSIX のエンジン出力は pipe readiness で待機し、入力がない間の読み取りを
