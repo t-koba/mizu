@@ -415,6 +415,28 @@ class WebSeparationTests(Fixture):
         self.assertEqual(len(out["results"]), SEARCH_RESULT_LIMIT)
         self.assertTrue(out["truncated"])
 
+    def test_adapter_fields_follow_search_bounds_and_keep_metadata(self):
+        from mizu.web import Web
+        import json
+        import tempfile
+        from mizu.process import Result
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
+        web = Web({"hosts": [], "feeds": [], "cache_seconds": 0, "timeout_seconds": 5,
+                   "max_bytes": 1048576, "search_command": ["python3", "adapter"],
+                   "intranet": False}, tmp / "c", tmp / "r")
+        import mizu.web as webmod
+        item = {"title": "t" * 301, "url": "https://example.com/", "summary": "s" * 1501,
+                "extra": "preserved"}
+        payload = json.dumps({"results": [item]})
+        with patch.object(webmod, "run", return_value=Result(0, payload, "", "exited", 0.1)):
+            out = web.search("q")
+        result = out["results"][0]
+        self.assertEqual(result["title"], "t" * 300)
+        self.assertEqual(result["summary"], "s" * 1500)
+        self.assertEqual(result["source"], "search-adapter")
+        self.assertEqual(result["extra"], "preserved")
+
     def test_adapter_also_consults_feeds_with_source_labels(self):
         from mizu.web import Web
         import json

@@ -609,6 +609,8 @@ class Web:
                 # never a whole-call failure, so one bad row keeps the rest.
                 if not item["url"].startswith("https://"):
                     continue
+                item["title"] = item["title"][:300]
+                item["summary"] = item["summary"][:1500]
                 item["source"] = "search-adapter"
                 kept.append(item)
             adapter_overflow = len(kept) > SEARCH_RESULT_LIMIT
