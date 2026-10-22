@@ -284,9 +284,14 @@ def submit(context, script=None, *, kind="experiment", fresh=False, purpose=None
         raise Denied('Check job input is not representable')
     # Run-local identity remains the fallback when observed inputs cannot be shared.
     env = environment(project)
+    # A fresh request asks for a measurement of its own: it never joins an
+    # existing execution. Its own result still carries the shared key, so a
+    # later request with the same inputs reuses that measurement instead of
+    # repeating it. Asking for a remeasurement and sharing the result are
+    # separate decisions.
     shared_key = digest(canonical({'source': capture['code_digest'], 'execution': execution_key(context.config),
                                    'commands': commands, 'kind': 'verify' if script is None else kind,
-                                   'environment': env})) if env is not None and not fresh else None
+                                   'environment': env})) if env is not None else None
     identity = {'run': context.run_dir.name, 'source': capture['code_digest'],
                 'execution': execution_key(context.config), 'commands': commands,
                 'kind': 'verify' if script is None else kind, 'environment': env, 'fresh': fresh}
@@ -299,7 +304,7 @@ def submit(context, script=None, *, kind="experiment", fresh=False, purpose=None
             _state_purpose(project, job_id, purpose)
             _retire_superseded(project, owner, purpose, keep={job_id}, replaced_by=job_id)
             return summary(read(project, job_id))
-        if shared_key is not None:
+        if shared_key is not None and not fresh:
             for path in sorted(root(project).glob('*/job.json')):
                 other = read_json(path, {})
                 if other.get('shared_key') == shared_key and reusable(other) and not (path.parent / 'cancel.json').exists():

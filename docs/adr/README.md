@@ -611,3 +611,22 @@ pending queue and the runner's time, which is what the replacement needs.
 The consequence is that a role can replace its own demand without waiting to
 rediscover it, and the capacity the obsolete demand held is available to the
 replacement that supersedes it.
+
+## ADR-046 — A forced remeasurement still shares its result with later requests
+`check_job action=start fresh=true` asked for a new measurement and, as a side
+effect, made that measurement invisible to later automatic matching: a second
+request with the same source, commands, execution and dependency fingerprint
+ran the whole gate again (one observed pair cost 750 s of repeated
+verification). Asking for a remeasurement and sharing the result are separate
+decisions, and the sharing policy (`sandbox.check_reuse` with the full input
+checks) already decides whether a result may be shared.
+
+A fresh request now carries the same shared key as any other result of its
+inputs. It still runs its own execution and never joins an existing one, so
+the independent measurement the caller asked for is the one it gets. A later
+request with the same inputs subscribes to that result instead of repeating
+it, exactly as it would have subscribed to any other matching result.
+
+Nothing else changes. A failed, interrupted or changed-input result is still
+not shareable, the explicit way to ask for an independent rerun is preserved,
+and every input identity and evidence gate is unchanged.

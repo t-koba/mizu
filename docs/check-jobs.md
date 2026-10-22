@@ -110,7 +110,10 @@ sandbox configuration and observed dependency inputs share one queued/running
 execution or a completed passing result. Failures and interruptions are not
 cached for new units. `check_job action=start fresh=true` requests a fresh run
 when remeasurement is needed (for example time-sensitive or nondeterministic
-checks). Retrying the same request within a unit remains idempotent.
+checks); that request runs its own execution and never joins an existing one.
+Its result is still shared under the same policy, so a later request with the
+same inputs reuses that measurement instead of repeating it. Retrying the same
+request within a unit remains idempotent.
 
 The prompt exposes `shared_checks` candidates without expensive dependency
 traversal; these are not yet accepted evidence. `check_job action=list` validates

@@ -599,6 +599,17 @@ class SharingTests(PurposeTests):
         self.config = dataclasses.replace(self.config, sandbox=dataclasses.replace(self.config.sandbox, check_reuse=True))
         self.project.config = self.config
 
+    def test_a_fresh_request_runs_its_own_execution_and_shares_its_result(self):
+        ctx = self.context()
+        fresh = check_jobs.submit(ctx, 'echo fresh', kind='experiment', fresh=True)
+        self.assertEqual(check_jobs.read(self.project, fresh['id'])['status'], 'queued')
+        # A later request with the same inputs reuses the fresh measurement
+        # instead of running the execution again.
+        later = self.context()
+        shared = check_jobs.submit(later, 'echo fresh', kind='experiment')
+        self.assertEqual(shared.get('shared_job'), fresh['id'])
+        self.assertNotEqual(shared['id'], fresh['id'])
+
     def test_purpose_replaces_the_roles_earlier_job_when_the_request_shares(self):
         ctx = self.context()
         first = check_jobs.submit(ctx, 'echo first', kind='experiment', purpose='acceptance')
