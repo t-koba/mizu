@@ -677,18 +677,50 @@ class Snapshots:
         end = history.index(anchor) + 1
         return [self.get(sid) for sid in history[max(0, end - limit):end]]
 
-    def changes(self, anchor: str, maximum: int = PREVIEW_BYTES) -> dict:
+    def changes(self, anchor: str, maximum: int = PREVIEW_BYTES, base: str | None = None) -> dict:
+        """Bounded unified diff of stored manifests, without exposing a worktree.
+
+        With an explicit base, diff that retained ancestor (or the anchor
+        itself, which renders an empty diff and preserves state-only ranges);
+        a malformed, unretained or non-ancestral base raises Denied so the
+        caller keeps the previous-distinct fallback. Without a base, diff
+        against the nearest earlier snapshot with a different code digest.
+        Output bounds (PREVIEW_BYTES per file, maximum total) hold either way.
+        """
         current = self.get(anchor)
+        if base is not None:
+            base_record = self._diff_base(anchor, base)
+        else:
+            ids = self._history_ids()
+            earlier = ids[:ids.index(anchor)] if anchor in ids else []
+            base_record = None
+            for sid in reversed(earlier):
+                candidate = self.get(sid)
+                if candidate["code_digest"] != current["code_digest"]:
+                    base_record = candidate
+                    break
+            if base_record is None:
+                return {"base_snapshot": None, "target_snapshot": anchor, "diff": "", "note": "No earlier distinct code snapshot in the recent window"}
+        return self._render_diff(base_record, current, maximum)
+
+    def _diff_base(self, anchor: str, base: str) -> dict:
+        """Return the retained record for an explicit diff base.
+
+        The base must name a snapshot still listed in the retained history at
+        or before the anchor. Anything else raises Denied: malformed IDs,
+        records no longer on disk, generations pruned from the history window
+        and IDs that do not descend toward the anchor are all unusable, never
+        trusted. A base equal to the anchor is valid and renders empty.
+        """
+        if not isinstance(base, str) or not DIGEST.fullmatch(base):
+            raise Denied("Invalid diff base snapshot")
+        record = self.get(base)
         ids = self._history_ids()
-        earlier = ids[:ids.index(anchor)] if anchor in ids else []
-        base = None
-        for sid in reversed(earlier):
-            candidate = self.get(sid)
-            if candidate["code_digest"] != current["code_digest"]:
-                base = candidate
-                break
-        if base is None:
-            return {"base_snapshot": None, "target_snapshot": anchor, "diff": "", "note": "No earlier distinct code snapshot in the recent window"}
+        if anchor not in ids or base not in ids or ids.index(base) > ids.index(anchor):
+            raise Denied("Diff base is not an ancestor of the target snapshot")
+        return record
+
+    def _render_diff(self, base: dict, current: dict, maximum: int) -> dict:
         chunks, count, skipped = [], 0, []
         for name in sorted(set(base["files"]) | set(current["files"])):
             if base["files"].get(name) == current["files"].get(name):
@@ -709,7 +741,7 @@ class Snapshots:
                                              fromfile="before/" + name, tofile="after/" + name)):
                 encoded = line.encode()
                 if count + len(encoded) > maximum:
-                    return {"base_snapshot": base["id"], "target_snapshot": anchor, "diff": "".join(chunks), "truncated": True, "skipped": skipped}
+                    return {"base_snapshot": base["id"], "target_snapshot": current["id"], "diff": "".join(chunks), "truncated": True, "skipped": skipped}
                 chunks.append(line)
                 count += len(encoded)
-        return {"base_snapshot": base["id"], "target_snapshot": anchor, "diff": "".join(chunks), "truncated": bool(skipped), "skipped": skipped}
+        return {"base_snapshot": base["id"], "target_snapshot": current["id"], "diff": "".join(chunks), "truncated": bool(skipped), "skipped": skipped}

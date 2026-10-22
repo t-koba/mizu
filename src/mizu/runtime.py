@@ -86,6 +86,10 @@ INSIGHT_RETRIEVAL_LIMIT = 1000
 MAX_ENGINE_TOOL_INVOCATIONS = 4096
 MAX_ENGINE_TOOL_ID = 256
 MAX_READ_IDENTITIES = 1024
+#: Bound for reading a role's observed snapshot cursor when basing a diff.
+#: The cursor the engine writes holds two hex digests; the bound only keeps a
+#: hand-edited or corrupt record from being materialized without limit.
+OBSERVED_CURSOR_MAX_BYTES = 4096
 #: Bounded serialized size of the work items a CI request covers.
 MAX_COVERED_BYTES = 2048
 
@@ -989,7 +993,46 @@ class Context:
         return handler(self, args)
 
     def _op_diff(self, args: dict) -> dict:
+        base = self._observed_diff_base()
+        if base is not None:
+            try:
+                return self.project.snapshots.changes(self.snapshot["id"], base=base)
+            except Denied:
+                pass
         return self.project.snapshots.changes(self.snapshot["id"])
+
+    def _observed_diff_base(self) -> str | None:
+        """Return this role's observed snapshot ID when it is usable as a diff base.
+
+        Schema: the ``observed/<role>.json`` cursor the engine writes, holding
+        ``snapshot`` and ``code_digest``. Bounds: the cursor is read under
+        ``OBSERVED_CURSOR_MAX_BYTES``. Trust: local recorded state, never a
+        claim about the tree, so an absent, malformed, digest-mismatched or
+        no-longer-retained cursor is unusable and yields None; ancestry is
+        rechecked by the snapshot store at diff time and falls back there.
+        Failure: never raises for cursor problems; a valid cursor naming the
+        current snapshot is usable and renders an empty diff.
+        """
+        try:
+            cursor = read_json(
+                self.project.root / "observed" / f"{self.role.name}.json",
+                {}, max_bytes=OBSERVED_CURSOR_MAX_BYTES)
+        except (OSError, ValueError, Busy, Denied, LimitExceeded):
+            return None
+        if not isinstance(cursor, dict):
+            return None
+        snapshot_id = cursor.get("snapshot")
+        code_digest = cursor.get("code_digest")
+        if (not isinstance(snapshot_id, str) or not DIGEST.fullmatch(snapshot_id)
+                or not isinstance(code_digest, str) or not DIGEST.fullmatch(code_digest)):
+            return None
+        try:
+            record = self.project.snapshots.get(snapshot_id)
+        except (OSError, ValueError, Busy, Denied, LimitExceeded):
+            return None
+        if record.get("code_digest") != code_digest:
+            return None
+        return snapshot_id
 
     def _op_files(self, args: dict) -> dict:
         if self.role.workspace == "none":

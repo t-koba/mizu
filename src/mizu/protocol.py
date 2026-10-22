@@ -98,7 +98,7 @@ WORK_ITEM_WAIT_SCHEMA = obj({**WAIT_SCHEMA["properties"],
                    minItems=1, uniqueItems=True)}, ("kind",))
 
 DEFINITIONS = {
-    "diff": ("Read the bounded difference between this published snapshot and the preceding distinct code snapshot.", obj()),
+    "diff": ("Read the bounded difference between this published snapshot and the role's last observed snapshot when that cursor is still retained and ancestral, otherwise the preceding distinct code snapshot. The result names base_snapshot.", obj()),
     "files": ("List visible workspace files without reading their contents; use offset/limit for subsequent pages.", obj(PAGE_FIELDS)),
     "read": ("Read a relative workspace text file in bounded character-offset pages. The first read of a path in this unit may start at any offset and pins its content identity. Later pages may omit content_id to use that pin; a changed file fails. Start at offset=0 to read a new version, and pass content_id to require continuity across units. The host retains at most 1024 path identities per unit. Never follows symbolic or hard links.",
              obj({"path": text(4096), "content_id": text(64),

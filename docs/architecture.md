@@ -157,7 +157,9 @@ kept up to `limits.pending_insights`;
 `acceptance_commands` only to roles with `verify`. Exact snapshot references
 (`id`, `code_digest`, `state`, `verification`) are always pinned, never
 summarized. `diff` compares the anchored
-snapshot with the preceding distinct code digest. Large and binary files are
+snapshot with the role's last observed snapshot when that cursor is still
+retained and ancestral (naming it as `base_snapshot`, empty when the cursor
+already names the anchor), otherwise with the preceding distinct code digest. Large and binary files are
 listed rather than inserted into a huge diff. This is bounded context, not a
 vector database or an automatically complete history search. Usage day buckets
 and the usage window edge use the configured `timezone` day boundary so
