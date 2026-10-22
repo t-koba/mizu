@@ -16,7 +16,7 @@ from .fs import mkdir, write_json
 from .process import environment
 from .pi import credentials
 from .protocol import tool_definitions
-from .startup import record_startup, startup_bound
+from .startup import RUNTIME_ENDPOINT, record_startup, startup_bound
 
 
 def auth_source():
@@ -182,7 +182,7 @@ class CodexDriver:
                             # initialize response, including refusals. Probe
                             # paths measure through process exit; the shared
                             # record keeps the larger interval.
-                            record_startup(self.config, 'codex', time.monotonic() - spawned)
+                            record_startup(self.config, 'codex', time.monotonic() - spawned, RUNTIME_ENDPOINT)
                         if 'error' in event:
                             error = event['error']
                             if method == 'turn/start' and isinstance(error, dict):

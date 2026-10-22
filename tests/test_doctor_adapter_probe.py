@@ -156,6 +156,10 @@ class AdapterProbeOutcomeTests(unittest.TestCase):
         self.assertEqual(details["host_relative_bound_seconds"],
                          doctor.adapter_startup_bound(3.75))
         self.assertEqual(details["host_relative_bound_seconds"], 60)
+        # The endpoint names the measurement the cost came from, so the
+        # operator can tell a probe's spawn-to-exit interval from a
+        # managed runtime's spawn-to-first-answer interval.
+        self.assertEqual(details["startup_endpoint"], "probe")
 
     def test_the_published_pair_follows_the_rule_it_reports(self):
         # The measurement is slow and the probe that follows is fast: the
@@ -175,6 +179,24 @@ class AdapterProbeOutcomeTests(unittest.TestCase):
         # The published pair satisfies the published rule.
         self.assertEqual(doctor.adapter_startup_bound(details["startup_seconds"]),
                          details["host_relative_bound_seconds"])
+        self.assertEqual(details["startup_endpoint"], "probe")
+
+    def test_an_unwritable_record_publishes_a_consistent_pair(self):
+        # The host's record cannot be written or read back, so it holds no
+        # measurement the surfaces can share. The published pair must still
+        # satisfy the published rule: no cost, and the floor bound.
+        blocker = Path(tempfile.mkdtemp(prefix="mizu-startup-record-")) / "blocker"
+        blocker.write_text("not a directory", encoding="utf-8")
+        config = SimpleNamespace(command=lambda name: ["node"], data=blocker / "data")
+        exports = adapter_contract("pi")["exports"]
+        report = json.dumps({"exports": exports})
+        doctor.run = lambda argv, **kwargs: Result(0, report, "", "exited", 20.0)
+        details = doctor.engine_contract(config, "pi")
+        self.assertIsNone(details["startup_seconds"])
+        self.assertTrue(details["startup_unmeasured"])
+        self.assertEqual(details["host_relative_bound_seconds"],
+                         doctor.ADAPTER_STARTUP_FLOOR_SECONDS)
+        self.assertNotIn("startup_endpoint", details)
 
     def test_a_child_a_signal_stopped_is_not_a_missing_capability(self):
         # The reachable shape: a child a signal stopped is reported as
@@ -273,7 +295,7 @@ class CheckCliProbeTests(unittest.TestCase):
         original = self.module.subprocess.run
         self.module.subprocess.run = fake_run
         self.addCleanup(setattr, self.module.subprocess, "run", original)
-        result, startup, bound = self.module.run_probe(["node", "launcher.mjs"])
+        result, startup, bound, endpoint = self.module.run_probe(["node", "launcher.mjs"])
         # The measurement carries the measuring ceiling and the probe the
         # bound that measurement requires, the same shape the doctor uses.
         self.assertEqual(seen[0], self.module.ADAPTER_STARTUP_MEASURE_CEILING_SECONDS)
@@ -287,7 +309,7 @@ class CheckCliProbeTests(unittest.TestCase):
         # publishes is the one that bound was derived from.
         with tempfile.TemporaryDirectory() as td:
             config = SimpleNamespace(data=Path(td))
-            doctor.record_startup(config, "pi", 20.0)
+            doctor.record_startup(config, "pi", 20.0, doctor.PROBE_ENDPOINT)
             seen = []
 
             def fake_run(command, **kwargs):
@@ -297,8 +319,8 @@ class CheckCliProbeTests(unittest.TestCase):
             original = self.module.subprocess.run
             self.module.subprocess.run = fake_run
             self.addCleanup(setattr, self.module.subprocess, "run", original)
-            result, cost, bound = self.module.run_probe(["node", "launcher.mjs"],
-                                                         engine="pi", config=config)
+            result, cost, bound, endpoint = self.module.run_probe(
+                ["node", "launcher.mjs"], engine="pi", config=config)
             # The host's recorded cost of 20 s requires the ceiling, and the
             # child is held to it.
             self.assertEqual(bound, 150)
@@ -446,9 +468,9 @@ class AnsweredChildIsAMeasurementTests(unittest.TestCase):
         seen = []
         doctor.run = self.failing_child(seen)
         config = config_for()
-        result, bound, cost = doctor.adapter_probe(config, "pi",
-                                                   ["node", "launcher.mjs", "--check-contract"],
-                                                   maximum=8192, label="probe")
+        result, bound, cost, endpoint = doctor.adapter_probe(
+            config, "pi", ["node", "launcher.mjs", "--check-contract"],
+            maximum=8192, label="probe")
         # The measurement carried the measuring ceiling; the probe that
         # follows is held to the bound the host's record derives, never to
         # the ceiling that measured the answer.
@@ -508,7 +530,7 @@ class AnsweredChildIsAMeasurementTests(unittest.TestCase):
         # from, not this run's sample.
         with tempfile.TemporaryDirectory() as td:
             config = SimpleNamespace(data=Path(td))
-            doctor.record_startup(config, "pi", 20.0)
+            doctor.record_startup(config, "pi", 20.0, doctor.PROBE_ENDPOINT)
 
             def fake_run(command, **kwargs):
                 return subprocess.CompletedProcess(command, 0,

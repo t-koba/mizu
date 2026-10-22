@@ -14,7 +14,7 @@ from .errors import ProtocolError, ModelFailure
 from .fs import mkdir, write_json
 from .process import environment
 from .protocol import tool_definitions
-from .startup import record_startup, startup_bound
+from .startup import RUNTIME_ENDPOINT, record_startup, startup_bound
 
 ROOT = Path(__file__).resolve().parents[2]
 TOKEN_FIELDS = ('inputTokens', 'outputTokens', 'cacheReadInputTokens', 'cacheCreationInputTokens')
@@ -126,7 +126,7 @@ class ClaudeDriver:
                 # Runtime startup is measured through this first protocol
                 # response, including refusals. Probe paths measure through
                 # process exit; the shared record keeps the larger interval.
-                record_startup(self.config, 'claude', time.monotonic() - spawned)
+                record_startup(self.config, 'claude', time.monotonic() - spawned, RUNTIME_ENDPOINT)
                 if ready.get('type') != 'ready' or not context.hello.is_set():
                     raise ProtocolError('Claude SDK handshake failed: '+str(ready)[:4000])
                 admit_invocation(context, unit='query')

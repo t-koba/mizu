@@ -496,8 +496,18 @@ records the interval from child spawn to its first protocol response: Pi's
 first `get_state` response, Claude's first `ready` event, and Codex's matching
 `initialize` response. A refusal response is recorded before it is classified;
 a child that never responds contributes no runtime sample. The shared record
-keeps the largest interval for that engine, so probe and runtime timing are
-not represented as the same measurement.
+keeps the largest interval for that engine together with the endpoint that
+measured it, and the published evidence names that endpoint, so the two
+measurements are never published as one unlabeled number.
+
+The published pair always satisfies the rule the product publishes: the
+published cost is the one the bound was derived from, so the bound is twelve
+times that cost, at least 60 s and at most 150 s. A record this host cannot
+read or write holds no measurement the surfaces can share, so the product
+publishes no cost and the floor bound rather than a cost beside a bound that
+did not come from it. A record file that cannot be parsed holds no
+measurement either, so the next measurement replaces it instead of leaving
+the host at the floor for ever.
 
 The runtime bound applies only to the initial startup/initialize exchange.
 Codex app-server RPCs after `initialize` keep their existing 30 s response cap.

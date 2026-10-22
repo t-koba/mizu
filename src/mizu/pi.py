@@ -15,7 +15,7 @@ from .errors import ConfigError, DeadlineWrapUp, ProtocolError, ModelFailure
 from .fs import atomic_write, mkdir, write_json
 from .process import environment
 from .protocol import tool_definitions
-from .startup import record_startup, startup_bound
+from .startup import RUNTIME_ENDPOINT, record_startup, startup_bound
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -71,7 +71,7 @@ class PiDriver:
                     # response, including refusals. Probe paths measure
                     # through process exit; the shared record keeps the
                     # larger interval.
-                    record_startup(self.config, 'pi', time.monotonic() - spawned)
+                    record_startup(self.config, 'pi', time.monotonic() - spawned, RUNTIME_ENDPOINT)
                     if not event.get("success") or not context.hello.is_set():
                         raise ProtocolError("Pi managed SDK handshake failed")
                     actual = event.get("data", {}).get("model") or {}

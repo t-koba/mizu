@@ -202,6 +202,9 @@ class SyntheticEngineTests(Fixture):
                         self.execute(engine, scenario)
                 record.assert_called_once()
                 self.assertEqual(record.call_args.args[1], engine)
+                # The runtime's interval is a spawn-to-first-answer
+                # measurement, so the record names that endpoint.
+                self.assertEqual(record.call_args.args[3], 'runtime')
 
     def test_pi_records_a_refused_first_state_answer(self):
         ctx = self.context('consult')
@@ -220,6 +223,9 @@ class SyntheticEngineTests(Fixture):
                 PiDriver(config).execute(ctx, 'synthetic prompt')
         record.assert_called_once()
         self.assertEqual(record.call_args.args[1], 'pi')
+        # The runtime's interval is a spawn-to-first-answer measurement,
+        # so the record names that endpoint.
+        self.assertEqual(record.call_args.args[3], 'runtime')
 
     def test_a_startup_bound_refusal_names_the_bound_it_was_held_to(self):
         # A child that never answers its initial handshake is refused by the

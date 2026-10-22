@@ -24,8 +24,8 @@ from .sandbox import CHECKPOINT_ANNOTATION, CHECKPOINT_INSPECT_MAXIMUM, Sandbox,
 # second copy of it.
 from .startup import (ADAPTER_STARTUP_CEILING_SECONDS, ADAPTER_STARTUP_FLOOR_SECONDS,
                       ADAPTER_STARTUP_MEASURE_CEILING_SECONDS, ADAPTER_STARTUP_MULTIPLIER,
-                      adapter_startup_bound, measured_startup, observed_startup,
-                      record_startup, startup_bound)
+                      PROBE_ENDPOINT, adapter_startup_bound, measured_startup,
+                      observed_startup, record_startup, startup_bound)
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -132,7 +132,8 @@ def adapter_probe(config, engine, command, *, maximum: int, label: str):
     conservative per-engine bound. A probe stopped before reporting is not
     evidence that a capability is missing.
 
-    Returns the probe result and applied bound for its evidence.
+    Returns the probe result, applied bound, published cost and the
+    endpoint that measured it.
     """
     measured = run(command, timeout=ADAPTER_STARTUP_MEASURE_CEILING_SECONDS, maximum=maximum)
     if measured.reason == "exited" and measured.exit_code is not None and measured.exit_code >= 0:
@@ -140,33 +141,41 @@ def adapter_probe(config, engine, command, *, maximum: int, label: str):
         # The record retains the largest interval for this engine, including
         # any runtime first-response sample, and the reported pair follows
         # from that record.
-        cost, bound = observed_startup(config, engine, measured.seconds)
+        cost, bound, endpoint = observed_startup(config, engine, measured.seconds,
+                                                 PROBE_ENDPOINT)
     else:
         # The measuring command did not complete within its ceiling. No
         # sample is recorded, so the probe uses the configured floor.
         bound = ADAPTER_STARTUP_FLOOR_SECONDS
         cost = None
+        endpoint = None
     result = run(command, timeout=bound, maximum=maximum)
     probe_outcome(result.reason, result.exit_code,
                   stop_note(result) or result.stderr, label, bound)
-    return result, bound, cost
+    return result, bound, cost, endpoint
 
 
-def startup_evidence(cost, bound: int) -> dict:
+def startup_evidence(cost, bound: int, endpoint: str | None = None) -> dict:
     """This host's measured cost for one adapter child and the bound it needs.
 
     The cost is the one the bound was derived from, so the published pair
     satisfies the published rule: the bound is twelve times the cost, at
-    least the floor and at most the ceiling. A cost that could not be
-    measured is published as no cost at all: the bound is then the floor,
-    because a child that has not answered cannot claim a wider one.
+    least the floor and at most the ceiling. The endpoint names the
+    measurement the cost came from, so the operator can tell a one-shot
+    probe's spawn-to-exit interval from a managed runtime's
+    spawn-to-first-answer interval. A cost that could not be measured is
+    published as no cost at all: the bound is then the floor, because a
+    child that has not answered cannot claim a wider one.
     """
     if cost is None:
         return {"startup_seconds": None,
                 "host_relative_bound_seconds": bound,
                 "startup_unmeasured": True}
-    return {"startup_seconds": round(float(cost), 3),
-            "host_relative_bound_seconds": bound}
+    evidence = {"startup_seconds": round(float(cost), 3),
+                "host_relative_bound_seconds": bound}
+    if endpoint is not None:
+        evidence["startup_endpoint"] = endpoint
+    return evidence
 
 
 def engine_contract(config: Config, engine: str) -> dict:
@@ -175,9 +184,9 @@ def engine_contract(config: Config, engine: str) -> dict:
     contract = adapter_contract(engine)
     command = config.command(engine)
     if engine == "codex":
-        result, bound, cost = adapter_probe(config, engine,
-                                            [*command, contract["command"][0], "--help"],
-                                            maximum=262144, label=probe_label(engine))
+        result, bound, cost, endpoint = adapter_probe(
+            config, engine, [*command, contract["command"][0], "--help"],
+            maximum=262144, label=probe_label(engine))
         flags = list(contract["required_flags"])
         for item in contract.get("contracts", []):
             flags.extend(item["required_flags"])
@@ -186,11 +195,11 @@ def engine_contract(config: Config, engine: str) -> dict:
             raise ConfigError("Codex app-server stdio capability missing: "
                               + ", ".join(missing or [stop_note(result)]))
         return {"request_unit": contract["request_unit"], "required_flags": sorted(set(flags)),
-                "inference": "not_run", **startup_evidence(cost, bound)}
+                "inference": "not_run", **startup_evidence(cost, bound, endpoint)}
     launcher = ROOT / "adapters" / engine / contract["entrypoint"]
-    result, bound, cost = adapter_probe(config, engine,
-                                        [*command, str(launcher), "--check-contract"],
-                                        maximum=8192, label=probe_label(engine))
+    result, bound, cost, endpoint = adapter_probe(
+        config, engine, [*command, str(launcher), "--check-contract"],
+        maximum=8192, label=probe_label(engine))
     if result.exit_code:
         raise ConfigError("Required engine SDK capabilities missing: "
                           + (stop_note(result) or result.stderr[-1000:]))
@@ -203,7 +212,7 @@ def engine_contract(config: Config, engine: str) -> dict:
     if missing:
         raise ConfigError(f"Adapter drift: {engine} contract declares missing exports: " + ", ".join(missing))
     return {"request_unit": contract["request_unit"], "exports": sorted(set(verified)),
-            "inference": "not_run", **startup_evidence(cost, bound)}
+            "inference": "not_run", **startup_evidence(cost, bound, endpoint)}
 
 
 def sandbox_image(config: Config) -> str:

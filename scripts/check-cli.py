@@ -20,7 +20,7 @@ from mizu.doctor import (ADAPTER_STARTUP_FLOOR_SECONDS,
 from mizu.engine_config import adapter_contract
 from mizu.errors import ConfigError
 from mizu.platform import default_config_file
-from mizu.startup import observed_startup
+from mizu.startup import PROBE_ENDPOINT, observed_startup
 
 
 def probe(engine, prefix):
@@ -102,23 +102,25 @@ def run_probe(command, engine=None, config=None):
         # the shared record retains the largest per-engine interval.
         if config is None and engine is not None:
             config = host_config()
-        cost, bound = observed_startup(config, engine, startup)
+        cost, bound, endpoint = observed_startup(config, engine, startup,
+                                                 PROBE_ENDPOINT)
     else:
         # The measuring command did not complete within its ceiling. No
         # sample is recorded, so the probe uses the configured floor.
         bound = ADAPTER_STARTUP_FLOOR_SECONDS
         cost = None
+        endpoint = None
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=bound)
     except subprocess.TimeoutExpired as exc:
         bound_refusal(exc, bound, engine)
-    return result, cost, bound
+    return result, cost, bound, endpoint
 
 
 def probe_engine(engine, command, expected, config=None):
     """Probe one installed adapter and return its check record."""
     try:
-        result, cost, bound = run_probe(command, engine=engine, config=config)
+        result, cost, bound, endpoint = run_probe(command, engine=engine, config=config)
     except (ProbeTimeout, ConfigError) as exc:
         return {'engine': engine, 'status': 'fail', 'reason': str(exc)}
     if result.returncode is not None and result.returncode < 0:
@@ -151,7 +153,7 @@ def probe_engine(engine, command, expected, config=None):
     # The cost published is the one the bound was derived from, and the
     # shape of that evidence is the doctor's, so one child reads the same
     # way wherever it is probed.
-    evidence.update(startup_evidence(cost, bound))
+    evidence.update(startup_evidence(cost, bound, endpoint))
     return {'engine': engine, 'status': 'pass' if success else 'fail',
             'exit_code': result.returncode,
             'request_unit': adapter_contract(engine)['request_unit'], 'contract': evidence}

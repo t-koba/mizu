@@ -31,13 +31,16 @@ runtime code. A fourth engine needs, in this order:
    A completed refusal contributes a measurement; a measuring run that does not
    complete leaves the floor in place. The record can also contain a managed
    runtime's spawn-to-first-protocol-response interval, so the probe and runtime
-   endpoints are not equivalent and the larger interval supplies the bound.
+   endpoints are not equivalent: the record keeps the larger interval and the
+   endpoint that measured it, and the published evidence names that endpoint.
    Managed Pi, Claude and Codex use that bound for their initial handshake;
    Codex's later app-server RPCs retain their 30 s cap. A new managed driver
    should start its timer before child launch, apply the bound only to the
    initial handshake, and record the first protocol response even when it is
-   refused. `pi-durable` runtime startup remains on its existing
-   transport-deadline path. A stopped probe is
+   refused, with the runtime endpoint. `pi-durable` runtime startup remains on
+   its existing transport-deadline path. A record this host cannot read or
+   write measures nothing, so the published evidence carries no cost and the
+   floor bound. A stopped probe is
    not evidence of a missing capability: product-selected stop reasons remain
    primary, with a termination signal as secondary detail (ADR-042).
 2. `src/mizu/<engine>.py`: trusted argv builder, isolated per-run config,

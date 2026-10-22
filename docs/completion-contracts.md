@@ -76,9 +76,12 @@ insights/searchの一覧はoffset/limit（filesと同じ型・上限）を受理
 bound（60 秒 floor、記録値の 12 倍、150 秒 ceiling）を使います。doctor / check-cli
 は one-shot probe の spawn から process exit までを測り、runtime は Pi の最初の state
 応答、Claude の最初の `ready` 応答、Codex の initialize 応答までを測ります。拒否応答も
-runtime 記録に含めますが、両者の測定区間が同一とは限りません。共有記録は大きい方を
-保持します。Codex の initialize 後の app-server RPC は既存の 30 秒上限を維持し、
-pi-durable runtime は startup 記録ではなく既存の transport deadline を使います。
+runtime 記録に含めますが、両者の測定区間は同一ではありません。共有記録は大きい方の
+区間とその測定端点（probe / runtime）を保持し、公開証跡はその端点を名付けます。
+公開される cost と bound の組は常に公開規則を満たし、読み書きできない記録では
+cost を出さず floor の bound を公開します。Codex の initialize 後の app-server RPC は
+既存の 30 秒上限を維持し、pi-durable runtime は startup 記録ではなく既存の transport
+deadline を使います。
 run の取消・期限・不正 JSON・上限超過・terminal 前の EOF は成功になりません。停止時は公開 interrupt を要求し、stdin を
 閉じ、process group を回収してから結果を返します。親の bridge は seal 以降の
 操作を拒否し、single-writer 公開は既存の verify と immutable snapshot 契約に従います。
