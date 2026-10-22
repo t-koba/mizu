@@ -61,6 +61,16 @@ class NodeCapabilityProbeTests(unittest.TestCase):
             self.probe_with(Result(1, "", "no such export", "exited", 1.0))
         self.assertIn("capabilities missing", str(caught.exception))
 
+    def test_a_child_that_answered_a_failure_names_its_outcome(self):
+        # The message names the child's own outcome, so the operator sees
+        # what the child said instead of an empty detail.
+        with self.assertRaises(ConfigError) as caught:
+            self.probe_with(Result(1, "", "no such export", "exited", 1.0))
+        message = str(caught.exception)
+        self.assertIn("exit 1", message)
+        self.assertIn("no such export", message)
+        self.assertFalse(message.rstrip().endswith(":"))
+
     def test_a_child_that_answered_reports_what_it_holds(self):
         self.assertEqual(self.probe_with(
             Result(0, "module and stream capabilities available\n", "", "exited", 1.0)),
@@ -90,6 +100,17 @@ class CodexCapabilityProbeTests(unittest.TestCase):
         message = str(caught.exception)
         self.assertIn("killed", message)
         self.assertNotIn("capability missing", message)
+
+    def test_a_child_that_answered_a_failure_names_its_outcome(self):
+        # A child that answered and reported a failure keeps its answer, and
+        # the message names that answer rather than ending with a colon.
+        with self.assertRaises(ConfigError) as caught:
+            self.probe_with(Result(3, "", "app-server refused", "exited", 1.0))
+        message = str(caught.exception)
+        self.assertIn("capability missing", message)
+        self.assertIn("exit 3", message)
+        self.assertIn("app-server refused", message)
+        self.assertFalse(message.rstrip().endswith(":"))
 
 
 class ContainerRuntimeProbeTests(Fixture):

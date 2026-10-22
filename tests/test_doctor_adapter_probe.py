@@ -492,7 +492,30 @@ class AnsweredChildIsAMeasurementTests(unittest.TestCase):
             doctor.engine_contract(config_for(), "pi")
         # The bound does not change what the child said: a child that
         # answered and reported a failure is still the child's own answer.
-        self.assertIn("SDK capabilities missing", str(caught.exception))
+        message = str(caught.exception)
+        self.assertIn("SDK capabilities missing", message)
+        # The message names that answer, so the operator sees the exit code
+        # and the text the child produced rather than an empty detail.
+        self.assertIn("exit 1", message)
+        self.assertIn("boom", message)
+        self.assertFalse(message.rstrip().endswith(":"))
+
+    def test_the_contract_check_names_the_answer_of_a_failing_child(self):
+        def fake_run(command, **kwargs):
+            return subprocess.CompletedProcess(command, 1, "", "boom")
+
+        original = self.module.subprocess.run
+        self.module.subprocess.run = fake_run
+        self.addCleanup(setattr, self.module.subprocess, "run", original)
+        with tempfile.TemporaryDirectory() as td:
+            record = self.module.probe_engine("pi", ["node", "launcher.mjs"],
+                                              ["ModelRuntime"],
+                                              config=SimpleNamespace(data=Path(td)))
+        # The child answered and reported a failure, so the record names
+        # that answer instead of leaving the operator with an empty reason.
+        self.assertEqual(record["status"], "fail")
+        self.assertIn("exit 1", record["reason"])
+        self.assertIn("boom", record["reason"])
 
     def test_the_contract_check_measures_a_child_that_answered_with_a_failure(self):
         seen = []

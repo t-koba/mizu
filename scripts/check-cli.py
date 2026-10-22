@@ -150,13 +150,23 @@ def probe_engine(engine, command, expected, config=None):
                     'reason': 'Isolated SDK interpreter not configured'}
         success = result.returncode == 0 and not missing
         evidence = {'exports': sorted(set(verified)), 'missing': missing}
+    # A child that answered and reported a failure keeps its own answer, and
+    # the record names it, so the receipt never claims that the exports are
+    # missing when the child simply refused to report.
+    reason = None
+    if result.returncode:
+        detail = (result.stderr or '').strip()
+        reason = 'exit %s' % result.returncode + (': ' + detail[-1000:] if detail else '')
     # The cost published is the one the bound was derived from, and the
     # shape of that evidence is the doctor's, so one child reads the same
     # way wherever it is probed.
     evidence.update(startup_evidence(cost, bound, endpoint))
-    return {'engine': engine, 'status': 'pass' if success else 'fail',
-            'exit_code': result.returncode,
-            'request_unit': adapter_contract(engine)['request_unit'], 'contract': evidence}
+    record = {'engine': engine, 'status': 'pass' if success else 'fail',
+              'exit_code': result.returncode,
+              'request_unit': adapter_contract(engine)['request_unit'], 'contract': evidence}
+    if reason is not None:
+        record['reason'] = reason
+    return record
 
 
 def main():

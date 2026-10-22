@@ -42,7 +42,10 @@ runtime code. A fourth engine needs, in this order:
    write measures nothing, so the published evidence carries no cost and the
    floor bound. A stopped probe is
    not evidence of a missing capability: product-selected stop reasons remain
-   primary, with a termination signal as secondary detail (ADR-042).
+   primary, with a termination signal as secondary detail (ADR-042). A child
+   that answered and reported a failure keeps its own answer: the capability
+   message names the child's exit code and the text it produced, so no
+   message ends with an empty detail.
 2. `src/mizu/<engine>.py`: trusted argv builder, isolated per-run config,
    event parser, `requires_sandbox = True`, no new host authority.
 3. `command_for` entry plus `engines.NAME.command` trusted argv config.

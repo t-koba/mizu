@@ -51,9 +51,9 @@ def container_runtime(config: Config) -> dict:
     if versioned.exit_code != 0:
         # A run reports its exit only after every pipe thread stopped, so a
         # zero exit means the version output was read to its end. A child
-        # that did not complete never said the runtime was missing.
-        raise Denied("Container runtime failed (exit %s): " % versioned.exit_code
-                     + (stop_note(versioned) or versioned.stderr[-1000:]))
+        # that did not complete never said the runtime was missing, and a
+        # child that answered names its own answer.
+        raise Denied("Container runtime failed: " + probe_answer(versioned))
     version = versioned.stdout.strip().splitlines()[0] if versioned.stdout.strip() else "unknown"
     if config.sandbox.mode == "single":
         # Constrained-host path: Linux user namespaces only.
@@ -63,8 +63,9 @@ def container_runtime(config: Config) -> dict:
         probe_outcome(evidence.reason, evidence.exit_code,
                       stop_note(evidence) or evidence.stderr, "Namespace helper probe", 10)
         if evidence.exit_code != 0:
-            raise Denied("Namespace helper failed (exit %s): " % evidence.exit_code
-                         + (stop_note(evidence) or evidence.stderr[-500:]))
+            # The helper that answered keeps its own answer, and the
+            # message names it rather than ending with an empty detail.
+            raise Denied("Namespace helper failed: " + probe_answer(evidence))
         lines = evidence.stdout.split()
         if len(lines) != 4 or lines[0] != "0" or lines[2] != "1" or lines[3] != "0":
             raise Denied("Single mode requires a single-ID namespace map, found: " + evidence.stdout.strip())
@@ -110,6 +111,26 @@ def probe_outcome(reason, exit_code, detail, label: str, bound: int | None = Non
     raise ConfigError(f"{label} did not complete ({reason}) and was stopped "
                       "before it could report" + stopped
                       + (f": {text[-1000:]}" if text else ""))
+
+
+def probe_answer(result) -> str:
+    """The child's own answer when it answered and reported a failure.
+
+    A child that completed is the only one that can have said what it
+    holds, so its answer is its exit code, its stop fault and the text it
+    produced. The capability message names that answer, so no message ends
+    with an empty detail and the operator sees what the child said.
+    """
+    parts = []
+    if result.exit_code:
+        parts.append('exit %s' % result.exit_code)
+    note = stop_note(result)
+    if note:
+        parts.append(note)
+    stderr = (result.stderr or '').strip()
+    if stderr:
+        parts.append(stderr[-1000:])
+    return ': '.join(parts) if parts else 'the child reported a failure'
 
 
 def probe_label(engine: str | None) -> str:
@@ -192,8 +213,13 @@ def engine_contract(config: Config, engine: str) -> dict:
             flags.extend(item["required_flags"])
         missing = [flag for flag in dict.fromkeys(flags) if not help_has_flag(result.stdout, flag)]
         if result.exit_code or missing:
+            # The child's own outcome is named beside the missing flags, so
+            # the message never ends with an empty detail. A child that
+            # answered successfully reported no failure of its own.
+            detail = ", ".join(missing)
+            answer = probe_answer(result) if result.exit_code else ""
             raise ConfigError("Codex app-server stdio capability missing: "
-                              + ", ".join(missing or [stop_note(result)]))
+                              + ": ".join(part for part in (detail, answer) if part))
         return {"request_unit": contract["request_unit"], "required_flags": sorted(set(flags)),
                 "inference": "not_run", **startup_evidence(cost, bound, endpoint)}
     launcher = ROOT / "adapters" / engine / contract["entrypoint"]
@@ -201,8 +227,10 @@ def engine_contract(config: Config, engine: str) -> dict:
         config, engine, [*command, str(launcher), "--check-contract"],
         maximum=8192, label=probe_label(engine))
     if result.exit_code:
+        # The child answered and reported a failure, so its own answer is
+        # named: the exit code, its stop fault and the text it produced.
         raise ConfigError("Required engine SDK capabilities missing: "
-                          + (stop_note(result) or result.stderr[-1000:]))
+                          + probe_answer(result))
     try:
         reported = json.loads(result.stdout.strip())
     except (json.JSONDecodeError, UnicodeError) as exc:
@@ -269,9 +297,8 @@ def node_capability(config: Config) -> str:
     if result.exit_code:
         # The child answered and reported a failure: name the failure it
         # reported, not a capability it never claimed to be missing.
-        raise ConfigError('Required Node module/stream capabilities missing'
-                          + (' (exit %s)' % result.exit_code)
-                          + (': ' + stop_note(result) if stop_note(result) else ''))
+        raise ConfigError('Required Node module/stream capabilities missing: '
+                          + probe_answer(result))
     return result.stdout.strip()
 
 
