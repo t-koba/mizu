@@ -862,6 +862,49 @@ class GateRelayBudgetTests(unittest.TestCase):
             self.assertEqual(relay.tail('d' * 10), '')
         self.assertEqual(output.getvalue(), 'a' * 50)
 
+    def test_a_capped_failing_step_keeps_its_evidence_in_the_receipt(self):
+        # The step that spends the shared relay budget hides the output of
+        # the steps that follow it, so a failing step must carry its own
+        # evidence in the receipt. Without that copy the reason the gate
+        # failed is lost: the live output is capped and the shared tail
+        # budget is already spent.
+        verbose = ''.join(f'test_suite.test_case_{index:05d} ... ok\n'
+                          for index in range(8000))
+        verbose += 'Ran 8000 tests in 1.0s\nOK\n'
+        failure = 'Error: unexpected token in bridge.test.mjs\n'
+
+        class FakeProcess:
+            def __init__(self, command, **kwargs):
+                self.command = command
+                self.stdout = io.StringIO(failure if command[0] == 'node' else verbose)
+
+            def wait(self, timeout):
+                return 1
+
+            def kill(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as temporary:
+            report = Path(temporary) / 'report.json'
+            output = io.StringIO()
+            with mock.patch.object(CHECK.sys, 'argv',
+                                   ['check.py', '--report', str(report), '--no-provision']), \
+                    mock.patch.object(CHECK, 'spawn', FakeProcess), \
+                    mock.patch.object(CHECK, 'popen_kwargs', return_value={}), \
+                    mock.patch.object(CHECK, 'terminate_process', return_value=None), \
+                    mock.patch.object(CHECK.shutil, 'which',
+                                      side_effect=lambda name: '/usr/bin/node' if name == 'node' else None), \
+                    mock.patch.object(CHECK, 'bash_available', return_value=False), \
+                    mock.patch.object(CHECK.sys, 'stdout', output):
+                status = CHECK.main()
+            receipt = json.loads(report.read_text(encoding='utf-8'))
+        self.assertEqual(status, 1)
+        entry = next(c for c in receipt['checks']
+                     if c['name'] == 'node-transport-and-extension-tests')
+        self.assertEqual(entry['status'], 'fail')
+        self.assertIn('unexpected token', str(entry.get('details', '')),
+                      'a capped failing step keeps its own evidence in the receipt')
+
 
 class UnittestTimingEvidenceTests(unittest.TestCase):
     """Per-test runtime evidence only; never a timeout policy or gate."""

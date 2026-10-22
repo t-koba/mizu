@@ -44,10 +44,13 @@ and keeps a bounded tail (16 384 bytes) of the lines that budget no longer
 covers, so the gate's output cannot grow with the number of tests the suite
 runs. A child's summary and failure text sit at the end of its output, so
 the tail keeps them visible, and the receipt keeps the structured outcome
-either way. The harness captures a command's stdout and stderr under one
-cap (`limits.output_bytes`, 262 144 bytes by default), so a gate whose
-output grew with the suite was killed by its own harness before it could
-report its own outcome.
+either way. A step whose own output the capped relay hid (the steps that
+follow the one that spends the budget) carries the tail of its output in the
+receipt's `details`, so a failing step still names why it failed. The
+harness captures a command's stdout and stderr under one cap
+(`limits.output_bytes`, 262 144 bytes by default), so a gate whose output
+grew with the suite was killed by its own harness before it could report its
+own outcome.
 Core-only installation may reuse that receipt instead of running the nested
 staged gate a second time, only via an explicit handoff:
 

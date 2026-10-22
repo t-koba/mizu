@@ -891,6 +891,15 @@ def main():
         if status == 'fail' and failure_summary is not None:
             summary = failure_summary()
             details = f'{details}; {summary}' if details else summary
+        if status == 'fail' and capped and not timed_out and failure_summary is None:
+            # The shared relay budget hid this step's own output, so the
+            # receipt carries its tail instead: a failing child keeps the
+            # evidence of why it failed even when the gate's live output is
+            # capped. A step whose output was relayed needs no copy here.
+            tail = ''.join(chunks).strip()[-1500:]
+            if tail:
+                details = (f'{details}; output tail: {tail}' if details
+                           else f'output tail: {tail}')
         entry = {'name': name, 'status': status,
                  'seconds': round(time.monotonic() - started, 3), 'exit_code': exit_code}
         if timed_out:
