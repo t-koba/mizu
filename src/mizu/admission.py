@@ -187,7 +187,20 @@ def _read_state(root: Path, capacity: int, state_bytes: int) -> list:
     return tickets
 
 
-_PENDING_ADMISSIONS: dict[tuple[str, ...], tuple[str, object]] = {}
+class _PendingAdmission:
+    """One live fail-fast ticket reusable by a later admission in this process."""
+
+    def __init__(self, identity: str, manager):
+        self.identity = identity
+        self.manager = manager
+        # At most one call may reuse/release this manager at a time. The claim
+        # is dropped when a fail-fast attempt returns while retaining its ticket.
+        self.claim = threading.Lock()
+        self.claim.acquire()
+
+
+_PENDING_ADMISSIONS: dict[tuple[str, ...], _PendingAdmission] = {}
+_PENDING_ADMISSIONS_LOCK = threading.Lock()
 
 
 class _Queue:
@@ -203,7 +216,7 @@ class _Queue:
     All dispatch locks are nonblocking, including the short queue transaction.
     """
 
-    def __init__(self, config, resources):
+    def __init__(self, config, resources, *, reuse_pending=False):
         self.root = config.data / "slots"
         self.capacity = config.limits.parallel_runs
         self.projects = config.data / "projects"
@@ -217,6 +230,14 @@ class _Queue:
         self.state_bytes = _state_bytes(self.capacity)
         self.identity = uuid.uuid4().hex
         self.alive = None
+        self.reuse_pending = bool(reuse_pending)
+        self.pending_claim = None
+
+    def _pending_key(self):
+        # Different Mizu state roots are independent admission domains even
+        # when their project-relative resource names happen to be identical.
+        root = os.path.normcase(os.path.realpath(self.root))
+        return (root, *self.resources)
 
     def _pending(self, owner):
         return lock(self.root / f"pending-{owner}.lock", blocking=False)
@@ -243,6 +264,25 @@ class _Queue:
     def _enqueue(self, tickets):
         if len(tickets) >= self.capacity:
             raise _Full("Execution admission queue is full")
+        key = self._pending_key()
+        if self.reuse_pending:
+            with _PENDING_ADMISSIONS_LOCK:
+                entry = _PENDING_ADMISSIONS.get(key)
+                if entry is not None:
+                    if not entry.claim.acquire(blocking=False):
+                        raise _Full("An admission for these resources is already active")
+                    if any(ticket["id"] == entry.identity for ticket in tickets):
+                        self.identity = entry.identity
+                        self.alive = entry.manager
+                        self.pending_claim = entry.claim
+                        return
+                    # The row was reaped while its process-local pointer
+                    # survived. Retire the stale manager before replacing it.
+                    with contextlib.suppress(Exception):
+                        entry.manager.__exit__(None, None, None)
+                    if _PENDING_ADMISSIONS.get(key) is entry:
+                        del _PENDING_ADMISSIONS[key]
+                    entry.claim.release()
         occupied = {ticket["owner"] for ticket in tickets}
         for owner in range(self.capacity):
             if owner in occupied:
@@ -256,7 +296,11 @@ class _Queue:
             tickets.append({"id": self.identity, "owner": owner,
                             "resources": list(self.resources), "enqueued_at": now()})
             self._write(tickets)
-            _PENDING_ADMISSIONS[tuple(self.resources)] = (self.identity, manager)
+            if self.reuse_pending:
+                entry = _PendingAdmission(self.identity, manager)
+                with _PENDING_ADMISSIONS_LOCK:
+                    _PENDING_ADMISSIONS[key] = entry
+                    self.pending_claim = entry.claim
             return
         raise _Full("Execution admission queue is full")
 
@@ -283,6 +327,14 @@ class _Queue:
         """
         with lock(self.root / "queue.lock", blocking=False):
             tickets = self._read()
+            if (self.pending_claim is not None
+                    and not any(ticket["id"] == self.identity for ticket in tickets)):
+                # A process-local pointer outlived its serialized ticket.
+                # Release it inside the queue transaction before retrying with
+                # a fresh identity; never rewrite queue state outside its lock.
+                self._release_pending()
+                self.identity = uuid.uuid4().hex
+                tickets = self._read()
             attempt = contextlib.ExitStack()
             try:
                 for ticket in tickets:
@@ -312,13 +364,21 @@ class _Queue:
                 raise
 
     def _release_pending(self):
-        if self.alive is not None:
-            self.alive.__exit__(None, None, None)
-            key = tuple(self.resources)
-            entry = _PENDING_ADMISSIONS.get(key)
-            if entry is not None and entry[0] == self.identity:
-                del _PENDING_ADMISSIONS[key]
-            self.alive = None
+        with _PENDING_ADMISSIONS_LOCK:
+            if self.alive is not None:
+                manager = self.alive
+                manager.__exit__(None, None, None)
+                if self.reuse_pending:
+                    key = self._pending_key()
+                    entry = _PENDING_ADMISSIONS.get(key)
+                    if (entry is not None and entry.identity == self.identity
+                            and entry.manager is manager):
+                        del _PENDING_ADMISSIONS[key]
+                self.alive = None
+            if self.pending_claim is not None:
+                if self.pending_claim.locked():
+                    self.pending_claim.release()
+                self.pending_claim = None
 
     def close(self):
         # Release first: even if another transaction is in progress, this
@@ -411,7 +471,7 @@ def admission(config, resources=(), *, wait=False, enqueue=False, stop=None, che
     # to expire, and a revalidation that is slow on a loaded host must not
     # refuse a run that never queued.
     deadline = None
-    queue = _Queue(config, resources)
+    queue = _Queue(config, resources, reuse_pending=bool(not wait and enqueue))
     if not wait and enqueue:
         _reuse_pending_admission(queue)
     try:
@@ -447,36 +507,32 @@ def admission(config, resources=(), *, wait=False, enqueue=False, stop=None, che
                 yield max(0.0, time.monotonic() - admission_started)
             return
     finally:
-        key = tuple(queue.resources)
-        entry = _PENDING_ADMISSIONS.get(key)
-        keep_queued = (not wait and bool(enqueue) and not stop.is_set()
-                       and entry is not None and entry[0] == queue.identity
-                       and queue.alive is not None)
-        if keep_queued:
-            # A fail-fast daemon ticket keeps its pending place and lock alive
-            # for the next admission attempt; it is not a blocking wait.
-            pass
-        else:
+        with _PENDING_ADMISSIONS_LOCK:
+            key = queue._pending_key()
+            entry = _PENDING_ADMISSIONS.get(key)
+            keep_queued = (queue.reuse_pending and not wait and bool(enqueue)
+                           and not stop.is_set() and entry is not None
+                           and entry.identity == queue.identity
+                           and entry.manager is queue.alive and queue.alive is not None)
+            if keep_queued and queue.pending_claim is not None:
+                # A fail-fast daemon ticket keeps its pending place and lock
+                # alive for the next attempt, but no active call owns it now.
+                if queue.pending_claim.locked():
+                    queue.pending_claim.release()
+                queue.pending_claim = None
+        if not keep_queued:
             queue.close()
 
 
 def _reuse_pending_admission(queue: "_Queue") -> None:
-    """Reuse a pending ticket this process already queued, if it is still live."""
-    key = tuple(queue.resources)
-    entry = _PENDING_ADMISSIONS.get(key)
-    if entry is None:
-        return
-    ticket_id, manager = entry
-    queue.identity = ticket_id
-    queue.alive = manager
-    try:
-        tickets = queue._read()
-    except Busy:
-        tickets = None
-    if tickets is not None and not any(
-            isinstance(t, dict) and t.get("id") == ticket_id for t in tickets):
-        with contextlib.suppress(Exception):
-            manager.__exit__(None, None, None)
-        del _PENDING_ADMISSIONS[key]
-        queue.identity = uuid.uuid4().hex
-        queue.alive = None
+    """Claim and reuse a live fail-fast ticket scoped to this queue root."""
+    key = queue._pending_key()
+    with _PENDING_ADMISSIONS_LOCK:
+        entry = _PENDING_ADMISSIONS.get(key)
+        if entry is None or not entry.claim.acquire(blocking=False):
+            return
+        queue.identity = entry.identity
+        queue.alive = entry.manager
+        queue.pending_claim = entry.claim
+        # Ticket validation and stale-row cleanup happen in attempt() while
+        # holding queue.lock; this function only claims the process-local entry.

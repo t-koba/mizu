@@ -599,6 +599,56 @@ class QueueTests(Fixture):
                 pass
         self.assertEqual(self.tickets(), [])
 
+    def test_concurrent_fail_fast_admissions_share_one_process_ticket(self):
+        self.tune(parallel_runs=2)
+        resource = self.resources('worker')[0]
+        barrier = threading.Barrier(2)
+        outcomes = []
+        def fail_fast():
+            try:
+                with admission(self.config, (resource,), wait=False, enqueue=True,
+                               check=lambda: barrier.wait(5)):
+                    outcomes.append('admitted')
+            except BaseException as exc:
+                outcomes.append(exc)
+        with lock(resource):
+            threads = [threading.Thread(target=fail_fast) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(5)
+                self.assertFalse(thread.is_alive(), 'concurrent fail-fast admission did not finish')
+            self.assertEqual(len(outcomes), 2)
+            self.assertTrue(all(isinstance(outcome, Busy) for outcome in outcomes))
+            self.assertEqual(len(self.tickets(synchronized=True)), 1)
+        # A later attempt reuses and retires the same ticket and pending lock.
+        with admission(self.config, (resource,), wait=False, enqueue=True):
+            pass
+        self.assertEqual(self.tickets(synchronized=True), [])
+
+    def test_pending_daemon_tickets_are_scoped_to_their_queue_root(self):
+        self.tune(parallel_runs=2)
+        other_data = self.config.data.parent / 'other-admission-state'
+        other_config = dataclasses.replace(self.config, data=other_data)
+        resource_a = self.resources('worker')[0]
+        resource_b = role_exclusion(other_data / 'projects' / 'sample', 'worker')
+        first = _Queue(self.config, (resource_a,), reuse_pending=True)
+        second = _Queue(other_config, (resource_b,), reuse_pending=True)
+        self.addCleanup(first.close)
+        self.addCleanup(second.close)
+        self.assertEqual(first.resources, second.resources)
+        with contextlib.ExitStack() as held:
+            held.enter_context(lock(resource_a))
+            held.enter_context(lock(resource_b))
+            for queue_obj in (first, second):
+                with self.assertRaises(Busy):
+                    queue_obj.attempt(enqueue=True)
+            self.assertEqual(len(read_json(first.root / 'queue.json')['tickets']), 1)
+            self.assertEqual(len(read_json(second.root / 'queue.json')['tickets']), 1)
+            self.assertNotEqual(first.identity, second.identity)
+        first.close()
+        second.close()
+
     def test_fail_fast_daemon_ticket_survives_continuous_one_shot_arrivals(self):
         # A daemon worker that cannot dispatch enqueues one pending ticket and
         # defers. Continuous one-shot arrivals queue behind it instead of
