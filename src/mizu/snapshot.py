@@ -16,6 +16,7 @@ from . import platform as _platform
 from .config import role_no_progress_backoff_seconds
 from .errors import CaptureLimitExceeded, Denied, LimitExceeded, SnapshotConflict
 from .fs import DIGEST, ID, PREVIEW_BYTES, PRIVATE_EVIDENCE_TREES, atomic_write, canonical, digest, lock, mkdir, now, publish_pointer, read_json, safe_read, safe_read_info, write_json, relative_parts
+from .distribution import is_private_name
 from .startup import HOST_STATE_FILES
 from .vcs import REF_PREFIX
 
@@ -255,6 +256,17 @@ class Snapshots:
         """
         return name.rsplit("/", 1)[-1] in HOST_STATE_FILES
 
+    @staticmethod
+    def _private(name: str) -> bool:
+        """Whether a workspace path names a product-private file or directory.
+
+        The product treats these names as secrets or per-installation state
+        (see ``mizu.distribution.is_private_name``). A capture leaves them
+        out whatever the operator configured, so a published tree never
+        carries them and a regenerated value never moves the tree's identity.
+        """
+        return is_private_name(name.rsplit("/", 1)[-1])
+
     def excluded(self, name: str) -> bool:
         # Legacy in-workspace upstream-ref subtree (pre-move): the store now
         # lives outside the working tree, so this only guards workspaces
@@ -309,7 +321,7 @@ class Snapshots:
                     else:
                         visible_dirs.append(d)
                     continue
-                if self.excluded(rel) or self._private_evidence(rel):
+                if self.excluded(rel) or self._private_evidence(rel) or self._private(rel):
                     continue
                 if stat.S_ISLNK(os.stat(d, dir_fd=directory_fd, follow_symlinks=False).st_mode):
                     skipped.append(rel)
@@ -321,7 +333,7 @@ class Snapshots:
                 if self._reserved_prefix(path):
                     reserved.append(path)
                     continue
-                if self.excluded(path) or self._host_state(path):
+                if self.excluded(path) or self._host_state(path) or self._private(path):
                     continue
                 info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
                 if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
@@ -348,7 +360,7 @@ class Snapshots:
                     else:
                         visible_dirs.append(d)
                     continue
-                if self.excluded(rel) or self._private_evidence(rel):
+                if self.excluded(rel) or self._private_evidence(rel) or self._private(rel):
                     continue
                 if full.is_symlink() or bool(getattr(full.lstat(), "st_file_attributes", 0) & 0x400):
                     skipped.append(rel)
@@ -360,7 +372,7 @@ class Snapshots:
                 if self._reserved_prefix(rel):
                     reserved.append(rel)
                     continue
-                if self.excluded(rel) or self._host_state(rel):
+                if self.excluded(rel) or self._host_state(rel) or self._private(rel):
                     continue
                 full = Path(directory) / name
                 try:

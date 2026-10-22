@@ -9,6 +9,15 @@ METADATA = frozenset({'README.md', 'Makefile', 'SECURITY.md', '.editorconfig', '
 EXCLUDED = frozenset({'.git', 'node_modules', '__pycache__', '.pytest_cache', '.ruff_cache', '.venv', 'dist', 'build', '.DS_Store'}) | PRIVATE_EVIDENCE_TREES
 PRIVATE = frozenset({'credentials.env', 'config.local.toml', 'installation.json', 'source-manifest.json', 'installation-checks.json'})
 
+def is_private_name(name: str) -> bool:
+    """Whether a base name is product-private and must never be captured or packaged.
+
+    One owner for the "private names" rule: names the product treats as
+    secrets or per-installation state, plus the ``.env`` family. Shared by
+    the snapshot capture and the source packager so the two can never drift.
+    """
+    return name in PRIVATE or name.startswith(".env")
+
 #: Versioned schema for the offline source-gate report reused by core-only
 #: installation. Both scripts/check.py (producer) and scripts/install.py
 #: (consumer) bind to this exact version; a mismatch is stale, not compatible.
@@ -31,7 +40,7 @@ def source_manifest_sha(root: Path) -> str:
 def source_files(root: Path):
     files = []
     def add(path):
-        if path.name in EXCLUDED | PRIVATE or path.name.startswith('.env') or path.suffix in ('.pyc', '.pyo'):
+        if path.name in EXCLUDED or is_private_name(path.name) or path.suffix in ('.pyc', '.pyo'):
             return
         relative = path.relative_to(root)
         if path.is_symlink():
@@ -52,7 +61,7 @@ def source_files(root: Path):
         for current, dirs, names in os.walk(directory, followlinks=False):
             retained = []
             for child in sorted(dirs):
-                if child in EXCLUDED | PRIVATE or child.startswith('.env'):
+                if child in EXCLUDED or is_private_name(child):
                     continue
                 path = Path(current) / child
                 if path.is_symlink():
