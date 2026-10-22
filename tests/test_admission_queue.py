@@ -16,7 +16,7 @@ import unittest
 from unittest.mock import Mock, call, patch
 
 from support import Fixture, ScriptDriver
-from mizu.admission import _Full, _Queue, admission
+from mizu.admission import _Full, _Queue, admission, role_exclusion, waiting
 from mizu.budget import Budget
 from mizu.config import load
 from mizu.errors import Busy, Cancelled, Denied, InfraExceeded
@@ -205,6 +205,77 @@ class QueueTests(Fixture):
         except BaseException:
             stack.close()
             raise
+
+    def test_status_names_the_roles_waiting_for_a_slot(self):
+        # A worker that is waiting for a slot must be distinguishable from
+        # a worker that is running and from one that was never admitted.
+        self.assertEqual(self.waiting_view(), [])
+
+        # The waiter queues for the only slot while this thread holds it.
+        self.tune(parallel_runs=1)
+
+        def waiter():
+            with admission(self.config, self.resources('worker'), wait=True):
+                pass
+
+        with admission(self.config):
+            thread = threading.Thread(target=waiter)
+            thread.start()
+            self.until(lambda: len(self.waiting_view()) == 1)
+            view = self.waiting_view()[0]
+            self.assertEqual(view["project"], "sample")
+            self.assertEqual(view["roles"], ["worker"])
+            self.assertEqual(view["slot"], 0)
+            self.assertIn("enqueued_at", view)
+        # The slot frees, the waiter takes it and leaves: the slot is no
+        # longer waited for.
+        thread.join(30)
+        self.assertFalse(thread.is_alive())
+        self.until(lambda: self.waiting_view() == [])
+
+    def test_status_does_not_name_a_ticket_whose_owner_died(self):
+        # A ticket whose pending lock is free names no waiter: the owner is
+        # gone, so the slot is not being waited for.
+        with self.queue_ticket(0, ["worker"]):
+            self.assertEqual(self.waiting_view(), [])
+
+    def test_status_reports_no_waiter_for_unreadable_queue_state(self):
+        # State nobody can read names no waiter.
+        path = self.config.data / 'slots/queue.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{not json", encoding="utf-8")
+        try:
+            self.assertEqual(self.waiting_view(), [])
+        finally:
+            path.unlink(missing_ok=True)
+
+    def waiting_view(self):
+        """The project's own view of the roles waiting for a slot."""
+        return Project(self.config, "sample").status()["admission"]
+
+    def resources(self, role):
+        """The dispatch locks one role's admission holds."""
+        return [role_exclusion(self.project.root, role)]
+
+    @contextlib.contextmanager
+    def pending_slot(self, owner):
+        """Hold a pending slot's lock, as a waiting owner does."""
+        with lock(self.config.data / 'slots' / f'pending-{owner}.lock', blocking=False):
+            yield
+
+    @contextlib.contextmanager
+    def queue_ticket(self, owner, roles):
+        """Write one admission ticket for the given roles."""
+        path = self.config.data / 'slots/queue.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        resources = [f"sample/locks/run-{role}.lock" for role in roles]
+        write_json(path, {"version": 1, "tickets": [
+            {"id": "a" * 32, "owner": owner, "resources": resources,
+             "enqueued_at": "2026-10-22T00:00:00.000000+00:00"}]})
+        try:
+            yield
+        finally:
+            path.unlink(missing_ok=True)
 
     def test_the_child_report_wait_is_a_host_cost_bound(self):
         # A spawned child is a fresh interpreter that re-imports the

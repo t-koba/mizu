@@ -101,6 +101,92 @@ class _Full(Busy):
     """Queue overflow is a deferral, not another wait for a pending place."""
 
 
+def _valid_resource(resource):
+    """Whether a resource path names a project-relative lock the queue holds."""
+    if not isinstance(resource, str):
+        return False
+    parts = resource.split("/")
+    if len(parts) != 3 or not ID.fullmatch(parts[0]) or parts[1] != "locks":
+        return False
+    name = parts[2]
+    return name == "workspace.lock" or (name.startswith("run-") and name.endswith(".lock")
+                                        and ID.fullmatch(name[4:-5]) is not None)
+
+
+def _valid_enqueued_at(value):
+    """Whether a value is a bounded, aware enqueue instant."""
+    if not isinstance(value, str) or len(value) > 32:
+        return False
+    try:
+        return datetime.fromisoformat(value).tzinfo is not None
+    except ValueError:
+        return False
+
+
+def _read_state(root: Path, capacity: int, state_bytes: int) -> list:
+    """Read the queue file's tickets, or fail closed.
+
+    Schema: ``{"version": 1, "tickets": [...]}``; a ticket names its
+    identity, its pending-slot owner and the resources it waits for, and
+    may carry the aware instant it was enqueued at. Bounds: the file is at
+    most ``state_bytes``, the ticket list is at most ``capacity`` long, and
+    every field is bounded. Trust: local coordination state. Failure:
+    ``_Invalid`` for an unreadable, oversized or malformed file, so a
+    caller never orders admissions from state nobody can read.
+    """
+    try:
+        path = root / "queue.json"
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        flags = os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+        try:
+            # Without O_NOFOLLOW (notably Windows), reject known links and
+            # special files first. This fallback cannot prevent replacement
+            # between lstat and open; the local data directory must be trusted.
+            if not nofollow and not stat.S_ISREG(path.lstat().st_mode):
+                raise ValueError("Non-regular queue state")
+            fd = os.open(path, flags)
+        except FileNotFoundError:
+            return []
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError("Non-regular queue state")
+            if info.st_size > state_bytes:
+                raise ValueError("Oversized queue state")
+            # The configured bound can be enormous even for a tiny file.
+            # Allocate only for bytes received, with fixed-size requests.
+            raw = bytearray()
+            while chunk := os.read(fd, min(64 * 1024, state_bytes + 1 - len(raw))):
+                raw.extend(chunk)
+                if len(raw) > state_bytes:  # Also catch growth after fstat.
+                    raise ValueError("Oversized queue state")
+        finally:
+            os.close(fd)
+        state = json.loads(raw)
+    except (OSError, ValueError, RecursionError):
+        raise _Invalid("Execution admission queue is unreadable") from None
+    if (not isinstance(state, dict) or set(state) != {"version", "tickets"}
+            or type(state["version"]) is not int or state["version"] != 1
+            or not isinstance(state["tickets"], list) or len(state["tickets"]) > capacity):
+        raise _Invalid("Execution admission queue is invalid")
+    tickets = state["tickets"]
+    owners, identities = set(), set()
+    for ticket in tickets:
+        if (not isinstance(ticket, dict) or set(ticket) not in ({"id", "owner", "resources"},
+                                                               {"id", "owner", "resources", "enqueued_at"})
+                or not isinstance(ticket["id"], str) or len(ticket["id"]) != 32
+                or any(c not in "0123456789abcdef" for c in ticket["id"])
+                or type(ticket["owner"]) is not int or not 0 <= ticket["owner"] < capacity
+                or not isinstance(ticket["resources"], list) or len(ticket["resources"]) > 2
+                or any(not _valid_resource(p) for p in ticket["resources"])
+                or ticket["owner"] in owners or ticket["id"] in identities
+                or ("enqueued_at" in ticket and not _valid_enqueued_at(ticket["enqueued_at"]))):
+            raise _Invalid("Execution admission queue is invalid")
+        owners.add(ticket["owner"])
+        identities.add(ticket["id"])
+    return tickets
+
+
 class _Queue:
     """A bounded list under queue.lock; fixed pending locks prove liveness.
 
@@ -122,91 +208,18 @@ class _Queue:
             self.resources = tuple(Path(p).relative_to(self.projects).as_posix() for p in resources)
         except (TypeError, ValueError):
             raise Busy("Execution admission resources are invalid") from None
-        if len(self.resources) > 2 or any(not self._valid_resource(p) for p in self.resources):
+        if len(self.resources) > 2 or any(not _valid_resource(p) for p in self.resources):
             raise Busy("Execution admission resources are invalid")
         # Bound storage and parsing by the largest canonical ticket schema.
-        # The per-ticket newline covers the comma separating list entries.
-        longest = f"{'a' * 63}/locks/run-{'a' * 63}.lock"
-        self.state_bytes = len(canonical({"version": 1, "tickets": []})) + self.capacity * len(canonical(
-            {"id": "f" * 32, "owner": self.capacity - 1, "resources": [longest, longest],
-             "enqueued_at": "2099-01-01T00:00:00.000000+00:00"}))
+        self.state_bytes = _state_bytes(self.capacity)
         self.identity = uuid.uuid4().hex
         self.alive = None
 
     def _pending(self, owner):
         return lock(self.root / f"pending-{owner}.lock", blocking=False)
 
-    @staticmethod
-    def _valid_resource(resource):
-        if not isinstance(resource, str):
-            return False
-        parts = resource.split("/")
-        if len(parts) != 3 or not ID.fullmatch(parts[0]) or parts[1] != "locks":
-            return False
-        name = parts[2]
-        return name == "workspace.lock" or (name.startswith("run-") and name.endswith(".lock")
-                                            and ID.fullmatch(name[4:-5]) is not None)
-
-    @staticmethod
-    def _valid_enqueued_at(value):
-        if not isinstance(value, str) or len(value) > 32:
-            return False
-        try:
-            return datetime.fromisoformat(value).tzinfo is not None
-        except ValueError:
-            return False
-
     def _read(self):
-        try:
-            path = self.root / "queue.json"
-            nofollow = getattr(os, "O_NOFOLLOW", 0)
-            flags = os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
-            try:
-                # Without O_NOFOLLOW (notably Windows), reject known links and
-                # special files first. This fallback cannot prevent replacement
-                # between lstat and open; the local data directory must be trusted.
-                if not nofollow and not stat.S_ISREG(path.lstat().st_mode):
-                    raise ValueError("Non-regular queue state")
-                fd = os.open(path, flags)
-            except FileNotFoundError:
-                return []
-            try:
-                info = os.fstat(fd)
-                if not stat.S_ISREG(info.st_mode):
-                    raise ValueError("Non-regular queue state")
-                if info.st_size > self.state_bytes:
-                    raise ValueError("Oversized queue state")
-                # The configured bound can be enormous even for a tiny file.
-                # Allocate only for bytes received, with fixed-size requests.
-                raw = bytearray()
-                while chunk := os.read(fd, min(64 * 1024, self.state_bytes + 1 - len(raw))):
-                    raw.extend(chunk)
-                    if len(raw) > self.state_bytes:  # Also catch growth after fstat.
-                        raise ValueError("Oversized queue state")
-            finally:
-                os.close(fd)
-            state = json.loads(raw)
-        except (OSError, ValueError, RecursionError):
-            raise _Invalid("Execution admission queue is unreadable") from None
-        if (not isinstance(state, dict) or set(state) != {"version", "tickets"}
-                or type(state["version"]) is not int or state["version"] != 1
-                or not isinstance(state["tickets"], list) or len(state["tickets"]) > self.capacity):
-            raise _Invalid("Execution admission queue is invalid")
-        tickets = state["tickets"]
-        owners, identities = set(), set()
-        for ticket in tickets:
-            if (not isinstance(ticket, dict) or set(ticket) not in ({"id", "owner", "resources"},
-                                                                   {"id", "owner", "resources", "enqueued_at"})
-                    or not isinstance(ticket["id"], str) or len(ticket["id"]) != 32
-                    or any(c not in "0123456789abcdef" for c in ticket["id"])
-                    or type(ticket["owner"]) is not int or not 0 <= ticket["owner"] < self.capacity
-                    or not isinstance(ticket["resources"], list) or len(ticket["resources"]) > 2
-                    or any(not self._valid_resource(p) for p in ticket["resources"])
-                    or ticket["owner"] in owners or ticket["id"] in identities
-                    or ("enqueued_at" in ticket and not self._valid_enqueued_at(ticket["enqueued_at"]))):
-                raise _Invalid("Execution admission queue is invalid")
-            owners.add(ticket["owner"])
-            identities.add(ticket["id"])
+        tickets = _read_state(self.root, self.capacity, self.state_bytes)
         live = []
         for ticket in tickets:
             if ticket["id"] == self.identity and self.alive is not None:
@@ -310,6 +323,57 @@ class _Queue:
                     self._read()
             except Busy:
                 pass
+
+
+def waiting(config, project: str) -> list:
+    """Every live admission ticket of one project, for the operator's view.
+
+    A ticket is live when its pending-slot lock is still held, so a ticket
+    whose owner died is not reported as a waiter. Schema: one entry per
+    ticket, naming the roles it waits for, the slot it holds and the
+    instant it was enqueued. Bounds: at most one entry per configured
+    slot. Trust: local coordination state. Failure: an unreadable or
+    malformed queue reports nothing rather than a waiter nobody can verify.
+    """
+    root = config.data / "slots"
+    capacity = max(0, config.limits.parallel_runs)
+    try:
+        tickets = _read_state(root, capacity, _state_bytes(capacity))
+    except _Invalid:
+        return []
+    live = []
+    for ticket in tickets:
+        try:
+            with lock(root / f"pending-{ticket['owner']}.lock", blocking=False):
+                continue
+        except Busy:
+            pass
+        view = _wait_view(ticket)
+        if view is not None and view["project"] == project:
+            live.append(view)
+    return live
+
+
+def _wait_view(ticket: dict) -> dict | None:
+    """One waiting ticket, as the operator sees it, or None."""
+    projects = {path.split("/")[0] for path in ticket["resources"]}
+    roles = sorted(path.split("/")[2][4:-5] for path in ticket["resources"]
+                   if path.split("/")[2].startswith("run-"))
+    if len(projects) != 1 or not roles:
+        # A ticket the operator cannot attribute names no waiter.
+        return None
+    view = {"project": projects.pop(), "roles": roles, "slot": ticket["owner"]}
+    if "enqueued_at" in ticket:
+        view["enqueued_at"] = ticket["enqueued_at"]
+    return view
+
+
+def _state_bytes(capacity: int) -> int:
+    """The byte bound of the queue file for a given pending capacity."""
+    longest = f"{'a' * 63}/locks/run-{'a' * 63}.lock"
+    return len(canonical({"version": 1, "tickets": []})) + capacity * len(canonical(
+        {"id": "f" * 32, "owner": capacity - 1, "resources": [longest, longest],
+         "enqueued_at": "2099-01-01T00:00:00.000000+00:00"}))
 
 
 @contextlib.contextmanager

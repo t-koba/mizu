@@ -674,3 +674,24 @@ constant names the reserved trees; the capture and the distribution packager
 share it, so the two cannot drift apart. The rule is not the operator's
 exclusion list, so it holds whatever the operator configured, and a snapshot
 that already holds such a path stays readable: the rule governs new captures.
+
+## ADR-048 — The operator sees the roles waiting for an execution slot
+A worker that is waiting for an execution slot looked the same as a worker
+that was running and like one that was never admitted: the queue's tickets
+were coordination state with no operator-facing view, so a project whose
+workers all sat in the queue showed nothing that distinguished capacity
+waiting from a run in progress.
+
+`mizu status` now reports the waiting roles under `admission`, beside the
+existing `active` (running) and `health` (completion) views. Each entry
+names the project, the roles the ticket waits for, the pending slot it
+holds and the instant it was enqueued, so a waiter is distinguishable from
+a running role and from one that was never admitted.
+
+The queue file's format has one owner: the reader that orders admissions
+and the operator's view both read it through the same bounded parser, so
+the view cannot report a shape the queue would refuse. A ticket is
+reported only while its pending-slot lock is still held, so a ticket whose
+owner died names no waiter, and unreadable or malformed state names no
+waiter either. The view reads; it never writes, and it never changes the
+admission order.

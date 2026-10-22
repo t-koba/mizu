@@ -137,6 +137,7 @@ class Project:
         return reset
 
     def status(self) -> dict:
+        from .admission import waiting as admission_waiting
         from .check_jobs import deferrals
         from .selection import project_status
         snapshot = self.snapshots.get()
@@ -171,6 +172,10 @@ class Project:
                 "goal_digest": snapshot.get("goal_digest"), "wake_at": snapshot.get("wake_at"),
                 # A role the check queue holds now, with the bound that ends it.
                 "check_waits": deferrals(self),
+                # The roles waiting for an execution slot now, so a waiter is
+                # distinguishable from a running role and from one that was
+                # never admitted.
+                "admission": admission_waiting(self.config, self.name),
                 "selection": project_status(self.config, self),
                 "health": {p.stem: read_json(p) for p in (self.root / "health").glob("*.json") if not p.is_symlink()},
                 "active": {p.stem: read_json(p) for p in (self.root / "active").glob("*.json") if not p.is_symlink()},
