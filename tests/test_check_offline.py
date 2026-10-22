@@ -906,6 +906,63 @@ class GateRelayBudgetTests(unittest.TestCase):
                       'a capped failing step keeps its own evidence in the receipt')
 
 
+    def test_the_printed_receipt_matches_the_receipt_the_gate_wrote(self):
+        status, stdout, receipt = self.run_gate('Ran 1 test in 0.0s\nOK\n')
+        self.assertEqual(status, 1)
+        self.assertIn(json.dumps(receipt, indent=2), stdout,
+                      'the printed receipt is the receipt the gate wrote')
+
+
+class GateReceiptOutputBudgetTests(unittest.TestCase):
+    """The printed receipt and failure summary stay inside the cap."""
+
+    def failing_checks(self, count):
+        return [{'name': f'step-{index}', 'status': 'fail', 'exit_code': 1,
+                 'details': 'child output ' + 'x' * 2000}
+                for index in range(count)]
+
+    def test_many_failing_steps_cannot_grow_the_printed_receipt(self):
+        # Each step's entry carries the tail of that step's own output, so
+        # a gate that prints the receipt whole grows with the number of
+        # failures and is killed by its own harness before it can report
+        # its outcome.
+        receipt = {'suite': 'offline', 'checks': self.failing_checks(120)}
+        text, shortened = CHECK.receipt_text(receipt)
+        self.assertTrue(shortened)
+        self.assertLessEqual(len(text.encode('utf-8')),
+                             CHECK.RECEIPT_DETAIL_BUDGET_BYTES)
+        for index in range(120):
+            self.assertIn(f'"step-{index}"', text,
+                          'every failing step is still named')
+
+    def test_a_short_receipt_is_printed_whole(self):
+        receipt = {'suite': 'offline', 'checks': [{'name': 'a', 'status': 'pass'}]}
+        text, shortened = CHECK.receipt_text(receipt)
+        self.assertFalse(shortened)
+        self.assertEqual(text, json.dumps(receipt, indent=2))
+
+    def test_the_failure_summary_names_every_failing_step(self):
+        checks = self.failing_checks(120)
+        lines = CHECK.failure_summary_lines(checks)
+        self.assertEqual(len(lines), 120)
+        self.assertIn('step-0', lines[0])
+        self.assertIn('step-119', lines[-1])
+        # The summary is the view a truncated log keeps, so its budget is
+        # spent on the last failures first.
+        self.assertIn('x' * 100, lines[-1])
+        self.assertNotIn('child output', lines[0])
+        self.assertLessEqual(sum(len(line.encode('utf-8')) + 1 for line in lines),
+                             CHECK.SUMMARY_DETAIL_BUDGET_BYTES + 120 * 80)
+
+    def test_the_gate_output_budgets_stay_inside_the_harness_cap(self):
+        from mizu.config import Limits
+        budgets = (CHECK.RELAY_BUDGET_BYTES + CHECK.RELAY_TAIL_BYTES
+                   + CHECK.RECEIPT_DETAIL_BUDGET_BYTES
+                   + CHECK.SUMMARY_DETAIL_BUDGET_BYTES)
+        self.assertLess(budgets, Limits().output_bytes,
+                        'the gate output budgets must fit the documented cap')
+
+
 class UnittestTimingEvidenceTests(unittest.TestCase):
     """Per-test runtime evidence only; never a timeout policy or gate."""
 

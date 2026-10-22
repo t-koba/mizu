@@ -175,6 +175,20 @@ RELAY_BUDGET_BYTES = 49152
 #: spent. This budget is shared as well, so the gate's stdout stays bounded
 #: however many steps it runs.
 RELAY_TAIL_BYTES = 16384
+#: The bytes the gate may print from the receipt it writes. Each step's
+#: entry carries the tail of that step's own output, so the printed receipt
+#: grew with the number of failing steps. The harness captures a command's
+#: stdout and stderr under one documented cap (`limits.output_bytes`,
+#: 262144 bytes by default), so a gate whose output grows with its own
+#: failures is killed by its harness before it can report its outcome. One
+#: budget is shared by every step's free text, exactly as the relay shares
+#: one budget: the step names, statuses, exit codes and counts are never
+#: shortened, so the gate still names every step that failed.
+RECEIPT_DETAIL_BUDGET_BYTES = 16384
+#: The bytes the tail-visible failure summary may print. The summary
+#: repeats the failing steps' own output after the receipt, and draws on
+#: its own budget for the same reason.
+SUMMARY_DETAIL_BUDGET_BYTES = 8192
 
 
 class OutputRelay:
@@ -209,6 +223,66 @@ class OutputRelay:
             data = data[len(data) - self.tail_remaining:]
         self.tail_remaining -= len(data)
         return data.decode('utf-8', 'replace')
+
+
+def receipt_text(receipt: dict, budget: int = RECEIPT_DETAIL_BUDGET_BYTES) -> tuple[str, bool]:
+    """Return the receipt text the gate prints and whether it was shortened.
+
+    Every step's free text draws on one shared budget, so the number of
+    failing steps cannot grow the gate's own output past the harness's
+    command cap. The step names, statuses, exit codes and counts are kept
+    whole: the gate must always report which steps failed. The receipt
+    written by ``--report`` keeps the full text of every step.
+    """
+    text = json.dumps(receipt, indent=2)
+    if len(text.encode('utf-8')) <= budget:
+        return text, False
+    allowance = budget
+    while True:
+        checks = []
+        remaining = allowance
+        for entry in receipt.get('checks', []):
+            item = dict(entry)
+            detail = item.get('details')
+            if isinstance(detail, str) and detail:
+                allowed = max(0, min(len(detail), remaining))
+                if allowed:
+                    item['details'] = detail[:allowed]
+                else:
+                    item.pop('details', None)
+                remaining -= allowed
+            checks.append(item)
+        reduced = dict(receipt)
+        reduced['checks'] = checks
+        text = json.dumps(reduced, indent=2)
+        if len(text.encode('utf-8')) <= budget or allowance == 0:
+            return text, True
+        allowance //= 2
+
+
+def failure_summary_lines(checks: list, budget: int = SUMMARY_DETAIL_BUDGET_BYTES) -> list[str]:
+    """Return the tail-visible failure lines within one shared budget.
+
+    Every failing step is named with its exit code; only the free text
+    that repeats the receipt's own details draws on the budget, so the
+    number of failing steps cannot grow the gate's own output. The budget
+    is spent on the last failures first, because the summary is the view a
+    truncated log keeps.
+    """
+    failing = [entry for entry in checks if entry.get('status') == 'fail']
+    details = [str(entry.get('details', '')).strip().replace('\n', ' | ')
+               for entry in failing]
+    allowances = [0] * len(failing)
+    remaining = budget
+    for index in range(len(failing) - 1, -1, -1):
+        allowed = max(0, min(len(details[index]), remaining, 1500))
+        allowances[index] = allowed
+        remaining -= allowed
+    lines = []
+    for entry, detail, allowed in zip(failing, details, allowances):
+        text = detail[-allowed:] if allowed else ''
+        lines.append(f"- {entry.get('name')}: exit={entry.get('exit_code', '?')} {text}".rstrip())
+    return lines
 
 
 def javascript_sources(root: Path | None = None) -> list:
@@ -1102,16 +1176,25 @@ def main():
     if args.report:
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(json.dumps(receipt, indent=2) + '\n')
-    print(json.dumps(receipt, indent=2))
+    printed, shortened = receipt_text(receipt)
+    print(printed)
+    if shortened:
+        # The printed receipt is a bounded view of the receipt the gate
+        # wrote: the harness's own cap ends the gate's output, so the
+        # steps' own text is shortened to keep the outcome reportable.
+        # The step names, statuses and counts are complete.
+        where = f' The full receipt is at {args.report}.' if args.report else ''
+        print("note: the printed receipt shortens the steps' own output "
+              "to stay within the harness's output cap." + where,
+              flush=True)
     if not receipt['ok']:
         # Tail-visible diagnosis: the VCS log view truncates to the tail,
         # which hides the failing entry at the head of the receipt checks
         # array (verbose progress plus later suites bury it). Re-print each
         # failure last so a timeout names the hanging test in the tail.
         print('FAILED CHECKS SUMMARY (tail-visible):', flush=True)
-        for failed in [c for c in checks if c.get('status') == 'fail']:
-            detail = str(failed.get('details', '')).strip().replace('\n', ' | ')[-1500:]
-            print(f"- {failed.get('name')}: exit={failed.get('exit_code', '?')} {detail}", flush=True)
+        for line in failure_summary_lines(checks):
+            print(line, flush=True)
     return 0 if receipt['ok'] else 1
 
 

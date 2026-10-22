@@ -51,6 +51,17 @@ harness captures a command's stdout and stderr under one cap
 (`limits.output_bytes`, 262 144 bytes by default), so a gate whose output
 grew with the suite was killed by its own harness before it could report its
 own outcome.
+
+The receipt the gate prints is bounded the same way. Its step entries carry
+the tail of each failing step's own output, so the printed receipt would
+grow with the number of failing steps; the steps' free text draws on one
+shared budget (16 384 bytes), and the tail-visible failure summary that
+follows it draws on its own (8 192 bytes), spent on the last failures first
+because the summary is the view a truncated log keeps. The step names, statuses, exit
+codes and counts are never shortened, so the gate always names every step
+that failed, and the receipt written by `--report` keeps the full text of
+every step. When the printed receipt is shortened, the gate says so on its
+own output.
 Core-only installation may reuse that receipt instead of running the nested
 staged gate a second time, only via an explicit handoff:
 
