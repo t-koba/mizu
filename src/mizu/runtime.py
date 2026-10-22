@@ -1344,13 +1344,14 @@ class Context:
         return self.project.work_items.create(
             idempotency_key=args["idempotency_key"], title=args["title"],
             origin=args.get("origin"), actor=self.role.name,
-            **({"description": args["description"]} if "description" in args else {}))
+            **({"description": args["description"]} if "description" in args else {}),
+            **({"scope": args["scope"]} if "scope" in args else {}))
 
     def _op_work_items_transition(self, args: dict) -> dict:
         return self.project.work_items.transition(
             args["id"], expected_rev=args["expected_rev"], status=args["status"],
             actor=self.role.name, reason=args.get("reason"), wait=args.get("wait"),
-            snapshot_id=args.get("snapshot_id"))
+            snapshot_id=args.get("snapshot_id"), scope=args.get("scope"))
 
     def _op_insights(self, args: dict) -> dict:
         if args.get("id"):
@@ -1385,7 +1386,8 @@ class Context:
         return self.project.insights.decide(args["id"], args["action"], args["reason"],
                                             args.get("revisit", ""), self.run_dir.name,
                                             wait=args.get("wait"),
-                                            expected_rev=args["rev"], work_item_intent=args.get("work_item_intent"))
+                                            expected_rev=args["rev"], work_item_intent=args.get("work_item_intent"),
+                                            scope=args.get("scope"))
 
     def _op_submit_insight(self, args: dict) -> dict:
         # Model submissions carry runtime-bound provenance only (source/run);

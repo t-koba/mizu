@@ -273,6 +273,16 @@ the current insight title and `{insight_id, rev}` origin, starts `open` at item
 revision 1 with no holder, and uses the decision timestamp for creation and
 update. `defer` and `reject` do not create a seed.
 
+An accept/modify decision may also state the accepted scope: the work the
+decision authorizes (1-4000 nonblank characters). It is recorded in that same
+immutable decision event and in the seeded work item, so the scope a work item
+is held to is a recorded fact rather than prose absorbed into a description or
+reason. A decision that states no scope leaves its item without one; that
+older shape stays readable history, and such an item's closure may state the
+scope it delivers. The scope is immutable in the seed, like the title and the
+origin, and is validated as bounded nonblank text. The compact page rows carry
+the scope in force as a bounded preview beside the description it belongs to.
+
 New decisions carry a `decision_key`: the first 32 lowercase hex characters of
 SHA-256 over canonical JSON `["insight-substantive-decision", insight_id, rev]`.
 Accept/modify/reject use that key as their immutable event filename; defer keeps
@@ -330,7 +340,18 @@ seed creation. A positive non-bool expected revision must match; each change
 exclusively atomically appends the full state to
 `work-items/<item-id>/<next-rev>.json`. There is no mutable index or pointer.
 Reconstruction requires consecutive revisions, with at most 256 revisions
-including the seed and 128 KiB per seed/event record. Unsafe links, unknown IDs,
+including the seed and 128 KiB per seed/event record. Every revision states the
+scope in force for the item at that revision: a revision that supplies one sets
+it from that revision on, a revision that omits one inherits the previous
+revision's scope, and a scope is never cleared. A revision that supplies a
+different scope is that item's own scope-change event, visible in its history
+and in by-ID reads; it carries a reason naming what it supersedes, and it may
+stand at the same status, so a scope change is recorded as an event rather
+than absorbed into a closure. A `done` closure may not change the scope it
+inherits: it is refused unless it states the same scope, and the change must
+be recorded in an earlier transition. A closure of an item whose seed has no
+scope may state one, which becomes the scope in force. The compact page rows
+carry the scope in force as a bounded preview. Unsafe links, unknown IDs,
 malformed/oversized records, gaps and exhausted bounds fail closed; a stale
 CAS writes nothing and must be re-read, not blindly retried. `get()` and
 `transition()` recover under the shared lock by removing only recognized

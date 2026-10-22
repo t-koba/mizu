@@ -85,6 +85,11 @@ WAIT_SCHEMA = obj({"kind": {"type": "string", "enum": ["deadline", "code_change"
                                      "action": {"type": "string", "enum": ["accept", "modify", "reject"]}},
                                     ("insight", "rev", "action"))}, ("kind",))
 
+#: One accepted-scope statement: the work a decision or item authorizes.
+#: 1-4000 nonblank characters, like the immutable description.
+SCOPE_SCHEMA = {"type": "string", "minLength": 1, "maxLength": 4000,
+                 "pattern": "[\\s\\S]*\\S[\\s\\S]*"}
+
 # CI is deliberately work-item-only; insight deferrals retain WAIT_SCHEMA.
 WORK_ITEM_WAIT_SCHEMA = obj({**WAIT_SCHEMA["properties"],
     "kind": {"type": "string", "enum": WAIT_SCHEMA["properties"]["kind"]["enum"] + ["ci"]},
@@ -141,25 +146,27 @@ DEFINITIONS = {
                                   "reason": {"type": "string", "minLength": 1, "maxLength": 4000},
                                   "title": {"type": "string", "minLength": 1, "maxLength": 200}},
                                  ("event_id", "expected_action", "outcome", "reason"))),
-    "work_items_create": ("Create self-directed or split-off work with a stable caller-chosen idempotency_key (1-128 characters) and title (1-200). Optional immutable description is 1-4000 nonblank characters; compact rows/events carry a 1024 UTF-8-byte preview and truncation flag, by-ID reads retain the full text. Omission preserves legacy seed shape. Description presence and exact text are part of retry identity. Actor is bound to the runtime role, never supplied. Optional origin has exactly one of insight_id or work_item_id plus rev; non-current referenced revisions are denied on first commit. Omitted origin is null in storage. Keys are actor-scoped: exact retries return the original immutable {record, created:false}, even after transitions; conflicting retries are denied. First commit returns created:true. No automatic retry, scheduling, decision or assignment; no model-supplied actor. Shared bounded seed/history readers and done-verification checks apply. Unsafe or malformed state fails closed; local I/O errors propagate. Retain the same key and request after cancellation or an uncertain response.",
+    "work_items_create": ("Create self-directed or split-off work with a stable caller-chosen idempotency_key (1-128 characters) and title (1-200). Optional immutable description is 1-4000 nonblank characters; compact rows/events carry a 1024 UTF-8-byte preview and truncation flag, by-ID reads retain the full text. Omission preserves legacy seed shape. Optional immutable scope (1-4000 nonblank characters) states the accepted scope of this work: later revisions inherit it, a change of it is its own recorded event, and a closure binds it. Description and scope presence and exact text are part of retry identity. Actor is bound to the runtime role, never supplied. Optional origin has exactly one of insight_id or work_item_id plus rev; non-current referenced revisions are denied on first commit. Omitted origin is null in storage. Keys are actor-scoped: exact retries return the original immutable {record, created:false}, even after transitions; conflicting retries are denied. First commit returns created:true. No automatic retry, scheduling, decision or assignment; no model-supplied actor. Shared bounded seed/history readers and done-verification checks apply. Unsafe or malformed state fails closed; local I/O errors propagate. Retain the same key and request after cancellation or an uncertain response.",
                           obj({"idempotency_key": {"type": "string", "minLength": 1, "maxLength": 128},
                                "title": {"type": "string", "minLength": 1, "maxLength": 200},
                                "description": {"type": "string", "minLength": 1, "maxLength": 4000,
                                                "pattern": "[\\s\\S]*\\S[\\s\\S]*"},
+                               "scope": SCOPE_SCHEMA,
                                "origin": dict(obj({"insight_id": text(128),
                                               "work_item_id": {"type": "string", "pattern": "^wi_[0-9a-f]{32}$"},
                                               "rev": {"type": "integer", "minimum": 1}}, ("rev",)),
                                               minProperties=2, maxProperties=2)},
                               ("idempotency_key", "title"))),
-    "work_items_transition": ("Append one work-item state transition using the required expected_rev CAS. Re-read the current work-item projection/revision after a stale-CAS refusal; retries are not automatic. Actor is bound to the runtime role, never supplied by the caller. Done requires snapshot_id for retained published history with passing digest-bound verification, and that snapshot carries the delivery: the ledger derives the tree the workspace presents and refuses a closure bound to another tree; dropped requires a nonempty reason; blocked may register a decide-style wait or a work-item-only CI wait {kind:ci, publication_id, checks} with 1-64 unique exact check names and a 2048-byte serialized-set bound; automatic VCS polling and a completed publication receipt are required. Terminal CI evidence wakes the holder without changing status. Terminal transitions may wake explicitly subscribed roles; this does not schedule or assign work.",
+    "work_items_transition": ("Append one work-item state transition using the required expected_rev CAS. Re-read the current work-item projection/revision after a stale-CAS refusal; retries are not automatic. Actor is bound to the runtime role, never supplied by the caller. An optional scope (1-4000 nonblank characters) states the accepted scope in force from this revision on; omitting it inherits the scope in force, a scope is never cleared, and a done closure may not change the scope it inherits (record a scope change in an earlier transition). Done requires snapshot_id for retained published history with passing digest-bound verification, and that snapshot carries the delivery: the ledger derives the tree the workspace presents and refuses a closure bound to another tree; dropped requires a nonempty reason; blocked may register a decide-style wait or a work-item-only CI wait {kind:ci, publication_id, checks} with 1-64 unique exact check names and a 2048-byte serialized-set bound; automatic VCS polling and a completed publication receipt are required. Terminal CI evidence wakes the holder without changing status. Terminal transitions may wake explicitly subscribed roles; this does not schedule or assign work.",
                                obj({"id": text(64), "expected_rev": {"type": "integer", "minimum": 1},
                                     "status": {"type": "string", "enum": list(STATUSES)},
                                     "reason": {"type": "string", "minLength": 1, "maxLength": 4000},
                                     "wait": WORK_ITEM_WAIT_SCHEMA,
+                                    "scope": SCOPE_SCHEMA,
                                     "snapshot_id": {"type": "string", "minLength": 64, "maxLength": 64,
                                                     "pattern": "^[0-9a-f]{64}$"}},
                                    ("id", "expected_rev", "status"))),
-    "decide": ("New create-intent seeds store the exact decision reason as immutable description (1-4000 nonblank characters); replay validates that binding when present and keeps existing seeds without descriptions unchanged. Record a proposal decision with action, reason and revisit fields. The defer action requires a revisit value. "
+    "decide": ("New create-intent seeds store the exact decision reason as immutable description (1-4000 nonblank characters); replay validates that binding when present and keeps existing seeds without descriptions unchanged. Accept/modify may state the accepted scope (1-4000 nonblank characters): the work the decision authorizes. It is recorded with the decision, carried by the seeded work item, inherited by every later revision and bound by its closure; a change of it is its own recorded event, never prose in a reason. Defer and reject store no scope. Record a proposal decision with action, reason and revisit fields. The defer action requires a revisit value. "
                "A defer may register one structured wait as {kind} with kind deadline (plus at: timezone-aware ISO "
                "timestamp), code_change, insight_decided (plus insight: proposal id), or dependency (plus recipient: "
                "responsible role and requires: {insight, rev, action} binding the exact assessed result revision and "
@@ -173,6 +180,7 @@ DEFINITIONS = {
                     "reason": text(4000), "revisit": text(2000),
                     "rev": {"type": "integer", "minimum": 1},
                     "wait": WAIT_SCHEMA,
+                    "scope": SCOPE_SCHEMA,
                     "work_item_intent": {"type": "string", "enum": ["create", "none"]}},
                    ("id", "action", "reason", "rev"))),
     "submit_insight": ("Submit an immutable proposal. Sender identity is assigned by the runtime, not the model.",

@@ -96,6 +96,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--title", help="Proposal title for submit")
     p.add_argument("--body", type=Path, help="Read Markdown body from this file; '-' reads stdin")
     p.add_argument("--work-item-intent", choices=("create", "none"), help="Work disposition for accept/modify; omitted uses source policy")
+    p.add_argument("--accepted-scope", default=None, help="Accepted scope for accept/modify decisions (1-4000 nonblank characters)")
     p.add_argument("--decision", help="Decision action for decide (accept/modify/defer/reject)")
     p.add_argument("--reason", default="", help="Decision reason for decide, withdrawal reason for withdraw")
     p.add_argument("--revisit", default="", help="Revisit condition for defer")
@@ -303,6 +304,8 @@ def _cmd_insight(config, project, args):
         raise ConfigError("--work-item-intent applies only to accept/modify decisions")
     if args.action != "page" and any(getattr(args, key, None) is not None for key in ("scope", "limit", "cursor")):
         raise ConfigError("--scope, --limit and --cursor apply only to insight page")
+    if args.action != "decide" and args.accepted_scope is not None:
+        raise ConfigError("--accepted-scope applies only to insight decide")
     if args.action == "page":
         return project.insights.list_page(scope=args.scope or "live", limit=args.limit if args.limit is not None else 30,
                                           cursor=args.cursor)
@@ -337,7 +340,8 @@ def _cmd_insight(config, project, args):
             raise ConfigError("Insight decide requires --id and --decision")
         return project.insights.decide(args.id, args.decision, args.reason or "", args.revisit or "", "operator",
                                                  wait=_parse_wait(args.wait),
-                                                 expected_rev=args.expected_rev, work_item_intent=args.work_item_intent)
+                                                 expected_rev=args.expected_rev, work_item_intent=args.work_item_intent,
+                                                 scope=args.accepted_scope)
     if args.action == "withdraw":
         if not args.id or not args.reason.strip():
             raise ConfigError("Insight withdraw requires --id and --reason")

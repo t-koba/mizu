@@ -26,8 +26,8 @@ from .fs import (DIGEST, PREVIEW_BYTES, canonical, identifier, lock, now, safe_r
                  sync_dir, text_preview, write_json)
 from .insights import _decision_key
 from .platform import IS_WINDOWS
-from .work_item_seed import (DESCRIPTION_UNSET, ITEM_ID, SEED_FIELDS, make_seed,
-                             validate_origin, validate_seed)
+from .work_item_seed import (DESCRIPTION_UNSET, ITEM_ID, SCOPE_UNSET, SEED_FIELDS, make_seed,
+                             validate_origin, validate_scope, validate_seed)
 
 MAX_REVISIONS = 256  # Includes the immutable seed at revision 1.
 STATUSES = ("open", "doing", "blocked", "done", "dropped")
@@ -36,7 +36,12 @@ STATUSES = ("open", "doing", "blocked", "done", "dropped")
 #: claim, and the ledger refuses one that cannot state it.
 LEGACY_EVENT_FIELDS = SEED_FIELDS | {"actor", "transition", "reason", "wait", "snapshot_id",
                                     "verification"}
-EVENT_FIELDS = LEGACY_EVENT_FIELDS | {"delivered_tree"}
+#: Records written before the accepted scope existed carry the delivery claim
+#: but no scope. They stay readable history.
+DELIVERED_EVENT_FIELDS = LEGACY_EVENT_FIELDS | {"delivered_tree"}
+#: A record written now always carries the scope in force, so a revision
+#: states the scope its item is held to.
+EVENT_FIELDS = DELIVERED_EVENT_FIELDS | {"scope"}
 MAX_PROJECTION_BYTES = PREVIEW_BYTES + 256
 MAX_OPEN_PAGE_ROWS = 100
 MAX_OPEN_CURSOR_CHARS = 128
@@ -192,18 +197,19 @@ class WorkItems:
 
     def create_seed(self, item_id: str, title: str, origin, stamp: str, *,
                     actor=None, idempotency_key=None, decision_key=None,
-                    description=DESCRIPTION_UNSET) -> dict:
+                    description=DESCRIPTION_UNSET, scope=SCOPE_UNSET) -> dict:
         """Preflight a new immutable seed while the caller holds insights.lock.
 
-        Validate the source's ID binding, an empty safe storage slot, and the
-        exact live origin revision. Recognized regular orphan temporaries are
+        Validate the source's ID binding, an empty safe storage slot, the
+        optional description and accepted scope, and the exact live origin
+        revision. Recognized regular orphan temporaries are
         recovered (removed without promotion) before the emptiness check; any
         numeric revision history, direct/legacy record, unknown entry, or
         unsafe/ambiguous temporary still fails closed. This does not commit:
         direct callers commit create.json; decisions embed the seed in their
         atomic event. Existing commits must use validate_seed_replay instead.
         """
-        seed = make_seed(item_id, title, origin, stamp, description=description)
+        seed = make_seed(item_id, title, origin, stamp, description=description, scope=scope)
         if decision_key is not None:
             if (actor is not None or idempotency_key is not None
                     or origin is None or "insight_id" not in origin
@@ -268,12 +274,14 @@ class WorkItems:
                 raise Denied("Conflicting work-item seed replay")
 
     def create(self, *, idempotency_key, title, actor, origin=None,
-               description=DESCRIPTION_UNSET) -> dict:
+               description=DESCRIPTION_UNSET, scope=SCOPE_UNSET) -> dict:
         """Commit one immutable seed; exact retries return the original record.
 
         Keys are actor-scoped, 1-128 characters. Reference revisions must be
         current at first commit; retries compare the immutable request before
-        consulting live references. Caller holds no lock; runtime binds actor.
+        consulting live references. The optional description and accepted
+        scope are part of that immutable request. Caller holds no lock;
+        runtime binds actor.
         """
         item_id = self._create_id(actor, idempotency_key)
         validate_origin(origin)
@@ -291,7 +299,7 @@ class WorkItems:
                     existing = self._direct_record(item_id)
             if existing is not None:
                 seed = make_seed(item_id, title, origin, existing["work_item"]["created_at"],
-                                 description=description)
+                                 description=description, scope=scope)
                 record = {"kind": "direct", "actor": actor, "idempotency_key": idempotency_key,
                           "work_item": seed}
                 if existing != record:
@@ -299,7 +307,8 @@ class WorkItems:
                 self.validate_seed_replay(seed, seed_event=existing)
                 return {"record": existing, "created": False}
             seed = self.create_seed(item_id, title, origin, now(), actor=actor,
-                                    idempotency_key=idempotency_key, description=description)
+                                    idempotency_key=idempotency_key, description=description,
+                                    scope=scope)
             record = {"kind": "direct", "actor": actor, "idempotency_key": idempotency_key,
                       "work_item": seed}
             directory.mkdir(parents=True, exist_ok=True)
@@ -639,7 +648,8 @@ class WorkItems:
         validate_seed(seed)
         if seed != make_seed(item_id, seed["title"], {"insight_id": event["id"], "rev": event["rev"]},
                              event["created_at"],
-                             **({"description": event.get("reason")} if "description" in seed else {})):
+                             **({"description": event.get("reason")} if "description" in seed else {}),
+                             **({"scope": event.get("scope")} if "scope" in seed else {})):
             raise Denied("Work-item seed does not match decision event")
         return seed
 
@@ -698,7 +708,14 @@ class WorkItems:
         WorkItems._validate_decision_key(None, decision)
         if "decision_key" in decision:
             fields.add("decision_key")
-        if (set(decision) != fields or decision.get("id") != insight_id
+        # A decision written before the accepted scope existed keeps the older
+        # field set; a decision that states one carries the extra key.
+        allowed = {frozenset(fields)}
+        if action in ("accept", "modify"):
+            allowed.add(frozenset(fields | {"scope"}))
+            if "scope" in decision:
+                validate_scope(decision["scope"])
+        if (frozenset(decision) not in allowed or decision.get("id") != insight_id
                 or type(revision) is not int or revision < 1
                 or not isinstance(decision.get("reason"), str) or not decision["reason"].strip()
                 or not isinstance(decision.get("revisit"), str)
@@ -907,16 +924,34 @@ class WorkItems:
 
     def _validate_transition(self, previous: dict, record: dict) -> None:
         fields = set(record)
-        allowed = (EVENT_FIELDS | ({"description"} if "description" in previous else set()),
-                   LEGACY_EVENT_FIELDS | ({"description"} if "description" in previous else set()))
-        if fields not in allowed:
+        # A record written now always carries the scope in force; a record
+        # written before the scope existed keeps the older field set and stays
+        # readable history.
+        description = {"description"} if "description" in previous else set()
+        allowed = {frozenset(base | description | scope)
+                   for base in (EVENT_FIELDS, DELIVERED_EVENT_FIELDS, LEGACY_EVENT_FIELDS)
+                   for scope in (set(), {"scope"})}
+        if frozenset(fields) not in allowed:
             raise Denied("Invalid work-item transition fields")
         actor = identifier(record["actor"])
         validate_origin(record["origin"])
         status = record["status"]
+        previous_scope = previous.get("scope")
+        record_scope = record.get("scope")
+        if record_scope is not None:
+            validate_scope(record_scope)
+        scope_changed = record_scope != previous_scope
         if (status not in STATUSES or previous["status"] in ("done", "dropped")
-                or status == previous["status"]):
+                or (status == previous["status"] and not scope_changed)):
             raise Denied("Invalid work-item status transition")
+        # The scope in force is inherited by every revision; it is never
+        # cleared, and a closure may not change it.
+        if previous_scope is not None and record_scope is None:
+            raise Denied("A work-item transition cannot clear the accepted scope")
+        if (status == "done" and previous_scope is not None
+                and record_scope != previous_scope):
+            raise Denied("Completion cannot change the accepted scope; "
+                         "record the scope change in an earlier transition")
         holder = actor if status == "doing" else (previous["holder"] or actor) if status == "blocked" else None
         if (any(record[key] != previous[key] for key in ("id", "title", "origin", "created_at")
                 + (("description",) if "description" in previous else ()))
@@ -928,6 +963,10 @@ class WorkItems:
         reason = record["reason"]
         if reason is not None and (not isinstance(reason, str) or not reason.strip()):
             raise Denied("Work-item reason must be nonempty text")
+        # A scope change is its own recorded event, so it carries the reason
+        # that names what it supersedes.
+        if scope_changed and (reason is None or not reason.strip()):
+            raise Denied("A scope change requires a reason")
         if status == "dropped" and reason is None:
             raise Denied("Dropping a work item requires a reason")
         if status == "blocked":
@@ -1368,6 +1407,11 @@ class WorkItems:
             preview, clipped = text_preview(item["description"], 1024)
             row["description_preview"] = preview
             row["description_truncated"] = clipped
+        scope = item.get("scope")
+        if scope is not None:
+            preview, clipped = text_preview(scope, 1024)
+            row["scope_preview"] = preview
+            row["scope_truncated"] = clipped
         reason = item.get("reason")
         if reason is not None:
             preview, clipped = text_preview(reason, 1024)
@@ -1389,6 +1433,11 @@ class WorkItems:
             preview, clipped = text_preview(item["description"], 1024)
             row["description_preview"] = preview
             row["description_truncated"] = clipped
+        scope = item.get("scope")
+        if scope is not None:
+            preview, clipped = text_preview(scope, 1024)
+            row["scope_preview"] = preview
+            row["scope_truncated"] = clipped
         reason = item.get("reason")
         if reason is not None:
             preview, clipped = text_preview(reason, 1024)
@@ -1539,10 +1588,14 @@ class WorkItems:
         return self._page_closed_impl(limit=limit, readonly=True)
 
     def transition(self, item_id: str, *, expected_rev, status, actor, reason=None,
-                   wait=None, snapshot_id=None) -> dict:
+                   wait=None, snapshot_id=None, scope=None) -> dict:
         """Append one immutable full-state CAS event; terminal metadata wakes subscribers.
 
-        Actor is trusted caller attribution, not authorization. Done validates an
+        The event states the scope in force for the item at that revision: a
+        supplied scope sets it from this revision on, an omitted one inherits
+        the previous revision's scope, a scope is never cleared, and a
+        completion may not change the scope it inherits. Actor is trusted
+        caller attribution, not authorization. Done validates an
         exact retained published snapshot and its embedded stored verification;
         that evidence is copied so later history retention cannot erase it.
         The ledger derives the tree the workspace presents and binds the
@@ -1592,13 +1645,29 @@ class WorkItems:
                 delivered_tree = presented
                 if delivered_tree != snapshot.get("code_digest"):
                     raise Denied("Completion must bind the published tree that carries the delivery")
+            # The scope in force is inherited from the previous revision. A
+            # supplied scope states a change of it, which is this revision's
+            # own scope-change event; a closure may not change it.
+            effective_scope = current.get("scope")
+            if scope is None:
+                in_force = effective_scope
+            else:
+                validate_scope(scope)
+                if (status == "done" and effective_scope is not None
+                        and scope != effective_scope):
+                    raise Denied("Completion cannot change the accepted scope; "
+                                 "record the scope change in an earlier transition")
+                if scope != effective_scope and (reason is None or not reason.strip()):
+                    raise Denied("A scope change requires a reason")
+                in_force = scope
             record = {**current, "rev": current["rev"] + 1, "status": status,
                       "updated_at": now(), "actor": actor,
                       "transition": {"from": current["status"], "to": status},
                       "holder": actor if status == "doing" else
                           (current["holder"] or actor) if status == "blocked" else None,
                       "reason": reason, "wait": registered, "snapshot_id": snapshot_id,
-                      "verification": verification, "delivered_tree": delivered_tree}
+                      "verification": verification, "delivered_tree": delivered_tree,
+                      "scope": in_force}
             self._validate_transition(current, record)
             if len(canonical(record)) > PREVIEW_BYTES:
                 raise LimitExceeded("Work-item event exceeds byte bound")

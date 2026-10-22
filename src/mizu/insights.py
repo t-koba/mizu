@@ -50,7 +50,7 @@ from pathlib import Path
 
 from . import insight_archive
 from .errors import Denied, LimitExceeded
-from .work_item_seed import make_seed, validate_seed
+from .work_item_seed import make_seed, validate_scope, validate_seed
 from .fs import PREVIEW_BYTES, canonical, digest, identifier, lock, now, read_json, safe_read, write_json, mkdir, DIGEST
 
 
@@ -86,12 +86,19 @@ def _validate_keyed_substantive_event(event, insight_id: str, rev: int, key: str
             fields.add("work_item")
     elif action != "reject":
         raise Denied("Decision event ID collision")
+    # A decision written before the accepted scope existed keeps the older
+    # field set; a decision that states one carries the extra key.
+    present = set(event)
+    shape_ok = present == fields or (action in ("accept", "modify")
+                                      and present == fields | {"scope"})
+    if shape_ok and "scope" in event:
+        validate_scope(event["scope"])
     stamp = event.get("created_at")
     try:
         parsed_stamp = dt.datetime.fromisoformat(stamp) if isinstance(stamp, str) else None
     except ValueError:
         parsed_stamp = None
-    if (set(event) != fields or event.get("id") != insight_id or type(event.get("rev")) is not int
+    if (not shape_ok or event.get("id") != insight_id or type(event.get("rev")) is not int
             or event["rev"] != rev or event.get("decision_key") != key
             or not isinstance(event.get("reason"), str) or not event["reason"].strip()
             or not isinstance(event.get("revisit"), str)
@@ -103,7 +110,8 @@ def _validate_keyed_substantive_event(event, insight_id: str, rev: int, key: str
         seed = event.get("work_item")
         validate_seed(seed)
         if seed != make_seed(f"wi_{key}", title, {"insight_id": insight_id, "rev": rev}, stamp,
-                             **({"description": event["reason"]} if "description" in seed else {})):
+                             **({"description": event["reason"]} if "description" in seed else {}),
+                             **({"scope": event.get("scope")} if "scope" in seed else {})):
             raise Denied("Malformed keyed work-item seed")
     return event
 
@@ -730,10 +738,25 @@ replacement insight without implying rejected substance.
         return digest(canonical(sorted(parts)))
 
     def decide(self, insight_id: str, action: str, reason: str, revisit: str, run: str, wait=None,
-               expected_rev: int | None = None, work_item_intent: str | None = None) -> dict:
+               expected_rev: int | None = None, work_item_intent: str | None = None,
+               scope: str | None = None) -> dict:
+        """Record one decision, optionally stating the accepted scope.
+
+        An accepted scope is the work the decision authorizes. It is recorded
+        at decision time, inherited by every later revision of the work item
+        and bound by its closure; a change of it is its own recorded event.
+        A decision that states no scope leaves the item without one, the
+        legacy shape that stays readable history.
+        """
         if work_item_intent is not None and (work_item_intent not in ("create", "none")
                                                or action not in ("accept", "modify")):
             raise Denied("work_item_intent must be create or none, only for accept/modify")
+        if scope is not None:
+            if action not in ("accept", "modify"):
+                # Defer and reject authorize no work, so they store no scope.
+                scope = None
+            else:
+                validate_scope(scope)
         intent_override = work_item_intent
         if action not in ("accept", "modify", "defer", "reject") or not reason.strip():
             raise Denied("Decision requires a supported action and a reason")
@@ -764,6 +787,7 @@ replacement insight without implying rejected substance.
                                                               current["title"])
                 if (existing["action"] != action or existing["reason"] != reason
                         or existing["revisit"] != revisit
+                        or (scope is not None and existing.get("scope") != scope)
                         or (intent_override is not None and action in ("accept", "modify")
                             and existing["work_item_intent"] != intent_override)):
                     raise Denied("Insight already decided at this revision; revise the topic to reopen it")
@@ -803,12 +827,15 @@ replacement insight without implying rejected substance.
                       "run": run, "created_at": stamped, "rev": rev, "decision_key": key}
             if action in ("accept", "modify"):
                 record["work_item_intent"] = work_item_intent
+                if scope is not None:
+                    record["scope"] = scope
             if action in ("accept", "modify") and len(canonical(record)) > PREVIEW_BYTES:
                 raise LimitExceeded("Decision event with work-item intent exceeds byte bound")
             if work_item_intent == "create":
                 record["work_item"] = work_items.create_seed(
                     f"wi_{event_id}", current["title"], {"insight_id": insight_id, "rev": rev},
-                    stamped, decision_key=key, description=reason)
+                    stamped, decision_key=key, description=reason,
+                    **({"scope": scope} if scope is not None else {}))
             if action in ("accept", "modify") and len(canonical(record)) > PREVIEW_BYTES:
                 raise LimitExceeded("Decision event with work-item intent exceeds byte bound")
             work_items.prepare_decision_write(need_wait=(registered is not None))

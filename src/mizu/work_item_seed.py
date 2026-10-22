@@ -9,7 +9,15 @@ from .fs import identifier
 
 ITEM_ID = re.compile(r"wi_([0-9a-f]{32})\Z")
 DESCRIPTION_UNSET = object()
+SCOPE_UNSET = object()
 SEED_FIELDS = {"id", "title", "origin", "status", "rev", "holder", "created_at", "updated_at"}
+#: Seed shapes: the base fields, an optional description, an optional accepted
+#: scope, or both. A seed written before the scope existed keeps the older
+#: shape and stays readable history.
+SEED_SHAPES = (frozenset(SEED_FIELDS),
+               frozenset(SEED_FIELDS | {"description"}),
+               frozenset(SEED_FIELDS | {"scope"}),
+               frozenset(SEED_FIELDS | {"description", "scope"}))
 
 
 def validate_origin(origin) -> None:
@@ -26,18 +34,35 @@ def validate_origin(origin) -> None:
         raise Denied("Invalid parent work-item ID")
 
 
+def validate_text(value, label: str) -> None:
+    """Validate one bounded nonblank seed text (the description)."""
+    if (not isinstance(value, str) or not 1 <= len(value) <= 4000
+            or not value.strip() or "\x00" in value):
+        raise Denied(f"Work-item {label} must be 1-4000 nonblank characters")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise Denied(f"Work-item {label} must be valid UTF-8") from None
+
+
+def validate_scope(value) -> None:
+    """Validate one accepted-scope statement (1-4000 nonblank characters)."""
+    if (not isinstance(value, str) or not 1 <= len(value) <= 4000
+            or not value.strip() or "\x00" in value):
+        raise Denied("An accepted scope must be 1-4000 nonblank characters")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise Denied("An accepted scope must be valid UTF-8") from None
+
+
 def validate_seed(seed) -> dict:
-    if not isinstance(seed, dict) or set(seed) not in (SEED_FIELDS, SEED_FIELDS | {"description"}):
+    if not isinstance(seed, dict) or frozenset(seed) not in SEED_SHAPES:
         raise Denied("Invalid work-item seed fields")
     if "description" in seed:
-        description = seed["description"]
-        if (not isinstance(description, str) or not 1 <= len(description) <= 4000
-                or not description.strip() or "\x00" in description):
-            raise Denied("Work-item description must be 1-4000 nonblank characters")
-        try:
-            description.encode("utf-8")
-        except UnicodeEncodeError:
-            raise Denied("Work-item description must be valid UTF-8") from None
+        validate_text(seed["description"], "description")
+    if "scope" in seed:
+        validate_scope(seed["scope"])
     validate_origin(seed["origin"])
     try:
         stamp = dt.datetime.fromisoformat(seed["created_at"])
@@ -53,11 +78,14 @@ def validate_seed(seed) -> dict:
 
 
 def make_seed(item_id: str, title: str, origin, stamp: str, *,
-              description=DESCRIPTION_UNSET) -> dict:
-    # Absence is part of the immutable v1 shape, not a null description.
+              description=DESCRIPTION_UNSET, scope=SCOPE_UNSET) -> dict:
+    # Absence is part of the immutable v1 shape, not a null description or a
+    # null scope: a seed states an accepted scope only when one was accepted.
     seed = {"id": item_id, "title": title, "origin": origin,
             "status": "open", "rev": 1, "holder": None,
             "created_at": stamp, "updated_at": stamp}
     if description is not DESCRIPTION_UNSET:
         seed["description"] = description
+    if scope is not SCOPE_UNSET:
+        seed["scope"] = scope
     return validate_seed(seed)
