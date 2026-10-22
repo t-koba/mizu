@@ -564,6 +564,39 @@ class QueueTests(Fixture):
                 self.fail('deadline admitted without capacity')
             self.assertEqual(self.tickets(), [])
 
+    def test_caller_that_never_waited_is_not_refused_by_an_expired_wait(self):
+        # The knob bounds the wait for capacity. A caller that is admitted
+        # without waiting has no wait to expire, so a slow revalidation on a
+        # loaded host must not refuse the run as an expired wait.
+        self.tune(admission_wait_seconds=1)
+        clock = {'now': 1000.0}
+        def slow_check():
+            clock['now'] += 5.0
+        with patch('mizu.admission.time.monotonic', lambda: clock['now']):
+            with admission(self.config, wait=True, check=slow_check):
+                pass
+        self.assertEqual(self.tickets(), [])
+
+    def test_admitted_run_is_not_refused_by_a_late_dispatch_revalidation(self):
+        # The ticket is retired and the slot is taken before the dispatch
+        # revalidation, so an expired wait must not lose an admitted run.
+        self.tune(parallel_runs=1, admission_wait_seconds=10)
+        clock = {'now': 1000.0}
+        admitted = {'value': False}
+        original = _Queue.attempt
+        def attempt(queue_obj, *, enqueue):
+            result = original(queue_obj, enqueue=enqueue)
+            admitted['value'] = True
+            return result
+        def late_check():
+            if admitted['value']:
+                clock['now'] += 100.0
+        with patch('mizu.admission.time.monotonic', lambda: clock['now']), \
+                patch.object(_Queue, 'attempt', attempt):
+            with admission(self.config, wait=True, check=late_check):
+                pass
+        self.assertEqual(self.tickets(), [])
+
     def test_wait_fails_fast_on_corrupt_queue(self):
         write_json(self.config.data / 'slots/queue.json', {'version': 99, 'tickets': []})
         with self.assertRaisesRegex(Busy, 'queue is invalid'), admission(self.config, wait=True):

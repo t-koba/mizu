@@ -382,7 +382,10 @@ def admission(config, resources=(), *, wait=False, stop=None, check=None):
 
     Pending capacity is derived from parallel_runs (one waiter per slot).
     Overflow and invalid state are immediate Busy. The operator selects the
-    admission_wait_seconds deadline (0 means none); poll at
+    admission_wait_seconds bound on the wait for capacity (0 means none);
+    the bound starts when the wait starts, so a caller that is admitted
+    without waiting is never refused as an expired wait, and an admitted
+    run is never refused by it. Poll at
     idle_seconds with no role/workspace/slot locks; stop wakes the wait. check
     revalidates normal authority/budget before each attempt and at dispatch,
     outside the queue transaction. Only Busy contention retries. Success
@@ -395,7 +398,11 @@ def admission(config, resources=(), *, wait=False, stop=None, check=None):
     stop = stop if stop is not None else threading.Event()
     admission_started = time.monotonic()
     window = config.limits.admission_wait_seconds
-    deadline = admission_started + window if wait and window else None
+    # The bound is a wait for capacity, so it is armed when the wait begins
+    # and not before. A caller that is admitted without waiting has no wait
+    # to expire, and a revalidation that is slow on a loaded host must not
+    # refuse a run that never queued.
+    deadline = None
     queue = _Queue(config, resources)
     try:
         while True:
@@ -412,18 +419,21 @@ def admission(config, resources=(), *, wait=False, stop=None, check=None):
             except Busy:
                 if not wait:
                     raise
+                if deadline is None and window:
+                    deadline = time.monotonic() + window
                 remaining = (max(0.0, deadline - time.monotonic())
                              if deadline is not None else config.limits.idle_seconds)
                 stop.wait(min(config.limits.idle_seconds, remaining))
                 continue
-            # The successful transaction already retired the pending ticket.
+            # The successful transaction already retired the pending ticket,
+            # so the wait for capacity is over. The dispatch revalidation
+            # still applies, but an expired wait cannot refuse a run that
+            # has already been admitted.
             with attempt:
                 if stop.is_set():
                     raise Busy("Run stopped before execution admission")
                 if check is not None:
                     check()
-                if deadline is not None and time.monotonic() >= deadline:
-                    raise Busy("Execution admission wait expired")
                 yield max(0.0, time.monotonic() - admission_started)
             return
     finally:
