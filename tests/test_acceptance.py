@@ -681,3 +681,260 @@ class AcceptanceTests(Fixture):
             acceptance.effective(self.project, ctx.snapshot)
         with self.assertRaises(Denied):
             acceptance.audit(self.project.root)
+
+    def pending_producer(self):
+        ctx = self.context()
+        job = check_jobs.submit(ctx)
+        with patch('mizu.acceptance._retain', side_effect=OSError('simulated retention interruption')):
+            with self.assertRaises(OSError):
+                self.run_job()
+        path = check_jobs.root(self.project) / job['id']
+        self.assertIn('acceptance_scope', check_jobs.raw_read(self.project, job['id']))
+        self.assertEqual(acceptance.audit(self.project.root), 0)
+        return ctx, job, path
+
+    def queued_other(self, ctx, command='healthy'):
+        self.project.verify = (command,)
+        return check_jobs.submit(ctx, purpose=command)
+
+    def assert_producer_isolated(self, filename, content, code):
+        ctx, suspect, path = self.pending_producer()
+        healthy = self.queued_other(ctx)
+        if callable(content):
+            content = canonical(content(json.loads((path / filename).read_bytes())))
+        (path / filename).write_bytes(content)
+        before = {name: (path / name).read_bytes() for name in ('job.json', 'result.json')}
+        result = self.run_job()
+        self.assertEqual(result['id'], healthy['id'])
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(result['invalid_producers'], {'entries': [{'job_id': suspect['id'], 'code': code}],
+                                                     'total': 1, 'omitted': 0})
+        self.assertEqual(acceptance.audit(self.project.root), 1)
+        receipt = acceptance.get(self.project.root,
+                                 check_jobs.raw_read(self.project, healthy['id'])['acceptance_receipt_id'])
+        self.assertEqual(receipt['producer']['id'], healthy['id'])
+        for name, raw in before.items():
+            self.assertEqual((path / name).read_bytes(), raw)
+        self.assertEqual(acceptance.recover_producers(self.project), {suspect['id']: code})
+        self.assertEqual(self.run_job()['invalid_producers'], result['invalid_producers'])
+        self.assertEqual(acceptance.audit(self.project.root), 1)
+        self.assertFalse((path / 'quarantine.json').exists())
+
+    def test_isolate_result_json_and_run_unrelated_job(self):
+        self.assert_producer_isolated('result.json', b'not json', 'result_json')
+
+    def test_isolate_result_nonobject_and_run_unrelated_job(self):
+        self.assert_producer_isolated('result.json', b'[]', 'result_integrity')
+
+    def test_isolate_result_digest_and_run_unrelated_job(self):
+        self.assert_producer_isolated('result.json', lambda r: {**r, 'code_digest': 'b' * 64},
+                                     'result_integrity')
+
+    def test_isolate_job_json_before_scheduler_sort(self):
+        self.assert_producer_isolated('job.json', b'not json', 'job_json')
+
+    def test_isolate_job_nonobject_before_scheduler_sort(self):
+        self.assert_producer_isolated('job.json', b'[]', 'job_schema')
+
+    def test_isolate_job_scope_and_run_unrelated_job(self):
+        self.assert_producer_isolated('job.json', lambda j: {**j, 'acceptance_scope':
+                                     {**j['acceptance_scope'], 'image': 'invalid'}}, 'job_scope')
+
+    def test_isolate_unbound_job_list_timestamp_before_scheduler_sort(self):
+        self.assert_producer_isolated('job.json', lambda j:
+            {**{k: v for k, v in j.items() if k != 'acceptance_scope'}, 'created_at': []},
+            'job_schema')
+
+    def test_isolate_unbound_job_object_timestamp_before_scheduler_sort(self):
+        self.assert_producer_isolated('job.json', lambda j:
+            {**{k: v for k, v in j.items() if k != 'acceptance_scope'}, 'created_at': {}},
+            'job_schema')
+
+    def test_isolate_job_json_parser_recursion_before_scheduler_sort(self):
+        self.assert_producer_isolated('job.json', b'[' * 10000 + b'0' + b']' * 10000,
+                                     'job_json')
+
+    def test_isolate_result_json_parser_recursion_and_run_unrelated_job(self):
+        self.assert_producer_isolated('result.json', b'[' * 10000 + b'0' + b']' * 10000,
+                                     'result_json')
+
+    def test_invalid_producer_bound_filters_all_and_batch_deduplicates(self):
+        ctx = self.context()
+        healthy = self.queued_other(ctx)
+        second = check_jobs.submit(self.context('reviewer'), 'printf second', kind='exec')
+        invalid = {}
+        for number in range(35):
+            job_id = f'{number:064x}'
+            path = check_jobs.root(self.project) / job_id
+            path.mkdir()
+            (path / 'job.json').write_bytes(b'not json')
+            invalid[job_id] = 'job_json'
+        result = check_jobs.run_pending(self.project, threading.Event(), sandbox_factory=FakeSandbox)
+        self.assertEqual(result['processed'], 2)
+        self.assertEqual(result['status'], 'idle')
+        self.assertEqual(result['invalid_producers'], {'entries': [{'job_id': key, 'code': invalid[key]}
+                                         for key in sorted(invalid)[:32]], 'total': 35, 'omitted': 3})
+        self.assertEqual(acceptance.recover_producers(self.project), invalid)
+        self.assertEqual(len(FakeSandbox.calls), 2)
+        self.assertIn('acceptance_receipt_id', check_jobs.raw_read(self.project, healthy['id']))
+        self.assertEqual(check_jobs.raw_read(self.project, second['id'])['status'], 'completed')
+        self.project.set_control(paused=True)
+        self.assertEqual(self.run_job(), {'status': 'deferred', 'invalid_producers': result['invalid_producers']})
+
+    def test_post_finalization_content_failure_is_reported_without_mutation(self):
+        ctx = self.context()
+        job = check_jobs.submit(ctx)
+        original = acceptance.recover_job
+        before = {}
+        def corrupt_then_recover(project, job_id):
+            path = check_jobs.root(project) / job_id
+            if (path / 'result.json').exists():
+                (path / 'result.json').write_bytes(b'not json')
+                before.update({name: (path / name).read_bytes() for name in ('job.json', 'result.json')})
+            return original(project, job_id)
+        with patch('mizu.acceptance.recover_job', side_effect=corrupt_then_recover):
+            result = self.run_job()
+        self.assertEqual(result['id'], job['id'])
+        self.assertEqual(result['invalid_producers']['entries'], [{'job_id': job['id'], 'code': 'result_json'}])
+        for name, raw in before.items():
+            self.assertEqual((check_jobs.root(self.project) / job['id'] / name).read_bytes(), raw)
+        self.assertEqual(acceptance.audit(self.project.root), 0)
+
+    def test_invalid_producer_keeps_pending_proof_eviction_pin(self):
+        from pathlib import Path
+        from mizu.errors import Busy
+        ctx, job, path = self.pending_producer()
+        value = check_jobs.raw_read(self.project, job['id'])
+        value['acknowledged'] = True
+        write_json(path / 'job.json', value)
+        (path / 'result.json').write_bytes(b'not json')
+        pending = (path / 'job.json').read_bytes()
+        self.run_job()
+        with patch.object(Path, 'glob', return_value=[path / 'job.json'] * 1024):
+            with self.assertRaises(Busy):
+                check_jobs._make_room(self.project)
+        self.assertEqual((path / 'job.json').read_bytes(), pending)
+        self.assertTrue(path.exists())
+
+    def test_valid_durable_proof_survives_corrupt_producer_cache(self):
+        ctx, job, proof = self.produce()
+        path = check_jobs.root(self.project) / job['id'] / 'job.json'
+        path.write_bytes(b'not json')
+        self.assertEqual(self.run_job()['invalid_producers']['total'], 1)
+        self.assertEqual(acceptance.effective(self.project, ctx.snapshot), proof)
+        self.assertEqual(acceptance.audit(self.project.root), 1)
+        self.assertEqual(path.read_bytes(), b'not json')
+
+    def test_backup_recovers_healthy_proof_but_refuses_unresolved_producer(self):
+        ctx, suspect, path = self.pending_producer()
+        healthy = self.queued_other(ctx)
+        (path / 'result.json').write_bytes(b'not json')
+        with patch('mizu.acceptance._retain', side_effect=OSError('simulated retention interruption')):
+            with self.assertRaises(OSError):
+                self.run_job()
+        before = {name: (path / name).read_bytes() for name in ('job.json', 'result.json')}
+        self.project.set_control(paused=True)
+        archive = self.root / 'invalid-backup.tar.gz'
+        with self.assertRaisesRegex(Denied, 'Backup refused: unresolved invalid acceptance producers') as caught:
+            storage.backup(self.project, archive)
+        self.assertIn(suspect['id'], str(caught.exception))
+        self.assertFalse(archive.exists())
+        self.assertIn('acceptance_receipt_id', check_jobs.raw_read(self.project, healthy['id']))
+        self.assertEqual(acceptance.audit(self.project.root), 1)
+        for name, raw in before.items():
+            self.assertEqual((path / name).read_bytes(), raw)
+
+    def test_producer_isolation_does_not_swallow_path_io_or_durable_failures(self):
+        ctx, job, path = self.pending_producer()
+        pending = (path / 'job.json').read_bytes()
+        result_raw = (path / 'result.json').read_bytes()
+        for error in (Denied('unsafe read'), OSError('systemic read failure'),
+                      RecursionError('read failure outside JSON parsing')):
+            with self.subTest(error=type(error).__name__):
+                with patch('mizu.acceptance.safe_read', side_effect=error):
+                    with self.assertRaises(type(error)) as caught:
+                        self.run_job()
+                    self.assertNotIsInstance(caught.exception, acceptance.InvalidProducer)
+        for target in ('job.json', 'result.json'):
+            source = path / target
+            linked = self.root / 'linked-producer'
+            os.link(source, linked)
+            try:
+                with self.assertRaises(Denied) as caught:
+                    self.run_job()
+                self.assertNotIsInstance(caught.exception, acceptance.InvalidProducer)
+            finally:
+                linked.unlink()
+            source.rename(linked)
+            self.symlink(linked, source)
+            try:
+                with self.assertRaises(Denied) as caught:
+                    self.run_job()
+                self.assertNotIsInstance(caught.exception, acceptance.InvalidProducer)
+            finally:
+                source.unlink()
+                linked.rename(source)
+        with patch('mizu.acceptance.atomic_write', side_effect=Denied('write refusal')):
+            with self.assertRaises(Denied) as caught:
+                self.run_job()
+            self.assertNotIsInstance(caught.exception, acceptance.InvalidProducer)
+        self.assertEqual((path / 'job.json').read_bytes(), pending)
+        self.assertEqual((path / 'result.json').read_bytes(), result_raw)
+        proof = acceptance.recover_job(self.project, job['id'])
+        self.object_path(proof).write_bytes(b'not json')
+        with self.assertRaises(Denied) as caught:
+            self.run_job()
+        self.assertNotIsInstance(caught.exception, acceptance.InvalidProducer)
+        with self.assertRaises(Denied):
+            acceptance.audit(self.project.root)
+
+    def test_producer_scan_refuses_shared_directory_links_and_io(self):
+        from pathlib import Path
+        self.produce()
+        base = check_jobs.root(self.project)
+        moved = self.project.root / 'moved-check-jobs'
+        base.rename(moved)
+        self.symlink(moved, base, target_is_directory=True)
+        try:
+            with self.assertRaises(Denied):
+                self.run_job()
+        finally:
+            base.unlink()
+            moved.rename(base)
+        original = Path.iterdir
+        def broken_iterdir(path):
+            if path == base:
+                raise PermissionError('shared directory unreadable')
+            return original(path)
+        with patch.object(Path, 'iterdir', broken_iterdir):
+            with self.assertRaises(PermissionError):
+                self.run_job()
+
+    def test_backup_run_recovery_stays_strict(self):
+        ctx = self.context()
+        (ctx.run_dir / 'verification.json').write_bytes(b'not json')
+        with self.assertRaises(Denied):
+            acceptance.recover_producers(self.project, include_runs=True)
+
+    def test_isolate_normalization_failure_without_retaining_proof(self):
+        self.assert_producer_isolated('result.json', lambda r: {**r, 'commands': []}, 'result_integrity')
+
+    def test_isolate_finalized_job_binding_failure(self):
+        self.assert_producer_isolated('job.json', lambda j: {**j, 'commands': ['mismatched']}, 'job_integrity')
+
+    def test_durable_index_corruption_is_not_a_producer_diagnostic(self):
+        ctx, job, proof = self.produce()
+        index = next((self.project.root / 'evidence/acceptance/index').glob('*/*.json'))
+        index.write_bytes(b'not json')
+        path = check_jobs.root(self.project) / job['id'] / 'job.json'
+        value = check_jobs.raw_read(self.project, job['id'])
+        value.pop('acceptance_receipt_id')  # Retry the durable object/index boundary.
+        write_json(path, value)
+        pending = path.read_bytes()
+        with self.assertRaises(Denied) as caught:
+            self.run_job()
+        self.assertNotIsInstance(caught.exception, acceptance.InvalidProducer)
+        self.assertEqual(path.read_bytes(), pending)
+        self.assertEqual(index.read_bytes(), b'not json')
+        with self.assertRaises(Denied):
+            acceptance.audit(self.project.root)

@@ -66,7 +66,10 @@ def backup(project: Project, destination: Path, *, verify: bool = False) -> dict
     # mutable worktree. A separate sealed snapshot captures uncommitted work.
     with quiescent(project):
         insight_archive.recover(project.root)
-        acceptance.recover_producers(project, include_runs=True)
+        invalid = acceptance.recover_producers(project, include_runs=True)
+        if invalid:
+            raise Denied('Backup refused: unresolved invalid acceptance producers: ' +
+                         json.dumps(acceptance.producer_diagnostics(invalid), sort_keys=True))
         acceptance.audit(project.root)
         captured = project.snapshots.capture_files(project.workspace)
         checkpoint = project.snapshots.create(captured, goal=project.goal, state=project.snapshots.get()["state"],

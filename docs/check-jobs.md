@@ -220,7 +220,47 @@ finalization of an oversized result. This bounded, non-authoritative disposition
 mints no proof, leaves the result bytes and execution verdict intact, and
 permits normal acknowledged cache eviction without repeated retention retries.
 It cannot later promote raw result bytes, even if the read bound increases.
-Malformed, unsafe or integrity-failing evidence still fails closed.
+Malformed or integrity-failing producer content cannot mint proof; unsafe
+paths and shared/durable store failures still refuse the operation.
+
+### Invalid producer diagnostics and operator repair
+
+Runner recovery isolates invalid individual job-cache content only after a safe,
+bounded regular-file read: malformed JSON, invalid job schema/scope, and failed
+producer/result integrity or normalization. Healthy finalized producers still
+recover, and unrelated queued jobs still run in the existing order. No switch
+or automatic retry is added. The invalid producer is excluded **before** scheduler
+sorting/reads, not treated as successful, acknowledged, quarantined or evictable;
+its bytes and any pending-proof eviction pin are left unchanged. Existing durable
+proof remains usable independently of corrupt cache bytes. The existing size-only
+retention refusal above is separate and unchanged.
+
+Every `run_one`/`run_pending` return with detected corruption includes
+`invalid_producers: {entries: [{job_id, code}], total, omitted}`. Entries are
+sorted by the validated 64-hex job ID and limited to 32; counts cover all distinct
+invalid IDs, and batch repeats are deduplicated. Codes are fixed, not exception
+text: `job_json`, `job_schema`, `job_scope`, `job_integrity`, `result_json`,
+`result_integrity`. All IDs, including those omitted from the public view, are
+excluded internally. Diagnostics can accompany `idle`, `busy`, `deferred` or a
+completed healthy job; none of those statuses means the corrupt evidence was
+resolved. A later recovery trigger rechecks the files; it does not poll or repair.
+
+Unsafe shared directories, links/hardlinks, unstable reads, systemic I/O errors,
+durable receipt/index corruption and write failures remain fatal, not isolated.
+Durable evidence audit is separate and strict. Backup retries healthy producer
+retention first, then visibly refuses if any invalid producer remains: job caches
+are excluded from archives, so a successful backup must not silently omit the
+only suspect bytes. Historical run recovery during backup also remains strict.
+
+Repair is an explicit operator action, outside autonomous recovery: pause the
+project and obtain the maintenance exclusions, preserve the suspect producer
+files and diagnostics outside the disposable cache, and investigate storage and
+source evidence. Restore only from an independently trusted intact copy; do not
+invent passing results, receipts, acknowledgements or remove a scope to unpin a
+suspect producer. If evidence cannot be restored, retain it for investigation
+rather than silently resetting it. Re-run recovery/backup after repair and check
+that the diagnostic is gone and strict durable audit succeeds. This mechanism
+provides no automatic delete, rewrite, quarantine or repair command.
 
 `objects/<receipt-id>.json` is immutable, keyed by SHA-256 of the canonical
 schema-1 receipt. `index/<code-digest>/<scope-digest>.json` is an immutable

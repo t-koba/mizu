@@ -22,6 +22,66 @@ def _digest(value):
     return isinstance(value, str) and DIGEST.fullmatch(value) is not None
 
 
+# Only safely read cache content can cross this boundary. Store/path failures
+# and durable proof validation deliberately remain ordinary Denied/OSError.
+class InvalidProducer(Denied):
+    CODES = frozenset({'job_json', 'job_schema', 'job_scope',
+                      'job_integrity', 'result_json', 'result_integrity'})
+
+    def __init__(self, job_id, code):
+        if not _digest(job_id) or code not in self.CODES:
+            raise Denied('Invalid producer diagnostic')
+        self.job_id, self.code = job_id, code
+        super().__init__(f'Invalid acceptance producer {job_id}: {code}')
+
+
+def producer_diagnostics(invalid):
+    """Bound the public view, not the internal exclusion/deduplication set."""
+    if not invalid:
+        return {}
+    entries = [{'job_id': key, 'code': invalid[key]} for key in sorted(invalid)[:32]]
+    return {'invalid_producers': {'entries': entries, 'total': len(invalid),
+                                  'omitted': len(invalid) - len(entries)}}
+
+
+def _producer_read(project, job_id, name):
+    # safe_read failures are NOT content failures. In particular, never catch
+    # Denied here: it includes unsafe links, changing files and shared paths.
+    raw = safe_read(project.root, f'check-jobs/{job_id}/{name}.json', project.config.limits.file_bytes)
+    try:
+        return json.loads(raw)
+    except (ValueError, UnicodeError, RecursionError) as exc:
+        raise InvalidProducer(job_id, name + '_json') from exc
+
+
+def read_job(project, job_id):
+    if not _digest(job_id):
+        raise Denied('Invalid acceptance job ID')
+    job = _producer_read(project, job_id, 'job')
+    # The scheduler sorts every candidate, including old/unbound terminal jobs.
+    # Keep its missing-timestamp default, but never coerce invalid content.
+    if (not isinstance(job, dict) or job.get('id') != job_id
+            or not isinstance(job.get('created_at', ''), str)):
+        raise InvalidProducer(job_id, 'job_schema')
+    return job
+
+
+def job_paths(project):
+    """Enumerate under check-jobs.lock without suppressing directory I/O errors."""
+    base = project.root / 'check-jobs'
+    if not _present(project.root, 'check-jobs'):
+        return []
+    if not stat.S_ISDIR(base.lstat().st_mode):
+        raise Denied('Unsafe acceptance producer directory')
+    paths = []
+    for child in sorted(base.iterdir()):
+        info = child.lstat()
+        if stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            if _present(project.root, f'check-jobs/{child.name}/job.json'):
+                paths.append(child / 'job.json')
+    return paths
+
+
 def _directory(root, relative):
     # Managed directories are never aliases. Reads additionally pin components
     # with safe_read. Writers are serialized by acceptance.lock.
@@ -275,31 +335,32 @@ def recover_job(project, job_id):
         if not _present(project.root, f'check-jobs/{job_id}/job.json'):
             return None  # Cache eviction is not loss of durable proof.
         try:
-            job = _read(project.root, f'check-jobs/{job_id}/job.json', project.config.limits.file_bytes)
+            job = read_job(project, job_id)
         except LimitExceeded:
             return None
-        if not isinstance(job, dict) or job.get('id') != job_id:
-            raise Denied('Invalid acceptance job')
         bound = job.get('acceptance_scope')
         if bound is None:
             return None
         if (not isinstance(bound, dict) or job.get('shared_job') or job.get('kind') != 'verify' or job.get('status') != 'completed'
                 or job.get('passed') is not True or (project.root / f'check-jobs/{job_id}/cancel.json').exists()
                 or any(bound.get(k) != job.get(k) for k in ('commands', 'execution', 'environment'))):
-            raise Denied('Invalid finalized acceptance job')
-        _scope(bound)  # Malformed scope is not a size-only retention refusal.
+            raise InvalidProducer(job_id, 'job_integrity')
+        try:
+            _scope(bound)
+        except (Denied, ValueError, UnicodeError) as exc:  # Pure validation only, no store access.
+            raise InvalidProducer(job_id, 'job_scope') from exc
         existing = job.get('acceptance_receipt_id')
         if existing is not None:
             receipt = get(project.root, existing)
             if receipt['code_digest'] != job.get('code_digest') or receipt['scope'] != bound:
-                raise Denied('Retained producer scope mismatch')
+                raise InvalidProducer(job_id, 'job_integrity')
             return existing
         try:
-            record = _read(project.root, f'check-jobs/{job_id}/result.json', project.config.limits.file_bytes)
+            record = _producer_read(project, job_id, 'result')
         except LimitExceeded:
             # Only a safely opened regular result exceeding its read bound
-            # takes this non-authoritative disposition. Unsafe paths, malformed
-            # JSON and integrity errors still refuse recovery. Removing the
+            # takes this non-authoritative disposition. Unsafe paths still
+            # refuse recovery; malformed JSON/integrity are isolated. Removing the
             # scope makes this terminal (no retry/pin or later raw promotion),
             # without inventing a receipt or changing the execution verdict.
             job.pop('acceptance_scope')
@@ -308,15 +369,19 @@ def recover_job(project, job_id):
             write_json(project.root / f'check-jobs/{job_id}/job.json', job)
             return None
         if not isinstance(record, dict) or record.get('code_digest') != job.get('code_digest'):
-            raise Denied('Acceptance result source mismatch')
+            raise InvalidProducer(job_id, 'result_integrity')
         producer = {'kind': 'check_verify', 'id': job_id, 'run': job.get('run')}
-    receipt_id = retain(project, record, bound, producer=producer)
+    try:
+        value = normalize(record, bound, producer=producer)
+    except (Denied, ValueError, UnicodeError) as exc:  # Pure normalization, never receipt/index I/O.
+        raise InvalidProducer(job_id, 'result_integrity') from exc
+    receipt_id = _retain(project.root, value)
     # Separate acquisitions: never acceptance.lock -> check-jobs.lock while
     # retaining. Eviction waits for this durable-proof acknowledgement.
     with lock(project.root / 'locks/check-jobs.lock'):
         if not _present(project.root, f'check-jobs/{job_id}/job.json'):
             return receipt_id
-        latest = _read(project.root, f'check-jobs/{job_id}/job.json', project.config.limits.file_bytes)
+        latest = read_job(project, job_id)
         if latest.get('acceptance_receipt_id') != receipt_id:
             latest['acceptance_receipt_id'] = receipt_id
             from .fs import write_json
@@ -328,14 +393,23 @@ def recover_producers(project, *, include_runs=False):
     """Recovery trigger for runner/backup; terminal producers are idempotent.
 
     Old/unbound results have no scope marker and cannot acquire one in recovery.
+    Invalid cache content is returned by ID/code, never modified or retained.
+    Callers bound the visible diagnostics separately from the exclusion set.
     Runner recovery scans only the bounded job cache. Backup maintenance can
     also retry retained run records and unindexed objects. Normal read
     projection is indexed, with no result collection or historical scan.
     """
     if include_runs:
         recover(project.root)
-    for path in sorted((project.root / 'check-jobs').glob('*/job.json')):
-        recover_job(project, path.parent.name)
+    invalid = {}
+    with lock(project.root / 'locks/check-jobs.lock'):
+        paths = job_paths(project)
+    for path in paths:
+        try:
+            recover_job(project, path.parent.name)
+        except InvalidProducer as exc:
+            invalid[exc.job_id] = exc.code
     if include_runs:
         for path in sorted((project.root / 'runs').glob('*/verification.json')):
             recover_run(project, path.parent.name)
+    return invalid

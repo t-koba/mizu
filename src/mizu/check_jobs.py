@@ -592,7 +592,16 @@ def run_one(project, stop, *, sandbox_factory=Sandbox):
     interrupted, never retried as successful; its requester can submit a new run.
     """
     from . import acceptance
-    acceptance.recover_producers(project)  # Never while holding check-jobs.lock.
+    invalid = {}
+    result = _run_one(project, stop, sandbox_factory, invalid)
+    return {**result, **acceptance.producer_diagnostics(invalid)}
+
+
+def _run_one(project, stop, sandbox_factory, invalid):
+    from . import acceptance
+    # Never while holding check-jobs.lock. Keep ALL invalid IDs out of the
+    # scheduler's reads/sort, even when only 32 diagnostics can be displayed.
+    invalid.update(acceptance.recover_producers(project))
     from .workspace_cache import maintain
     maintain(project)  # No owner/cache/slot exclusion has been acquired yet.
     control = project.control()
@@ -601,10 +610,18 @@ def run_one(project, stop, *, sandbox_factory=Sandbox):
     if shutil.disk_usage(project.root).free < project.config.limits.free_disk_mb * 1048576:
         return {'status': 'disk-reserve'}
     blocked = False
-    paths = sorted(root(project).glob('*/job.json'),
-                   key=lambda p: read_json(p, {}).get('created_at', ''))
-    for path in paths:
-        job = read_json(path, {})
+    candidates = []
+    with lock(project.root / 'locks/check-jobs.lock'):
+        for path in acceptance.job_paths(project):
+            if path.parent.name in invalid:
+                continue
+            try:
+                job = acceptance.read_job(project, path.parent.name)
+            except acceptance.InvalidProducer as exc:
+                invalid[exc.job_id] = exc.code
+                continue
+            candidates.append((path, job))
+    for path, job in sorted(candidates, key=lambda pair: pair[1].get('created_at', '')):
         if job.get('shared_job') or job.get('status') not in ('queued', 'running'):
             continue
         # Acquire only the resources this job uses. A blocked cache owner or
@@ -617,7 +634,14 @@ def run_one(project, stop, *, sandbox_factory=Sandbox):
             except Busy:
                 blocked = True
                 continue
-            job = read_json(path, {})
+            try:
+                with lock(project.root / 'locks/check-jobs.lock'):
+                    if not acceptance._present(project.root, f'check-jobs/{path.parent.name}/job.json'):
+                        continue  # Acknowledged cache eviction since enumeration.
+                    job = acceptance.read_job(project, path.parent.name)
+            except acceptance.InvalidProducer as exc:
+                invalid[exc.job_id] = exc.code
+                continue
             if job.get('shared_job') or job.get('status') not in ('queued', 'running'):
                 continue
             for slot in range(project.config.limits.parallel_checks):
@@ -652,7 +676,13 @@ def run_one(project, stop, *, sandbox_factory=Sandbox):
                 shutil.rmtree(path.parent / 'input', ignore_errors=True)
                 os.utime(root(project), None)
                 return summary(job)
-            result = _execute(project, job, stop, sandbox_factory, slot)
+            try:
+                result = _execute(project, job, stop, sandbox_factory, slot)
+            except acceptance.InvalidProducer as exc:
+                # Execution has finalized; only its retention content failed.
+                invalid[exc.job_id] = exc.code
+                os.utime(root(project), None)
+                result = summary(job)
             if result['status'] == 'cleanup_failed':
                 return quarantine(project, read(project, job['id']), slot, result.get('error', 'Cleanup failed'))
             return result
@@ -667,13 +697,15 @@ def run_pending(project, stop, *, sandbox_factory=Sandbox):
     returns immediately to the operator's existing event/recovery trigger.
     Each job retains its own durable result and frozen input checks.
     """
+    from . import acceptance
+    invalid = {}
     processed = 0
     for _ in range(project.config.limits.check_pending):
-        result = run_one(project, stop, sandbox_factory=sandbox_factory)
+        result = _run_one(project, stop, sandbox_factory, invalid)
         if result.get('status') not in ('completed', 'refused', 'cancelled', 'interrupted'):
             break
         processed += 1
-    return {**result, 'processed': processed}
+    return {**result, 'processed': processed, **acceptance.producer_diagnostics(invalid)}
 
 
 def _execute(project, job, stop, sandbox_factory, slot):
