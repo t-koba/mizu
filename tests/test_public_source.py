@@ -335,6 +335,14 @@ class EditorExportProjectionTests(Fixture):
                 with self.assertRaisesRegex(Denied, "^Bundle public-source integrity failure$"):
                     Capsule(bundle, self.project.root / "spool/editor")
 
+    def test_unreadable_projection_is_not_treated_as_a_legacy_bundle(self):
+        bundle = self.root / "bundle-unsafe-projection"
+        export(self.project, bundle)
+        (bundle / "public_source.json").unlink()
+        (bundle / "public_source.json").mkdir()
+        with self.assertRaises(Denied):
+            Capsule(bundle, self.project.root / "spool/editor")
+
     def test_tampered_projection_refused_and_legacy_bundle_reports_none(self):
         bundle = self.root / "bundle-tamper"
         export(self.project, bundle)

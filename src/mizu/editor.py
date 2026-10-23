@@ -101,10 +101,17 @@ class Capsule:
         body = {k: v for k, v in self.snapshot.items() if k != "id"}
         if digest(canonical(body)) != self.snapshot.get("id"):
             raise Denied("Bundle manifest integrity failure")
+        # Missing is the only legacy case. An unsafe, unreadable, oversized or
+        # malformed projection must fail closed rather than being mistaken for
+        # an older bundle with no projection metadata. lstat distinguishes an
+        # absent entry without following a symlink; safe_read then pins/validates
+        # any present entry and propagates every refusal.
         try:
-            raw = safe_read(self.bundle, "public_source.json", BUNDLE_MANIFEST_BYTES)
-        except (Denied, OSError):
+            (self.bundle / "public_source.json").lstat()
+        except FileNotFoundError:
             raw = None
+        else:
+            raw = safe_read(self.bundle, "public_source.json", BUNDLE_MANIFEST_BYTES)
         self.public_source = None
         if raw is not None:
             try:
