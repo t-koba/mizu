@@ -4416,9 +4416,19 @@ class Engine:
                         "insight": context.progress_insight,
                         "input": context.progress_input,
                     }
+                    # Recorded-at-finish ready-work observation: one bounded
+                    # single-row existence probe, never a live join in status.
+                    # Unreadable ledgers record explicit unknown (None) so the
+                    # diagnostic fails closed without blocking publication.
+                    try:
+                        ready_work_at_finish = bool(
+                            project.work_items.page_ready(limit=1)["items"])
+                    except (Denied, OSError):
+                        ready_work_at_finish = None
                     progress = _progress_record(context.snapshot, role_name, selected_progress,
                                                observed_progress, finished["outcome"],
-                                               obligations_digest=context.progress_obligations_digest)
+                                               obligations_digest=context.progress_obligations_digest,
+                                               ready_work=ready_work_at_finish)
                     snapshot = project.snapshots.create(
                         captured, goal=context.goal, state=finished["state"], run=run_id,
                         outcome=finished["outcome"], summary=finished["summary"], verification=verification,
@@ -4969,9 +4979,22 @@ def _progress_obligations_digest(obligations) -> str:
     return digest(canonical(rows))
 
 
+#: Sentinel for _progress_record callers that carry no ready-work observation.
+#: Omission keeps the legacy schema-1 record; writer completion always passes
+#: an explicit True/False/None and produces schema 2.
+_READY_WORK_UNSET: object = object()
+
+
 def _progress_record(snapshot: dict, role_name: str, selected: tuple[str, ...],
-                    signals: dict[str, bool], outcome: str, *, obligations_digest: str | None = None) -> dict:
-    """Build compact unit evidence and its bounded consecutive no-progress count."""
+                    signals: dict[str, bool], outcome: str, *, obligations_digest: str | None = None,
+                    ready_work: bool | None | object = _READY_WORK_UNSET) -> dict:
+    """Build compact unit evidence and its bounded consecutive no-progress count.
+
+    ``ready_work`` is the bounded ``page_ready(limit=1)`` existence probe
+    taken at writer run completion (True/False) or None when that probe was
+    unreadable. An explicit value produces a schema-2 record; omission keeps
+    the legacy schema-1 shape for direct callers without an observation.
+    """
     has_progress = any(signals[name] for name in selected)
     previous = snapshot.get("progress")
     previous_count = 0
@@ -4992,12 +5015,23 @@ def _progress_record(snapshot: dict, role_name: str, selected: tuple[str, ...],
         # sufficient to preserve the parked disposition without unbounded growth.
         count = min(101, previous_count + 1)
     obligations_digest = obligations_digest or _progress_obligations_digest(())
-    record = {"schema": 1, "signals": {name: bool(signals.get(name, False))
+    if ready_work is _READY_WORK_UNSET:
+        record = {"schema": 1, "signals": {name: bool(signals.get(name, False))
+                                            for name in PROGRESS_SIGNALS},
+                  "selected": list(selected), "role": role_name,
+                  "has_progress": has_progress, "no_progress_count": count,
+                  "obligations_digest": obligations_digest,
+                  "recorded_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="microseconds")}
+        return validate_progress(record)
+    if ready_work is not None and type(ready_work) is not bool:
+        raise Denied("Invalid ready-work observation")
+    record = {"schema": 2, "signals": {name: bool(signals.get(name, False))
                                         for name in PROGRESS_SIGNALS},
               "selected": list(selected), "role": role_name,
               "has_progress": has_progress, "no_progress_count": count,
               "obligations_digest": obligations_digest,
-              "recorded_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="microseconds")}
+              "recorded_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="microseconds"),
+              "ready_work": ready_work}
     return validate_progress(record)
 
 

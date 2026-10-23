@@ -130,6 +130,34 @@ item as blocked when it is not actionable. Thus leaving an `open`/`doing` item
 while finishing `wait` or `done` intentionally allows another writer unit at
 the configured cadence. Cache-affinity ordering is separate.
 
+### Idle-with-open-work diagnostic
+
+`Project.status()` carries a bounded `idle_with_open_work` diagnostic that
+makes one accepted scheduler slice visible without changing scheduling. It is
+active only when the published snapshot's outcome is `wait` or `continue`
+with a no-progress record (`has_progress` false) while the ready-work
+observation recorded at writer run completion is true. That observation is
+one bounded existence probe (`page_ready(limit=1)`) taken before the run's
+snapshot is created and stored immutably in the schema-2 progress record
+(`ready_work` True/False, or null when the probe was unreadable at finish);
+`open`/`doing`, or a `blocked` item whose structured wait is satisfied,
+counts as ready. `done` and `bounded` never count, progress
+(`has_progress` true) clears it, and a recorded false leaves it inactive.
+The value is recorded at finish: later work creation, drops, or due
+transitions never change the published run's diagnostic; only a newer writer
+run with its own observation moves it. Read-only runs create no snapshot and
+never move it.
+
+The durable record is the published snapshot itself (outcome plus progress
+with the schema-2 `ready_work` observation); no new durable file or lock is
+introduced, so immutable snapshots, FIFO order, lock semantics, transitions,
+no-progress recovery and publication contracts are unchanged. The recorded
+value carries no work-item ids, titles or descriptions — only existence. A
+recorded unknown reads as inactive (`unreadable_work_state`), as do a legacy
+snapshot without a progress record and schema-1 progress without the observation
+(`legacy_no_progress_record`). Malformed progress is rejected by the existing
+snapshot validator; it cannot produce an active diagnostic.
+
 ### Exact-SHA work-item CI waits
 
 Only `work_items_transition` to `blocked` accepts this additional wait:

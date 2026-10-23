@@ -37,13 +37,31 @@ _PROGRESS_TIMESTAMP = re.compile(
 
 
 def validate_progress(value: dict) -> dict:
-    """Validate the compact, immutable progress record; legacy absence is valid."""
-    fields = {"schema", "signals", "selected", "role", "has_progress",
+    """Validate the compact, immutable progress record; legacy absence is valid.
+
+    Schema 1 is the original no-progress record without any ready-work
+    observation. Schema 2 adds ``ready_work`` (True/False for the bounded
+    ``page_ready(limit=1)`` existence probe taken at writer run completion,
+    None when that probe was unreadable). Both schemas stay readable; only
+    schema 2 carries the recorded idle observation.
+    """
+    fields_v1 = {"schema", "signals", "selected", "role", "has_progress",
               "no_progress_count", "obligations_digest", "recorded_at"}
-    if not isinstance(value, dict) or set(value) != fields:
+    fields_v2 = fields_v1 | {"ready_work"}
+    if not isinstance(value, dict):
         raise Denied("Invalid snapshot progress record")
-    if type(value["schema"]) is not int or value["schema"] != 1:
+    schema = value.get("schema")
+    if type(schema) is not int or schema not in (1, 2):
         raise Denied("Invalid snapshot progress schema")
+    if schema == 1:
+        if set(value) != fields_v1:
+            raise Denied("Invalid snapshot progress record")
+    else:
+        if set(value) != fields_v2:
+            raise Denied("Invalid snapshot progress record")
+        ready = value.get("ready_work")
+        if ready is not None and type(ready) is not bool:
+            raise Denied("Invalid snapshot ready-work observation")
     signals = value["signals"]
     if (not isinstance(signals, dict) or set(signals) != set(PROGRESS_SIGNALS)
             or any(type(signals[name]) is not bool for name in PROGRESS_SIGNALS)):
@@ -92,11 +110,15 @@ def progress_projection(value: dict | None) -> dict | None:
     if value is None:
         return None
     validate_progress(value)
-    return {"schema": 1, "signals": {name: value["signals"][name] for name in PROGRESS_SIGNALS},
-            "selected": list(value["selected"]), "role": value["role"],
-            "has_progress": value["has_progress"],
-            "no_progress_count": value["no_progress_count"],
-            "recorded_at": value["recorded_at"]}
+    projected = {"schema": value["schema"],
+                 "signals": {name: value["signals"][name] for name in PROGRESS_SIGNALS},
+                 "selected": list(value["selected"]), "role": value["role"],
+                 "has_progress": value["has_progress"],
+                 "no_progress_count": value["no_progress_count"],
+                 "recorded_at": value["recorded_at"]}
+    if value["schema"] == 2:
+        projected["ready_work"] = value["ready_work"]
+    return projected
 
 
 def progress_disposition(value: dict | None, outcome: str, config=None,

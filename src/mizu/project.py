@@ -16,7 +16,7 @@ from .fs import atomic_write, identifier, lock, mkdir, now, read_json, safe_read
 from .insights import Insights
 from .process import environment, run, stop_note
 from .snapshot import (no_progress_recovery_due, open_store,
-                       progress_disposition, progress_projection)
+                       progress_disposition, progress_projection, validate_progress)
 from .work_items import WorkItems
 
 
@@ -52,6 +52,67 @@ def session_persistence_scope(config: Config, role_name: str | None) -> str:
     if sessions == {"ephemeral"}:
         return "ephemeral"
     return "conditional"
+
+
+#: Completed outcomes whose no-progress finish can idle with actionable work.
+#: ``done`` never counts: the objective is complete even with open ledger rows.
+#: ``bounded`` is not named by the accepted scope, so it never marks idle.
+IDLE_NO_PROGRESS_OUTCOMES = ("wait", "continue")
+
+
+def idle_with_open_work(snapshot: dict) -> dict:
+    """Project the recorded idle-with-open-work diagnostic from durable facts.
+
+    The published snapshot carries the outcome and progress record. Schema-2
+    progress also carries the ready-work existence observation bound at writer
+    completion: True/False from one bounded ``page_ready(limit=1)`` probe, or
+    None if that probe was unreadable. No live ledger read happens here, so
+    later work creation, drops, or due transitions cannot retroactively mark
+    the old run idle. No work-item ids, titles or descriptions are included.
+
+    Malformed or missing facts fail closed with a naming reason. Schema-1
+    progress is readable but predates the observation. Only ``wait`` and
+    ``continue`` can mark idle; ``bounded`` never does. This is diagnostic
+    only and cannot affect FIFO ordering, locks, transitions, recovery or
+    publication.
+    """
+    snapshot_id = snapshot.get("id") if isinstance(snapshot, dict) else None
+    outcome = snapshot.get("outcome") if isinstance(snapshot, dict) else None
+    progress = snapshot.get("progress") if isinstance(snapshot, dict) else None
+    if not isinstance(snapshot_id, str):
+        snapshot_id = None
+    if not isinstance(outcome, str):
+        outcome = None
+
+    def result(reason, role=None, has_progress=None, ready_work=None):
+        return {"active": reason == "no_progress_with_ready_work", "reason": reason,
+                "snapshot": snapshot_id, "outcome": outcome,
+                "role": role, "has_progress": has_progress,
+                "ready_work": ready_work}
+
+    if progress is None:
+        return result("legacy_no_progress_record")
+    if not isinstance(progress, dict):
+        return result("invalid_progress_record")
+    try:
+        validate_progress(progress)
+    except Denied:
+        role = progress.get("role")
+        return result("invalid_progress_record", role if isinstance(role, str) else None)
+
+    role, has_progress = progress["role"], progress["has_progress"]
+    if progress["schema"] == 1:
+        return result("legacy_no_progress_record", role, has_progress)
+    ready_work = progress["ready_work"]
+    if outcome not in IDLE_NO_PROGRESS_OUTCOMES:
+        return result("outcome_not_applicable", role, has_progress, ready_work)
+    if has_progress:
+        return result("has_progress", role, has_progress, ready_work)
+    if ready_work is None:
+        return result("unreadable_work_state", role, has_progress, None)
+    if not ready_work:
+        return result("no_ready_work", role, has_progress, False)
+    return result("no_progress_with_ready_work", role, has_progress, True)
 
 
 class Project:
@@ -156,6 +217,11 @@ class Project:
                            "conditional" if session_scope == "conditional" else "unknown")
         progress_disposition_value = progress_disposition(
             progress, snapshot["outcome"], self.config, progress_role)
+        # Recorded-at-finish diagnostic: no live ledger read, so later work
+        # creation, drops, or due transitions cannot retroactively mark the
+        # old run idle. The observation was bound into the progress record
+        # when this snapshot was created.
+        idle_diagnostic = idle_with_open_work(snapshot)
         return {"project": self.name, "control": self.control(), "snapshot": snapshot["id"],
                 "code_digest": snapshot["code_digest"], "created_at": snapshot["created_at"],
                 "outcome": snapshot["outcome"], "summary": snapshot["summary"],
@@ -169,6 +235,7 @@ class Project:
                                           "session_scope": session_scope,
                                           "no_progress_count": progress_count,
                                           "after": self.config.limits.no_progress_recovery_after}},
+                "idle_with_open_work": idle_diagnostic,
                 "goal_digest": snapshot.get("goal_digest"), "wake_at": snapshot.get("wake_at"),
                 # A role the check queue holds now, with the bound that ends it.
                 "check_waits": deferrals(self),
