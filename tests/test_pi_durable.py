@@ -228,6 +228,8 @@ class PolicyTests(Fixture):
             if len(dispatches) > 1:
                 did_tool_work = bool(context.tool_count or context.engine_tool_invocations)
                 if did_tool_work:
+                    self.assertIn("For the rest of this work unit only:", cfg["prompt"])
+                    self.assertIn("call mizu_finish now", cfg["prompt"])
                     self.assertEqual([t["operation"] for t in cfg["tools"]], ["finish"])
                     self.assertEqual([t["operation"] for t in bridge["tools"]], ["finish"])
                     self.assertFalse(call("files", {})["ok"])
@@ -341,6 +343,14 @@ class PolicyTests(Fixture):
                                  if bound == "deadline" else
                                  tuple(c for c in WRAP_UP_OPS if c in authority.capabilities))
                 self.assertEqual(ctx.role.engine_tools, ())
+                notice = prompt.split("\n\n", 1)[0]
+                self.assertTrue(notice.startswith("For the rest of this work unit only:"))
+                self.assertIn(f"per-run {bound} bound reached", notice)
+                self.assertIn("mizu_finish", notice)
+                self.assertNotIn("mizu_files", notice)
+                from mizu.errors import Denied
+                with self.assertRaisesRegex(Denied, "no capability"):
+                    ctx.handle("files", {})
                 ctx.handle("_hello", {})
                 ctx.handle("_budget", {"sequence": 1})
                 ctx.handle("finish", {"outcome": "wait", "summary": "bounded", "state": "done"})

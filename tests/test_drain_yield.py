@@ -1,6 +1,7 @@
 """Offline drain boundaries and fake adapter handshakes; no live/isolation claims."""
 import dataclasses
 import errno
+import json
 import threading
 from unittest.mock import patch
 
@@ -311,9 +312,20 @@ class DrainYieldTests(Fixture):
                 ctx.check_deadlines(wrap_up=True)
             self.assertEqual((ctx.workspace / "app.py").read_text(), "VALUE = 3\n")
             if len(dispatches) == 2:
+                notice, original = prompt.split("\n\n", 1)
+                self.assertIn("For the rest of this work unit only:", notice)
+                self.assertIn("per-run drain bound reached", notice)
+                self.assertNotIn("mizu_exec", notice)
+                self.assertIn("mizu_exec", json.loads(original)["unit_tool_surface"]["tools"])
                 self.assertEqual(ctx.role.engine_tools, ())
                 self.assertNotIn("exec", ctx.role.capabilities)
                 self.assertEqual(ctx.wrap_up_requests, 1)
+            if len(dispatches) >= 3:
+                self.assertIsNone(ctx.bound_hit)
+                self.assertFalse(ctx.wrap_up_attempted)
+                self.assertEqual(json.loads(prompt)["unit_tool_surface"]["tools"],
+                                 ["mizu_" + c for c in ctx.role.capabilities])
+                ctx.handle("files", {})
             ctx.handle("finish", FINISH)
             ctx.handle("_request_done", {"sequence": 1})
             return {"engine": "pi-durable", "requests": ctx.request_count}
@@ -341,6 +353,12 @@ class DrainYieldTests(Fixture):
         self.assertEqual(dispatches[-1][2], dispatches[0][2])
         self.assertNotEqual(dispatches[-1][1], dispatches[0][1])
         self.assertEqual(read_json(next_ctx.run_dir / "prompt_projection.json")["prompt_mode"], "delta")
+        # Retiring the remembered session chooses a fresh full opening without
+        # restoring a predecessor's drain restriction either.
+        path.unlink()
+        third = engine.run(self.project, "worker")
+        self.assertEqual(third["status"], "completed")
+        self.assertEqual(read_json(dispatches[-1][0].run_dir / "prompt_projection.json")["prompt_mode"], "full")
         conn = open_store(dispatches[0][2])
         try:
             self.assertTrue(load_run(conn, first["run"])["result"]["sealed"])

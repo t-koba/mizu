@@ -87,6 +87,11 @@ class DelegateTests(Fixture):
                     ctx.handle(operation, args)
                 ctx.handle("finish", {"outcome": "wait", "summary": "Children checked", "state": "Checked"})
             else:
+                decoded = json.JSONDecoder().raw_decode(prompt)[0]
+                self.assertEqual(decoded["unit_tool_surface"]["tools"],
+                                 ["mizu_" + c for c in ctx.role.capabilities])
+                self.assertNotIn("mizu_delegate", decoded["unit_tool_surface"]["tools"])
+                self.assertNotIn("mizu_exec", decoded["unit_tool_surface"]["tools"])
                 self.assertEqual(ctx.goal, pinned)
                 self.assertEqual(ctx.goal_digest, digest(pinned.encode()))
                 self.assertTrue(system_context_text(ctx.role, ctx.goal).endswith(pinned))
@@ -298,8 +303,8 @@ class DelegateTests(Fixture):
         result = Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["finish"]["outcome"], "bounded", (seen, result["finish"]))
-        self.assertIn("1 requests and 4 wrap-up tools remain", seen["notice"])
-        self.assertNotIn("3 requests and 5 wrap-up tools remain", seen["notice"])
+        self.assertIn("1 requests and 4 wrap-up tools left", seen["notice"])
+        self.assertNotIn("3 requests and 5 wrap-up tools left", seen["notice"])
 
     def test_forbidden_grants_are_refused(self):
         from mizu.runtime import DELEGATE_FORBIDDEN

@@ -76,6 +76,55 @@ class SessionDeltaTests(Fixture):
         self.assertEqual(record["session_key"], projection(self, first_result["run"])["session_key"])
         self.assertEqual(record["recent_snapshots"], 0)
 
+    def test_new_unit_after_spend_wrap_up_opens_with_its_own_surface(self):
+        from mizu.errors import LimitExceeded
+        roles = dict(self.config.roles)
+        roles["worker"] = dataclasses.replace(roles["worker"], capabilities=("files", "read", "finish"))
+        self.config = dataclasses.replace(self.config, roles=roles)
+        self.project = Project(self.config, "sample")
+        for resumed in (False, True):
+            with self.subTest(resumed=resumed):
+                # Begin without a remembered session, then exercise either a
+                # fresh full opening or a resumed delta after a bounded seal.
+                path = save_worker_session(self, {"tokens": 0})
+                path.unlink()
+                turns = []
+                def bounded(ctx, prompt, profile):
+                    turns.append((ctx, prompt))
+                    if len(turns) == 1:
+                        ctx.bound_hit = "requests"
+                        raise LimitExceeded("per-run requests exhausted")
+                    self.assertEqual(ctx.role.capabilities, ("finish",))
+                    notice, original = prompt.split("\n\n", 1)
+                    self.assertIn("For the rest of this work unit only:", notice)
+                    self.assertIn("(mizu_finish)", notice)
+                    self.assertNotIn("mizu_research", notice)
+                    self.assertEqual(json.loads(original)["unit_tool_surface"]["tools"],
+                                     ["mizu_files", "mizu_read", "mizu_finish"])
+                    with self.assertRaisesRegex(Denied, "no capability"):
+                        ctx.handle("files", {})
+                    ctx.handle("finish", {"outcome": "wait", "summary": "bounded", "state": "resume"})
+                engine = Engine(self.config, driver=ScriptDriver(bounded))
+                first = engine.run(self.project, "worker")
+                self.assertEqual(first["finish"]["outcome"], "bounded")
+                path = save_worker_session(self, {"tokens": 0})
+                if not resumed:
+                    path.unlink()
+                def new_unit(ctx, prompt, profile):
+                    decoded = json.loads(prompt)
+                    self.assertIsNone(ctx.bound_hit)
+                    self.assertFalse(ctx.wrap_up_attempted)
+                    self.assertEqual(decoded["unit_tool_surface"]["tools"],
+                                     ["mizu_files", "mizu_read", "mizu_finish"])
+                    self.assertIn("earlier work units, not later", decoded["unit_tool_surface"]["scope"])
+                    ctx.handle("files", {})  # Restored grant works, not just text.
+                    ctx.handle("finish", {"outcome": "wait", "summary": "new unit", "state": "ready"})
+                second = Engine(self.config, driver=ScriptDriver(new_unit)).run(self.project, "worker")
+                self.assertEqual(projection(self, second["run"])["prompt_mode"], "delta" if resumed else "full")
+                if resumed:
+                    self.assertEqual(projection(self, first["run"])["session_key"],
+                                     projection(self, second["run"])["session_key"])
+
     def test_age_bound_rotates_to_a_fresh_full_prompt(self):
         config = dataclasses.replace(
             self.config, limits=dataclasses.replace(self.config.limits, session_max_age_seconds=1))

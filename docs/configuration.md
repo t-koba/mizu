@@ -816,6 +816,17 @@ reasoning-effort keys (`thinkingLevel` and `cacheRetention` on pi, `model_reason
 profile switch therefore continues the role's conversation with the current
 effort; any other change still starts a fresh bounded session whose first
 unit prompt carries snapshots, pending insights, and research state.
+
+Full and resumed delta prompts open with the same names-only
+`unit_tool_surface`, derived from that dispatch role's broker tool grants. It
+is explicitly a **UNIT-OPENING** snapshot: it supersedes earlier units' wrap-up
+restrictions, never a later restriction in the same unit (a narrowed re-dispatch
+may retain the original opening prompt). Request/tool/deadline/drain wrap-up
+and tool-active missing-finish notices restrict only the rest of their own work
+unit. The opening text grants nothing, does not advertise native engine tools,
+and never replaces host capability enforcement or changes persistent-session
+identity.
+
 Pi-durable sessions instead cover only engine, backend, and the declared store
 format (see the profile section above), so compatible changes ride the live
 conversation there. On every engine, stable system instructions compose the

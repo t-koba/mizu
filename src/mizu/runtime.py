@@ -44,7 +44,7 @@ from .project import Project
 from .snapshot import (MAX_MISSING_FINISH_STREAK, PROGRESS_SIGNALS, missing_finish_recovery_due,
                        missing_finish_streak, no_progress_recovery_due,
                        progress_disposition, validate_progress)
-from .protocol import DEFINITIONS, validate
+from .protocol import DEFINITIONS, tool_definitions, validate
 from .report import previous as _previous_report, publish
 from .sandbox import Sandbox, cleanup
 from . import vcs as _vcs
@@ -830,9 +830,10 @@ class Context:
     def _bound_message(self) -> str:
         requests_left, tools_left = self._wrap_up_remaining()
         how = f"{max(0, requests_left)} requests and {max(0, tools_left)} wrap-up tools"
-        return (f"Per-run {self.bound_hit} bound reached; wrap-up only "
-                f"(finish, research, submit_insight, attach_evidence, decide) "
-                f"with {how} left")
+        tools = ", ".join(tool["name"] for tool in tool_definitions(
+            tuple(c for c in self.role.capabilities if c in WRAP_UP_OPS))) or "none"
+        return (f"For the rest of this work unit only: per-run {self.bound_hit} "
+                f"bound reached; wrap-up only ({tools}) with {how} left")
 
     def handle(self, operation: str, arguments: dict) -> dict:
         if not isinstance(operation, str) or not isinstance(arguments, dict):
@@ -3296,6 +3297,23 @@ UNIT_BEGINS_STATEMENT = (
     "seal: do useful work within your role and capabilities, then finish "
     "with mizu_finish and a short state.")
 
+def _prompt_tool_surface(context: Context) -> dict:
+    """Names-only broker surface, bounded by this dispatch role's configured grants.
+
+    This is an opening snapshot, not a live grant: narrowed re-dispatches
+    prepend their notice to the original prompt later in the same unit.
+    """
+    return {
+        "scope": (
+            "UNIT-OPENING host broker tool surface for this work unit. This "
+            "supersedes restrictions from earlier work units, not later "
+            "restrictions within this same unit. Host tools and enforcement "
+            "remain authoritative; this text grants nothing and does not "
+            "advertise native engine tools."),
+        "tools": [tool["name"] for tool in tool_definitions(context.role.capabilities)],
+    }
+
+
 def _prompt_run_identity(context: Context) -> dict:
     """Bounded run identity for the opening prompt (never fails).
 
@@ -3356,6 +3374,7 @@ def prompt_for(context: Context) -> str:
     if "vcs_read" in caps:
         ci_failures, ci_failures_may_be_truncated = ci_failures_projection(context.project)
     return json.dumps({"unit": UNIT_BEGINS_STATEMENT,
+                       "unit_tool_surface": _prompt_tool_surface(context),
                        "goal_digest": context.goal_digest,
                        "published_snapshot": {k: context.snapshot[k] for k in (
                            "id", "code_digest", "created_at", "state", "summary", "verification")},
@@ -3392,7 +3411,8 @@ def prompt_for(context: Context) -> str:
 def prompt_delta_for(context: Context, pending: list) -> str:
     """Append-only delta for a resumed persistent session.
 
-    Schema: the constant ``unit`` opening, then the ``goal_digest`` pin, the
+    Schema: the constant ``unit`` opening, then the names-only
+    ``unit_tool_surface``, the ``goal_digest`` pin, the
     pinned ``published_snapshot`` and a small ``snapshot_delta``
     (previous/current ids), then only the pending
     proposals not yet offered, an ``open_insights`` statement of the still
@@ -3432,6 +3452,7 @@ def prompt_delta_for(context: Context, pending: list) -> str:
     open_work_items = context.project.work_items.page_open(
         limit=context.config.limits.work_items_prompt)
     return json.dumps({"unit": UNIT_BEGINS_STATEMENT,
+                       "unit_tool_surface": _prompt_tool_surface(context),
                        "goal_digest": context.goal_digest,
                        "published_snapshot": {k: context.snapshot[k] for k in (
                            "id", "code_digest", "created_at", "state", "summary", "verification")},
@@ -3695,7 +3716,8 @@ class Engine:
                     if did_tool_work:
                         followup_prompt = (
                             "The prior turn returned normally without calling mizu_finish. "
-                            "This work unit remains open. Do not repeat the work or call any other tool; "
+                            "This work unit remains open. For the rest of this work unit only: "
+                            "do not repeat the work or call any other tool; "
                             "call mizu_finish now with an accurate outcome and summary. No action may follow the seal.")
                         followup_role = dataclasses.replace(base_role, capabilities=("finish",),
                                                             engine_tools=(), selector="")
@@ -4416,15 +4438,10 @@ class Engine:
                                     c in context.role.capabilities for c in ("exec", "experiment", "verify")):
                                 container_runtime(self.config)
                                 cleanup(self.config, project.root, role_name, owner=True)
-                            requests_left, tools_left = context._wrap_up_remaining()
-                            notice = (f"Per-run {context.bound_hit} budget exhausted with no finish "
-                                      f"sealed. Wrap-up only: seal with finish (recorded as a bounded "
-                                      f"end) or use research, submit_insight, attach_evidence, decide. "
-                                      f"Keep the published state unless this run changed it. "
-                                      f"{max(0, requests_left)} requests and "
-                                      f"{max(0, tools_left)} wrap-up tools remain.")
-                            if context.bound_hit == "drain":
-                                notice = context._bound_message()
+                            notice = context._bound_message()
+                            if context.bound_hit != "drain":
+                                notice += (". Seal with finish (recorded as a bounded end). "
+                                           "Keep the published state unless this run changed it.")
                             context.execution_attempt += 1
                             model_result = self._execute(context, driver, notice + "\n\n" + prompt)
                         finally:

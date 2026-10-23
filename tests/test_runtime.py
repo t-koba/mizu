@@ -842,6 +842,52 @@ class PromptProjectionTests(Fixture):
             self.assertEqual(json.loads(prompt)["run"],
                              {"id": worker_dir.name, "started_at": "2026-10-18T00:00:00+00:00"})
 
+    def test_unit_opening_surface_uses_dispatch_role_not_retained_authority(self):
+        import json
+        from mizu.protocol import tool_definitions
+        from mizu.runtime import prompt_for, prompt_delta_for
+        for name in self.config.roles:
+            with self.subTest(role=name):
+                ctx = self.context(name)
+                # Neither retained authority, session identity nor spend owner
+                # may widen what the model is told this dispatch exposes.
+                ctx.turn_authority_role = self.config.roles["worker"]
+                ctx.session_identity_capabilities = self.config.roles["worker"].capabilities
+                ctx.spend_role = self.config.roles["worker"]
+                full = json.loads(prompt_for(ctx))
+                delta = json.loads(prompt_delta_for(ctx, []))
+                surface = full["unit_tool_surface"]
+                self.assertEqual(surface, delta["unit_tool_surface"])
+                self.assertEqual(list(full)[:3], ["unit", "unit_tool_surface", "goal_digest"])
+                self.assertEqual(list(delta)[:3], ["unit", "unit_tool_surface", "goal_digest"])
+                self.assertEqual(surface["tools"], [t["name"] for t in tool_definitions(ctx.role.capabilities)])
+                self.assertIn("UNIT-OPENING", surface["scope"])
+                self.assertIn("earlier work units, not later", surface["scope"])
+                self.assertIn("this same unit", surface["scope"])
+                self.assertIn("this text grants nothing", surface["scope"])
+                # Bounds and authority can change within this unit; even if a
+                # prompt is explicitly rebuilt it reports only the reduced role.
+                ctx.role = dataclasses.replace(ctx.role, capabilities=("finish",), engine_tools=())
+                self.assertEqual(json.loads(prompt_for(ctx))["unit_tool_surface"]["tools"], ["mizu_finish"])
+                with self.assertRaisesRegex(Denied, "no capability"):
+                    ctx.handle("files", {})
+
+    def test_bound_notices_list_only_granted_wrap_up_operations(self):
+        from mizu.runtime import WRAP_UP_OPS
+        ctx = self.context("worker")
+        ctx.role = dataclasses.replace(ctx.role, capabilities=("files", "finish", "research"))
+        ctx.turn_authority_role = self.config.roles["worker"]
+        for bound in ("requests", "tools", "deadline", "drain"):
+            with self.subTest(bound=bound):
+                ctx.bound_hit = bound
+                notice = ctx._bound_message()
+                self.assertTrue(notice.startswith("For the rest of this work unit only:"))
+                self.assertIn(f"per-run {bound} bound reached", notice)
+                self.assertIn("(mizu_finish, mizu_research)", notice)
+                for operation in WRAP_UP_OPS - {"finish", "research"}:
+                    self.assertNotIn("mizu_" + operation, notice)
+                self.assertNotIn("mizu_files", notice)
+
     def test_finish_refuses_unknown_next_profile(self):
         from mizu.errors import Denied
         finish = {"outcome": "continue", "summary": "s", "state": "n",
@@ -1358,6 +1404,15 @@ class WrapUpTests(Fixture):
                 seen.append("first")
                 ctx.bound_hit = "requests"
                 raise LimitExceeded("Per-run provider request budget exhausted")
+            import json
+            self.assertTrue(prompt.startswith("For the rest of this work unit only:"))
+            notice, original = prompt.split("\n\n", 1)
+            self.assertIn("mizu_finish", notice)
+            self.assertNotIn("mizu_files", notice)
+            self.assertEqual(json.loads(original)["unit_tool_surface"]["tools"],
+                             ["mizu_" + c for c in self.config.roles["worker"].capabilities])
+            with self.assertRaisesRegex(Denied, "no capability"):
+                ctx.handle("files", {})
             seen.append("wrap-up")
             seen.append(tuple(sorted(ctx.role.capabilities)))
             seen.append(tuple(ctx.role.engine_tools))
@@ -1390,7 +1445,9 @@ class WrapUpTests(Fixture):
                                   "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
         Engine(self.config, driver=ScriptDriver(callback)).run(self.project, "worker")
         self.assertEqual(len(prompts), 2)
-        self.assertIn("Per-run tools budget exhausted", prompts[1])
+        self.assertIn("For the rest of this work unit only: per-run tools bound reached", prompts[1])
+        self.assertIn("recorded as a bounded end", prompts[1])
+        self.assertIn("Keep the published state", prompts[1])
 
     def test_no_finish_inside_wrap_up_fails_as_before(self):
         import time
@@ -1500,7 +1557,7 @@ class PromptOrderTests(Fixture):
         from mizu.runtime import prompt_for, prompt_delta_for
         ctx = self.context("worker")
         self.assertEqual(list(json.loads(prompt_for(ctx)).keys()),
-                         ["unit", "goal_digest", "published_snapshot", "recent_snapshots",
+                         ["unit", "unit_tool_surface", "goal_digest", "published_snapshot", "recent_snapshots",
                           "workspace", "workspace_mode", "pending_insights",
                           "open_insights", "open_work_items",
                           "decision_events", "decision_task", "wait_events", "obligations",
@@ -1509,7 +1566,7 @@ class PromptOrderTests(Fixture):
                           "previous_report", "ready_work", "run", "now", "timezone"])
         self.assertEqual(
             list(json.loads(prompt_delta_for(ctx, [])).keys()),
-            ["unit", "goal_digest", "published_snapshot", "snapshot_delta",
+            ["unit", "unit_tool_surface", "goal_digest", "published_snapshot", "snapshot_delta",
              "pending_insights", "open_insights", "open_work_items", "decision_events", "decision_task", "wait_events", "obligations",
              "research_state", "capture_limit", "workspace", "workspace_mode",
              "check_jobs", "check_continuation", "shared_checks", "acceptance_commands", "ci_branch", "ci_failures",
