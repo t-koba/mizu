@@ -415,12 +415,13 @@ def list_jobs(project, role, *, include_acknowledged=True, discovery=None):
 def prompt_projection(context):
     """Share one read snapshot across prompt views; cap aggregate UTF-8 bytes."""
     if 'check_job' not in context.role.capabilities:
-        return {'check_jobs': [], 'shared_checks': [], 'check_continuation': None}
+        return {'check_jobs': [], 'check_continuation': None, 'shared_checks': []}
     from .acceptance import discover, producer_diagnostics
     discovery = discover(context.project)
-    result = {'check_jobs': [], 'shared_checks': [],
+    result = {'check_jobs': [],
               'check_continuation': continuation(context.project, context.role.name,
                                                 context.snapshot, discovery=discovery),
+              'shared_checks': [],
               'check_discovery': {'coverage_complete': not discovery[1],
                                   'summaries_omitted': 0, 'continuation_omitted': False,
                                   **producer_diagnostics(discovery[1])}}
