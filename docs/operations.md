@@ -203,6 +203,12 @@ mizu prune demo                                # 削除対象のプレビュー�
 mizu prune demo --apply --keep-artifacts 30   # 最新30件を残して古い成果物・再現可能入力を削除
 ```
 
+Workspace cache reclamation is separately opt-in via `[workspace_cache]`
+(see [configuration](configuration.md#regenerable-workspace-caches)). Empty
+roots keep it disabled. Due cleanup runs only at a quiescent execution boundary;
+it skips busy locks without pausing/draining and retains its latest result in
+`maintenance/workspace-cache.json`. Operator `prune` behavior is unchanged.
+
 `--keep-artifacts N` は最新の成果物を含め N 件を保持します。`[web] cache_seconds` を過ぎた共有 web-cache（`data_dir/web-cache/*.json`）の期限切れエントリも候補となり、次回 fetch で再取得されるため削除は安全に再試行できます。セッション（`sessions/`）は監査証跡として保持され、削除対象になりません（`mizu storage` で件数・バイト数を報告）。削除ログは `maintenance/prune-*.json` に記録され、バックアップ対象となります。
 
 ```sh

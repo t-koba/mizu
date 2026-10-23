@@ -588,6 +588,8 @@ def run_one(project, stop, *, sandbox_factory=Sandbox):
     The live per-job lock is crash ownership. A leftover running record is
     interrupted, never retried as successful; its requester can submit a new run.
     """
+    from .workspace_cache import maintain
+    maintain(project)  # No owner/cache/slot exclusion has been acquired yet.
     control = project.control()
     if not control.get('armed') or control.get('paused') or control.get('draining') or stop.is_set():
         return {'status': 'deferred'}

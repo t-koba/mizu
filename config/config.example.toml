@@ -12,6 +12,14 @@ timezone = "UTC"
 consult_role = "consult"
 exclude = [".git", ".pi", ".env", ".env.*", ".venv", "node_modules", "__pycache__", "*.pyc", "*.pyo", ".pytest_cache"]
 
+# Optional regenerable workspace caches only. Empty roots disable cleanup.
+# Relative literal directory roots must be untracked and snapshot-excluded;
+# private/host state, links, and overlapping roots are refused.
+[workspace_cache]
+roots = []
+max_bytes = 1073741824          # Total logical file bytes; at/above clears all roots.
+check_interval_seconds = 3600  # Due checks at execution boundaries, no background timer.
+
 # Decision-to-work policy: the mechanism defaults to create for every source.
 # These example source defaults avoid tasks for operator/VCS dispositions;
 # each accept/modify may override them with work_item_intent = "create".

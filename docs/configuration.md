@@ -10,6 +10,72 @@ Environment substitution reads the controller process environment, not
 `ConfigError`); there are no implicit defaults so a missing export cannot
 silently change grants or paths. Prefer literal model aliases for systemd services.
 
+## Regenerable workspace caches
+
+Automatic reclamation is opt-in and separate from operator-invoked `prune`:
+
+```toml
+[workspace_cache]
+roots = []
+max_bytes = 1073741824
+check_interval_seconds = 3600
+```
+
+Empty `roots` disables all work, including locks and scans (the default).
+Each entry designates a **regenerable directory**, relative to the canonical
+project workspace, not a glob or a path in a run/check input. Set only caches
+that may be rebuilt, never sessions, private data, or source. There are at most
+32 nonoverlapping literal roots, each at most 1024 UTF-8 bytes / 32 components;
+absolute paths, traversal, empty components, backslashes and `.git` components
+are refused. Case/Unicode-normalization aliases count as overlap.
+`max_bytes` is an integer from 1 through 2^63−1; the default is 1 GiB.
+`check_interval_seconds` is an integer from 1 through 2678400 (31 days),
+default 3600. Unknown keys, invalid types and bounds fail configuration load.
+
+A due check is attempted before a top-level role execution or check runner
+acquires its own execution locks. There is no timer, model request or automatic
+pause/drain. Cleanup takes the canonical workspace lock, then all configured
+and existing role exclusions plus all configured check-slot exclusions in
+sorted, deduplicated order, then the shared check-cache lock. Every acquire is
+nonblocking. Any contention/unreadable exclusion set releases the partial set
+and skips; it never waits for, drains, cancels or interrupts an active unit.
+The complete set remains held through validation and deletion, excluding new
+roles/checks too. The order cannot create a waiting lock cycle with admission
+or check runners because maintenance never waits. FIFO and pause/drain state
+are unchanged.
+
+Every root must be excluded by the snapshot store, outside reserved virtual
+refs, and contain no Git-indexed path (including tracked ancestor/submodule
+paths). The proof requires a local Git worktree rooted exactly at the workspace;
+ordinary `.git` directories and regular linked-worktree pointer files are
+supported. Plain imports, parent-repository discovery, unavailable/unreadable
+Git and incomplete Git output skip cleanup rather than infer non-membership.
+Index lookup disables fsmonitor, has a 10-second deadline and an 8-MiB
+combined-output cap. Comparisons also refuse case/Unicode aliases of tracked
+paths. Missing roots are harmless; existing roots, their ancestors, and their
+contents must have no symlinks or Windows reparse points. Nested `.git` entries,
+hardlinked files, special files, and any product-private/host-state path omitted
+from snapshots (including private-evidence trees and private-name files) are
+refused too.
+The scan reads metadata, not cache contents, and is bounded across all roots
+by 100000 entries, 64 descendant levels and 10 seconds. Any unsafe root or
+incomplete scan refuses the **whole** candidate set before any deletion.
+All managed workspace writers must use the harness exclusions; these locks
+are not protection against an unrelated host process mutating the tree.
+
+When the sum of regular-file logical sizes is at least `max_bytes`, all
+validated existing roots are removed; otherwise nothing is removed. This is
+not an allocated-disk quota or an age-based eviction policy. Deletion I/O
+failure can be partial and is recorded as `refused`, never success. The latest
+bounded result is `maintenance/workspace-cache.json` (`checked_at` Unix seconds,
+`status`, `bytes` scanned, `removed_roots`); no file contents or per-file paths
+are recorded. Completed checks and safety refusals consume the interval;
+busy acquisition does not. Missing cadence state is due; malformed, oversized
+(over 4096 bytes), unreadable or future-dated state skips cleanup. There is no
+implicit retry: a later boundary retries when due. Backward clock movement
+therefore delays reclamation, not deletion safety. Maintenance never changes
+snapshots, publication or configuration, and failures do not fail execution.
+
 ## Decision-to-work policy
 
 `mizu_decide` (the `decide` capability) accepts optional

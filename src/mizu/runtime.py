@@ -3956,6 +3956,8 @@ class Engine:
         if role_name not in project.roles:
             raise Denied("Role is not enabled for this project")
         role = self.config.roles[role_name]
+        from .workspace_cache import maintain
+        maintain(project)  # Before probes/admission take any execution locks.
         # Any top-level run services due recovery probes first — daemon,
         # one-shot, or smoke — so block recovery never depends on a resident
         # daemon for the sponsoring role or that role's execution mode. The

@@ -296,3 +296,15 @@ setup must fail, `doctor --sandbox` must fail when the cgroup parent is
 missing, and an inherited `API_KEY` must fail the probe. Image-index
 confusion after a failed build is recovered with `system reset` plus re-pull;
 re-run `doctor --sandbox` afterwards and keep the recovery in the receipt.
+
+## Workspace cache maintenance
+
+`tests/test_workspace_cache.py` uses disposable workspaces and an actual Git
+index to check opt-in defaults, aggregate size/cadence, snapshot identity,
+unsafe-path, private-state and incomplete-scan refusal, ordinary/linked Git
+worktree eligibility, nonblocking rollback for every role, workspace,
+check-slot and shared-cache exclusion, and unchanged pause/drain state. A
+separate Python process attempts every held exclusion during
+preflight, proving kernel exclusion of new entrants rather than only the
+process-local guard. Runtime/check-runner wiring is checked before execution
+locks are held. No installed deployment or private workspace is inspected.

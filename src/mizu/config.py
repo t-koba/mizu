@@ -6,12 +6,13 @@ import datetime as dt
 import os
 import re
 import tomllib
+import unicodedata
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .errors import ConfigError
-from .fs import ID
+from .errors import ConfigError, Denied
+from .fs import ID, relative_parts
 from .process import ADAPTER_DIAGNOSTIC_BYTES_DEFAULT, ADAPTER_DIAGNOSTIC_BYTES_MAX
 CAPABILITIES = frozenset({"diff", "files", "read", "exec", "experiment", "verify", "check_job", "fetch", "probe",
                           "search", "insights", "decide", "submit_insight", "revise_insight", "withdraw_insight", "withdraw_decided", "attach_evidence", "consult", "delegate",
@@ -259,7 +260,7 @@ def _load_merged(top: Path) -> dict:
         # Unknown root keys still fail here per fragment so the error names
         # the fragment, then the final merged load re-checks the whole.
         allowed = {"data_dir", "engines", "timezone", "limits", "sandbox", "profiles",
-                   "roles", "consult_role", "delegate_role", "web", "vcs", "materialize", "exclude", "selectors", "include", "insight_decisions"}
+                   "roles", "consult_role", "delegate_role", "web", "vcs", "materialize", "exclude", "selectors", "include", "insight_decisions", "workspace_cache"}
         unknown = set(data) - allowed
         if unknown:
             raise ConfigError(f"Unknown keys in {resolved}: {', '.join(sorted(unknown))}")
@@ -701,6 +702,37 @@ def role_policy_bytes(role: "Role") -> bytes:
 
 
 @dataclasses.dataclass(frozen=True)
+class WorkspaceCache:
+    roots: tuple[str, ...] = ()
+    max_bytes: int = 1073741824
+    check_interval_seconds: int = 3600
+
+
+def workspace_cache_policy(raw: dict) -> WorkspaceCache:
+    keys(raw, {"roots", "max_bytes", "check_interval_seconds"}, "workspace_cache")
+    roots = strings(raw.get("roots", []), "workspace_cache.roots")
+    if len(roots) > 32:
+        raise ConfigError("workspace_cache.roots permits at most 32 roots")
+    for root in roots:
+        try:
+            parts = relative_parts(root)
+        except Denied as exc:
+            raise ConfigError("workspace_cache.roots requires literal relative paths") from exc
+        if len(root.encode("utf-8")) > 1024 or len(parts) > 32 or any(p.casefold() == ".git" for p in parts):
+            raise ConfigError("Invalid workspace_cache root")
+    aliases = [unicodedata.normalize("NFC", root).casefold() for root in roots]
+    for i, root in enumerate(aliases):
+        if any(root == other or root.startswith(other + "/") or other.startswith(root + "/")
+               for other in aliases[:i]):
+            raise ConfigError("workspace_cache.roots must not overlap")
+    maximum = raw.get("max_bytes", 1073741824)
+    interval = raw.get("check_interval_seconds", 3600)
+    number(maximum, "workspace_cache.max_bytes", 1, 2**63 - 1)
+    number(interval, "workspace_cache.check_interval_seconds", 1, 31 * 86400)
+    return WorkspaceCache(roots, maximum, interval)
+
+
+@dataclasses.dataclass(frozen=True)
 class Config:
     file: Path
     data: Path
@@ -722,6 +754,9 @@ class Config:
     tzinfo: dt.tzinfo | None = None
     insight_decisions: dict = dataclasses.field(default_factory=lambda: {
         "work_item_intent_default": "create", "work_item_intent_by_source": {}})
+
+    #: Disabled unless the operator designates reproducible, excluded roots.
+    workspace_cache: WorkspaceCache = dataclasses.field(default_factory=WorkspaceCache)
 
     def __post_init__(self):
         object.__setattr__(self, "tzinfo", resolve_timezone(self.timezone))
@@ -762,7 +797,7 @@ def load(file: Path) -> Config:
     file = file.expanduser().resolve()
     data = _load_merged(file)
     keys(data, {"data_dir", "engines", "timezone", "limits", "sandbox", "profiles",
-                "roles", "consult_role", "delegate_role", "web", "vcs", "materialize", "exclude", "selectors", "include", "insight_decisions"}, "root")
+                "roles", "consult_role", "delegate_role", "web", "vcs", "materialize", "exclude", "selectors", "include", "insight_decisions", "workspace_cache"}, "root")
     data.pop("include", None)
     decisions = data.get("insight_decisions", {})
     keys(decisions, {"work_item_intent_default", "work_item_intent_by_source"}, "insight_decisions")
@@ -1287,4 +1322,5 @@ def load(file: Path) -> Config:
     return Config(file, path_value(string(data.get("data_dir", "~/.local/state/mizu"), "data_dir"), file.parent),
                   environments, limits, sandbox, profiles, roles, consult_role, delegate_role, timezone, web, vcs, mat,
                   strings(data.get("exclude", [".git", ".pi", ".env", ".env.*", ".venv",
-                                                "node_modules", "__pycache__", "*.pyc", "*.pyo", ".pytest_cache"]), "exclude"), selectors, insight_decisions=decisions)
+                                                "node_modules", "__pycache__", "*.pyc", "*.pyo", ".pytest_cache"]), "exclude"), selectors, insight_decisions=decisions,
+                  workspace_cache=workspace_cache_policy(data.get("workspace_cache", {})))
