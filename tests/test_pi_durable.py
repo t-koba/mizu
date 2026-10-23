@@ -75,6 +75,7 @@ class PolicyTests(Fixture):
         self.assertNotEqual(expected, pi_durable.grant_for({"options": {}}, role, model, goal + "\n"))
 
     def test_charter_change_applies_to_new_turn_in_same_store(self):
+        from pathlib import Path
         from unittest.mock import patch
         from mizu.fs import digest
         # Exercise Windows-style policy bytes on every host, independently of
@@ -90,13 +91,29 @@ class PolicyTests(Fixture):
         first.goal = "Operator charter: 正確さ\r\nKeep LF too.\n\r\n"
         first.goal_digest = digest(first.goal.encode("utf-8"))
         dispatches = []
-        with patch("mizu.pi_durable.run", self._normal_launcher(first, dispatches, seal_on=1)):
-            driver.execute(first, "first unit", profile=profile)
-        second = self.context()
-        second.goal = "Changed operator charter: 持続性\nKeep CRLF too.\r\n\n"
-        second.goal_digest = digest(second.goal.encode("utf-8"))
-        with patch("mizu.pi_durable.run", self._normal_launcher(second, dispatches, seal_on=2)):
-            driver.execute(second, "next unit", profile=profile)
+        original_read_text = Path.read_text
+        config_reads = []
+
+        def read_text(path, *args, **kwargs):
+            if path.name in ("pi-durable-effective.json", "bridge.json"):
+                encoding = kwargs.get("encoding", args[0] if args else None)
+                config_reads.append((path.name, encoding))
+                # Emulate a non-UTF-8 host default so omitted encoding cannot
+                # accidentally pass merely because this test host uses UTF-8.
+                if encoding is None:
+                    return original_read_text(path, encoding="cp1252")
+            return original_read_text(path, *args, **kwargs)
+
+        with patch.object(Path, "read_text", read_text):
+            with patch("mizu.pi_durable.run", self._normal_launcher(first, dispatches, seal_on=1)):
+                driver.execute(first, "first unit", profile=profile)
+            second = self.context()
+            second.goal = "Changed operator charter: 持続性\nKeep CRLF too.\r\n\n"
+            second.goal_digest = digest(second.goal.encode("utf-8"))
+            with patch("mizu.pi_durable.run", self._normal_launcher(second, dispatches, seal_on=2)):
+                driver.execute(second, "next unit", profile=profile)
+        self.assertEqual(config_reads, [("pi-durable-effective.json", "utf-8"),
+                                        ("bridge.json", "utf-8")] * 2)
         self.assertEqual(len(dispatches), 2)
         self.assertEqual(dispatches[0]["store"], dispatches[1]["store"])
         self.assertNotEqual(dispatches[0]["instructions"], dispatches[1]["instructions"])
@@ -200,8 +217,8 @@ class PolicyTests(Fixture):
         from mizu.process import Result
 
         def launch(argv, **kwargs):
-            cfg = json.loads(Path(argv[-1]).read_text())
-            bridge = json.loads(Path(kwargs["env"]["MIZU_BRIDGE_CONFIG"]).read_text())
+            cfg = json.loads(Path(argv[-1]).read_text(encoding="utf-8"))
+            bridge = json.loads(Path(kwargs["env"]["MIZU_BRIDGE_CONFIG"]).read_text(encoding="utf-8"))
             dispatches.append(cfg)
             from mizu.config import system_context_text
             self.assertEqual(cfg["instructions"], system_context_text(context.role, context.goal))

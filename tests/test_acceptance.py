@@ -751,12 +751,77 @@ class AcceptanceTests(Fixture):
             'job_schema')
 
     def test_isolate_job_json_parser_recursion_before_scheduler_sort(self):
-        self.assert_producer_isolated('job.json', b'[' * 10000 + b'0' + b']' * 10000,
-                                     'job_json')
+        payload = b'[' * 10000 + b'0' + b']' * 10000
+        try:
+            parsed = json.loads(payload)
+        except RecursionError:
+            expected = 'job_json'
+        else:
+            self.assertIsInstance(parsed, list)
+            expected = 'job_schema'
+        self.assert_producer_isolated('job.json', payload, expected)
 
     def test_isolate_result_json_parser_recursion_and_run_unrelated_job(self):
-        self.assert_producer_isolated('result.json', b'[' * 10000 + b'0' + b']' * 10000,
-                                     'result_json')
+        payload = b'[' * 10000 + b'0' + b']' * 10000
+        try:
+            parsed = json.loads(payload)
+        except RecursionError:
+            expected = 'result_json'
+        else:
+            self.assertIsInstance(parsed, list)
+            expected = 'result_integrity'
+        self.assert_producer_isolated('result.json', payload, expected)
+
+    def _recursion_shim(self, suspect):
+        import types
+        real = json
+        original_loads = real.loads
+
+        def fake_loads(s, *args, **kwargs):
+            if s == suspect:
+                raise RecursionError('simulated parser recursion')
+            if isinstance(s, str) and isinstance(suspect, bytes):
+                try:
+                    if s.encode('utf-8') == suspect:
+                        raise RecursionError('simulated parser recursion')
+                except UnicodeEncodeError:
+                    pass
+            return original_loads(s, *args, **kwargs)
+
+        class _Shim(types.SimpleNamespace):
+            def __getattr__(self, name):
+                return getattr(real, name)
+        return _Shim(loads=fake_loads)
+
+    def _assert_recursion_path_isolated(self, filename, code):
+        suspect = b'[' * 10000 + b'0' + b']' * 10000
+        ctx, suspect_job, path = self.pending_producer()
+        healthy = self.queued_other(ctx)
+        (path / filename).write_bytes(suspect)
+        before = {name: (path / name).read_bytes() for name in ('job.json', 'result.json')}
+        shim = self._recursion_shim(suspect)
+        with patch('mizu.acceptance.json', shim):
+            result = self.run_job()
+            self.assertEqual(result['id'], healthy['id'])
+            self.assertEqual(result['status'], 'completed')
+            self.assertEqual(result['invalid_producers'], {'entries': [{'job_id': suspect_job['id'], 'code': code}],
+                                                         'total': 1, 'omitted': 0})
+            self.assertEqual(acceptance.audit(self.project.root), 1)
+            receipt = acceptance.get(self.project.root,
+                                     check_jobs.raw_read(self.project, healthy['id'])['acceptance_receipt_id'])
+            self.assertEqual(receipt['producer']['id'], healthy['id'])
+            for name, raw in before.items():
+                self.assertEqual((path / name).read_bytes(), raw)
+            self.assertEqual(acceptance.recover_producers(self.project), {suspect_job['id']: code})
+            self.assertEqual(self.run_job()['invalid_producers'], result['invalid_producers'])
+            self.assertEqual(acceptance.audit(self.project.root), 1)
+            self.assertFalse((path / 'quarantine.json').exists())
+
+    def test_isolate_job_json_recursion_error_path_before_scheduler_sort(self):
+        self._assert_recursion_path_isolated('job.json', 'job_json')
+
+    def test_isolate_result_json_recursion_error_path_and_run_unrelated_job(self):
+        self._assert_recursion_path_isolated('result.json', 'result_json')
 
     def test_invalid_producer_bound_filters_all_and_batch_deduplicates(self):
         ctx = self.context()
