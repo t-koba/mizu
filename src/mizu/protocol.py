@@ -176,11 +176,15 @@ DEFINITIONS = {
                "Accept/modify optionally take work_item_intent=create|none; omission uses configured trusted-source "
                "policy (global default create). None durably records no work without a seed. "
                "Optional work_items names 1-16 tasks, each with title (1-200 nonblank characters) and description "
-               "(1-4000 nonblank characters). Tasks require create intent (explicit create if source policy is none); "
-               "an empty list or explicit none is denied. The complete event including specs and seeds is bounded "
-               "to 131072 UTF-8 bytes and committed atomically. Each task inherits the decision scope, starts open, "
-               "and has a deterministic identity bound to the whole ordered task list and exact decision revision. "
-               "Exact replays require the identical ordered list; omissions or changes conflict. "
+               "(1-4000 nonblank characters), optionally wait using the same four defer kinds (not ci). "
+               "Tasks require create intent (explicit create if source policy is none); "
+               "an empty list or explicit none is denied. The complete event including specs, normalized wait manifest "
+               "and seeds is bounded "
+               "to 131072 UTF-8 bytes and committed atomically. Each task inherits the decision scope and is unheld; "
+               "without wait it starts open, with wait it starts blocked carrying the normalized condition. "
+               "Each has a deterministic identity bound to the whole ordered task list and exact decision revision. "
+               "Raw wait specs are part of the ordered request identity. Exact replays return stored baselines, never rebase "
+               "code_change waits; omissions or changes conflict. "
                "Conflicting decisions after accept/modify/reject require revise. Exact keyed replays return the original event; "
                "if only its current pointer failed, a matching retry restores it without a second event. Read current state after uncertainty.",
                obj({"id": text(64), "action": {"type": "string", "enum": ["accept", "modify", "defer", "reject"]},
@@ -190,7 +194,7 @@ DEFINITIONS = {
                     "scope": SCOPE_SCHEMA,
                     "work_items": {"type": "array", "minItems": 1, "maxItems": MAX_DECISION_TASKS,
                                    "items": obj({"title": {**text(200), "minLength": 1},
-                                                 "description": {**text(4000), "minLength": 1}},
+                                                 "description": {**text(4000), "minLength": 1}, "wait": WAIT_SCHEMA},
                                                 ("title", "description"))},
                     "work_item_intent": {"type": "string", "enum": ["create", "none"]}},
                    ("id", "action", "reason", "rev"))),

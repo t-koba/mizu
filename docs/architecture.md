@@ -282,11 +282,13 @@ the current insight title and `{insight_id, rev}` origin, starts `open` at item
 revision 1 with no holder, and uses the decision timestamp for creation and
 update. `defer` and `reject` do not create a seed.
 
-An explicit `work_items` list instead names 1–16 tasks (title and description
-only), without parsing the reason. Its resolved intent must be `create`;
+An explicit `work_items` list instead names 1–16 tasks (title, description
+and optional structured wait), without parsing the reason. Its resolved intent must be `create`;
 policy `none` requires an explicit create override. The history event embeds
-both the ordered `work_item_specs` and complete `work_items` seed manifest in
-one atomic write. No per-member seed files or mutable index are needed: group
+the ordered `work_item_specs` and complete `work_items` seed manifest in one
+atomic write. For groups with waits, a parallel `work_item_waits` array binds
+each normalized condition (including a captured code-change baseline) to its
+seed. No per-member seed files or mutable index are needed: group
 lookup scans immutable events for a hashed task ID; enumeration reuses each
 manifest. IDs hash the decision key, complete ordered specs and member index,
 so missing/reordered/tampered members fail closed against the whole set.
@@ -295,8 +297,17 @@ All specs and seed slots, then the complete event's `PREVIEW_BYTES` bound
 the entire group; an exact ordered-list retry validates every seed/chain and
 repairs only a missing/stale non-substantive current pointer. Conflicting
 retries fail. Old single-seed/no-work events keep their exact shapes. Task
-seeds start open and inherit any decision-level scope; task-specific scope and
-dependency waits are not part of this mechanism. Current projections name all
+seeds inherit any decision-level scope and remain unheld. Tasks without waits
+keep the open seed shape. Tasks with one existing observable wait (`deadline`,
+`code_change`, `insight_decided`, `dependency`; not `ci`) start blocked with the
+normalized wait in that same immutable event. Raw specs, including waits, bind
+IDs and exact replay; first commit captures the code-change baseline in
+`work_item_waits`, and replay validates that manifest against the blocked seeds
+without rebasing. Other waits must strictly correspond to their normalized raw
+specs. No sidecar or second transaction is needed; `_wait_due` supplies the
+existing readiness re-evaluation. Only group
+seeds accept blocked/wait shapes; direct and legacy seed rules are unchanged.
+Task-specific scope is not part of this mechanism. Current projections name all
 `work_item_ids`, and submitter status uses `{items: [...]}` for groups only.
 See configuration.md for field bounds and the CLI file interface.
 

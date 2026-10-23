@@ -47,7 +47,8 @@ first rejects unarmed/paused/draining control, then checks changed goal
 digest and operator wake-generation, then an independent ready-work read.
 Ready work for a named role requires the `work_items_transition` capability.
 It means an unheld `open` item the role can claim, or a `doing` item held by
-that role, with no structured wait (plus its own due blocked waits below).
+that role, with no structured wait. Satisfied blocked waits below are ready
+for their holder, or claimable by any transition-capable role when unheld.
 Another role's held work never admits it. Such eligible work admits the writer
 even after `done`, an unexpired run-level `wait`, or a no-progress park. This
 is independent of terminal-event subscriptions, but filtered by role/holder
@@ -153,6 +154,11 @@ prioritize admission.
 
 A blocked item with a satisfied `deadline`, `code_change`,
 `insight_decided`, or `dependency` wait re-enters `ready_work` for reassessment.
+Decision tasks may start blocked and unheld with one of these waits, atomically
+with their open or blocked siblings. No per-task transition or wait registration
+is needed. Once satisfied, an unheld blocked seed is claimable just like unheld
+open work; a held blocked item is routed only to its holder. Dependency
+`recipient` keeps its existing condition semantics, not task assignment.
 Its prompt row includes the normalized `wait` and `wait_satisfied: true`;
 the ledger stays blocked at the same revision until the writer decides what
 work or evidence remains. A missing or unsatisfied wait is not ready. CI

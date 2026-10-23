@@ -115,14 +115,18 @@ To name separate tasks explicitly, `decide` also accepts optional `work_items`:
 
 ```json
 [{"title": "Implement the first part", "description": "The concrete first task"},
- {"title": "Implement the second part", "description": "The concrete second task"}]
+ {"title": "Reassess after the deadline", "description": "The contingent follow-up",
+  "wait": {"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"}}]
 ```
 
 The operator CLI reads this array from `--work-items tasks.json`. Each entry
-requires exactly `title` (1–200 nonblank characters) and `description`
-(1–4000 nonblank characters), both valid UTF-8 without NUL. There are 1–16
-entries; an empty list, unknown fields, per-task scope and dependency waits
-are refused. A supplied list requires resolved intent `create`: explicit
+requires `title` (1–200 nonblank characters) and `description`
+(1–4000 nonblank characters), both valid UTF-8 without NUL, and may carry one
+`wait` using the existing defer schema: `deadline` with timezone-aware `at`,
+`code_change` with no other fields, `insight_decided` with `insight`, or
+`dependency` with `recipient` and exact `requires: {insight, rev, action}`.
+CI waits, null/malformed waits, unknown fields and per-task scopes are refused.
+There are 1–16 entries; an empty list is refused. A supplied list requires resolved intent `create`: explicit
 `none` conflicts, and if trusted-source policy is `none`, explicitly pass
 `--work-item-intent create` (or the tool equivalent) rather than silently
 losing tasks. Omission preserves all existing single-seed/no-work behavior.
@@ -133,16 +137,28 @@ seeds**, must fit `PREVIEW_BYTES` (131072 UTF-8 bytes); individual field limits
 do not guarantee that the aggregate fits. Every spec and every seed storage
 slot is validated before commit. The immutable history event contains
 `work_item_specs` (the ordered input list) and `work_items` (the complete seed
-list), instead of `work_item`. Each task starts `open`, has its own description
-and deterministic ID bound to the exact decision key/revision, complete ordered
-list and position. If the decision states an accepted scope, every task
+list), instead of `work_item`. Each task is unheld (`holder: null`): without
+`wait` it starts `open` in the unchanged seed shape; with `wait` it starts
+`blocked` with the normalized condition embedded in that immutable seed. There
+is no intermediate open revision, sidecar registration or per-task transition.
+Each task has its own description and deterministic ID bound to the exact
+decision key/revision, complete ordered **raw** list (including waits) and position. If the decision states an accepted scope, every task
 inherits that same scope; task-specific scopes are not introduced here.
 
-One atomic immutable event commits the entire group; there are no separately
+One atomic immutable event commits the entire group; it contains the raw
+`work_item_specs`, complete `work_items` seed list and, when any wait is
+present, a parallel `work_item_waits` array that binds normalized waits (and
+the captured code-change baseline) to their seeds. There are no separately
 committed members or mutable seed index. Before that commit no tasks are
 visible, and afterward all are visible even if the current-decision pointer
 write was interrupted. Retry with the identical ordered list to return the
-original event and repair a missing/stale non-substantive pointer. A changed,
+original event and repair a missing/stale non-substantive pointer. Wait
+normalization occurs on first commit: a `code_change` baseline is the published
+code digest then, stored in `work_item_waits` and preserved on retry even if the
+head changed or is unavailable. Replay validates that manifest against the
+seed's normalized wait and raw kind, without rebasing;
+other waits must match their raw specs after normalization. Even a raw timestamp
+change that normalizes identically is a conflicting request. A changed,
 reordered or omitted list conflicts; a conflicting substantive pointer or a
 missing/tampered manifest member fails closed instead of being repaired.
 Every task read validates the complete manifest. Direct ID lookup scans
@@ -152,8 +168,10 @@ projections expose `work_item_ids` for groups; the original submitter's
 `work_item_status` is `{items: [status, ...]}` in declared order, bounded by
 `PREVIEW_BYTES`. Legacy single-item projections retain their existing shape.
 These groups fully resolve legacy coverage and cannot be reconciled as old
-unseeded decisions. This adds no grant, dependency wait, scheduling or FIFO
-change; contingent follow-ups remain a later structured-wait slice.
+unseeded decisions. Existing wait re-evaluation makes satisfied unheld blocked
+tasks claimable by any transition-capable role; held blocked tasks remain
+ready only for their holder. Unsatisfied waits are not ready. This adds no
+grant, actor/assignee input, condition vocabulary or FIFO change.
 
 A substantive `accept`/`modify`/`reject` at the current insight revision prevents
 conflicting further decisions on that revision. An exact keyed replay returns

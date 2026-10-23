@@ -21,6 +21,7 @@ import stat
 from pathlib import Path
 
 from . import insight_archive
+from .work_item_waits import stored_wait
 from .errors import Denied, LimitExceeded
 from .fs import (DIGEST, PREVIEW_BYTES, canonical, identifier, lock, now, safe_read,
                  sync_dir, text_preview, write_json)
@@ -198,7 +199,7 @@ class WorkItems:
 
     def create_seed(self, item_id: str, title: str, origin, stamp: str, *,
                     actor=None, idempotency_key=None, decision_key=None,
-                    task_specs=None, task_index=None,
+                    task_specs=None, task_index=None, wait=None,
                     description=DESCRIPTION_UNSET, scope=SCOPE_UNSET) -> dict:
         """Preflight a new immutable seed while the caller holds insights.lock.
 
@@ -211,7 +212,10 @@ class WorkItems:
         direct callers commit create.json; decisions embed the seed in their
         atomic event. Existing commits must use validate_seed_replay instead.
         """
-        seed = make_seed(item_id, title, origin, stamp, description=description, scope=scope)
+        if wait is not None and (task_specs is None or decision_key is None):
+            raise Denied("Only decision task seeds carry waits")
+        seed = make_seed(item_id, title, origin, stamp, description=description, scope=scope,
+                         wait=wait)
         if task_specs is not None:
             validate_tasks(task_specs)
             if type(task_index) is not int or not 0 <= task_index < len(task_specs):
@@ -270,7 +274,7 @@ class WorkItems:
         Recognized atomic-write leftovers may be recovered as on normal reads.
         Valid transitions never alter the immutable creation result.
         """
-        validate_seed(seed)
+        validate_seed(seed, decision_task="work_item_specs" in seed_event)
         item_id = seed["id"]
         revisions = self._recover_temporary_writes(item_id)
         # An embedded decision seed must not hide a colliding direct record.
@@ -959,16 +963,7 @@ class WorkItems:
         if kind == "ci":
             from .ci_waits import normalize
             return normalize(self.root, value, stored=True)
-        if kind == "code_change":
-            baseline = value.get("digest")
-            if set(value) != {"kind", "digest"} or not isinstance(baseline, str) or not DIGEST.fullmatch(baseline):
-                raise Denied("Invalid stored code-change wait")
-            return value
-        raw = {"kind": kind, "insight": value.get("target")} if kind == "insight_decided" else value
-        normalized = self.insights._normalize_wait(raw, "defer")
-        if value != normalized:
-            raise Denied("Invalid normalized work-item wait")
-        return normalized
+        return stored_wait(value)
 
     def _presented_tree(self) -> str:
         """Return the digest of the tree the workspace currently presents.
@@ -1580,7 +1575,8 @@ class WorkItems:
                     if item["status"] == "open":
                         if item.get("holder") is not None:
                             continue
-                    elif item.get("holder") != role_name:
+                    elif item.get("holder") != role_name and not (
+                            item["status"] == "blocked" and item.get("holder") is None):
                         continue
                 if item["status"] == "blocked":
                     wait = item.get("wait")

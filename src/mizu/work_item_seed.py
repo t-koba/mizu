@@ -5,6 +5,7 @@ import datetime as dt
 import re
 
 from .errors import Denied
+from .work_item_waits import normalize_wait, stored_wait
 from .fs import PREVIEW_BYTES, canonical, digest, identifier
 
 ITEM_ID = re.compile(r"wi_([0-9a-f]{32})\Z")
@@ -56,9 +57,15 @@ def validate_scope(value) -> None:
         raise Denied("An accepted scope must be valid UTF-8") from None
 
 
-def validate_seed(seed) -> dict:
-    if not isinstance(seed, dict) or frozenset(seed) not in SEED_SHAPES:
+def validate_seed(seed, *, decision_task=False) -> dict:
+    if not isinstance(seed, dict):
         raise Denied("Invalid work-item seed fields")
+    blocked = decision_task and "wait" in seed
+    fields = frozenset(set(seed) - {"wait"}) if blocked else frozenset(seed)
+    if fields not in SEED_SHAPES:
+        raise Denied("Invalid work-item seed fields")
+    if blocked:
+        stored_wait(seed["wait"])
     if "description" in seed:
         validate_text(seed["description"], "description")
     if "scope" in seed:
@@ -71,14 +78,14 @@ def validate_seed(seed) -> dict:
     if (not isinstance(seed["id"], str) or ITEM_ID.fullmatch(seed["id"]) is None
             or not isinstance(seed["title"], str) or not 1 <= len(seed["title"]) <= 200
             or type(seed["rev"]) is not int or seed["rev"] != 1
-            or seed["status"] != "open" or seed["holder"] is not None
+            or seed["status"] != ("blocked" if blocked else "open") or seed["holder"] is not None
             or stamp.tzinfo is None or seed["updated_at"] != seed["created_at"]):
         raise Denied("Invalid work-item seed")
     return seed
 
 
 def make_seed(item_id: str, title: str, origin, stamp: str, *,
-              description=DESCRIPTION_UNSET, scope=SCOPE_UNSET) -> dict:
+              description=DESCRIPTION_UNSET, scope=SCOPE_UNSET, wait=None) -> dict:
     # Absence is part of the immutable v1 shape, not a null description or a
     # null scope: a seed states an accepted scope only when one was accepted.
     seed = {"id": item_id, "title": title, "origin": origin,
@@ -88,7 +95,9 @@ def make_seed(item_id: str, title: str, origin, stamp: str, *,
         seed["description"] = description
     if scope is not SCOPE_UNSET:
         seed["scope"] = scope
-    return validate_seed(seed)
+    if wait is not None:
+        seed.update(status="blocked", wait=wait)
+    return validate_seed(seed, decision_task=wait is not None)
 
 
 MAX_DECISION_TASKS = 16
@@ -99,8 +108,11 @@ def validate_tasks(tasks) -> list:
     if not isinstance(tasks, list) or not 1 <= len(tasks) <= MAX_DECISION_TASKS:
         raise Denied("work_items must contain 1-16 task specifications")
     for task in tasks:
-        if not isinstance(task, dict) or set(task) != {"title", "description"}:
-            raise Denied("Each task requires only title and description")
+        if (not isinstance(task, dict)
+                or set(task) not in ({"title", "description"}, {"title", "description", "wait"})):
+            raise Denied("Each task requires title, description and optionally wait")
+        if "wait" in task:
+            validate_task_wait(task["wait"])
         title = task["title"]
         if (not isinstance(title, str) or not 1 <= len(title) <= 200
                 or not title.strip() or "\x00" in title):
@@ -111,6 +123,20 @@ def validate_tasks(tasks) -> list:
             raise Denied("Task title must be valid UTF-8") from None
         validate_text(task["description"], "description")
     return tasks
+
+
+def validate_task_wait(wait) -> None:
+    """Validate raw task wait shape without capturing a mutable code baseline."""
+    fields = {"deadline": {"kind", "at"}, "code_change": {"kind"},
+              "insight_decided": {"kind", "insight"},
+              "dependency": {"kind", "recipient", "requires"}}
+    if (not isinstance(wait, dict) or not isinstance(wait.get("kind"), str)
+            or set(wait) != fields.get(wait["kind"], set())):
+        raise Denied("Invalid decision task wait")
+    # The shared normalizer validates values. Code-change has only its kind;
+    # its baseline must be captured at commit, not during request/replay checks.
+    if wait["kind"] != "code_change":
+        normalize_wait(wait, "defer")
 
 
 def task_id(key: str, tasks: list, index: int) -> str:
@@ -130,12 +156,31 @@ def task_seeds(event: dict) -> list:
     ids = [task_id(event["decision_key"], tasks, index) for index in range(len(tasks))]
     if len(set(ids)) != len(ids):
         raise Denied("Decision task IDs collide")
-    for task, seed, item_id in zip(tasks, seeds, ids):
-        validate_seed(seed)
+    specs_have_waits = any("wait" in task for task in tasks)
+    if "work_item_waits" in event:
+        waits = event["work_item_waits"]
+        if (not specs_have_waits or not isinstance(waits, list)
+                or len(waits) != len(tasks)):
+            raise Denied("Invalid normalized decision task wait manifest")
+    else:
+        if specs_have_waits:
+            raise Denied("Decision task wait manifest is missing")
+        waits = [None] * len(tasks)
+    for task, seed, item_id, normalized in zip(tasks, seeds, ids, waits):
+        validate_seed(seed, decision_task=True)
         expected = make_seed(item_id, task["title"],
                              {"insight_id": event["id"], "rev": event["rev"]}, event["created_at"],
                              description=task["description"],
                              **({"scope": event["scope"]} if "scope" in event else {}))
+        if "wait" in task:
+            normalized = stored_wait(normalized)
+            if (normalized["kind"] != task["wait"]["kind"]
+                    or (normalized["kind"] != "code_change"
+                        and normalized != normalize_wait(task["wait"], "defer"))):
+                raise Denied("Task wait does not match raw decision manifest")
+            expected.update(status="blocked", wait=normalized)
+        elif normalized is not None:
+            raise Denied("Unexpected normalized wait for an open task")
         if seed != expected:
             raise Denied("Task seed does not match complete decision manifest")
     return seeds

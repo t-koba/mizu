@@ -49,6 +49,7 @@ import os
 from pathlib import Path
 
 from . import insight_archive
+from .work_item_waits import WAIT_KINDS, normalize_wait
 from .errors import Denied, LimitExceeded
 from .work_item_seed import (make_seed, validate_scope, validate_seed, validate_tasks,
                              task_id, task_seeds)
@@ -84,8 +85,12 @@ def _validate_keyed_substantive_event(event, insight_id: str, rev: int, key: str
         if intent not in ("create", "none"):
             raise Denied("Malformed keyed work-item intent")
         if intent == "create":
-            fields.update({"work_items", "work_item_specs"} if "work_items" in event
-                          or "work_item_specs" in event else {"work_item"})
+            if "work_items" in event or "work_item_specs" in event:
+                fields.update({"work_items", "work_item_specs"})
+                if "work_item_waits" in event:
+                    fields.add("work_item_waits")
+            else:
+                fields.add("work_item")
     elif action != "reject":
         raise Denied("Decision event ID collision")
     # A decision written before the accepted scope existed keeps the older
@@ -206,12 +211,6 @@ def _archive_summary(item: dict) -> dict:
         record["evidence_count"] = 0
     return record
 
-
-#: Observable wait kinds a deferral may register. All are checkable at
-#: dispatch from local recorded state, so waits survive restarts without
-#: polling or model calls. Anything else is refused at registration with
-#: this list, exposing the missing wake source instead of implying it.
-WAIT_KINDS = ("deadline", "code_change", "insight_decided", "dependency")
 
 #: Evidence-entry bounds (fixed mechanism, not knobs): at most this many
 #: append-only entries per insight, each at most this many chars of text.
@@ -848,11 +847,18 @@ replacement insight without implying rejected substance.
             if action in ("accept", "modify") and len(canonical(record)) > PREVIEW_BYTES:
                 raise LimitExceeded("Decision event with work-item intent exceeds byte bound")
             if work_items is not None:
+                normalized_waits = [self._normalize_wait(task.get("wait"), "defer")
+                                    for task in work_items]
                 record["work_item_specs"] = work_items
+                if any(wait is not None for wait in normalized_waits):
+                    # Persist a separate normalized manifest so generated
+                    # baselines (notably code_change) are bound to each seed.
+                    record["work_item_waits"] = normalized_waits
                 record["work_items"] = [store.create_seed(
                     task_id(key, work_items, index), task["title"],
                     {"insight_id": insight_id, "rev": rev}, stamped, decision_key=key,
                     task_specs=work_items, task_index=index, description=task["description"],
+                    wait=normalized_waits[index],
                     **({"scope": scope} if scope is not None else {}))
                     for index, task in enumerate(work_items)]
             elif work_item_intent == "create":
@@ -876,76 +882,7 @@ replacement insight without implying rejected substance.
         return record
 
     def _normalize_wait(self, wait, action: str) -> dict | None:
-        """Validate a structured defer wait (fail closed, no prose parsing).
-
-        Schema: None, or ``{"kind": ...}`` with kind-specific fields:
-        ``deadline`` needs tz-aware ISO ``at``; ``code_change`` needs no
-        fields (the current published digest is the baseline);
-        ``insight_decided`` needs an ``insight`` id; ``dependency`` needs
-        a ``recipient`` role and ``requires`` with the assessed result
-        ``insight``, exact ``rev``, and substantive ``action``. Bounds: at
-        most one wait per insight; unknown kinds, bad params, and waits
-        on non-defer actions are Denied naming the supported set. Trust:
-        recorded state only. Failure: Denied, never a silent downgrade
-        to prose.
-        """
-        if wait is None:
-            return None
-        if action != "defer":
-            raise Denied("Structured waits may only be registered with a deferral")
-        if not isinstance(wait, dict):
-            raise Denied(f"Unsupported wait; supported kinds: {', '.join(WAIT_KINDS)}")
-        kind = wait.get("kind")
-        if kind not in WAIT_KINDS:
-            raise Denied(f"Unsupported wait; supported kinds: {', '.join(WAIT_KINDS)}")
-        if kind == "deadline":
-            at = wait.get("at")
-            try:
-                moment = dt.datetime.fromisoformat(at) if isinstance(at, str) else None
-            except (ValueError, TypeError):
-                moment = None
-            if moment is None or moment.tzinfo is None:
-                raise Denied("A deadline wait needs a timezone-aware ISO timestamp in 'at'")
-            return {"kind": kind, "at": moment.isoformat(timespec="seconds")}
-        if kind == "insight_decided":
-            target = wait.get("insight")
-            if not isinstance(target, str) or not target:
-                raise Denied("An insight_decided wait needs an 'insight' id")
-            identifier(target)
-            return {"kind": kind, "target": target}
-        if kind == "dependency":
-            recipient = wait.get("recipient")
-            if not isinstance(recipient, str) or not recipient:
-                raise Denied("A dependency wait needs a 'recipient' role")
-            identifier(recipient)
-            requires = wait.get("requires")
-            if not isinstance(requires, dict):
-                raise Denied("A dependency wait needs 'requires' with insight, rev, and action")
-            target = requires.get("insight")
-            if not isinstance(target, str) or not target:
-                raise Denied("A dependency wait needs a 'requires.insight' id")
-            identifier(target)
-            required_rev = requires.get("rev")
-            if type(required_rev) is not int or required_rev < 1:
-                raise Denied("A dependency wait binds the required result revision in 'requires.rev'")
-            required_action = requires.get("action")
-            if required_action not in ("accept", "modify", "reject"):
-                raise Denied("A dependency wait needs a substantive 'requires.action'")
-            if set(wait) - {"kind", "recipient", "requires"}:
-                raise Denied("A dependency wait takes only recipient and requires")
-            if set(requires) - {"insight", "rev", "action"}:
-                raise Denied("A dependency wait requires only insight, rev, and action")
-            return {"kind": kind, "recipient": recipient,
-                    "requires": {"insight": target, "rev": required_rev, "action": required_action}}
-        # code_change falls through: no fields beyond kind, baseline is the
-        # current published digest.
-        if set(wait) - {"kind"}:
-            raise Denied("A code_change wait takes no fields")
-        try:
-            baseline = self.project_snapshots_digest()
-        except (OSError, ValueError, TypeError, AttributeError):
-            raise Denied("A code_change wait needs a published snapshot baseline")
-        return {"kind": kind, "digest": baseline}
+        return normalize_wait(wait, action, self.project_snapshots_digest)
 
     def project_snapshots_digest(self) -> str:
         """Current published code digest (wait baseline hook, never raises silently)."""
