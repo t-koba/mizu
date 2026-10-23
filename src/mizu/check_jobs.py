@@ -8,6 +8,7 @@ claimed against the current source and execution configuration.
 from __future__ import annotations
 import contextlib
 import hashlib
+import json
 import stat
 import os
 import re
@@ -184,13 +185,16 @@ def reusable(job):
                  or job.get('status') == 'completed' and job.get('passed')))
 
 
-def available(context, *, validate=True):
+def available(context, *, validate=True, discovery=None):
     """Discover bounded candidates; validate dependencies only on tool use."""
-    if not context.config.sandbox.check_reuse or context.role.workspace == 'none':
+    if ('check_job' not in context.role.capabilities
+            or not context.config.sandbox.check_reuse or context.role.workspace == 'none'):
         return []
     key = execution_key(context.config)
-    candidates = [j for p in root(context.project).glob('*/job.json')
-                  if isinstance((j := read_json(p)), dict) and reusable(j)
+    if discovery is None:
+        from .acceptance import discover
+        discovery = discover(context.project)
+    candidates = [j for j in discovery[0].values() if reusable(j)
                   and j.get('environment') is not None and j.get('execution') == key]
     if not candidates:
         return []
@@ -379,25 +383,63 @@ def summary(job):
                     if job.get('status') in ('queued', 'running') else {})
     return {**continuation, **({'accepted_for_current_source': False} if job.get('kind') == 'verify' and job.get('status') in ('queued', 'running') else {}), **{'command_count': len(job.get('commands', [])),
                'command_preview': [text_preview(c, 128)[0] for c in job.get('commands', [])[:4]]},
-            **{k: job[k] for k in ('id', 'role', 'run', 'kind', 'code_digest', 'status',
+            **{k: text_preview(job[k], 512)[0] if isinstance(job[k], str) else job[k]
+               for k in ('id', 'role', 'run', 'kind', 'code_digest', 'status',
                                'created_at', 'finished_at', 'passed', 'error', 'shared_job',
                                'purpose', 'replaced_by') if k in job}}
 
 
-def pending(project, role):
+def pending(project, role, *, discovery=None):
+    # Keep a list result: diagnostics alone are never a completion wake.
     if role not in project.config.roles or "check_job" not in project.config.roles[role].capabilities:
         return []
-    return [summary(j) for p in sorted(root(project).glob('*/job.json'))
-            if isinstance((j := read(project, p.parent.name)), dict) and j.get('role') == role
+    if discovery is None:
+        from .acceptance import discover
+        discovery = discover(project)
+    return [summary(j) for j in discovery[0].values() if j.get('role') == role
             and j.get('status') in ('completed', 'interrupted', 'refused', 'cancelled', 'cleanup_failed')
             and not j.get('acknowledged')][:32]
 
 
-def list_jobs(project, role, *, include_acknowledged=True):
-    jobs = [summary(j) for p in root(project).glob('*/job.json')
-            if isinstance((j := read(project, p.parent.name)), dict) and j.get('role') == role
+def list_jobs(project, role, *, include_acknowledged=True, discovery=None):
+    if role not in project.config.roles or 'check_job' not in project.config.roles[role].capabilities:
+        return []
+    if discovery is None:
+        from .acceptance import discover
+        discovery = discover(project)
+    jobs = [j for j in discovery[0].values() if j.get('role') == role
             and (include_acknowledged or not j.get('acknowledged'))]
-    return sorted(jobs, key=lambda j: j['created_at'], reverse=True)[:32]
+    return [summary(j) for j in sorted(jobs, key=lambda j: j.get('created_at', ''), reverse=True)[:32]]
+
+
+def prompt_projection(context):
+    """Share one read snapshot across prompt views; cap aggregate UTF-8 bytes."""
+    if 'check_job' not in context.role.capabilities:
+        return {'check_jobs': [], 'shared_checks': [], 'check_continuation': None}
+    from .acceptance import discover, producer_diagnostics
+    discovery = discover(context.project)
+    result = {'check_jobs': [], 'shared_checks': [],
+              'check_continuation': continuation(context.project, context.role.name,
+                                                context.snapshot, discovery=discovery),
+              'check_discovery': {'coverage_complete': not discovery[1],
+                                  'summaries_omitted': 0, 'continuation_omitted': False,
+                                  **producer_diagnostics(discovery[1])}}
+    views = (
+        ('check_jobs', list_jobs(context.project, context.role.name,
+                                 include_acknowledged=False, discovery=discovery)),
+        ('shared_checks', available(context, validate=False, discovery=discovery)))
+    result['check_discovery']['summaries_omitted'] = sum(len(values) for _, values in views)
+    if len(json.dumps(result, ensure_ascii=False).encode('utf-8')) > 65536:
+        result['check_continuation'] = None
+        result['check_discovery']['continuation_omitted'] = True
+    for key, values in views:
+        for value in values:
+            result[key].append(value)
+            result['check_discovery']['summaries_omitted'] -= 1
+            if len(json.dumps(result, ensure_ascii=False).encode('utf-8')) > 65536:
+                result[key].pop()
+                result['check_discovery']['summaries_omitted'] += 1
+    return result
 
 
 def result(context, job_id):
@@ -612,7 +654,7 @@ def _run_one(project, stop, sandbox_factory, invalid):
     blocked = False
     candidates = []
     with lock(project.root / 'locks/check-jobs.lock'):
-        for path in acceptance.job_paths(project):
+        for path in acceptance.job_paths(project, invalid):
             if path.parent.name in invalid:
                 continue
             try:
@@ -909,7 +951,7 @@ def clear_wait(project, role):
     (root(project) / (role + '.wait.json')).unlink(missing_ok=True)
 
 
-def continuation(project, role, snapshot):
+def continuation(project, role, snapshot, *, discovery=None):
     """Bounded prior-role report for a check-wait continuation, never evidence.
 
     Available only to the owning role with check_job. Source changes are
@@ -921,14 +963,15 @@ def continuation(project, role, snapshot):
     report = record.get('continuation')
     if not isinstance(report, dict) or not isinstance(report.get('run'), str):
         return None
-    try:
-        job = read(project, record['id'])
-    except (Denied, KeyError):
+    if discovery is None:
+        from .acceptance import discover
+        discovery = discover(project)
+    job = discovery[0].get(record.get('id')) if isinstance(record.get('id'), str) else None
+    if job is None or job.get('role') != role:
         return None
-    if job.get('role') != role:
-        return None
-    return {'trust': 'prior-role-report', 'run': report['run'],
-            'snapshot': report.get('snapshot'), 'code_digest': report.get('code_digest'),
+    return {'trust': 'prior-role-report', 'run': text_preview(report['run'], 128)[0],
+            **{k: text_preview(report[k], 128)[0] if isinstance(report.get(k), str) else None
+               for k in ('snapshot', 'code_digest')},
             'same_code': report.get('code_digest') == snapshot.get('code_digest'),
             'summary': text_preview(str(report.get('summary', '')), 4000)[0],
             'state': text_preview(str(report.get('state', '')), 4000)[0],

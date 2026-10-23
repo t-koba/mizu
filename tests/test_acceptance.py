@@ -708,7 +708,7 @@ class AcceptanceTests(Fixture):
         self.assertEqual(result['id'], healthy['id'])
         self.assertEqual(result['status'], 'completed')
         self.assertEqual(result['invalid_producers'], {'entries': [{'job_id': suspect['id'], 'code': code}],
-                                                     'total': 1, 'omitted': 0})
+                                                     'total': 1, 'omitted': 0, 'coverage_complete': False})
         self.assertEqual(acceptance.audit(self.project.root), 1)
         receipt = acceptance.get(self.project.root,
                                  check_jobs.raw_read(self.project, healthy['id'])['acceptance_receipt_id'])
@@ -805,7 +805,7 @@ class AcceptanceTests(Fixture):
             self.assertEqual(result['id'], healthy['id'])
             self.assertEqual(result['status'], 'completed')
             self.assertEqual(result['invalid_producers'], {'entries': [{'job_id': suspect_job['id'], 'code': code}],
-                                                         'total': 1, 'omitted': 0})
+                                                         'total': 1, 'omitted': 0, 'coverage_complete': False})
             self.assertEqual(acceptance.audit(self.project.root), 1)
             receipt = acceptance.get(self.project.root,
                                      check_jobs.raw_read(self.project, healthy['id'])['acceptance_receipt_id'])
@@ -838,7 +838,7 @@ class AcceptanceTests(Fixture):
         self.assertEqual(result['processed'], 2)
         self.assertEqual(result['status'], 'idle')
         self.assertEqual(result['invalid_producers'], {'entries': [{'job_id': key, 'code': invalid[key]}
-                                         for key in sorted(invalid)[:32]], 'total': 35, 'omitted': 3})
+                                         for key in sorted(invalid)[:32]], 'total': 35, 'omitted': 3, 'coverage_complete': False})
         self.assertEqual(acceptance.recover_producers(self.project), invalid)
         self.assertEqual(len(FakeSandbox.calls), 2)
         self.assertIn('acceptance_receipt_id', check_jobs.raw_read(self.project, healthy['id']))

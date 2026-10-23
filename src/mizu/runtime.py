@@ -1309,7 +1309,11 @@ class Context:
             return check_jobs.submit(self, args.get('script'), fresh=args.get('fresh', False),
                                      purpose=args.get('purpose'))
         if action == 'list':
-            return {'jobs': check_jobs.list_jobs(self.project, self.role.name), 'available': check_jobs.available(self)}
+            from .acceptance import discover, producer_diagnostics
+            discovery = discover(self.project)
+            return {'jobs': check_jobs.list_jobs(self.project, self.role.name, discovery=discovery),
+                    'available': check_jobs.available(self, discovery=discovery),
+                    **producer_diagnostics(discovery[1])}
         if not args.get('id'):
             raise Denied('Check result requires id')
         if action == 'join':
@@ -3404,9 +3408,7 @@ def prompt_for(context: Context) -> str:
                        "decision_task": _decision_task(context),
                        "wait_events": list(getattr(context, "wait_events", []) or []),
                        "obligations": list(getattr(context, "obligations", []) or []),
-                       "check_jobs": (check_jobs.list_jobs(context.project, context.role.name, include_acknowledged=False) if "check_job" in caps else []),
-                       "check_continuation": check_jobs.continuation(context.project, context.role.name, context.snapshot),
-                       "shared_checks": (check_jobs.available(context, validate=False) if "check_job" in caps else []),
+                       **check_jobs.prompt_projection(context),
                        "acceptance_commands": acceptance,
                        "research_state": _prompt_research_state(context),
                        "capture_limit": _prompt_capture_limit(context),
@@ -3484,9 +3486,7 @@ def prompt_delta_for(context: Context, pending: list) -> str:
                        "research_state": _prompt_research_state(context),
                        "capture_limit": _prompt_capture_limit(context),
                        "workspace": "/workspace", "workspace_mode": context.role.workspace,
-                       "check_jobs": (check_jobs.list_jobs(context.project, context.role.name, include_acknowledged=False) if "check_job" in caps else []),
-                       "check_continuation": check_jobs.continuation(context.project, context.role.name, context.snapshot),
-                       "shared_checks": (check_jobs.available(context, validate=False) if "check_job" in caps else []),
+                       **check_jobs.prompt_projection(context),
                        "acceptance_commands": acceptance,
                        "ci_branch": ((context.config.vcs.get("ci_branch") or None)
                                      if "vcs_read" in caps else None),

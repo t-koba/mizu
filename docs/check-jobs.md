@@ -235,15 +235,62 @@ its bytes and any pending-proof eviction pin are left unchanged. Existing durabl
 proof remains usable independently of corrupt cache bytes. The existing size-only
 retention refusal above is separate and unchanged.
 
-Every `run_one`/`run_pending` return with detected corruption includes
-`invalid_producers: {entries: [{job_id, code}], total, omitted}`. Entries are
-sorted by the validated 64-hex job ID and limited to 32; counts cover all distinct
-invalid IDs, and batch repeats are deduplicated. Codes are fixed, not exception
-text: `job_json`, `job_schema`, `job_scope`, `job_integrity`, `result_json`,
-`result_integrity`. All IDs, including those omitted from the public view, are
-excluded internally. Diagnostics can accompany `idle`, `busy`, `deferred` or a
-completed healthy job; none of those statuses means the corrupt evidence was
-resolved. A later recovery trigger rechecks the files; it does not poll or repair.
+Read-only discovery uses one `check-jobs.lock` snapshot for job listing, shared
+candidates, pending completions and continuation summaries. Full and delta
+prompts reuse that snapshot across all three check views. Discovery validates
+fields consumed by sorting, filtering, summaries and the **one-hop** subscription
+overlay, plus marked acceptance producer content using the same pure inspector
+as retention. It never invokes mutating recovery/retention, creates proof,
+acknowledges a result, removes a pending scope, or rewrites producer bytes.
+An invalid/missing original excludes its attached subscription from delivery;
+detached subscriptions keep their existing cancelled disposition.
+
+An ordinary `check-jobs/<non-producer-name>/job.json` is classified only after
+safe reading its regular, non-hardlinked leaf (including path checks before a
+size-only refusal). It is left untouched and does not veto valid jobs. The
+public diagnostic contains `entry_digest`, **not** a job ID or literal path:
+SHA-256 of `mizu.check-job-entry.v1` + NUL + the filesystem-encoded entry name.
+This domain-separated digest is a diagnostic locator, never a usable job ID.
+`InvalidProducer` still accepts only valid 64-hex producer identities. Symlinks,
+hardlinks or unsafe shared paths are not ordinary non-producer entries.
+
+Every `run_one`/`run_pending` return with detected corruption, and check-job tool
+`list`, includes
+`invalid_producers: {entries: [{job_id, code} | {entry_digest, code}], total,
+omitted, coverage_complete: false}`. One deterministic view is limited to 32
+entries; counts cover all distinct invalid producers and non-producer entries,
+and batch repeats are deduplicated. All exclusions, including omitted entries,
+remain internal. Codes are fixed, not exception text: `job_json`, `job_schema`,
+`job_scope`, `job_integrity`, `result_json`, `result_integrity`, plus discovery's
+`job_file_bytes`, `result_file_bytes`, `job_subscription` and
+`non_producer_entry`. The recovery-only size disposition above is unchanged.
+Diagnostics can accompany `idle`, `busy`, `deferred` or a completed healthy job;
+none of those statuses means the suspect evidence was resolved.
+
+For roles with `check_job`, both prompt modes include `check_discovery` with
+`coverage_complete`, `summaries_omitted`, `continuation_omitted`, and the same bounded
+`invalid_producers` envelope when exclusions exist. `coverage_complete` means
+no suspect producer/entry was excluded, not that every valid summary fits.
+Each owned/shared list remains capped at 32. Their combined JSON projection,
+including continuation and diagnostics, is capped at 64 KiB (UTF-8, including
+JSON escaping); an oversized continuation is withheld with `continuation_omitted`
+set true. `summaries_omitted` counts additional byte-budget omissions
+from those count-capped lists. Command previews remain 128 bytes each (first
+four), summary string fields are at most 512 bytes, and continuation report
+text is at most 4,000 bytes per field with 128-byte reference previews.
+Roles without the grant neither scan this cache nor receive its diagnostics.
+Existing role, source, execution, environment and workspace visibility filters
+remain in force; prompt shared candidates still require dependency validation
+on tool use. Pending completion discovery returns only genuine eligible jobs:
+diagnostics alone never become a completion wake. A later discovery rechecks
+files; it does not poll, acknowledge, quarantine or repair them.
+
+This boundary does not make mutation scans tolerant: submission's reuse scan,
+queue-capacity accounting (`_pending_jobs`), eviction (`_make_room`), and
+same-purpose replacement (`_superseded`/interest checks) retain their existing
+direct-read behavior and can still fail on corrupt cache content. These paths,
+and direct-ID result, cancellation and acknowledgement operations, are not
+covered by the read-discovery isolation contract.
 
 Unsafe shared directories, links/hardlinks, unstable reads, systemic I/O errors,
 durable receipt/index corruption and write failures remain fatal, not isolated.

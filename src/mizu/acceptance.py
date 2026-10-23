@@ -7,6 +7,7 @@ Only the two acceptance producers supply finalized, input-bound results.
 from __future__ import annotations
 
 import json
+import os
 import re
 import stat
 from pathlib import Path
@@ -26,7 +27,8 @@ def _digest(value):
 # and durable proof validation deliberately remain ordinary Denied/OSError.
 class InvalidProducer(Denied):
     CODES = frozenset({'job_json', 'job_schema', 'job_scope',
-                      'job_integrity', 'result_json', 'result_integrity'})
+                      'job_integrity', 'result_json', 'result_integrity',
+                      'job_file_bytes', 'result_file_bytes', 'job_subscription'})
 
     def __init__(self, job_id, code):
         if not _digest(job_id) or code not in self.CODES:
@@ -39,9 +41,13 @@ def producer_diagnostics(invalid):
     """Bound the public view, not the internal exclusion/deduplication set."""
     if not invalid:
         return {}
-    entries = [{'job_id': key, 'code': invalid[key]} for key in sorted(invalid)[:32]]
+    entries = []
+    for key in sorted(invalid, key=str)[:32]:
+        identity = {'entry_digest': key[1]} if isinstance(key, tuple) else {'job_id': key}
+        entries.append({**identity, 'code': invalid[key]})
     return {'invalid_producers': {'entries': entries, 'total': len(invalid),
-                                  'omitted': len(invalid) - len(entries)}}
+                                  'omitted': len(invalid) - len(entries),
+                                  'coverage_complete': False}}
 
 
 def _producer_read(project, job_id, name):
@@ -58,16 +64,35 @@ def read_job(project, job_id):
     if not _digest(job_id):
         raise Denied('Invalid acceptance job ID')
     job = _producer_read(project, job_id, 'job')
-    # The scheduler sorts every candidate, including old/unbound terminal jobs.
-    # Keep its missing-timestamp default, but never coerce invalid content.
+    # Validate every field consumed by sorting, filtering, summaries and the
+    # one-hop subscription overlay. Missing legacy fields retain their defaults.
+    strings = ('role', 'run', 'kind', 'status', 'created_at', 'finished_at', 'error',
+               'purpose')
+    identities = ('code_digest', 'execution', 'environment', 'shared_key',
+                  'shared_job', 'replaced_by', 'acceptance_receipt_id')
+    flags = ('acknowledged', 'detached', 'passed')
     if (not isinstance(job, dict) or job.get('id') != job_id
-            or not isinstance(job.get('created_at', ''), str)):
+            or any(k in job and not isinstance(job[k], str) for k in strings)
+            or any(k in job and job[k] is not None and not _digest(job[k]) for k in identities)
+            or any(k in job and type(job[k]) is not bool for k in flags)
+            or not isinstance(job.get('commands', []), list)
+            or len(job.get('commands', [])) > 32
+            or any(not isinstance(c, str) for c in job.get('commands', []))):
         raise InvalidProducer(job_id, 'job_schema')
+    try:
+        canonical(job)  # Reject non-finite numbers and unencodable JSON strings.
+    except (ValueError, UnicodeError, RecursionError) as exc:
+        raise InvalidProducer(job_id, 'job_schema') from exc
     return job
 
 
-def job_paths(project):
-    """Enumerate under check-jobs.lock without suppressing directory I/O errors."""
+def job_paths(project, invalid=None):
+    """Enumerate under check-jobs.lock; unsafe paths and I/O always refuse.
+
+    A non-producer name is classified only after safely opening its ordinary
+    job leaf. The digest is domain-separated and never a usable job identity.
+    Callers without a diagnostic sink retain strict refusal.
+    """
     base = project.root / 'check-jobs'
     if not _present(project.root, 'check-jobs'):
         return []
@@ -76,10 +101,97 @@ def job_paths(project):
     paths = []
     for child in sorted(base.iterdir()):
         info = child.lstat()
-        if stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
-            if _present(project.root, f'check-jobs/{child.name}/job.json'):
+        if stat.S_ISLNK(info.st_mode):
+            raise Denied('Unsafe acceptance producer directory')
+        if stat.S_ISDIR(info.st_mode):
+            relative = f'check-jobs/{child.name}/job.json'
+            if not _present(project.root, relative):
+                continue
+            if _digest(child.name):
                 paths.append(child / 'job.json')
+            else:
+                # Even oversized leaves must first pass safe_read's path/link
+                # checks. Only its size disposition is content-only.
+                try:
+                    safe_read(project.root, relative, project.config.limits.file_bytes)
+                except LimitExceeded:
+                    pass
+                if invalid is None:
+                    raise Denied('Invalid acceptance producer entry')
+                key = digest(b'mizu.check-job-entry.v1\0' + os.fsencode(child.name))
+                invalid[('entry', key)] = 'non_producer_entry'
     return paths
+
+
+def _inspect_evidence(project, job):
+    """Shared pure inspection for discovery/retention; never mint or repair proof."""
+    job_id = job['id']
+    bound = job.get('acceptance_scope')
+    if bound is None:
+        return None, None
+    if (not isinstance(bound, dict) or job.get('shared_job') or job.get('kind') != 'verify'
+            or job.get('status') != 'completed' or job.get('passed') is not True
+            or _present(project.root, f'check-jobs/{job_id}/cancel.json')
+            or any(bound.get(k) != job.get(k) for k in ('commands', 'execution', 'environment'))):
+        raise InvalidProducer(job_id, 'job_integrity')
+    try:
+        _scope(bound)
+    except (Denied, ValueError, UnicodeError) as exc:
+        raise InvalidProducer(job_id, 'job_scope') from exc
+    existing = job.get('acceptance_receipt_id')
+    if existing is not None:
+        receipt = get(project.root, existing)  # Durable-store corruption stays fatal.
+        if receipt['code_digest'] != job.get('code_digest') or receipt['scope'] != bound:
+            raise InvalidProducer(job_id, 'job_integrity')
+        return existing, None
+    try:
+        record = _producer_read(project, job_id, 'result')
+    except LimitExceeded as exc:
+        raise InvalidProducer(job_id, 'result_file_bytes') from exc
+    try:
+        value = normalize(record, bound, producer={'kind': 'check_verify', 'id': job_id, 'run': job.get('run')})
+    except (Denied, ValueError, UnicodeError) as exc:
+        raise InvalidProducer(job_id, 'result_integrity') from exc
+    if record.get('code_digest') != job.get('code_digest'):
+        raise InvalidProducer(job_id, 'result_integrity')
+    return None, value
+
+
+def discover(project):
+    """One queue-locked read-only snapshot, with complete internal exclusions.
+
+    Only safely read individual content failures are isolated. No retention,
+    acknowledgement, quarantine, proof creation or producer writes occur here.
+    Raw records are retained so overlays remain exactly one hop.
+    """
+    jobs, invalid = {}, {}
+    with lock(project.root / 'locks/check-jobs.lock'):
+        for path in job_paths(project, invalid):
+            job_id = path.parent.name
+            try:
+                try:
+                    job = read_job(project, job_id)
+                except LimitExceeded as exc:
+                    raise InvalidProducer(job_id, 'job_file_bytes') from exc
+                _inspect_evidence(project, job)
+                jobs[job_id] = job
+            except InvalidProducer as exc:
+                invalid[exc.job_id] = exc.code
+        projected = {}
+        for job_id, raw in jobs.items():
+            job = dict(raw)
+            if job.get('shared_job') and not job.get('detached'):
+                original = jobs.get(job['shared_job'])
+                if original is None:
+                    invalid[job_id] = 'job_subscription'
+                    continue
+                for key in ('status', 'passed', 'error', 'finished_at'):
+                    if key in original:
+                        job[key] = original[key]
+            elif job.get('detached'):
+                job.update(status='cancelled', passed=False)
+            projected[job_id] = job
+    return projected, invalid
 
 
 def _directory(root, relative):
@@ -338,43 +450,20 @@ def recover_job(project, job_id):
             job = read_job(project, job_id)
         except LimitExceeded:
             return None
-        bound = job.get('acceptance_scope')
-        if bound is None:
-            return None
-        if (not isinstance(bound, dict) or job.get('shared_job') or job.get('kind') != 'verify' or job.get('status') != 'completed'
-                or job.get('passed') is not True or (project.root / f'check-jobs/{job_id}/cancel.json').exists()
-                or any(bound.get(k) != job.get(k) for k in ('commands', 'execution', 'environment'))):
-            raise InvalidProducer(job_id, 'job_integrity')
         try:
-            _scope(bound)
-        except (Denied, ValueError, UnicodeError) as exc:  # Pure validation only, no store access.
-            raise InvalidProducer(job_id, 'job_scope') from exc
-        existing = job.get('acceptance_receipt_id')
-        if existing is not None:
-            receipt = get(project.root, existing)
-            if receipt['code_digest'] != job.get('code_digest') or receipt['scope'] != bound:
-                raise InvalidProducer(job_id, 'job_integrity')
-            return existing
-        try:
-            record = _producer_read(project, job_id, 'result')
-        except LimitExceeded:
-            # Only a safely opened regular result exceeding its read bound
-            # takes this non-authoritative disposition. Unsafe paths still
-            # refuse recovery; malformed JSON/integrity are isolated. Removing the
-            # scope makes this terminal (no retry/pin or later raw promotion),
-            # without inventing a receipt or changing the execution verdict.
+            existing, value = _inspect_evidence(project, job)
+        except InvalidProducer as exc:
+            if exc.code != 'result_file_bytes':
+                raise
+            # Recovery alone owns this terminal non-authoritative size
+            # disposition. Read-only discovery leaves the scope and bytes alone.
             job.pop('acceptance_scope')
             job['acceptance_retention_refusal'] = 'result_file_bytes'
             from .fs import write_json
             write_json(project.root / f'check-jobs/{job_id}/job.json', job)
             return None
-        if not isinstance(record, dict) or record.get('code_digest') != job.get('code_digest'):
-            raise InvalidProducer(job_id, 'result_integrity')
-        producer = {'kind': 'check_verify', 'id': job_id, 'run': job.get('run')}
-    try:
-        value = normalize(record, bound, producer=producer)
-    except (Denied, ValueError, UnicodeError) as exc:  # Pure normalization, never receipt/index I/O.
-        raise InvalidProducer(job_id, 'result_integrity') from exc
+        if existing is not None or value is None:
+            return existing
     receipt_id = _retain(project.root, value)
     # Separate acquisitions: never acceptance.lock -> check-jobs.lock while
     # retaining. Eviction waits for this durable-proof acknowledgement.
@@ -396,14 +485,15 @@ def recover_producers(project, *, include_runs=False):
     Invalid cache content is returned by ID/code, never modified or retained.
     Callers bound the visible diagnostics separately from the exclusion set.
     Runner recovery scans only the bounded job cache. Backup maintenance can
-    also retry retained run records and unindexed objects. Normal read
-    projection is indexed, with no result collection or historical scan.
+    also retry retained run records and unindexed objects. Durable acceptance
+    projection stays indexed; discover() separately inspects the cache without
+    retaining results or scanning historical runs.
     """
     if include_runs:
         recover(project.root)
     invalid = {}
     with lock(project.root / 'locks/check-jobs.lock'):
-        paths = job_paths(project)
+        paths = job_paths(project, invalid)
     for path in paths:
         try:
             recover_job(project, path.parent.name)
