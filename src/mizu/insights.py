@@ -1253,7 +1253,8 @@ replacement insight without implying rejected substance.
         at most limit rows (1..100); each history/payload read is at most 1 MiB.
         Own-source deferrals still only ride along; no rotation acknowledges
         them. Superseded, withdrawn and revision-stale decisions never emit.
-        Unsafe stores/receipts fail closed. History is never rewritten.
+        Malformed history records are skipped individually; unsafe shared
+        stores and receipt corruption fail closed. History is never rewritten.
         """
         identifier(role_name)
         if type(limit) is not int or not 1 <= limit <= 100:
@@ -1267,41 +1268,39 @@ replacement insight without implying rejected substance.
 
         def eligible():
             for path in history.glob("*.json"):
-                identifier(path.stem)
-                record = json.loads(safe_read(self.root, f"decision-history/{path.name}", MAX_DECISION_EVENT_BYTES))
-                if not isinstance(record, dict):
-                    raise Denied("Malformed decision history")
-                if record.get("action") not in wanted:
-                    continue
                 try:
+                    identifier(path.stem)
+                    record = json.loads(safe_read(self.root, f"decision-history/{path.name}",
+                                                   MAX_DECISION_EVENT_BYTES))
+                    if not isinstance(record, dict) or record.get("action") not in wanted:
+                        continue
                     created = dt.datetime.fromisoformat(record["created_at"])
                     if created.tzinfo is None:
-                        raise ValueError("naive timestamp")
-                except (KeyError, TypeError, ValueError) as exc:
-                    raise Denied("Invalid decision timestamp") from exc
-                try:
+                        continue
                     current = self.read(record.get("id", ""))
-                except (Denied, OSError, ValueError, TypeError, AttributeError):
+                    if sources == "own" and current.get("source") != role_name:
+                        continue
+                    rev = _rev_of(current)
+                    if type(record.get("rev")) is not int or record["rev"] != rev:
+                        continue
+                    raw = self.root / "decisions" / f"{current['id']}.json"
+                    effective = _effective_decision(rev, json.loads(safe_read(
+                        self.root, raw.relative_to(self.root).as_posix(), MAX_DECISION_EVENT_BYTES)))
+                    if effective != record:
+                        continue
+                    payload = {"event": path.stem, "insight": current["id"], "rev": rev,
+                               "title": current.get("title", ""), "body": current.get("body", ""),
+                               "action": record["action"], "reason": record.get("reason", ""),
+                               "revisit": record.get("revisit", ""),
+                               "decided_at": record["created_at"], "source": current.get("source", ""),
+                               "evidence": current.get("evidence", [])}
+                    if len(canonical(payload)) > MAX_DECISION_EVENT_BYTES:
+                        continue
+                    payload["ack_token"] = self._decision_token(role_name, payload)
+                except (Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError, AttributeError):
+                    # A damaged individual event cannot veto all other pending
+                    # decisions. Receipt validation below remains fail-closed.
                     continue
-                if sources == "own" and current.get("source") != role_name:
-                    continue
-                rev = _rev_of(current)
-                if type(record.get("rev")) is not int or record["rev"] != rev:
-                    continue
-                raw = self.root / "decisions" / f"{current['id']}.json"
-                effective = _effective_decision(rev, json.loads(safe_read(
-                    self.root, raw.relative_to(self.root).as_posix(), MAX_DECISION_EVENT_BYTES)))
-                if effective != record:
-                    continue
-                payload = {"event": path.stem, "insight": current["id"], "rev": rev,
-                           "title": current.get("title", ""), "body": current.get("body", ""),
-                           "action": record["action"], "reason": record.get("reason", ""),
-                           "revisit": record.get("revisit", ""),
-                           "decided_at": record["created_at"], "source": current.get("source", ""),
-                           "evidence": current.get("evidence", [])}
-                if len(canonical(payload)) > MAX_DECISION_EVENT_BYTES:
-                    raise LimitExceeded("Decision event exceeds payload byte bound")
-                payload["ack_token"] = self._decision_token(role_name, payload)
                 if not self._decision_received(role_name, payload):
                     yield created, path.stem, payload
 

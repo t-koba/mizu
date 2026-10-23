@@ -173,6 +173,22 @@ class DecisionReceiptTests(Fixture):
         with self.assertRaises((Denied, OSError)):
             self.rows()
 
+    def test_corrupt_history_record_does_not_hide_good_event(self):
+        _reject(self.project, "reviewer")
+        good = self.rows()
+        self.assertEqual(len(good), 1)
+        path = self.project.root / "decision-history" / ("f" * 32 + ".json")
+        corruptions = (
+            b"not-json{",
+            b"[]",
+            json.dumps({"action": "reject", "created_at": "not-a-timestamp"}).encode(),
+        )
+        for payload in corruptions:
+            with self.subTest(payload=payload[:24]):
+                path.write_bytes(payload)
+                self.assertEqual(self.rows(), good)
+                self.assertEqual(path.read_bytes(), payload)
+
     def test_prompt_limit_does_not_hide_substantive_admission_behind_defers(self):
         with patch("mizu.insights.now", return_value="2026-01-01T00:00:00+00:00"):
             item = self.project.insights.submit(source="reviewer", title="Deferred", body="evidence",
