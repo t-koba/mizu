@@ -5,13 +5,13 @@ import time
 from unittest.mock import patch
 
 from support import Fixture, ScriptDriver
-from mizu.config import DEFAULT_PROGRESS_SIGNALS, load, role_no_progress_backoff_seconds
+from mizu.config import DEFAULT_PROGRESS_SIGNALS, load, role_no_progress_backoff_seconds, role_progress_signals
 from mizu.errors import ConfigError, Denied
 from mizu.explain import explain
 from mizu.fs import canonical, digest, now, write_json
 from mizu.runtime import (Engine, _is_observational_operation, _progress_obligations_digest,
                           _progress_record, should_run)
-from mizu.snapshot import PROGRESS_SIGNALS, progress_disposition, validate_progress
+from mizu.snapshot import PROGRESS_SIGNALS, no_progress_recovery_due, progress_disposition, validate_progress
 
 
 class ProgressConfigTests(Fixture):
@@ -582,6 +582,151 @@ class ProgressAdmissionTests(Fixture):
         disabled = dataclasses.replace(self.config, limits=limits, roles=roles)
         self.assertEqual(progress_disposition(worker_record, "continue", disabled, "worker", epoch + 7200),
                          "parked_no_progress")
+
+
+class PerRoleProgressSignalsTests(Fixture):
+    def _baseline(self):
+        current = self.project.snapshots.get()
+        generation = self.project.insights.generation()
+        base = self.project.snapshots.create(
+            self.project.snapshots.capture_files(self.project.workspace),
+            goal=self.project.goal, state=current["state"], run=None,
+            outcome="wait", summary="Baseline inputs for a progress test",
+            wake_at=time.time() + 3600, inbox_seen=generation,
+            wake_generation=self.project.control().get("wake_generation", ""),
+            parent=current["id"])
+        self.project.snapshots.publish(base)
+        return base
+
+    def _record(self, *, role="worker", selected=None, count=1, signals=None, stamp=None):
+        selected = list(self.config.limits.progress_signals if selected is None else selected)
+        signals = {name: False for name in PROGRESS_SIGNALS} if signals is None else dict(signals)
+        has_progress = any(signals[name] for name in selected)
+        return validate_progress({
+            "schema": 1, "signals": signals, "selected": selected, "role": role,
+            "has_progress": has_progress, "no_progress_count": count,
+            "obligations_digest": _progress_obligations_digest(
+                self.project.insights.pending_obligations(role)),
+            "recorded_at": stamp or now(),
+        })
+
+    def _recorded_run(self, callback=None, *, custom_config=None, base=None):
+        base = base or self._baseline()
+        config = custom_config or self.config
+        if custom_config is not None:
+            self.project.config = custom_config
+        def run(ctx, prompt, profile):
+            if callback:
+                callback(ctx, base)
+            if ctx.finished is None:
+                ctx.handle("finish", {"outcome": "continue", "summary": "Finished this unit",
+                                      "state": base["state"]})
+        Engine(config, driver=ScriptDriver(run)).run(self.project, "worker")
+        return self.project.snapshots.get()
+
+    def _with_role_signals(self, role_name, signals):
+        roles = dict(self.config.roles)
+        roles[role_name] = dataclasses.replace(roles[role_name], progress_signals=signals)
+        return dataclasses.replace(self.config, roles=roles)
+
+    def test_inherits_project_list_by_default(self):
+        for name in ("worker", "searcher"):
+            with self.subTest(role=name):
+                self.assertIsNone(self.config.roles[name].progress_signals)
+                self.assertEqual(role_progress_signals(self.config, self.config.roles[name]),
+                                 tuple(self.config.limits.progress_signals))
+                self.assertEqual(role_progress_signals(self.config, self.config.roles[name]),
+                                 DEFAULT_PROGRESS_SIGNALS)
+
+    def test_nonempty_override_including_state(self):
+        config = self._with_role_signals("worker", ("state",))
+        self.assertEqual(role_progress_signals(config, config.roles["worker"]), ("state",))
+        # Unset roles keep the project default.
+        self.assertEqual(role_progress_signals(config, config.roles["searcher"]),
+                         tuple(config.limits.progress_signals))
+        state_only = self._record(role="worker", selected=("state",), count=0,
+                                  signals={**{n: False for n in PROGRESS_SIGNALS}, "state": True})
+        self.assertTrue(state_only["has_progress"])
+        self.assertEqual(state_only["no_progress_count"], 0)
+        tool_only = self._record(role="worker", selected=("state",),
+                                 signals={**{n: False for n in PROGRESS_SIGNALS}, "tool": True})
+        self.assertFalse(tool_only["has_progress"])
+        self.assertEqual(progress_disposition(state_only, "continue", config, "worker"),
+                         "self_admit_progress")
+        parked = self._record(role="worker", selected=("state",), count=1,
+                              signals={**{n: False for n in PROGRESS_SIGNALS}, "tool": True})
+        self.assertFalse(parked["has_progress"])
+        self.assertEqual(progress_disposition(parked, "continue", config, "worker"),
+                         "parked_no_progress")
+
+    def test_empty_override_disables_qualification(self):
+        config = self._with_role_signals("worker", ())
+        self.assertEqual(role_progress_signals(config, config.roles["worker"]), ())
+        crowded = self._record(role="worker", selected=(), count=1,
+                               signals={n: True for n in PROGRESS_SIGNALS})
+        self.assertFalse(crowded["has_progress"])
+        self.assertEqual(progress_disposition(crowded, "continue", config, "worker"),
+                         "parked_no_progress")
+        mismatched_empty = self._record(role="worker", selected=(), count=2)
+        self.assertFalse(no_progress_recovery_due(mismatched_empty, "continue", self.config))
+        due = validate_progress({**self._record(role="worker", selected=(), count=2),
+                                 "no_progress_count": 2})
+        self.assertTrue(no_progress_recovery_due(due, "continue", config))
+        snapshot = self._recorded_run(custom_config=config)
+        self.assertEqual(snapshot["progress"]["selected"], [])
+        self.assertFalse(snapshot["progress"]["has_progress"])
+
+    def test_role_values_reject_unknown_and_duplicates(self):
+        original = self.file.read_text()
+        for value in ('["tool", "unknown"]', '["tool", "tool"]', '"tool"', '[123]'):
+            with self.subTest(value=value):
+                self.file.write_text(original.replace(
+                    "[roles.worker]", f"[roles.worker]\nprogress_signals = {value}"))
+                with self.assertRaises(ConfigError):
+                    load(self.file)
+        self.file.write_text(original)
+        empty = original.replace("[roles.worker]", "[roles.worker]\nprogress_signals = []")
+        self.file.write_text(empty)
+        self.assertEqual(load(self.file).roles["worker"].progress_signals, ())
+        self.file.write_text(original.replace(
+            "[roles.worker]", '[roles.worker]\nprogress_signals = ["state"]'))
+        self.assertEqual(load(self.file).roles["worker"].progress_signals, ("state",))
+        self.file.write_text(original)
+
+    def test_record_selection_uses_effective_list_and_resets_streak(self):
+        config = self._with_role_signals("worker", ("state",))
+        snapshot = self._recorded_run(custom_config=config)
+        self.assertEqual(snapshot["progress"]["selected"], ["state"])
+        # Signal-policy change resets the consecutive no-progress streak.
+        previous = self._record(role="worker", selected=list(DEFAULT_PROGRESS_SIGNALS), count=3)
+        reselected = _progress_record({"progress": previous}, "worker", ("state",),
+                                      {n: False for n in PROGRESS_SIGNALS}, "continue",
+                                      obligations_digest=previous["obligations_digest"])
+        self.assertEqual(reselected["selected"], ["state"])
+        self.assertEqual(reselected["no_progress_count"], 1)
+        continued = _progress_record({"progress": reselected}, "worker", ("state",),
+                                     {n: False for n in PROGRESS_SIGNALS}, "continue",
+                                     obligations_digest=reselected["obligations_digest"])
+        self.assertEqual(continued["no_progress_count"], 2)
+
+    def test_disposition_and_recovery_follow_effective_list(self):
+        config = self._with_role_signals("worker", ("state",))
+        # Same record content parks under the override but progresses by default.
+        tool_only_override = self._record(role="worker", selected=("state",),
+                                          signals={**{n: False for n in PROGRESS_SIGNALS}, "tool": True})
+        self.assertEqual(progress_disposition(tool_only_override, "continue", config, "worker"),
+                         "parked_no_progress")
+        tool_only_default = self._record(role="worker", selected=list(DEFAULT_PROGRESS_SIGNALS), count=0,
+                                         signals={**{n: False for n in PROGRESS_SIGNALS}, "tool": True})
+        self.assertEqual(progress_disposition(tool_only_default, "continue", self.config, "worker"),
+                         "self_admit_progress")
+        # Recovery requires the stored selection to match the effective list.
+        mismatched = self._record(role="worker", selected=list(DEFAULT_PROGRESS_SIGNALS), count=2)
+        self.assertFalse(no_progress_recovery_due(mismatched, "continue", config))
+        matched = self._record(role="worker", selected=("state",), count=2)
+        self.assertTrue(no_progress_recovery_due(matched, "continue", config))
+        legacy = self._record(role="worker", selected=list(DEFAULT_PROGRESS_SIGNALS), count=2)
+        self.assertTrue(no_progress_recovery_due(legacy, "continue", self.config))
 
 
 if __name__ == "__main__":

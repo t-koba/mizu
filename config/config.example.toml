@@ -255,6 +255,10 @@ daemon = true
 # [limits].cooldown_seconds; applies to writable daemon spacing and deferred
 # re-evaluation, read-only cadence stays on idle_seconds).
 # cooldown_seconds = 5
+# Per-role progress-signal override (optional, same unique supported names
+# as [limits].progress_signals; unset inherits the project list, explicit []
+# disables qualification for this role).
+# progress_signals = ["tool", "code", "decision", "insight", "input"]
 
 [roles.searcher]
 profile = "alternate"

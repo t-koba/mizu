@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 
 from . import platform as _platform
-from .config import role_no_progress_backoff_seconds
+from .config import role_no_progress_backoff_seconds, role_progress_signals
 from .errors import CaptureLimitExceeded, Denied, LimitExceeded, SnapshotConflict
 from .fs import DIGEST, ID, PREVIEW_BYTES, PRIVATE_EVIDENCE_TREES, atomic_write, canonical, digest, lock, mkdir, now, publish_pointer, read_json, safe_read, safe_read_info, write_json, relative_parts
 from .distribution import is_private_name
@@ -129,15 +129,20 @@ def progress_disposition(value: dict | None, outcome: str, config=None,
     try:
         validate_progress(value)
         limits = config.limits
-        selected = tuple(limits.progress_signals)
+        roles = getattr(config, "roles", None)
+        _role_name = value["role"] if role_name is None else role_name
+        _role_config = roles.get(_role_name) if isinstance(roles, dict) else None
+        try:
+            selected = tuple(role_progress_signals(config, _role_config))
+        except Exception:
+            selected = tuple(limits.progress_signals)
         allowance = limits.no_progress_continuations
-        role = value["role"] if role_name is None else role_name
+        role = _role_name
+        role_config = _role_config
         # Effective per-role timer: roles.<name>.no_progress_backoff_seconds
         # when set, else the project limit. Keep resolution centralized with
         # the role configuration helpers; legacy config-like callers lacking
         # a roles mapping still inherit the project value.
-        roles = getattr(config, "roles", None)
-        role_config = roles.get(role) if isinstance(roles, dict) else None
         backoff = role_no_progress_backoff_seconds(config, role_config)
         if set(value["selected"]) != set(selected) or value["role"] != role:
             return "reevaluate"
@@ -171,8 +176,14 @@ def no_progress_recovery_due(value: dict | None, outcome: str, config,
         validate_progress(value)
         limits = config.limits
         role = value["role"] if role_name is None else role_name
+        roles = getattr(config, "roles", None)
+        role_config = roles.get(role) if isinstance(roles, dict) else None
+        try:
+            selected = tuple(role_progress_signals(config, role_config))
+        except Exception:
+            selected = tuple(limits.progress_signals)
         return (value["role"] == role
-                and set(value["selected"]) == set(limits.progress_signals)
+                and set(value["selected"]) == set(selected)
                 and not value["has_progress"]
                 and value["no_progress_count"] >= limits.no_progress_recovery_after)
     except (AttributeError, TypeError, ValueError, Denied):

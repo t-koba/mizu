@@ -185,7 +185,8 @@ stays red and affects no gates or retries; missing annotation is not proof of
 determinism because evidence is bounded.
 
 Writable `continue` and `bounded` snapshots also carry a compact, digest-bound
-progress record. `[limits] progress_signals` selects which observed signals
+progress record. The effective per-role `progress_signals` list (`roles.<name>.progress_signals`
+when set, else `[limits] progress_signals`) selects which observed signals
 qualify; any selected true signal is progress. The default selects successful
 non-finish Mizu operations except pure reads of existing workspace, proposal,
 research, VCS or retained command/experiment evidence and exact web-receipt

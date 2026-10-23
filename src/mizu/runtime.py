@@ -26,7 +26,7 @@ from . import ci_waits, dispatch_evidence, work_item_events
 from .budget import Budget
 from .config import (MAX_CI_WAKE_EXTRA_BRANCHES, Config, Role, load,
                      role_cooldown_seconds, role_decision_events_limit,
-                     role_policy_bytes, role_requests_per_run,
+                     role_policy_bytes, role_progress_signals, role_requests_per_run,
                      role_run_seconds, role_tools_per_run,
                      role_work_item_events_limit, role_wrap_up_requests,
                      role_wrap_up_tools)
@@ -4408,7 +4408,7 @@ class Engine:
                         verification = {**verification, "passed": False, "invalidated": "code changed or final snapshot is unrepresentable"}
                     if finished["outcome"] == "done" and not (verification and verification["passed"]):
                         raise Denied("Code changed after verification; completion refused")
-                    selected_progress = tuple(self.config.limits.progress_signals)
+                    selected_progress = tuple(role_progress_signals(self.config, role))
                     observed_progress = {
                         "tool": context.progress_tool,
                         "code": captured["code_digest"] != context.snapshot["code_digest"],

@@ -477,6 +477,11 @@ class Role:
     #: re-evaluation use it; read-only cadence stays on `idle_seconds` and
     #: read-only deferrals stay on the project `cooldown_seconds`.
     cooldown_seconds: int | None = None
+    #: Per-role progress-signal override. None inherits the project
+    #: `[limits]` value; a set value (including empty, which disables
+    #: qualification for that role) must hold unique supported signal
+    #: names like the project bound.
+    progress_signals: tuple[str, ...] | None = None
 
 
 def role_requests_per_run(config: "Config", role: "Role") -> int:
@@ -599,6 +604,37 @@ def role_cooldown_seconds(config: "Config", role: "Role") -> int:
     if type(value) is int and 1 <= value <= 1073741824:
         return value
     return config.limits.cooldown_seconds
+
+
+#: Supported progress-signal names shared by project and per-role lists.
+ALLOWED_PROGRESS_SIGNALS = frozenset({"tool", "code", "state", "decision", "insight", "input"})
+
+
+def role_progress_signals(config, role):
+    """Effective progress-signal list for one role for one dispatch.
+
+    Schema: role override when set (including empty, which disables
+    qualification for that role), else project `[limits]`
+    progress_signals. Trust: configuration. Failure: never raises;
+    malformed overrides read as the project value (load already refuses
+    them fail-closed).
+    """
+    try:
+        value = getattr(role, "progress_signals", None)
+    except Exception:
+        value = None
+    if value is None:
+        try:
+            return tuple(config.limits.progress_signals)
+        except Exception:
+            return DEFAULT_PROGRESS_SIGNALS
+    if isinstance(value, (tuple, list)) and all(isinstance(v, str) for v in value):
+        if len(value) == len(set(value)) and all(v in ALLOWED_PROGRESS_SIGNALS for v in value):
+            return tuple(value)
+    try:
+        return tuple(config.limits.progress_signals)
+    except Exception:
+        return DEFAULT_PROGRESS_SIGNALS
 
 
 def role_policy_text(role: "Role") -> str:
@@ -746,7 +782,7 @@ def load(file: Path) -> Config:
                      "missing_finish_followups": (0, 3),
                      "missing_finish_recovery_after": (1, 100),
                      "free_disk_mb": (0, 1073741824)}
-    allowed_progress_signals = {"tool", "code", "state", "decision", "insight", "input"}
+    allowed_progress_signals = ALLOWED_PROGRESS_SIGNALS
     for k, v in lim.items():
         if k == "progress_signals":
             values = strings(v, "limits.progress_signals")
@@ -946,7 +982,7 @@ def load(file: Path) -> Config:
             raise ConfigError(f"Role name '{name}' is reserved for the operator channel")
         keys(role, {"profile", "policy", "workspace", "capabilities", "engine_tools", "on_change",
                     "interval_seconds", "calendar", "daemon", "selector", "attributes",
-                    "decision_events", "work_item_events", "decision_sources", "work_item_sources", "ci_wake", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds", "decision_events_limit", "work_item_events_limit", "no_progress_backoff_seconds", "cooldown_seconds"}, f"roles.{name}")
+                    "decision_events", "work_item_events", "decision_sources", "work_item_sources", "ci_wake", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds", "decision_events_limit", "work_item_events_limit", "no_progress_backoff_seconds", "cooldown_seconds", "progress_signals"}, f"roles.{name}")
         profile = string(role.get("profile", ""), f"roles.{name}.profile")
         selector = string(role.get("selector", ""), f"roles.{name}.selector")
         if ("profile" in role) == ("selector" in role):
@@ -1090,6 +1126,14 @@ def load(file: Path) -> Config:
         role_cooldown = role.get("cooldown_seconds")
         if role_cooldown is not None:
             number(role_cooldown, f"roles.{name}.cooldown_seconds", 1, 1073741824)
+        role_progress = role.get("progress_signals")
+        if role_progress is not None:
+            values = strings(role_progress, f"roles.{name}.progress_signals")
+            if len(values) != len(set(values)) or any(value not in ALLOWED_PROGRESS_SIGNALS for value in values):
+                raise ConfigError(f"roles.{name}.progress_signals must contain unique supported signal names")
+            role_progress = values
+        else:
+            role_progress = None
         roles[name] = Role(name, profile, policy, workspace, caps,
                            strings(role.get("engine_tools", []), "engine_tools"),
                            boolean(role.get("on_change", False), "on_change"), interval, calendar, daemon, selector, attrs,
@@ -1101,7 +1145,8 @@ def load(file: Path) -> Config:
                            decision_events_limit=role_decision_limit,
                            work_item_events_limit=role_work_item_limit,
                            no_progress_backoff_seconds=role_backoff,
-                           cooldown_seconds=role_cooldown)
+                           cooldown_seconds=role_cooldown,
+                           progress_signals=role_progress)
     if not roles:
         raise ConfigError("At least one role is required")
     consult_role = string(data.get("consult_role", ""), "consult_role")

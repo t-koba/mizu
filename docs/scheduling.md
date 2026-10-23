@@ -53,7 +53,8 @@ roles (`_ci_due_for`); expired `wait` `wake_at`; and finally the no-progress
 self-admission guard for `continue`/`bounded` units
 (`progress_disposition != parked_no_progress`).
 
-Progress self-admission uses project `[limits].progress_signals` (example
+Progress self-admission uses the effective per-role `progress_signals` list
+(`roles.<name>.progress_signals` when set, else project `[limits].progress_signals`; example
 default: `tool`, `code`, `decision`, `insight`, `input`; `state` is
 optional), `no_progress_continuations`, and the effective per-role
 `no_progress_backoff_seconds` (`roles.<name>.no_progress_backoff_seconds`
