@@ -43,10 +43,12 @@ LEGACY_EVENT_FIELDS = SEED_FIELDS | {"actor", "transition", "reason", "wait", "s
 #: Records written before the accepted scope existed carry the delivery claim
 #: but no scope. They stay readable history.
 DELIVERED_EVENT_FIELDS = LEGACY_EVENT_FIELDS | {"delivered_tree"}
-#: A record written now always carries the scope in force, so a revision
-#: states the scope its item is held to.
-EVENT_FIELDS = DELIVERED_EVENT_FIELDS | {"scope"}
-DELIVERY_EVENT_FIELDS = EVENT_FIELDS | {"delivery_schema", "delivery", "verification_scope"}
+#: Pre-delivery-schema records carry scope but no explicit delivery binding.
+SCOPED_EVENT_FIELDS = DELIVERED_EVENT_FIELDS | {"scope"}
+#: Every transition written now carries accepted scope and the delivery-schema
+#: projection; older shapes remain readable without rewriting their history.
+EVENT_FIELDS = SCOPED_EVENT_FIELDS | {"delivery_schema", "delivery", "verification_scope"}
+DELIVERY_EVENT_FIELDS = EVENT_FIELDS
 MAX_PROJECTION_BYTES = PREVIEW_BYTES + 256
 MAX_OPEN_PAGE_ROWS = 100
 MAX_OPEN_CURSOR_CHARS = 128
@@ -1026,7 +1028,7 @@ class WorkItems:
         # readable history.
         description = {"description"} if "description" in previous else set()
         allowed = {frozenset(base | description | scope)
-                   for base in (DELIVERY_EVENT_FIELDS, EVENT_FIELDS, DELIVERED_EVENT_FIELDS, LEGACY_EVENT_FIELDS)
+                   for base in (EVENT_FIELDS, SCOPED_EVENT_FIELDS, DELIVERED_EVENT_FIELDS, LEGACY_EVENT_FIELDS)
                    for scope in (set(), {"scope"})}
         if frozenset(fields) not in allowed:
             raise Denied("Invalid work-item transition fields")
