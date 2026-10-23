@@ -676,8 +676,10 @@ Windows の匿名 pipe は既存の PeekNamedPipe 経路を使います。
 
 ### Bind delivery before closing a work item
 With `work_items_transition`, first move the item to `doing`, then append a
-same-status revision with `delivery_snapshot_id` naming the exact retained
-published snapshot that delivers its current accepted scope. Use the returned
+same-status `doing` revision with `snapshot_id` naming the exact retained
+published snapshot that delivers its current accepted scope (the binding event
+stores `snapshot_id` as null and persists the delivery object; `snapshot_id`
+is refused for other statuses). Use the returned
 revision for the next CAS. Bind before history eviction; a manifest existing
 on disk alone is not sufficient. Binding and publication serialize under the
 publication lock, before the insights lock.

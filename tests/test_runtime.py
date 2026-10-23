@@ -386,7 +386,7 @@ class ContextTests(Fixture):
         self.project.snapshots.publish(snapshot)
         ctx.handle("work_items_transition", {"id": item["id"], "expected_rev": 2, "status": "doing"})
         ctx.handle("work_items_transition", {"id": item["id"], "expected_rev": 3, "status": "doing",
-                                              "delivery_snapshot_id": snapshot["id"]})
+                                              "snapshot_id": snapshot["id"]})
         completed = ctx.handle("work_items_transition", {"id": item["id"], "expected_rev": 4,
                                                           "status": "done",
                                                           "snapshot_id": snapshot["id"]})
@@ -453,7 +453,7 @@ class ContextTests(Fixture):
         self.project.snapshots.publish(snapshot)
         ctx.handle("work_items_transition", {"id": done_seed["id"], "expected_rev": 1, "status": "doing"})
         ctx.handle("work_items_transition", {"id": done_seed["id"], "expected_rev": 2, "status": "doing",
-                                              "delivery_snapshot_id": snapshot["id"]})
+                                              "snapshot_id": snapshot["id"]})
         ctx.handle("work_items_transition", {"id": done_seed["id"], "expected_rev": 3,
                                               "status": "done", "snapshot_id": snapshot["id"]})
         dropped_seed = self._accepted_work_item("Runtime dropped read")

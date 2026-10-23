@@ -401,8 +401,10 @@ regular `.new-<8-char>` atomic-write leftovers; an uncommitted temporary is
 never promoted, and a post-link alias
 is removed only when it matches one committed revision, direct creation record,
 or legacy sidecar inode. Unknown names and unsafe
-links still fail closed. Delivery is an explicit same-status `doing` revision
-with `delivery_snapshot_id`, unchanged accepted scope and normal revision CAS.
+links still fail closed. Delivery is an explicit same-status `doing` revision carrying `snapshot_id`
+with unchanged accepted scope and normal revision CAS. The binding event stores
+`snapshot_id` as null and persists the delivery object; `snapshot_id` is refused
+for other statuses.
 It validates the exact immutable manifest and retained published membership
 under the snapshot store's `locks/publication.lock`
 then `insights.lock`, holding both through append. `Snapshots.publish` takes only
@@ -601,14 +603,16 @@ The separately granted `work_items_transition` operation exposes only
 `Project.work_items.transition`: required `id`, positive `expected_rev`, and
 status (`open`, `doing`, `blocked`, `done`, `dropped`), with optional nonempty
 reason (1–4000 characters), structured wait, accepted scope, and 64-character
-lowercase digest `snapshot_id` / `delivery_snapshot_id`. The configured worker
+lowercase digest `snapshot_id` (status-dependent: delivery binding on `doing`,
+exact prior binding on `done`). The configured worker
 example role alone holds this grant; `work_items_read` does not imply it, and
 consultation/delegation roles are explicitly forbidden from holding it. The
 runtime binds `actor` to the role name and accepts no model-supplied actor. It
 returns the store's bounded record and preserves store errors. A stale CAS
 refuses without writing: re-read the fresh work-item projection and use its
-revision before retrying. First record delivery with `delivery_snapshot_id`
-on a doing-to-doing transition with unchanged scope; then close with
+revision before retrying. First record delivery with `snapshot_id`
+on a doing-to-doing transition with unchanged scope (the binding event stores
+`snapshot_id` as null); then close with
 `snapshot_id` exactly equal to that binding and valid embedded or retained
 acceptance proof. The live workspace may have advanced independently.
 `dropped` requires a reason, and a `blocked` transition may include the same

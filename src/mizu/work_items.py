@@ -1734,7 +1734,7 @@ class WorkItems:
         return self._page_closed_impl(limit=limit, readonly=True)
 
     def transition(self, item_id: str, *, expected_rev, status, actor, reason=None,
-                   wait=None, snapshot_id=None, scope=None, delivery_snapshot_id=None) -> dict:
+                   wait=None, snapshot_id=None, scope=None) -> dict:
         """Append one immutable full-state CAS event; terminal metadata wakes subscribers.
 
         The event states the scope in force for the item at that revision: a
@@ -1742,9 +1742,11 @@ class WorkItems:
         the previous revision's scope, a scope is never cleared, and a
         completion may not change the scope it inherits. Actor is trusted
         caller attribution, not authorization. Done validates an
-        exact pre-existing delivery revision, never the live workspace. Delivery
-        binding validates retained membership under publication.lock, then
-        insights.lock through append. Completion copies valid embedded proof or
+        exact pre-existing delivery revision, never the live workspace. A doing
+        transition carrying snapshot_id records that delivery binding (event
+        snapshot_id stays null); done carrying snapshot_id must equal it.
+        Delivery binding validates retained membership under publication.lock,
+        then insights.lock through append. Completion copies valid embedded proof or
         pins an independently retained acceptance receipt by immutable ID.
         All validation precedes the exclusive atomic
         write. Stale CAS writes nothing; cancellation/process death releases
@@ -1754,8 +1756,9 @@ class WorkItems:
             raise Denied("Expected revision must be a positive integer")
         # Global ordering: publication -> insights. Publishers never acquire
         # insights.lock. Keep membership validation and append in one critical section.
+        binding_request = (status == "doing" and snapshot_id is not None)
         publication = (lock(self.snapshots.root / "locks" / "publication.lock")
-                       if delivery_snapshot_id is not None else contextlib.nullcontext())
+                       if binding_request else contextlib.nullcontext())
         with publication, lock(self.root / "locks" / "insights.lock"):
             history_revisions = self._recover_temporary_writes(item_id)
             current = self._get(item_id, history_revisions=history_revisions)
@@ -1792,6 +1795,8 @@ class WorkItems:
                     receipt = get(self.root, verification.get("receipt_id"))
                     verification_scope = digest(canonical(receipt["scope"]))
                 delivered_tree = delivery["code_digest"]
+            elif binding_request:
+                pass
             elif snapshot_id is not None:
                 raise Denied("Only completed work items carry snapshot evidence")
             # The scope in force is inherited from the previous revision. A
@@ -1809,20 +1814,22 @@ class WorkItems:
                     raise Denied("A scope change requires a reason")
                 in_force = scope
             delivery = current.get("delivery")
-            if delivery_snapshot_id is not None:
+            stored_snapshot_id = snapshot_id
+            if binding_request:
                 if current["status"] != "doing" or status != "doing" or in_force != effective_scope:
                     raise Denied("Delivery binding requires doing-to-doing with unchanged scope")
-                snapshot = self.snapshots.get(delivery_snapshot_id)
-                if delivery_snapshot_id not in self.snapshots._history_ids():
+                snapshot = self.snapshots.get(snapshot_id)
+                if snapshot_id not in self.snapshots._history_ids():
                     raise Denied("Delivery snapshot must be retained published history")
-                delivery = {"snapshot_id": delivery_snapshot_id, "code_digest": snapshot["code_digest"],
+                delivery = {"snapshot_id": snapshot_id, "code_digest": snapshot["code_digest"],
                             "scope_digest": self._scope_digest(in_force), "binding_rev": current["rev"] + 1}
+                stored_snapshot_id = None
             record = {**current, "rev": current["rev"] + 1, "status": status,
                       "updated_at": now(), "actor": actor,
                       "transition": {"from": current["status"], "to": status},
                       "holder": actor if status == "doing" else
                           (current["holder"] or actor) if status == "blocked" else None,
-                      "reason": reason, "wait": registered, "snapshot_id": snapshot_id,
+                      "reason": reason, "wait": registered, "snapshot_id": stored_snapshot_id,
                       "verification": verification, "delivered_tree": delivered_tree,
                       "scope": in_force, "delivery_schema": 1, "delivery": delivery,
                       "verification_scope": verification_scope}

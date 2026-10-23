@@ -36,7 +36,10 @@ class RetainedDeliveryTests(Fixture):
         return snapshot
 
     def bind(self, snapshot):
-        return self.step("doing", delivery_snapshot_id=snapshot["id"])
+        bound = self.step("doing", snapshot_id=snapshot["id"])
+        assert bound["snapshot_id"] is None
+        assert bound["delivery"]["snapshot_id"] == snapshot["id"]
+        return bound
 
     def receipt(self, snapshot):
         bound = {"commands": ["check"], "execution": "1" * 64, "environment": "2" * 64,
@@ -64,9 +67,9 @@ class RetainedDeliveryTests(Fixture):
         snapshot = self.snapshot()
         for status in ("open", "blocked", "done", "dropped"):
             with self.subTest(status=status), self.assertRaises(Denied):
-                self.step(status, delivery_snapshot_id=snapshot["id"])
+                self.step(status, snapshot_id=snapshot["id"])
         with self.assertRaises(Denied):
-            self.step("doing", delivery_snapshot_id=snapshot["id"], scope="Different", reason="Changed")
+            self.step("doing", snapshot_id=snapshot["id"], scope="Different", reason="Changed")
         self.bind(snapshot)
         newer = self.snapshot()
         with self.assertRaises(Denied):

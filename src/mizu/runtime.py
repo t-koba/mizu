@@ -1458,8 +1458,7 @@ class Context:
         return self.project.work_items.transition(
             args["id"], expected_rev=args["expected_rev"], status=args["status"],
             actor=self.role.name, reason=args.get("reason"), wait=args.get("wait"),
-            snapshot_id=args.get("snapshot_id"), scope=args.get("scope"),
-            delivery_snapshot_id=args.get("delivery_snapshot_id"))
+            snapshot_id=args.get("snapshot_id"), scope=args.get("scope"))
 
     def _op_insights(self, args: dict) -> dict:
         if args.get("id"):

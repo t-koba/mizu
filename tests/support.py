@@ -38,7 +38,7 @@ def bind_delivery(project, item_id, snapshot_id, *, expected_rev=1):
         store.transition(item_id, expected_rev=1, status="doing", actor="worker")
         expected_rev = 2
     return store.transition(item_id, expected_rev=expected_rev, status="doing", actor="worker",
-                            delivery_snapshot_id=snapshot_id)
+                            snapshot_id=snapshot_id)
 
 
 class Fixture(unittest.TestCase):

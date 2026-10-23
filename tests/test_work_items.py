@@ -38,7 +38,7 @@ class WorkItemTests(Fixture):
 
     def bind(self, snapshot, expected_rev=2):
         return self.change("doing", expected_rev=expected_rev,
-                           delivery_snapshot_id=snapshot["id"])
+                           snapshot_id=snapshot["id"])
 
     def snapshot(self, verification=None, publish=True):
         self.serial += 1
