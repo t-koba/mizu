@@ -2,6 +2,7 @@
   "entrypoint": "launcher.py",
   "api": "claude_agent_sdk.ClaudeSDKClient",
   "exports": [
+    "ClaudeAgentOptions.verbatim_prompts",
     "ClaudeSDKClient.interrupt",
     "ClaudeSDKClient.get_mcp_status",
     "ResultMessage.terminal_reason",

@@ -22,10 +22,11 @@ async def main():
     from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, HookMatcher, PermissionResultAllow, PermissionResultDeny, ResultMessage, AgentDefinition
     if '--check-contract' in sys.argv:
         assert callable(ClaudeSDKClient.interrupt) and callable(ClaudeSDKClient.get_mcp_status)
+        assert 'verbatim_prompts' in {f.name for f in dataclasses.fields(ClaudeAgentOptions)}
         fields = {f.name for f in dataclasses.fields(ResultMessage)}
         assert {'terminal_reason', 'model_usage'} <= fields
         emit({'contract': 'official-python-agent-sdk',
-              'exports': ['ClaudeSDKClient.interrupt', 'ClaudeSDKClient.get_mcp_status',
+              'exports': ['ClaudeAgentOptions.verbatim_prompts', 'ClaudeSDKClient.interrupt', 'ClaudeSDKClient.get_mcp_status',
                           'ResultMessage.terminal_reason', 'ResultMessage.model_usage'],
               'inference': 'not_run'})
         return
@@ -64,6 +65,8 @@ async def main():
                                        'permissionDecisionReason': 'Tool admission refused'}}
 
     options = dict(cfg['options'])
+    if 'verbatim_prompts' in options:
+        raise ValueError('verbatim_prompts is runtime-owned and must be True')
     # Operator hook declarations remain native settings; the grant hook cannot be replaced.
     if 'hooks' in options:
         raise ValueError('SDK hook callbacks are runtime-owned; configure reviewed native hooks in settings')
@@ -79,7 +82,7 @@ async def main():
         options['agents'] = agents
     tools = sorted(grants - {name for name in grants if name.startswith('mcp__')})
     opts = ClaudeAgentOptions(**options, model=cfg['model'], cwd=cfg['cwd'],
-                             system_prompt=cfg['systemPrompt'], resume=cfg.get('resume'),
+                             verbatim_prompts=True, system_prompt=cfg['systemPrompt'], resume=cfg.get('resume'),
                              tools=tools, allowed_tools=[], permission_mode='default',
                              mcp_servers=cfg['mcp_servers'], can_use_tool=permission,
                              hooks={'PreToolUse': [HookMatcher(hooks=[before_tool])]})

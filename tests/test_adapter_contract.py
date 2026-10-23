@@ -67,6 +67,10 @@ class AdapterContractTests(unittest.TestCase):
         argv, _, (_, exports) = module.probe('pi', ['node'])
         self.assertTrue(argv[-2].endswith('launcher.mjs'))
         self.assertIn('ModelRuntime', exports)
+        argv, _, (_, exports) = module.probe('claude', ['python'])
+        self.assertTrue(argv[-2].endswith('launcher.py'))
+        self.assertEqual(argv[-1], '--check-contract')
+        self.assertIn('ClaudeAgentOptions.verbatim_prompts', exports)
 
     def test_no_hardcoded_probe_names(self):
         doctor = (ROOT / 'src/mizu/doctor.py').read_text()

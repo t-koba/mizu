@@ -95,6 +95,13 @@ PreToolUse は自動承認済みの要求も検査する。`allowed_tools` は�
 MCP の pending を待ち、connected を確認してから query を送る。
 子の tools は親の明示許可集合の部分集合でなければ設定エラー。
 
+固定 Python SDK 0.2.163 の `ClaudeAgentOptions.verbatim_prompts` を必須契約に含め、
+launcher で常に `True` を指定する。合成 prompt は `@path` や先頭 slash も含めて
+書き換えず literal data として送る。これは runtime 所有であり、汎用 options からの
+指定は拒否する。レビュー済み plugin/skill と明示 grant の tool は変更しない。
+オフライン fake SDK テストは option と文字列の配線の証拠であり、実 CLI での
+展開防止や有料推論を検証したという意味ではない。
+
 `terminal_reason=completed`、success subtype、error なし、seal の全てを要求する。
 API 失敗が success subtype を持つ場合も成功にしない。
 `model_usage` のモデル別累積値から再開前の値を引く。message や subagent の

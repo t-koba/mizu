@@ -48,7 +48,7 @@ def effective(config, role, profile):
         'pi': {'cwd', 'agentDir', 'modelRuntime', 'model', 'tools', 'customTools', 'resourceLoader', 'sessionManager', 'systemPrompt'},
         'pi-durable': {'cwd', 'agentDir', 'modelRuntime', 'model', 'tools', 'customTools', 'resourceLoader', 'sessionManager', 'systemPrompt'},
         'codex': {'model', 'model_provider', 'model_instructions_file', 'mcp_servers', 'cwd', 'base_instructions', 'developer_instructions'},
-        'claude': {'strict_mcp_config', 'continue_conversation', 'fork_session', 'hooks', 'permission_prompt_tool_name', 'model', 'system_prompt', 'cwd', 'mcp_servers', 'can_use_tool', 'resume', 'session_id', 'permission_mode', 'tools', 'allowed_tools'},
+        'claude': {'verbatim_prompts', 'strict_mcp_config', 'continue_conversation', 'fork_session', 'hooks', 'permission_prompt_tool_name', 'model', 'system_prompt', 'cwd', 'mcp_servers', 'can_use_tool', 'resume', 'session_id', 'permission_mode', 'tools', 'allowed_tools'},
     }[raw['engine']]
     if set(options) & owned:
         raise ConfigError('Engine options conflict with runtime-owned configuration: ' + ', '.join(sorted(set(options) & owned)))

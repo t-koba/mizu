@@ -57,6 +57,25 @@ class EngineConfigTests(Fixture):
             with self.assertRaises(ConfigError): effective(ctx.config, ctx.role, ctx.role.profile)
             self.assertEqual(ctx.request_count,0)
 
+    def test_claude_verbatim_prompts_is_owned_before_launch_or_admission(self):
+        for value in (True, False, 'true', None, 1, {}):
+            with self.subTest(value=value):
+                ctx = self.context('consult')
+                profile = ctx.role.profile
+                config = dataclasses.replace(self.config, profiles={**self.config.profiles, profile:
+                    {**self.config.profiles[profile], 'engine': 'claude',
+                     'options': {'verbatim_prompts': value}}})
+                ctx.config = config
+                with unittest.mock.patch('mizu.claude.Channel') as channel, \
+                     unittest.mock.patch('mizu.claude.Bridge') as bridge, \
+                     unittest.mock.patch('mizu.claude.connected_servers') as servers:
+                    with self.assertRaisesRegex(ConfigError, 'runtime-owned.*verbatim_prompts'):
+                        ClaudeDriver(config).execute(ctx, 'synthetic prompt')
+                channel.assert_not_called()
+                bridge.assert_not_called()
+                servers.assert_not_called()
+                self.assertEqual(ctx.request_count, 0)
+
     def test_shared_admission_idempotent_and_bounded(self):
         ctx=self.context('consult')
         admit_invocation(ctx,unit='turn'); admit_invocation(ctx,unit='turn')

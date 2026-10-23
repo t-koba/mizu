@@ -807,6 +807,13 @@ leaves the session/store and all durable grant and replay checks intact. Other
 or uncertain failures retain the work-unit key and therefore refuse a changed
 grant rather than forking around unresolved work.
 
+Claude composed prompts are literal data: the launcher always sets the pinned
+SDK's `ClaudeAgentOptions.verbatim_prompts=True`. This field is runtime-owned;
+any supplied `options.verbatim_prompts` value (even `true`) is refused before
+launch. Prompt text is not escaped or rewritten to handle `@path` or leading
+slashes. Reviewed plugins/skills and explicitly granted native/MCP tools remain
+supported; prompt text is not a separate CLI command API.
+
 Settings that collide with runtime-owned prompt/model/bridge/session fields
 fail before input; they are never silently overwritten. Native engine errors
 remain errors. On every engine but pi-durable, session identifiers include model,

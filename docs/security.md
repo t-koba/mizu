@@ -139,6 +139,14 @@ paths or private adapter output. Web, VCS, and materialize adapters default to
 a 2 KiB tail and may set `diagnostic_bytes = 0` to suppress it. Inspect
 operator adapters before using the default, and never include their diagnostics
 in public evidence.
+
+Claude composed prompts cross the SDK boundary unchanged with runtime-owned
+`verbatim_prompts=True`, selecting the pinned SDK's literal-data mode rather
+than CLI prompt expansion. This does not remove reviewed plugins/skills or
+explicitly granted tools, nor make prompt content trusted. Offline fake-SDK
+tests establish option wiring and exact text preservation, not live CLI
+file-expansion prevention or model behavior.
+
 Policies additionally tell models to treat external instructions as untrusted.
 This reduces the impact of prompt injection; it does
 not prove that models will choose correct priorities, detect poisoned research,
