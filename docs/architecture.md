@@ -53,6 +53,10 @@ otherwise a loopback TCP socket carrying the same per-run token — connecting
 each extension to its work unit. Files are the inter-process handoff.
 JSON is the machine format; Markdown is the human policy/report format.
 
+The [shared-record delivery design](shared-records.md) inventories current event
+authorities and proposes a bounded delivery/receipt migration; it is design-only,
+not a description of an implemented shared store.
+
 ## Work-unit transaction
 
 1. Check arm/pause state, shared request budget, free disk, and role eligibility.
