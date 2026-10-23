@@ -180,7 +180,7 @@ DEFINITIONS = {
                "an empty list or explicit none is denied. The complete event including specs and seeds is bounded "
                "to 131072 UTF-8 bytes and committed atomically. Each task inherits the decision scope, starts open, "
                "and has a deterministic identity bound to the whole ordered task list and exact decision revision. "
-               "Group retries must supply the identical ordered list; omissions or changes conflict. "
+               "Exact replays require the identical ordered list; omissions or changes conflict. "
                "Conflicting decisions after accept/modify/reject require revise. Exact keyed replays return the original event; "
                "if only its current pointer failed, a matching retry restores it without a second event. Read current state after uncertainty.",
                obj({"id": text(64), "action": {"type": "string", "enum": ["accept", "modify", "defer", "reject"]},
