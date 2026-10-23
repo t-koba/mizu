@@ -188,6 +188,19 @@ item as blocked when it is not actionable. Thus leaving an `open`/`doing` item
 while finishing `wait` or `done` intentionally allows another writer unit at
 the configured cadence. Cache-affinity ordering is separate.
 
+### Externality of a blocker
+
+A structured wait observes recorded state; it does not prove that an outside
+actor caused the condition. In particular, `code_change`, `insight_decided`,
+and `dependency` do not attest who produced the code change or decision, and
+a dependency's `recipient` does not assign the task or restrict who may satisfy
+its condition. The task author should use `blocked` only when its condition is
+genuinely outside the active writer's control. If the writer can cause the
+code change or decision, or can retrieve the needed CI, log, artifact, or
+experiment evidence with its own tools, it should keep the work actionable
+rather than waiting on that condition. This is a usage rule; readiness checks
+do not mechanically establish externality.
+
 ### Idle-with-open-work diagnostic
 
 `Project.status()` carries a bounded `idle_with_open_work` diagnostic that
