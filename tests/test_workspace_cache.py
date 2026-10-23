@@ -6,13 +6,14 @@ import shutil
 import sys
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from support import Fixture, ScriptDriver
 from mizu import check_jobs, workspace_cache as cache
 from mizu.admission import check_slot_exclusions, role_exclusion, role_exclusions
 from mizu.config import WorkspaceCache, load, workspace_cache_policy
-from mizu.errors import Busy, ConfigError
+from mizu.errors import Busy, ConfigError, Denied
 from mizu.fs import held, lock, write_json
 from mizu.process import Result, run
 from mizu.runtime import Engine
@@ -69,9 +70,37 @@ class WorkspaceCacheTests(Fixture):
     def test_aggregate_threshold_and_missing_roots(self):
         self.policy(('__pycache__', '.pytest_cache', 'missing/__pycache__'))
         first, second = self.make(size=4), self.make('.pytest_cache', size=6)
-        self.assertEqual(cache.maintain(self.project)['removed_roots'], 2)
+        result = cache.maintain(self.project)
+        self.assertEqual((result['status'], result['bytes'], result['removed_roots']),
+                         ('removed', 10, 2))
         self.assertFalse(first.exists())
         self.assertFalse(second.exists())
+
+    def test_scan_uses_full_link_metadata_not_cached_directory_metadata(self):
+        directory = self.make()
+        scandir = os.scandir
+        metadata = SimpleNamespace(st_mode=0o100644, st_nlink=0, st_size=10,
+                                   st_file_attributes=0)
+
+        @contextlib.contextmanager
+        def cached_metadata(path):
+            # Windows DirEntry.stat() reports st_nlink=0 even for ordinary
+            # files. It cannot prove the file has exactly one hardlink.
+            with scandir(path) as entries:
+                yield (SimpleNamespace(name=entry.name, stat=lambda **kwargs: metadata)
+                       for entry in entries)
+
+        with mock.patch.object(cache.os, 'scandir', cached_metadata):
+            self.assertEqual(cache._preflight(self.project, self.config.workspace_cache.roots),
+                             ([directory], 10))
+        try:
+            os.link(directory / 'cache.bin', directory / 'linked')
+        except OSError:
+            self.skipTest('Hardlinks unavailable')
+        with mock.patch.object(cache.os, 'scandir', cached_metadata), self.assertRaises(Denied):
+            cache._preflight(self.project, self.config.workspace_cache.roots)
+        self.assertTrue((directory / 'cache.bin').exists())
+        self.assertTrue((directory / 'linked').exists())
 
     def test_tracked_and_nonexcluded_refused_before_any_deletion(self):
         for unsafe in ('source-cache', '.pytest_cache', 'refs/remotes/upstream/cache'):

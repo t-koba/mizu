@@ -125,7 +125,9 @@ def _preflight(project, roots):
                         raise Denied('Cache contains a nested repository')
                     if _snapshot_protected(project.snapshots, relative):
                         raise Denied('Cache contains snapshot-protected state')
-                    info = entry.stat(follow_symlinks=False)
+                    # DirEntry.stat() omits the hardlink count on Windows.
+                    # lstat supplies it without following symlinks/reparse points.
+                    info = (directory / entry.name).lstat()
                     if getattr(info, 'st_file_attributes', 0) & 0x400:
                         raise Denied('Cache contains a reparse point')
                     if stat.S_ISDIR(info.st_mode):
