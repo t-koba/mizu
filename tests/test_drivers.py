@@ -464,12 +464,21 @@ class SyntheticEngineTests(Fixture):
         # Synthetic peers exercise host serialization, not live inference or
         # provider compaction. Reconstruct Context for the resumed unit;
         # these read-only contexts must not use the newer live project goal.
+        pinned_goal = "Pinned charter: café\r\nPreserve exact text.\r\n"
+        snapshot = self.project.snapshots.create(
+            self.project.snapshots.capture_files(self.project.workspace),
+            goal=pinned_goal, state="", run=None, outcome="wait", summary="Pinned charter")
+        self.project.snapshots.publish(snapshot)
+        # Byte writes make CRLF policy coverage deterministic on every host.
+        for policy in self.config.roles['consult'].policy:
+            policy.write_bytes(b"Synthetic policy.\r\nKeep exact newlines.\r\n")
         (self.project.root / "PROJECT.md").write_text("New unpublished live charter")
         for engine in ('pi', 'codex', 'claude'):
             with self.subTest(engine=engine):
                 expected = None
                 for resumed in (False, True):
                     ctx = self.context('consult')
+                    self.assertEqual(ctx.goal, pinned_goal)
                     if engine == 'pi':
                         profile = ctx.role.profile
                         raw = {**self.config.profiles[profile], 'engine': engine,
@@ -483,7 +492,7 @@ class SyntheticEngineTests(Fixture):
                         cfg = read_json(ctx.run_dir/'pi-effective.json')
                         actual = cfg['systemPrompt']
                         self.assertEqual(bool(cfg['resume']), resumed)
-                        self.assertEqual((ctx.run_dir/'system.md').read_text(), actual)
+                        self.assertEqual((ctx.run_dir/'system.md').read_bytes(), actual.encode('utf-8'))
                     else:
                         sent = []
                         send = Channel.send
