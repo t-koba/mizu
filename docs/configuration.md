@@ -658,6 +658,24 @@ or timestamp tie window is loaded or truncated. History reads and decision
 payloads are each bounded to 1 MiB; selection uses a heap of at most the
 role-effective limit (fixed maximum 100 rows).
 
+A safely read per-token receipt with invalid content or semantics (malformed
+JSON, wrong shape or role/event/token binding, bad timestamp) isolates only
+that event: it stays undelivered and unacknowledged, its bytes are left
+unchanged, and at most 10 bounded diagnostics are reported as
+`decision_receipt_diagnostics` (each `{event, ack_token, action, reason}` with
+`reason` in `malformed_json`, `invalid_receipt`, `invalid_timestamp` and no
+receipt bytes or untrusted content) in full and delta prompts, the run record
+(`decision-receipt-diagnostics.json`), and scheduling, so a corrupt receipt
+alone still admits a run instead of reading as drained. Unrelated valid events
+still deliver. Unsafe receipt directories, symlinks, hardlinks, size-bound
+refusals, and systemic I/O still fail closed and are never isolated.
+Acknowledgement of a suspect token is refused and never overwrites the file.
+No in-product repair operation currently exists. Keep the local store untouched
+and escalate the event ID and bounded reason code to the project operator for
+an explicit recovery plan; until an authorized recovery path is provided, that
+event remains withheld. The product never deletes or silently repairs a
+receipt, and direct file editing is not a supported repair procedure.
+
 Selection excludes exact receipts, then takes the globally oldest eligible
 rows by timezone-aware timestamp and event ID before the prompt limit, across
 substantive decisions and deferrals. Nothing silently rotates past ignored

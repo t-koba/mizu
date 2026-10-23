@@ -832,8 +832,9 @@ oldest-first (aware timestamp, event ID), before the prompt limit. There is no
 defer rotation or timestamp watermark. Legacy completion cursors are ignored:
 eligible history conservatively replays because old finishes prove no handling.
 Withdrawn, superseded and revision-stale decisions never emit; history is never
-rewritten. See [the receipt contract](configuration.md#decision-event-receipts)
-for bounds, retry and migration limitations.
+rewritten. A safely read corrupt per-token receipt isolates only that event
+while unrelated events still deliver; see [the receipt contract](configuration.md#decision-event-receipts)
+for bounds, diagnostics, repair, retry and migration limitations.
 
 In `own` mode a deferral alone still never admits a run: event-triggered and
 unchanged-code dispatch exit unless a substantive event or due wait is pending.

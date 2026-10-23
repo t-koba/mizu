@@ -425,8 +425,10 @@ class WorkItemEventTests(Fixture):
             result = engine.run(self.project, "reviewer", event_trigger=True)
         delivered_prompt = json.loads(driver.calls[-1][1])
         self.assertEqual(delivered_prompt["work_item_events"], batch)
-        self.assertEqual(list(delivered_prompt).index("work_item_events"),
+        self.assertEqual(list(delivered_prompt).index("decision_receipt_diagnostics"),
                          list(delivered_prompt).index("decision_events") + 1)
+        self.assertEqual(list(delivered_prompt).index("work_item_events"),
+                         list(delivered_prompt).index("decision_events") + 2)
         run = self.project.root / "runs" / result["run"]
         self.assertEqual(read_json(run / "started.json")["admission"], "work_item")
         self.assertEqual(read_json(run / "started.json")["work_item_events"], 1)

@@ -56,6 +56,34 @@ from .work_item_seed import (make_seed, validate_scope, validate_seed, validate_
 from .fs import PREVIEW_BYTES, canonical, digest, identifier, lock, now, read_json, safe_read, write_json, mkdir, DIGEST
 
 MAX_DECISION_EVENT_BYTES = 1024 * 1024
+#: Bound for one per-token decision receipt file (1 KiB). Receipts are small
+#: fixed-shape records; the bound keeps the acknowledgement check bounded.
+DECISION_RECEIPT_BYTES = 1024
+#: Bound for the number of per-token receipt diagnostics returned alongside
+#: decision events. Diagnostics carry only safe identifiers and reason codes.
+DECISION_RECEIPT_DIAGNOSTIC_LIMIT = 10
+#: Reason codes for per-token receipt content invalidity. Only these bounded
+#: codes ever leave the receipt check; receipt bytes are never surfaced.
+DECISION_RECEIPT_REASONS = frozenset({"malformed_json", "invalid_receipt", "invalid_timestamp"})
+
+
+class CorruptDecisionReceipt(Exception):
+    """One safely-read per-token receipt has invalid content/semantics.
+
+    Raised only after :func:`mizu.fs.safe_read` has returned the receipt
+    bytes from a safely identified regular per-token file, so unsafe
+    directories, symlinks, hardlinks, size-bound refusals and systemic I/O
+    still raise their own errors and fail closed. Carries only safe
+    identifiers (event id, token) and a bounded reason code, never receipt
+    bytes or untrusted content. Callers isolate this per event; acknowledgement
+    paths translate it back to a refusal.
+    """
+
+    def __init__(self, event: str, ack_token: str, reason: str):
+        super().__init__(f"Corrupt decision receipt: {reason}")
+        self.event = event
+        self.ack_token = ack_token
+        self.reason = reason
 
 
 def _rev_of(record: dict) -> int:
@@ -1223,6 +1251,15 @@ replacement insight without implying rejected substance.
                                  "payload": {k: v for k, v in payload.items() if k != "ack_token"}}))
 
     def _decision_received(self, role_name: str, event: dict) -> bool:
+        """True once a valid per-token receipt exists; False when absent.
+
+        A safely read per-token file whose content or semantics are invalid
+        (malformed JSON, wrong shape/binding, bad timestamp) raises
+        :class:`CorruptDecisionReceipt` so the caller can isolate that one
+        event without suppressing unrelated valid events. Unsafe paths,
+        symlinks, hardlinks, size-bound refusals and systemic I/O propagate
+        unchanged and still fail closed. Corrupt bytes are never altered.
+        """
         token = event["ack_token"]
         parent = self.root / "decision-receipts" / role_name
         if not insight_archive._directory(parent.parent) or not insight_archive._directory(parent):
@@ -1232,17 +1269,40 @@ replacement insight without implying rejected substance.
             path.lstat()
         except FileNotFoundError:
             return False
+        # Fail closed on unsafe/syscall failures; only content errors below
+        # become an isolatable per-event diagnostic.
+        raw = safe_read(self.root, path.relative_to(self.root).as_posix(), DECISION_RECEIPT_BYTES)
         try:
-            receipt = json.loads(safe_read(self.root, path.relative_to(self.root).as_posix(), 1024))
-            valid = (isinstance(receipt, dict)
-                     and set(receipt) == {"role", "event", "ack_token", "acknowledged_at"}
-                     and receipt["role"] == role_name and receipt["event"] == event["event"]
-                     and receipt["ack_token"] == token
-                     and dt.datetime.fromisoformat(receipt["acknowledged_at"]).tzinfo is not None)
-        except (ValueError, TypeError, KeyError) as exc:
-            raise Denied("Malformed decision receipt") from exc
-        if not valid:
-            raise Denied("Invalid decision receipt")
+            receipt = json.loads(raw)
+        except ValueError as exc:
+            raise CorruptDecisionReceipt(event["event"], token, "malformed_json") from exc
+        if not isinstance(receipt, dict):
+            raise CorruptDecisionReceipt(event["event"], token, "invalid_receipt")
+        try:
+            shape_ok = (set(receipt) == {"role", "event", "ack_token", "acknowledged_at"}
+                        and receipt["role"] == role_name and receipt["event"] == event["event"]
+                        and receipt["ack_token"] == token)
+            stamp = receipt.get("acknowledged_at")
+            try:
+                parsed = dt.datetime.fromisoformat(stamp) if isinstance(stamp, str) else None
+            except ValueError as exc:
+                raise CorruptDecisionReceipt(event["event"], token, "invalid_timestamp") from exc
+        except CorruptDecisionReceipt:
+            raise
+        except (TypeError, KeyError, AttributeError) as exc:
+            raise CorruptDecisionReceipt(event["event"], token, "invalid_receipt") from exc
+        if not shape_ok:
+            raise CorruptDecisionReceipt(event["event"], token, "invalid_receipt")
+        try:
+            stamp_ok = parsed is not None and parsed.tzinfo is not None
+        except (TypeError, AttributeError) as exc:
+            raise CorruptDecisionReceipt(event["event"], token, "invalid_timestamp") from exc
+        if parsed is None:
+            raise CorruptDecisionReceipt(event["event"], token, "invalid_timestamp")
+        if parsed.tzinfo is None:
+            raise CorruptDecisionReceipt(event["event"], token, "invalid_timestamp")
+        if not stamp_ok:
+            raise CorruptDecisionReceipt(event["event"], token, "invalid_timestamp")
         return True
 
     def decision_events(self, role_name: str, actions, *, limit: int = 10, sources: str = "own") -> list:
@@ -1253,8 +1313,26 @@ replacement insight without implying rejected substance.
         at most limit rows (1..100); each history/payload read is at most 1 MiB.
         Own-source deferrals still only ride along; no rotation acknowledges
         them. Superseded, withdrawn and revision-stale decisions never emit.
-        Malformed history records are skipped individually; unsafe shared
-        stores and receipt corruption fail closed. History is never rewritten.
+        Malformed history records are skipped individually. One safely read
+        per-token receipt with invalid content/semantics (malformed JSON,
+        wrong shape/binding, bad timestamp) isolates that event: it stays
+        undelivered and unacknowledged, its bytes are left unchanged, and a
+        bounded diagnostic is returned by
+        :meth:`decision_events_with_diagnostics` while unrelated valid events
+        still deliver. Unsafe shared stores, symlinks, hardlinks, size-bound
+        refusals and systemic I/O still fail closed. History and corrupt
+        receipts are never rewritten; repair is explicit operator action.
+        """
+        events, _ = self._scan_decision_delivery(role_name, actions, limit=limit, sources=sources)
+        return events
+
+    def _scan_decision_delivery(self, role_name: str, actions, *, limit: int,
+                                sources: str) -> tuple[list, list]:
+        """One bounded scan returning (deliverable events, receipt diagnostics).
+
+        Diagnostics carry only safe identifiers (event id, token, action) and
+        a bounded reason code; receipt bytes never leave the store. Unsafe or
+        systemic receipt failures still raise and fail closed.
         """
         identifier(role_name)
         if type(limit) is not int or not 1 <= limit <= 100:
@@ -1264,7 +1342,8 @@ replacement insight without implying rejected substance.
         wanted = {a for a in (actions or ()) if isinstance(a, str)} - {"withdraw"}
         history = self.root / "decision-history"
         if not wanted or not insight_archive._directory(history):
-            return []
+            return [], []
+        diagnostics: list = []
 
         def eligible():
             for path in history.glob("*.json"):
@@ -1298,13 +1377,33 @@ replacement insight without implying rejected substance.
                         continue
                     payload["ack_token"] = self._decision_token(role_name, payload)
                 except (Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError, AttributeError):
-                    # A damaged individual event cannot veto all other pending
-                    # decisions. Receipt validation below remains fail-closed.
                     continue
-                if not self._decision_received(role_name, payload):
+                try:
+                    received = self._decision_received(role_name, payload)
+                except CorruptDecisionReceipt as corrupt:
+                    if len(diagnostics) < DECISION_RECEIPT_DIAGNOSTIC_LIMIT:
+                        diagnostics.append({"event": payload["event"],
+                                            "ack_token": payload["ack_token"],
+                                            "action": payload["action"],
+                                            "reason": corrupt.reason})
+                    continue
+                if not received:
                     yield created, path.stem, payload
 
-        return [row for _, _, row in heapq.nsmallest(limit, eligible(), key=lambda e: (e[0], e[1]))]
+        events = [row for _, _, row in heapq.nsmallest(limit, eligible(), key=lambda e: (e[0], e[1]))]
+        return events, list(diagnostics)
+
+    def decision_events_with_diagnostics(self, role_name: str, actions, *, limit: int = 10,
+                                         sources: str = "own") -> tuple[list, list]:
+        """Deliverable events plus bounded per-token receipt diagnostics.
+
+        The events list matches :meth:`decision_events`. Each diagnostic is
+        ``{"event", "ack_token", "action", "reason"}`` with ``reason`` in
+        ``DECISION_RECEIPT_REASONS``. Corrupt receipts stay undelivered and
+        unchanged; diagnostics let the runtime surface them instead of
+        silently treating the queue as drained.
+        """
+        return self._scan_decision_delivery(role_name, actions, limit=limit, sources=sources)
 
     def acknowledge_decisions(self, role_name: str, events, *, sources: str = "own") -> None:
         """Host-only exact receipts after durable successful finish/publication.
@@ -1314,6 +1413,9 @@ replacement insight without implying rejected substance.
         during handling does not invalidate the delivered decision. Atomic
         per-token files bound each read/write to 1 KiB, with no lossy tie window
         or unbounded aggregate. I/O failure causes replay; exact retries no-op.
+        A suspect (corrupt-content) receipt is never overwritten or silently
+        repaired: acknowledgement of its token is refused and its bytes are
+        left for explicit operator-controlled recovery.
         """
         identifier(role_name)
         if sources not in ("own", "any"):
@@ -1330,7 +1432,11 @@ replacement insight without implying rejected substance.
                 raise Denied("Invalid decision acknowledgement")
             tokens.add(event["ack_token"])
         for event in events:
-            if self._decision_received(role_name, event):
+            try:
+                received = self._decision_received(role_name, event)
+            except CorruptDecisionReceipt as exc:
+                raise Denied("Invalid decision acknowledgement") from exc
+            if received:
                 continue
             path = self.root / "decision-receipts" / role_name / f"{event['ack_token']}.json"
             mkdir(path.parent)
@@ -1339,8 +1445,12 @@ replacement insight without implying rejected substance.
             try:
                 write_json(path, receipt, exclusive=True)
             except (FileExistsError, Denied):
-                if not self._decision_received(role_name, event):
-                    raise
+                try:
+                    if self._decision_received(role_name, event):
+                        continue
+                except CorruptDecisionReceipt as exc:
+                    raise Denied("Invalid decision acknowledgement") from exc
+                raise
 
     def decision_cursor(self, role_name: str) -> dict:
         """Read legacy cursor for diagnostics only; never used to suppress delivery."""

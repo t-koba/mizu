@@ -154,12 +154,24 @@ class DecisionReceiptTests(Fixture):
         self.assertEqual(restored.insights.decision_events("reviewer", ("reject",)), [])
 
     def test_receipt_corruption_and_unsafe_paths_fail_closed(self):
+        # Safely read invalid content isolates that event; unsafe paths and
+        # size-bound refusals still fail closed. Corrupt bytes are never
+        # altered and acknowledgement of the suspect token is refused.
         _reject(self.project, "reviewer")
         row = self.rows()[0]
         path = self.project.root / "decision-receipts/reviewer" / f"{row['ack_token']}.json"
         write_json(path, {"role": "searcher"})
+        before = path.read_bytes()
+        self.assertEqual(self.rows(), [])
+        _, diagnostics = self.project.insights.decision_events_with_diagnostics("reviewer", ("reject",))
+        self.assertEqual(len(diagnostics), 1)
+        self.assertEqual((diagnostics[0]["event"], diagnostics[0]["ack_token"]),
+                         (row["event"], row["ack_token"]))
+        self.assertIn(diagnostics[0]["reason"], ("malformed_json", "invalid_receipt", "invalid_timestamp"))
+        self.assertEqual(path.read_bytes(), before)
         with self.assertRaises(Denied):
-            self.rows()
+            self.project.insights.acknowledge_decisions("reviewer", [row])
+        self.assertEqual(path.read_bytes(), before)
         path.write_bytes(b"x" * 1025)
         with self.assertRaises(LimitExceeded):
             self.rows()
@@ -172,6 +184,111 @@ class DecisionReceiptTests(Fixture):
             return  # Windows may not grant symlink creation
         with self.assertRaises((Denied, OSError)):
             self.rows()
+
+    def test_corrupt_receipt_malformed_json_isolated_two_events(self):
+        _reject(self.project, "reviewer", title="First")
+        _reject(self.project, "reviewer", title="Second")
+        rows = self.rows()
+        self.assertEqual(len(rows), 2)
+        first = next(r for r in rows if r["title"] == "First")
+        second = next(r for r in rows if r["title"] == "Second")
+        path = self.project.root / "decision-receipts/reviewer" / f"{first['ack_token']}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"{invalid-json")
+        before = path.read_bytes()
+        delivered = self.rows()
+        self.assertEqual([r["ack_token"] for r in delivered], [second["ack_token"]])
+        self.assertNotIn(first["ack_token"], [r["ack_token"] for r in delivered])
+        events, diagnostics = self.project.insights.decision_events_with_diagnostics(
+            "reviewer", ("reject",))
+        self.assertEqual([r["ack_token"] for r in events], [second["ack_token"]])
+        self.assertEqual(len(diagnostics), 1)
+        self.assertEqual(diagnostics[0]["event"], first["event"])
+        self.assertEqual(diagnostics[0]["ack_token"], first["ack_token"])
+        self.assertEqual(diagnostics[0]["reason"], "malformed_json")
+        self.assertNotIn("invalid-json", json.dumps(diagnostics))
+        self.assertEqual(path.read_bytes(), before)
+        with self.assertRaises(Denied):
+            self.project.insights.acknowledge_decisions("reviewer", [first])
+        self.assertEqual(path.read_bytes(), before)
+        self.project.insights.acknowledge_decisions("reviewer", [second])
+        self.assertEqual([r["ack_token"] for r in self.rows()], [])
+        # The suspect stays undelivered and unacknowledged; its bytes remain.
+        _, troubled = self.project.insights.decision_events_with_diagnostics("reviewer", ("reject",))
+        self.assertEqual([d["ack_token"] for d in troubled], [first["ack_token"]])
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_corrupt_receipt_invalid_timestamp_isolated_two_events(self):
+        _reject(self.project, "reviewer", title="First")
+        _reject(self.project, "reviewer", title="Second")
+        rows = self.rows()
+        self.assertEqual(len(rows), 2)
+        first = next(r for r in rows if r["title"] == "First")
+        second = next(r for r in rows if r["title"] == "Second")
+        path = self.project.root / "decision-receipts/reviewer" / f"{first['ack_token']}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(json.dumps({"role": "reviewer", "event": first["event"],
+                                     "ack_token": first["ack_token"],
+                                     "acknowledged_at": "not-a-timestamp"}).encode())
+        before = path.read_bytes()
+        delivered = self.rows()
+        self.assertEqual([r["ack_token"] for r in delivered], [second["ack_token"]])
+        events, diagnostics = self.project.insights.decision_events_with_diagnostics(
+            "reviewer", ("reject",))
+        self.assertEqual([r["ack_token"] for r in events], [second["ack_token"]])
+        self.assertEqual(len(diagnostics), 1)
+        self.assertEqual(diagnostics[0]["ack_token"], first["ack_token"])
+        self.assertEqual(diagnostics[0]["reason"], "invalid_timestamp")
+        self.assertNotIn("not-a-timestamp", json.dumps(diagnostics))
+        self.assertEqual(path.read_bytes(), before)
+        with self.assertRaises(Denied):
+            self.project.insights.acknowledge_decisions("reviewer", [first])
+        self.assertEqual(path.read_bytes(), before)
+        # Diagnostics alone admit a real event-triggered run and reach both
+        # full/delta prompt payloads and the bounded run sidecar.
+        self.project.insights.acknowledge_decisions("reviewer", [second])
+        self.assertEqual(self.rows(), [])
+        config = _trigger_config(self.config)
+        self.project.config = config
+        driver = ScriptDriver()
+        result = Engine(config, driver=driver).run(self.project, "reviewer", event_trigger=True)
+        self.assertEqual(result["status"], "completed")
+        prompt = json.loads(driver.calls[0][1])
+        self.assertEqual(prompt["decision_events"], [])
+        self.assertEqual(len(prompt["decision_receipt_diagnostics"]), 1)
+        delta = json.loads(prompt_delta_for(driver.calls[0][0], []))
+        self.assertEqual(len(delta["decision_receipt_diagnostics"]), 1)
+        run_dir = self.project.root / "runs" / result["run"]
+        sidecar = read_json(run_dir / "decision-receipt-diagnostics.json")
+        self.assertEqual(sidecar["diagnostics"], prompt["decision_receipt_diagnostics"])
+
+    def test_unsafe_shared_receipt_directory_fails_closed(self):
+        _reject(self.project, "reviewer")
+        receipt_root = self.project.root / "decision-receipts"
+        receipt_root.mkdir(parents=True, exist_ok=True)
+        target = self.root / "receipt-target"
+        target.mkdir()
+        shared = receipt_root / "reviewer"
+        try:
+            shared.symlink_to(target, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            return  # Windows may not grant symlink creation.
+        with self.assertRaises(Denied):
+            self.rows()
+
+    def test_systemic_receipt_read_error_fails_closed(self):
+        _reject(self.project, "reviewer")
+        row = self.rows()[0]
+        self.project.insights.acknowledge_decisions("reviewer", [row])
+        from mizu import insights as insights_module
+        safe_read = insights_module.safe_read
+        def failing_receipt_read(root, name, maximum):
+            if name.startswith("decision-receipts/"):
+                raise OSError("simulated receipt-store I/O failure")
+            return safe_read(root, name, maximum)
+        with patch("mizu.insights.safe_read", side_effect=failing_receipt_read):
+            with self.assertRaises(OSError):
+                self.rows()
 
     def test_corrupt_history_record_does_not_hide_good_event(self):
         _reject(self.project, "reviewer")

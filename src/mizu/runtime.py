@@ -503,6 +503,7 @@ class Context:
         # terminal pi-durable unanswered settlement can advance it.
         self.attempt_ordinal = 0
         self.decision_events: list = []
+        self.decision_receipt_diagnostics: list = []
         self.work_item_events: list = []
         self.wait_events: list = []
         self.obligations: list = []
@@ -3273,8 +3274,22 @@ def _decision_task(context: Context) -> str | None:
     only. Failure: never raises.
     """
     events = list(getattr(context, "decision_events", []) or [])
-    if not events:
+    diagnostics = list(getattr(context, "decision_receipt_diagnostics", []) or [])
+    if not events and not diagnostics:
         return None
+    if events and diagnostics:
+        return (f"Delivered decision events: {len(events)}. "
+                f"Corrupt receipt diagnostics shown: {len(diagnostics)} (bounded; more may exist; see "
+                "decision_receipt_diagnostics; do not acknowledge those tokens; "
+                "corrupt bytes stay unchanged pending operator recovery). "
+                "Select each handled row's ack_token in finish.ack_events; omitted rows "
+                "remain pending oldest-first, including deferrals. Finishing alone "
+                "does not acknowledge decisions. Handling is defined by role policy.")
+    if diagnostics:
+        return (f"Corrupt receipt diagnostics shown: {len(diagnostics)} (bounded; more may exist; see "
+                "decision_receipt_diagnostics; do not acknowledge those tokens; "
+                "corrupt bytes stay unchanged pending operator recovery). "
+                "No deliverable decision events; handling is defined by role policy.")
     return (f"Delivered decision events: {len(events)}. "
             "Select each handled row's ack_token in finish.ack_events; omitted rows "
             "remain pending oldest-first, including deferrals. Finishing alone "
@@ -3403,6 +3418,8 @@ def prompt_for(context: Context) -> str:
                        "open_insights": _open_backlog(context, caps),
                        "open_work_items": open_work_items,
                        "decision_events": list(getattr(context, "decision_events", []) or []),
+                       "decision_receipt_diagnostics": list(
+                           getattr(context, "decision_receipt_diagnostics", []) or []),
                        **({"work_item_events": list(context.work_item_events)}
                           if getattr(context, "work_item_events", None) else {}),
                        "decision_task": _decision_task(context),
@@ -3478,6 +3495,8 @@ def prompt_delta_for(context: Context, pending: list) -> str:
                        "open_insights": open_backlog,
                        "open_work_items": open_work_items,
                        "decision_events": list(getattr(context, "decision_events", []) or []),
+                       "decision_receipt_diagnostics": list(
+                           getattr(context, "decision_receipt_diagnostics", []) or []),
                        **({"work_item_events": list(context.work_item_events)}
                           if getattr(context, "work_item_events", None) else {}),
                        "decision_task": _decision_task(context),
@@ -3906,9 +3925,12 @@ class Engine:
         code_unchanged = role.on_change and _on_change_observed(cursor, snapshot)
         triggers = tuple(getattr(role, "decision_events", ()) or ())
         sources = getattr(role, "decision_sources", "own") or "own"
-        decision_events = project.insights.decision_events(
-            role_name, triggers, limit=role_decision_events_limit(project.config, role),
-            sources=sources) if triggers else []
+        if triggers:
+            decision_events, receipt_diagnostics = project.insights.decision_events_with_diagnostics(
+                role_name, triggers, limit=role_decision_events_limit(project.config, role),
+                sources=sources)
+        else:
+            decision_events, receipt_diagnostics = [], []
         terminal_page = work_item_events.pending(
             project.work_items, role_name, role.work_item_events, sources=role.work_item_sources,
             limit=role_work_item_events_limit(project.config, role))
@@ -3930,13 +3952,19 @@ class Engine:
         # flag, so scheduled discovery still runs at its interval.
         if sources == "any":
             substantive_events = [e for e in decision_events if isinstance(e, dict)]
+            substantive_diagnostics = [d for d in receipt_diagnostics if isinstance(d, dict)]
         else:
             substantive_events = [e for e in decision_events if e.get("action") != "defer"]
-            if not substantive_events and "defer" in triggers:
+            substantive_diagnostics = [d for d in receipt_diagnostics
+                                        if isinstance(d, dict) and d.get("action") != "defer"]
+            if not substantive_events and not substantive_diagnostics and "defer" in triggers:
                 # A prompt-size window of old deferrals must not suppress a
                 # pending substantive trigger outside that window.
-                substantive_events = project.insights.decision_events(
-                    role_name, tuple(a for a in triggers if a != "defer"), limit=1, sources=sources)
+                substantive_events, substantive_diagnostics = (
+                    project.insights.decision_events_with_diagnostics(
+                        role_name, tuple(a for a in triggers if a != "defer"), limit=1, sources=sources))
+                substantive_diagnostics = [d for d in substantive_diagnostics
+                                            if isinstance(d, dict) and d.get("action") != "defer"]
         try:
             ci_present = _ci_due_for(project, self.config, role)
         except Exception:
@@ -3968,7 +3996,7 @@ class Engine:
                 operator_woke=operator_woke and role.workspace != "write",
                 explicit_wake=operator_woke and role.workspace != "write",
                 ready_work_changed=ready_work_changed,
-                has_decision=bool(substantive_events),
+                has_decision=bool(substantive_events or substantive_diagnostics),
                 has_work_item=bool(terminal_events),
                 has_wait=bool(wait_events or check_jobs.pending(project, role_name)),
                 has_ci=bool(ci_failures),
@@ -4000,7 +4028,7 @@ class Engine:
             has_code_event=bool(has_code_event),
             explicit_wake=bool(explicit_wake),
             ready_work_changed=ready_work_changed,
-            has_decision=bool(substantive_events),
+            has_decision=bool(substantive_events or substantive_diagnostics),
             has_work_item=bool(terminal_events),
             has_wait=bool(wait_events or check_jobs.pending(project, role_name)),
             has_ci=bool(ci_failures),
@@ -4010,7 +4038,7 @@ class Engine:
         if _dispatch.skipped == "unchanged":
             return {"skip": {"skipped": "unchanged", "snapshot": snapshot["id"],
                     "code_digest": snapshot["code_digest"]}}
-        return {'snapshot': snapshot, 'sources': sources, 'terminal_events': terminal_events, 'terminal_page': terminal_page, 'wait_events': wait_events, 'obligations': obligations, 'ci_present': ci_present, 'ci_failures': ci_failures, 'prior_wait_expired': prior_wait_expired, 'decision_events': decision_events, '_dispatch': _dispatch}
+        return {'snapshot': snapshot, 'sources': sources, 'terminal_events': terminal_events, 'terminal_page': terminal_page, 'wait_events': wait_events, 'obligations': obligations, 'ci_present': ci_present, 'ci_failures': ci_failures, 'prior_wait_expired': prior_wait_expired, 'decision_events': decision_events, 'decision_receipt_diagnostics': receipt_diagnostics, '_dispatch': _dispatch}
 
     def run(self, project: Project, role_name: str, *, attributes=None, retry_busy: bool = False,
                 enqueue_busy: bool = False, event_trigger: bool = False, probes_serviced: bool = False) -> dict:
@@ -4073,6 +4101,7 @@ class Engine:
             ci_failures = dispatch_state['ci_failures']
             prior_wait_expired = dispatch_state['prior_wait_expired']
             decision_events = dispatch_state['decision_events']
+            receipt_diagnostics = dispatch_state.get('decision_receipt_diagnostics', [])
             _dispatch = dispatch_state['_dispatch']
             # Pre-execution selection probe: evaluate before allocating a run
             # directory so unchanged waits coalesce onto one audit run
@@ -4128,6 +4157,7 @@ class Engine:
                             "snapshot": snapshot["id"], "started_at": now(),
                             "admission_elapsed_seconds": round(admission_elapsed, 6),
                             "admission": admission, "decision_events": len(decision_events),
+                            "decision_receipt_diagnostics": len(receipt_diagnostics),
                             "work_item_events": len(terminal_events),
                             "wait_events": len(wait_events),
                             "obligation_events": len(obligations),
@@ -4141,6 +4171,10 @@ class Engine:
                     write_json(run_dir / "decision-events.json",
                                {"run": run_id, "role": role_name, "admission": admission,
                                 "events": decision_events})
+                if receipt_diagnostics:
+                    write_json(run_dir / "decision-receipt-diagnostics.json",
+                               {"run": run_id, "role": role_name, "admission": admission,
+                                "diagnostics": receipt_diagnostics})
                 if terminal_events:
                     write_json(run_dir / "work-item-events.json",
                                {"run": run_id, "role": role_name, "admission": admission,
@@ -4220,6 +4254,7 @@ class Engine:
                 context._admission_observation_sink = record_admission
                 context.ephemeral = self.ephemeral
                 context.decision_events = decision_events
+                context.decision_receipt_diagnostics = list(receipt_diagnostics or [])
                 context.work_item_events = terminal_events
                 context.wait_events = wait_events
                 context.obligations = obligations
@@ -4234,7 +4269,7 @@ class Engine:
                     (role.workspace == "write" and context.inbox_seen != snapshot.get("inbox_seen", ""))
                     or _operator_woke({"wake_generation": context.wake_generation}, role_cursor,
                                       observer=role.workspace != "write")
-                    or bool(decision_events or terminal_events or wait_events or ci_failures)
+                    or bool(decision_events or receipt_diagnostics or terminal_events or wait_events or ci_failures)
                     or new_obligation or (role.workspace == "write" and prior_wait_expired))
                 prompt, prompt_mode, session_key, rotation, session_dir = session_prompt(context, role, run_dir)
                 dispatch_evidence.capture_projection(context, role.profile, prompt_mode,
@@ -4253,6 +4288,7 @@ class Engine:
                                 "unseeded_decisions": work_items_page["unseeded_decisions"],
                                 "coverage_complete": work_items_page["coverage_complete"]},
                             "decision_events": len(decoded.get("decision_events", [])),
+                            "decision_receipt_diagnostics": len(decoded.get("decision_receipt_diagnostics", [])),
                             "work_item_events": len(decoded.get("work_item_events", [])),
                             "wait_events": len(decoded.get("wait_events", [])),
                             "acceptance_commands": len(decoded.get("acceptance_commands", [])),
@@ -5089,14 +5125,15 @@ def _role_events_due(project: Project, snapshot: dict, role_name=None) -> bool:
                 triggers = project.config.roles[name].decision_events
                 sources = getattr(project.config.roles[name], "decision_sources", "own") or "own"
                 if triggers:
-                    pending = project.insights.decision_events(
+                    pending, troubled = project.insights.decision_events_with_diagnostics(
                         name, triggers if sources == "any" else tuple(a for a in triggers if a != "defer"),
-                        limit=1,
-                        sources=sources)
+                        limit=1, sources=sources)
                     if sources == "any":
-                        if any(isinstance(e, dict) for e in pending):
+                        if any(isinstance(e, dict) for e in pending) or any(
+                                isinstance(d, dict) for d in troubled):
                             return True
-                    elif any(isinstance(e, dict) and e.get("action") != "defer" for e in pending):
+                    elif (any(isinstance(e, dict) and e.get("action") != "defer" for e in pending)
+                          or any(isinstance(d, dict) and d.get("action") != "defer" for d in troubled)):
                         return True
             except (Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError, AttributeError):
                 pass
