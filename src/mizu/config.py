@@ -740,6 +740,17 @@ def role_policy_text(role: "Role") -> str:
     return "\n".join(piece.rstrip("\n") for piece in texts) + "\n"
 
 
+def system_context_text(role: "Role", goal: str) -> str:
+    """Stable engine instructions: ordered role policy, then the pinned charter.
+
+    ``goal`` is the exact operator-supplied Context.goal, already pinned by
+    the caller; never discover a charter in the managed workspace. Preserve
+    its bytes (including whitespace) after the section heading. Policy reads
+    retain role_policy_text's bounds and fail-closed behavior.
+    """
+    return role_policy_text(role) + "\n# Project charter\n\n" + goal
+
+
 def role_policy_bytes(role: "Role") -> bytes:
     """Composed policy bytes for digests and engine prompts."""
     return role_policy_text(role).encode("utf-8")

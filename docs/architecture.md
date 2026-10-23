@@ -986,12 +986,21 @@ A resumed persistent session receives only an append-only delta (goal pin,
 current snapshot pin, proposals not yet offered, plus an `open_insights`
 statement of the still-undecided backlog with ids, total, and explicit
 truncation so already-offered insights never read as done), never the full
-goal and history again; a new, compacted-away, or rotated session receives
-the full prompt, which states the same backlog alongside the full entries. Rotation is operator policy via `[limits] session_max_tokens`,
+history again; a new, compacted-away, or rotated session receives
+the full prompt, which states the same backlog alongside the full entries.
+Both modes carry only `goal_digest` for the charter. Every engine dispatch,
+including resume, places the ordered role policy and exact pinned charter in
+stable system instructions, independently of compactable unit history.
+Writers pin the live operator goal, observers pin the snapshot goal, and
+children inherit the parent's goal. Normal session fingerprints include that
+goal's digest; pi-durable preserves its live-configured store identity instead,
+with both resume-authority and turn grants binding the composed system text
+through `policy_text` to refuse stale crash recovery.
+Rotation is operator policy via `[limits] session_max_tokens`,
 `session_max_cost_usd`, and `session_max_age_seconds` (0 disables each, age bounds
 conversation lifetime from its stable creation surviving same-id saves):
 a due rotation removes `session.json` so the next dispatch mints a fresh
-provider session while the published snapshot and composed policy reload
+provider session while the published snapshot and composed system context reload
 unchanged, recording the reason in `rotation.json` and the mode/key in
 `prompt_projection.json` (ADR-028). Rotation also bumps the session
 `generation` counter (native engines ignore it): a pi-durable persistent

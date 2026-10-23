@@ -535,8 +535,14 @@ class ContextTests(Fixture):
     def test_observer_goal_is_anchored_to_snapshot(self):
         before = self.project.snapshots.get()["goal"]
         (self.project.root / "PROJECT.md").write_text("A new operator goal")
-        self.assertEqual(self.context("reviewer").goal, before)
-        self.assertEqual(self.context("worker").goal, "A new operator goal")
+        from mizu.config import system_context_text
+        observer, writer = self.context("reviewer"), self.context("worker")
+        self.assertEqual(observer.goal, before)
+        self.assertEqual(writer.goal, "A new operator goal")
+        (self.project.root / "PROJECT.md").write_text("Changed after context pinning")
+        self.assertTrue(system_context_text(observer.role, observer.goal).endswith(before))
+        self.assertTrue(system_context_text(writer.role, writer.goal).endswith("A new operator goal"))
+        self.assertNotIn("Changed after context pinning", system_context_text(observer.role, observer.goal))
 
     def test_verification_records_the_exact_code_digest(self):
         ctx = self.context()
@@ -1494,7 +1500,7 @@ class PromptOrderTests(Fixture):
         from mizu.runtime import prompt_for, prompt_delta_for
         ctx = self.context("worker")
         self.assertEqual(list(json.loads(prompt_for(ctx)).keys()),
-                         ["unit", "goal", "published_snapshot", "recent_snapshots",
+                         ["unit", "goal_digest", "published_snapshot", "recent_snapshots",
                           "workspace", "workspace_mode", "pending_insights",
                           "open_insights", "open_work_items",
                           "decision_events", "decision_task", "wait_events", "obligations",

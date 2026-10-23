@@ -12,7 +12,7 @@ from support import Fixture, ROOT
 from mizu.bridge import Bridge
 from mizu.claude import ClaudeDriver, model_delta, terminal_result
 from mizu.codex import CodexDriver, TokenUsage
-from mizu.config import load
+from mizu.config import load, role_policy_text, system_context_text
 from mizu.drivers import admit_invocation, command_for, driver_for
 from mizu.engine_config import effective, session_record, save_session
 from mizu.engine_channel import Channel
@@ -459,6 +459,54 @@ class SyntheticEngineTests(Fixture):
         for engine in ('codex','claude'):
             self.execute(engine,'post-finish')
         with self.assertRaises(Denied): self.execute('codex','native-after-finish')
+
+    def test_new_and_resumed_system_context_contains_pinned_charter(self):
+        # Synthetic peers exercise host serialization, not live inference or
+        # provider compaction. Reconstruct Context for the resumed unit;
+        # these read-only contexts must not use the newer live project goal.
+        (self.project.root / "PROJECT.md").write_text("New unpublished live charter")
+        for engine in ('pi', 'codex', 'claude'):
+            with self.subTest(engine=engine):
+                expected = None
+                for resumed in (False, True):
+                    ctx = self.context('consult')
+                    if engine == 'pi':
+                        profile = ctx.role.profile
+                        raw = {**self.config.profiles[profile], 'engine': engine,
+                               'provider': 'custom', 'options': {}, 'session': 'persistent'}
+                        engines = {**self.config.engines, engine: {**self.config.engines[engine],
+                            'command': (sys.executable, str(ROOT/'tests/fake_pi.py'))}}
+                        config = dataclasses.replace(self.config,
+                            profiles={**self.config.profiles, profile: raw}, engines=engines)
+                        ctx.config = config
+                        PiDriver(config).execute(ctx, 'digest-only unit')
+                        cfg = read_json(ctx.run_dir/'pi-effective.json')
+                        actual = cfg['systemPrompt']
+                        self.assertEqual(bool(cfg['resume']), resumed)
+                        self.assertEqual((ctx.run_dir/'system.md').read_text(), actual)
+                    else:
+                        sent = []
+                        send = Channel.send
+                        def record(channel, message):
+                            sent.append(message)
+                            return send(channel, message)
+                        with unittest.mock.patch.object(Channel, 'send', record):
+                            self.execute(engine, persistent=True, context=ctx)
+                        if engine == 'codex':
+                            requests = [m for m in sent if m.get('method') in ('thread/start', 'thread/resume')]
+                            self.assertEqual(len(requests), 1)
+                            self.assertEqual(requests[0]['method'], 'thread/resume' if resumed else 'thread/start')
+                            actual = requests[0]['params']['baseInstructions']
+                        else:
+                            cfg = read_json(ctx.run_dir/'claude-effective.json')
+                            actual = cfg['systemPrompt']
+                            self.assertEqual(bool(cfg['resume']), resumed)
+                    self.assertEqual(actual, role_policy_text(ctx.role) + "\n# Project charter\n\n" + ctx.goal)
+                    self.assertEqual(actual, system_context_text(ctx.role, ctx.goal))
+                    self.assertNotIn("New unpublished live charter", actual)
+                    if expected is not None:
+                        self.assertEqual(actual, expected)
+                    expected = actual
 
     def test_resume_uses_saved_session_and_usage_baseline(self):
         for engine in ('codex','claude'):

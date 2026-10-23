@@ -71,6 +71,34 @@ class _PollDriver:
 
 
 class DelegateTests(Fixture):
+    def test_children_inherit_parent_charter_after_operator_goal_changes(self):
+        from mizu.config import system_context_text
+        from mizu.fs import digest
+        config = _configured(self)
+        pinned = self.project.goal
+        observed = []
+        def callback(ctx, prompt, profile):
+            if ctx.role.name == "worker":
+                (self.project.root / "PROJECT.md").write_text("New live operator charter")
+                for operation, args in (
+                    ("consult", {"roles": ["consult"], "question": "Check the charter"}),
+                    ("delegate", {"role": "helper", "task": "Check the charter"}),
+                ):
+                    ctx.handle(operation, args)
+                ctx.handle("finish", {"outcome": "wait", "summary": "Children checked", "state": "Checked"})
+            else:
+                self.assertEqual(ctx.goal, pinned)
+                self.assertEqual(ctx.goal_digest, digest(pinned.encode()))
+                self.assertTrue(system_context_text(ctx.role, ctx.goal).endswith(pinned))
+                decoded = json.loads(prompt.split("\n\nQuestion:")[0].split("\n\nTask:")[0])
+                self.assertNotIn("goal", decoded)
+                self.assertEqual(decoded["goal_digest"], ctx.goal_digest)
+                observed.append(ctx.role.name)
+                ctx.handle("finish", {"outcome": "wait", "summary": "Pinned charter", "state": "Checked"})
+        result = Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(observed, ["consult", "helper"])
+
     def test_delegation_completes_in_live_workspace(self):
         config = _configured(self)
         marker = self.project.workspace / "delegate-marker.txt"

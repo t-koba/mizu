@@ -182,14 +182,17 @@ daemon; the bound is not an operator knob.
 
 ## ADR-027 — Composed role policies from ordered Markdown parts
 A role's `policy` accepts one path or an ordered array of paths, composed in order as the
-system prompt and the policy digest. Operators share principles across roles without an external
-concatenation step; any part change re-keys sessions, and missing or oversize parts fail closed.
+policy portion of system instructions and the policy digest. Operators share principles across
+roles without an external concatenation step; any part change re-keys normal engine sessions
+(pi-durable uses live configure and grant checks), and missing or oversize parts fail closed.
 Bounds (fixed): at most 16 parts, each at most 64 KiB, 256 KiB total; see "Roles" in
 `docs/configuration.md`.
 
 ## ADR-028 — Persistent-session delta prompt and rotation as policy
 A resumed persistent session receives only what changed since its last unit; new, compacted,
-or rotated sessions get the full prompt with the exact published state and composed policy text.
+or rotated sessions get the full unit prompt with the exact published state.
+Both unit prompt modes carry `goal_digest`; the composed policy and pinned charter
+are stable system instructions on every dispatch, including resume.
 Rotation past token, cost, or age `[limits]` keys records the new session key and reason.
 Rotation only freshens context: the generation bump lands before the old
 session record is removed, so a failed transition never silently resumes

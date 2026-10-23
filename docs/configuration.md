@@ -815,10 +815,24 @@ reasoning-effort keys (`thinkingLevel` and `cacheRetention` on pi, `model_reason
 `effort` on Claude), command and resource content digests. An effort-only (or `cacheRetention`-only on pi)
 profile switch therefore continues the role's conversation with the current
 effort; any other change still starts a fresh bounded session whose first
-prompt carries the full goal, snapshots, pending insights, and research state.
+unit prompt carries snapshots, pending insights, and research state.
 Pi-durable sessions instead cover only engine, backend, and the declared store
 format (see the profile section above), so compatible changes ride the live
-conversation there.
+conversation there. On every engine, stable system instructions compose the
+ordered role policy followed by the exact pinned operator-supplied project
+charter (`Context.goal`). Pi sends this as `systemPrompt` (and `system.md`),
+Codex as `baseInstructions` on both start and resume, Claude as `systemPrompt`,
+and pi-durable as `instructions` (and `system.md`). Both full and delta unit
+prompts carry only `goal_digest`, not a duplicate charter body. Writers pin the
+live project goal at context construction; read-only roles pin the published
+snapshot goal, and consultation/delegation children inherit their parent's pin.
+No charter is discovered in the managed workspace. Charter changes retain the
+existing `goal_changed` wake. They re-key normal engine sessions just like
+policy changes; pi-durable instead keeps its store identity and applies the
+composed instructions through its existing live configure/readback convergence.
+Its resume-authority and current-turn grants both bind the composed charter
+in the existing `policy_text` digest: a new unit can use a changed charter in
+the same store, but stale crash recovery under a different charter is refused.
 Resume errors never start a new conversation. Persistent sessions belong to
 that fingerprint; ephemeral state belongs to the run. Authentication is an
 explicit operator operation. Mizu does not alter operator settings files.

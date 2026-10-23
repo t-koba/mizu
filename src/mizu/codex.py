@@ -9,7 +9,7 @@ from pathlib import Path
 from .bridge import Bridge
 from .drivers import admit_invocation
 from .engine_channel import Channel
-from .config import role_policy_text
+from .config import system_context_text
 from .engine_config import effective, connected_servers, mizu_server, session_record, save_session
 from .errors import ModelFailure, ConfigError, ProtocolError, Denied
 from .fs import mkdir, write_json
@@ -200,7 +200,7 @@ class CodexDriver:
                                        'capabilities': {'experimentalApi': bool(options.pop('experimentalApi', False))}})
                 channel.send({'method': 'initialized'})
                 params = {'model': settings['model'], 'modelProvider': settings['provider'], 'cwd': str(cwd),
-                          'baseInstructions': role_policy_text(context.role), 'config': options}
+                          'baseInstructions': system_context_text(context.role, context.goal), 'config': options}
                 if saved:
                     params['threadId'] = saved['id']
                     params['excludeTurns'] = True

@@ -8,7 +8,7 @@ from pathlib import Path
 from .bridge import Bridge
 from .drivers import admit_invocation
 from .engine_channel import Channel
-from .config import role_policy_text
+from .config import system_context_text
 from .engine_config import effective, connected_servers, mizu_server, session_record, save_session
 from .errors import ProtocolError, ModelFailure
 from .fs import mkdir, write_json
@@ -110,7 +110,7 @@ class ClaudeDriver:
                 options['extra_args'] = {**options.get('extra_args', {}), 'no-session-persistence': None}
             file = context.run_dir/'claude-effective.json'
             write_json(file, {**settings, 'options': options, 'mcp_servers': servers, 'cwd': str(cwd),
-                             'systemPrompt': role_policy_text(context.role),
+                             'systemPrompt': system_context_text(context.role, context.goal),
                              'resume': saved['id'] if saved else None})
             bound = startup_bound(self.config, 'claude')
             spawned = time.monotonic()

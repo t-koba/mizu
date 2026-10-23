@@ -3333,6 +3333,8 @@ def _prompt_capture_limit(context: Context) -> str | None:
 
 
 def prompt_for(context: Context) -> str:
+    # The charter body belongs to stable engine system context on every
+    # dispatch (including resume); full and delta unit prompts carry its pin.
     caps = set(context.role.capabilities)
     # Mechanism enforces grants, not policy choice: capability-gated context
     # is offered where appropriate, alongside the always-present, bounded
@@ -3354,7 +3356,7 @@ def prompt_for(context: Context) -> str:
     if "vcs_read" in caps:
         ci_failures, ci_failures_may_be_truncated = ci_failures_projection(context.project)
     return json.dumps({"unit": UNIT_BEGINS_STATEMENT,
-                       "goal": context.goal,
+                       "goal_digest": context.goal_digest,
                        "published_snapshot": {k: context.snapshot[k] for k in (
                            "id", "code_digest", "created_at", "state", "summary", "verification")},
                        "recent_snapshots": [{k: s[k] for k in ("id", "created_at", "outcome", "summary", "code_digest")}
@@ -3400,8 +3402,8 @@ def prompt_delta_for(context: Context, pending: list) -> str:
     capability-gated ``previous_report`` preview for roles holding
     ``report``. The independent bounded ``ready_work`` projection follows
     this stable context in the volatile suffix, before run identity and clock.
-    The full goal text and ``recent_snapshots`` history are never repeated: the
-    provider session already holds them. Key order is fixed (stable context
+    The charter body is supplied separately in stable system instructions;
+    ``recent_snapshots`` history is not repeated in deltas. Key order is fixed (stable context
     first, volatile ready-work age, run identity and clock last) so
     repeated prompts preserve as much identical prefix as possible.
     Bounds: pending and the open insight backlog both follow

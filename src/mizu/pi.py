@@ -7,7 +7,7 @@ from pathlib import Path
 
 from . import platform as _platform
 from .bridge import Bridge
-from .config import Config, Role, role_policy_text
+from .config import Config, Role, system_context_text
 from .engine_channel import Channel
 from .engine_config import effective, connected_servers, session_record, save_session, session_token_total, MAX_SESSION_TOKENS
 from .errors import RequestYieldExceeded
@@ -35,7 +35,7 @@ class PiDriver:
         settings = effective(self.config, context.role, profile)
         path, saved = session_record(context, profile, settings)
         model = self.config.model(profile)
-        policy = role_policy_text(context.role)
+        policy = system_context_text(context.role, context.goal)
         atomic_write(context.run_dir / "system.md", policy.encode())
         cwd = context.run_dir / "controller"
         mkdir(cwd)

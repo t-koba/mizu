@@ -46,19 +46,51 @@ class PolicyTests(Fixture):
     def test_grant_binds_durable_policy(self):
         role = self.config.roles["worker"]
         model = {"provider": "p", "model": "m"}
-        base = pi_durable.grant_for({"options": {}}, role, model)
+        base = pi_durable.grant_for({"options": {}}, role, model, self.project.goal)
         for key, value in (("durable_backend", "sqlite"), ("durable_resume", "fresh"),
                            ("durable_retention_days", 30),
                            ("durable_compaction_reserve_tokens", 5000),
                            ("durable_compaction_keep_recent_tokens", 8000),
                            ("durable_compaction_background_tokens", 1000)):
-            changed = pi_durable.grant_for({"options": {key: value}}, role, model)
+            changed = pi_durable.grant_for({"options": {key: value}}, role, model, self.project.goal)
             self.assertNotEqual(base, changed, key)
         # Reasoning effort is a per-turn live key, not authority: an
         # effort-only retune keeps the grant so resume is not refused.
         for value in ("off", "low", "high"):
-            same = pi_durable.grant_for({"options": {"thinkingLevel": value}}, role, model)
+            same = pi_durable.grant_for({"options": {"thinkingLevel": value}}, role, model, self.project.goal)
             self.assertEqual(base, same, value)
+
+    def test_grant_binds_composed_charter_exactly(self):
+        from mizu.config import system_context_text
+        from mizu.engine_config import adapter_digest
+        from mizu.fs import canonical, digest
+        role = self.config.roles["worker"]
+        model = {"provider": "p", "model": "m"}
+        goal = "Operator charter\n"
+        expected = grant_digest(policy_text=system_context_text(role, goal),
+                                capabilities=tuple(role.capabilities), model=model,
+                                adapter_digest_value=adapter_digest("pi-durable"),
+                                options_digest=digest(canonical({})))
+        self.assertEqual(pi_durable.grant_for({"options": {}}, role, model, goal), expected)
+        self.assertNotEqual(expected, pi_durable.grant_for({"options": {}}, role, model, goal + "\n"))
+
+    def test_charter_change_applies_to_new_turn_in_same_store(self):
+        from unittest.mock import patch
+        profile = self._durable_profile()
+        self.config.profiles[profile]["session"] = "persistent"
+        driver = pi_durable.PiDurableDriver(self.config)
+        first = self.context()
+        dispatches = []
+        with patch("mizu.pi_durable.run", self._normal_launcher(first, dispatches, seal_on=1)):
+            driver.execute(first, "first unit", profile=profile)
+        (self.project.root / "PROJECT.md").write_text("Changed operator charter\n")
+        second = self.context()
+        with patch("mizu.pi_durable.run", self._normal_launcher(second, dispatches, seal_on=2)):
+            driver.execute(second, "next unit", profile=profile)
+        self.assertEqual(len(dispatches), 2)
+        self.assertEqual(dispatches[0]["store"], dispatches[1]["store"])
+        self.assertNotEqual(dispatches[0]["instructions"], dispatches[1]["instructions"])
+        self.assertTrue(dispatches[1]["instructions"].endswith(second.goal))
 
     def test_removed_turn_bound_is_refused(self):
         with self.assertRaises(ConfigError):
@@ -160,6 +192,9 @@ class PolicyTests(Fixture):
             cfg = json.loads(Path(argv[-1]).read_text())
             bridge = json.loads(Path(kwargs["env"]["MIZU_BRIDGE_CONFIG"]).read_text())
             dispatches.append(cfg)
+            from mizu.config import system_context_text
+            self.assertEqual(cfg["instructions"], system_context_text(context.role, context.goal))
+            self.assertEqual((context.run_dir / "system.md").read_text(), cfg["instructions"])
             conn = open_store(Path(cfg["store"]))
             try:
                 rows = conn.execute("SELECT run_key FROM durable_runs WHERE run_key LIKE ?",
@@ -169,9 +204,12 @@ class PolicyTests(Fixture):
                 record = load_run(conn, rows[0][0])
                 authority = context.turn_authority_role or context.role
                 grant = pi_durable.grant_for(effective(context.config, authority, "primary"),
-                                             authority, context.config.model("primary"))
+                                             authority, context.config.model("primary"), context.goal)
                 check_grant(conn, rows[0][0], grant)
                 self.assertEqual(record["grant_digest"], grant)
+                self.assertEqual(record["turns"][-1]["payload"]["turn_grant"],
+                                 pi_durable.grant_for(effective(context.config, authority, "primary"),
+                                                      context.role, context.config.model("primary"), context.goal))
                 self.assertEqual(record["turns"][-1]["payload"]["request_id"], cfg["requestId"])
             finally:
                 conn.close()
@@ -290,7 +328,7 @@ class PolicyTests(Fixture):
                 authority = ctx.turn_authority_role or ctx.role
                 conn = open_store(store_path)
                 try:
-                    check_grant(conn, run_key, pi_durable.grant_for(settings, authority, model))
+                    check_grant(conn, run_key, pi_durable.grant_for(settings, authority, model, context.goal))
                 finally:
                     conn.close()
                 if len(dispatches) == 1:
@@ -999,7 +1037,7 @@ class SessionIsolationTests(Fixture):
 
         def unanswered(ctx, settings, model, prompt, selected_profile, run_key, store_path):
             captured.append((run_key, store_path,
-                             pi_durable.grant_for(settings, ctx.role, model)))
+                             pi_durable.grant_for(settings, ctx.role, model, ctx.goal)))
             raise ModelFailure("pi-durable", kind="unanswered", message="model_error")
 
         driver._run_once = unanswered
@@ -1009,7 +1047,7 @@ class SessionIsolationTests(Fixture):
 
         def complete(ctx, settings, model, prompt, selected_profile, run_key, store_path):
             captured.append((run_key, store_path,
-                             pi_durable.grant_for(settings, ctx.role, model)))
+                             pi_durable.grant_for(settings, ctx.role, model, ctx.goal)))
             return {"engine": "pi-durable", "requests": 1, "usage": []}
 
         driver._run_once = complete
@@ -1045,7 +1083,7 @@ class SessionIsolationTests(Fixture):
 
         def unanswered(ctx, settings, model, prompt, selected_profile, run_key, store_path):
             captured.append((run_key, store_path,
-                             pi_durable.grant_for(settings, ctx.role, model)))
+                             pi_durable.grant_for(settings, ctx.role, model, ctx.goal)))
             raise ModelFailure("pi-durable", kind="unanswered", message="model_error")
 
         driver._run_once = unanswered
@@ -1055,7 +1093,7 @@ class SessionIsolationTests(Fixture):
 
         def complete(ctx, settings, model, prompt, selected_profile, run_key, store_path):
             captured.append((run_key, store_path,
-                             pi_durable.grant_for(settings, ctx.role, model)))
+                             pi_durable.grant_for(settings, ctx.role, model, ctx.goal)))
             return {"engine": "pi-durable", "requests": 1, "usage": []}
 
         driver._run_once = complete
@@ -1095,6 +1133,25 @@ class SessionIsolationTests(Fixture):
             self.assertIsNone(load_run(conn, context.run_dir.name + "-a1"))
         finally:
             conn.close()
+
+    def test_charter_only_change_refuses_stale_crash_recovery(self):
+        from mizu.fs import digest
+        profile = self._durable_profile()
+        self.config.profiles[profile]["session"] = "persistent"
+        driver = pi_durable.PiDurableDriver(self.config)
+        context = self.context()
+        seen = []
+        def interrupted(*args, **kwargs):
+            seen.append(args[6])
+            raise ModelFailure("pi-durable", kind="error", message="uncertain")
+        driver._run_once = interrupted
+        with self.assertRaises(ModelFailure):
+            driver.execute(context, "identical prompt", profile=profile)
+        context.goal += "Changed operator charter\n"
+        context.goal_digest = digest(context.goal.encode())
+        with self.assertRaisesRegex(AuthorityGrantMismatch, "authority differs"):
+            driver.execute(context, "identical prompt", profile=profile)
+        self.assertEqual(len(seen), 1)
 
     def test_effort_only_change_resumes_without_grant_refusal(self):
         profile = self._durable_profile()

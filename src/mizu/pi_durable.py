@@ -19,7 +19,7 @@ from pathlib import Path
 
 from . import pi as _pi
 from .bridge import Bridge
-from .config import role_policy_text
+from .config import system_context_text
 from .drivers import EVENT_RECORD_BYTES
 from .engine_config import (MAX_SESSION_TOKENS, adapter_digest, effective,
                              save_session, session_generation, session_record,
@@ -147,8 +147,10 @@ GRANT_BOUND_OPTIONS = frozenset((
 ))
 
 
-def grant_for(settings: dict, role, model: dict) -> str:
-    policy = role_policy_text(role)
+def grant_for(settings: dict, role, model: dict, goal: str) -> str:
+    # Bind the exact pinned charter with policy in both resume authority and
+    # current-turn grants, without re-keying the live durable conversation.
+    policy = system_context_text(role, goal)
     options_digest = digest(canonical({k: v for k, v in settings.get("options", {}).items()
                                        if k in GRANT_BOUND_OPTIONS}))
     return grant_digest(policy_text=policy, capabilities=tuple(role.capabilities),
@@ -215,7 +217,7 @@ class PiDurableDriver:
             session_key = f"run-{context.run_dir.name}"
         project_name = getattr(getattr(context, "project", None), "name", "unknown")
         model = self.config.model(profile)
-        grant = grant_for(settings, authority, model)
+        grant = grant_for(settings, authority, model, context.goal)
         store_path = (context.run_dir / 'durable.sqlite' if getattr(context, 'recovery_probe', False)
                       else store_path_for(self.config.data, project_name, context.role.name, session_key))
         pruned_generations = []
@@ -263,7 +265,7 @@ class PiDurableDriver:
             record = load_run(conn, run_key)
             turns = record["turns"]
             payload = {"bytes": len(prompt_bytes), "prompt_digest": digest(prompt_bytes),
-                       "turn_grant": grant_for(settings, context.role, model)}
+                       "turn_grant": grant_for(settings, context.role, model, context.goal)}
             if continuing:
                 if (record.get("result") or {}).get("sealed"):
                     raise ConfigError("Durable continuation refused after seal")
@@ -355,7 +357,7 @@ class PiDurableDriver:
         # JSON result document out. The bridge stays open for the whole
         # submission; each provider admission has its own absolute deadline.
         # Spend is bounded only by request admission, never a turn cap.
-        policy = role_policy_text(context.role)
+        policy = system_context_text(context.role, context.goal)
         atomic_write(context.run_dir / "system.md", policy.encode())
         cwd = context.run_dir / "controller"
         mkdir(cwd)
