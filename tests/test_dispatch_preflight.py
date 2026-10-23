@@ -8,6 +8,7 @@ from mizu.runtime import Engine
 
 class DispatchPreflightTests(Fixture):
     def test_no_event_does_not_acquire_or_enqueue(self):
+        self.project.set_control(wake_generation="")  # no pending observer wake
         engine = Engine(self.config, driver=ScriptDriver())
         with patch.object(engine, '_admit', side_effect=AssertionError('must not queue')):
             result = engine.run(self.project, 'reviewer', event_trigger=True, retry_busy=True)

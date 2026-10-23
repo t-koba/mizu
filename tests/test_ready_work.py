@@ -126,6 +126,49 @@ class ReadyWorkTests(Fixture):
         with patch.object(self.project.work_items, "page_ready", side_effect=AssertionError("read role")):
             self.assertFalse(should_run(self.project, snapshot, role_name="reviewer"))
 
+    def test_role_filter_precedes_ready_page_selection_and_counting(self):
+        # An earlier other-holder row must not hide this role's later work.
+        other = self.item("other", "doing")
+        own = self.item("own")
+        self.project.work_items.transition(own["id"], expected_rev=1,
+                                           status="doing", actor="reviewer")
+        page = self.project.work_items.page_ready(limit=1, role_name="reviewer")
+        self.assertEqual([row["id"] for row in page["items"]], [own["id"]])
+        self.assertEqual((page["total"], page["overflow_count"]), (1, 0))
+        self.project.work_items.transition(own["id"], expected_rev=2, status="blocked",
+            actor="reviewer", wait={"kind": "deadline", "at": "2000-01-01T00:00:00+00:00"})
+        opened = self.item("unheld")
+        page = self.project.work_items.page_ready(limit=1, role_name="reviewer")
+        self.assertEqual(page["total"], 2)
+        self.assertEqual(page["overflow_count"], 1)
+        self.assertNotEqual(page["items"][0]["id"], other["id"])
+        self.assertEqual(self.project.work_items.page_ready()["total"], 3)
+        self.assertEqual(self.project.work_items.get(own["id"])["rev"], 3)
+        with self.assertRaises(Denied):
+            self.project.work_items.page_ready(role_name="../invalid")
+
+    def test_transition_capable_read_role_admits_without_source_authority(self):
+        role = self.config.roles["reviewer"]
+        self.config.roles["reviewer"] = dataclasses.replace(role, capabilities=(
+            *role.capabilities, "work_items_transition"))
+        engine = Engine(self.config, driver=ScriptDriver())
+        engine.run(self.project, "reviewer")  # consume initial wake/code
+        other = self.item("other-role", "doing")
+        self.assertEqual(engine.run(self.project, "reviewer")["skipped"], "unchanged")
+        opened = self.item("open-to-claim")
+        before = self.project.snapshots.get()["id"]
+        self.assertEqual(engine.run(self.project, "reviewer")["status"], "completed")
+        self.assertEqual(self.project.snapshots.get()["id"], before)
+        self.project.work_items.transition(opened["id"], expected_rev=1,
+                                           status="doing", actor="reviewer")
+        self.assertEqual(engine.run(self.project, "reviewer", event_trigger=True)["status"], "completed")
+        self.assertTrue(should_run(self.project, self.project.snapshots.get(), role_name="reviewer"))
+        ctx = self.context("reviewer")
+        self.assertEqual(ctx.role.workspace, "read")
+        self.assertNotEqual(ctx.workspace, self.project.workspace)
+        self.assertEqual(ctx.role.capabilities, (*role.capabilities, "work_items_transition"))
+        self.assertEqual(self.project.work_items.get(other["id"])["holder"], "worker")
+
     def test_prompt_ready_page_is_independent_bounded_and_shared(self):
         for index in range(3):
             self.item(f"blocked-{index}", "blocked")

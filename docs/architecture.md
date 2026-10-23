@@ -207,23 +207,29 @@ consecutive no-progress continuations; selected progress or a role/policy change
 resets the streak. `no_progress_backoff_seconds = 0` disables a timer wake; a
 positive value permits a parked continuation to wake after that delay measured
 from its recorded progress timestamp. `no_progress_recovery_after = 2` rotates a
-persistent conversation to a fresh generation on the next independently
-admitted dispatch after two empty `continue`/`bounded` units; it does not admit
+persistent writer conversation to a fresh generation on the next independently
+admitted dispatch after two empty writer snapshots; it does not admit
 or schedule a run. `mizu status` exposes whether that recovery threshold is due
 and the count, so parked empty work is visible while awaiting its next trigger.
-Goal and operator wakes, ready work, and retained exact-SHA work-item CI wait
-evidence for the current blocked holder are checked before the saved outcome;
-inbox generations, routed decision/terminal work-item events, due CI, waits,
-and wait expiry then precede progress self-admission. Ready work is a
-project-wide writable-role wake for a seeded `open`/`doing` item without a
-structured wait; it overrides a prior `done`, `wait` or no-progress park and
-appears in the bounded `ready_work` prompt projection with its ledger age. The
-no-progress park applies only when no ready item exists, and the configured
-writer cooldown still applies. Writable on-change roles honor these explicit
-wakes with unchanged code; event-triggered dispatch admits subscribed
-substantive decision or terminal work-item events and due waits/CI; writable
-roles also admit ready work. See [scheduling](scheduling.md) for the complete
-ordering.
+Writer-daemon readiness checks goal and operator generations, role-eligible
+ready work, and retained exact-SHA work-item CI wait evidence for the current
+blocked holder before the saved outcome; inbox generations, routed
+decision/terminal work-item events, due CI, waits, and wait expiry then precede
+progress self-admission. Ready work is role-scoped: a named role needs
+`work_items_transition` and may claim an unheld `open` item or continue its own
+held `doing`/due `blocked` item. Other roles’ held work does not wake it. This
+ledger authority is independent of workspace mode and does not grant source
+write or publication authority. Eligible work overrides a prior `done`, `wait`
+or no-progress park and appears in the bounded `ready_work` prompt projection
+with its ledger age. The no-progress park applies only when no eligible ready
+item exists, and writer-daemon cooldown still applies. Read-only on-change
+roles use per-role completion cursors for progress and one-shot operator wakes;
+they do not inherit publisher inbox/goal/run-wait generations or its progress
+record. Event-triggered dispatch admits role-routed decision/work-item/wait/CI
+events, eligible ready work, a role-cursored read-only operator wake, or an
+unobserved code change where subscribed; generic snapshot wakes and
+progress-only continuation remain outside the event probe. See
+[scheduling](scheduling.md) for the complete ordering.
 Legacy snapshots without progress keep their previous admission behavior.
 Schema 1 records the six observed booleans,
 the selected signal names, role ID, aggregate progress boolean, saturated
@@ -378,7 +384,10 @@ self-directed work and splits. The runtime binds `actor` to the role, never a
 model argument. The example grants it only to `worker`; consultation and
 delegation children explicitly forbid it. Creation itself does not assign work,
 make an insight decision or publish; the independent writer readiness gate may
-admit a run for ready work, as described in [scheduling](scheduling.md). The
+admit a run for role-eligible ready work, as described in
+[scheduling](scheduling.md); a read-only role needs the separate
+`work_items_transition` capability and still cannot edit source through its
+workspace. The
 work-item ledger is the single record of accepted and planned work, including
 blocked conditions; the finish outcome and structured wake source record why a
 unit stopped, while `Now`/`Next` are short working notes, not a second backlog.

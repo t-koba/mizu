@@ -129,6 +129,9 @@ class CiWakeTests(Fixture):
         from mizu.runtime import Engine
         from support import ScriptDriver
         config = _red_config(self)
+        # The fixture starts with an operator-wake token for writer tests;
+        # this case isolates foreign CI with no observer wake pending.
+        self.project.set_control(wake_generation="")
         driver = ScriptDriver()
         engine = Engine(config, driver=driver)
         # A read role with no CI subscription spends nothing on foreign red:

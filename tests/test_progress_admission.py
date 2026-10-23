@@ -8,9 +8,9 @@ from support import Fixture, ScriptDriver
 from mizu.config import DEFAULT_PROGRESS_SIGNALS, load, role_no_progress_backoff_seconds, role_progress_signals
 from mizu.errors import ConfigError, Denied
 from mizu.explain import explain
-from mizu.fs import canonical, digest, now, write_json
-from mizu.runtime import (Engine, _is_observational_operation, _progress_obligations_digest,
-                          _progress_record, should_run)
+from mizu.fs import canonical, digest, now, read_json, write_json
+from mizu.runtime import (Engine, _is_observational_operation, _operator_woke,
+                          _progress_obligations_digest, _progress_record, should_run)
 from mizu.snapshot import PROGRESS_SIGNALS, no_progress_recovery_due, progress_disposition, validate_progress
 
 
@@ -732,3 +732,140 @@ class PerRoleProgressSignalsTests(Fixture):
 if __name__ == "__main__":
     import unittest
     unittest.main()
+
+
+class ReadOnlyProgressTests(Fixture):
+    def cursor(self):
+        return read_json(self.project.root / "observed" / "reviewer.json")
+
+    def run_observer(self, callback=None, outcome="continue", **kwargs):
+        def finish(ctx, *_):
+            if callback:
+                callback(ctx)
+            if outcome == "bounded":
+                ctx.bound_hit = "requests"
+            ctx.handle("finish", {"outcome": "continue" if outcome == "bounded" else outcome,
+                                  "summary": "Observed this unit",
+                                  "state": "Role-local conclusion"})
+        return Engine(self.config, driver=ScriptDriver(finish)).run(
+            self.project, "reviewer", **kwargs)
+
+    def test_explicit_operator_wake_is_role_cursored_once_even_for_probes(self):
+        self.run_observer(outcome="wait")
+        self.assertEqual(self.run_observer(event_trigger=True)["skipped"], "no-event")
+        before = self.project.snapshots.get()
+        self.project.set_control(wake_generation="observer-wake")
+        self.assertTrue(should_run(self.project, before, role_name="reviewer"))
+        self.assertEqual(self.run_observer(outcome="wait", event_trigger=True)["status"], "completed")
+        self.assertEqual(self.cursor()["wake_generation_digest"], digest(b"observer-wake"))
+        self.assertTrue(self.cursor()["progress"]["signals"]["input"])
+        self.assertEqual(self.project.snapshots.get()["id"], before["id"])
+        self.assertEqual(self.run_observer(event_trigger=True)["skipped"], "no-event")
+        self.assertEqual(self.run_observer()["skipped"], "unchanged")
+        self.assertFalse(should_run(self.project, before, role_name="reviewer"))
+        # Global inbox/goal/wait changes are not observer wake signals.
+        self.project.insights.submit(source="editor", title="Unrouted input", body="News",
+                                     base_snapshot=before["id"])
+        (self.project.root / "PROJECT.md").write_text("New writer objective")
+        self.assertEqual(self.run_observer(event_trigger=True)["skipped"], "no-event")
+        self.assertEqual(self.run_observer()["skipped"], "unchanged")
+
+    def test_meaningful_progress_self_admits_then_no_progress_parks(self):
+        self.run_observer(outcome="wait")
+        self.project.set_control(wake_generation="new-input")
+        def submit(ctx):
+            ctx.handle("submit_insight", {"title": "A new observation", "body": "Measured evidence"})
+        before = self.project.snapshots.get()["id"]
+        self.run_observer(submit)
+        progress = validate_progress(self.cursor()["progress"])
+        self.assertTrue(progress["signals"]["tool"])
+        self.assertTrue(progress["signals"]["insight"])
+        self.assertFalse(progress["signals"]["code"])
+        self.assertEqual(progress["role"], "reviewer")
+        self.assertEqual(progress["no_progress_count"], 0)
+        self.assertTrue(should_run(self.project, self.project.snapshots.get(), role_name="reviewer"))
+        self.assertEqual(self.run_observer()["status"], "completed")
+        progress = self.cursor()["progress"]
+        self.assertFalse(progress["has_progress"])
+        self.assertFalse(progress["signals"]["input"])
+        self.assertEqual(progress["no_progress_count"], 1)
+        self.assertEqual(self.run_observer()["skipped"], "unchanged")
+        self.assertFalse(should_run(self.project, self.project.snapshots.get(), role_name="reviewer"))
+        self.assertEqual(self.project.snapshots.get()["id"], before)
+        self.project.set_control(wake_generation="wake-parked-observer")
+        self.assertEqual(self.run_observer()["status"], "completed")
+
+    def test_bounded_continuations_use_role_policy_and_saturating_counter(self):
+        self.config.roles["reviewer"] = dataclasses.replace(
+            self.config.roles["reviewer"], progress_signals=("state",))
+        self.config = dataclasses.replace(self.config, limits=dataclasses.replace(
+            self.config.limits, no_progress_continuations=1))
+        self.project.config = self.config
+        self.run_observer(outcome="bounded")
+        self.assertTrue(self.cursor()["progress"]["signals"]["state"])
+        self.assertEqual(self.run_observer(outcome="bounded")["status"], "completed")
+        self.assertEqual(self.cursor()["progress"]["no_progress_count"], 1)
+        self.assertEqual(self.run_observer(outcome="bounded")["status"], "completed")
+        self.assertEqual(self.cursor()["progress"]["no_progress_count"], 2)
+        self.assertEqual(self.run_observer()["skipped"], "unchanged")
+        cursor = self.cursor()
+        cursor["progress"]["no_progress_count"] = 101
+        write_json(self.project.root / "observed" / "reviewer.json", cursor)
+        self.project.set_control(wake_generation="next-empty-unit")
+        self.run_observer(outcome="bounded")
+        self.assertEqual(self.cursor()["progress"]["no_progress_count"], 101)
+
+    def test_malformed_control_wake_fails_closed_on_observer_completion(self):
+        self.run_observer(outcome="wait")
+        role = self.config.roles["reviewer"]
+        self.config.roles["reviewer"] = dataclasses.replace(
+            role, capabilities=(*role.capabilities, "work_items_transition"))
+        self.project.config = self.config
+        item = self.project.work_items.create(
+            idempotency_key="malformed-wake-ready", title="Observer-ready work",
+            actor="worker")["record"]["work_item"]
+        self.project.set_control(wake_generation=123)
+        self.assertFalse(_operator_woke(self.project.control(), self.cursor(), observer=True))
+        self.assertEqual(self.run_observer()["status"], "completed")
+        self.assertEqual(self.cursor()["wake_generation_digest"], digest(b""))
+        self.project.work_items.transition(item["id"], expected_rev=1, actor="reviewer",
+                                           status="dropped", reason="Test task settled")
+        self.assertEqual(self.run_observer(event_trigger=True)["skipped"], "no-event")
+
+    def test_invalid_observer_progress_cannot_self_admit(self):
+        self.run_observer(outcome="wait")
+        cursor = {**self.cursor(), "outcome": "continue", "progress": {}}
+        write_json(self.project.root / "observed" / "reviewer.json", cursor)
+        self.assertEqual(self.run_observer()["skipped"], "unchanged")
+        self.assertFalse(should_run(self.project, self.project.snapshots.get(), role_name="reviewer"))
+
+    def test_wake_during_run_remains_pending_and_failures_do_not_acknowledge(self):
+        self.run_observer(outcome="wait")
+        self.project.set_control(wake_generation="offered-wake")
+        self.run_observer(lambda ctx: self.project.set_control(wake_generation="later-wake"),
+                          outcome="wait", event_trigger=True)
+        self.assertEqual(self.cursor()["wake_generation_digest"], digest(b"offered-wake"))
+        def fail(ctx):
+            raise Denied("Injected observer failure")
+        with self.assertRaises(Denied):
+            self.run_observer(fail, outcome="wait", event_trigger=True)
+        self.assertEqual(self.cursor()["wake_generation_digest"], digest(b"offered-wake"))
+        self.assertEqual(self.run_observer(outcome="wait", event_trigger=True)["status"], "completed")
+        self.assertEqual(self.cursor()["wake_generation_digest"], digest(b"later-wake"))
+        self.assertEqual(self.run_observer(event_trigger=True)["skipped"], "no-event")
+
+    def test_role_routed_event_wakes_parked_progress_without_repeating_input(self):
+        self.config.roles["reviewer"] = dataclasses.replace(
+            self.config.roles["reviewer"], decision_events=("reject",))
+        self.run_observer()  # initial input progress
+        self.run_observer()  # empty continuation parks
+        self.assertEqual(self.run_observer()["skipped"], "unchanged")
+        proposal = self.project.insights.submit(
+            source="reviewer", title="Finding", body="Evidence",
+            base_snapshot=self.project.snapshots.get()["id"])
+        self.project.insights.decide(proposal["id"], "reject", "Not material", "", "test", expected_rev=1)
+        self.assertEqual(self.run_observer(event_trigger=True)["status"], "completed")
+        self.assertTrue(self.cursor()["progress"]["signals"]["input"])
+        self.assertEqual(self.run_observer()["status"], "completed")
+        self.assertFalse(self.cursor()["progress"]["signals"]["input"])
+        self.assertEqual(self.run_observer()["skipped"], "unchanged")

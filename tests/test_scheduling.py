@@ -29,9 +29,9 @@ def _dispatch(**overrides):
     base = {
         "event_trigger": False, "on_change": False, "code_unchanged": False,
         "has_code_event": False,
-        "workspace_write": False, "has_decision": False, "has_work_item": False,
-        "has_wait": False, "has_ci": False, "goal_changed": False,
-        "inbox_changed": False, "operator_woke": False, "wait_expired": False,
+        "has_decision": False, "has_work_item": False,
+        "has_wait": False, "has_ci": False, "explicit_wake": False,
+        "operator_woke": False,
         "progress_self_admits": False,
     }
     base.update(overrides)
@@ -138,10 +138,8 @@ class DispatchEvaluatorTests(unittest.TestCase):
             facts.event_trigger = True  # type: ignore[misc]
 
     def test_event_trigger_needs_substantive_event(self):
-        # Snapshot-wide wakes alone do not admit an event trigger.
-        decision = evaluate(_dispatch(event_trigger=True, workspace_write=True,
-                                      goal_changed=True, inbox_changed=True,
-                                      operator_woke=True, wait_expired=True,
+        # Snapshot-wide wakes/progress alone do not admit an event trigger.
+        decision = evaluate(_dispatch(event_trigger=True, explicit_wake=True,
                                       progress_self_admits=True))
         self.assertEqual((decision.admitted, decision.skipped), (False, "no-event"))
         for flag in ("has_decision", "has_work_item", "has_wait", "has_ci"):
@@ -165,41 +163,25 @@ class DispatchEvaluatorTests(unittest.TestCase):
                     decision = evaluate(_dispatch(**{**flags, **context}))
                     self.assertEqual(decision.admission, label, (name, context))
 
-    def test_read_vs_write_unchanged(self):
-        # Read-only on-change roles ignore snapshot-wide wakes and progress.
-        for wake in ({"goal_changed": True}, {"operator_woke": True}, {"inbox_changed": True},
-                     {"wait_expired": True}, {"progress_self_admits": True}):
-            with self.subTest(wake=tuple(wake)):
-                decision = evaluate(_dispatch(on_change=True, code_unchanged=True,
-                                              workspace_write=False, **wake))
-                self.assertEqual((decision.admitted, decision.skipped), (False, "unchanged"))
-        # Write roles admit on the same wakes with a change label when eventless.
-        for wake in ({"goal_changed": True}, {"operator_woke": True}, {"inbox_changed": True},
-                     {"wait_expired": True}, {"progress_self_admits": True}):
-            with self.subTest(wake=tuple(wake)):
-                decision = evaluate(_dispatch(on_change=True, code_unchanged=True,
-                                              workspace_write=True, **wake))
-                self.assertEqual((decision.admitted, decision.skipped, decision.admission),
-                                 (True, None, "change"))
-        # Event reasons admit either workspace mode with the event label.
-        for workspace_write in (False, True):
-            decision = evaluate(_dispatch(on_change=True, code_unchanged=True,
-                                          workspace_write=workspace_write, has_wait=True))
-            self.assertEqual((decision.admitted, decision.admission), (True, "wait"))
+    def test_normalized_wake_and_progress_admit_unchanged(self):
+        for wake in ({"explicit_wake": True}, {"progress_self_admits": True}):
+            with self.subTest(wake=wake):
+                decision = evaluate(_dispatch(on_change=True, code_unchanged=True, **wake))
+                self.assertEqual((decision.admitted, decision.admission), (True, "change"))
+        operator = evaluate(_dispatch(event_trigger=True, code_unchanged=True,
+                                     operator_woke=True, explicit_wake=True))
+        self.assertEqual((operator.admitted, operator.admission), (True, "operator"))
+        # Generic publisher-only wakes are not event subscriptions.
+        self.assertEqual(evaluate(_dispatch(event_trigger=True, explicit_wake=True)).skipped,
+                         "no-event")
 
-    def test_ready_work_is_a_write_only_wake_source(self):
+    def test_role_eligible_ready_work_admits(self):
         for event_trigger in (False, True):
-            for writable in (False, True):
-                facts = _dispatch(ready_work=True, workspace_write=writable,
-                                  code_unchanged=True, on_change=True,
-                                  event_trigger=event_trigger)
-                result = evaluate(facts)
-                self.assertEqual(result.admitted, writable)
-                self.assertEqual(result.admission, "ready_work" if writable else None)
-                if not writable:
-                    self.assertEqual(result.skipped, "no-event" if event_trigger else "unchanged")
-        # Keep terminal event routing/labels independent and higher priority.
-        self.assertEqual(evaluate(_dispatch(ready_work=True, workspace_write=True,
+            facts = _dispatch(ready_work=True, code_unchanged=True, on_change=True,
+                              event_trigger=event_trigger)
+            result = evaluate(facts)
+            self.assertEqual((result.admitted, result.admission), (True, "ready_work"))
+        self.assertEqual(evaluate(_dispatch(ready_work=True,
                          has_work_item=True, event_trigger=True)).admission, "work_item")
 
     def test_event_trigger_treats_unobserved_code_change_as_event(self):
@@ -283,6 +265,7 @@ class SchedulingParityTests(Fixture):
         self.project.set_control(armed=True, paused=False, draining=False)
 
     def test_event_trigger_no_event_creates_no_run(self):
+        Engine(self.config, driver=ScriptDriver()).run(self.project, "searcher")
         before = {path.name for path in (self.project.root / "runs").iterdir()} if (
             self.project.root / "runs").exists() else set()
         result = Engine(self.config, driver=ScriptDriver()).run(

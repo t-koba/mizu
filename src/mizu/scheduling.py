@@ -69,19 +69,16 @@ class DispatchFacts:
     # on_change roles keep timer-based discovery; their --event probes still
     # exit with no-event when no subscribed decision/work/wait/CI is due.
     has_code_event: bool = False
-    workspace_write: bool = False
     has_decision: bool = False
     has_work_item: bool = False
     ready_work: bool = False
     has_wait: bool = False
     has_ci: bool = False
-    goal_changed: bool = False
-    inbox_changed: bool = False
+    # Runtime normalizes role-consumable wakes. A role-cursored operator
+    # wake may also admit an event probe; snapshot-wide wakes do not.
+    explicit_wake: bool = False
     operator_woke: bool = False
-    wait_expired: bool = False
-    # Raw progress verdict (disposition != parked) before the write-only
-    # gate below; the evaluator applies the workspace restriction so
-    # read-only on-change roles never self-admit on progress.
+    # Runtime resolves the role-specific persisted progress policy.
     progress_self_admits: bool = False
 
 
@@ -94,7 +91,7 @@ class DispatchDecision:
 
 def _has_event(facts: DispatchFacts) -> bool:
     return bool(facts.has_decision or facts.has_work_item or facts.has_wait or facts.has_ci
-                or (facts.workspace_write and facts.ready_work))
+                or facts.ready_work or (facts.event_trigger and facts.operator_woke))
 
 
 def _event_label(facts: DispatchFacts) -> str:
@@ -106,6 +103,8 @@ def _event_label(facts: DispatchFacts) -> str:
         return "wait"
     if facts.has_ci:
         return "ci"
+    if facts.event_trigger and facts.operator_woke:
+        return "operator"
     return "ready_work"
 
 
@@ -163,16 +162,11 @@ def evaluate_dispatch(facts: DispatchFacts) -> DispatchDecision:
     """Order dispatch facts exactly as ``Engine.run`` does."""
     if facts.event_trigger and not _has_event(facts) and not facts.has_code_event:
         return DispatchDecision(admitted=False, skipped="no-event", admission=None)
-    explicit_wake = bool(
-        facts.workspace_write
-        and (facts.goal_changed or facts.operator_woke or facts.inbox_changed or facts.wait_expired)
-    )
-    progress_admits = bool(facts.workspace_write and facts.progress_self_admits)
     if (
         facts.code_unchanged
         and not _has_event(facts)
-        and not explicit_wake
-        and not progress_admits
+        and not facts.explicit_wake
+        and not facts.progress_self_admits
     ):
         return DispatchDecision(admitted=False, skipped="unchanged", admission=None)
     if facts.code_unchanged and _has_event(facts):

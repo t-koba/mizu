@@ -1333,20 +1333,24 @@ class WorkItems:
         with lock(self.root / "locks" / "insights.lock"):
             return self._page_open_impl(cursor=cursor, limit=limit, readonly=False)
 
-    def page_ready(self, *, limit=25) -> dict:
+    def page_ready(self, *, limit=25, role_name=None) -> dict:
         """Return actionable open/doing items and blocked items whose wait is due.
 
         Same bounds, ordering, recovery, lock and fail-closed contract as
         page_open. Filter before selection/counting, scanning the ledger with
         O(limit) retained rows: blocked rows cannot hide ready work. No state
-        transitions are performed. Satisfied generic waits re-enter this page
-        for the writer to reassess; they never imply completion. CI waits retain
+        transitions are performed. With role_name, only unheld open items
+        and that role's held doing/blocked items are eligible. Authorization
+        to transition is checked by the caller. Satisfied generic waits re-enter
+        this page for reassessment; they never imply completion. CI waits retain
         their receipt-bound event path. Legacy unseeded decisions
         remain explicit coverage gaps, never inferred ready work.
         """
+        if role_name is not None:
+            identifier(role_name)
         with lock(self.root / "locks" / "insights.lock"):
             return self._page_open_impl(cursor=None, limit=limit, readonly=False,
-                                        ready_only=True)
+                                        ready_only=True, role_name=role_name)
 
     def _seed_for_event(self, event_id: str, event: dict, *, readonly: bool):
         """Resolve the seed for one committed event with an explicit mode.
@@ -1458,7 +1462,8 @@ class WorkItems:
             raise LimitExceeded("Closed work-item page row exceeds byte bound")
         return sort_key, row
 
-    def _page_open_impl(self, *, cursor, limit, readonly: bool, ready_only: bool = False) -> dict:
+    def _page_open_impl(self, *, cursor, limit, readonly: bool, ready_only: bool = False,
+                        role_name: str | None = None) -> dict:
         """Collect the bounded open page with an explicit recovery mode.
 
         Callers hold insights.lock when ``readonly`` is False; the read-only
@@ -1488,6 +1493,12 @@ class WorkItems:
             if item["status"] not in ("open", "doing", "blocked"):
                 continue
             if ready_only:
+                if role_name is not None:
+                    if item["status"] == "open":
+                        if item.get("holder") is not None:
+                            continue
+                    elif item.get("holder") != role_name:
+                        continue
                 if item["status"] == "blocked":
                     wait = item.get("wait")
                     if not wait or wait.get("kind") == "ci":

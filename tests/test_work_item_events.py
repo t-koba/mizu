@@ -406,6 +406,7 @@ class WorkItemEventTests(Fixture):
         self.assertTrue(page["acknowledged_ids_truncated"])
 
     def test_event_admission_prompts_run_evidence_and_successful_only_ack(self):
+        self.project.set_control(wake_generation="")  # no pending operator wake
         config = self.subscribed_config()
         driver = ScriptDriver()
         engine = Engine(config, driver=driver)
@@ -652,6 +653,7 @@ class WorkItemEventTests(Fixture):
         self.assertEqual(self.page()["pending"], 1)
 
     def test_any_source_unknown_routes_admits_once_without_decision_subscription(self):
+        self.project.set_control(wake_generation="")  # no pending operator wake
         proposal, _ = self.terminal(source="searcher")
         (self.project.root / "inbox" / f"{proposal['id']}.json").unlink()
         own = Engine(self.subscribed_config(), driver=ScriptDriver())

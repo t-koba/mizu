@@ -93,6 +93,7 @@ class DecisionTriggerTests(Fixture):
         self.project.insights.decide(item["id"], "accept", "now material", "", "test", expected_rev=2)
 
     def test_event_trigger_skips_without_subscribed_event(self):
+        self.project.set_control(wake_generation="")  # no pending operator wake
         # Schedule-only roles (no on_change) previously ran a full model unit
         # on every file-trigger wake, even with no subscribed event pending:
         # decision-history changes from unrelated roles re-triggered the
@@ -165,6 +166,7 @@ class AnySourceResolverTests(Fixture):
         self.assertEqual(len(self.project.insights.decision_events("searcher", ("defer",), sources="any")), 1)
 
     def test_any_source_defer_admits_once_then_skips(self):
+        self.project.set_control(wake_generation="")  # no pending operator wake
         import dataclasses
         from mizu.runtime import Engine
         from support import ScriptDriver

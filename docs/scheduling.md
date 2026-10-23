@@ -45,10 +45,14 @@ no file trigger and instead renders a bounded poll task invoking
 `should_run` (`src/mizu/runtime.py`) is the writer-daemon readiness gate. It
 first rejects unarmed/paused/draining control, then checks changed goal
 digest and operator wake-generation, then an independent ready-work read.
-Ready work means a seeded ledger item whose current status is `open` or
-`doing` and which carries no structured wait. Any such item admits the writer
+Ready work for a named role requires the `work_items_transition` capability.
+It means an unheld `open` item the role can claim, or a `doing` item held by
+that role, with no structured wait (plus its own due blocked waits below).
+Another role's held work never admits it. Such eligible work admits the writer
 even after `done`, an unexpired run-level `wait`, or a no-progress park. This
-is a project-wide source, not filtered by holder or terminal-event subscription.
+is independent of terminal-event subscriptions, but filtered by role/holder
+before page selection and counting. Unnamed diagnostic callers retain the
+aggregate project view. Workspace mode is not a readiness capability.
 Next, unacknowledged receipt-pinned CI wait evidence admits only its current
 blocked holder (daemon reason `ci_wait`), including after `done`. Without ready
 work or that evidence, `done` still ignores inbox, routed events, general CI,
@@ -65,7 +69,9 @@ default: `tool`, `code`, `decision`, `insight`, `input`; `state` is
 optional), `no_progress_continuations`, and the effective per-role
 `no_progress_backoff_seconds` (`roles.<name>.no_progress_backoff_seconds`
 when set, else the project `[limits]` value).
-It bounds continuation of writer daemons; it is not a platform trigger.
+It bounds continuation of writer daemons and on-change dispatch; it is not a
+platform trigger. Read-only on-change roles use their own progress record,
+not the publisher's snapshot record (see below).
 
 Non-write daemon readiness is only control state: the daemon loop in
 `src/mizu/runtime.py` runs a read role at its idle cadence when the project
@@ -81,24 +87,56 @@ Scheduled timer dispatches are plain one-shot runs: `mizu run` without
 Event-triggered dispatch (`mizu run --event`, invoked by the platform file
 triggers or the recovery/poll triggers below) admits on a substantive decision event, a
 terminal `work_item_events` row, a due structured wait, a due CI red for that
-role, ready work for a writable role, or an unobserved code change for an
+role, role-eligible ready work, an unconsumed role-cursored operator wake
+for a read-only role, or an unobserved code change for an
 `on_change` role, and otherwise exits with `skipped: no-event` before
 allocating a run directory or any model use. The code-change event carries
 admission `change` when no more-specific event wins. For `on_change` roles
 whose code snapshot is already observed, `Engine.run` otherwise skips
 unchanged-code dispatch unless there is a substantive decision, terminal
 event, due wait, or due CI red.
-Writable roles additionally bypass that skip for changed goal, operator wake,
-inbox generation, prior-wait expiry, progress self-admission, or ready work;
-read-only on-change roles do not use those snapshot-wide wakes, progress or
-ready work. A changed code snapshot bypasses the skip for either workspace mode. The recorded
-`admission` label is `decision` / `work_item` / `wait` / `ci` / `ready_work` /
-`change` / `schedule`. Existing event labels take precedence over ready work;
+The snapshot-publishing role additionally bypasses that skip for changed goal,
+inbox generation or prior-wait expiry. Operator wake, role-eligible ready work
+and role-specific progress self-admission bypass it independently of workspace
+mode. Read-only roles never inherit goal/inbox/run-wait generations or the
+publisher's progress. Event probes still exclude generic goal/inbox/run-wait
+changes and progress-only continuation; writer probes retain their existing
+subscribed-event gate. A changed code snapshot bypasses the skip for either
+workspace mode. The recorded
+`admission` label is `decision` / `work_item` / `wait` / `ci` / `operator` /
+`ready_work` / `change` / `schedule`. Existing event labels take precedence over ready work;
 ready work has its own label for event-triggered or unchanged-code admission.
 It does not add or consume terminal work-item events. The daemon's configured
 cooldown spacing still applies (writable roles use the role-effective
 `cooldown_seconds`: `roles.<name>.cooldown_seconds` when set, else the project
 `[limits]` value; read-only roles use `idle_seconds`); ready work does not accelerate it.
+
+### Read-only completion cursors
+
+After successful completion (excluding a deferred check wait), a read-only
+role atomically replaces its existing `observed/<role>.json` cursor with the
+snapshot/code cursor plus `wake_generation_digest`, `state_digest`, `outcome` and
+`progress`. Reads are bounded to 4096 bytes; malformed/unreadable records
+provide no trusted progress. Wake generations and state are stored as fixed-size
+SHA-256 digests. The generation offered at run start is acknowledged,
+not a later wake arriving during execution. Failed/skipped runs do not
+acknowledge it. An operator wake therefore admits each observer once, even
+via `--event`, without requiring publication or spinning on a stale global
+snapshot generation.
+
+The progress field uses the existing validated bounded progress schema and
+`role_progress_signals` / `progress_disposition` policy. Supported tool,
+state, decision, insight and delivered role-input signals are recorded; code
+progress is always false. State comparison uses a digest of the role's last
+completion state, not another role's state. The consecutive no-progress count
+saturates at 101. A progressful `continue`/`bounded` completion can self-admit
+an ordinary on-change dispatch; an empty continuation replaces that evidence
+and parks at the configured allowance/backoff. A fresh routed event or
+operator wake can still admit parked work. Existing configuration defaults,
+workspace permissions and publication/verification authority are unchanged:
+granting transition capability to a read-only role does not grant source edits.
+Read-only daemon cadence remains the existing control-only policy above;
+this slice changes on-change dispatch, not schedule modes or spacing.
 
 ### Bounded ready-work input
 
@@ -122,10 +160,12 @@ waits keep their existing receipt-bound result notifications. Re-evaluation
 uses current local time, published code and exact-revision decisions; it
 neither imports acceptance nor closes work automatically.
 
-The store's internal `page_ready(limit=...)` shares the open-page validation,
-recovery and locking contract. It filters before bounded selection across the
-ledger, so even a general page filled with blocked items cannot hide ready
-work. Admission retains at most one ready row; prompts retain at most
+The store's internal `page_ready(limit=..., role_name=...)` shares the
+open-page validation, recovery and locking contract. It filters before bounded selection across the
+ledger, so blocked or other-holder rows cannot hide later eligible work.
+Omitting `role_name` retains the aggregate page used by prompt diagnostics;
+the prompt page is not itself an admission grant. Admission retains at most
+one ready row; prompts retain at most
 `[limits].work_items_prompt` rows (1–100), with the existing 8192-byte row and
 1 MiB page bounds. The scan retains O(limit) rows; scan time follows ledger
 size, as for `page_open`. Reads never change item status or resolve waits.

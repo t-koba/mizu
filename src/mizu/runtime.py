@@ -56,6 +56,16 @@ from .web import Web
 from .web_worker import bounded
 
 
+def _normalized_wake_generation(value) -> str:
+    """Fail closed on malformed local control generations without crashing a run."""
+    return value if isinstance(value, str) else ""
+
+
+def _wake_generation_digest(value) -> str:
+    """Bound observer cursor state to a valid generation or the empty sentinel."""
+    return digest(_normalized_wake_generation(value).encode())
+
+
 @contextlib.contextmanager
 def slot(config: Config):
     """Fail-fast slot admission, respecting older pending work (also probes)."""
@@ -89,9 +99,8 @@ MAX_QUEUE_OBSERVATIONS = 8
 MAX_ENGINE_TOOL_INVOCATIONS = 4096
 MAX_ENGINE_TOOL_ID = 256
 MAX_READ_IDENTITIES = 1024
-#: Bound for reading a role's observed snapshot cursor when basing a diff.
-#: The cursor the engine writes holds two hex digests; the bound only keeps a
-#: hand-edited or corrupt record from being materialized without limit.
+#: Bound for role cursors: snapshot/code, wake generation, and (for read-only
+#: completion) state digest, outcome and validated compact progress evidence.
 OBSERVED_CURSOR_MAX_BYTES = 4096
 #: Bounded serialized size of the work items a CI request covers.
 MAX_COVERED_BYTES = 2048
@@ -245,10 +254,13 @@ def _clear_missing_finish_streak(project, role_name):
         write_json(path, health)
 
 
-def _has_ready_work(project) -> bool:
+def _has_ready_work(project, role=None) -> bool:
     """Ready-work existence from a filtered bounded ledger scan; errors close."""
+    if role is not None and "work_items_transition" not in role.capabilities:
+        return False
     try:
-        return bool(project.work_items.page_ready(limit=1)["items"])
+        return bool(project.work_items.page_ready(
+            limit=1, **({"role_name": role.name} if role is not None else {}))["items"])
     except Exception:
         return False
 
@@ -371,7 +383,8 @@ class Context:
         self.goal_digest = digest(self.goal.encode())
         # Capture the inputs actually offered to this run, not arrivals at publication.
         self.inbox_seen = project.insights.generation()
-        self.wake_generation = project.control().get("wake_generation", "")
+        self.wake_generation = _normalized_wake_generation(
+            project.control().get("wake_generation", ""))
         self.stop = stop or threading.Event()
         self.run_seconds = role_run_seconds(config, role)
         started = time.monotonic()
@@ -1008,7 +1021,7 @@ class Context:
         """Return this role's observed snapshot ID when it is usable as a diff base.
 
         Schema: the ``observed/<role>.json`` cursor the engine writes, holding
-        ``snapshot`` and ``code_digest``. Bounds: the cursor is read under
+        ``snapshot`` and ``code_digest`` (and read-only scheduling evidence). Bounds: the cursor is read under
         ``OBSERVED_CURSOR_MAX_BYTES``. Trust: local recorded state, never a
         claim about the tree, so an absent, malformed, digest-mismatched or
         no-longer-retained cursor is unusable and yields None; ancestry is
@@ -3833,7 +3846,7 @@ class Engine:
         make a queued attempt obsolete without losing pending work.
         """
         snapshot = project.snapshots.get()
-        cursor = read_json(project.root / "observed" / f"{role_name}.json", {})
+        cursor = _role_cursor(project, role_name)
         code_unchanged = role.on_change and _on_change_observed(cursor, snapshot)
         triggers = tuple(getattr(role, "decision_events", ()) or ())
         sources = getattr(role, "decision_sources", "own") or "own"
@@ -3880,15 +3893,19 @@ class Engine:
                           or role.decision_events or role.work_item_events)
         unscheduled = not bool(role.daemon or role.interval_seconds or role.calendar)
         has_code_event = bool(role.on_change and unscheduled and not code_unchanged)
-        ready_work = (role.workspace == "write" and (not event_trigger or autonomous)
-                      and _has_ready_work(project))
+        ready_work = ((not event_trigger or autonomous) and _has_ready_work(project, role))
+        # Only publishers consume snapshot-wide generations. Observers consume
+        # operator wakes independently, even when no new code is published.
+        wake_base = snapshot if role.workspace == "write" else cursor
+        operator_woke = _operator_woke(project.control(), wake_base, observer=role.workspace != "write")
         if event_trigger:
             event_gate = _scheduling.evaluate(_scheduling.DispatchFacts(
                 event_trigger=True,
                 on_change=bool(role.on_change),
                 code_unchanged=bool(code_unchanged),
                 has_code_event=bool(has_code_event),
-                workspace_write=role.workspace == "write",
+                operator_woke=operator_woke and role.workspace != "write",
+                explicit_wake=operator_woke and role.workspace != "write",
                 ready_work=ready_work,
                 has_decision=bool(substantive_events),
                 has_work_item=bool(terminal_events),
@@ -3898,37 +3915,35 @@ class Engine:
             if event_gate.skipped == "no-event":
                 return {"skip": {"skipped": "no-event", "snapshot": snapshot["id"],
                         "code_digest": snapshot["code_digest"]}}
-        # Writable roles consume these generations in their next snapshot.
-        # Read-only on-change roles keep their code/event cursor semantics;
-        # they cannot acknowledge snapshot-wide input by publishing.
-        goal_changed = digest(project.goal.encode()) != snapshot["goal_digest"]
-        inbox_changed = project.insights.generation() != snapshot.get("inbox_seen", "")
-        operator_woke = project.control().get("wake_generation", "") != snapshot.get("wake_generation", "")
+        # Only publishers consume snapshot-wide goal/inbox/run-wait input.
+        goal_changed = role.workspace == "write" and digest(project.goal.encode()) != snapshot["goal_digest"]
+        inbox_changed = role.workspace == "write" and project.insights.generation() != snapshot.get("inbox_seen", "")
         _dispatch_now = time.time()
         prior_wait_expired = (snapshot.get("outcome") == "wait"
                               and snapshot.get("wake_at") is not None
                               and _dispatch_now >= snapshot["wake_at"])
-        progress_self_admits = False
-        if (role.workspace == "write" and snapshot.get("outcome") in ("continue", "bounded")
-                and snapshot.get("progress") is not None):
-            disposition = progress_disposition(snapshot["progress"], snapshot["outcome"],
-                                               self.config, role_name)
-            progress_self_admits = disposition != "parked_no_progress"
+        progress_base = snapshot if role.workspace == "write" else cursor
+        if role.workspace == "write":
+            progress_self_admits = (snapshot.get("outcome") in ("continue", "bounded")
+                and snapshot.get("progress") is not None
+                and progress_disposition(snapshot["progress"], snapshot["outcome"],
+                                         self.config, role_name) != "parked_no_progress")
+        else:
+            progress_self_admits = _progress_self_admits(progress_base, self.config, role_name)
+        explicit_wake = operator_woke or (role.workspace == "write" and (
+            goal_changed or inbox_changed or prior_wait_expired))
         _dispatch = _scheduling.evaluate(_scheduling.DispatchFacts(
             event_trigger=bool(event_trigger),
             on_change=bool(role.on_change),
             code_unchanged=bool(code_unchanged),
             has_code_event=bool(has_code_event),
-            workspace_write=role.workspace == "write",
+            explicit_wake=bool(explicit_wake),
             ready_work=ready_work,
             has_decision=bool(substantive_events),
             has_work_item=bool(terminal_events),
             has_wait=bool(wait_events or check_jobs.pending(project, role_name)),
             has_ci=bool(ci_failures),
-            goal_changed=bool(goal_changed),
-            inbox_changed=bool(inbox_changed),
-            operator_woke=bool(operator_woke),
-            wait_expired=bool(prior_wait_expired),
+            operator_woke=bool(operator_woke and role.workspace != "write"),
             progress_self_admits=bool(progress_self_admits),
         ))
         if _dispatch.skipped == "unchanged":
@@ -4146,16 +4161,18 @@ class Engine:
                 context.wait_events = wait_events
                 context.obligations = obligations
                 context.progress_obligations_digest = _progress_obligations_digest(obligations)
-                previous_progress = snapshot.get("progress")
+                role_cursor = _role_cursor(project, role_name) if role.workspace != "write" else snapshot
+                previous_progress = role_cursor.get("progress")
                 previous_obligations_digest = None
                 if (isinstance(previous_progress, dict) and previous_progress.get("role") == role_name):
                     previous_obligations_digest = previous_progress.get("obligations_digest")
                 new_obligation = bool(obligations) and previous_obligations_digest != context.progress_obligations_digest
                 context.progress_input = (
-                    context.inbox_seen != snapshot.get("inbox_seen", "")
-                    or context.wake_generation != snapshot.get("wake_generation", "")
+                    (role.workspace == "write" and context.inbox_seen != snapshot.get("inbox_seen", ""))
+                    or _operator_woke({"wake_generation": context.wake_generation}, role_cursor,
+                                      observer=role.workspace != "write")
                     or bool(decision_events or terminal_events or wait_events or ci_failures)
-                    or new_obligation or prior_wait_expired)
+                    or new_obligation or (role.workspace == "write" and prior_wait_expired))
                 prompt, prompt_mode, session_key, rotation, session_dir = session_prompt(context, role, run_dir)
                 dispatch_evidence.capture_projection(context, role.profile, prompt_mode,
                                                      session_key, rotation, session_dir)
@@ -4499,8 +4516,24 @@ class Engine:
                         check_jobs.acknowledge(project, role_name,
                                                set(getattr(context, "check_results_read", set())) | released)
                 if not finished.get("wait_for_check"):
-                    write_json(project.root / "observed" / f"{role_name}.json",
-                               {"snapshot": snapshot["id"], "code_digest": snapshot["code_digest"]})
+                    observed = {"snapshot": snapshot["id"], "code_digest": snapshot["code_digest"]}
+                    if role.workspace != "write":
+                        state_digest = digest(finished.get("state", "").encode())
+                        signals = {
+                            "tool": context.progress_tool, "code": False,
+                            "state": state_digest != role_cursor.get(
+                                "state_digest", digest(context.snapshot["state"].encode())),
+                            "decision": context.progress_decision,
+                            "insight": context.progress_insight, "input": context.progress_input,
+                        }
+                        observed.update(
+                            wake_generation_digest=_wake_generation_digest(context.wake_generation),
+                            state_digest=state_digest, outcome=finished["outcome"],
+                            progress=_progress_record(
+                                role_cursor, role_name, tuple(role_progress_signals(self.config, role)),
+                                signals, finished["outcome"],
+                                obligations_digest=context.progress_obligations_digest))
+                    write_json(project.root / "observed" / f"{role_name}.json", observed)
                 if context.decision_events and not finished.get("wait_for_check"):
                     with contextlib.suppress(OSError, ValueError, TypeError, AttributeError, Denied):
                         project.insights.acknowledge_decisions(
@@ -4898,6 +4931,46 @@ class Engine:
                 ctx.closed = True
 
 
+def _role_cursor(project, role_name) -> dict:
+    """Read bounded local observation evidence; unsafe/malformed cursors close."""
+    try:
+        cursor = read_json(project.root / "observed" / f"{role_name}.json", {},
+                           max_bytes=OBSERVED_CURSOR_MAX_BYTES)
+        return cursor if isinstance(cursor, dict) else {}
+    except (OSError, ValueError, Busy, Denied, LimitExceeded):
+        return {}
+
+
+def _operator_woke(control, cursor, *, observer=False) -> bool:
+    raw_generation = control.get("wake_generation", "")
+    if not isinstance(raw_generation, str):
+        return False
+    generation = raw_generation
+    if observer:
+        # A digest keeps the observer cursor bounded without narrowing the
+        # publisher's existing control-generation contract. Malformed local
+        # control state is the empty sentinel, never a wake or a crash.
+        return (_wake_generation_digest(generation) !=
+                cursor.get("wake_generation_digest", _wake_generation_digest("")))
+    seen = _normalized_wake_generation(cursor.get("wake_generation", ""))
+    return generation != seen
+
+
+def _progress_self_admits(record, config, role_name, current_time=None) -> bool:
+    """Only validated, role-specific continuation evidence can self-admit."""
+    if record.get("outcome") not in ("continue", "bounded"):
+        return False
+    progress = record.get("progress")
+    try:
+        validate_progress(progress)
+    except Denied:
+        return False
+    if progress["role"] != role_name:
+        return False
+    return progress_disposition(progress, record["outcome"], config, role_name,
+                                current_time) != "parked_no_progress"
+
+
 def _on_change_observed(cursor: dict, snapshot: dict) -> bool:
     """True when an ``on_change`` role already observed this code.
 
@@ -5052,10 +5125,15 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
     The evaluator names one next fact at a time. This preserves the old
     short-circuit contract: absent ready work or receipt-pinned CI wait evidence,
     done does not read inbox/events/general CI/insight waits/progress. A higher-priority wake does not probe
-    lower-priority stores. Read-only roles never self-admit on ready work.
+    lower-priority stores. Named roles only see role-eligible ready work;
+    observers use their own completion cursor, never the writer's progress.
     """
     current_time = time.time() if current_time is None else current_time
     control = project.control()
+    effective = config if config is not None else getattr(project, "config", None)
+    role = effective.roles.get(role_name) if effective is not None and role_name is not None else None
+    observer = role is not None and role.workspace != "write"
+    role_record = _role_cursor(project, role_name) if observer else snapshot
     if role_name is not None and check_jobs.waiting(project, role_name):
         return False
     facts = _scheduling.DaemonFacts(
@@ -5067,14 +5145,11 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
     while decision.ready is None:
         needed = decision.needed
         if needed == "goal_changed":
-            value = digest(project.goal.encode()) != snapshot["goal_digest"]
+            value = not observer and digest(project.goal.encode()) != snapshot["goal_digest"]
         elif needed == "operator_woke":
-            value = control.get("wake_generation", "") != snapshot.get("wake_generation", "")
+            value = _operator_woke(control, role_record, observer=observer)
         elif needed == "ready_work":
-            effective = config if config is not None else getattr(project, "config", None)
-            role = effective.roles.get(role_name) if effective is not None and role_name is not None else None
-            value = ((role_name is None or (role is not None and role.workspace == "write"))
-                     and _has_ready_work(project))
+            value = ((role_name is None or role is not None) and _has_ready_work(project, role))
         elif needed == "ci_wait_due":
             names = [role_name] if role_name in project.roles else [
                 name for name in project.roles
@@ -5084,9 +5159,11 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
             except (Denied, LimitExceeded, OSError, ValueError):
                 value = False
         elif needed == "outcome":
-            value = snapshot["outcome"]
+            value = role_record.get("outcome", "wait")
+            if observer and value not in ("continue", "bounded", "done", "wait", "blocked"):
+                value = "wait"
         elif needed == "inbox_changed":
-            value = project.insights.generation() != snapshot.get("inbox_seen", "")
+            value = not observer and project.insights.generation() != snapshot.get("inbox_seen", "")
         elif needed == "routed_events_due":
             value = _role_events_due(project, snapshot, role_name)
         elif needed == "ci_due":
@@ -5102,11 +5179,13 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
             except Exception:
                 value = False
         elif needed == "wait_expired":
-            value = (snapshot.get("outcome") == "wait"
+            value = (not observer and snapshot.get("outcome") == "wait"
                      and snapshot.get("wake_at") is not None
                      and current_time >= snapshot["wake_at"])
         elif needed == "progress_admits":
-            if "progress" not in snapshot or role_name is None:
+            if observer:
+                value = _progress_self_admits(role_record, effective, role_name, current_time)
+            elif "progress" not in snapshot or role_name is None:
                 value = True
             else:
                 progress = snapshot["progress"]
