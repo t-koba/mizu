@@ -5351,7 +5351,7 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                     role = config.roles[role_name]
                     policy = getattr(role, "daemon_policy", None)
                     if policy not in DAEMON_POLICIES:
-                        policy = "signals" if role.workspace == "write" else "periodic"
+                        raise ConfigError("Invalid daemon_policy; reload validated configuration")
                     if policy == "signals":
                         ready = should_run(project, project.snapshots.get(), role_name=role_name)
                     else:

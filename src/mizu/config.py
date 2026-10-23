@@ -646,21 +646,17 @@ def role_daemon_spacing_seconds(config: "Config", role: "Role") -> int:
     ``next_evaluation_at``/``idle_seconds``/``cooldown_seconds`` policy.
     """
     try:
+        policy = getattr(role, "daemon_policy", None)
+    except Exception:
+        policy = None
+    if policy not in DAEMON_POLICIES:
+        raise ConfigError("Invalid daemon_policy; reload validated configuration")
+    try:
         explicit = getattr(role, "daemon_spacing_seconds", None)
     except Exception:
         explicit = None
     if type(explicit) is int and 1 <= explicit <= 1073741824:
         return explicit
-    try:
-        policy = getattr(role, "daemon_policy", None)
-    except Exception:
-        policy = None
-    if policy not in DAEMON_POLICIES:
-        try:
-            workspace = getattr(role, "workspace", None)
-        except Exception:
-            workspace = None
-        policy = "signals" if workspace == "write" else "periodic"
     if policy == "signals":
         return role_cooldown_seconds(config, role)
     return config.limits.idle_seconds

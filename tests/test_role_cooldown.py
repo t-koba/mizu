@@ -286,13 +286,18 @@ capabilities = ["files", "read", "finish"]
             role_daemon_spacing_seconds(
                 config, dataclasses.replace(searcher, daemon_policy="signals",
                                             daemon_spacing_seconds=7)), 7)
-        # Malformed overrides read as the policy default, never raise.
+        # Malformed spacing overrides read as the policy default, but a
+        # malformed policy fails closed rather than consulting workspace.
         self.assertEqual(
             role_daemon_spacing_seconds(
                 config, dataclasses.replace(searcher, daemon_spacing_seconds=0)), 15)
         self.assertEqual(
             role_daemon_spacing_seconds(
                 config, dataclasses.replace(worker, daemon_spacing_seconds="60")), 5)
+        with self.assertRaises(ConfigError):
+            role_daemon_spacing_seconds(
+                config, dataclasses.replace(worker, daemon_policy="invalid",
+                                            daemon_spacing_seconds=42))
 
     def _run_loop(self, config, role_name, should_run_value, result):
         """Drive the actual daemon loop twice on a fake clock; no model, no sleep."""
@@ -371,6 +376,19 @@ capabilities = ["files", "read", "finish"]
         self.assertGreaterEqual(should_run.call_count, 1)
         self.assertEqual(dispatched_at, [1000.0, 1007.0])
         self.assertEqual(clock.waits, [7, 7])
+
+    def test_loop_invalid_policy_fails_closed_without_workspace_fallback(self):
+        config = dataclasses.replace(
+            self.config,
+            roles={**self.config.roles,
+                   "worker": dataclasses.replace(self.config.roles["worker"],
+                                                 daemon_policy="invalid")})
+        clock, dispatched_at, should_run, engine = self._run_loop(
+            config, "worker", True, {"status": "done"})
+        self.assertEqual(dispatched_at, [])
+        self.assertEqual(should_run.call_count, 0)
+        engine.return_value.run.assert_not_called()
+        self.assertEqual(clock.waits, [config.limits.idle_seconds] * 2)
 
     def test_loop_deferred_reentry_ignores_explicit_spacing(self):
         config = dataclasses.replace(
