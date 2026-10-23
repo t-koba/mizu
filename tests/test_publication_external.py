@@ -4,6 +4,7 @@ Offline only: no adapter, no network, no real publication.
 """
 import dataclasses
 import json
+import io
 import uuid
 from unittest.mock import patch
 
@@ -12,6 +13,7 @@ from mizu.cli import execute, parser
 from mizu.errors import Denied
 from mizu.fs import mkdir
 from mizu.publication import Publication
+from mizu.distribution import public_source_identity
 from mizu.runtime import Context
 
 SHA = "a" * 40
@@ -43,7 +45,7 @@ class ExternalPublicationTests(Fixture):
 
     def record(self, **overrides):
         arguments = {"branch": BRANCH, "published_sha": SHA, "code_digest": DIGEST,
-                     "approval": APPROVAL}
+                     "approval": APPROVAL, "projection": public_source_identity({})}
         arguments.update(overrides)
         return Publication.record_external(self.root, **arguments)
 
@@ -55,8 +57,9 @@ class ExternalPublicationTests(Fixture):
         self.assertEqual(stored, record)
         self.assertEqual(set(stored), {"schema", "publication_id", "op", "branch",
                                         "published_sha", "code_digest", "approval",
-                                        "source_commit", "run", "recorded_at"})
-        self.assertEqual(stored["schema"], 2)
+                                        "source_commit", "run", "recorded_at",
+                                        "projection_schema", "projection_algorithm", "projection_digest"})
+        self.assertEqual(stored["schema"], 3)
         self.assertEqual(stored["op"], "external")
         self.assertIsNone(stored["source_commit"])
         self.assertIsNone(stored["run"])
@@ -108,7 +111,8 @@ class ExternalPublicationTests(Fixture):
         first = self.record()
         second = self.record(published_sha=OTHER_SHA, code_digest=OTHER_DIGEST, branch="other")
         # A schema-1 receipt of the product's own publish path is listed too.
-        product = Publication(self.root, "e" * 40, "f" * 64, "product", "push")
+        product = Publication(self.root, "e" * 40, "f" * 64, "product", "push",
+                              projection=public_source_identity({}))
         intent, _ = product.prepare("approval-ref", "run-ref")
         product.mark_dispatch()
         product.complete(intent, "1" * 40)
@@ -128,7 +132,8 @@ class ExternalPublicationTests(Fixture):
         self.assertEqual(ids, sorted(ids))
         row = next(row for row in listed if row["publication_id"] == first["publication_id"])
         self.assertEqual(set(row), {"publication_id", "op", "branch", "published_sha",
-                                    "code_digest", "approval", "source_commit", "run"})
+                                    "code_digest", "approval", "source_commit", "run",
+                                    "projection_schema", "projection_algorithm", "projection_digest"})
         self.assertEqual(row["op"], "external")
         self.assertEqual(row["published_sha"], SHA)
         self.assertEqual(
@@ -179,7 +184,6 @@ class ExternalPublicationTests(Fixture):
         self.assertEqual(complete["total"], 3)
 
     def test_oversized_record_is_skipped_and_never_overwritten(self):
-        from mizu.fs import canonical, digest
         record = self.record()
         # A record larger than the read bound must not deny the valid receipts
         # beside it, and must never be overwritten by a new recording.
@@ -188,9 +192,7 @@ class ExternalPublicationTests(Fixture):
         listing = Publication.list_receipts(self.root)
         self.assertEqual([row["publication_id"] for row in listing["publications"]],
                          [record["publication_id"]])
-        identity = {"op": "external", "branch": BRANCH, "code_digest": DIGEST,
-                    "published_sha": SHA}
-        publication_id = digest(canonical(identity))
+        publication_id = record["publication_id"]
         blocking = self.root / "evidence" / "publications" / (publication_id + ".external.json")
         blocking.write_bytes(b'{"x": "' + b"y" * 20000 + b'"}')
         with self.assertRaises(Denied):
@@ -211,7 +213,8 @@ class ExternalPublicationTests(Fixture):
         store = project.work_items
         record = Publication.record_external(
             project.root, branch=BRANCH, published_sha=SHA, code_digest=DIGEST,
-            approval=APPROVAL, source_commit="e" * 40, run="operator-run")
+            approval=APPROVAL, source_commit="e" * 40, run="operator-run",
+            projection=public_source_identity({}))
         wait = {"kind": "ci", "publication_id": record["publication_id"], "checks": ["unit"]}
         seed = store.create(actor="worker", idempotency_key="external-wait",
                             title="Observe CI")["record"]["work_item"]
@@ -252,9 +255,15 @@ class ExternalPublicationTests(Fixture):
         args = parser().parse_args([
             "--config", str(self.file), "publication", "record", "sample",
             "--branch", BRANCH, "--published-sha", SHA, "--code-digest", DIGEST,
-            "--approval", APPROVAL, "--source-commit", "e" * 40, "--run", "operator-run"])
+            "--approval", APPROVAL, "--source-commit", "e" * 40, "--run", "operator-run",
+            "--projection-schema", "1", "--projection-algorithm", public_source_identity({})["algorithm"],
+            "--projection-digest", public_source_identity({})["digest"]])
         record = execute(args)
         self.assertEqual(record["op"], "external")
+        self.assertEqual(record["schema"], 3)
+        self.assertEqual(record["projection_digest"], public_source_identity({})["digest"])
+        self.assertEqual(record["projection_algorithm"], public_source_identity({})["algorithm"])
+        self.assertEqual(record["projection_schema"], 1)
         self.assertEqual(record["published_sha"], SHA)
         self.assertEqual(record["source_commit"], "e" * 40)
         listed = execute(parser().parse_args(
@@ -274,3 +283,23 @@ class ExternalPublicationTests(Fixture):
         self.assertEqual(execute(parser().parse_args(
             ["--config", str(self.file), "publication", "list", "sample",
              "--branch", "absent"]))["publications"], [])
+
+    def test_cli_refuses_missing_or_invalid_projection_identity(self):
+        base = ["--config", str(self.file), "publication", "record", "sample",
+                "--branch", BRANCH, "--published-sha", SHA, "--code-digest", DIGEST,
+                "--approval", APPROVAL]
+        flags = {"--projection-schema": "1", "--projection-algorithm": public_source_identity({})["algorithm"],
+                 "--projection-digest": public_source_identity({})["digest"]}
+        for missing in flags:
+            argv = base + [part for key, value in flags.items() if key != missing for part in (key, value)]
+            with self.subTest(missing=missing), patch("sys.stderr", new=io.StringIO()):
+                with self.assertRaises(SystemExit) as exc:
+                    parser().parse_args(argv)
+                self.assertEqual(exc.exception.code, 2)
+        for key, invalid in (("--projection-schema", "2"), ("--projection-algorithm", "x" * 129),
+                             ("--projection-digest", "not-a-digest")):
+            values = {**flags, key: invalid}
+            argv = base + [part for pair in values.items() for part in pair]
+            with self.subTest(key=key), self.assertRaises(Denied):
+                execute(parser().parse_args(argv))
+        self.assertFalse((self.root / "evidence/publications").exists())

@@ -926,24 +926,44 @@ uncommitted content still needs the exact digest approval, and the adapter
 must verify the tree it actually publishes.
 
 The adapter request is
-`{"op", "branch", "digest", "source_commit", "publication_id"}`. The source
-commit is 40 or 64 lowercase hex; `digest` and `publication_id` are 64 lowercase
-hex. `publication_id` is the SHA-256 of Mizu's canonical JSON bytes (sorted keys,
+`{"op", "branch", "digest", "source_commit", "publication_id", "projection_schema", "projection_algorithm", "projection_digest"}`.
+The source commit is 40 or 64 lowercase hex; `digest`, `publication_id` and
+`projection_digest` are 64 lowercase hex. `digest` acknowledges the approved
+whole-capture `code_digest`, **not** the filtered Git tree's digest. The
+separate projection identity is schema 1, algorithm `mizu-public-source-v1`
+(at most 128 characters), and the SHA-256 of the canonical public-source
+manifest. That manifest maps each curated distribution path to its `sha256`
+and `executable` fields (no capture `bytes` field), using the inventory,
+private-name exclusions and suffix rules in `mizu.distribution.source_files`.
+
+`publication_id` is the SHA-256 of Mizu's canonical JSON bytes (sorted keys,
 compact UTF-8, trailing LF) for
-`{"source_commit", "code_digest", "branch", "op"}`. It excludes run and approval
-identity, so retries of the same request reuse the same ID. The adapter must
-verify the pushed tree matches `digest` before any external mutation, echo
-both `digest` and `publication_id`, and return `published_sha`: the exact
-published commit, 40 or 64 lowercase hex. Missing, mismatched, abbreviated or
-malformed values are refused. A later branch head or CI result never supplies
-a missing publication SHA.
+`{"source_commit", "code_digest", "branch", "op", "projection_schema", "projection_algorithm", "projection_digest"}`.
+It binds both identities and excludes run and approval identity, so retries
+of the same request reuse the same ID. Before external mutation, the
+operator-owned adapter must establish the whole-capture target against the
+approved capture/export material, not hash the filtered Git tree and call
+that `code_digest`. Independently, it must derive the curated source manifest
+from the Git tree it will publish and compare it to `projection_digest`.
+Unavailable capture material or either mismatch must refuse publication.
+The adapter echoes `digest`, all three projection fields and `publication_id`,
+and returns `published_sha`: the exact published commit, 40 or 64 lowercase
+hex. Mizu checks these acknowledgements, not an independent proof that the
+adapter validated the capture. An integration unable to validate the capture
+must not claim it did; an echo alone establishes no exact-tree match.
+Missing, mismatched, abbreviated or malformed values are refused. A later
+branch head or CI result never supplies a missing publication SHA.
 
 Durable project evidence lives outside the workspace at
 `evidence/publications/<publication_id>.{intent,dispatch,receipt}.json`.
 Records are create-only under a per-ID lock and bounded no-follow reads
-(8 KiB each). The schema-1 intent binds `publication_id`, `source_commit`,
-`code_digest`, `branch`, `op`, `approval` (human approval insight ID), and `run`
-(the originating run ID). Intent persistence must succeed before dispatch.
+(8 KiB each). Every new intent uses schema 3 and binds `publication_id`,
+`source_commit`, `code_digest`, `branch`, `op`, all three projection fields,
+`approval` (human approval insight ID), and `run` (the originating run ID).
+New external receipts also require the projection and use schema 3. Historical
+schema-1 intents/receipts and schema-2 external receipts remain readable as
+immutable legacy history; no new projection-less writes or reinterpretation
+of old digests are permitted. Intent persistence must succeed before dispatch.
 Immediately before starting the adapter, Mizu persists the usual run-local
 unknown-outcome mutation evidence and a create-only dispatch marker containing
 `publication_id`. A validated adapter response permits a create-only receipt:

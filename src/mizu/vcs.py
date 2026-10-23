@@ -1308,15 +1308,18 @@ def publish_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
     and ``source_commit`` (full 40/64 lowercase hex). The request carries the
     approved whole-capture digest as ``digest`` plus the explicit projection
     identity; neither side calls the projection an exact whole-snapshot
-    match. The adapter verifies both: it confirms the whole-capture digest
-    from the approved tree and it recomputes the same public-source manifest
-    from the Git publication tree (same curated inventory and private-name
-    policy as ``mizu.distribution``, same algorithm) and compares that
-    manifest's digest to ``projection_digest``, rejecting mismatch. In
-    particular the adapter must not filter Git ignored state and claim an
-    exact pushed-tree match without the projection identity. It echoes
-    ``digest``, the projection identity, and ``publication_id`` plus the
-    exact ``published_sha`` (40/64 lowercase hex).
+    match. Before any external mutation the adapter must establish the
+    whole-capture identity against approved capture/export material, not by
+    hashing the filtered Git tree as if it were the capture. Independently it
+    recomputes the public-source manifest from the Git publication tree (same
+    curated inventory, private-name policy and algorithm as
+    ``mizu.distribution``) and compares its digest to ``projection_digest``.
+    Missing capture material or a mismatch must refuse publication, not mint
+    an exact-match claim. It echoes ``digest``, the projection identity, and
+    ``publication_id`` plus the exact ``published_sha`` (40/64 lowercase hex).
+    These echo checks acknowledge the requested identities; they are not
+    independent proof of the adapter's verification. The product cannot
+    attest to whole-capture validation by an integration that cannot do it.
     Bounds: same as ``invoke``. Trust: operator-owned adapter only; caller
     must pass ``require_go_approval`` and durably record publication intent
     first. Failure: ``Denied`` for invalid pins, operations or response;
@@ -1355,8 +1358,9 @@ def publish_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
     if not isinstance(data, dict):
         raise Denied("VCS adapter must return a JSON object")
     if data.get("digest") != code_digest:
-        raise Denied("VCS adapter must confirm the pushed code digest")
-    if (data.get("projection_schema") != projection_schema
+        raise Denied("VCS adapter must acknowledge the whole-capture digest")
+    if (type(data.get("projection_schema")) is not int
+            or data.get("projection_schema") != projection_schema
             or data.get("projection_algorithm") != projection_algorithm
             or data.get("projection_digest") != projection_digest):
         raise Denied("VCS adapter must confirm the pushed projection identity")

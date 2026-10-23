@@ -10,6 +10,7 @@ from mizu.fs import PREVIEW_BYTES, canonical, read_json, write_json
 from mizu.project import Project
 from mizu.protocol import DEFINITIONS, validate
 from mizu.publication import Publication
+from mizu.distribution import public_source_identity
 from mizu.runtime import Engine, _role_events_due, poll_project_vcs, refresh_poll_state, should_run
 
 SHA = "b" * 40
@@ -22,7 +23,8 @@ class CiWaitTests(Fixture):
             "poll_enabled": True, "command": ["configured-adapter"], "poll_max_branches": 2})
         self.project = Project(self.config, "sample")
         self.store = self.project.work_items
-        self.publication = Publication(self.project.root, "a" * 40, "c" * 64, "published", "push")
+        self.publication = Publication(self.project.root, "a" * 40, "c" * 64, "published", "push",
+                                       projection=public_source_identity({}))
         intent, _ = self.publication.prepare("approval", "run")
         self.publication.mark_dispatch()
         self.receipt = self.publication.complete(intent, SHA)
@@ -76,7 +78,8 @@ class CiWaitTests(Fixture):
 
         # Preserve the point-of-no-return marker even when publication has no
         # receipt: restoring without it would authorize a fresh dispatch.
-        uncertain = Publication(self.project.root, "d" * 40, "e" * 64, "published", "push")
+        uncertain = Publication(self.project.root, "d" * 40, "e" * 64, "published", "push",
+                                projection=public_source_identity({}))
         uncertain.prepare("uncertain-approval", "uncertain-run")
         uncertain.mark_dispatch()
 
@@ -93,7 +96,8 @@ class CiWaitTests(Fixture):
         self.assertTrue(ci_waits._acknowledged(restored.work_items, restored_item, events[0]))
         self.assertEqual(ci_waits.pending(restored.work_items, "worker"), [])
 
-        restored_uncertain = Publication(restored.root, "d" * 40, "e" * 64, "published", "push")
+        restored_uncertain = Publication(restored.root, "d" * 40, "e" * 64, "published", "push",
+                                         projection=public_source_identity({}))
         with self.assertRaisesRegex(Denied, "outcome unresolved; already dispatched"):
             restored_uncertain.prepare("uncertain-approval", "retry-run")
 

@@ -106,11 +106,8 @@ def is_public_source_path(relative: str) -> bool:
     name = parts[-1]
     if name in EXCLUDED or is_private_name(name):
         return False
-    if name.endswith(".pyc") or name.endswith(".pyo"):
-        # Mirrors the ``add`` suffix guard in source_files without treating
-        # every dotted name as compiled output.
-        if relative.endswith(".pyc") or relative.endswith(".pyo"):
-            return False
+    if Path(name).suffix in (".pyc", ".pyo"):
+        return False
     if len(parts) == 1:
         return relative in METADATA
     top = parts[0]

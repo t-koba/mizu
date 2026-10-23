@@ -566,20 +566,23 @@ triggering it until the operator grants them.
 
 ### Externally recorded publication receipts
 
-The product's own publish path records a schema-1 receipt in
+The product's own publish path records a schema-3 receipt in
 `evidence/publications/` as `<publication_id>.intent.json`,
 `<publication_id>.dispatch.json` and `<publication_id>.receipt.json`. An
 operator-run publisher that pushes approved commits to the development branch
 outside the product leaves no such record, so its publications had no durable
 source-to-published identity.
 
-A publication by such a publisher may be recorded afterwards as a schema-2
+A publication by such a publisher may be recorded afterwards as a schema-3
 external receipt: one create-only file
 `evidence/publications/<publication_id>.external.json` holding exactly the
-operation `external`, the branch, the published SHA, the code digest, the
+operation `external`, the branch, the published SHA, the whole-capture code
+digest, the versioned public-source projection (schema/algorithm/digest), the
 approval reference, the optional source commit and run reference, and the
 recording time. Its identity is the digest of the operation, branch, code
-digest and published SHA, so one publication keeps one ID across recordings.
+digest, published SHA and projection identity, so one publication keeps one ID
+across recordings. Projection-less writes are refused; schema-1/2 records
+remain readable as immutable legacy history (ADR-049).
 The write is create-only and idempotent: an identical request replays the
 stored receipt unchanged, a request that disagrees about the approval,
 source commit or run reference is refused by naming the conflicting

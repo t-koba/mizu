@@ -114,9 +114,16 @@ operator-run accept decision; model submits and decides are refused as
 forged. Configs combining publish with insight submit/decide fail to load.
 
 ## ADR-019 — Digest-bound publication adapter
-`vcs_publish` sends the approved `code_digest` and the adapter verifies the
-pushed tree before pushing, echoing the digest back. Missing or mismatched
-echoes are refused, binding the approval to the exact pushed bits.
+As refined by ADR-049, `vcs_publish` sends the approved whole-capture
+`code_digest` as `digest` and a separately versioned public-source projection.
+Before mutation the adapter must establish the capture identity from approved
+capture/export material, then independently compare the Git tree's curated
+source manifest to the projection digest. The filtered tree is never hashed
+as if it were the whole capture. The schema-3 publication ID binds both
+identities. Missing or mismatched echoes are refused; echoes are identity
+acknowledgements, not independent proof of adapter verification. An adapter
+unable to validate the whole-capture target must refuse, not claim it did.
+Schema-1/2 records remain read-only legacy history.
 
 ## ADR-020 — Reserved role names keep the operator channel unforgeable
 Config load refuses the role names `operator`, `vcs`, and `editor`, so a
@@ -711,10 +718,15 @@ deterministic public-source projection derived from captured file metadata
 with the same curated inventory and private-name policy as the distribution
 packager (`mizu-public-source-v1`, schema 1). The Editor export writes that
 identity to `public_source.json` and serves it on `get_status`; the VCS
-publish request carries it explicitly; the adapter confirms both the snapshot
-digest and the projection identity. The adapter recomputes the same manifest
-from the Git publication tree and compares its digest to the projection,
-rejecting mismatch; it must not filter Git ignored state and claim an exact
-match without the projection identity. Schema-1/2 records stay readable and
-are never rewritten; the projection digest is never stored or compared as a
-`code_digest`, and derivation never inspects ignored private state.
+publish request carries it explicitly and the publication ID binds both
+identities. Before mutation the adapter establishes the whole-capture target
+against approved capture/export material (never by hashing the filtered Git
+tree as the capture), then independently recomputes the same manifest from
+the Git publication tree and compares its digest to the projection, refusing
+unavailable capture material or a mismatch. Its echoes acknowledge identities;
+Mizu does not independently prove the adapter's verification, and an integration
+unable to validate the capture must not claim it did. Every new intent or
+external receipt requires the projection. Schema-1/2 records stay readable as
+read-only legacy history and are never rewritten; the projection digest is
+never stored or compared as a `code_digest`, and derivation never inspects
+ignored private state.

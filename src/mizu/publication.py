@@ -6,10 +6,10 @@ create-only and read with a fixed 8 KiB no-follow bound. A dispatch marker is a
 conservative point of no return: without a valid receipt it requires manual
 reconciliation, even if the process died before actually starting the adapter.
 
-Two receipt shapes share this store. The schema-1 receipt is the product's own
-publish path: intent, dispatch marker and receipt for one publication ID. The
-schema-2 external receipt is recorded after the fact by an operator-run
-publisher that pushed outside the product. It is create-only, idempotent for an
+Two receipt shapes share this store. The product's own publish path retains
+intent, dispatch marker and receipt for one publication ID. The external
+receipt is recorded after the fact by an operator-run publisher that pushed
+outside the product. It is create-only, idempotent for an
 identical request, and carries the same caller-visible fields, so an exact-SHA
 CI wait can be pinned to either shape.
 
@@ -21,7 +21,7 @@ projection (``projection_schema``/``projection_algorithm``/
 verify against the Git publication tree. A filtered projection digest is never
 stored or compared as a ``code_digest``, and no exact whole-snapshot match is
 claimed for a filtered tree. Schema-1/2 records stay readable and are never
-rewritten.
+rewritten; new writes require schema 3.
 """
 from __future__ import annotations
 
@@ -125,8 +125,9 @@ def _timestamp(value) -> bool:
 def _external_record(record, publication_id: str) -> dict:
     """Validate one external receipt record against its stable publication ID.
 
-    Schema: exactly the recorded fields, schema 2, operation ``external``, and
-    a publication ID equal to the file name and to the digest of its identity.
+    Schema: exactly the recorded fields, schema 2 (legacy) or 3, operation
+    ``external``, and a publication ID equal to the file name and to the
+    digest of its identity.
     Bounds: 8 KiB record (read bound), 40/64-hex commit SHAs, a 64-hex code
     digest, and references of at most 256 characters. Trust: the operator
     asserts the recorded content; it is never inferred from a branch head.
@@ -215,10 +216,10 @@ class Publication:
                  branch: str, op: str, projection: dict | None = None):
         """Bind one publication to a whole capture plus its public projection.
 
-        Schema: ``projection`` is None for a legacy schema-1 intent (old
-        records stay readable and are never rewritten) or a
-        ``{"schema", "algorithm", "digest"}`` projection identity from
-        ``mizu.distribution.public_source_identity`` for a schema-3 intent.
+        Schema: ``projection`` must be a ``{"schema", "algorithm", "digest"}``
+        identity from ``mizu.distribution.public_source_identity`` for a
+        schema-3 intent. Missing projections are refused before any write;
+        schema-1/2 records are read-only legacy history.
         The publication ID digests the whole identity, so the receipt ID
         binds the projection; the projection digest is never a code digest.
         Failure: ``Denied``.
@@ -233,21 +234,20 @@ class Publication:
             raise Denied("Invalid code digest for publication")
         self.identity = {"source_commit": source, "code_digest": code_digest,
                          "branch": branch, "op": op}
-        if projection is not None:
-            if not isinstance(projection, dict) or set(projection) != {"schema", "algorithm", "digest"}:
-                raise Denied("Invalid projection identity for publication")
-            _check_projection(projection["schema"], projection["algorithm"], projection["digest"])
-            self.identity = {**self.identity,
-                             "projection_schema": projection["schema"],
-                             "projection_algorithm": projection["algorithm"],
-                             "projection_digest": projection["digest"]}
+        if not isinstance(projection, dict) or set(projection) != {"schema", "algorithm", "digest"}:
+            raise Denied("Invalid projection identity for publication")
+        _check_projection(projection["schema"], projection["algorithm"], projection["digest"])
+        self.identity = {**self.identity,
+                         "projection_schema": projection["schema"],
+                         "projection_algorithm": projection["algorithm"],
+                         "projection_digest": projection["digest"]}
         self.id = digest(canonical(self.identity))
         self.root = project_root / "evidence" / "publications"
 
     @property
     def schema(self) -> int:
-        """Record schema of intents this publication writes (1 or 3)."""
-        return PROJECTION_SCHEMA if any(key in self.identity for key in PROJECTION_KEYS) else 1
+        """Record schema of all new publication intents."""
+        return PROJECTION_SCHEMA
 
     def _check_directories(self) -> None:
         # Match the portable safe-FS screening, including Windows reparse
@@ -409,14 +409,14 @@ class Publication:
         published. Schema: branch (ref name), published SHA (40 or 64 hex),
         code digest (64 hex, always the whole capture), an approval reference,
         an optional source commit and an optional run reference; the record
-        carries schema 2, the operation ``external``, the publication ID and
-        the recording time. With ``projection`` (a ``{"schema", "algorithm",
-        "digest"}`` public-source identity) the record carries schema 3 and
-        the publication ID additionally binds the projection, so a filtered
-        tree is never recorded as an exact whole-snapshot match; without it
-        the legacy schema-2 shape is written and stays readable.
+        carries schema 3, the operation ``external``, the publication ID and
+        the recording time. ``projection`` must be a ``{"schema", "algorithm",
+        "digest"}`` public-source identity. The publication ID binds that
+        projection, so a filtered tree is never recorded as an exact
+        whole-snapshot match. Missing projections are refused before any
+        write; schema-2 receipts remain read-only legacy history.
         Identity: the publication ID is the digest of the operation, branch,
-        code digest, published SHA (and projection when present), so the same
+        code digest, published SHA and projection, so the same
         publication keeps one ID. Bounds: 8 KiB record, 256 characters per
         reference. Trust: the operator asserts this content; the product never
         infers a published SHA from a branch head. Retry: none; the write is
@@ -438,28 +438,21 @@ class Publication:
             run = _reference(run, "run")
         identity = {"op": EXTERNAL_OP, "branch": branch, "code_digest": code_digest,
                     "published_sha": published_sha}
-        schema = EXTERNAL_SCHEMA
+        if not isinstance(projection, dict) or set(projection) != {"schema", "algorithm", "digest"}:
+            raise Denied("Invalid projection identity for external publication")
+        _check_projection(projection["schema"], projection["algorithm"], projection["digest"])
+        extra = {"projection_schema": projection["schema"],
+                 "projection_algorithm": projection["algorithm"],
+                 "projection_digest": projection["digest"]}
+        identity = {**identity, **extra}
         compared = ("branch", "published_sha", "code_digest", "approval",
-                    "source_commit", "run")
-        extra: dict = {}
-        if projection is not None:
-            if not isinstance(projection, dict) or set(projection) != {"schema", "algorithm", "digest"}:
-                raise Denied("Invalid projection identity for external publication")
-            _check_projection(projection["schema"], projection["algorithm"], projection["digest"])
-            identity = {**identity, "projection_schema": projection["schema"],
-                        "projection_algorithm": projection["algorithm"],
-                        "projection_digest": projection["digest"]}
-            schema = PROJECTION_SCHEMA
-            compared = compared + ("projection_schema", "projection_algorithm", "projection_digest")
-            extra = {"projection_schema": projection["schema"],
-                     "projection_algorithm": projection["algorithm"],
-                     "projection_digest": projection["digest"]}
+                    "source_commit", "run", *PROJECTION_KEYS)
         publication_id = digest(canonical(identity))
         store = cls.__new__(cls)
         store.id = publication_id
         store.root = Path(project_root) / "evidence" / "publications"
         store.identity = identity
-        record = {"schema": schema, "publication_id": publication_id,
+        record = {"schema": PROJECTION_SCHEMA, "publication_id": publication_id,
                   "op": EXTERNAL_OP, "branch": branch, "published_sha": published_sha,
                   "code_digest": code_digest, "approval": approval,
                   "source_commit": source_commit, "run": run, "recorded_at": now(),

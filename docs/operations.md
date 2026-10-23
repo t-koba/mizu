@@ -469,8 +469,18 @@ mizu publication record demo \
   --branch mizu \
   --published-sha 0123456789abcdef0123456789abcdef01234567 \
   --code-digest 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  --projection-schema 1 \
+  --projection-algorithm mizu-public-source-v1 \
+  --projection-digest fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 \
   --approval 'GO mizu (insight id)'
 ```
+
+`--code-digest` names the approved whole capture, not the filtered Git tree.
+All three `--projection-*` flags are required: obtain them from the approved
+export's `public_source.json` and independently compare the Git tree's curated
+source manifest to that projection before recording. These example digests
+are placeholders. A schema-3 receipt binds both identities; historical
+schema-1/2 receipts remain read-only and are never rewritten.
 
 `--source-commit` and `--run` are optional references to the published tree and
 the publisher run. The record is create-only and idempotent: repeating the same

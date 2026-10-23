@@ -109,7 +109,10 @@ def parser() -> argparse.ArgumentParser:
     record.add_argument("project", help="Managed project name")
     record.add_argument("--branch", required=True, help="Published branch name")
     record.add_argument("--published-sha", required=True, help="Published commit SHA (40 or 64 hex)")
-    record.add_argument("--code-digest", required=True, help="Approved code digest of the published tree (64 hex)")
+    record.add_argument("--code-digest", required=True, help="Approved whole-capture code digest, not the filtered Git tree digest (64 hex)")
+    record.add_argument("--projection-schema", required=True, type=int, help="Public-source projection schema (1)")
+    record.add_argument("--projection-algorithm", required=True, help="Public-source projection algorithm (mizu-public-source-v1)")
+    record.add_argument("--projection-digest", required=True, help="Curated public-source manifest digest (64 hex)")
     record.add_argument("--approval", required=True, help="Operator approval reference")
     record.add_argument("--source-commit", default=None, help="Source commit of the published tree (40 or 64 hex)")
     record.add_argument("--run", default=None, help="Optional publisher run reference")
@@ -402,7 +405,8 @@ def _cmd_storage(config, project, args):
 def _cmd_publication_record(config, project, args):
     """Record one operator-run publication as a durable receipt.
 
-    Schema: the recorded receipt, as stored. The write is create-only: an
+    Schema: the schema-3 receipt, with required whole-capture and versioned
+    public-source projection identities. The write is create-only: an
     identical request replays the stored record, a conflicting one is
     refused. Trust: the operator asserts the published SHA and approval
     reference; the product never infers them from a branch head. Failure:
@@ -412,7 +416,9 @@ def _cmd_publication_record(config, project, args):
     return Publication.record_external(
         project.root, branch=args.branch, published_sha=args.published_sha,
         code_digest=args.code_digest, approval=args.approval,
-        source_commit=args.source_commit, run=args.run)
+        source_commit=args.source_commit, run=args.run,
+        projection={"schema": args.projection_schema, "algorithm": args.projection_algorithm,
+                    "digest": args.projection_digest})
 
 
 def _cmd_publication_list(config, project, args):

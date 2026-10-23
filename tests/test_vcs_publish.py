@@ -14,6 +14,7 @@ from mizu.errors import ConfigError, Denied
 from mizu.fs import canonical, digest, lock, mkdir, write_json
 from mizu.project import git_env
 from mizu.publication import Publication
+from mizu.distribution import public_source_identity
 from mizu.process import Result
 from mizu.runtime import Context, check_consult_role
 
@@ -275,7 +276,7 @@ class VcsDigestBindingTests(PublishFixture):
         approve(self, "main", digest)
         config = _dc.replace(config, vcs=adapter_settings(PUSH_WRONG_DIGEST))
         ctx = make_context(self, config, role)
-        with self.assertRaisesRegex(Denied, "confirm the pushed code digest"):
+        with self.assertRaisesRegex(Denied, "acknowledge the whole-capture digest"):
             ctx.handle("vcs_publish", {"op": "push", "branch": "main"})
 
     def test_missing_digest_echo_refused(self):
@@ -285,7 +286,7 @@ class VcsDigestBindingTests(PublishFixture):
         approve(self, "main", digest)
         config = _dc.replace(config, vcs=adapter_settings(PUSH_NO_DIGEST))
         ctx = make_context(self, config, role)
-        with self.assertRaisesRegex(Denied, "confirm the pushed code digest"):
+        with self.assertRaisesRegex(Denied, "acknowledge the whole-capture digest"):
             ctx.handle("vcs_publish", {"op": "push", "branch": "main"})
 
     def test_mismatched_projection_echo_refused(self):
@@ -500,7 +501,8 @@ class PublicationReceiptTests(PublishFixture):
                     base = self.root / f"unsafe-{component}-{kind}"
                     base.mkdir()
                     project = base / "project"
-                    store = Publication(project, self.source_commit, "0" * 64, "main", "push")
+                    store = Publication(project, self.source_commit, "0" * 64, "main", "push",
+                                        projection=public_source_identity({}))
                     paths = {"project": project, "evidence": project / "evidence",
                              "publications": store.root}
                     target = paths[component]

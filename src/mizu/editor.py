@@ -117,9 +117,9 @@ class Capsule:
                     or not isinstance(candidate.get("projection_digest"), str)):
                 raise Denied("Bundle public-source integrity failure")
             expected = export_public_source(self.snapshot)
-            if any(candidate.get(key) != expected[key] for key in
-                   ("projection_schema", "projection_algorithm", "projection_digest",
-                    "captured_files", "public_files")):
+            if (set(candidate) != set(expected)
+                    or any(type(candidate[key]) is not type(value) or candidate[key] != value
+                           for key, value in expected.items())):
                 raise Denied("Bundle public-source integrity failure")
             self.public_source = candidate
         mkdir(self.outbox)

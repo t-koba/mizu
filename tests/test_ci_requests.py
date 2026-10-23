@@ -15,6 +15,7 @@ from mizu.fs import mkdir, read_json
 from mizu.protocol import tool_definitions
 from mizu.project import Project
 from mizu.publication import Publication
+from mizu.distribution import public_source_identity
 from mizu.runtime import Context, Engine
 
 SHA = "a" * 40
@@ -38,7 +39,8 @@ def runs(head_sha=SHA, workflow="ci", run_id="run-1"):
 class CiRequestTests(Fixture):
     def setUp(self):
         super().setUp()
-        self.publication = Publication(self.project.root, "e" * 40, "c" * 64, "published", "push")
+        self.publication = Publication(self.project.root, "e" * 40, "c" * 64, "published", "push",
+                                       projection=public_source_identity({}))
         intent, _ = self.publication.prepare("approval", "run")
         self.publication.mark_dispatch()
         self.receipt = self.publication.complete(intent, SHA)
