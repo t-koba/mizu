@@ -76,20 +76,31 @@ class PolicyTests(Fixture):
 
     def test_charter_change_applies_to_new_turn_in_same_store(self):
         from unittest.mock import patch
+        from mizu.fs import digest
+        # Exercise Windows-style policy bytes on every host, independently of
+        # checkout newline conversion and the host's default text encoding.
+        for policy in self.config.roles["worker"].policy:
+            policy.write_bytes("Worker policy: 正確さ\r\nPreserve bytes.\r\n".encode("utf-8"))
         profile = self._durable_profile()
         self.config.profiles[profile]["session"] = "persistent"
         driver = pi_durable.PiDurableDriver(self.config)
         first = self.context()
+        # Pin exact mixed-newline Unicode charters directly: PROJECT.md reads
+        # normalize newlines, so disk text cannot exercise this boundary.
+        first.goal = "Operator charter: 正確さ\r\nKeep LF too.\n\r\n"
+        first.goal_digest = digest(first.goal.encode("utf-8"))
         dispatches = []
         with patch("mizu.pi_durable.run", self._normal_launcher(first, dispatches, seal_on=1)):
             driver.execute(first, "first unit", profile=profile)
-        (self.project.root / "PROJECT.md").write_text("Changed operator charter\n")
         second = self.context()
+        second.goal = "Changed operator charter: 持続性\nKeep CRLF too.\r\n\n"
+        second.goal_digest = digest(second.goal.encode("utf-8"))
         with patch("mizu.pi_durable.run", self._normal_launcher(second, dispatches, seal_on=2)):
             driver.execute(second, "next unit", profile=profile)
         self.assertEqual(len(dispatches), 2)
         self.assertEqual(dispatches[0]["store"], dispatches[1]["store"])
         self.assertNotEqual(dispatches[0]["instructions"], dispatches[1]["instructions"])
+        self.assertTrue(dispatches[0]["instructions"].endswith(first.goal))
         self.assertTrue(dispatches[1]["instructions"].endswith(second.goal))
 
     def test_removed_turn_bound_is_refused(self):
@@ -194,7 +205,8 @@ class PolicyTests(Fixture):
             dispatches.append(cfg)
             from mizu.config import system_context_text
             self.assertEqual(cfg["instructions"], system_context_text(context.role, context.goal))
-            self.assertEqual((context.run_dir / "system.md").read_text(), cfg["instructions"])
+            self.assertEqual((context.run_dir / "system.md").read_bytes(),
+                             cfg["instructions"].encode("utf-8"))
             conn = open_store(Path(cfg["store"]))
             try:
                 rows = conn.execute("SELECT run_key FROM durable_runs WHERE run_key LIKE ?",
