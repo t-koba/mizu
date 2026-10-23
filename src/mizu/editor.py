@@ -35,6 +35,34 @@ TOOLS = {
 }
 
 
+def export_public_source(snapshot: dict) -> dict:
+    """Derive the versioned public-source identity of an exported snapshot.
+
+    Schema: ``{"snapshot", "code_digest", "projection_schema",
+    "projection_algorithm", "projection_digest", "captured_files",
+    "public_files"}``. The whole-capture ``code_digest`` keeps its exact
+    meaning; the projection digest binds only the filtered public manifest
+    and must never be compared as a ``code_digest``. Bounds: no filesystem
+    access beyond the snapshot record. Failure: ``Denied`` on malformed
+    snapshot file metadata (never inspects ignored private state).
+    """
+    from .distribution import public_source_identity, public_projection
+    if not isinstance(snapshot, dict) or not isinstance(snapshot.get("files"), dict):
+        raise Denied("Export requires snapshot file metadata")
+    if not isinstance(snapshot.get("code_digest"), str):
+        raise Denied("Export requires a snapshot code digest")
+    try:
+        identity = public_source_identity(snapshot["files"])
+        public_files = len(public_projection(snapshot["files"]))
+    except ValueError as exc:
+        raise Denied(f"Export requires projectable snapshot files: {exc}") from exc
+    return {"snapshot": snapshot.get("id"), "code_digest": snapshot["code_digest"],
+            "projection_schema": identity["schema"],
+            "projection_algorithm": identity["algorithm"],
+            "projection_digest": identity["digest"],
+            "captured_files": len(snapshot["files"]), "public_files": public_files}
+
+
 def export(project: Project, destination: Path) -> dict:
     destination = destination.resolve()
     if destination.exists():
@@ -45,13 +73,20 @@ def export(project: Project, destination: Path) -> dict:
         snapshot = project.snapshots.get()
         project.snapshots.materialize(snapshot, stage / "code")
         write_json(stage / "snapshot.json", snapshot)
+        public_source = export_public_source(snapshot)
+        write_json(stage / "public_source.json", public_source)
         write_json(stage / "changes.json", project.snapshots.changes(snapshot["id"]))
         write_json(stage / "history.json", [{k: item[k] for k in ("id", "created_at", "summary", "outcome", "code_digest")}
                                            for item in project.snapshots.history(snapshot["id"])])
         atomic_write(stage / "PROJECT.md", snapshot["goal"].encode())
         atomic_write(stage / "STATE.md", snapshot["state"].encode())
         os.rename(stage, destination)
-        return {"bundle": str(destination), "snapshot": snapshot["id"], "created_at": snapshot["created_at"]}
+        return {"bundle": str(destination), "snapshot": snapshot["id"], "created_at": snapshot["created_at"],
+                "code_digest": snapshot["code_digest"],
+                "projection_schema": public_source["projection_schema"],
+                "projection_algorithm": public_source["projection_algorithm"],
+                "projection_digest": public_source["projection_digest"],
+                "public_files": public_source["public_files"]}
     finally:
         if stage.exists():
             shutil.rmtree(stage)
@@ -66,6 +101,27 @@ class Capsule:
         body = {k: v for k, v in self.snapshot.items() if k != "id"}
         if digest(canonical(body)) != self.snapshot.get("id"):
             raise Denied("Bundle manifest integrity failure")
+        try:
+            raw = safe_read(self.bundle, "public_source.json", BUNDLE_MANIFEST_BYTES)
+        except (Denied, OSError):
+            raw = None
+        self.public_source = None
+        if raw is not None:
+            try:
+                candidate = json.loads(raw)
+            except ValueError as exc:
+                raise Denied("Bundle public-source integrity failure") from exc
+            if (not isinstance(candidate, dict)
+                    or candidate.get("snapshot") != self.snapshot.get("id")
+                    or candidate.get("code_digest") != self.snapshot.get("code_digest")
+                    or not isinstance(candidate.get("projection_digest"), str)):
+                raise Denied("Bundle public-source integrity failure")
+            expected = export_public_source(self.snapshot)
+            if any(candidate.get(key) != expected[key] for key in
+                   ("projection_schema", "projection_algorithm", "projection_digest",
+                    "captured_files", "public_files")):
+                raise Denied("Bundle public-source integrity failure")
+            self.public_source = candidate
         mkdir(self.outbox)
 
     def read(self, name: str) -> str:
@@ -86,7 +142,11 @@ class Capsule:
             return {"changes": json.loads(safe_read(self.bundle, "changes.json", BUNDLE_CHANGES_BYTES)),
                     "history": json.loads(safe_read(self.bundle, "history.json", BUNDLE_CHANGES_BYTES))}
         if name == "get_status":
-            return {k: self.snapshot[k] for k in ("id", "created_at", "code_digest", "goal", "state", "outcome", "summary", "verification")}
+            status = {k: self.snapshot[k] for k in ("id", "created_at", "code_digest", "goal", "state", "outcome", "summary", "verification")}
+            # Legacy bundles predate the projection file and report None;
+            # current bundles carry the explicit projection identity.
+            status["public_source"] = self.public_source
+            return status
         if name == "list_files":
             result = page(sorted(self.snapshot["files"]), arguments.get("offset", 0), arguments.get("limit", 1000))
             result["files"] = result.pop("items")

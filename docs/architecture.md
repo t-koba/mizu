@@ -598,6 +598,18 @@ oversized or invalid record is skipped, never returned unvalidated, and it
 never denies the valid records beside it. The same validation path lets an
 exact-SHA CI wait pin a `publication_id` to either receipt shape.
 
+Source-identity boundary (ADR-049): `code_digest` always names the whole
+immutable capture, never a filtered tree. New schema-3 records of both shapes
+additionally bind the versioned public-source projection
+(`projection_schema`/`projection_algorithm`/`projection_digest`,
+`mizu-public-source-v1`) derived from captured file metadata with the same
+curated inventory and private-name policy as the distribution packager; the
+Editor export writes it to `public_source.json` and the publish request
+carries it explicitly, with the receipt ID binding it. The host adapter
+recomputes that manifest from the Git publication tree and rejects mismatch,
+and never filters Git ignored state while claiming an exact whole-snapshot
+match. Schema-1/2 records stay readable and are never rewritten.
+
 Under one `insights.lock` section, the reader scans committed
 `decision-history/*.json`, validates and reconstructs every seeded item
 (including closed states), and returns only

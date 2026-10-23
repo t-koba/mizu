@@ -1302,10 +1302,21 @@ def publish_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
     """Invoke a mutating adapter operation (``push``/``pr``) after approval.
 
     Schema: ``params`` includes ``branch``, ``code_digest`` (64 lowercase
-    hex), ``publication_id`` (64 lowercase hex), and ``source_commit`` (full
-    40/64 lowercase hex). Request carries the approved digest as ``digest``;
-    adapter verifies the exact pushed tree and echoes both ``digest`` and
-    ``publication_id`` plus the exact ``published_sha`` (40/64 lowercase hex).
+    hex, always the whole capture), the versioned public-source projection
+    (``projection_schema`` int, ``projection_algorithm`` label,
+    ``projection_digest`` 64 hex), ``publication_id`` (64 lowercase hex),
+    and ``source_commit`` (full 40/64 lowercase hex). The request carries the
+    approved whole-capture digest as ``digest`` plus the explicit projection
+    identity; neither side calls the projection an exact whole-snapshot
+    match. The adapter verifies both: it confirms the whole-capture digest
+    from the approved tree and it recomputes the same public-source manifest
+    from the Git publication tree (same curated inventory and private-name
+    policy as ``mizu.distribution``, same algorithm) and compares that
+    manifest's digest to ``projection_digest``, rejecting mismatch. In
+    particular the adapter must not filter Git ignored state and claim an
+    exact pushed-tree match without the projection identity. It echoes
+    ``digest``, the projection identity, and ``publication_id`` plus the
+    exact ``published_sha`` (40/64 lowercase hex).
     Bounds: same as ``invoke``. Trust: operator-owned adapter only; caller
     must pass ``require_go_approval`` and durably record publication intent
     first. Failure: ``Denied`` for invalid pins, operations or response;
@@ -1313,6 +1324,7 @@ def publish_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
     Optional ``before_invoke`` has the validation/dispatch contract of ``invoke``.
     """
     from .fs import DIGEST as _DIGEST
+    from .publication import _check_projection
     if op not in PUBLISH_OPS:
         raise Denied("vcs_publish cannot publish this operation")
     if not isinstance(params, dict):
@@ -1322,6 +1334,11 @@ def publish_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
     code_digest = params.get("code_digest")
     if not isinstance(code_digest, str) or not _DIGEST.fullmatch(code_digest):
         raise Denied("Invalid code digest for publication")
+    _check_projection(params.get("projection_schema"), params.get("projection_algorithm"),
+                      params.get("projection_digest"))
+    projection_schema = params["projection_schema"]
+    projection_algorithm = params["projection_algorithm"]
+    projection_digest = params["projection_digest"]
     publication_id = params.get("publication_id")
     if not isinstance(publication_id, str) or not _DIGEST.fullmatch(publication_id):
         raise Denied("Invalid publication ID")
@@ -1329,6 +1346,9 @@ def publish_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
     if not isinstance(source_commit, str) or not _SHA.fullmatch(source_commit):
         raise Denied("Invalid source commit for publication")
     data = invoke(settings, {"op": op, "branch": branch, "digest": code_digest,
+                             "projection_schema": projection_schema,
+                             "projection_algorithm": projection_algorithm,
+                             "projection_digest": projection_digest,
                              "publication_id": publication_id,
                              "source_commit": source_commit},
                      cancel=cancel, before_invoke=before_invoke)
@@ -1336,6 +1356,10 @@ def publish_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
         raise Denied("VCS adapter must return a JSON object")
     if data.get("digest") != code_digest:
         raise Denied("VCS adapter must confirm the pushed code digest")
+    if (data.get("projection_schema") != projection_schema
+            or data.get("projection_algorithm") != projection_algorithm
+            or data.get("projection_digest") != projection_digest):
+        raise Denied("VCS adapter must confirm the pushed projection identity")
     if data.get("publication_id") != publication_id:
         raise Denied("VCS adapter must confirm the publication ID")
     published_sha = data.get("published_sha")

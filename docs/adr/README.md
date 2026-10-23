@@ -695,3 +695,26 @@ reported only while its pending-slot lock is still held, so a ticket whose
 owner died names no waiter, and unreadable or malformed state names no
 waiter either. The view reads; it never writes, and it never changes the
 admission order.
+
+## ADR-049 — The whole capture keeps its digest; the published tree carries a projection
+A snapshot's `code_digest` covers the whole captured workspace (private names
+already excluded), while the Git publication carries a filtered public tree
+(curated distribution inventory, Git ignored state aside). The publication
+request sent only the whole-capture digest and the adapter docstring claimed
+exact pushed-tree verification, so a filtered tree could be recorded as an
+exact whole-snapshot match and no receipt distinguished the two identities.
+
+The capture digest keeps its exact meaning and no historical digest is
+reinterpreted. New schema-3 publication records (product intent/receipt trio
+and external receipt alike) additionally bind a separately versioned
+deterministic public-source projection derived from captured file metadata
+with the same curated inventory and private-name policy as the distribution
+packager (`mizu-public-source-v1`, schema 1). The Editor export writes that
+identity to `public_source.json` and serves it on `get_status`; the VCS
+publish request carries it explicitly; the adapter confirms both the snapshot
+digest and the projection identity. The adapter recomputes the same manifest
+from the Git publication tree and compares its digest to the projection,
+rejecting mismatch; it must not filter Git ignored state and claim an exact
+match without the projection identity. Schema-1/2 records stay readable and
+are never rewritten; the projection digest is never stored or compared as a
+`code_digest`, and derivation never inspects ignored private state.

@@ -26,11 +26,13 @@ def adapter_settings(code, timeout=5, maximum=524288):
 READ_OK = ("import sys,json; req=json.load(sys.stdin); "
            "print(json.dumps({'op': req['op'], 'branch': req['branch'], 'checks': []}))")
 PUSH_OK = ("import sys,json; req=json.load(sys.stdin); "
-           "print(json.dumps({'op': req['op'], 'branch': req['branch'], 'digest': req['digest'], 'publication_id': req['publication_id'], 'published_sha': 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'pushed': True}))")
+           "print(json.dumps({'op': req['op'], 'branch': req['branch'], 'digest': req['digest'], 'projection_schema': req['projection_schema'], 'projection_algorithm': req['projection_algorithm'], 'projection_digest': req['projection_digest'], 'publication_id': req['publication_id'], 'published_sha': 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'pushed': True}))")
 PUSH_WRONG_DIGEST = ("import sys,json; req=json.load(sys.stdin); "
-           "print(json.dumps({'op': req['op'], 'branch': req['branch'], 'digest': '" + "f" * 64 + "', 'pushed': True}))")
+           "print(json.dumps({'op': req['op'], 'branch': req['branch'], 'digest': '" + "f" * 64 + "', 'projection_schema': req['projection_schema'], 'projection_algorithm': req['projection_algorithm'], 'projection_digest': req['projection_digest'], 'pushed': True}))")
 PUSH_NO_DIGEST = ("import sys,json; req=json.load(sys.stdin); "
            "print(json.dumps({'op': req['op'], 'branch': req['branch'], 'pushed': True}))")
+PUSH_WRONG_PROJECTION = ("import sys,json; req=json.load(sys.stdin); "
+           "print(json.dumps({'op': req['op'], 'branch': req['branch'], 'digest': req['digest'], 'projection_schema': req['projection_schema'], 'projection_algorithm': req['projection_algorithm'], 'projection_digest': '" + "f" * 64 + "', 'publication_id': req['publication_id'], 'published_sha': 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'pushed': True}))")
 
 
 def init_publish_git(fixture):
@@ -286,6 +288,16 @@ class VcsDigestBindingTests(PublishFixture):
         with self.assertRaisesRegex(Denied, "confirm the pushed code digest"):
             ctx.handle("vcs_publish", {"op": "push", "branch": "main"})
 
+    def test_mismatched_projection_echo_refused(self):
+        import dataclasses as _dc
+        config, role = with_caps(self, "worker", ["vcs_publish"])
+        digest = current_digest(self)
+        approve(self, "main", digest)
+        config = _dc.replace(config, vcs=adapter_settings(PUSH_WRONG_PROJECTION))
+        ctx = make_context(self, config, role)
+        with self.assertRaisesRegex(Denied, "confirm the pushed projection identity"):
+            ctx.handle("vcs_publish", {"op": "push", "branch": "main"})
+
     def test_publish_via_requires_digest_param(self):
         with self.assertRaisesRegex(Denied, "code digest"):
             vcs.publish_via(adapter_settings(PUSH_OK), "push", {"branch": "main"})
@@ -298,13 +310,20 @@ class PublicationReceiptTests(PublishFixture):
         config, role = with_caps(self, "worker", ["vcs_publish"])
         config = dataclasses.replace(config, vcs=adapter_settings(PUSH_OK))
         ctx = make_context(self, config, role)
-        store = Publication(self.project.root, self.source_commit, code_digest, branch, op)
+        from mizu.distribution import public_source_identity
+        captured = self.project.snapshots.capture_files(self.project.workspace)
+        projection = public_source_identity(captured.get("files", {}))
+        store = Publication(self.project.root, self.source_commit, code_digest, branch, op,
+                            projection=projection)
         return ctx, store, approval, {"op": op, "branch": branch}
 
     @staticmethod
     def reply(_argv, **kwargs):
         req = json.loads(kwargs["input_data"])
         return Result(0, json.dumps({"digest": req["digest"],
+                      "projection_schema": req["projection_schema"],
+                      "projection_algorithm": req["projection_algorithm"],
+                      "projection_digest": req["projection_digest"],
                       "publication_id": req["publication_id"],
                       "published_sha": "b" * 40}), "", "exited", 0)
 
@@ -315,7 +334,10 @@ class PublicationReceiptTests(PublishFixture):
         approval = approve(self, "main", code_digest)
         source = self.source_commit
         publisher = make_context(self, config, role)
-        receipt_store = Publication(self.project.root, source, code_digest, "main", "push")
+        from mizu.distribution import public_source_identity
+        _captured = self.project.snapshots.capture_files(self.project.workspace)
+        receipt_store = Publication(self.project.root, source, code_digest, "main", "push",
+                                    projection=public_source_identity(_captured.get("files", {})))
         publish_args = {"op": "push", "branch": "main"}
         with patch.object(vcs, "run", side_effect=self.reply):
             published = publisher.handle("vcs_publish", publish_args)
@@ -341,7 +363,10 @@ class PublicationReceiptTests(PublishFixture):
             "publication_id": receipt_store.id, "source_commit": source,
             "code_digest": code_digest, "branch": "main",
             "published_sha": "b" * 40, "approval": approval["id"],
-            "run": publisher.run_dir.name})
+            "run": publisher.run_dir.name,
+            "projection_schema": receipt_store.identity["projection_schema"],
+            "projection_algorithm": receipt_store.identity["projection_algorithm"],
+            "projection_digest": receipt_store.identity["projection_digest"]})
         checks = observed["result"]["checks"]
         self.assertEqual([(row["check"], row["sha"]) for row in checks],
                          [("required", "b" * 40)])
@@ -354,7 +379,10 @@ class PublicationReceiptTests(PublishFixture):
         code_digest = current_digest(self)
         approve(self, "main", code_digest)
         publisher = make_context(self, config, role)
-        store = Publication(self.project.root, self.source_commit, code_digest, "main", "push")
+        from mizu.distribution import public_source_identity as _identity
+        _cap = self.project.snapshots.capture_files(self.project.workspace)
+        store = Publication(self.project.root, self.source_commit, code_digest, "main", "push",
+                            projection=_identity(_cap.get("files", {})))
         with patch.object(vcs, "run", side_effect=self.reply):
             publisher.handle("vcs_publish", {"op": "push", "branch": "main"})
         reader = make_context(self, dataclasses.replace(config, vcs=adapter_settings(READ_OK)), role)
@@ -385,7 +413,7 @@ class PublicationReceiptTests(PublishFixture):
         adapter.assert_called_once()
         receipt_bytes = store.path("receipt").read_bytes()
         receipt = json.loads(receipt_bytes)
-        self.assertEqual(receipt, {**store.identity, "schema": 1,
+        self.assertEqual(receipt, {**store.identity, "schema": store.schema,
                          "publication_id": digest(canonical(store.identity)),
                          "approval": approval["id"], "run": ctx.run_dir.name,
                          "published_sha": "b" * 40})
@@ -411,12 +439,22 @@ class PublicationReceiptTests(PublishFixture):
     def test_identity_changes_only_with_stable_request_pins(self):
         _, store, _, _ = self.publication()
         pins = dict(source=self.source_commit, code_digest=store.identity["code_digest"],
-                    branch="main", op="push")
+                    branch="main", op="push",
+                    projection={"schema": store.identity["projection_schema"],
+                                "algorithm": store.identity["projection_algorithm"],
+                                "digest": store.identity["projection_digest"]})
         self.assertEqual(Publication(self.project.root, **pins).id, store.id)
         for key, value in (("source", "a" * 64), ("code_digest", "0" * 64),
                            ("branch", "other"), ("op", "pr")):
             with self.subTest(key=key):
                 self.assertNotEqual(Publication(self.project.root, **{**pins, key: value}).id, store.id)
+        with self.subTest(key="projection_digest"):
+            from mizu.distribution import public_source_identity as _identity2
+            altered = dict(pins)
+            altered["projection"] = {"schema": pins["projection"]["schema"],
+                                     "algorithm": pins["projection"]["algorithm"],
+                                     "digest": "0" * 64}
+            self.assertNotEqual(Publication(self.project.root, **altered).id, store.id)
 
     def test_undispatched_intent_reuses_identity(self):
         ctx, store, approval, args = self.publication()
@@ -565,7 +603,11 @@ class PublicationReceiptTests(PublishFixture):
         self.assertEqual(out["publication_id"], store.id)
 
     def test_bad_request_identity_refused_before_adapter(self):
+        from mizu.distribution import PUBLIC_SOURCE_ALGORITHM, PUBLIC_SOURCE_SCHEMA
         params = {"branch": "main", "code_digest": "a" * 64,
+                  "projection_schema": PUBLIC_SOURCE_SCHEMA,
+                  "projection_algorithm": PUBLIC_SOURCE_ALGORITHM,
+                  "projection_digest": "a" * 64,
                   "publication_id": "b" * 64, "source_commit": "c" * 40}
         for key, values in (("publication_id", (None, "", "A" * 64, "a" * 63, 1)),
                             ("source_commit", (None, "abc", "A" * 40, "a" * 41))):
@@ -576,7 +618,11 @@ class PublicationReceiptTests(PublishFixture):
                     adapter.assert_not_called()
         for sha in ("a" * 40, "b" * 64):
             with patch.object(vcs, "run", return_value=Result(0, json.dumps(
-                    {"digest": params["code_digest"], "publication_id": params["publication_id"],
+                    {"digest": params["code_digest"],
+                     "projection_schema": params["projection_schema"],
+                     "projection_algorithm": params["projection_algorithm"],
+                     "projection_digest": params["projection_digest"],
+                     "publication_id": params["publication_id"],
                      "published_sha": sha}), "", "exited", 0)):
                 self.assertEqual(vcs.publish_via(adapter_settings(PUSH_OK), "push", params)["published_sha"], sha)
 

@@ -46,8 +46,15 @@ class MutationIntentTests(Fixture):
             approval = dispose.approve(self, args["branch"], code_digest, **endpoints)
             parameters.update(code_digest=code_digest, approval=approval["id"])
         if capability == "vcs_publish":
-            publication = Publication(self.project.root, source, code_digest, args["branch"], op)
-            parameters.update(source_commit=source, publication_id=publication.id)
+            from mizu.distribution import public_source_identity
+            _captured = self.project.snapshots.capture_files(self.project.workspace)
+            _projection = public_source_identity(_captured.get("files", {}))
+            publication = Publication(self.project.root, source, code_digest, args["branch"], op,
+                                      projection=_projection)
+            parameters.update(source_commit=source, publication_id=publication.id,
+                              projection_schema=_projection["schema"],
+                              projection_algorithm=_projection["algorithm"],
+                              projection_digest=_projection["digest"])
         ctx = dispose.make_context(self, config, role)
         return ctx, capability, args, {"op": op, "parameters": parameters}
 
@@ -64,6 +71,9 @@ class MutationIntentTests(Fixture):
         op = request["op"]
         if op in ("push", "pr"):
             data = {"digest": request["digest"], "pushed": True,
+                    "projection_schema": request["projection_schema"],
+                    "projection_algorithm": request["projection_algorithm"],
+                    "projection_digest": request["projection_digest"],
                     "publication_id": request["publication_id"], "published_sha": dispose.SHA_A}
         elif op == "retire":
             data = {"branch": request["branch"], "sha": request["expected_sha"],

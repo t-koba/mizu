@@ -1627,7 +1627,7 @@ class Context:
         except OSError as exc:
             raise Denied(f"VCS read is unavailable: {exc}") from exc
         if publication is not None:
-            data = {**data, "publication": {
+            observed = {
                 "publication_id": publication["publication_id"],
                 "source_commit": publication["source_commit"],
                 "code_digest": publication["code_digest"],
@@ -1635,7 +1635,14 @@ class Context:
                 "published_sha": publication["published_sha"],
                 "approval": publication["approval"],
                 "run": publication["run"],
-            }}
+            }
+            if any(key in publication for key in ("projection_schema", "projection_algorithm",
+                                                  "projection_digest")):
+                observed = {**observed,
+                            "projection_schema": publication["projection_schema"],
+                            "projection_algorithm": publication["projection_algorithm"],
+                            "projection_digest": publication["projection_digest"]}
+            data = {**data, "publication": observed}
         evidence_id, evidence = self._new_invocation_evidence("vcs-read")
         record = {"op": args["op"], "branch": params.get("branch"), "trust": "external-untrusted",
                   "evidence_id": evidence_id, "evidence": evidence, "result": data}
@@ -1653,16 +1660,24 @@ class Context:
         if captured.get("skipped"):
             raise Denied("Publication requires a representable snapshot")
         code_digest = captured["code_digest"]
+        from .distribution import public_source_identity
+        try:
+            projection = public_source_identity(captured.get("files", {}))
+        except ValueError as exc:
+            raise Denied(f"Publication requires a projectable snapshot: {exc}") from exc
         approval = _vcs.require_go_approval(self.project, args["branch"], code_digest)
         try:
             source = source_commit(self.workspace, cancel=self.tools_cancelled)
             publication = Publication(self.project.root, source, code_digest,
-                                      args["branch"], args["op"])
+                                      args["branch"], args["op"], projection=projection)
             with lock(publication.lock):
                 intent, receipt = publication.prepare(approval["insight"], self.run_dir.name)
                 before_local, observe = self._mutation_evidence(
                     "vcs-publish", args["op"],
                     {"branch": args["branch"], "code_digest": code_digest,
+                     "projection_schema": projection["schema"],
+                     "projection_algorithm": projection["algorithm"],
+                     "projection_digest": projection["digest"],
                      "approval": approval["insight"], "source_commit": source,
                      "publication_id": publication.id})
 
@@ -1683,6 +1698,9 @@ class Context:
                     # Retain a run-local observation even on a durable replay.
                     before_local()
                     data = {"digest": code_digest, "publication_id": publication.id,
+                            "projection_schema": projection["schema"],
+                            "projection_algorithm": projection["algorithm"],
+                            "projection_digest": projection["digest"],
                             "published_sha": receipt["published_sha"],
                             "trust": "external-untrusted"}
         except OSError as exc:

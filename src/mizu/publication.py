@@ -12,6 +12,16 @@ schema-2 external receipt is recorded after the fact by an operator-run
 publisher that pushed outside the product. It is create-only, idempotent for an
 identical request, and carries the same caller-visible fields, so an exact-SHA
 CI wait can be pinned to either shape.
+
+Source-identity boundary: ``code_digest`` always names the whole immutable
+capture, never a filtered tree; historical digests keep that meaning. New
+schema-3 records (both shapes) additionally bind the versioned public-source
+projection (``projection_schema``/``projection_algorithm``/
+``projection_digest`` from ``mizu.distribution``) that the host adapter must
+verify against the Git publication tree. A filtered projection digest is never
+stored or compared as a ``code_digest``, and no exact whole-snapshot match is
+claimed for a filtered tree. Schema-1/2 records stay readable and are never
+rewritten.
 """
 from __future__ import annotations
 
@@ -36,6 +46,47 @@ EXTERNAL_SCHEMA = 2
 #: Exact fields of an external receipt record.
 EXTERNAL_FIELDS = {"schema", "publication_id", "op", "branch", "published_sha",
                    "code_digest", "approval", "source_commit", "run", "recorded_at"}
+#: Schema version of a projection-bound receipt (product intent/receipt trio
+#: and external receipt alike). The operation still distinguishes the shapes;
+#: the schema marks that the publication ID binds the projection identity.
+PROJECTION_SCHEMA = 3
+#: Projection keys carried by a schema-3 publication identity and receipt.
+PROJECTION_KEYS = ("projection_schema", "projection_algorithm", "projection_digest")
+#: Exact fields of a projection-bound external receipt record.
+EXTERNAL_PROJECTION_FIELDS = EXTERNAL_FIELDS | set(PROJECTION_KEYS)
+
+
+def _check_projection(schema, algorithm, projection_digest: str) -> None:
+    """Validate one projection identity carried in publication evidence.
+
+    Schema: ``schema`` is the distribution projection schema (int),
+    ``algorithm`` is the exact distribution projection algorithm label, and
+    ``projection_digest`` is a 64-hex digest of the projection manifest -- a
+    filtered-tree digest that must never be stored or compared as a
+    ``code_digest``. Bounds: the algorithm label is short ASCII (at most 128
+    chars). Failure: ``Denied``.
+    """
+    from .distribution import (PUBLIC_SOURCE_ALGORITHM,
+                               PUBLIC_SOURCE_ALGORITHM_CHARS, PUBLIC_SOURCE_SCHEMA)
+    if type(schema) is not int or schema != PUBLIC_SOURCE_SCHEMA:
+        raise Denied("Invalid projection schema for publication")
+    if (not isinstance(algorithm, str) or not algorithm
+            or len(algorithm) > PUBLIC_SOURCE_ALGORITHM_CHARS
+            or any(ord(char) < 32 or ord(char) == 127 for char in algorithm)
+            or algorithm != PUBLIC_SOURCE_ALGORITHM):
+        raise Denied("Invalid projection algorithm for publication")
+    if (not isinstance(projection_digest, str)
+            or not DIGEST.fullmatch(projection_digest)):
+        raise Denied("Invalid projection digest for publication")
+
+
+def _projection_of(record: dict) -> dict | None:
+    """Return the projection identity of a record, or None for legacy ones."""
+    if any(key in record for key in PROJECTION_KEYS):
+        return {"schema": record.get("projection_schema"),
+                "algorithm": record.get("projection_algorithm"),
+                "digest": record.get("projection_digest")}
+    return None
 #: File names of recorded receipts inside the publications directory.
 RECEIPT_FILE = re.compile(r"([0-9a-f]{64})\.(external|receipt)\.json\Z")
 #: Directory entries read by one bounded listing.
@@ -81,15 +132,30 @@ def _external_record(record, publication_id: str) -> dict:
     asserts the recorded content; it is never inferred from a branch head.
     Failure: ``Denied`` for any mismatch.
     """
-    if not isinstance(record, dict) or set(record) != EXTERNAL_FIELDS:
+    if not isinstance(record, dict):
         raise Denied(f"Invalid external publication receipt: {publication_id}")
-    if (type(record.get("schema")) is not int or record["schema"] != EXTERNAL_SCHEMA
-            or record.get("op") != EXTERNAL_OP
+    if record.get("schema") == EXTERNAL_SCHEMA:
+        if set(record) != EXTERNAL_FIELDS:
+            raise Denied(f"Invalid external publication receipt: {publication_id}")
+        projection = None
+    elif record.get("schema") == PROJECTION_SCHEMA:
+        if set(record) != EXTERNAL_PROJECTION_FIELDS:
+            raise Denied(f"Invalid external publication receipt: {publication_id}")
+        projection = _projection_of(record)
+        assert projection is not None
+        _check_projection(projection["schema"], projection["algorithm"], projection["digest"])
+    else:
+        raise Denied(f"Invalid external publication receipt: {publication_id}")
+    if (record.get("op") != EXTERNAL_OP
             or record.get("publication_id") != publication_id):
         raise Denied(f"Invalid external publication receipt: {publication_id}")
     identity = {"op": EXTERNAL_OP, "branch": record["branch"],
                 "code_digest": record["code_digest"],
                 "published_sha": record["published_sha"]}
+    if projection is not None:
+        identity = {**identity, "projection_schema": projection["schema"],
+                    "projection_algorithm": projection["algorithm"],
+                    "projection_digest": projection["digest"]}
     try:
         computed = digest(canonical(identity))
     except (TypeError, ValueError) as exc:
@@ -118,10 +184,16 @@ def _external_record(record, publication_id: str) -> dict:
 
 def _summary(record: dict) -> dict:
     """Project one validated receipt onto its caller-visible fields."""
-    return {"publication_id": record["publication_id"], "op": record["op"],
-            "branch": record["branch"], "published_sha": record["published_sha"],
-            "code_digest": record["code_digest"], "approval": record["approval"],
-            "source_commit": record.get("source_commit"), "run": record.get("run")}
+    summary = {"publication_id": record["publication_id"], "op": record["op"],
+               "branch": record["branch"], "published_sha": record["published_sha"],
+               "code_digest": record["code_digest"], "approval": record["approval"],
+               "source_commit": record.get("source_commit"), "run": record.get("run")}
+    projection = _projection_of(record)
+    if projection is not None:
+        summary = {**summary, "projection_schema": projection["schema"],
+                   "projection_algorithm": projection["algorithm"],
+                   "projection_digest": projection["digest"]}
+    return summary
 
 
 def source_commit(workspace: Path, *, cancel=lambda: False) -> str:
@@ -140,7 +212,17 @@ def source_commit(workspace: Path, *, cancel=lambda: False) -> str:
 
 class Publication:
     def __init__(self, project_root: Path, source: str, code_digest: str,
-                 branch: str, op: str):
+                 branch: str, op: str, projection: dict | None = None):
+        """Bind one publication to a whole capture plus its public projection.
+
+        Schema: ``projection`` is None for a legacy schema-1 intent (old
+        records stay readable and are never rewritten) or a
+        ``{"schema", "algorithm", "digest"}`` projection identity from
+        ``mizu.distribution.public_source_identity`` for a schema-3 intent.
+        The publication ID digests the whole identity, so the receipt ID
+        binds the projection; the projection digest is never a code digest.
+        Failure: ``Denied``.
+        """
         from .vcs import PUBLISH_OPS, check_branch
         check_branch(branch)
         if op not in PUBLISH_OPS:
@@ -151,8 +233,21 @@ class Publication:
             raise Denied("Invalid code digest for publication")
         self.identity = {"source_commit": source, "code_digest": code_digest,
                          "branch": branch, "op": op}
+        if projection is not None:
+            if not isinstance(projection, dict) or set(projection) != {"schema", "algorithm", "digest"}:
+                raise Denied("Invalid projection identity for publication")
+            _check_projection(projection["schema"], projection["algorithm"], projection["digest"])
+            self.identity = {**self.identity,
+                             "projection_schema": projection["schema"],
+                             "projection_algorithm": projection["algorithm"],
+                             "projection_digest": projection["digest"]}
         self.id = digest(canonical(self.identity))
         self.root = project_root / "evidence" / "publications"
+
+    @property
+    def schema(self) -> int:
+        """Record schema of intents this publication writes (1 or 3)."""
+        return PROJECTION_SCHEMA if any(key in self.identity for key in PROJECTION_KEYS) else 1
 
     def _check_directories(self) -> None:
         # Match the portable safe-FS screening, including Windows reparse
@@ -226,13 +321,26 @@ class Publication:
         if intent is None or dispatched is None or receipt is None:
             raise Denied(f"Publication receipt unavailable or unresolved: {publication_id}")
         from .vcs import PUBLISH_OPS, check_branch
-        fields = {"source_commit", "code_digest", "branch", "op", "schema",
-                  "publication_id", "approval", "run"}
+        if intent.get("schema") == 1:
+            fields = {"source_commit", "code_digest", "branch", "op", "schema",
+                      "publication_id", "approval", "run"}
+            identity_keys = ("source_commit", "code_digest", "branch", "op")
+        elif intent.get("schema") == PROJECTION_SCHEMA:
+            fields = {"source_commit", "code_digest", "branch", "op", "schema",
+                      "publication_id", "approval", "run",
+                      "projection_schema", "projection_algorithm", "projection_digest"}
+            identity_keys = ("source_commit", "code_digest", "branch", "op",
+                             "projection_schema", "projection_algorithm", "projection_digest")
+        else:
+            raise Denied(f"Invalid publication intent: {publication_id}")
         if set(intent) != fields:
             raise Denied(f"Invalid publication intent: {publication_id}")
-        identity = {key: intent[key] for key in ("source_commit", "code_digest", "branch", "op")}
-        if (type(intent.get("schema")) is not int or intent.get("schema") != 1
-                or intent.get("publication_id") != publication_id
+        identity = {key: intent[key] for key in identity_keys}
+        if ("projection_schema" in identity):
+            _check_projection(identity["projection_schema"],
+                              identity["projection_algorithm"],
+                              identity["projection_digest"])
+        if (intent.get("publication_id") != publication_id
                 or not isinstance(identity["source_commit"], str)
                 or not SHA.fullmatch(identity["source_commit"])
                 or not isinstance(identity["code_digest"], str)
@@ -260,10 +368,10 @@ class Publication:
         if intent is None:
             if receipt is not None or dispatched is not None:
                 raise Denied(f"Missing publication intent: {self.id}")
-            intent = {**self.identity, "schema": 1, "publication_id": self.id,
+            intent = {**self.identity, "schema": self.schema, "publication_id": self.id,
                       "approval": identifier(approval), "run": identifier(run)}
             self._write("intent", intent)
-        expected = {**self.identity, "schema": 1, "publication_id": self.id}
+        expected = {**self.identity, "schema": self.schema, "publication_id": self.id}
         if (set(intent) != set(expected) | {"approval", "run"}
                 or any(intent.get(key) != value for key, value in expected.items())):
             raise Denied(f"Publication intent mismatch: {self.id}")
@@ -294,22 +402,27 @@ class Publication:
     @classmethod
     def record_external(cls, project_root: Path, *, branch: str, published_sha: str,
                         code_digest: str, approval: str, source_commit: str | None = None,
-                        run: str | None = None) -> dict:
+                        run: str | None = None, projection: dict | None = None) -> dict:
         """Record one operator-run publication as a durable receipt.
 
         The publisher pushes outside the product, then records what it
         published. Schema: branch (ref name), published SHA (40 or 64 hex),
-        code digest (64 hex), an approval reference, an optional source commit
-        and an optional run reference; the record carries schema 2, the
-        operation ``external``, the publication ID and the recording time.
+        code digest (64 hex, always the whole capture), an approval reference,
+        an optional source commit and an optional run reference; the record
+        carries schema 2, the operation ``external``, the publication ID and
+        the recording time. With ``projection`` (a ``{"schema", "algorithm",
+        "digest"}`` public-source identity) the record carries schema 3 and
+        the publication ID additionally binds the projection, so a filtered
+        tree is never recorded as an exact whole-snapshot match; without it
+        the legacy schema-2 shape is written and stays readable.
         Identity: the publication ID is the digest of the operation, branch,
-        code digest and published SHA, so the same publication keeps one ID.
-        Bounds: 8 KiB record, 256 characters per reference. Trust: the
-        operator asserts this content; the product never infers a published
-        SHA from a branch head. Retry: none; the write is create-only and an
-        identical request replays the stored record, a conflicting one is
-        refused. Failure: ``Denied`` for invalid input or a conflicting
-        receipt.
+        code digest, published SHA (and projection when present), so the same
+        publication keeps one ID. Bounds: 8 KiB record, 256 characters per
+        reference. Trust: the operator asserts this content; the product never
+        infers a published SHA from a branch head. Retry: none; the write is
+        create-only and an identical request replays the stored record, a
+        conflicting one is refused. Failure: ``Denied`` for invalid input or
+        a conflicting receipt.
         """
         from .vcs import check_branch
         check_branch(branch)
@@ -325,15 +438,32 @@ class Publication:
             run = _reference(run, "run")
         identity = {"op": EXTERNAL_OP, "branch": branch, "code_digest": code_digest,
                     "published_sha": published_sha}
+        schema = EXTERNAL_SCHEMA
+        compared = ("branch", "published_sha", "code_digest", "approval",
+                    "source_commit", "run")
+        extra: dict = {}
+        if projection is not None:
+            if not isinstance(projection, dict) or set(projection) != {"schema", "algorithm", "digest"}:
+                raise Denied("Invalid projection identity for external publication")
+            _check_projection(projection["schema"], projection["algorithm"], projection["digest"])
+            identity = {**identity, "projection_schema": projection["schema"],
+                        "projection_algorithm": projection["algorithm"],
+                        "projection_digest": projection["digest"]}
+            schema = PROJECTION_SCHEMA
+            compared = compared + ("projection_schema", "projection_algorithm", "projection_digest")
+            extra = {"projection_schema": projection["schema"],
+                     "projection_algorithm": projection["algorithm"],
+                     "projection_digest": projection["digest"]}
         publication_id = digest(canonical(identity))
         store = cls.__new__(cls)
         store.id = publication_id
         store.root = Path(project_root) / "evidence" / "publications"
         store.identity = identity
-        record = {"schema": EXTERNAL_SCHEMA, "publication_id": publication_id,
+        record = {"schema": schema, "publication_id": publication_id,
                   "op": EXTERNAL_OP, "branch": branch, "published_sha": published_sha,
                   "code_digest": code_digest, "approval": approval,
-                  "source_commit": source_commit, "run": run, "recorded_at": now()}
+                  "source_commit": source_commit, "run": run, "recorded_at": now(),
+                  **extra}
         with kernel_lock(store.lock):
             try:
                 existing = store._read("external")
@@ -343,9 +473,7 @@ class Publication:
                 raise Denied(f"Invalid external publication receipt: {publication_id}") from exc
             if existing is not None:
                 stored = _external_record(existing, publication_id)
-                if any(stored[key] != record[key] for key in
-                       ("branch", "published_sha", "code_digest", "approval",
-                        "source_commit", "run")):
+                if any(stored.get(key) != record.get(key) for key in compared):
                     raise Denied(f"Conflicting external publication receipt: {publication_id}")
                 return stored
             store._write("external", record)
