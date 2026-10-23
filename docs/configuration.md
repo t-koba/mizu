@@ -670,11 +670,16 @@ alone still admits a run instead of reading as drained. Unrelated valid events
 still deliver. Unsafe receipt directories, symlinks, hardlinks, size-bound
 refusals, and systemic I/O still fail closed and are never isolated.
 Acknowledgement of a suspect token is refused and never overwrites the file.
-No in-product repair operation currently exists. Keep the local store untouched
-and escalate the event ID and bounded reason code to the project operator for
-an explicit recovery plan; until an authorized recovery path is provided, that
-event remains withheld. The product never deletes or silently repairs a
-receipt, and direct file editing is not a supported repair procedure.
+There is no receipt-repair command. The product never deletes, quarantines, acknowledges, replays, overwrites, or silently repairs a suspect receipt, and directly editing receipt files is not a supported repair procedure. Until an authorized recovery completes, that event remains withheld. Recover only through this operator runbook, without printing or copying suspect receipt bytes; establish identity from the bounded diagnostic identity (`event`, `ack_token`, `action`, `reason`) plus immutable delivery/decision history (role, event ID/revision/action/scope, payload-bound ack token):
+
+1. `mizu pause PROJECT`; keep the source paused and unchanged throughout.
+2. `mizu backup PROJECT ARCHIVE --verify` (requires a paused project; creates a new archive outside the project tree under quiescence/locks; includes `decision-receipts`; returns checkpoint metadata). Treat archives as protected operator holdings. A current backup containing the corrupt receipt is evidence/rollback only, never a recovery candidate.
+3. A recovery candidate is eligible only when an independently known-good pre-incident backup is proven to contain the exact role, event ID/revision/action/scope, payload-bound ack token, and an already-valid receipt for that identity, plus all project state the operator intends to retain. A checkpoint that would omit later required decisions, evidence, or accepted scope is not eligible.
+4. `mizu restore NEW_PROJECT --archive ARCHIVE` restores an eligible candidate only under a new project name as a new paused, unarmed project; it never overwrites or restores in place. Check the returned checkpoint and compare project identity, goal, policy, immutable decision history, accepted scope, and other required state; keep the candidate unarmed and do not adopt it unless those checks and independent receipt-validity evidence match the intended recovery.
+5. `--verify` and restore integrity checks alone do not prove receipt validity or completeness of the intended project state.
+6. If no such known-good checkpoint exists, the exact receipt cannot be independently established, or project continuity requires the source lineage, there is no supported in-place recovery: keep the source paused, preserve the archives, and escalate; do not delete, quarantine, acknowledge, replay, or directly edit receipt files.
+7. Record operator, project, diagnostic identity/reason, source and candidate checkpoint IDs, archive verification/result, and the final decision, without receipt bytes.
+8. On any failure or rejection, roll back by leaving the source untouched and not adopting the candidate.
 
 Selection excludes exact receipts, then takes the globally oldest eligible
 rows by timezone-aware timestamp and event ID before the prompt limit, across
