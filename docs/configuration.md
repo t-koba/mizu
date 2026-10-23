@@ -700,8 +700,17 @@ decision windows while another takes smaller terminal batches), optional
 per-role event-only recovery poll override `event_poll_seconds` (60–2,678,400
 seconds, default 60; the Task Scheduler minimum/bounds; unscheduled watched
 roles recheck pending event inputs at this cadence on every platform while
-scheduled timers stay on their schedule), and at most one
-of `daemon`, `interval_seconds`, `calendar`. `policy` is a path
+scheduled timers stay on their schedule), explicit daemon scheduling policy
+`daemon_policy` (`signals` consults the role-aware `should_run` gate,
+`periodic` runs at the ordinary cadence while armed and neither paused nor
+draining; unset keeps the workspace default with identical effective behavior:
+`write` uses `signals`, `read`/`none` use `periodic`, so the daemon loop
+consumes this policy, never `workspace`), optional ordinary daemon spacing
+override `daemon_spacing_seconds` (1-1,073,741,824; unset keeps the policy
+default: `signals` uses the effective `cooldown_seconds`, `periodic` uses
+`idle_seconds`; affects ordinary daemon spacing only, never deferred
+`next_evaluation_at` re-entry or the `cooldown_seconds` retry policy), and at
+most one of `daemon`, `interval_seconds`, `calendar`. `policy` is a path
 string or an array of path strings (e.g. shared principles plus the role file);
 parts are read as UTF-8 in order and joined with one `\n` (trailing newline
 kept), so the composed text is the prompt and the policy digest. Missing,

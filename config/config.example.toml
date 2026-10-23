@@ -263,6 +263,17 @@ daemon = true
 # [limits].cooldown_seconds; applies to writable daemon spacing and deferred
 # re-evaluation, read-only cadence stays on idle_seconds).
 # cooldown_seconds = 5
+# Explicit daemon scheduling policy (optional, signals|periodic; unset keeps the
+# workspace default: write uses signals, read/none use periodic). signals
+# consults the role-aware should_run gate, periodic runs at the ordinary cadence
+# while armed and neither paused nor draining. The daemon loop consumes this
+# policy, never workspace.
+# daemon_policy = "signals"
+# Optional ordinary daemon spacing in seconds (optional, 1-1073741824; unset keeps
+# the policy default: signals uses the effective cooldown_seconds, periodic uses
+# [limits].idle_seconds). Affects ordinary daemon spacing only, never deferred
+# next-evaluation re-entry or the cooldown_seconds retry policy.
+# daemon_spacing_seconds = 5
 # Per-role progress-signal override (optional, same unique supported names
 # as [limits].progress_signals; unset inherits the project list, explicit []
 # disables qualification for this role).

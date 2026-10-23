@@ -24,8 +24,8 @@ from .admission import admission, role_exclusion
 from . import check_jobs
 from . import ci_waits, dispatch_evidence, work_item_events
 from .budget import Budget
-from .config import (MAX_CI_WAKE_EXTRA_BRANCHES, Config, Role, load,
-                     role_cooldown_seconds, role_decision_events_limit,
+from .config import (DAEMON_POLICIES, MAX_CI_WAKE_EXTRA_BRANCHES, Config, Role, load,
+                     role_cooldown_seconds, role_daemon_spacing_seconds, role_decision_events_limit,
                      role_policy_bytes, role_progress_signals, role_requests_per_run,
                      role_run_seconds, role_tools_per_run,
                      role_work_item_events_limit, role_wrap_up_requests,
@@ -5349,14 +5349,19 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                                                       now=time.time(), interval=interval):
                             print(json.dumps(event, ensure_ascii=False), flush=True)
                     role = config.roles[role_name]
-                    ready = should_run(project, project.snapshots.get(), role_name=role_name) if role.workspace == "write" else (
-                        project.control().get("armed") and not project.control().get("paused") and not project.control().get("draining"))
+                    policy = getattr(role, "daemon_policy", None)
+                    if policy not in DAEMON_POLICIES:
+                        policy = "signals" if role.workspace == "write" else "periodic"
+                    if policy == "signals":
+                        ready = should_run(project, project.snapshots.get(), role_name=role_name)
+                    else:
+                        ready = (project.control().get("armed") and not project.control().get("paused")
+                                 and not project.control().get("draining"))
                     if ready and time.monotonic() >= ordinary_after:
                         result = Engine(config, stop=stop).run(project, role_name, probes_serviced=True,
                                         enqueue_busy=True)
                         print(json.dumps(result, ensure_ascii=False), flush=True)
-                        delay = (role_cooldown_seconds(config, role)
-                                 if role.workspace == "write" else config.limits.idle_seconds)
+                        delay = role_daemon_spacing_seconds(config, role)
                         if result.get("status") in ("waiting", "deferred"):
                             # Poll at idle cadence as well, to observe operator fact/config updates.
                             delay = min(config.limits.idle_seconds, max(0.1, result["next_evaluation_at"] - time.time()))

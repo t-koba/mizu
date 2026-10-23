@@ -494,6 +494,19 @@ class Role:
     #: Task Scheduler repetition bound. Only unscheduled watched roles use
     #: it for recovery reevaluation; scheduled timers stay on their schedule.
     event_poll_seconds: int | None = None
+    #: Explicit daemon scheduling policy: ``signals`` consults the
+    #: role-aware ``should_run`` readiness gate, ``periodic`` runs at the
+    #: ordinary cadence while the project is armed and neither paused nor
+    #: draining. Load resolves an omitted value from the workspace
+    #: (``write`` keeps ``signals``, ``read``/``none`` keep ``periodic``)
+    #: so the daemon loop consumes this policy, never ``workspace``.
+    daemon_policy: str = "periodic"
+    #: Optional ordinary daemon spacing override in seconds (1-1073741824).
+    #: None keeps the policy default: ``signals`` uses the effective
+    #: ``cooldown_seconds``, ``periodic`` uses ``idle_seconds``. It affects
+    #: ordinary daemon spacing only, never deferred re-evaluation or the
+    #: ``cooldown_seconds`` retry policy.
+    daemon_spacing_seconds: int | None = None
 
 
 def role_requests_per_run(config: "Config", role: "Role") -> int:
@@ -616,6 +629,41 @@ def role_cooldown_seconds(config: "Config", role: "Role") -> int:
     if type(value) is int and 1 <= value <= 1073741824:
         return value
     return config.limits.cooldown_seconds
+
+
+#: Explicit daemon scheduling policies for ``roles.<name>.daemon_policy``.
+DAEMON_POLICIES = frozenset({"signals", "periodic"})
+
+
+def role_daemon_spacing_seconds(config: "Config", role: "Role") -> int:
+    """Effective ordinary daemon spacing for one role for one dispatch.
+
+    Schema: explicit ``daemon_spacing_seconds`` when set, else the policy
+    default (``signals`` uses the effective ``cooldown_seconds``,
+    ``periodic`` uses ``idle_seconds``). Trust: configuration. Failure:
+    never raises; malformed overrides read as the policy default (load
+    already refuses them fail-closed). Deferred re-evaluation keeps its own
+    ``next_evaluation_at``/``idle_seconds``/``cooldown_seconds`` policy.
+    """
+    try:
+        explicit = getattr(role, "daemon_spacing_seconds", None)
+    except Exception:
+        explicit = None
+    if type(explicit) is int and 1 <= explicit <= 1073741824:
+        return explicit
+    try:
+        policy = getattr(role, "daemon_policy", None)
+    except Exception:
+        policy = None
+    if policy not in DAEMON_POLICIES:
+        try:
+            workspace = getattr(role, "workspace", None)
+        except Exception:
+            workspace = None
+        policy = "signals" if workspace == "write" else "periodic"
+    if policy == "signals":
+        return role_cooldown_seconds(config, role)
+    return config.limits.idle_seconds
 
 
 #: Supported progress-signal names shared by project and per-role lists.
@@ -1046,7 +1094,7 @@ def load(file: Path) -> Config:
             raise ConfigError(f"Role name '{name}' is reserved for the operator channel")
         keys(role, {"profile", "policy", "workspace", "capabilities", "engine_tools", "on_change",
                     "interval_seconds", "calendar", "daemon", "selector", "attributes",
-                    "decision_events", "work_item_events", "decision_sources", "work_item_sources", "ci_wake", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds", "decision_events_limit", "work_item_events_limit", "no_progress_backoff_seconds", "cooldown_seconds", "progress_signals", "event_poll_seconds"}, f"roles.{name}")
+                    "decision_events", "work_item_events", "decision_sources", "work_item_sources", "ci_wake", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds", "decision_events_limit", "work_item_events_limit", "no_progress_backoff_seconds", "cooldown_seconds", "progress_signals", "event_poll_seconds", "daemon_policy", "daemon_spacing_seconds"}, f"roles.{name}")
         profile = string(role.get("profile", ""), f"roles.{name}.profile")
         selector = string(role.get("selector", ""), f"roles.{name}.selector")
         if ("profile" in role) == ("selector" in role):
@@ -1202,6 +1250,16 @@ def load(file: Path) -> Config:
         if role_event_poll is not None:
             number(role_event_poll, f"roles.{name}.event_poll_seconds",
                    EVENT_POLL_SECONDS_MIN, EVENT_POLL_SECONDS_MAX)
+        raw_daemon_policy = role.get("daemon_policy")
+        if raw_daemon_policy is None:
+            daemon_policy = "signals" if workspace == "write" else "periodic"
+        else:
+            if type(raw_daemon_policy) is not str or raw_daemon_policy not in ("signals", "periodic"):
+                raise ConfigError(f"roles.{name}.daemon_policy must be signals or periodic")
+            daemon_policy = raw_daemon_policy
+        role_daemon_spacing = role.get("daemon_spacing_seconds")
+        if role_daemon_spacing is not None:
+            number(role_daemon_spacing, f"roles.{name}.daemon_spacing_seconds", 1, 1073741824)
         roles[name] = Role(name, profile, policy, workspace, caps,
                            strings(role.get("engine_tools", []), "engine_tools"),
                            boolean(role.get("on_change", False), "on_change"), interval, calendar, daemon, selector, attrs,
@@ -1215,7 +1273,9 @@ def load(file: Path) -> Config:
                            no_progress_backoff_seconds=role_backoff,
                            cooldown_seconds=role_cooldown,
                            progress_signals=role_progress,
-                           event_poll_seconds=role_event_poll)
+                           event_poll_seconds=role_event_poll,
+                           daemon_policy=daemon_policy,
+                           daemon_spacing_seconds=role_daemon_spacing)
     if not roles:
         raise ConfigError("At least one role is required")
     consult_role = string(data.get("consult_role", ""), "consult_role")

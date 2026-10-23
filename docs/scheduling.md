@@ -74,8 +74,10 @@ It bounds continuation of writer daemons and on-change dispatch; it is not a
 platform trigger. Read-only on-change roles use their own progress record,
 not the publisher's snapshot record (see below).
 
-Non-write daemon readiness is only control state: the daemon loop in
-`src/mizu/runtime.py` runs a read role at its idle cadence when the project
+Daemon readiness follows the explicit per-role `daemon_policy` in
+`src/mizu/runtime.py`, never `workspace`: `signals` (the default for `write`
+roles) consults the role-aware `should_run` gate, while `periodic` (the
+default for `read`/`none` roles) runs at the ordinary cadence when the project
 is armed and neither paused nor draining, without consulting `should_run`.
 
 A readiness signal does not itself name a delivered event. The normal
@@ -108,9 +110,12 @@ workspace mode. The recorded
 `ready_work` / `change` / `schedule`. Existing event labels take precedence over ready work;
 ready work has its own label for event-triggered or unchanged-code admission.
 It does not add or consume terminal work-item events. The daemon's configured
-cooldown spacing still applies (writable roles use the role-effective
-`cooldown_seconds`: `roles.<name>.cooldown_seconds` when set, else the project
-`[limits]` value; read-only roles use `idle_seconds`); ready work does not accelerate it.
+ordinary spacing still applies (`roles.<name>.daemon_spacing_seconds` when set,
+else the policy default: `signals` uses the role-effective `cooldown_seconds`
+(`roles.<name>.cooldown_seconds` when set, else the project `[limits]` value),
+`periodic` uses `idle_seconds`); it affects ordinary daemon spacing only, never
+deferred `next_evaluation_at` re-entry or the `cooldown_seconds` retry policy.
+Ready work does not accelerate it.
 
 ### Read-only completion cursors
 
@@ -357,8 +362,10 @@ receipt bindings still fail the whole scan; they are not per-waiter evidence
 errors. An acknowledgement error does not abort the remaining batch;
 unacknowledged valid events remain eligible for replay.
 
-Control and configured cooldown spacing remain in force (writable roles use
-the role-effective cooldown, read-only roles use `idle_seconds`). Daemons recheck on
+Control and configured ordinary spacing remain in force (explicit
+`daemon_spacing_seconds` when set, else the policy default: `signals` uses the
+role-effective cooldown, `periodic` uses `idle_seconds`; ordinary spacing only,
+never deferred re-entry). Daemons recheck on
 idle ticks; observation also touches the existing `waits` directory as a
 best-effort hint to already-configured platform event watches. Those hints
 never carry authority: dispatch revalidates the exact waiter and evidence.

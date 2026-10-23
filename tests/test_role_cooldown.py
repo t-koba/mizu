@@ -1,4 +1,4 @@
-"""Per-role writer-daemon cooldown override: config, helper and runtime."""
+"""Per-role daemon policy/spacing and writer-daemon cooldown: config, helper and runtime."""
 import copy
 import dataclasses
 import unittest
@@ -6,7 +6,7 @@ from contextlib import nullcontext
 from unittest.mock import Mock, call, patch
 
 from support import Fixture, ScriptDriver
-from mizu.config import load, role_cooldown_seconds
+from mizu.config import load, role_cooldown_seconds, role_daemon_spacing_seconds
 from mizu.errors import ConfigError, ModelFailure
 from mizu.runtime import Engine, daemon
 
@@ -65,6 +65,8 @@ class RoleCooldownConfigTests(Fixture):
         from pathlib import Path
         text = (Path(__file__).resolve().parents[1] / "config" / "config.example.toml").read_text()
         self.assertIn("cooldown_seconds", text)
+        self.assertIn("daemon_policy", text)
+        self.assertIn("daemon_spacing_seconds", text)
 
 
 class RoleCooldownRuntimeTests(Fixture):
@@ -184,6 +186,241 @@ class RoleCooldownRuntimeTests(Fixture):
                                  [call(project, role_name, probes_serviced=True,
                                        enqueue_busy=True)] * len(expected_runs))
 
+
+
+
+class DaemonPolicyTests(Fixture):
+    """Explicit daemon policy/spacing: config, helper and loop.
+
+    The daemon loop consumes ``role.daemon_policy`` (``signals`` consults
+    the role-aware ``should_run`` gate, ``periodic`` uses armed/paused/
+    draining control only), never ``role.workspace``. Omitted policies
+    resolve from the workspace with identical effective behavior.
+    """
+
+    def _append_role(self, name, workspace):
+        original = self.file.read_text()
+        self.file.write_text(
+            original + f"""\n[roles.{name}]
+profile = "alternate"
+policy = ["policies/shared.md", "policies/consult.md"]
+workspace = "{workspace}"
+capabilities = ["files", "read", "finish"]
+""")
+        return load(self.file)
+
+    def test_omitted_policy_defaults_by_workspace(self):
+        self.assertEqual(self.config.roles["worker"].daemon_policy, "signals")
+        self.assertEqual(self.config.roles["searcher"].daemon_policy, "periodic")
+        self.assertEqual(self.config.roles["consult"].daemon_policy, "periodic")
+        self.assertIsNone(self.config.roles["worker"].daemon_spacing_seconds)
+        config = self._append_role("nonewatch", "none")
+        self.assertEqual(config.roles["nonewatch"].daemon_policy, "periodic")
+        self.assertIsNone(config.roles["nonewatch"].daemon_spacing_seconds)
+
+    def test_policy_and_spacing_validation(self):
+        original = self.file.read_text()
+        for value, valid in (('"signals"', True), ('"periodic"', True),
+                             ('"sometimes"', False), ('""', False), ("true", False), ("5", False)):
+            with self.subTest(value=value):
+                self.file.write_text(
+                    original.replace("[roles.searcher]",
+                                     f"[roles.searcher]\ndaemon_policy = {value}"))
+                if valid:
+                    self.assertEqual(load(self.file).roles["searcher"].daemon_policy,
+                                     value.strip('"'))
+                else:
+                    with self.assertRaises(ConfigError):
+                        load(self.file)
+        for value, valid in (("1", True), ("7", True), ("1073741824", True),
+                             ("0", False), ("1073741825", False), ("true", False),
+                             ('"7"', False), ("2.5", False)):
+            with self.subTest(value=value):
+                self.file.write_text(
+                    original.replace("[roles.searcher]",
+                                     f"[roles.searcher]\ndaemon_spacing_seconds = {value}"))
+                if valid:
+                    self.assertEqual(load(self.file).roles["searcher"].daemon_spacing_seconds,
+                                     int(value))
+                else:
+                    with self.assertRaises(ConfigError):
+                        load(self.file)
+        for unknown in ("daemon_policy_typo = \"signals\"", "daemon_spacing_seconds_typo = 5"):
+            with self.subTest(unknown=unknown):
+                self.file.write_text(
+                    original.replace("[roles.searcher]", f"[roles.searcher]\n{unknown}"))
+                with self.assertRaises(ConfigError):
+                    load(self.file)
+
+    def test_explicit_cross_workspace_values_load(self):
+        original = self.file.read_text()
+        text = original.replace("daemon = true",
+                                "daemon = true\ndaemon_policy = \"periodic\"\ndaemon_spacing_seconds = 42", 1)
+        text = text.replace('[roles.searcher]\nprofile = "alternate"',
+                            '[roles.searcher]\nprofile = "alternate"\ndaemon_policy = "signals"\ndaemon_spacing_seconds = 7', 1)
+        self.file.write_text(text)
+        config = load(self.file)
+        self.assertEqual(config.roles["worker"].daemon_policy, "periodic")
+        self.assertEqual(config.roles["worker"].daemon_spacing_seconds, 42)
+        self.assertEqual(config.roles["searcher"].daemon_policy, "signals")
+        self.assertEqual(config.roles["searcher"].daemon_spacing_seconds, 7)
+
+    def test_spacing_helper_effective_defaults(self):
+        config = dataclasses.replace(
+            self.config,
+            limits=dataclasses.replace(self.config.limits, cooldown_seconds=5, idle_seconds=15))
+        worker = config.roles["worker"]
+        searcher = config.roles["searcher"]
+        # Omitted spacing follows the policy: signals uses the effective
+        # cooldown, periodic uses idle.
+        self.assertEqual(role_daemon_spacing_seconds(config, worker), 5)
+        self.assertEqual(role_daemon_spacing_seconds(config, searcher), 15)
+        cooled = dataclasses.replace(worker, cooldown_seconds=60)
+        self.assertEqual(role_daemon_spacing_seconds(config, cooled), 60)
+        # Explicit spacing wins for either policy, even cross-workspace.
+        self.assertEqual(
+            role_daemon_spacing_seconds(
+                config, dataclasses.replace(worker, daemon_policy="periodic",
+                                            daemon_spacing_seconds=42)), 42)
+        self.assertEqual(
+            role_daemon_spacing_seconds(
+                config, dataclasses.replace(searcher, daemon_policy="signals",
+                                            daemon_spacing_seconds=7)), 7)
+        # Malformed overrides read as the policy default, never raise.
+        self.assertEqual(
+            role_daemon_spacing_seconds(
+                config, dataclasses.replace(searcher, daemon_spacing_seconds=0)), 15)
+        self.assertEqual(
+            role_daemon_spacing_seconds(
+                config, dataclasses.replace(worker, daemon_spacing_seconds="60")), 5)
+
+    def _run_loop(self, config, role_name, should_run_value, result):
+        """Drive the actual daemon loop twice on a fake clock; no model, no sleep."""
+        class StopClock:
+            def __init__(self):
+                self.now = 1000.0
+                self.waits = []
+
+            def is_set(self):
+                return len(self.waits) >= 2
+
+            def wait(self, seconds):
+                self.waits.append(seconds)
+                self.now += seconds
+                return self.is_set()
+
+        clock = StopClock()
+        project = Mock()
+        project.control.return_value = {"armed": True}
+        dispatched_at = []
+
+        def run(*args, **kwargs):
+            dispatched_at.append(clock.now)
+            if callable(result):
+                return result()
+            return result
+
+        with (patch("mizu.runtime.threading.Event", return_value=clock),
+              patch("mizu.runtime.signal.signal"),
+              patch("mizu.runtime.lock", return_value=nullcontext()),
+              patch("mizu.runtime.load", return_value=config),
+              patch("mizu.runtime.Project", return_value=project),
+              patch("mizu.runtime.should_run", return_value=should_run_value) as should_run,
+              patch("mizu.runtime.vcs_poll_enabled", return_value=False),
+              patch("mizu.probes.service_due", return_value=None),
+              patch("mizu.probes.next_deadline", return_value=None),
+              patch("mizu.runtime.time.monotonic", side_effect=lambda: clock.now),
+              patch("mizu.runtime.time.time", side_effect=lambda: clock.now),
+              patch("mizu.runtime.Engine") as engine,
+              patch("builtins.print")):
+            engine.return_value.run.side_effect = run
+            daemon(config, "sample", role_name)
+        return clock, dispatched_at, should_run, engine
+
+    def test_loop_periodic_ignores_should_run_on_write_workspace(self):
+        config = dataclasses.replace(
+            self.config,
+            limits=dataclasses.replace(self.config.limits, cooldown_seconds=5, idle_seconds=15),
+            roles={**self.config.roles,
+                   "worker": dataclasses.replace(self.config.roles["worker"],
+                                                 daemon_policy="periodic",
+                                                 daemon_spacing_seconds=9)})
+        # should_run refuses, but the periodic policy still dispatches.
+        clock, dispatched_at, should_run, engine = self._run_loop(
+            config, "worker", False, {"status": "done"})
+        self.assertEqual(should_run.call_count, 0)
+        self.assertEqual(dispatched_at, [1000.0, 1009.0])
+        self.assertEqual(clock.waits, [9, 9])
+
+    def test_loop_signals_consults_should_run_on_read_workspace(self):
+        config = dataclasses.replace(
+            self.config,
+            limits=dataclasses.replace(self.config.limits, cooldown_seconds=5, idle_seconds=15),
+            roles={**self.config.roles,
+                   "searcher": dataclasses.replace(self.config.roles["searcher"],
+                                                   daemon_policy="signals",
+                                                   daemon_spacing_seconds=7)})
+        # A refusing gate dispatches nothing but still polls at idle cadence.
+        clock, dispatched_at, should_run, engine = self._run_loop(
+            config, "searcher", False, {"status": "done"})
+        self.assertGreaterEqual(should_run.call_count, 1)
+        self.assertEqual(dispatched_at, [])
+        # An admitting gate dispatches at the explicit spacing, not idle.
+        clock, dispatched_at, should_run, engine = self._run_loop(
+            config, "searcher", True, {"status": "done"})
+        self.assertGreaterEqual(should_run.call_count, 1)
+        self.assertEqual(dispatched_at, [1000.0, 1007.0])
+        self.assertEqual(clock.waits, [7, 7])
+
+    def test_loop_deferred_reentry_ignores_explicit_spacing(self):
+        config = dataclasses.replace(
+            self.config,
+            limits=dataclasses.replace(self.config.limits, cooldown_seconds=5, idle_seconds=15),
+            roles={**self.config.roles,
+                   "worker": dataclasses.replace(self.config.roles["worker"],
+                                                 daemon_policy="signals",
+                                                 daemon_spacing_seconds=60)})
+        clock_holder = {}
+
+        class StopClock:
+            def __init__(self):
+                self.now = 1000.0
+                self.waits = []
+
+            def is_set(self):
+                return len(self.waits) >= 2
+
+            def wait(self, seconds):
+                self.waits.append(seconds)
+                self.now += seconds
+                return self.is_set()
+
+        clock = StopClock()
+        clock_holder["clock"] = clock
+        project = Mock()
+        project.control.return_value = {"armed": True}
+
+        def waiting():
+            return {"status": "waiting", "next_evaluation_at": clock.now + 5}
+
+        with (patch("mizu.runtime.threading.Event", return_value=clock),
+              patch("mizu.runtime.signal.signal"),
+              patch("mizu.runtime.lock", return_value=nullcontext()),
+              patch("mizu.runtime.load", return_value=config),
+              patch("mizu.runtime.Project", return_value=project),
+              patch("mizu.runtime.should_run", return_value=True),
+              patch("mizu.runtime.vcs_poll_enabled", return_value=False),
+              patch("mizu.probes.service_due", return_value=None),
+              patch("mizu.probes.next_deadline", return_value=None),
+              patch("mizu.runtime.time.monotonic", side_effect=lambda: clock.now),
+              patch("mizu.runtime.time.time", side_effect=lambda: clock.now),
+              patch("mizu.runtime.Engine") as engine,
+              patch("builtins.print")):
+            engine.return_value.run.side_effect = lambda *a, **k: waiting()
+            daemon(config, "sample", "worker")
+        # Deferred re-entry uses next_evaluation_at capped by idle_seconds,
+        # not the explicit ordinary spacing of 60.
+        self.assertEqual(clock.waits, [5, 5])
 
 if __name__ == "__main__":
     unittest.main()
