@@ -275,12 +275,30 @@ decisions on that revision; an exact keyed replay is a no-op returning the
 original event, and a meaningful revision reopens it. Accept/modify store the resolved
 `work_item_intent` (`create`/`none`), from an explicit override or configured
 trusted-source default (global fallback `create`; see configuration.md).
-`none` durably records no work with no seed. `create` places an initial durable
-`work_item` seed in that same immutable decision-history event (and the
+`none` durably records no work with no seed. When the task list is omitted,
+`create` places an initial durable `work_item` seed in that same immutable decision-history event (and the
 matching current-decision record). Its ID is `wi_<event-id>`; it records
 the current insight title and `{insight_id, rev}` origin, starts `open` at item
 revision 1 with no holder, and uses the decision timestamp for creation and
 update. `defer` and `reject` do not create a seed.
+
+An explicit `work_items` list instead names 1–16 tasks (title and description
+only), without parsing the reason. Its resolved intent must be `create`;
+policy `none` requires an explicit create override. The history event embeds
+both the ordered `work_item_specs` and complete `work_items` seed manifest in
+one atomic write. No per-member seed files or mutable index are needed: group
+lookup scans immutable events for a hashed task ID; enumeration reuses each
+manifest. IDs hash the decision key, complete ordered specs and member index,
+so missing/reordered/tampered members fail closed against the whole set.
+All specs and seed slots, then the complete event's `PREVIEW_BYTES` bound
+(131072 UTF-8 bytes), are checked before commit. A crash exposes no group or
+the entire group; an exact ordered-list retry validates every seed/chain and
+repairs only a missing/stale non-substantive current pointer. Conflicting
+retries fail. Old single-seed/no-work events keep their exact shapes. Task
+seeds start open and inherit any decision-level scope; task-specific scope and
+dependency waits are not part of this mechanism. Current projections name all
+`work_item_ids`, and submitter status uses `{items: [...]}` for groups only.
+See configuration.md for field bounds and the CLI file interface.
 
 An accept/modify decision may also state the accepted scope: the work the
 decision authorizes (1-4000 nonblank characters). It is recorded in that same
@@ -414,8 +432,8 @@ are not rewritten. A seed without `description` retains the exact v1 field set;
 a supplied `description` adds only that field (v2), with no version marker.
 Descriptions must be strings of 1–4000 characters containing non-whitespace;
 whitespace is preserved, and explicit null is invalid. Both seed shapes are
-accepted on reads/replay. New decision seeds use the exact decision `reason`
-as their description; readers validate this binding only when the description
+accepted on reads/replay. New single-seed decisions use the exact decision
+`reason` as their description; explicit task seeds use their task descriptions; readers validate this binding only when the description
 field exists, so old events (including longer reasons) remain replayable.
 New transitions preserve their seed's field set: v1 never gains a description,
 and v2 must retain exactly its immutable text, rejecting change or removal.
@@ -634,6 +652,8 @@ after the input cursor and beyond this page; `truncated` is exactly whether that
 count is positive. Accept/modify history events without a `work_item` seed are
 counted as `unseeded_decisions` only while unresolved. An explicit
 `work_item_intent: "none"` resolves coverage without a sidecar or seed.
+Explicit task manifests also resolve coverage, validating every member instead
+of treating the absence of singular `work_item` as an unseeded legacy event.
 `coverage_complete` is true only when every such event has an explicit no-work
 marker or a valid reconciliation sidecar; malformed
 sidecars fail closed rather than claiming coverage. No legacy state is inferred. The prompt carries this count,

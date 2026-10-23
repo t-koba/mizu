@@ -24,10 +24,11 @@ from . import insight_archive
 from .errors import Denied, LimitExceeded
 from .fs import (DIGEST, PREVIEW_BYTES, canonical, identifier, lock, now, safe_read,
                  sync_dir, text_preview, write_json)
-from .insights import _decision_key
+from .insights import _decision_key, _validate_keyed_substantive_event
 from .platform import IS_WINDOWS
 from .work_item_seed import (DESCRIPTION_UNSET, ITEM_ID, SCOPE_UNSET, SEED_FIELDS, make_seed,
-                             validate_origin, validate_scope, validate_seed)
+                             task_id, task_seeds, validate_origin, validate_scope, validate_seed,
+                             validate_tasks)
 
 MAX_REVISIONS = 256  # Includes the immutable seed at revision 1.
 STATUSES = ("open", "doing", "blocked", "done", "dropped")
@@ -197,6 +198,7 @@ class WorkItems:
 
     def create_seed(self, item_id: str, title: str, origin, stamp: str, *,
                     actor=None, idempotency_key=None, decision_key=None,
+                    task_specs=None, task_index=None,
                     description=DESCRIPTION_UNSET, scope=SCOPE_UNSET) -> dict:
         """Preflight a new immutable seed while the caller holds insights.lock.
 
@@ -210,11 +212,16 @@ class WorkItems:
         atomic event. Existing commits must use validate_seed_replay instead.
         """
         seed = make_seed(item_id, title, origin, stamp, description=description, scope=scope)
+        if task_specs is not None:
+            validate_tasks(task_specs)
+            if type(task_index) is not int or not 0 <= task_index < len(task_specs):
+                raise Denied("Invalid task index")
         if decision_key is not None:
             if (actor is not None or idempotency_key is not None
                     or origin is None or "insight_id" not in origin
                     or decision_key != _decision_key(origin["insight_id"], origin["rev"])
-                    or item_id != f"wi_{decision_key}"):
+                    or item_id != (task_id(decision_key, task_specs, task_index)
+                                   if task_specs is not None else f"wi_{decision_key}")):
                 raise Denied("Invalid decision work-item binding")
         elif item_id != self._create_id(actor, idempotency_key):
             raise Denied("Invalid direct work-item binding")
@@ -316,7 +323,12 @@ class WorkItems:
             return {"record": record, "created": True}
 
     def _iter_item_events(self, *, recover: bool):
-        yield from self._iter_decision_events(recover=recover)
+        for event_id, event in self._iter_decision_events(recover=recover):
+            if "work_items" in event or "work_item_specs" in event:
+                for seed in task_seeds(event):
+                    yield seed["id"][3:], event
+            else:
+                yield event_id, event
         directory = self.root / "work-items"
         if not _directory(directory):
             return
@@ -333,7 +345,10 @@ class WorkItems:
                     try:
                         decision.lstat()
                     except FileNotFoundError:
+                        group = self._task_event(entry.name)
                         revisions = self._history_revisions(entry.name, recover=recover)
+                        if group is not None:
+                            continue
                         if revisions or (directory / entry.name / "legacy.json").exists():
                             raise Denied("Work-item history has no immutable seed")
                     continue
@@ -360,7 +375,7 @@ class WorkItems:
     def _validate_decision_key(event_id: str | None, event: dict) -> None:
         """Validate new keyed decisions; legacy events without a key remain readable."""
         if "decision_key" not in event:
-            if "work_item_intent" in event:
+            if "work_item_intent" in event or "work_items" in event or "work_item_specs" in event:
                 raise Denied("Explicit work-item intent lacks a decision key")
             return
         action = event.get("action")
@@ -376,6 +391,8 @@ class WorkItems:
                 or (event_id is not None and action in ("accept", "modify", "reject")
                     and event_id != key)):
             raise Denied("Invalid decision key binding")
+        if "work_items" in event or "work_item_specs" in event:
+            _validate_keyed_substantive_event(event, insight_id, rev, key, "")
 
     @staticmethod
     def _legacy_seed(event_id: str, event: dict, title) -> dict:
@@ -390,6 +407,9 @@ class WorkItems:
                            history_revisions=_HISTORY_UNSET) -> dict | None:
         """Validate the immutable sidecar against the exact canonical source."""
         self._validate_decision_key(event_id, event)
+        if "work_items" in event or "work_item_specs" in event:
+            task_seeds(event)
+            return None
         intent = event.get("work_item_intent")
         if "work_item_intent" in event and (
                 event.get("action") not in ("accept", "modify")
@@ -532,6 +552,9 @@ class WorkItems:
         with lock(self.root / "locks" / "insights.lock"):
             selected, total, eligible, unresolved = [], 0, 0, 0
             for event_id, event in self._decision_events():
+                if "work_items" in event:
+                    task_seeds(event)
+                    continue
                 if event["action"] not in ("accept", "modify") or "work_item" in event:
                     self._legacy_resolution(event_id, event, recover=True)
                     if "work_item" in event:
@@ -613,6 +636,20 @@ class WorkItems:
     def _decision_events(self):
         yield from self._iter_decision_events(recover=True)
 
+    def _task_event(self, item_id: str) -> dict | None:
+        """Resolve hashed task IDs from atomic manifests, with no mutable index.
+
+        No recovery here: reads must not promote interrupted events. The
+        regular event iterator validates the whole group before matching.
+        """
+        found = None
+        for _, event in self._iter_decision_events(recover=False):
+            if "work_items" in event and any(seed["id"] == item_id for seed in event["work_items"]):
+                if found is not None:
+                    raise Denied("Ambiguous task seed sources")
+                found = event
+        return found
+
     def _seed(self, item_id: str, event: dict | None = None, *,
               history_revisions=_HISTORY_UNSET) -> dict:
         """Validate a seed, optionally reusing its already safe-read event."""
@@ -628,9 +665,31 @@ class WorkItems:
                 raise Denied("Conflicting work-item seed sources")
             return direct["work_item"]
         if event is None:
-            event = self._read(f"decision-history/{match[1]}.json")
+            try:
+                (self.root / "decision-history" / f"{match[1]}.json").lstat()
+            except FileNotFoundError:
+                event = self._task_event(item_id)
+                if event is None:
+                    raise Denied("Work item has no immutable seed")
+            else:
+                event = self._read(f"decision-history/{match[1]}.json")
         if not isinstance(event, dict):
             raise Denied("Invalid work-item seed event")
+        if "work_items" in event or "work_item_specs" in event:
+            self._validate_decision_key(event.get("decision_key"), event)
+            seeds = task_seeds(event)
+            for seed in seeds:
+                if seed["id"] == item_id:
+                    try:
+                        (self.root / "work-items" / item_id / "legacy.json").lstat()
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        raise Denied("Task seed cannot carry legacy reconciliation")
+                    if self._direct_record(item_id) is not None:
+                        raise Denied("Conflicting task seed sources")
+                    return seed
+            raise Denied("Work item is not a member of its decision manifest")
         resolution = self._legacy_resolution(match[1], event, history_revisions=history_revisions)
         if event.get("work_item_intent") == "none":
             raise Denied("Explicit no-work decision has no work item")
@@ -700,6 +759,8 @@ class WorkItems:
                 fields.add("work_item_intent")
             if "work_item" in decision:
                 fields.add("work_item")
+            if "work_items" in decision or "work_item_specs" in decision:
+                fields.update({"work_items", "work_item_specs"})
         elif action == "withdraw":
             fields.add("actor")
         elif action not in ("defer", "reject"):
@@ -730,7 +791,7 @@ class WorkItems:
         return action, revision
 
     def _resolve_current_work_item(self, decision: dict, *, readonly: bool):
-        """Resolve the work-item id for a validated current decision.
+        """Resolve the work-item ID (or ordered task IDs) for a current decision.
 
         The keyed ``work_item`` branch reuses the immutable seed validator,
         which never recovers; only the legacy no-event-ID branch needs the
@@ -740,6 +801,14 @@ class WorkItems:
         if action == "withdraw":
             identifier(decision["actor"])
             return None
+        if "work_items" in decision or "work_item_specs" in decision:
+            seeds = task_seeds(decision)
+            event = self._read(f"decision-history/{decision['decision_key']}.json")
+            if event != decision:
+                raise Denied("Current task decision differs from its immutable event")
+            for seed in seeds:
+                self._seed(seed["id"], event)
+            return [seed["id"] for seed in seeds]
         if action in ("accept", "modify") and "work_item" in decision:
             seed = decision["work_item"]
             if (not isinstance(seed, dict) or not isinstance(seed.get("id"), str)
@@ -782,7 +851,10 @@ class WorkItems:
         work_item_id = self._resolve_current_work_item(decision, readonly=readonly)
         result = {"rev": revision, "action": action}
         if include_work_item:
-            result["work_item_id"] = work_item_id
+            if isinstance(work_item_id, list):
+                result["work_item_ids"] = work_item_id
+            else:
+                result["work_item_id"] = work_item_id
         return result
 
     def _current_decision(self, insight_id: str, *, include_work_item: bool = False) -> dict | None:
@@ -1164,31 +1236,40 @@ class WorkItems:
         """
         with lock(self.root / "locks" / "insights.lock"):
             decision = self._current_decision(insight_id, include_work_item=True)
-            if (decision is None or decision["action"] not in ("accept", "modify")
-                    or decision["work_item_id"] is None):
+            if decision is None or decision["action"] not in ("accept", "modify"):
                 return None
-            item_id = decision["work_item_id"]
-            history_revisions = self._recover_temporary_writes(item_id)
-            item = self._get(item_id, history_revisions=history_revisions)
-            origin_decision = {"rev": decision["rev"], "action": decision["action"]}
-            origin = self._origin_projection(item, current_decision=origin_decision)
-            status = {"id": item["id"], "status": item["status"], "rev": item["rev"],
-                      "holder": item["holder"], "updated_at": item["updated_at"],
-                      "current_origin_rev": origin["current_origin_rev"],
-                      "stale": origin["stale"]}
-            reason = item.get("reason")
-            if reason is not None:
-                preview, clipped = text_preview(reason, 512)
-                status["reason_preview"] = preview
-                status["reason_truncated"] = clipped
-            if item["status"] == "blocked":
-                status["wait"] = item["wait"]
-            elif item["status"] == "done":
-                status["snapshot_id"] = item["snapshot_id"]
-                status["delivered_tree"] = item.get("delivered_tree")
-            if len(canonical(status)) > 4096:
-                raise LimitExceeded("Submitter work-item status exceeds byte bound")
-            return status
+            if "work_item_ids" in decision:
+                result = {"items": [self._submitter_item_status(item_id, decision)
+                                    for item_id in decision["work_item_ids"]]}
+                if len(canonical(result)) > PREVIEW_BYTES:
+                    raise LimitExceeded("Submitter task statuses exceed byte bound")
+                return result
+            if decision["work_item_id"] is None:
+                return None
+            return self._submitter_item_status(decision["work_item_id"], decision)
+
+    def _submitter_item_status(self, item_id: str, decision: dict) -> dict:
+        history_revisions = self._recover_temporary_writes(item_id)
+        item = self._get(item_id, history_revisions=history_revisions)
+        origin_decision = {"rev": decision["rev"], "action": decision["action"]}
+        origin = self._origin_projection(item, current_decision=origin_decision)
+        status = {"id": item["id"], "status": item["status"], "rev": item["rev"],
+                  "holder": item["holder"], "updated_at": item["updated_at"],
+                  "current_origin_rev": origin["current_origin_rev"],
+                  "stale": origin["stale"]}
+        reason = item.get("reason")
+        if reason is not None:
+            preview, clipped = text_preview(reason, 512)
+            status["reason_preview"] = preview
+            status["reason_truncated"] = clipped
+        if item["status"] == "blocked":
+            status["wait"] = item["wait"]
+        elif item["status"] == "done":
+            status["snapshot_id"] = item["snapshot_id"]
+            status["delivered_tree"] = item.get("delivered_tree")
+        if len(canonical(status)) > 4096:
+            raise LimitExceeded("Submitter work-item status exceeds byte bound")
+        return status
 
     def projection(self, item_id: str) -> dict:
         """Return one bounded item plus revision-derived origin staleness.
@@ -1362,6 +1443,8 @@ class WorkItems:
         shared :meth:`_legacy_resolution`, recovered when locked and read
         from the read-only scan otherwise. Malformed seeds fail closed.
         """
+        if "work_items" in event or "work_item_specs" in event:
+            return ("seed", self._seed(f"wi_{event_id}", event))
         if event.get("kind") == "direct":
             return ("seed", validate_seed(event["work_item"]))
         action = event["action"]

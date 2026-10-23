@@ -50,7 +50,8 @@ from pathlib import Path
 
 from . import insight_archive
 from .errors import Denied, LimitExceeded
-from .work_item_seed import make_seed, validate_scope, validate_seed
+from .work_item_seed import (make_seed, validate_scope, validate_seed, validate_tasks,
+                             task_id, task_seeds)
 from .fs import PREVIEW_BYTES, canonical, digest, identifier, lock, now, read_json, safe_read, write_json, mkdir, DIGEST
 
 
@@ -83,7 +84,8 @@ def _validate_keyed_substantive_event(event, insight_id: str, rev: int, key: str
         if intent not in ("create", "none"):
             raise Denied("Malformed keyed work-item intent")
         if intent == "create":
-            fields.add("work_item")
+            fields.update({"work_items", "work_item_specs"} if "work_items" in event
+                          or "work_item_specs" in event else {"work_item"})
     elif action != "reject":
         raise Denied("Decision event ID collision")
     # A decision written before the accepted scope existed keeps the older
@@ -107,6 +109,9 @@ def _validate_keyed_substantive_event(event, insight_id: str, rev: int, key: str
             or len(canonical(event)) > PREVIEW_BYTES):
         raise Denied("Malformed keyed decision event")
     if action in ("accept", "modify") and event["work_item_intent"] == "create":
+        if "work_items" in event or "work_item_specs" in event:
+            task_seeds(event)
+            return event
         seed = event.get("work_item")
         validate_seed(seed)
         if seed != make_seed(f"wi_{key}", title, {"insight_id": insight_id, "rev": rev}, stamp,
@@ -739,15 +744,21 @@ replacement insight without implying rejected substance.
 
     def decide(self, insight_id: str, action: str, reason: str, revisit: str, run: str, wait=None,
                expected_rev: int | None = None, work_item_intent: str | None = None,
-               scope: str | None = None) -> dict:
+               scope: str | None = None, work_items: list | None = None) -> dict:
         """Record one decision, optionally stating the accepted scope.
 
         An accepted scope is the work the decision authorizes. It is recorded
         at decision time, inherited by every later revision of the work item
         and bound by its closure; a change of it is its own recorded event.
         A decision that states no scope leaves the item without one, the
-        legacy shape that stays readable history.
+        legacy shape that stays readable history. Explicit tasks are stored
+        together with their seeds in one atomic manifest, never separate
+        commits; no accepted subset can become visible.
         """
+        if work_items is not None:
+            validate_tasks(work_items)
+            if action not in ("accept", "modify") or work_item_intent == "none":
+                raise Denied("Tasks require an accept/modify create decision")
         if work_item_intent is not None and (work_item_intent not in ("create", "none")
                                                or action not in ("accept", "modify")):
             raise Denied("work_item_intent must be create or none, only for accept/modify")
@@ -768,8 +779,8 @@ replacement insight without implying rejected substance.
             raise Denied("Decision revision must be a positive revision number")
         registered = self._normalize_wait(wait, action)
         with lock(self.root / "locks" / "insights.lock"):
-            work_items = self._work_item_store()
-            work_items.prepare_decision_write(need_wait=False)
+            store = self._work_item_store()
+            store.prepare_decision_write(need_wait=False)
             current = self.read(insight_id)
             rev = _rev_of(current)
             if expected_rev is not None and expected_rev != rev:
@@ -787,6 +798,7 @@ replacement insight without implying rejected substance.
                                                               current["title"])
                 if (existing["action"] != action or existing["reason"] != reason
                         or existing["revisit"] != revisit
+                        or existing.get("work_item_specs") != work_items
                         or (scope is not None and existing.get("scope") != scope)
                         or (intent_override is not None and action in ("accept", "modify")
                             and existing["work_item_intent"] != intent_override)):
@@ -794,12 +806,14 @@ replacement insight without implying rejected substance.
                 if (prior is not None and prior.get("action") in ("accept", "modify", "reject")
                         and prior != existing):
                     raise Denied("Conflicting substantive decision at this revision")
-                if "work_item" in existing:
-                    work_items.validate_seed_replay(existing["work_item"], seed_event=existing)
+                seeds = (existing["work_items"] if "work_items" in existing else
+                         [existing["work_item"]] if "work_item" in existing else [])
+                for seed in seeds:
+                    store.validate_seed_replay(seed, seed_event=existing)
                 # History committed but its current pointer may not have. Return the
                 # original event (including its run) and repair only a stale pointer.
                 if current_decision != existing:
-                    work_items.prepare_decision_write(need_wait=False)
+                    store.prepare_decision_write(need_wait=False)
                     with lock(self.root / "locks" / "decisions.lock"):
                         write_json(raw, existing)
                 return existing
@@ -809,6 +823,8 @@ replacement insight without implying rejected substance.
                 work_item_intent = (intent_override if intent_override is not None else
                                     self.work_item_intent_by_source.get(current["source"],
                                                                       self.work_item_intent_default))
+                if work_items is not None and work_item_intent != "create":
+                    raise Denied("Tasks conflict with configured no-work intent; specify create explicitly")
                 if work_item_intent not in ("create", "none"):
                     raise Denied("Invalid configured work-item intent")
             # Only pre-key writers could hide a random-ID substantive event behind
@@ -831,14 +847,24 @@ replacement insight without implying rejected substance.
                     record["scope"] = scope
             if action in ("accept", "modify") and len(canonical(record)) > PREVIEW_BYTES:
                 raise LimitExceeded("Decision event with work-item intent exceeds byte bound")
-            if work_item_intent == "create":
-                record["work_item"] = work_items.create_seed(
+            if work_items is not None:
+                record["work_item_specs"] = work_items
+                record["work_items"] = [store.create_seed(
+                    task_id(key, work_items, index), task["title"],
+                    {"insight_id": insight_id, "rev": rev}, stamped, decision_key=key,
+                    task_specs=work_items, task_index=index, description=task["description"],
+                    **({"scope": scope} if scope is not None else {}))
+                    for index, task in enumerate(work_items)]
+            elif work_item_intent == "create":
+                record["work_item"] = store.create_seed(
                     f"wi_{event_id}", current["title"], {"insight_id": insight_id, "rev": rev},
                     stamped, decision_key=key, description=reason,
                     **({"scope": scope} if scope is not None else {}))
             if action in ("accept", "modify") and len(canonical(record)) > PREVIEW_BYTES:
                 raise LimitExceeded("Decision event with work-item intent exceeds byte bound")
-            work_items.prepare_decision_write(need_wait=(registered is not None))
+            if work_items is not None:
+                _validate_keyed_substantive_event(record, insight_id, rev, key, current["title"])
+            store.prepare_decision_write(need_wait=(registered is not None))
             with lock(self.root / "locks" / "decisions.lock"):
                 write_json(self.root / "decision-history" / f"{event_id}.json", record, exclusive=True)
                 write_json(self.root / "decisions" / f"{insight_id}.json", record)

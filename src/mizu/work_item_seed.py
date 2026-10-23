@@ -5,7 +5,7 @@ import datetime as dt
 import re
 
 from .errors import Denied
-from .fs import identifier
+from .fs import PREVIEW_BYTES, canonical, digest, identifier
 
 ITEM_ID = re.compile(r"wi_([0-9a-f]{32})\Z")
 DESCRIPTION_UNSET = object()
@@ -89,3 +89,53 @@ def make_seed(item_id: str, title: str, origin, stamp: str, *,
     if scope is not SCOPE_UNSET:
         seed["scope"] = scope
     return validate_seed(seed)
+
+
+MAX_DECISION_TASKS = 16
+
+
+def validate_tasks(tasks) -> list:
+    """Explicit task specs only: no prose parsing or task-specific scope."""
+    if not isinstance(tasks, list) or not 1 <= len(tasks) <= MAX_DECISION_TASKS:
+        raise Denied("work_items must contain 1-16 task specifications")
+    for task in tasks:
+        if not isinstance(task, dict) or set(task) != {"title", "description"}:
+            raise Denied("Each task requires only title and description")
+        title = task["title"]
+        if (not isinstance(title, str) or not 1 <= len(title) <= 200
+                or not title.strip() or "\x00" in title):
+            raise Denied("Task title must be 1-200 nonblank characters")
+        try:
+            title.encode("utf-8")
+        except UnicodeEncodeError:
+            raise Denied("Task title must be valid UTF-8") from None
+        validate_text(task["description"], "description")
+    return tasks
+
+
+def task_id(key: str, tasks: list, index: int) -> str:
+    # Bind each identity to the complete ordered scope, not just one member.
+    return "wi_" + digest(canonical(["decision-task", key, tasks, index]))[:32]
+
+
+def task_seeds(event: dict) -> list:
+    """Validate a complete atomic task manifest, including every member ID."""
+    tasks = validate_tasks(event.get("work_item_specs"))
+    seeds = event.get("work_items")
+    if (event.get("action") not in ("accept", "modify")
+            or event.get("work_item_intent") != "create" or "work_item" in event
+            or not isinstance(seeds, list) or len(seeds) != len(tasks)
+            or len(canonical(event)) > PREVIEW_BYTES):
+        raise Denied("Invalid decision task manifest")
+    ids = [task_id(event["decision_key"], tasks, index) for index in range(len(tasks))]
+    if len(set(ids)) != len(ids):
+        raise Denied("Decision task IDs collide")
+    for task, seed, item_id in zip(tasks, seeds, ids):
+        validate_seed(seed)
+        expected = make_seed(item_id, task["title"],
+                             {"insight_id": event["id"], "rev": event["rev"]}, event["created_at"],
+                             description=task["description"],
+                             **({"scope": event["scope"]} if "scope" in event else {}))
+        if seed != expected:
+            raise Denied("Task seed does not match complete decision manifest")
+    return seeds

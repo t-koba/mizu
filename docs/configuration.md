@@ -103,13 +103,57 @@ every accept/modify may explicitly override either default. Editing the example
 does not update an existing private operator configuration.
 
 Every new accept/modify event stores the resolved `work_item_intent`. `create`
-keeps the canonical `wi_<event-id>` seed; `none` is a durable explicit no-work
-disposition without a seed. Both resolve work-item coverage. Old unseeded
+keeps the canonical `wi_<event-id>` seed when the task list is omitted; `none`
+is a durable explicit no-work disposition without a seed. Both resolve work-item coverage. Old unseeded
 accept/modify events without the marker remain unresolved until the existing
 hash-bound open/drop reconciliation; neither reads nor new policy infer or
 rewrite their intent. Explicit no-work events cannot be reconciled. The legacy
 audit page includes them as `work_item_intent: "none"`, `openable: false`, and
 `resolution: {outcome: "none"}`; no work-item status is attached to them.
+
+To name separate tasks explicitly, `decide` also accepts optional `work_items`:
+
+```json
+[{"title": "Implement the first part", "description": "The concrete first task"},
+ {"title": "Implement the second part", "description": "The concrete second task"}]
+```
+
+The operator CLI reads this array from `--work-items tasks.json`. Each entry
+requires exactly `title` (1–200 nonblank characters) and `description`
+(1–4000 nonblank characters), both valid UTF-8 without NUL. There are 1–16
+entries; an empty list, unknown fields, per-task scope and dependency waits
+are refused. A supplied list requires resolved intent `create`: explicit
+`none` conflicts, and if trusted-source policy is `none`, explicitly pass
+`--work-item-intent create` (or the tool equivalent) rather than silently
+losing tasks. Omission preserves all existing single-seed/no-work behavior.
+No rationale prose is parsed into tasks.
+
+The complete canonical decision event, **including both task specs and all
+seeds**, must fit `PREVIEW_BYTES` (131072 UTF-8 bytes); individual field limits
+do not guarantee that the aggregate fits. Every spec and every seed storage
+slot is validated before commit. The immutable history event contains
+`work_item_specs` (the ordered input list) and `work_items` (the complete seed
+list), instead of `work_item`. Each task starts `open`, has its own description
+and deterministic ID bound to the exact decision key/revision, complete ordered
+list and position. If the decision states an accepted scope, every task
+inherits that same scope; task-specific scopes are not introduced here.
+
+One atomic immutable event commits the entire group; there are no separately
+committed members or mutable seed index. Before that commit no tasks are
+visible, and afterward all are visible even if the current-decision pointer
+write was interrupted. Retry with the identical ordered list to return the
+original event and repair a missing/stale non-substantive pointer. A changed,
+reordered or omitted list conflicts; a conflicting substantive pointer or a
+missing/tampered manifest member fails closed instead of being repaired.
+Every task read validates the complete manifest. Direct ID lookup scans
+immutable decision events when there is no legacy single-seed event at that ID;
+normal page enumeration reuses the already-read group. Current decision
+projections expose `work_item_ids` for groups; the original submitter's
+`work_item_status` is `{items: [status, ...]}` in declared order, bounded by
+`PREVIEW_BYTES`. Legacy single-item projections retain their existing shape.
+These groups fully resolve legacy coverage and cannot be reconciled as old
+unseeded decisions. This adds no grant, dependency wait, scheduling or FIFO
+change; contingent follow-ups remain a later structured-wait slice.
 
 A substantive `accept`/`modify`/`reject` at the current insight revision prevents
 conflicting further decisions on that revision. An exact keyed replay returns
@@ -127,8 +171,8 @@ pointer repair. Revision CAS, append-only history, and source binding are
 unchanged. Read current state after uncertainty; refusals write no event or
 seed. Existing decision/seed byte bounds and lock/cancellation behavior apply;
 the decision-to-work policy adds no grant or scheduling. Independent task
-creation uses the separate grant below. New `create` decision seeds store the
-exact decision reason as immutable `description` (1–4000 nonblank characters),
+creation uses the separate grant below. New single-seed `create` decisions
+store the exact decision reason as immutable `description` (1–4000 nonblank characters),
 and replay verifies that binding. Existing decision seeds without descriptions
 remain valid and are never upgraded or rewritten; their retries keep the old
 shape and reason bounds.
@@ -713,7 +757,7 @@ models are recorded. Model usage excludes unreported auxiliary billing.
 | `work_items_transition` | Append one CAS-bound status revision; actor is fixed to the role, stale revisions require a fresh read, `done` requires retained passing digest-bound snapshot evidence for the published tree that carries the delivery, which the ledger derives from the workspace it presents, `dropped` requires a reason, and `blocked` may carry a structured wait. An optional scope (1-4000 nonblank characters) states the scope in force from that revision on; omitting it inherits the previous revision's scope, a scope is never cleared, a scope change is its own recorded event with a reason naming what it supersedes, and a `done` closure may not change the scope it inherits (record the change in an earlier transition). Granted only to the example worker role |
 | `work_items_legacy_read` | Read a bounded live event inventory of unresolved/reconciled legacy accept/modify history and explicit no-work dispositions, with origin validity, bounded decision/reconciliation reasons and coverage. Observational; no proposal bodies. Granted only to the example worker; does not imply reconciliation authority |
 | `work_items_reconcile` | Exclusively record one immutable hash-bound open/drop resolution without rewriting decisions. Expected action and optional revision must match; runtime actor and nonblank reason required; open needs title and valid source origin/timestamp, drop has no seed. Exact retries return `created: false` and do not count as progress; conflicts fail closed. Non-observational on first write, forbidden to consult/delegation children, no wrap-up exception. Granted only to the example worker |
-| `decide` | Record a revision-bound accept/modify/defer/reject and rationale, with optional accept/modify work-item intent; accept/modify may also state the accepted scope (1-4000 nonblank characters), which is recorded with the decision and carried by the seeded work item, while defer and reject store no scope; revise after any substantive decision |
+| `decide` | Record a revision-bound accept/modify/defer/reject and rationale, with optional accept/modify work-item intent and explicit 1–16 `work_items` task list (title/description, atomic group, total event ≤131072 bytes); accept/modify may also state the accepted scope (1-4000 nonblank characters), which is recorded with the decision and carried by the seeded work item, while defer and reject store no scope; revise after any substantive decision |
 | `submit_insight` | Submit proposal with route-derived identity |
 | `revise_insight` | Revise one of the role's own proposals under its stable ID (source fixed to the role, bound to the read rev; prior content archived, meaningful change reopens the topic) |
 | `withdraw_insight` | Withdraw one of the role's own proposals as author retraction, not rejection (source fixed to the role, bound to the read rev); a current accept/modify blocks withdrawal by default |

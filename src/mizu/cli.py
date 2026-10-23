@@ -95,6 +95,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--id", help="Proposal ID for read/submit/decide/withdraw")
     p.add_argument("--title", help="Proposal title for submit")
     p.add_argument("--body", type=Path, help="Read Markdown body from this file; '-' reads stdin")
+    p.add_argument("--work-items", type=Path, help="JSON file of 1-16 {title, description} tasks for accept/modify")
     p.add_argument("--work-item-intent", choices=("create", "none"), help="Work disposition for accept/modify; omitted uses source policy")
     p.add_argument("--accepted-scope", default=None, help="Accepted scope for accept/modify decisions (1-4000 nonblank characters)")
     p.add_argument("--decision", help="Decision action for decide (accept/modify/defer/reject)")
@@ -303,6 +304,8 @@ def _parse_wait(spec):
 
 
 def _cmd_insight(config, project, args):
+    if args.work_items is not None and args.action != "decide":
+        raise ConfigError("--work-items applies only to insight decide")
     if args.work_item_intent is not None and args.action != "decide":
         raise ConfigError("--work-item-intent applies only to accept/modify decisions")
     if args.action != "page" and any(getattr(args, key, None) is not None for key in ("scope", "limit", "cursor")):
@@ -341,10 +344,20 @@ def _cmd_insight(config, project, args):
     if args.action == "decide":
         if not args.id or not args.decision:
             raise ConfigError("Insight decide requires --id and --decision")
+        tasks = None
+        if args.work_items is not None:
+            if args.work_items.stat().st_size > PREVIEW_BYTES:
+                raise Denied("Task list file exceeds byte limit")
+            try:
+                tasks = json.loads(args.work_items.read_text(encoding="utf-8"))
+            except (ValueError, UnicodeError):
+                raise ConfigError("--work-items requires a UTF-8 JSON task list") from None
+            if tasks is None:
+                raise ConfigError("--work-items requires a nonempty JSON task list")
         return project.insights.decide(args.id, args.decision, args.reason or "", args.revisit or "", "operator",
                                                  wait=_parse_wait(args.wait),
                                                  expected_rev=args.expected_rev, work_item_intent=args.work_item_intent,
-                                                 scope=args.accepted_scope)
+                                                 scope=args.accepted_scope, work_items=tasks)
     if args.action == "withdraw":
         if not args.id or not args.reason.strip():
             raise ConfigError("Insight withdraw requires --id and --reason")

@@ -6,6 +6,7 @@ import re
 from .config import MAX_WAIT_SECONDS
 from .errors import Denied
 from .fs import READ_PAGE_CHARS, SCRIPT_MAX
+from .work_item_seed import MAX_DECISION_TASKS
 from .work_items import MAX_OPEN_CURSOR_CHARS, MAX_OPEN_PAGE_ROWS, MAX_REVISIONS, STATUSES
 
 #: MCP protocol versions accepted by the capsule and bridge servers.
@@ -125,7 +126,7 @@ DEFINITIONS = {
                    "offset": PAGE_FIELDS["offset"], "limit": {"type": "integer", "minimum": 1, "maximum": 8192}})),
     "search": ("Search configured feeds or the operator's search adapter. Returns results with stated scope and coverage. Continue with result_id and offset/limit instead of query; replay never searches again.",
                obj({"query": text(1000), "result_id": text(64), **PAGE_FIELDS})),
-    "insights": ("List pending proposals, or decided ones by action (accept/modify/defer/reject), or read one proposal by full ID or unique prefix. On an ID read only, the original submitter may also receive a small current work_item_status for a valid accepted/modified work item, including its ID, status, revision, holder, updated time, and origin staleness; other roles and list responses do not receive it. This projection does not transition, schedule, or wake work, and grants no work-item access.",
+    "insights": ("List pending proposals, or decided ones by action (accept/modify/defer/reject), or read one proposal by full ID or unique prefix. On an ID read only, the original submitter may also receive a small current work_item_status for a valid accepted/modified work item, including its ID, status, revision, holder, updated time, and origin staleness; other roles and list responses do not receive it. For explicit task groups work_item_status is {items: [status, ...]} in declared order, bounded by PREVIEW_BYTES; single-item decisions retain their existing status shape. This projection does not transition, schedule, or wake work, and grants no work-item access.",
                  obj({"id": text(64), "action": {"type": "string", "enum": ["accept", "modify", "defer", "reject"]}, **PAGE_FIELDS})),
     "work_items_read": ("Read a bounded page of currently open work items, or inspect one exact seeded item by id in any status with current origin-staleness and immutable ascending revision history including seed revision 1. Open-page mode accepts cursor (max 128 characters) and limit 1-100 (default 25); by-ID mode accepts exclusive after_rev 0-256 (default 0) and limit 1-100 (default 25), and cannot use cursor. Descriptions, when present, are immutable full text in by-ID item/history reads and 1024 UTF-8-byte description_preview with description_truncated in compact open rows. Existing seeds without descriptions remain valid. Each open row is at most 8192 canonical bytes; receipt-pinned CI waits bound the serialized declared check set to 2048 UTF-8 bytes so compact rows remain within this limit. The complete response is at most 1 MiB. By-ID history returns at most 100 full records (each bounded by the 128 KiB record reader) and stops at the row or byte bound but replays and validates the complete chain, up to the 256-revision chain bound; history_total is current rev, cursor echoes after_rev, and next_cursor is the last returned rev when more history remains. Local records are untrusted. Reads are fresh live projections and do not transition items; recognized atomic-write leftovers may be recovered under the shared lock. Unsafe or malformed store data fails closed.",
                         obj({"id": {"type": "string", "minLength": 35, "maxLength": 35,
@@ -174,6 +175,12 @@ DEFINITIONS = {
                "revision and are refused for other actions or unsupported kinds. "
                "Accept/modify optionally take work_item_intent=create|none; omission uses configured trusted-source "
                "policy (global default create). None durably records no work without a seed. "
+               "Optional work_items names 1-16 tasks, each with title (1-200 nonblank characters) and description "
+               "(1-4000 nonblank characters). Tasks require create intent (explicit create if source policy is none); "
+               "an empty list or explicit none is denied. The complete event including specs and seeds is bounded "
+               "to 131072 UTF-8 bytes and committed atomically. Each task inherits the decision scope, starts open, "
+               "and has a deterministic identity bound to the whole ordered task list and exact decision revision. "
+               "Group retries must supply the identical ordered list; omissions or changes conflict. "
                "Conflicting decisions after accept/modify/reject require revise. Exact keyed replays return the original event; "
                "if only its current pointer failed, a matching retry restores it without a second event. Read current state after uncertainty.",
                obj({"id": text(64), "action": {"type": "string", "enum": ["accept", "modify", "defer", "reject"]},
@@ -181,6 +188,10 @@ DEFINITIONS = {
                     "rev": {"type": "integer", "minimum": 1},
                     "wait": WAIT_SCHEMA,
                     "scope": SCOPE_SCHEMA,
+                    "work_items": {"type": "array", "minItems": 1, "maxItems": MAX_DECISION_TASKS,
+                                   "items": obj({"title": {**text(200), "minLength": 1},
+                                                 "description": {**text(4000), "minLength": 1}},
+                                                ("title", "description"))},
                     "work_item_intent": {"type": "string", "enum": ["create", "none"]}},
                    ("id", "action", "reason", "rev"))),
     "submit_insight": ("Submit an immutable proposal. Sender identity is assigned by the runtime, not the model.",

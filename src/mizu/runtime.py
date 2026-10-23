@@ -1446,7 +1446,7 @@ class Context:
                                             args.get("revisit", ""), self.run_dir.name,
                                             wait=args.get("wait"),
                                             expected_rev=args["rev"], work_item_intent=args.get("work_item_intent"),
-                                            scope=args.get("scope"))
+                                            scope=args.get("scope"), work_items=args.get("work_items"))
 
     def _op_submit_insight(self, args: dict) -> dict:
         # Model submissions carry runtime-bound provenance only (source/run);
