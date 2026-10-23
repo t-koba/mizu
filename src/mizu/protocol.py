@@ -252,12 +252,13 @@ DEFINITIONS = {
     "research": ("Replace this role's own current research state record with a full new JSON object state at the read generation; stale generations are refused. Audit evidence lands in research-state.json.",
                obj({"state": text(65536), "expected_generation": {"type": "integer", "minimum": 0}}, ("state", "expected_generation"))),
     "finish": ("End this work unit and release its model slot and workspace lock. Call after all other tools. For a timed external wait on a writable role, use outcome=wait and wait_seconds=N; the host persists the wake deadline instead of keeping a command running. Independent new work may wake the role earlier. With check_job, release_checks optionally lists obsolete subscriptions to cancel at a successful finish; other consumers are preserved. Use outcome=wait and wait_for_check=<id> when no independent work remains; release the unit and resume on completion or new input. 'done' on writable roles requires successful verification. "
-               "next_profile optionally names the recommended profile for the following unit; next_reason needs next_profile. "
+               "ack_events optionally selects delivered decision ack_token values handled by this role; omitted events stay pending. No other event sources use these tokens yet. next_profile optionally names the recommended profile for the following unit; next_reason needs next_profile. "
                "The recommendation binds to the finished task inputs and applies only while fresh, per operator selector rules; no extra model call is spent.",
                obj({"outcome": {"type": "string", "enum": ["continue", "wait", "blocked", "done"]},
                     "summary": text(12000), "state": text(32000),
                     "wait_for_check": text(64),
                     "release_checks": array(text(64), 32),
+                    "ack_events": array(text(64), 512),
                     "wait_seconds": {"type": "integer", "minimum": 1, "maximum": MAX_WAIT_SECONDS},
                     "next_profile": text(63), "next_reason": text(256)},
                    ("outcome", "summary"))),

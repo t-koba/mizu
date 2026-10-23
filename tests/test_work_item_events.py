@@ -7,7 +7,7 @@ import threading
 from contextlib import nullcontext
 from unittest.mock import patch
 
-from support import Fixture, ScriptDriver
+from support import Fixture, ScriptDriver, finish_with_decision_acks
 from mizu import fs, insight_archive, work_item_events as events
 from mizu.cli import execute, parser
 from mizu.config import load
@@ -118,7 +118,7 @@ class WorkItemEventTests(Fixture):
         config = load(self.file)
         self.project.config = config
         self.terminal(source="worker")
-        driver = ScriptDriver()
+        driver = ScriptDriver(finish_with_decision_acks)
         engine = Engine(config, driver=driver)
         for name in ("reviewer", "searcher"):
             role = config.roles[name]

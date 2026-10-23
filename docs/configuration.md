@@ -323,7 +323,7 @@ required). Operator tooling that concatenates configs
 | `event_stream_bytes` | Per-run engine event-stream retention in bytes (1 MiB–256 MiB; default 4 MiB). Bytes past the budget are dropped from `*-events.jsonl` with an explicit `*-events-truncated.json` marker while parsing and the run continue, so diagnostic volume can never discard sealed work. The per-record transport bound stays fixed mechanism |
 | `insight_cursor_ttl_seconds` | Absolute lifetime of `insight page` continuation cursors (60–604,800 seconds; default 86,400). Continuations never extend expiry. Expired cursors fail explicitly; restart enumeration. This is not archive retention |
 | `pending_insights` | Newest pending proposals offered in prompts (1–1,000; default 30). `mizu insight list` uses 1,000 |
-| `decision_events_limit` | Decision events delivered per dispatch per role (1–100; default 10; 100-event cap stays fixed mechanism). With rotation, a role with many deferrals sees each one every N/value runs |
+| `decision_events_limit` | Decision events delivered per dispatch per role (1–100; default 10; 100-event cap stays fixed mechanism). Prompt-size bound only; unacknowledged decisions replay globally oldest-first, including deferrals |
 | `work_item_events_limit` | Terminal work-item events delivered per dispatch per role (1–100; default 10; 100-event cap stays fixed mechanism). Independent of the decision batch: each source uses only its own limit |
 | `session_max_tokens` | Cumulative session tokens at which a resumed persistent session restarts with a fresh session key (0 disables; 0–1,073,741,824; default 0). The published snapshot and composed policy reload on the next unit; Pi accumulates per-run usage into the session record, Codex/Claude reuse their saved cumulative totals, unknown shapes count 0 (age still rotates) |
 | `session_max_cost_usd` | Estimated session cost (USD) at which a resumed persistent session restarts (0 disables; 0–1,000,000; default 0). Cost is the native provider estimate where reported (ADR-005); sessions without cost evidence never rotate on this bound |
@@ -614,6 +614,57 @@ the shared route; for example, `decision_sources = "any"` with
 `work_item_sources = "own"` delivers decisions from anyone but terminal events
 only for this role's findings. `mizu explain` reports the effective routes.
 
+### Decision-event receipts
+
+`finish` optionally accepts `ack_events`, an array of at most 512 strings,
+each at most 64 characters (default omitted, equivalent to `[]`). For this
+slice only `decision_events` rows carry a host-issued opaque `ack_token` in
+both full and delta prompts. Select exactly the handled rows' tokens, e.g.
+`{"outcome":"wait","summary":"Handled one decision","ack_events":["<ack_token>"]}`
+(writers also supply `state`). Role policy, not this field, defines handling.
+
+Tokens bind the consuming role, immutable decision history identity/record and
+exact delivered payload. They are not capabilities obtained by reading history
+or copying untrusted text: finish accepts only tokens delivered to this role in
+this unit. Duplicate, malformed, unknown, foreign and undelivered/stale tokens
+refuse the seal before writing its intent; they never partially acknowledge.
+Topic revision/withdrawal during handling does not invalidate that frozen
+delivery. No outcome, prose summary, or `wait_for_check` implies acknowledgement;
+explicit selections also work when the successful unit waits for a check.
+Work-item, structured-wait, CI and check-job acknowledgement are **unchanged**
+and do not yet use `ack_events`; full-source explicit receipts remain separate
+work.
+
+Only after the durable successful result and, for writers, successful snapshot
+publication does the host write selected exact receipts under
+`decision-receipts/<role>/<token>.json`. An intent alone is not a receipt.
+Atomic per-token receipts are at most 1 KiB, validated fail-closed without
+following links. Exact retries are idempotent and leave existing receipt bytes
+unchanged. Cancellation/failure before completion writes no receipts; a crash
+or I/O failure during receipt writes may replay the remaining decisions, never
+acknowledge an unselected one. Run `decision-events.json`, finish intent and
+result retain delivery and selection evidence. History is immutable. Receipt
+storage grows with distinct handled role/payload identities; no aggregate list
+or timestamp tie window is loaded or truncated. History reads and decision
+payloads are each bounded to 1 MiB; selection uses a heap of at most the
+role-effective limit (fixed maximum 100 rows).
+
+Selection excludes exact receipts, then takes the globally oldest eligible
+rows by timezone-aware timestamp and event ID before the prompt limit, across
+substantive decisions and deferrals. Nothing silently rotates past ignored
+deferrals. `own`/`any` routing and own-source defer ride-along admission stay
+unchanged. Leaving the oldest rows unacknowledged deliberately holds the
+window; use role policy to handle them or subscribe only to needed actions.
+
+**Migration:** legacy `decision-cursors` timestamps, tie IDs and defer offsets
+are ignored for suppression, not converted into receipts: unit completion did
+not prove handling. This can replay previously handled eligible history once;
+superseded, withdrawn and revision-stale history remains ineligible. Missing or
+lost receipts can cause replay. Changed delivered payload (such as attached
+evidence) has a distinct token and can replay even for the same decision.
+There is no claim that this repairs events already removed from history, or
+that explicit decision receipts complete the other event-source families.
+
 Terminal events are validated through the existing WorkItems immutable seed
 and complete current chain, oldest terminal instant first (aware timestamps
 normalized to UTC, then item ID/revision). Dispatch batches are independent per
@@ -622,8 +673,9 @@ else the project default) bounds terminal rows, 1–100 per dispatch, while the
 role-effective `decision_events_limit` bounds only decisions. Either role
 override is 1–100 with `None` meaning inherit; the fixed 100-event mechanism
 cap still applies to both. Choose each batch to fit the role's
-`requests_per_run`: a whole selected batch is acknowledged only after a
-completed run, otherwise it replays. Each terminal row is
+`requests_per_run`: decision rows require explicit per-row receipts (above);
+terminal batches retain completion acknowledgement after a completed run,
+otherwise they replay. Each terminal row is
 at most 8192 canonical bytes, the page at most 1 MiB; title retains the seed's
 200-character bound and reason is a 1024-byte preview with a truncation flag.
 Rows include stable `event: "work_item:<item-id>:<terminal-rev>"`, `source`,

@@ -424,8 +424,12 @@ writes, locks, recovers or deletes. The project is opened with
   subscription settings. Dispatch batches are independent per source: the
   role-effective `work_item_events_limit` bounds terminal delivery while the
   role-effective `decision_events_limit` bounds only decisions (each a role
-  override when set, else the project `[limits]` default). The 10-ID samples
-  here are display bounds on a read-only diagnostic, not dispatch batches. Open, closed and event-delivery pages are
+  override when set, else the project `[limits]` default). Decision rows carry
+  `ack_token`; select only handled decisions in `finish.ack_events`. Finishing
+  alone acknowledges no decisions. Unselected rows replay oldest-first,
+  including deferrals; batch limits bound prompt size, not handling.
+  The 10-ID samples here are display bounds on a read-only diagnostic, not
+  dispatch batches. Open, closed and event-delivery pages are
   individually bounded to 1 MiB (whole document at most 3 MiB plus field names).
   The view is live/non-atomic, not a scheduler verdict. Reading never
   acknowledges, repairs, recovers, rotates or writes a cursor. See

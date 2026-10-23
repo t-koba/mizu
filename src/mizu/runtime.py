@@ -2116,6 +2116,18 @@ class Context:
     def _op_finish(self, args: dict) -> dict:
         if not args["summary"].strip():
             raise Denied("A nonempty work summary is required")
+        tokens = args.get("ack_events", [])
+        delivered = {event["ack_token"]: event for event in self.decision_events}
+        if (not isinstance(tokens, list) or len(tokens) > 512
+                or any(not isinstance(token, str) or len(token) > 64 for token in tokens)
+                or len(set(tokens)) != len(tokens)
+                or any(token not in delivered for token in tokens)):
+            raise Denied("ack_events must select unique decision tokens delivered to this role in this unit")
+        # Recheck the immutable decision binding, not mutable topic state: the
+        # role may have revised/withdrawn a topic as part of handling it.
+        for token in tokens:
+            if self.project.insights._decision_token(self.role.name, delivered[token]) != token:
+                raise Denied("Decision acknowledgement binding changed")
         if args.get('wait_for_check'):
             if 'check_job' not in self.role.capabilities or args['outcome'] != 'wait':
                 raise Denied('Check wait requires check_job and outcome=wait')
@@ -3215,35 +3227,10 @@ def _decision_task(context: Context) -> str | None:
     events = list(getattr(context, "decision_events", []) or [])
     if not events:
         return None
-    try:
-        any_source = getattr(getattr(context, "role", None), "decision_sources", "own") == "any"
-    except Exception:
-        any_source = False
-    substantive = [e for e in events if isinstance(e, dict) and e.get("action") != "defer"]
-    handled = ("A deferral counts as handled only when its topic moves "
-               "(meaningful revision, withdrawal, or a superseding decision); "
-               "an unchanged deferral returns in a later window.")
-    if any_source:
-        if substantive:
-            return (f"Delivered decision events from any source: {len(substantive)} substantive, "
-                    f"{len(events) - len(substantive)} deferral(s). "
-                    "All deliver once and are acknowledged after successful processing. " + handled +
-                    " Handling is defined by the role policy.")
-        return (f"Delivered deferrals from any source: {len(events)} one-shot. "
-                "Each new deferral admits one focused run and is acknowledged after successful "
-                "processing. " + handled +
-                " Handling is defined by the role policy.")
-    if substantive:
-        return (f"Delivered decision events: {len(substantive)} substantive, "
-                f"{len(events) - len(substantive)} deferral(s). "
-                "Substantive events deliver once and are acknowledged after successful "
-                "processing; deferrals ride along when this role runs for other reasons "
-                "and rotate across dispatches. " + handled +
-                " Handling is defined by the role policy.")
-    return (f"Delivered deferrals: {len(events)} ride-along. "
-            "Deferrals ride along when this role runs for other reasons "
-            "and rotate across dispatches. " + handled +
-            " Handling is defined by the role policy.")
+    return (f"Delivered decision events: {len(events)}. "
+            "Select each handled row's ack_token in finish.ack_events; omitted rows "
+            "remain pending oldest-first, including deferrals. Finishing alone "
+            "does not acknowledge decisions. Handling is defined by role policy.")
 
 
 def _open_backlog(context: Context, caps: set) -> dict:
@@ -3875,8 +3862,12 @@ class Engine:
         if sources == "any":
             substantive_events = [e for e in decision_events if isinstance(e, dict)]
         else:
-            substantive_events = [e for e in decision_events
-                                  if isinstance(e, dict) and e.get("action") != "defer"]
+            substantive_events = [e for e in decision_events if e.get("action") != "defer"]
+            if not substantive_events and "defer" in triggers:
+                # A prompt-size window of old deferrals must not suppress a
+                # pending substantive trigger outside that window.
+                substantive_events = project.insights.decision_events(
+                    role_name, tuple(a for a in triggers if a != "defer"), limit=1, sources=sources)
         try:
             ci_present = _ci_due_for(project, self.config, role)
         except Exception:
@@ -4536,10 +4527,11 @@ class Engine:
                                 signals, finished["outcome"],
                                 obligations_digest=context.progress_obligations_digest))
                     write_json(project.root / "observed" / f"{role_name}.json", observed)
-                if context.decision_events and not finished.get("wait_for_check"):
+                if finished.get("ack_events"):
                     with contextlib.suppress(OSError, ValueError, TypeError, AttributeError, Denied):
                         project.insights.acknowledge_decisions(
-                            role_name, context.decision_events,
+                            role_name, [e for e in context.decision_events
+                                        if e["ack_token"] in finished["ack_events"]],
                             sources=getattr(role, "decision_sources", "own") or "own")
                 if context.work_item_events and not finished.get("wait_for_check") and finished.get("outcome") != "bounded" and not context.bound_hit:
                     with contextlib.suppress(OSError, ValueError, TypeError, AttributeError, Denied):
@@ -5030,8 +5022,8 @@ def _role_events_due(project: Project, snapshot: dict, role_name=None) -> bool:
                 sources = getattr(project.config.roles[name], "decision_sources", "own") or "own"
                 if triggers:
                     pending = project.insights.decision_events(
-                        name, triggers, limit=role_decision_events_limit(
-                            project.config, project.config.roles[name]),
+                        name, triggers if sources == "any" else tuple(a for a in triggers if a != "defer"),
+                        limit=1,
                         sources=sources)
                     if sources == "any":
                         if any(isinstance(e, dict) for e in pending):

@@ -2,7 +2,7 @@
 import datetime
 import json
 import unittest
-from support import Fixture, ScriptDriver
+from support import Fixture, ScriptDriver, finish_with_decision_acks
 from mizu.errors import Denied
 from mizu.fs import read_json
 from mizu.runtime import Engine, prompt_for
@@ -74,7 +74,7 @@ class WaitDispatchTests(Fixture):
         roles = dict(self.config.roles)
         roles["reviewer"] = dataclasses.replace(roles["reviewer"], decision_events=("reject",))
         config = dataclasses.replace(self.config, roles=roles)
-        engine = Engine(config, driver=ScriptDriver())
+        engine = Engine(config, driver=ScriptDriver(finish_with_decision_acks))
         engine.run(self.project, "reviewer")
         snap = self.project.snapshots.get()["id"]
         rejected = self.project.insights.submit(source="reviewer", title="First", body="evidence",

@@ -114,3 +114,11 @@ class ScriptDriver:
                 if attempt == context.execution_attempt:
                     context.handle("_request_done", {"sequence": sequence})
         return {"requests": context.request_count, "profile": profile or context.role.profile}
+
+
+def finish_with_decision_acks(context, prompt, profile=None):
+    """Test role explicitly handles every decision in its delivered prompt."""
+    rows = json.loads(prompt)["decision_events"]
+    context.handle("finish", {"outcome": "wait", "summary": "Handled delivered decisions",
+                              "state": "Next step is explicit.",
+                              "ack_events": [row["ack_token"] for row in rows]})

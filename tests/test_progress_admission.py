@@ -108,7 +108,8 @@ class ProgressAdmissionTests(Fixture):
         self.project.snapshots.publish(snapshot)
         return self.project.snapshots.get()
 
-    def _recorded_run(self, callback=None, *, custom_config=None, base=None):
+    def _recorded_run(self, callback=None, *, custom_config=None, base=None,
+                      ack_decisions=False):
         base = base or self._baseline()
         config = custom_config or self.config
         if custom_config is not None:
@@ -117,8 +118,11 @@ class ProgressAdmissionTests(Fixture):
             if callback:
                 callback(ctx, base)
             if ctx.finished is None:
-                ctx.handle("finish", {"outcome": "continue", "summary": "Finished this unit",
-                                      "state": base["state"]})
+                args = {"outcome": "continue", "summary": "Finished this unit",
+                        "state": base["state"]}
+                if ack_decisions:
+                    args["ack_events"] = [event["ack_token"] for event in ctx.decision_events]
+                ctx.handle("finish", args)
         Engine(config, driver=ScriptDriver(run)).run(self.project, "worker")
         return self.project.snapshots.get()
 
@@ -315,7 +319,8 @@ class ProgressAdmissionTests(Fixture):
                 parked = self._parked_snapshot(count=4)
                 due = [{"sha": "red", "check": "offline", "run": "test"}] if kind == "ci" else []
                 with patch("mizu.runtime._ci_due_for", return_value=due):
-                    result = self._recorded_run(base=parked, custom_config=config)
+                    result = self._recorded_run(base=parked, custom_config=config,
+                                                ack_decisions=(kind == "decision"))
                 self.assertTrue(result["progress"]["signals"]["input"])
                 self.assertEqual(result["progress"]["no_progress_count"], 0)
                 self.assertEqual(self.project.insights.due_waits("worker", result), [])
@@ -738,15 +743,17 @@ class ReadOnlyProgressTests(Fixture):
     def cursor(self):
         return read_json(self.project.root / "observed" / "reviewer.json")
 
-    def run_observer(self, callback=None, outcome="continue", **kwargs):
+    def run_observer(self, callback=None, outcome="continue", *, ack_decisions=False, **kwargs):
         def finish(ctx, *_):
             if callback:
                 callback(ctx)
             if outcome == "bounded":
                 ctx.bound_hit = "requests"
-            ctx.handle("finish", {"outcome": "continue" if outcome == "bounded" else outcome,
-                                  "summary": "Observed this unit",
-                                  "state": "Role-local conclusion"})
+            args = {"outcome": "continue" if outcome == "bounded" else outcome,
+                    "summary": "Observed this unit", "state": "Role-local conclusion"}
+            if ack_decisions:
+                args["ack_events"] = [event["ack_token"] for event in ctx.decision_events]
+            ctx.handle("finish", args)
         return Engine(self.config, driver=ScriptDriver(finish)).run(
             self.project, "reviewer", **kwargs)
 
@@ -864,7 +871,7 @@ class ReadOnlyProgressTests(Fixture):
             source="reviewer", title="Finding", body="Evidence",
             base_snapshot=self.project.snapshots.get()["id"])
         self.project.insights.decide(proposal["id"], "reject", "Not material", "", "test", expected_rev=1)
-        self.assertEqual(self.run_observer(event_trigger=True)["status"], "completed")
+        self.assertEqual(self.run_observer(event_trigger=True, ack_decisions=True)["status"], "completed")
         self.assertTrue(self.cursor()["progress"]["signals"]["input"])
         self.assertEqual(self.run_observer()["status"], "completed")
         self.assertFalse(self.cursor()["progress"]["signals"]["input"])

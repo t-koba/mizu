@@ -55,6 +55,8 @@ from .work_item_seed import (make_seed, validate_scope, validate_seed, validate_
                              task_id, task_seeds)
 from .fs import PREVIEW_BYTES, canonical, digest, identifier, lock, now, read_json, safe_read, write_json, mkdir, DIGEST
 
+MAX_DECISION_EVENT_BYTES = 1024 * 1024
+
 
 def _rev_of(record: dict) -> int:
     try:
@@ -1212,217 +1214,137 @@ replacement insight without implying rejected substance.
                 write_json(self.root / "decisions" / f"{insight_id}.json", record)
         return record
 
-    def decision_events(self, role_name: str, actions, *, limit: int = 10, sources: str = "own") -> list:
-        """Collect decision events routed to one role.
+    def _decision_token(self, role_name: str, payload: dict) -> str:
+        """Bind a host token to the role, immutable decision and frozen payload."""
+        identifier(role_name)
+        event = identifier(payload["event"])
+        record = json.loads(safe_read(self.root, f"decision-history/{event}.json", MAX_DECISION_EVENT_BYTES))
+        return digest(canonical({"role": role_name, "decision": record,
+                                 "payload": {k: v for k, v in payload.items() if k != "ack_token"}}))
 
-        Schema: ``actions`` is the role's configured trigger list; ``sources``
-        is ``own`` (default, only this role's findings) or ``any`` (matching
-        actions from any source, so a resolver runs on each new deferral);
-        returns focused payloads, substantive oldest-first then a rotating
-        window of deferrals,
-        ``{event, insight, rev, title, body, action, reason, revisit, decided_at,
-        source, evidence}``
-        (at most ``limit``). ``evidence`` carries the insight's attached
-        entries, so a decision on an evidenced topic reaches its submitter
-        with the evidence included. Bounds: ``limit`` is a positive int capped at
-        100; cursors keep at most 100 tie-window ids plus a defer-rotation
-        offset. Trust: only
-        recorded decisions and inbox state, never model input; routing is
-        ``insight.source == role_name`` in ``own`` mode so one role's rejection never
-        schedules another, or any source in ``any`` mode for an explicitly
-        opted-in resolver (``decision_sources = "any"``). Retry: read-only and idempotent; corrupt
-        records are skipped, never invented. Evidence: the acknowledged
-        cursor lives in ``decision-cursors/<role>.json``; dispatch logs
-        delivered events under the run directory. In ``any`` mode deferrals
-        deliver once like substantive decisions and admit a run (one-shot);
-        in ``own`` mode delivery is substantive
-        decisions (accept/modify/reject) emit once per decision and are
-        acknowledged on successful processing; deferrals ride along when
-        the role runs for other reasons and rotate across dispatches, so
-        an ignored deferral returns in a later window instead of occupying
-        every delivery. A deferral
-        counts as handled only when its topic moves: a meaningful revision
-        (which reopens the topic with no current decision), a withdrawal,
-        or a superseding substantive decision. Truncation keeps substantive
-        delivery lossless: unacknowledged substantive events come before
-        the defer window, oldest-first within each class, so persistent
-        defers fill only the remainder of ``limit`` and never starve a newer
-        substantive event, while rotation keeps every defer reachable
-        instead of pinning the oldest window. A deferral with a registered structured wait still
-        rides along while defer is a subscribed trigger; the wait is an
-        additional one-shot reconsideration signal, not a gate. To gate
-        reconsideration until the condition holds, subscribe to substantive
-        actions only and rely on the wait. Failure: Denied on bad
-        role name or limit; missing inbox, superseded decisions,
-        revision-stale records, and withdrawals never emit (a
-        revision-current withdraw over a rejection means do not
-        reanimate; a later revision reopens the topic through the normal
-        pending list instead).
+    def _decision_received(self, role_name: str, event: dict) -> bool:
+        token = event["ack_token"]
+        parent = self.root / "decision-receipts" / role_name
+        if not insight_archive._directory(parent.parent) or not insight_archive._directory(parent):
+            return False
+        path = parent / f"{token}.json"
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return False
+        try:
+            receipt = json.loads(safe_read(self.root, path.relative_to(self.root).as_posix(), 1024))
+            valid = (isinstance(receipt, dict)
+                     and set(receipt) == {"role", "event", "ack_token", "acknowledged_at"}
+                     and receipt["role"] == role_name and receipt["event"] == event["event"]
+                     and receipt["ack_token"] == token
+                     and dt.datetime.fromisoformat(receipt["acknowledged_at"]).tzinfo is not None)
+        except (ValueError, TypeError, KeyError) as exc:
+            raise Denied("Malformed decision receipt") from exc
+        if not valid:
+            raise Denied("Invalid decision receipt")
+        return True
+
+    def decision_events(self, role_name: str, actions, *, limit: int = 10, sources: str = "own") -> list:
+        """Return globally oldest eligible, unreceived decisions (timestamp/id).
+
+        Legacy completion cursors prove no handling and are ignored. Exact
+        receipts are role/payload-bound, never watermarks. A bounded heap keeps
+        at most limit rows (1..100); each history/payload read is at most 1 MiB.
+        Own-source deferrals still only ride along; no rotation acknowledges
+        them. Superseded, withdrawn and revision-stale decisions never emit.
+        Unsafe stores/receipts fail closed. History is never rewritten.
         """
         identifier(role_name)
-        if type(limit) is not int or limit < 1 or limit > 100:
+        if type(limit) is not int or not 1 <= limit <= 100:
             raise Denied("Decision event limit must be an integer in [1, 100]")
         if sources not in ("own", "any"):
             raise Denied("Decision event sources must be own or any")
-        any_source = (sources == "any")
         wanted = {a for a in (actions or ()) if isinstance(a, str)} - {"withdraw"}
-        if not wanted:
-            return []
-        cursor_path = self.root / "decision-cursors" / f"{role_name}.json"
-        try:
-            cursor = read_json(cursor_path, {})
-        except (OSError, ValueError, TypeError, AttributeError):
-            cursor = {}
-        ack_at = cursor.get("acknowledged_at") if isinstance(cursor, dict) else ""
-        if not isinstance(ack_at, str):
-            ack_at = ""
-        acked = cursor.get("acknowledged") if isinstance(cursor, dict) else []
-        acked = set(acked) if isinstance(acked, list) else set()
         history = self.root / "decision-history"
-        candidates = []
-        if history.is_dir() and not history.is_symlink():
+        if not wanted or not insight_archive._directory(history):
+            return []
+
+        def eligible():
             for path in history.glob("*.json"):
-                if path.is_symlink():
-                    continue
-                try:
-                    record = read_json(path, {})
-                except (OSError, ValueError, TypeError, AttributeError):
-                    continue
+                identifier(path.stem)
+                record = json.loads(safe_read(self.root, f"decision-history/{path.name}", MAX_DECISION_EVENT_BYTES))
                 if not isinstance(record, dict):
-                    continue
+                    raise Denied("Malformed decision history")
                 if record.get("action") not in wanted:
                     continue
-                created = record.get("created_at")
-                if not isinstance(created, str) or not created:
+                try:
+                    created = dt.datetime.fromisoformat(record["created_at"])
+                    if created.tzinfo is None:
+                        raise ValueError("naive timestamp")
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise Denied("Invalid decision timestamp") from exc
+                try:
+                    current = self.read(record.get("id", ""))
+                except (Denied, OSError, ValueError, TypeError, AttributeError):
                     continue
-                if (record.get("action") != "defer" or any_source) and (
-                        created < ack_at or (created == ack_at and path.stem in acked)):
+                if sources == "own" and current.get("source") != role_name:
                     continue
-                candidates.append((created, path.stem, record))
-        # Substantive delivery stays lossless under truncation: the defer
-        # window must fill only the remainder of ``limit``, never starve a
-        # newer substantive event behind older defers, and must rotate so
-        # newer defers are reachable instead of pinned behind the oldest.
-        candidates.sort(key=lambda item: (item[0], item[1]))
-        substantive_raw = [c for c in candidates if c[2].get("action") != "defer"]
-        defer_raw = [c for c in candidates if c[2].get("action") == "defer"]
-        try:
-            offset = 0
-            if isinstance(cursor, dict):
-                raw_offset = cursor.get("defer_offset", 0)
-                if type(raw_offset) is int and raw_offset >= 0:
-                    offset = raw_offset
-        except (TypeError, ValueError, AttributeError):
-            offset = 0
-        ordered_raw = list(substantive_raw) + list(defer_raw)
-        pending = []
-        substantive: list = []
-        defers: list = []
-        for created, stem, record in ordered_raw:
-            try:
-                current = self.read(record.get("id", ""))
-            except (Denied, OSError, ValueError, TypeError, AttributeError):
-                continue
-            if not any_source and current.get("source") != role_name:
-                continue
-            rev = _rev_of(current)
-            if not isinstance(record.get("rev"), int) or record["rev"] != rev:
-                continue
-            raw = self.root / "decisions" / f"{current['id']}.json"
-            try:
-                effective = _effective_decision(rev, None if raw.is_symlink() else read_json(raw))
-            except (OSError, ValueError, TypeError, AttributeError):
-                continue
-            if effective != record:
-                continue
-            evidence = current.get("evidence") if isinstance(current.get("evidence"), list) else []
-            payload = {"event": stem, "insight": current["id"], "rev": rev,
-                       "title": current.get("title", ""), "body": current.get("body", ""),
-                       "action": record.get("action"), "reason": record.get("reason", ""),
-                       "revisit": record.get("revisit", ""),
-                       "decided_at": created, "source": current.get("source", ""),
-                       "evidence": evidence}
-            if record.get("action") == "defer":
-                defers.append(payload)
-            else:
-                substantive.append(payload)
-        if any_source:
-            pending.extend(substantive[:limit])
-            room = limit - len(pending)
-            if room > 0 and defers:
-                pending.extend(defers[:room])
-            return pending
-        pending.extend(substantive[:limit])
-        room = limit - len(pending)
-        if room > 0 and defers:
-            if len(defers) <= room:
-                pending.extend(defers)
-            else:
-                start = offset % len(defers)
-                for i in range(room):
-                    pending.append(defers[(start + i) % len(defers)])
-        return pending
+                rev = _rev_of(current)
+                if type(record.get("rev")) is not int or record["rev"] != rev:
+                    continue
+                raw = self.root / "decisions" / f"{current['id']}.json"
+                effective = _effective_decision(rev, json.loads(safe_read(
+                    self.root, raw.relative_to(self.root).as_posix(), MAX_DECISION_EVENT_BYTES)))
+                if effective != record:
+                    continue
+                payload = {"event": path.stem, "insight": current["id"], "rev": rev,
+                           "title": current.get("title", ""), "body": current.get("body", ""),
+                           "action": record["action"], "reason": record.get("reason", ""),
+                           "revisit": record.get("revisit", ""),
+                           "decided_at": record["created_at"], "source": current.get("source", ""),
+                           "evidence": current.get("evidence", [])}
+                if len(canonical(payload)) > MAX_DECISION_EVENT_BYTES:
+                    raise LimitExceeded("Decision event exceeds payload byte bound")
+                payload["ack_token"] = self._decision_token(role_name, payload)
+                if not self._decision_received(role_name, payload):
+                    yield created, path.stem, payload
 
-    def acknowledge_decisions(self, role_name: str, events, *, sources: str = "own") -> dict:
-        """Advance one role's decision-event cursor over delivered events.
+        return [row for _, _, row in heapq.nsmallest(limit, eligible(), key=lambda e: (e[0], e[1]))]
 
-        Schema: ``events`` are payloads from ``decision_events``; ``sources``
-        is ``own`` (default) or ``any`` matching the delivery call. Trust:
-        called only after successful processing, so busy/budget/restart
-        redelivers instead of losing work (the defer window does not
-        advance in ``own`` mode). In ``own`` mode substantive payloads advance
-        the acknowledged cursor while defer payloads advance the rotation
-        offset so the next dispatch shows the next window; in ``any`` mode
-        deferrals deliver once like substantive decisions and advance the
-        acknowledged cursor instead of the rotation offset. Retry: idempotent
-        and forward only; an empty delivery leaves the cursor untouched.
-        Evidence: the cursor file records ``acknowledged_at`` plus the tie-window
-        ids at that timestamp and ``defer_offset``. Failure: Denied on bad role
-        name or sources.
+    def acknowledge_decisions(self, role_name: str, events, *, sources: str = "own") -> None:
+        """Host-only exact receipts after durable successful finish/publication.
+
+        Runtime selects only tokens delivered in this unit. Validate the entire
+        frozen batch against immutable history before writing; topic movement
+        during handling does not invalidate the delivered decision. Atomic
+        per-token files bound each read/write to 1 KiB, with no lossy tie window
+        or unbounded aggregate. I/O failure causes replay; exact retries no-op.
         """
         identifier(role_name)
         if sources not in ("own", "any"):
             raise Denied("Decision event sources must be own or any")
-        any_source = (sources == "any")
-        delivered = [e for e in (events or []) if isinstance(e, dict)
-                     and isinstance(e.get("decided_at"), str) and isinstance(e.get("event"), str)
-                     and e.get("action") != "defer"]
-        deferred = [e for e in (events or []) if isinstance(e, dict)
-                    and isinstance(e.get("decided_at"), str) and isinstance(e.get("event"), str)
-                    and e.get("action") == "defer"]
-        if any_source:
-            # One-shot deferral delivery: fold deferrals into the acknowledged
-            # cursor so a handled deferral never re-admits.
-            delivered = delivered + deferred
-            deferred = []
-        if not delivered and not deferred:
-            return self.decision_cursor(role_name)
-        cursor = self.decision_cursor(role_name)
-        if delivered:
-            ack_at = max([cursor.get("acknowledged_at") or ""] + [e["decided_at"] for e in delivered])
-            acked = {e["event"] for e in delivered if e["decided_at"] == ack_at}
-            if cursor.get("acknowledged_at") == ack_at and isinstance(cursor.get("acknowledged"), list):
-                acked |= set(cursor["acknowledged"])
-            if len(acked) > 100:
-                acked = set(sorted(acked)[-100:])
-        else:
-            ack_at = cursor.get("acknowledged_at") or ""
-            acked = set(cursor.get("acknowledged") or [])
-        try:
-            offset = cursor.get("defer_offset", 0)
-            if type(offset) is not int or offset < 0:
-                offset = 0
-        except (TypeError, ValueError, AttributeError):
-            offset = 0
-        offset += len(deferred)
-        record = {"role": role_name, "acknowledged_at": ack_at,
-                  "acknowledged": sorted(acked), "defer_offset": offset, "updated_at": now()}
-        mkdir(self.root / "decision-cursors")
-        write_json(self.root / "decision-cursors" / f"{role_name}.json", record)
-        return record
+        if not isinstance(events, list) or len(events) > 512:
+            raise Denied("Invalid decision receipt batch")
+        tokens = set()
+        for event in events:
+            if (not isinstance(event, dict) or not isinstance(event.get("ack_token"), str)
+                    or not DIGEST.fullmatch(event["ack_token"])
+                    or event["ack_token"] in tokens
+                    or (sources == "own" and event.get("source") != role_name)
+                    or self._decision_token(role_name, event) != event["ack_token"]):
+                raise Denied("Invalid decision acknowledgement")
+            tokens.add(event["ack_token"])
+        for event in events:
+            if self._decision_received(role_name, event):
+                continue
+            path = self.root / "decision-receipts" / role_name / f"{event['ack_token']}.json"
+            mkdir(path.parent)
+            receipt = {"role": role_name, "event": event["event"],
+                       "ack_token": event["ack_token"], "acknowledged_at": now()}
+            try:
+                write_json(path, receipt, exclusive=True)
+            except (FileExistsError, Denied):
+                if not self._decision_received(role_name, event):
+                    raise
 
     def decision_cursor(self, role_name: str) -> dict:
-        """Return one role's acknowledged decision-event cursor (never raises)."""
+        """Read legacy cursor for diagnostics only; never used to suppress delivery."""
         try:
             identifier(role_name)
             cursor = read_json(self.root / "decision-cursors" / f"{role_name}.json", {})

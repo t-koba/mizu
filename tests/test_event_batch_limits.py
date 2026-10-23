@@ -3,14 +3,14 @@
 Decision batches and terminal work-item batches are independent: each
 dispatch uses the role-effective decision limit only for decisions and
 the role-effective work-item limit only for terminal events. Both stay
-under the fixed 100-event mechanism cap, and selection keeps its
-all-or-nothing acknowledgement behavior per source.
+under the fixed 100-event mechanism cap. Decision receipts require explicit
+selection; terminal receipts retain their existing completion behavior.
 """
 import dataclasses
 import re
 import unittest
 
-from support import Fixture, ScriptDriver
+from support import Fixture, ScriptDriver, finish_with_decision_acks
 from mizu import work_item_events as events
 from mizu.config import (
     load,
@@ -122,7 +122,7 @@ class EventBatchLimitTests(Fixture):
             self.drop(serial=serial)
         config = self.subscribed(decision_events_limit=1, work_item_events_limit=2)
         self.project.config = config
-        driver = ScriptDriver()
+        driver = ScriptDriver(finish_with_decision_acks)
         result = Engine(config, driver=driver).run(
             self.project, "reviewer", event_trigger=True)
         self.assertEqual(result["status"], "completed")
@@ -137,7 +137,7 @@ class EventBatchLimitTests(Fixture):
         self.assertEqual(events.pending(
             self.project.work_items, "reviewer", ("done", "dropped"))["pending"], 1)
         # Draining continues with the same independent windows.
-        second = Engine(config, driver=ScriptDriver()).run(
+        second = Engine(config, driver=ScriptDriver(finish_with_decision_acks)).run(
             self.project, "reviewer", event_trigger=True)
         self.assertEqual(second["status"], "completed")
         self.assertEqual(len(self.project.insights.decision_events("reviewer", ("reject",))), 1)
@@ -154,7 +154,7 @@ class EventBatchLimitTests(Fixture):
                                       work_item_events_limit=1)
         config = dataclasses.replace(self.subscribed(), limits=limited)
         self.project.config = config
-        driver = ScriptDriver()
+        driver = ScriptDriver(finish_with_decision_acks)
         result = Engine(config, driver=driver).run(
             self.project, "reviewer", event_trigger=True)
         self.assertEqual(result["status"], "completed")
@@ -175,7 +175,7 @@ class EventBatchLimitTests(Fixture):
         self.assertEqual(len(self.project.insights.decision_events("reviewer", ("reject",))), 1)
         self.assertEqual(events.pending(
             self.project.work_items, "reviewer", ("done", "dropped"))["pending"], 1)
-        admitted = Engine(config, driver=ScriptDriver()).run(
+        admitted = Engine(config, driver=ScriptDriver(finish_with_decision_acks)).run(
             self.project, "reviewer", event_trigger=True)
         self.assertEqual(admitted["status"], "completed")
         self.assertEqual(self.project.insights.decision_events("reviewer", ("reject",)), [])

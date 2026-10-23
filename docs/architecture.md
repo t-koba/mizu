@@ -782,23 +782,27 @@ finding plus the reason as a `decision_events` field inside the role's ordinary 
 (all other granted inputs stay present), described factually by a `decision_task` field,
 records the admission and the
 delivered events under the run directory (sized by the role-effective
-`decision_events_limit`, independent of the terminal batch), and advances a per-role acknowledged
-cursor over substantive outcomes only after successful processing, so pause, budget,
-concurrency, and restart keep their authority and nothing is lost or repeated.
-Withdrawn or superseded decisions never emit, and a substantive decision never lands on a
-withdrawn revision. Substantive delivery is one-shot per decision; a deferral rides
-along when the role runs for other reasons and rotates across dispatches while still
-current, whatever its age against the cursor, and counts as handled only when its
-topic moves (revision, withdrawal, or a superseding decision). In `own` mode a deferral alone never
-admits a run: event-triggered and unchanged-code dispatch exit unless a substantive
-event or due wait is pending, so standing deferrals cost a cheap skip rather than a
-model run. Truncation keeps substantive delivery lossless: unacknowledged substantive events
-come before the rotating defer window, oldest-first within each class, so every deferral
-stays reachable instead of pinning the oldest window. A deferral with a
-registered structured wait still rides along while defer is a subscribed trigger; to gate
-reconsideration until the condition holds, subscribe to substantive actions only and rely
-on the wait. The prompt describes delivered kinds factually (substantive counts, ride-along deferral counts, and what counts as handled), so an unchanged deferral returning in a
-later window instead of vanishing is visible without directing behaviour; handling is defined by the role policy. The revisit
+`decision_events_limit`, independent of the terminal batch). Each delivered
+row includes a role/payload-bound opaque `ack_token`. Only tokens explicitly
+selected in `finish.ack_events` become exact per-role receipts after the durable
+successful finish (and publication for writers); finish outcome, summary and
+check waits never imply decision acknowledgement. Omitted rows replay globally
+oldest-first (aware timestamp, event ID), before the prompt limit. There is no
+defer rotation or timestamp watermark. Legacy completion cursors are ignored:
+eligible history conservatively replays because old finishes prove no handling.
+Withdrawn, superseded and revision-stale decisions never emit; history is never
+rewritten. See [the receipt contract](configuration.md#decision-event-receipts)
+for bounds, retry and migration limitations.
+
+In `own` mode a deferral alone still never admits a run: event-triggered and
+unchanged-code dispatch exit unless a substantive event or due wait is pending.
+A deferral rides along when the role runs for other reasons, pending until
+explicitly acknowledged or its topic moves out of eligibility. Admission checks
+substantive pending decisions independently of the prompt-size window, so older
+deferrals cannot hide a substantive admission trigger. The delivered window is
+nevertheless globally oldest-first; role policy defines handling, not mechanism.
+A registered structured wait is an additional reconsideration signal, not a gate
+on delivery; subscribe to substantive actions only to gate on the wait. The revisit
 prose is never parsed as an executable condition. A deferral may instead
 register one structured wait (``deadline``, ``code_change``,
 ``insight_decided``, or ``dependency``) through the decision interface; the wait binds to the
@@ -883,10 +887,10 @@ revision archives prior entries with the old rev and starts the new rev empty.
 No non-submitter revise grant exists: ownership never moves.
 A resolver role may opt into cross-source `decision_events` with
 `decision_sources = "any"` next to `decision_events = ["defer"]` (unset keeps
-own-source delivery): matching deferrals from any source then deliver once and
-admit one focused run each, acknowledged after successful processing, so the
+own-source delivery): matching deferrals from any source remain pending and
+admit focused runs until explicitly acknowledged through `finish.ack_events`, so the
 resolver runs on each new deferral instead of on a clock. Own-source deferrals
-keep ride-along rotation and never admit alone. The operator configures which
+keep ride-along delivery and never admit alone. The operator configures which
 role subscribes, to which actions, and its schedule/model/policy; the submitter
 owns its topic and takes it back at its next scheduled run when nothing resolved
 it. Keeping scheduled resolution opt-in avoids routine polling when explicit

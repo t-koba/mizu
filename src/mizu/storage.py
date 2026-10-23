@@ -37,7 +37,7 @@ from .snapshot import open_store
 MEMBERS = (
     "project.toml", "PROJECT.md", "control.json", "current.json", "snapshots", "objects",
     "inbox", "insight-ids", "insight-revisions", "insight-archive.sqlite3", "histories", ".ingest", "decisions",
-    "decision-history", "decision-cursors", "work-items", "work-item-receipts", "waits", "runs", "sessions",
+    "decision-history", "decision-cursors", "decision-receipts", "work-items", "work-item-receipts", "waits", "runs", "sessions",
     "evidence", "artifacts", "health", "observed", "maintenance", "spool", "selection",
 )
 
