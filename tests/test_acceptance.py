@@ -10,7 +10,7 @@ from support import Fixture
 from test_check_jobs import FakeSandbox
 from mizu import acceptance, check_jobs, storage
 from mizu.errors import Denied, LimitExceeded
-from mizu.fs import canonical, held, write_json
+from mizu.fs import canonical, digest, held, write_json
 from mizu.project import Project
 from mizu.runtime import prompt_for, prompt_delta_for
 
@@ -124,6 +124,33 @@ class AcceptanceTests(Fixture):
         self.configure(mounts=())
         self.configure(reuse=False)
         self.assertIsNone(acceptance.effective(self.project, ctx.snapshot))
+
+    def test_config_legal_empty_commands_cannot_project(self):
+        from mizu.selection import work_inputs
+        ctx, _, _ = self.produce()
+        settings = self.project.root / 'project.toml'
+        original = settings.read_text()
+        for commands in ([''], ['true', '']):
+            with self.subTest(commands=commands):
+                settings.write_text(original.replace(
+                    'verify = ' + json.dumps(list(self.project.verify)),
+                    'verify = ' + json.dumps(commands)))
+                project = Project(self.config, self.project.name)
+                self.assertEqual(project.verify, tuple(commands))
+                self.assertIsNone(acceptance.scope(project))
+                self.assertIsNone(acceptance.effective(project, ctx.snapshot))
+                self.assertIsNone(project.status()['effective_verification'])
+                value = work_inputs(project, ctx.role, ctx.snapshot,
+                    {'max_proposals': 1, 'max_decisions': 1, 'max_text_bytes': 512})
+                self.assertFalse(value['evidence']['snapshot']['verified'])
+                self.assertIsNone(value['evidence']['snapshot']['retained_verification'])
+
+    def test_scope_does_not_hide_environment_or_execution_failures(self):
+        for function in ('environment', 'execution_key'):
+            with self.subTest(function=function), patch(
+                    'mizu.check_jobs.' + function, side_effect=Denied('computation failed')):
+                with self.assertRaisesRegex(Denied, 'computation failed'):
+                    acceptance.scope(self.project)
 
     def test_unbound_and_custom_jobs_never_mint(self):
         for kind in ('experiment', 'exec'):
@@ -355,6 +382,60 @@ class AcceptanceTests(Fixture):
         path.unlink()
         with self.assertRaises(Denied):
             acceptance.audit(self.project.root)
+
+    def test_digest_consistent_invalid_stored_scope_still_refuses(self):
+        from mizu.selection import work_inputs
+        ctx, _, proof = self.produce()
+        receipt = acceptance.get(self.project.root, proof['receipt_id'])
+        index = next((self.project.root / 'evidence/acceptance/index').glob('*/*.json'))
+        for commands in ([''], ['true', '']):
+            with self.subTest(commands=commands):
+                value = {**receipt, 'scope': {**receipt['scope'], 'commands': commands}}
+                raw = canonical(value)
+                receipt_id = digest(raw)
+                path = self.object_path(receipt_id)
+                path.write_bytes(raw)
+                write_json(index, {'schema': 1, 'receipt_id': receipt_id})
+                index_raw = index.read_bytes()
+                readers = (
+                    lambda: acceptance.get(self.project.root, receipt_id),
+                    lambda: acceptance.effective(self.project, ctx.snapshot),
+                    self.project.status,
+                    lambda: work_inputs(self.project, ctx.role, ctx.snapshot,
+                        {'max_proposals': 1, 'max_decisions': 1, 'max_text_bytes': 512}),
+                    lambda: acceptance.audit(self.project.root),
+                )
+                for reader in readers:
+                    # The filename matches the bytes: scope validation, not
+                    # a receipt identity/hash mismatch, must refuse these.
+                    with self.assertRaisesRegex(Denied, 'Invalid acceptance scope'):
+                        reader()
+                    self.assertEqual(path.read_bytes(), raw)
+                    self.assertEqual(index.read_bytes(), index_raw)
+                path.unlink()
+
+    def test_malformed_stored_index_still_refuses_projection(self):
+        from mizu.selection import work_inputs
+        ctx, _, proof = self.produce()
+        path = self.object_path(proof['receipt_id'])
+        raw = path.read_bytes()
+        index = next((self.project.root / 'evidence/acceptance/index').glob('*/*.json'))
+        for invalid in (b'not json', b'{}', canonical(
+                {'schema': True, 'receipt_id': proof['receipt_id']})):
+            with self.subTest(invalid=invalid):
+                index.write_bytes(invalid)
+                # Exact-ID access does not use the index or hide its corruption.
+                self.assertEqual(acceptance.get(self.project.root, proof['receipt_id']), json.loads(raw))
+                for reader in (
+                        lambda: acceptance.effective(self.project, ctx.snapshot),
+                        self.project.status,
+                        lambda: work_inputs(self.project, ctx.role, ctx.snapshot,
+                            {'max_proposals': 1, 'max_decisions': 1, 'max_text_bytes': 512}),
+                        lambda: acceptance.audit(self.project.root)):
+                    with self.assertRaises(Denied):
+                        reader()
+                    self.assertEqual(path.read_bytes(), raw)
+                    self.assertEqual(index.read_bytes(), invalid)
 
     def test_unsafe_receipt_and_parent_paths_fail_closed(self):
         ctx, job, proof = self.produce()

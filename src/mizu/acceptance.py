@@ -67,7 +67,11 @@ def scope(project):
         return None
     value = {'commands': list(project.verify), 'execution': execution_key(project.config),
              'environment': env, 'image': project.config.sandbox.image}
-    return value if len(canonical(value)) <= MAX_BYTES // 2 else None
+    try:
+        _scope(value)
+    except Denied:
+        return None  # Fresh unrepresentable inputs cannot select retained proof.
+    return value
 
 
 def _scope(value):
