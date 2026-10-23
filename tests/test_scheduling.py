@@ -17,7 +17,7 @@ from mizu.scheduling import (
 def _daemon(**overrides):
     base = {
         "armed": True, "paused": False, "draining": False,
-        "goal_changed": False, "operator_woke": False, "ready_work": False, "ci_wait_due": False, "outcome": "continue",
+        "goal_changed": False, "operator_woke": False, "ready_work_changed": False, "ci_wait_due": False, "outcome": "continue",
         "inbox_changed": False, "routed_events_due": False, "ci_due": False,
         "wait_expired": False, "progress_admits": True,
     }
@@ -53,8 +53,8 @@ class DaemonEvaluatorTests(unittest.TestCase):
         self.assertEqual((decision.ready, decision.needed), (None, "operator_woke"))
         facts = dataclasses.replace(facts, operator_woke=False)
         decision = evaluate_daemon(facts)
-        self.assertEqual((decision.ready, decision.needed), (None, "ready_work"))
-        facts = dataclasses.replace(facts, ready_work=False)
+        self.assertEqual((decision.ready, decision.needed), (None, "ready_work_changed"))
+        facts = dataclasses.replace(facts, ready_work_changed=False)
         decision = evaluate_daemon(facts)
         self.assertEqual((decision.ready, decision.needed), (None, "ci_wait_due"))
         facts = dataclasses.replace(facts, ci_wait_due=False)
@@ -76,9 +76,9 @@ class DaemonEvaluatorTests(unittest.TestCase):
         decision = evaluate_daemon(facts)
         self.assertEqual((decision.ready, decision.needed), (None, "progress_admits"))
 
-    def test_ready_work_precedes_outcomes_but_not_control_or_explicit_wakes(self):
+    def test_ready_work_changed_precedes_outcomes_but_not_control_or_explicit_wakes(self):
         for outcome in ("done", "wait", "continue", "bounded"):
-            facts = _daemon(ready_work=True, outcome=outcome, progress_admits=False)
+            facts = _daemon(ready_work_changed=True, outcome=outcome, progress_admits=False)
             self.assertEqual(evaluate(facts).reason, "ready_work")
             self.assertTrue(evaluate(facts).ready)
             for gates in ({"armed": False}, {"paused": True}, {"draining": True}):
@@ -175,13 +175,13 @@ class DispatchEvaluatorTests(unittest.TestCase):
         self.assertEqual(evaluate(_dispatch(event_trigger=True, explicit_wake=True)).skipped,
                          "no-event")
 
-    def test_role_eligible_ready_work_admits(self):
+    def test_role_eligible_ready_work_changed_admits(self):
         for event_trigger in (False, True):
-            facts = _dispatch(ready_work=True, code_unchanged=True, on_change=True,
+            facts = _dispatch(ready_work_changed=True, code_unchanged=True, on_change=True,
                               event_trigger=event_trigger)
             result = evaluate(facts)
             self.assertEqual((result.admitted, result.admission), (True, "ready_work"))
-        self.assertEqual(evaluate(_dispatch(ready_work=True,
+        self.assertEqual(evaluate(_dispatch(ready_work_changed=True,
                          has_work_item=True, event_trigger=True)).admission, "work_item")
 
     def test_event_trigger_treats_unobserved_code_change_as_event(self):

@@ -837,6 +837,9 @@ class ReadOnlyProgressTests(Fixture):
         self.assertEqual(self.cursor()["wake_generation_digest"], digest(b""))
         self.project.work_items.transition(item["id"], expected_rev=1, actor="reviewer",
                                            status="dropped", reason="Test task settled")
+        # Removal is a ready-set event, not a malformed control wake.
+        self.assertEqual(self.run_observer(outcome="wait", event_trigger=True)["status"], "completed")
+        self.assertFalse(self.cursor()["progress"]["signals"]["input"])
         self.assertEqual(self.run_observer(event_trigger=True)["skipped"], "no-event")
 
     def test_invalid_observer_progress_cannot_self_admit(self):

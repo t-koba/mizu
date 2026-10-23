@@ -161,8 +161,9 @@ class ReadyWorkTests(Fixture):
         self.assertEqual(self.project.snapshots.get()["id"], before)
         self.project.work_items.transition(opened["id"], expected_rev=1,
                                            status="doing", actor="reviewer")
-        self.assertEqual(engine.run(self.project, "reviewer", event_trigger=True)["status"], "completed")
-        self.assertTrue(should_run(self.project, self.project.snapshots.get(), role_name="reviewer"))
+        # Claiming the same ID changes no membership and creates no ready event.
+        self.assertEqual(engine.run(self.project, "reviewer", event_trigger=True)["skipped"], "no-event")
+        self.assertFalse(should_run(self.project, self.project.snapshots.get(), role_name="reviewer"))
         ctx = self.context("reviewer")
         self.assertEqual(ctx.role.workspace, "read")
         self.assertNotEqual(ctx.workspace, self.project.workspace)
@@ -271,3 +272,222 @@ class SatisfiedWorkWaitTests(Fixture):
         (self.project.workspace / 'changed.txt').write_text('changed\n')
         self.parked('done')
         self.assertEqual(self.project.work_items.page_ready()['total'], 1)
+
+
+class ReadySetChangeTests(Fixture):
+    item = ReadyWorkTests.item
+    parked = ReadyWorkTests.parked
+
+    def engine(self, callback=None):
+        self.config.roles['worker'] = dataclasses.replace(self.config.roles['worker'], on_change=True)
+        return Engine(self.config, driver=ScriptDriver(callback))
+
+    def signature(self, role='worker', limit=1):
+        return self.project.work_items.page_ready(limit=limit, role_name=role)['signature']
+
+    def test_wait_with_unchanged_ready_work_parks_both_dispatch_paths(self):
+        self.item('persistent')
+        engine = self.engine()
+        self.assertEqual(engine.run(self.project, 'worker')['status'], 'completed')
+        snapshot = self.project.snapshots.get()
+        self.assertEqual(snapshot['progress']['schema'], 3)
+        self.assertEqual(snapshot['progress']['ready_work_signature'], self.signature())
+        self.assertTrue(self.project.status()['idle_with_open_work']['ready_work'])
+        for _ in range(3):
+            self.assertFalse(should_run(self.project, snapshot, role_name='worker'))
+            self.assertEqual(engine.run(self.project, 'worker')['skipped'], 'unchanged')
+            self.assertEqual(engine.run(self.project, 'worker', event_trigger=True)['skipped'], 'no-event')
+        # Independent run wait expiry is not suppressed by stable ready work.
+        expired = {**snapshot, 'wake_at': 1}
+        self.assertTrue(should_run(self.project, expired, current_time=2, role_name='worker'))
+        self.project.set_control(wake_generation='new-operator-input')
+        self.assertTrue(should_run(self.project, snapshot, role_name='worker'))
+        self.assertEqual(engine.run(self.project, 'worker')['status'], 'completed')
+        self.assertFalse(should_run(self.project, self.project.snapshots.get(), role_name='worker'))
+
+    def test_add_remove_and_equal_total_replacement_beyond_prompt_limit(self):
+        self.config = dataclasses.replace(self.config, limits=dataclasses.replace(
+            self.config.limits, work_items_prompt=1))
+        self.project.config = self.config
+        items = [self.item(f'offscreen-{i}') for i in range(3)]
+        engine = self.engine()
+        engine.run(self.project, 'worker')
+        original = json.loads(engine.driver.calls[-1][1])['ready_work']
+        old_signature = self.signature()
+        self.project.work_items.transition(items[-1]['id'], expected_rev=1, actor='worker',
+                                           status='dropped', reason='Replaced candidate')
+        self.item('replacement')
+        page = self.project.work_items.page_ready(limit=1, role_name='worker')
+        self.assertEqual(page['total'], original['total'])
+        self.assertEqual(page['items'][0]['id'], original['items'][0]['id'])
+        self.assertNotEqual(self.signature(), old_signature)
+        self.assertTrue(should_run(self.project, self.project.snapshots.get(), role_name='worker'))
+        self.assertEqual(engine.run(self.project, 'worker', event_trigger=True)['status'], 'completed')
+        extra = self.item('addition')
+        self.assertTrue(should_run(self.project, self.project.snapshots.get(), role_name='worker'))
+        self.assertEqual(engine.run(self.project, 'worker')['status'], 'completed')
+        self.project.work_items.transition(extra['id'], expected_rev=1, actor='worker',
+                                           status='dropped', reason='Removed candidate')
+        self.assertTrue(should_run(self.project, self.project.snapshots.get(), role_name='worker'))
+        self.assertEqual(engine.run(self.project, 'worker', event_trigger=True)['status'], 'completed')
+        self.assertFalse(should_run(self.project, self.project.snapshots.get(), role_name='worker'))
+
+    def test_removal_to_empty_wakes_once(self):
+        item = self.item('last')
+        engine = self.engine()
+        engine.run(self.project, 'worker')
+        self.project.work_items.transition(item['id'], expected_rev=1, actor='worker',
+                                           status='blocked', reason='Needs reassessment')
+        self.assertTrue(should_run(self.project, self.project.snapshots.get(), role_name='worker'))
+        engine.run(self.project, 'worker', event_trigger=True)
+        self.assertFalse(should_run(self.project, self.project.snapshots.get(), role_name='worker'))
+        self.assertEqual(engine.run(self.project, 'worker', event_trigger=True)['skipped'], 'no-event')
+
+    def test_new_ready_item_during_unit_is_not_consumed_at_finish(self):
+        self.item('offered')
+        before = self.signature()
+        engine = self.engine(lambda *_: self.item('arrived-during-run'))
+        engine.run(self.project, 'worker')
+        snapshot = self.project.snapshots.get()
+        self.assertEqual(snapshot['progress']['ready_work_signature'], before)
+        self.assertNotEqual(before, self.signature())
+        self.assertTrue(snapshot['progress']['ready_work'])
+        self.assertTrue(should_run(self.project, snapshot, role_name='worker'))
+        engine.driver = ScriptDriver()
+        self.assertEqual(engine.run(self.project, 'worker', event_trigger=True)['status'], 'completed')
+        self.assertFalse(should_run(self.project, self.project.snapshots.get(), role_name='worker'))
+
+    def test_blocked_wait_satisfaction_changes_membership_without_transition(self):
+        blocked = self.item('waiting', 'blocked',
+                            {'kind': 'deadline', 'at': '2099-01-01T00:00:00+00:00'})
+        engine = self.engine()
+        engine.run(self.project, 'worker')
+        snapshot = self.project.snapshots.get()
+        self.assertFalse(should_run(self.project, snapshot, role_name='worker'))
+        # Controlled wait fact, no clock sleeps or ledger transition.
+        with patch.object(self.project.insights, '_wait_due', return_value=True):
+            self.assertTrue(should_run(self.project, snapshot, role_name='worker'))
+            self.assertEqual(engine.run(self.project, 'worker', event_trigger=True)['status'], 'completed')
+            self.assertFalse(should_run(self.project, self.project.snapshots.get(), role_name='worker'))
+        self.assertEqual(self.project.work_items.get(blocked['id'])['rev'], 2)
+
+    def test_full_and_delta_inputs_capture_same_role_scoped_signature(self):
+        self.item('other-held', 'doing')
+        own = self.item('claimable')
+        ctx = self.context('reviewer')
+        for build in (lambda: prompt_for(ctx), lambda: prompt_delta_for(ctx, [])):
+            page = json.loads(build())['ready_work']
+            self.assertEqual([r['id'] for r in page['items']], [own['id']])
+            self.assertEqual(ctx.ready_work_signature, self.signature('reviewer'))
+            self.assertNotEqual(ctx.ready_work_signature, self.signature('worker'))
+
+    def test_unnamed_diagnostic_does_not_invent_a_change_for_empty_or_equal_sets(self):
+        engine = self.engine()
+        engine.run(self.project, 'worker')
+        self.assertFalse(should_run(self.project, self.project.snapshots.get()))
+        self.item('same-aggregate-and-worker-set')
+        engine.run(self.project, 'worker')
+        self.assertFalse(should_run(self.project, self.project.snapshots.get()))
+
+    def test_legacy_migration_empty_and_nonempty(self):
+        from mizu.runtime import _ready_work_changed
+        role = self.config.roles['worker']
+        base = self.parked('wait')
+        v1 = base['progress']
+        v2 = {**v1, 'schema': 2, 'ready_work': False}
+        for progress in (None, v1, v2):
+            record = {**base, 'progress': progress}
+            self.assertFalse(_ready_work_changed(self.project, record, role))
+        self.item('new-to-legacy')
+        for progress in (None, v1, v2):
+            self.assertTrue(_ready_work_changed(self.project, {**base, 'progress': progress}, role))
+        engine = self.engine()
+        engine.run(self.project, 'worker')
+        snapshot = self.project.snapshots.get()
+        self.assertEqual(snapshot['progress']['schema'], 3)
+        self.assertFalse(_ready_work_changed(self.project, snapshot, role))
+        # Invalid evidence closes, never reinterpreted as permissive legacy.
+        for bad in ({}, {**snapshot['progress'], 'ready_work_signature': 'bad'}):
+            self.assertFalse(_ready_work_changed(self.project, {'progress': bad}, role))
+
+    def test_signature_schema_validation_and_projection(self):
+        from mizu.snapshot import progress_projection, validate_progress
+        self.engine().run(self.project, 'worker')
+        progress = self.project.snapshots.get()['progress']
+        self.assertEqual(progress_projection(progress)['ready_work_signature'], self.signature())
+        for bad in ('', 'a' * 65, 'A' * 64, 1, [], {}):
+            with self.subTest(bad=bad), self.assertRaises(Denied):
+                validate_progress({**progress, 'ready_work_signature': bad})
+        validate_progress({**progress, 'ready_work_signature': None})
+        with self.assertRaises(Denied):
+            validate_progress({k: v for k, v in progress.items() if k != 'ready_work_signature'})
+
+    def test_unchanged_ready_work_respects_no_progress_backoff(self):
+        self.item('persistent-backoff')
+        self.config = dataclasses.replace(self.config, limits=dataclasses.replace(
+            self.config.limits, no_progress_backoff_seconds=60))
+        self.project.config = self.config
+        def finish(ctx, *_):
+            ctx.handle('finish', {'outcome': 'continue', 'summary': 'Observed only',
+                                  'state': 'An ordinary free-text rewrite'})
+        engine = self.engine(finish)
+        engine.run(self.project, 'worker')  # initial input is progress
+        engine.run(self.project, 'worker')  # unchanged input is not progress
+        snapshot = self.project.snapshots.get()
+        self.assertFalse(snapshot['progress']['has_progress'])
+        self.assertEqual(snapshot['progress']['no_progress_count'], 1)
+        stamp = dt.datetime.fromisoformat(snapshot['progress']['recorded_at']).timestamp()
+        self.assertFalse(should_run(self.project, snapshot, current_time=stamp + 59,
+                                    role_name='worker'))
+        self.assertTrue(should_run(self.project, snapshot, current_time=stamp + 61,
+                                   role_name='worker'))
+        self.assertEqual(engine.run(self.project, 'worker')['skipped'], 'unchanged')
+        self.assertEqual(engine.run(self.project, 'worker', event_trigger=True)['skipped'], 'no-event')
+
+    def test_observer_records_offered_signature_not_work_arriving_during_run(self):
+        role = self.config.roles['reviewer']
+        self.config.roles['reviewer'] = dataclasses.replace(
+            role, capabilities=(*role.capabilities, 'work_items_transition'))
+        before = self.signature('reviewer')
+        engine = Engine(self.config, driver=ScriptDriver(lambda *_: self.item('observer-new')))
+        engine.run(self.project, 'reviewer')
+        cursor = read_json(self.project.root / 'observed' / 'reviewer.json')
+        self.assertEqual(cursor['progress']['ready_work_signature'], before)
+        snapshot = self.project.snapshots.get()
+        self.assertTrue(should_run(self.project, snapshot, role_name='reviewer'))
+        engine.driver = ScriptDriver()
+        self.assertEqual(engine.run(self.project, 'reviewer', event_trigger=True)['status'], 'completed')
+        self.assertFalse(should_run(self.project, snapshot, role_name='reviewer'))
+
+    def test_fingerprint_scan_memory_output_and_order_are_bounded(self):
+        import tracemalloc
+        store = self.project.work_items
+        seed = self.item('template')
+        view = {'item': seed, 'current_origin_rev': None, 'stale': False, 'redecision': None}
+
+        def scan(count, reverse=False, limit=1):
+            indices = range(count - 1, -1, -1) if reverse else range(count)
+            events = ((f'{i:032x}', {'id': f'wi_{i:032x}'}) for i in indices)
+            with patch.object(store, '_iter_item_events', return_value=events), \
+                 patch.object(store, '_seed_for_event', new=lambda _, event, **kw: ('seed', event)), \
+                 patch.object(store, '_build_projection', new=lambda item_id, **kw: {
+                     **view, 'item': {**seed, 'id': item_id}}):
+                tracemalloc.start()
+                try:
+                    page = store._page_open_impl(cursor=None, limit=limit, readonly=True,
+                                                 ready_only=True, role_name='worker')
+                    peak = tracemalloc.get_traced_memory()[1]
+                finally:
+                    tracemalloc.stop()
+            return page, peak
+
+        small, small_peak = scan(10)
+        large, large_peak = scan(5000)
+        reordered, _ = scan(5000, reverse=True, limit=2)
+        self.assertEqual(large['signature'], reordered['signature'])
+        self.assertNotEqual(small['signature'], large['signature'])
+        self.assertEqual(len(large['signature']), 64)
+        self.assertEqual(len(large['items']), 1)
+        self.assertLess(len(json.dumps(large)), 8192)
+        # One heap row plus fixed-size accumulator, not retained IDs/hashes.
+        self.assertLess(large_peak - small_peak, 128 * 1024)

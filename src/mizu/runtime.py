@@ -265,6 +265,33 @@ def _has_ready_work(project, role=None) -> bool:
         return False
 
 
+def _ready_work_changed(project, record, role=None) -> bool:
+    """Compare full role-eligible membership to the input actually delivered.
+
+    Current store/read or malformed progress errors close. Valid legacy records
+    (or an undelivered input) admit nonempty sets once; empty legacy sets do not
+    manufacture an event. The progress role and fingerprint scope prevent an
+    observer from consuming another role's ready-work signal.
+    """
+    if role is not None and "work_items_transition" not in role.capabilities:
+        return False
+    try:
+        previous = record.get("progress")
+        if previous is not None:
+            validate_progress(previous)
+        page = project.work_items.page_ready(
+            limit=1, **({"role_name": role.name} if role is not None else {}))
+        signature = page["signature"]
+        if not isinstance(signature, str) or not DIGEST.fullmatch(signature):
+            return False
+        if (previous is None or previous.get("ready_work_signature") is None
+                or role is not None and previous["role"] != role.name):
+            return page["total"] > 0
+        return signature != previous["ready_work_signature"]
+    except Exception:
+        return False
+
+
 # Saturating display bound, not an admission/aging policy.
 MAX_READY_WORK_AGE_SECONDS = 2 ** 31 - 1
 
@@ -285,7 +312,11 @@ def _ready_work_age(updated_at, current_time):
 
 def _ready_work_projection(context):
     """Independent bounded ready page, never inferred from the general page."""
-    page = context.project.work_items.page_ready(limit=context.config.limits.work_items_prompt)
+    page = context.project.work_items.page_ready(
+        limit=context.config.limits.work_items_prompt, role_name=context.role.name)
+    # Capture the same locked scan that supplies the full/delta input, never
+    # the finish-time inventory: concurrent new work must remain unconsumed.
+    context.ready_work_signature = page["signature"]
     current_time = time.time()
     return {"items": [{**{key: row[key] for key in
                         ("id", "title", "status", "stale", "redecision", "updated_at")},
@@ -3884,7 +3915,8 @@ class Engine:
                           or role.decision_events or role.work_item_events)
         unscheduled = not bool(role.daemon or role.interval_seconds or role.calendar)
         has_code_event = bool(role.on_change and unscheduled and not code_unchanged)
-        ready_work = ((not event_trigger or autonomous) and _has_ready_work(project, role))
+        ready_work_changed = ((not event_trigger or autonomous) and _ready_work_changed(
+            project, snapshot if role.workspace == "write" else cursor, role))
         # Only publishers consume snapshot-wide generations. Observers consume
         # operator wakes independently, even when no new code is published.
         wake_base = snapshot if role.workspace == "write" else cursor
@@ -3897,7 +3929,7 @@ class Engine:
                 has_code_event=bool(has_code_event),
                 operator_woke=operator_woke and role.workspace != "write",
                 explicit_wake=operator_woke and role.workspace != "write",
-                ready_work=ready_work,
+                ready_work_changed=ready_work_changed,
                 has_decision=bool(substantive_events),
                 has_work_item=bool(terminal_events),
                 has_wait=bool(wait_events or check_jobs.pending(project, role_name)),
@@ -3929,7 +3961,7 @@ class Engine:
             code_unchanged=bool(code_unchanged),
             has_code_event=bool(has_code_event),
             explicit_wake=bool(explicit_wake),
-            ready_work=ready_work,
+            ready_work_changed=ready_work_changed,
             has_decision=bool(substantive_events),
             has_work_item=bool(terminal_events),
             has_wait=bool(wait_events or check_jobs.pending(project, role_name)),
@@ -4439,13 +4471,14 @@ class Engine:
                     # diagnostic fails closed without blocking publication.
                     try:
                         ready_work_at_finish = bool(
-                            project.work_items.page_ready(limit=1)["items"])
+                            project.work_items.page_ready(limit=1, role_name=role_name)["items"])
                     except (Denied, OSError):
                         ready_work_at_finish = None
                     progress = _progress_record(context.snapshot, role_name, selected_progress,
                                                observed_progress, finished["outcome"],
                                                obligations_digest=context.progress_obligations_digest,
-                                               ready_work=ready_work_at_finish)
+                                               ready_work=ready_work_at_finish,
+                                               ready_work_signature=getattr(context, "ready_work_signature", None))
                     snapshot = project.snapshots.create(
                         captured, goal=context.goal, state=finished["state"], run=run_id,
                         outcome=finished["outcome"], summary=finished["summary"], verification=verification,
@@ -4525,7 +4558,9 @@ class Engine:
                             progress=_progress_record(
                                 role_cursor, role_name, tuple(role_progress_signals(self.config, role)),
                                 signals, finished["outcome"],
-                                obligations_digest=context.progress_obligations_digest))
+                                obligations_digest=context.progress_obligations_digest,
+                                ready_work=None,
+                                ready_work_signature=getattr(context, "ready_work_signature", None)))
                     write_json(project.root / "observed" / f"{role_name}.json", observed)
                 if finished.get("ack_events"):
                     with contextlib.suppress(OSError, ValueError, TypeError, AttributeError, Denied):
@@ -5057,20 +5092,23 @@ def _progress_obligations_digest(obligations) -> str:
 
 
 #: Sentinel for _progress_record callers that carry no ready-work observation.
-#: Omission keeps the legacy schema-1 record; writer completion always passes
-#: an explicit True/False/None and produces schema 2.
+#: Omission keeps legacy shapes for direct callers; run completion supplies
+#: the prompt-bound signature explicitly and produces schema 3.
 _READY_WORK_UNSET: object = object()
 
 
 def _progress_record(snapshot: dict, role_name: str, selected: tuple[str, ...],
                     signals: dict[str, bool], outcome: str, *, obligations_digest: str | None = None,
-                    ready_work: bool | None | object = _READY_WORK_UNSET) -> dict:
+                    ready_work: bool | None | object = _READY_WORK_UNSET,
+                    ready_work_signature: str | None | object = _READY_WORK_UNSET) -> dict:
     """Build compact unit evidence and its bounded consecutive no-progress count.
 
     ``ready_work`` is the bounded ``page_ready(limit=1)`` existence probe
     taken at writer run completion (True/False) or None when that probe was
     unreadable. An explicit value produces a schema-2 record; omission keeps
     the legacy schema-1 shape for direct callers without an observation.
+    An explicit ready_work_signature produces schema 3, binding admission to
+    the ready set shown in the unit input rather than the finish-time probe.
     """
     has_progress = any(signals[name] for name in selected)
     previous = snapshot.get("progress")
@@ -5092,6 +5130,8 @@ def _progress_record(snapshot: dict, role_name: str, selected: tuple[str, ...],
         # sufficient to preserve the parked disposition without unbounded growth.
         count = min(101, previous_count + 1)
     obligations_digest = obligations_digest or _progress_obligations_digest(())
+    if ready_work_signature is not _READY_WORK_UNSET and ready_work is _READY_WORK_UNSET:
+        ready_work = None
     if ready_work is _READY_WORK_UNSET:
         record = {"schema": 1, "signals": {name: bool(signals.get(name, False))
                                             for name in PROGRESS_SIGNALS},
@@ -5109,6 +5149,8 @@ def _progress_record(snapshot: dict, role_name: str, selected: tuple[str, ...],
               "obligations_digest": obligations_digest,
               "recorded_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="microseconds"),
               "ready_work": ready_work}
+    if ready_work_signature is not _READY_WORK_UNSET:
+        record.update(schema=3, ready_work_signature=ready_work_signature)
     return validate_progress(record)
 
 
@@ -5142,8 +5184,9 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
             value = not observer and digest(project.goal.encode()) != snapshot["goal_digest"]
         elif needed == "operator_woke":
             value = _operator_woke(control, role_record, observer=observer)
-        elif needed == "ready_work":
-            value = ((role_name is None or role is not None) and _has_ready_work(project, role))
+        elif needed == "ready_work_changed":
+            value = ((role_name is None or role is not None)
+                     and _ready_work_changed(project, role_record, role))
         elif needed == "ci_wait_due":
             names = [role_name] if role_name in project.roles else [
                 name for name in project.roles

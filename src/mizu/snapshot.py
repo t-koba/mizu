@@ -42,26 +42,33 @@ def validate_progress(value: dict) -> dict:
     Schema 1 is the original no-progress record without any ready-work
     observation. Schema 2 adds ``ready_work`` (True/False for the bounded
     ``page_ready(limit=1)`` existence probe taken at writer run completion,
-    None when that probe was unreadable). Both schemas stay readable; only
-    schema 2 carries the recorded idle observation.
+    None when that probe was unreadable). Schema 3 also records the full
+    role-eligible ready-set ``ready_work_signature`` at the prompt boundary
+    (64 lowercase hex, or None if no input was delivered). Legacy schemas stay
+    readable; their missing signature never hides nonempty current ready work.
     """
     fields_v1 = {"schema", "signals", "selected", "role", "has_progress",
               "no_progress_count", "obligations_digest", "recorded_at"}
     fields_v2 = fields_v1 | {"ready_work"}
+    fields_v3 = fields_v2 | {"ready_work_signature"}
     if not isinstance(value, dict):
         raise Denied("Invalid snapshot progress record")
     schema = value.get("schema")
-    if type(schema) is not int or schema not in (1, 2):
+    if type(schema) is not int or schema not in (1, 2, 3):
         raise Denied("Invalid snapshot progress schema")
     if schema == 1:
         if set(value) != fields_v1:
             raise Denied("Invalid snapshot progress record")
     else:
-        if set(value) != fields_v2:
+        if set(value) != (fields_v2 if schema == 2 else fields_v3):
             raise Denied("Invalid snapshot progress record")
         ready = value.get("ready_work")
         if ready is not None and type(ready) is not bool:
             raise Denied("Invalid snapshot ready-work observation")
+    if schema == 3:
+        signature = value["ready_work_signature"]
+        if signature is not None and (not isinstance(signature, str) or not DIGEST.fullmatch(signature)):
+            raise Denied("Invalid snapshot ready-work signature")
     signals = value["signals"]
     if (not isinstance(signals, dict) or set(signals) != set(PROGRESS_SIGNALS)
             or any(type(signals[name]) is not bool for name in PROGRESS_SIGNALS)):
@@ -116,8 +123,10 @@ def progress_projection(value: dict | None) -> dict | None:
                  "has_progress": value["has_progress"],
                  "no_progress_count": value["no_progress_count"],
                  "recorded_at": value["recorded_at"]}
-    if value["schema"] == 2:
+    if value["schema"] >= 2:
         projected["ready_work"] = value["ready_work"]
+    if value["schema"] == 3:
+        projected["ready_work_signature"] = value["ready_work_signature"]
     return projected
 
 

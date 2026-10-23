@@ -23,7 +23,7 @@ from pathlib import Path
 from . import insight_archive
 from .work_item_waits import stored_wait
 from .errors import Denied, LimitExceeded
-from .fs import (DIGEST, PREVIEW_BYTES, canonical, identifier, lock, now, safe_read,
+from .fs import (DIGEST, PREVIEW_BYTES, canonical, digest, identifier, lock, now, safe_read,
                  sync_dir, text_preview, write_json)
 from .insights import _decision_key, _validate_keyed_substantive_event
 from .platform import IS_WINDOWS
@@ -1414,7 +1414,11 @@ class WorkItems:
 
         Same bounds, ordering, recovery, lock and fail-closed contract as
         page_open. Filter before selection/counting, scanning the ledger with
-        O(limit) retained rows: blocked rows cannot hide ready work. No state
+        O(limit) retained rows: blocked rows cannot hide ready work. ``signature``
+        is a fixed 64-hex fingerprint of the full eligible ID set (not just the
+        selected page), after role filtering. It is independent of scan order,
+        row metadata and limit, with constant extra memory. It is change
+        detection evidence, not authorization or a collision-free set proof. No state
         transitions are performed. With role_name, only unheld open items
         and that role's held doing/blocked items are eligible. Authorization
         to transition is checked by the caller. Satisfied generic waits re-enter
@@ -1558,6 +1562,7 @@ class WorkItems:
         total = 0
         eligible = 0
         unseeded_decisions = 0
+        ready_sum = 0
         for event_id, event in events:
             kind, seed = self._seed_for_event(event_id, event, readonly=readonly)
             if kind == "skip":
@@ -1588,6 +1593,12 @@ class WorkItems:
                         continue
                 elif item.get("wait") is not None:
                     continue
+            if ready_only:
+                # Order-independent set fingerprint: unique seeded IDs, no sort
+                # or retained ID list. Domain-separated SHA-256 leaves summed
+                # modulo 2**256, then hashed with scope and cardinality.
+                ready_sum = (ready_sum + int(digest(
+                    b"ready-item-v1\0" + item["id"].encode()), 16)) % (1 << 256)
             total += 1
             sort_key, row = self._open_row(item, view)
             if cursor_key is not None and sort_key <= cursor_key:
@@ -1606,6 +1617,9 @@ class WorkItems:
                   "overflow_count": overflow_count, "truncated": more,
                   "unseeded_decisions": unseeded_decisions,
                   "coverage_complete": unseeded_decisions == 0}
+        if ready_only:
+            result["signature"] = digest(canonical(
+                ["ready-set-v1", total, f"{ready_sum:064x}"]))
         if len(canonical(result)) > MAX_OPEN_PAGE_BYTES:
             raise LimitExceeded("Work-item page exceeds byte bound")
         return result

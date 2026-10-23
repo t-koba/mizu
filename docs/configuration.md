@@ -170,7 +170,16 @@ projections expose `work_item_ids` for groups; the original submitter's
 These groups fully resolve legacy coverage and cannot be reconciled as old
 unseeded decisions. Existing wait re-evaluation makes satisfied unheld blocked
 tasks claimable by any transition-capable role; held blocked tasks remain
-ready only for their holder. Unsatisfied waits are not ready. This adds no
+ready only for their holder. Unsatisfied waits are not ready. Admission compares the full role-eligible ID
+set to the set shown in the last unit input, using a bounded fingerprint from
+the existing locked ledger scan (progress schema 3). Persistent unchanged ready
+work is not a recurring wake: a writer `wait` parks, while ID additions,
+removals/replacements and wait satisfaction wake. The signature is captured
+with the full/delta prompt, not at finish, so new work during a run remains
+pending. Legacy missing signatures admit nonempty sets for reassessment;
+empty sets do not manufacture an event. Existing no-progress backoff and
+independent control/input/CI/wait signals are unchanged; see
+[scheduling](scheduling.md#wake-sources-versus-delivered-inputs). This adds no
 grant, actor/assignee input, condition vocabulary or FIFO change.
 
 A substantive `accept`/`modify`/`reject` at the current insight revision prevents
@@ -401,7 +410,7 @@ An unacknowledged decision event routed to the role (`decision_events` in
 `own` mode, or any-source matches with `decision_sources = "any"` delivering
 once and admitting even deferrals), a terminal work-item event routed by
 `work_item_sources`, a due structured wait, a red on the configured CI wake set
-for a role with `ci_wake`, or ready work is a distinct admission reason that
+for a role with `ci_wake`, or a changed ready-work ID set is a distinct admission reason that
 unchanged-code suppression must not swallow. Ready work is role-scoped: a role
 needs `work_items_transition`, and may claim an unheld `open` item or continue
 its own held `doing`/due `blocked` item; another role's held work does not qualify.

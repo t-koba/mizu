@@ -44,18 +44,43 @@ no file trigger and instead renders a bounded poll task invoking
 
 `should_run` (`src/mizu/runtime.py`) is the writer-daemon readiness gate. It
 first rejects unarmed/paused/draining control, then checks changed goal
-digest and operator wake-generation, then an independent ready-work read.
+digest and operator wake-generation, then an independent ready-set change read.
 Ready work for a named role requires the `work_items_transition` capability.
 It means an unheld `open` item the role can claim, or a `doing` item held by
 that role, with no structured wait. Satisfied blocked waits below are ready
 for their holder, or claimable by any transition-capable role when unheld.
-Another role's held work never admits it. Such eligible work admits the writer
+Another role's held work never admits it. A changed eligible ID set admits the writer
 even after `done`, an unexpired run-level `wait`, or a no-progress park. This
 is independent of terminal-event subscriptions, but filtered by role/holder
 before page selection and counting. Unnamed diagnostic callers retain the
 aggregate project view. Workspace mode is not a readiness capability.
+
+Ready work is a change signal, not standing admission. The existing locked
+full-ledger scan computes a fixed 64-hex fingerprint of **all** eligible IDs,
+including rows beyond the prompt limit. Unique domain-separated SHA-256 ID
+hashes are summed modulo 2**256, then hashed with cardinality; the validated progress role binds the comparison,
+scan order, metadata changes, prompt size and equal totals cannot substitute
+for membership. This probabilistic fingerprint is change evidence, not an
+authorization or collision-free set proof, and retains constant extra memory.
+Full and resumed/delta inputs capture that scan's signature when the ready
+projection is built. Successful writer snapshots and observer completion
+cursors store it in validated progress schema 3 as `ready_work_signature`
+(64 lowercase hex, or null for no delivered input). Finish-time `ready_work`
+remains the separate True/False/null idle diagnostic, not an admission cursor.
+Work added or becoming ready during execution therefore remains new input.
+
+An unchanged set after `wait` parks until independent input, wait expiry or
+another genuine wake; unchanged ready work does not bypass the existing
+no-progress allowance/backoff for `continue`/`bounded`. Additions, removals
+(including the last item), replacements with equal totals, and blocked-wait
+satisfaction change membership and wake once after delivery. Claiming the same
+ID or rewriting its metadata does not. Legacy schema 1/2 or absent signatures
+admit nonempty current sets for reassessment, but empty sets create no event.
+Malformed progress or unreadable current ledgers fail closed for this signal;
+control/goal/operator short-circuit behavior and other wake sources are unchanged.
+No mutable index, ordering policy or new configuration is added.
 Next, unacknowledged receipt-pinned CI wait evidence admits only its current
-blocked holder (daemon reason `ci_wait`), including after `done`. Without ready
+blocked holder (daemon reason `ci_wait`), including after `done`. Without changed ready
 work or that evidence, `done` still ignores inbox, routed events, general CI,
 `wake_at` and progress; a changed goal or operator wake continues to admit it.
 For other outcomes, it checks inbox generation; role-routed decision/terminal
@@ -90,7 +115,7 @@ Scheduled timer dispatches are plain one-shot runs: `mizu run` without
 Event-triggered dispatch (`mizu run --event`, invoked by the platform file
 triggers or the recovery/poll triggers below) admits on a substantive decision event, a
 terminal `work_item_events` row, a due structured wait, a due CI red for that
-role, role-eligible ready work, an unconsumed role-cursored operator wake
+role, a changed role-eligible ready set, an unconsumed role-cursored operator wake
 for a read-only role, or an unobserved code change for an
 `on_change` role, and otherwise exits with `skipped: no-event` before
 allocating a run directory or any model use. The code-change event carries
@@ -99,7 +124,7 @@ whose code snapshot is already observed, `Engine.run` otherwise skips
 unchanged-code dispatch unless there is a substantive decision, terminal
 event, due wait, or due CI red.
 The snapshot-publishing role additionally bypasses that skip for changed goal,
-inbox generation or prior-wait expiry. Operator wake, role-eligible ready work
+inbox generation or prior-wait expiry. Operator wake, changed role-eligible ready work
 and role-specific progress self-admission bypass it independently of workspace
 mode. Read-only roles never inherit goal/inbox/run-wait generations or the
 publisher's progress. Event probes still exclude generic goal/inbox/run-wait
@@ -147,7 +172,7 @@ this slice changes on-change dispatch, not schedule modes or spacing.
 ### Bounded ready-work input
 
 Both full and delta prompts always include `ready_work`, independently of the
-ordinary `open_work_items` page. It has `items`, `total`, `overflow_count`,
+ordinary `open_work_items` page, filtered by the receiving role/holder. It has `items`, `total`, `overflow_count`,
 `truncated`, `unseeded_decisions`, and `coverage_complete`. Each item contains
 `id`, `title`, `status`, `stale`, `redecision`, ledger `updated_at`, and
 `age_seconds`: time since the latest work-item ledger update (normally creation
@@ -214,7 +239,7 @@ active only when the published snapshot's outcome is `wait` or `continue`
 with a no-progress record (`has_progress` false) while the ready-work
 observation recorded at writer run completion is true. That observation is
 one bounded existence probe (`page_ready(limit=1)`) taken before the run's
-snapshot is created and stored immutably in the schema-2 progress record
+snapshot is created and stored immutably in the progress record (schema 2 or 3)
 (`ready_work` True/False, or null when the probe was unreadable at finish);
 `open`/`doing`, or a `blocked` item whose structured wait is satisfied,
 counts as ready. `done` and `bounded` never count, progress
@@ -225,7 +250,7 @@ run with its own observation moves it. Read-only runs create no snapshot and
 never move it.
 
 The durable record is the published snapshot itself (outcome plus progress
-with the schema-2 `ready_work` observation); no new durable file or lock is
+with the schema-2/3 `ready_work` observation); no new durable file or lock is
 introduced, so immutable snapshots, FIFO order, lock semantics, transitions,
 no-progress recovery and publication contracts are unchanged. The recorded
 value carries no work-item ids, titles or descriptions — only existence. A

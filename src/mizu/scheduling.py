@@ -34,7 +34,8 @@ class DaemonFacts:
     # evaluator returns which fact to collect, preserving short-circuit I/O.
     goal_changed: bool | None = None
     operator_woke: bool | None = None
-    ready_work: bool | None = None
+    # Full role-eligible ID set differs from the last delivered unit input.
+    ready_work_changed: bool | None = None
     ci_wait_due: bool | None = None
     outcome: str | None = None
     inbox_changed: bool | None = None
@@ -71,7 +72,7 @@ class DispatchFacts:
     has_code_event: bool = False
     has_decision: bool = False
     has_work_item: bool = False
-    ready_work: bool = False
+    ready_work_changed: bool = False
     has_wait: bool = False
     has_ci: bool = False
     # Runtime normalizes role-consumable wakes. A role-cursored operator
@@ -91,7 +92,7 @@ class DispatchDecision:
 
 def _has_event(facts: DispatchFacts) -> bool:
     return bool(facts.has_decision or facts.has_work_item or facts.has_wait or facts.has_ci
-                or facts.ready_work or (facts.event_trigger and facts.operator_woke))
+                or facts.ready_work_changed or (facts.event_trigger and facts.operator_woke))
 
 
 def _event_label(facts: DispatchFacts) -> str:
@@ -120,9 +121,9 @@ def evaluate_daemon(facts: DaemonFacts) -> DaemonDecision:
         return DaemonDecision(ready=None, reason="collecting", needed="operator_woke")
     if facts.operator_woke:
         return DaemonDecision(ready=True, reason="operator")
-    if facts.ready_work is None:
-        return DaemonDecision(ready=None, reason="collecting", needed="ready_work")
-    if facts.ready_work:
+    if facts.ready_work_changed is None:
+        return DaemonDecision(ready=None, reason="collecting", needed="ready_work_changed")
+    if facts.ready_work_changed:
         return DaemonDecision(ready=True, reason="ready_work")
     if facts.ci_wait_due is None:
         return DaemonDecision(ready=None, reason="collecting", needed="ci_wait_due")
@@ -131,7 +132,7 @@ def evaluate_daemon(facts: DaemonFacts) -> DaemonDecision:
     if facts.outcome is None:
         return DaemonDecision(ready=None, reason="collecting", needed="outcome")
     if facts.outcome == "done":
-        # Without ready work, a completed objective ignores inbox/events/CI/wait/progress.
+        # Without changed ready work, a completed objective ignores inbox/events/CI/wait/progress.
         return DaemonDecision(ready=False, reason="done")
     if facts.inbox_changed is None:
         return DaemonDecision(ready=None, reason="collecting", needed="inbox_changed")
