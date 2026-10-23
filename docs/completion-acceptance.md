@@ -39,7 +39,7 @@ OpenHands/Aider/Mizuの名称だけで包括的優位性を判定しません。
 
 ## ローカルで完了する検査と外部環境の境界
 
-Writerの検証はコードダイジェストと最終スナップショットの表現可能性に結び付きます。ダイジェストや表現可能性が変わらない別コマンドの実行では失効せず、コード変更または表現不能項目があれば `done` を拒否します。work-itemの `done` は引き続き、保持された公開スナップショットに埋め込まれた、そのダイジェストに結び付く検証を要求します。さらに台帳は作業空間が提示する木（配信された変更を含む木）を自ら導出し、`done` はその木を持つ公開スナップショットだけを名指しできます。導出できない木は拒否します。導出される木は作業空間が現在提示する木なので、`done` の閉じ方はその木が保持された公開履歴に入るまで成立しません。同じ木を運ぶ公開スナップショットだけが名指しでき、異なる木（同じ木でない古い祖先も）は拒否されます。配信が前の単位で行われた場合でも、現在の木がその配信を含むため、証拠は最新公開木の検証になります。記録は `delivered_tree` に導出された木を保持し、claim が存在しなかった時代に書かれた記録は木を主張せず、読める履歴として残ります。
+Writerの検証はコードダイジェストと最終スナップショットの表現可能性に結び付きます。コード変更または表現不能項目があれば単位の `done` を拒否します。work-item は先に `delivery_snapshot_id` を指定した doing→doing のリビジョンで、保持された公開スナップショットと変更しない受理スコープを明示的に結び付けます。新しい `done` はその既存 binding と完全一致する `snapshot_id` を要求し、現在の作業空間との一致は要求しません。検証はスナップショット内の有効な digest-bound 証拠、または `Project.effective_verification` が選ぶ遅着した retained acceptance receipt を使います。後者は厳密な receipt ID と acceptance-scope digest を記録し、再読時は現在の設定や index ではなく不変 receipt を検証します。スナップショットは変更しません。`delivered_tree` は binding の code digest です。dropped→done の前進訂正だけを許し、以前の delivery binding と独立した retained acceptance が必須です。過去の dropped リビジョンや旧形式の履歴を書き換えません。詳細は ADR-050 と architecture.md を参照してください。
 
 `tests/test_remaining.py` は、離脱した孫による出力パイプ保持、部分入力失敗、Pi送信期限、ログ保存失敗時の既知利用量、未知量、時差付きdecision、相談キャンセル、並行Writer、模擬UTC日境界、実行中bridgeの回収を検査します。`tests/fault_publication.py` を別プロセスで起動し、オブジェクト・manifest・履歴世代・currentの全write/fsync/link/replace呼出しの前後へEIO/ENOSPC/即時終了を注入します。各回に新しい読み手で公開ポインター、履歴末尾、参照本文を検査します。電源断、実ディスクの枯渇、OSのキャッシュ喪失を模擬成功に含めません。
 

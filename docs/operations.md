@@ -672,3 +672,25 @@ Windows の匿名 pipe は既存の PeekNamedPipe 経路を使います。
 作りません。保持上限・切り詰めの記録・原子的公開は変更しません。
 スナップショットの除外照合は同じ fnmatchcase パターンを結合した式を
 最大16ポリシー分だけ保持し、パス名や検証結果をキャッシュしません。
+
+
+### Bind delivery before closing a work item
+With `work_items_transition`, first move the item to `doing`, then append a
+same-status revision with `delivery_snapshot_id` naming the exact retained
+published snapshot that delivers its current accepted scope. Use the returned
+revision for the next CAS. Bind before history eviction; a manifest existing
+on disk alone is not sufficient. Binding and publication serialize under the
+publication lock, before the insights lock.
+
+Once bound, ordinary `done` names that exact ID as `snapshot_id` and requires
+valid embedded verification or matching late retained acceptance. Independent
+workspace changes and subsequent history-index eviction do not invalidate a
+binding. Scope changes require another explicit binding before closure; bindings
+are never silently cleared. A dropped-to-done correction requires an already
+recorded binding and independently retained acceptance, leaving the earlier
+dropped revision untouched. No other terminal reopening is available.
+
+On stale CAS, re-read; on missing/corrupt evidence, stop and repair through
+operator evidence recovery rather than editing the ledger or snapshot. Retry
+after cancellation by reading the current revision first: an append may already
+have committed. These operations publish nothing and schedule no work.

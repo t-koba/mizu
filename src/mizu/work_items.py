@@ -6,7 +6,9 @@ Read-only views (`page_open_readonly`, `page_closed_readonly`) never acquire
 insights.lock and never recover or delete temporary files; they validate the
 same committed records and fail closed on unsafe or malformed state.
 Unknown/unsafe records, incomplete chains and bounds fail closed. Retrying a
-committed CAS requires a re-read (same-status and terminal changes are refused).
+committed CAS requires a re-read. Same-status events require a scope change or
+explicit delivery binding; only a proven forward dropped-to-done correction
+may follow a terminal event.
 """
 from __future__ import annotations
 
@@ -44,6 +46,7 @@ DELIVERED_EVENT_FIELDS = LEGACY_EVENT_FIELDS | {"delivered_tree"}
 #: A record written now always carries the scope in force, so a revision
 #: states the scope its item is held to.
 EVENT_FIELDS = DELIVERED_EVENT_FIELDS | {"scope"}
+DELIVERY_EVENT_FIELDS = EVENT_FIELDS | {"delivery_schema", "delivery", "verification_scope"}
 MAX_PROJECTION_BYTES = PREVIEW_BYTES + 256
 MAX_OPEN_PAGE_ROWS = 100
 MAX_OPEN_CURSOR_CHARS = 128
@@ -140,12 +143,10 @@ def _directory(path: Path) -> bool:
 
 
 class WorkItems:
-    def __init__(self, root: Path, snapshots, insights, *, vcs=None, workspace=None):
+    def __init__(self, root: Path, snapshots, insights, *, vcs=None, effective_verification=None):
         self.root, self.snapshots, self.insights = root, snapshots, insights
         self.vcs = vcs or {}
-        #: Workspace whose presented tree carries a delivery. Without it the
-        #: ledger cannot state a delivery tree, and a closure fails closed.
-        self.workspace = workspace
+        self.effective_verification = effective_verification
 
     def _read(self, name: str) -> dict:
         try:
@@ -965,29 +966,58 @@ class WorkItems:
             return normalize(self.root, value, stored=True)
         return stored_wait(value)
 
-    def _presented_tree(self) -> str:
-        """Return the digest of the tree the workspace currently presents.
+    @staticmethod
+    def _scope_digest(scope):
+        return digest(canonical(scope)) if scope is not None else None
 
-        A delivery lands in the workspace, so the tree that carries it is the
-        workspace capture. The ledger derives that tree here instead of
-        trusting a caller's claim, and a closure may only bind the published
-        tree that equals it. An ancestor of the presented tree carries an
-        older state, so binding one would name a tree the delivery never
-        reached.
+    def _validate_delivery(self, previous, record):
+        """Replay the explicit binding, without consulting mutable history/config."""
+        marked = "delivery_schema" in record
+        if "delivery_schema" in previous and not marked:
+            raise Denied("A work-item transition cannot remove the delivery schema")
+        if not marked:
+            return False
+        if type(record["delivery_schema"]) is not int or record["delivery_schema"] != 1:
+            raise Denied("Invalid work-item delivery schema")
+        delivery = record["delivery"]
+        binding = delivery != previous.get("delivery")
+        if binding:
+            if (previous["status"] != "doing" or record["status"] != "doing"
+                    or previous.get("scope") != record.get("scope")):
+                raise Denied("Delivery binding requires doing-to-doing with unchanged scope")
+            if (not isinstance(delivery, dict)
+                    or set(delivery) != {"snapshot_id", "code_digest", "scope_digest", "binding_rev"}
+                    or type(delivery["binding_rev"]) is not int
+                    or delivery["binding_rev"] != record["rev"]
+                    or delivery["scope_digest"] != self._scope_digest(record.get("scope"))):
+                raise Denied("Invalid work-item delivery binding")
+        if delivery is not None:
+            if (not isinstance(delivery, dict) or not isinstance(delivery.get("snapshot_id"), str)
+                    or not DIGEST.fullmatch(delivery["snapshot_id"])):
+                raise Denied("Invalid delivery snapshot")
+            snapshot = self.snapshots.get(delivery["snapshot_id"])
+            if (snapshot.get("id") != delivery["snapshot_id"]
+                    or snapshot.get("code_digest") != delivery["code_digest"]):
+                raise Denied("Delivery does not match its immutable snapshot")
+        if record["status"] == "done":
+            if (delivery is None or delivery != previous.get("delivery")
+                    or record["snapshot_id"] != delivery["snapshot_id"]
+                    or delivery["scope_digest"] != self._scope_digest(record.get("scope"))):
+                raise Denied("Completion requires a prior exact snapshot and scope delivery binding")
+        return binding
 
-        Failure: ``Denied`` when the workspace or its capture is unavailable;
-        the closure then states no delivery tree and fails closed.
-        """
-        if self.workspace is None:
-            raise Denied("Completion requires a derivable delivery tree")
-        try:
-            captured = self.snapshots.capture_files(self.workspace)
-        except (OSError, Denied, LimitExceeded) as exc:
-            raise Denied("Completion requires a derivable delivery tree") from exc
-        presented = captured.get("code_digest")
-        if not isinstance(presented, str) or not DIGEST.fullmatch(presented):
-            raise Denied("Completion requires a derivable delivery tree")
-        return presented
+    def _retained_verification(self, verification, code_digest, scope_digest):
+        from .acceptance import get
+        if (not isinstance(verification, dict)
+                or set(verification) != {"source", "receipt_id", "passed", "code_digest"}
+                or verification["source"] != "retained_acceptance"
+                or verification["passed"] is not True
+                or verification["code_digest"] != code_digest):
+            raise Denied("Invalid retained completion verification")
+        receipt = get(self.root, verification["receipt_id"])
+        if (receipt["code_digest"] != code_digest
+                or digest(canonical(receipt["scope"])) != scope_digest):
+            raise Denied("Completion acceptance receipt code or scope mismatch")
 
     def _validate_transition(self, previous: dict, record: dict) -> None:
         fields = set(record)
@@ -996,7 +1026,7 @@ class WorkItems:
         # readable history.
         description = {"description"} if "description" in previous else set()
         allowed = {frozenset(base | description | scope)
-                   for base in (EVENT_FIELDS, DELIVERED_EVENT_FIELDS, LEGACY_EVENT_FIELDS)
+                   for base in (DELIVERY_EVENT_FIELDS, EVENT_FIELDS, DELIVERED_EVENT_FIELDS, LEGACY_EVENT_FIELDS)
                    for scope in (set(), {"scope"})}
         if frozenset(fields) not in allowed:
             raise Denied("Invalid work-item transition fields")
@@ -1008,14 +1038,16 @@ class WorkItems:
         if record_scope is not None:
             validate_scope(record_scope)
         scope_changed = record_scope != previous_scope
-        if (status not in STATUSES or previous["status"] in ("done", "dropped")
-                or (status == previous["status"] and not scope_changed)):
+        binding = self._validate_delivery(previous, record)
+        if (status not in STATUSES or previous["status"] == "done"
+                or (previous["status"] == "dropped" and status != "done")
+                or (status == previous["status"] and not scope_changed and not binding)):
             raise Denied("Invalid work-item status transition")
         # The scope in force is inherited by every revision; it is never
         # cleared, and a closure may not change it.
         if previous_scope is not None and record_scope is None:
             raise Denied("A work-item transition cannot clear the accepted scope")
-        if (status == "done" and previous_scope is not None
+        if (status == "done" and (previous_scope is not None or "delivery_schema" in record)
                 and record_scope != previous_scope):
             raise Denied("Completion cannot change the accepted scope; "
                          "record the scope change in an earlier transition")
@@ -1050,18 +1082,26 @@ class WorkItems:
                 raise Denied("Completion requires verified snapshot evidence")
             snapshot = self.snapshots.get(sid)
             stored_verification = snapshot.get("verification")
-            if (snapshot.get("id") != sid or not isinstance(stored_verification, dict)
+            retained = verification.get("source") == "retained_acceptance"
+            if retained and "delivery_schema" in record:
+                self._retained_verification(verification, snapshot["code_digest"],
+                                            record["verification_scope"])
+            elif (snapshot.get("id") != sid or not isinstance(stored_verification, dict)
                     or stored_verification != verification
                     or stored_verification.get("passed") is not True
-                    or stored_verification.get("code_digest") != snapshot.get("code_digest")):
+                    or stored_verification.get("code_digest") != snapshot.get("code_digest")
+                    or record.get("verification_scope") is not None):
                 raise Denied("Completion evidence does not match its verified snapshot")
+            if previous["status"] == "dropped" and (not retained or "delivery_schema" not in record):
+                raise Denied("Dropped correction requires independently retained acceptance")
             # A closure states the tree that carries its delivery. A record
             # written before the claim existed stays readable history; a
             # closure that states a tree its snapshot does not carry fails.
             if "delivered_tree" in record and record["delivered_tree"] != snapshot.get("code_digest"):
                 raise Denied("Completion does not name the tree that carries the delivery")
         elif (record["snapshot_id"] is not None or record["verification"] is not None
-                or record.get("delivered_tree") is not None):
+                or record.get("delivered_tree") is not None
+                or record.get("verification_scope") is not None):
             raise Denied("Only completed work items carry snapshot evidence")
 
     def _iter_chain(self, item_id: str, *, seed_event: dict | None = None,
@@ -1692,7 +1732,7 @@ class WorkItems:
         return self._page_closed_impl(limit=limit, readonly=True)
 
     def transition(self, item_id: str, *, expected_rev, status, actor, reason=None,
-                   wait=None, snapshot_id=None, scope=None) -> dict:
+                   wait=None, snapshot_id=None, scope=None, delivery_snapshot_id=None) -> dict:
         """Append one immutable full-state CAS event; terminal metadata wakes subscribers.
 
         The event states the scope in force for the item at that revision: a
@@ -1700,22 +1740,21 @@ class WorkItems:
         the previous revision's scope, a scope is never cleared, and a
         completion may not change the scope it inherits. Actor is trusted
         caller attribution, not authorization. Done validates an
-        exact retained published snapshot and its embedded stored verification;
-        that evidence is copied so later history retention cannot erase it.
-        The ledger derives the tree the workspace presents and binds the
-        snapshot that carries it, so a closure cannot name a published tree the
-        delivery never reached. All validation precedes the exclusive atomic
+        exact pre-existing delivery revision, never the live workspace. Delivery
+        binding validates retained membership under publication.lock, then
+        insights.lock through append. Completion copies valid embedded proof or
+        pins an independently retained acceptance receipt by immutable ID.
+        All validation precedes the exclusive atomic
         write. Stale CAS writes nothing; cancellation/process death releases
         the shared project lock.
         """
         if type(expected_rev) is not int or expected_rev < 1:
             raise Denied("Expected revision must be a positive integer")
-        presented = None
-        if status == "done" and snapshot_id is not None:
-            # Derived before the lock: the capture reads the workspace, and no
-            # shared state changes while it runs.
-            presented = self._presented_tree()
-        with lock(self.root / "locks" / "insights.lock"):
+        # Global ordering: publication -> insights. Publishers never acquire
+        # insights.lock. Keep membership validation and append in one critical section.
+        publication = (lock(self.snapshots.root / "locks" / "publication.lock")
+                       if delivery_snapshot_id is not None else contextlib.nullcontext())
+        with publication, lock(self.root / "locks" / "insights.lock"):
             history_revisions = self._recover_temporary_writes(item_id)
             current = self._get(item_id, history_revisions=history_revisions)
             if current["rev"] != expected_rev:
@@ -1732,23 +1771,27 @@ class WorkItems:
                 else:
                     registered = self.insights._normalize_wait(wait, "defer")
             verification = None
+            verification_scope = None
             delivered_tree = None
-            if snapshot_id is not None:
-                if status != "done":
-                    raise Denied("Only completed work items carry snapshot evidence")
-                # get(None) is a moving-head convenience, never completion proof.
+            if status == "done":
+                delivery = current.get("delivery")
+                if not delivery or snapshot_id != delivery["snapshot_id"]:
+                    raise Denied("Completion requires a prior exact snapshot delivery binding")
                 snapshot = self.snapshots.get(snapshot_id)
-                if snapshot_id not in self.snapshots._history_ids():
-                    raise Denied("Completion snapshot must be retained published history")
                 verification = snapshot.get("verification")
-                if (not isinstance(verification, dict) or verification.get("passed") is not True
+                if (current["status"] == "dropped" or not isinstance(verification, dict)
+                        or verification.get("passed") is not True
                         or verification.get("code_digest") != snapshot["code_digest"]):
-                    raise Denied("Completion snapshot must have passing digest-bound verification")
-                # The delivery lives in the workspace, so the snapshot that
-                # carries it is the one whose tree the workspace presents.
-                delivered_tree = presented
-                if delivered_tree != snapshot.get("code_digest"):
-                    raise Denied("Completion must bind the published tree that carries the delivery")
+                    verification = (self.effective_verification(snapshot)
+                                    if self.effective_verification is not None else None)
+                    if not isinstance(verification, dict):
+                        raise Denied("Completion snapshot must have passing digest-bound verification")
+                    from .acceptance import get
+                    receipt = get(self.root, verification.get("receipt_id"))
+                    verification_scope = digest(canonical(receipt["scope"]))
+                delivered_tree = delivery["code_digest"]
+            elif snapshot_id is not None:
+                raise Denied("Only completed work items carry snapshot evidence")
             # The scope in force is inherited from the previous revision. A
             # supplied scope states a change of it, which is this revision's
             # own scope-change event; a closure may not change it.
@@ -1757,13 +1800,21 @@ class WorkItems:
                 in_force = effective_scope
             else:
                 validate_scope(scope)
-                if (status == "done" and effective_scope is not None
-                        and scope != effective_scope):
+                if status == "done" and scope != effective_scope:
                     raise Denied("Completion cannot change the accepted scope; "
                                  "record the scope change in an earlier transition")
                 if scope != effective_scope and (reason is None or not reason.strip()):
                     raise Denied("A scope change requires a reason")
                 in_force = scope
+            delivery = current.get("delivery")
+            if delivery_snapshot_id is not None:
+                if current["status"] != "doing" or status != "doing" or in_force != effective_scope:
+                    raise Denied("Delivery binding requires doing-to-doing with unchanged scope")
+                snapshot = self.snapshots.get(delivery_snapshot_id)
+                if delivery_snapshot_id not in self.snapshots._history_ids():
+                    raise Denied("Delivery snapshot must be retained published history")
+                delivery = {"snapshot_id": delivery_snapshot_id, "code_digest": snapshot["code_digest"],
+                            "scope_digest": self._scope_digest(in_force), "binding_rev": current["rev"] + 1}
             record = {**current, "rev": current["rev"] + 1, "status": status,
                       "updated_at": now(), "actor": actor,
                       "transition": {"from": current["status"], "to": status},
@@ -1771,7 +1822,8 @@ class WorkItems:
                           (current["holder"] or actor) if status == "blocked" else None,
                       "reason": reason, "wait": registered, "snapshot_id": snapshot_id,
                       "verification": verification, "delivered_tree": delivered_tree,
-                      "scope": in_force}
+                      "scope": in_force, "delivery_schema": 1, "delivery": delivery,
+                      "verification_scope": verification_scope}
             self._validate_transition(current, record)
             if len(canonical(record)) > PREVIEW_BYTES:
                 raise LimitExceeded("Work-item event exceeds byte bound")

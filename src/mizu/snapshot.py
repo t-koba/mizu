@@ -527,6 +527,8 @@ class Snapshots:
         a stored record's CAS. Immutable history precedes the durable pointer commit;
         I/O failure can leave an unreferenced generation, as before. No external
         I/O or admission changes; fs.lock releases on exit/process death.
+        Never acquire insights.lock here: delivery binding takes this publication
+        lock first, then insights.lock through its immutable work-item append.
         """
         with lock(self.root / "locks" / "publication.lock"):
             record = self.get(snapshot["id"])

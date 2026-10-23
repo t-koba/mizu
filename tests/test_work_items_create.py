@@ -6,7 +6,7 @@ import json
 import os
 from unittest.mock import patch
 
-from support import Fixture
+from support import Fixture, bind_delivery
 from mizu import work_item_events as events
 from mizu.errors import ConfigError, Denied, LimitExceeded
 from mizu.fs import PREVIEW_BYTES, write_json
@@ -157,7 +157,8 @@ class DirectWorkItemTests(Fixture):
                     outcome="done", summary="Verified", verification={"passed": True, "run": "run",
                     "code_digest": captured["code_digest"]})
         self.project.snapshots.publish(snapshot)
-        done = self.store.transition(item["id"], expected_rev=1, status="done", actor="worker", snapshot_id=snapshot["id"])
+        bind_delivery(self.project, item["id"], snapshot["id"])
+        done = self.store.transition(item["id"], expected_rev=3, status="done", actor="worker", snapshot_id=snapshot["id"])
         self.assertEqual(self.store.get(item["id"]), done)
         report = audit(self.project)
         self.assertEqual(report["work_item_events_skipped"], 0)

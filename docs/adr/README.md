@@ -361,6 +361,8 @@ unlimited), so the bound refuses values a provider may produce; it is a
 product rule, not a claim about every platform.
 
 ## ADR-038 — A closure names the tree that carries its delivery
+Historical design; the live-workspace closure guard is superseded by ADR-050.
+
 A work item was closed against any retained published snapshot with a passing
 verification, so the evidence could speak for a tree the delivery never
 reached: the closure named one tree and the reason named another. The ledger
@@ -733,3 +735,30 @@ external receipt requires the projection. Schema-1/2 records stay readable as
 read-only legacy history and are never rewritten; the projection digest is
 never stored or compared as a `code_digest`, and derivation never inspects
 ignored private state.
+
+
+## ADR-050 — Delivery is an immutable item revision, acceptance a late projection
+The live-workspace guard in ADR-038 made a delivered item wait for a quiescent
+publication window: late passing checks could not close it after independent
+work changed the current tree. Delivery and verification are separate facts.
+A doing-to-doing delivery revision now explicitly attributes the accepted scope
+to an exact retained published snapshot. Its digest, scope digest and binding
+revision are inherited. Completion requires that prior binding, not current
+workspace equality. There is no inference from arbitrary older green snapshots.
+
+Publication membership validation and the delivery append share the publication
+lock before insights.lock; publication never acquires insights.lock. New chains
+carry a durable delivery schema and cannot downgrade to unmarked legacy shape.
+Snapshots stay immutable. Ordinary closure uses valid embedded proof or a compact
+exact retained acceptance receipt reference; the acceptance scope digest is
+pinned separately. Replay resolves the immutable receipt by ID, not today's
+configuration or first-writer index. Corruption or mismatches refuse. Existing
+unmarked histories keep their original interpretation and are not migrated.
+All historical delivery manifests are storage references, including bindings
+before closure and superseded bindings, because replay validates them.
+
+A dropped item may be corrected only forward to done, with an already-existing
+delivery and the stronger independently retained acceptance proof; embedded
+verification alone cannot correct it. The dropped revision remains unchanged.
+Done cannot reopen, and dropped cannot return to open/doing/blocked. This is an
+append-only correction mechanism, not a reset or rewriting of terminal history.

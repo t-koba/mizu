@@ -7,7 +7,7 @@ import threading
 from contextlib import nullcontext
 from unittest.mock import patch
 
-from support import Fixture, ScriptDriver, finish_with_decision_acks
+from support import Fixture, bind_delivery, ScriptDriver, finish_with_decision_acks
 from mizu import fs, insight_archive, work_item_events as events
 from mizu.cli import execute, parser
 from mizu.config import load
@@ -43,8 +43,9 @@ class WorkItemEventTests(Fixture):
                 summary="Verified", verification=verification)
             self.project.snapshots.publish(snapshot)
             kwargs["snapshot_id"] = snapshot["id"]
+            bind_delivery(self.project, seed["id"], snapshot["id"])
         with patch("mizu.work_items.now", return_value=timestamp) if timestamp else nullcontext():
-            item = self.store.transition(seed["id"], expected_rev=1,
+            item = self.store.transition(seed["id"], expected_rev=3 if done else 1,
                                          status="done" if done else "dropped", actor="worker",
                                          reason="Terminal reason " + "界" * 2000, **kwargs)
         return proposal, item

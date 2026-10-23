@@ -31,6 +31,16 @@ def host_child_cost() -> float:
     return time.monotonic() - started
 
 
+def bind_delivery(project, item_id, snapshot_id, *, expected_rev=1):
+    """Record the two explicit lifecycle revisions needed by completion fixtures."""
+    store = project.work_items
+    if expected_rev == 1:
+        store.transition(item_id, expected_rev=1, status="doing", actor="worker")
+        expected_rev = 2
+    return store.transition(item_id, expected_rev=expected_rev, status="doing", actor="worker",
+                            delivery_snapshot_id=snapshot_id)
+
+
 class Fixture(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="mizu-test-")

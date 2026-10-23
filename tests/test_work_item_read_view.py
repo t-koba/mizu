@@ -2,7 +2,7 @@
 import dataclasses
 from unittest.mock import patch
 
-from support import Fixture
+from support import Fixture, bind_delivery
 from mizu.errors import Denied
 from mizu.fs import write_json
 from mizu.snapshot import Snapshots
@@ -22,8 +22,9 @@ class ReadViewTests(Fixture):
             created = self.project.work_items.create(
                 actor="worker", title=f"Item {n}", idempotency_key=f"item-{n}")
             seed = created["record"]["work_item"]
+            bind_delivery(self.project, seed["id"], snapshot["id"])
             self.project.work_items.transition(
-                seed["id"], expected_rev=1, status="done", actor="worker",
+                seed["id"], expected_rev=3, status="done", actor="worker",
                 reason="Verified", snapshot_id=snapshot["id"])
         return snapshot
 

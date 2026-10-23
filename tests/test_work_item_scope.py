@@ -1,7 +1,7 @@
 """Accepted scope: recorded at decision time, inherited, and bound by closure."""
 import json
 
-from support import Fixture
+from support import Fixture, bind_delivery
 from mizu.errors import Denied
 from mizu.protocol import DEFINITIONS, validate
 
@@ -89,7 +89,8 @@ class WorkItemScopeTests(Fixture):
         doing = self.change(item_id, 1, reason="Started")
         self.assertEqual(doing["scope"], scope)
         snapshot = self.snapshot()
-        closed = self.change(item_id, 2, status="done", reason="Verified",
+        bind_delivery(self.project, item_id, snapshot["id"], expected_rev=2)
+        closed = self.change(item_id, 3, status="done", reason="Verified",
                              snapshot_id=snapshot["id"])
         self.assertEqual(closed["scope"], scope)
         self.assertEqual(self.store.get(item_id)["scope"], scope)
@@ -116,15 +117,16 @@ class WorkItemScopeTests(Fixture):
         item_id = decision["work_item"]["id"]
         self.change(item_id, 1)
         snapshot = self.snapshot()
+        bind_delivery(self.project, item_id, snapshot["id"], expected_rev=2)
         with self.assertRaisesRegex(Denied, "Completion cannot change the accepted scope"):
-            self.change(item_id, 2, status="done", reason="Changed the scope",
+            self.change(item_id, 3, status="done", reason="Changed the scope",
                         scope="Raise the CI cell timeout to 60 minutes.",
                         snapshot_id=snapshot["id"])
         # The refused closure wrote nothing; the scope in force is unchanged.
-        self.assertEqual(self.store.get(item_id)["rev"], 2)
+        self.assertEqual(self.store.get(item_id)["rev"], 3)
         self.assertEqual(self.store.get(item_id)["scope"], scope)
         # A closure that states the same scope is accepted.
-        closed = self.change(item_id, 2, status="done", reason="Verified", scope=scope,
+        closed = self.change(item_id, 3, status="done", reason="Verified", scope=scope,
                              snapshot_id=snapshot["id"])
         self.assertEqual(closed["scope"], scope)
 
@@ -132,9 +134,12 @@ class WorkItemScopeTests(Fixture):
         decision = self.decide()
         item_id = decision["work_item"]["id"]
         snapshot = self.snapshot()
-        closed = self.change(item_id, 1, status="done", reason="Verified",
-                             scope="Deliver the bounded receipt.",
-                             snapshot_id=snapshot["id"])
+        with self.assertRaises(Denied):
+            self.change(item_id, 1, status="done", reason="Verified",
+                        scope="Deliver the bounded receipt.", snapshot_id=snapshot["id"])
+        self.change(item_id, 1, scope="Deliver the bounded receipt.", reason="State accepted scope")
+        bind_delivery(self.project, item_id, snapshot["id"], expected_rev=2)
+        closed = self.change(item_id, 3, status="done", reason="Verified", snapshot_id=snapshot["id"])
         self.assertEqual(closed["scope"], "Deliver the bounded receipt.")
         self.assertEqual(self.store.get(item_id)["scope"], "Deliver the bounded receipt.")
 
@@ -217,7 +222,8 @@ class WorkItemScopeTests(Fixture):
         self.assertEqual(row["scope_preview"], scope)
         self.assertFalse(row["scope_truncated"])
         snapshot = self.snapshot()
-        self.change(item_id, 2, status="done", reason="Verified", snapshot_id=snapshot["id"])
+        bind_delivery(self.project, item_id, snapshot["id"], expected_rev=2)
+        self.change(item_id, 3, status="done", reason="Verified", snapshot_id=snapshot["id"])
         closed = self.store.page_closed_readonly(limit=10)
         crow = next(r for r in closed["items"] if r["id"] == item_id)
         self.assertEqual(crow["scope_preview"], scope)

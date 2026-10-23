@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
-from support import Fixture
+from support import Fixture, bind_delivery
 from mizu.cli import parser, execute
 from mizu.errors import Denied, LimitExceeded
 from mizu.fs import canonical
@@ -107,8 +107,9 @@ class WorkItemsCliViewTests(Fixture):
                     snapshot = self.make_snapshot(run=f"run-{index}")
                     self.store.transition(item_id, expected_rev=1, status="doing",
                                           actor="worker")
+                    bind_delivery(self.project, item_id, snapshot["id"], expected_rev=2)
                     with patch.object(wi, "now", return_value=stamps[index]):
-                        self.store.transition(item_id, expected_rev=2, status="done",
+                        self.store.transition(item_id, expected_rev=3, status="done",
                                               actor="worker", reason=f"Finish {title}",
                                               snapshot_id=snapshot["id"])
         args = parser().parse_args(

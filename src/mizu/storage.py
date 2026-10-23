@@ -811,16 +811,22 @@ def _audit_collect(project: Project) -> dict:
                             # Immutable append events make the internal read
                             # stable without taking the writer lock; reclaim
                             # calls this again under project quiescence.
-                            current = project.work_items._get(item_entry.name)
+                            item_references = set()
+                            for record in project.work_items._iter_chain(item_entry.name):
+                                # Every historical binding stays replayable, even
+                                # after re-binding, dropping or history eviction.
+                                delivery = record.get("delivery")
+                                if delivery is not None:
+                                    item_references.add(delivery["snapshot_id"])
+                                if record.get("status") == "done":
+                                    digest_id = _audit_digest(record.get("snapshot_id"))
+                                    if digest_id is None:
+                                        raise Denied("Invalid completed snapshot reference")
+                                    item_references.add(digest_id)
                         except (Denied, LimitExceeded, OSError, ValueError):
                             work_item_events_skipped += 1
                             continue
-                        if current.get("status") == "done":
-                            digest_id = _audit_digest(current.get("snapshot_id"))
-                            if digest_id is None:
-                                work_item_events_skipped += 1
-                            else:
-                                work_item_ids.add(digest_id)
+                        work_item_ids.update(item_references)
     except OSError:
         work_item_events_skipped += 1
     referenced_ids = (set(history_ids) | set(run_ids) | set(artifact_ids)

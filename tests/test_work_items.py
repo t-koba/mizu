@@ -36,6 +36,10 @@ class WorkItemTests(Fixture):
         return self.store.transition(self.item_id, expected_rev=expected_rev, status=status,
                                      actor=kwargs.pop("actor", "worker"), **kwargs)
 
+    def bind(self, snapshot, expected_rev=2):
+        return self.change("doing", expected_rev=expected_rev,
+                           delivery_snapshot_id=snapshot["id"])
+
     def snapshot(self, verification=None, publish=True):
         self.serial += 1
         store = self.project.snapshots
@@ -74,23 +78,24 @@ class WorkItemTests(Fixture):
     def test_explain_pages_seed_and_terminal_done_evidence(self):
         self.change("doing", reason="Started")
         snapshot = self.snapshot("valid")
-        self.change("done", expected_rev=2, reason="Verified", snapshot_id=snapshot["id"])
+        self.bind(snapshot)
+        self.change("done", expected_rev=3, reason="Verified", snapshot_id=snapshot["id"])
 
         first = self.store.explain(self.item_id, limit=2)
         self.assertEqual(first["item"]["status"], "done")
-        self.assertEqual(first["item"]["rev"], 3)
-        self.assertEqual(first["history_total"], 3)
+        self.assertEqual(first["item"]["rev"], 4)
+        self.assertEqual(first["history_total"], 4)
         self.assertEqual(first["cursor"], 0)
         self.assertEqual([record["rev"] for record in first["history"]], [1, 2])
         self.assertEqual(first["next_cursor"], 2)
         self.assertTrue(first["truncated"])
         second = self.store.explain(self.item_id, after_rev=first["next_cursor"], limit=2)
-        self.assertEqual([record["rev"] for record in second["history"]], [3])
+        self.assertEqual([record["rev"] for record in second["history"]], [3, 4])
         self.assertIsNone(second["next_cursor"])
         self.assertFalse(second["truncated"])
-        self.assertEqual(second["history"][0]["reason"], "Verified")
-        self.assertEqual(second["history"][0]["snapshot_id"], snapshot["id"])
-        self.assertEqual(second["history"][0]["verification"], snapshot["verification"])
+        self.assertEqual(second["history"][1]["reason"], "Verified")
+        self.assertEqual(second["history"][1]["snapshot_id"], snapshot["id"])
+        self.assertEqual(second["history"][1]["verification"], snapshot["verification"])
 
     def test_explain_preserves_structured_wait_record(self):
         self.change("blocked", wait={"kind": "insight_decided", "insight": self.proposal["id"]})
@@ -404,15 +409,16 @@ class WorkItemTests(Fixture):
         self.change("doing", reason="Start the work item")
         snapshot = self.snapshot("valid")
         presented = self.project.snapshots.capture_files(self.project.workspace)["code_digest"]
-        completed = self.change("done", expected_rev=2, snapshot_id=snapshot["id"], reason="Verified")
+        self.bind(snapshot)
+        completed = self.change("done", expected_rev=3, snapshot_id=snapshot["id"], reason="Verified")
         self.assertEqual(completed["delivered_tree"], presented)
         self.assertEqual(completed["delivered_tree"], snapshot["code_digest"])
         self.assertEqual(self.store.get(self.item_id)["delivered_tree"], presented)
 
-    def test_done_refuses_a_snapshot_whose_tree_lacks_the_delivery(self):
+    def test_done_refuses_a_snapshot_without_a_delivery_binding(self):
         self.change("doing", reason="Start the work item")
         snapshot = self.snapshot("valid")
-        # The workspace moves on: the published tree no longer carries the delivery.
+        # Moving the workspace does not establish an item delivery binding.
         (self.project.workspace / "app.py").write_bytes(b"VALUE = 3\n")
         with self.assertRaises(Denied):
             self.change("done", expected_rev=2, snapshot_id=snapshot["id"])
@@ -425,10 +431,11 @@ class WorkItemTests(Fixture):
         newer = self.snapshot("valid")
         self.assertEqual(older["code_digest"], newer["code_digest"])
         self.assertNotEqual(older["id"], newer["id"])
-        completed = self.change("done", expected_rev=2, snapshot_id=older["id"])
+        self.bind(older)
+        completed = self.change("done", expected_rev=3, snapshot_id=older["id"])
         self.assertEqual(completed["delivered_tree"], older["code_digest"])
 
-    def test_done_refuses_a_closure_without_a_derivable_delivery_tree(self):
+    def test_done_refuses_a_closure_without_a_delivery_binding(self):
         store = WorkItems(self.project.root, self.project.snapshots, self.project.insights)
         snapshot = self.snapshot("valid")
         with self.assertRaises(Denied):
@@ -438,8 +445,10 @@ class WorkItemTests(Fixture):
 
     def test_done_record_must_name_the_tree_its_snapshot_carries(self):
         snapshot = self.snapshot("valid")
-        completed = self.change("done", snapshot_id=snapshot["id"])
-        path = self.directory / "2.json"
+        self.change()
+        self.bind(snapshot)
+        completed = self.change("done", expected_rev=3, snapshot_id=snapshot["id"])
+        path = self.directory / "4.json"
         tampered = copy.deepcopy(completed)
         tampered["delivered_tree"] = "a" * 64
         write_json(path, tampered)
@@ -447,8 +456,13 @@ class WorkItemTests(Fixture):
             self.store.get(self.item_id)
         # A record written before the claim existed stays readable history.
         legacy = copy.deepcopy(completed)
-        del legacy["delivered_tree"]
-        write_json(path, legacy)
+        for key in ("delivered_tree", "delivery_schema", "delivery", "verification_scope"):
+            del legacy[key]
+        legacy["rev"] = 2
+        legacy["transition"]["from"] = "open"
+        (self.directory / "3.json").unlink()
+        path.unlink()
+        write_json(self.directory / "2.json", legacy)
         self.assertIsNone(self.store.get(self.item_id).get("delivered_tree"))
         row = self.store.page_closed_readonly(limit=10)["items"][0]
         self.assertIsNone(row["delivered_tree"])
@@ -500,7 +514,8 @@ class WorkItemTests(Fixture):
         with self.assertRaises(Denied):
             self.change("done", expected_rev=2, snapshot_id=loser["id"])
         self.assertEqual(self.store.get(self.item_id)["status"], "doing")
-        completed = self.change("done", expected_rev=2, snapshot_id=winner["id"])
+        self.bind(winner)
+        completed = self.change("done", expected_rev=3, snapshot_id=winner["id"])
         self.assertEqual(completed["snapshot_id"], winner["id"])
         self.assertEqual(completed["verification"], winner["verification"])
         self.assertNotEqual(completed["verification"], loser["verification"])
@@ -515,7 +530,8 @@ class WorkItemTests(Fixture):
         self.change()
         # Retained published history, not just the moving head, is allowed.
         self.snapshot()
-        completed = self.change("done", expected_rev=2, snapshot_id=bad["id"], reason="Verified fix")
+        self.bind(bad)
+        completed = self.change("done", expected_rev=3, snapshot_id=bad["id"], reason="Verified fix")
         self.assertIsNone(completed["holder"])
         self.assertEqual(completed["snapshot_id"], bad["id"])
         self.assertEqual(completed["verification"], bad["verification"])
@@ -524,13 +540,15 @@ class WorkItemTests(Fixture):
         self.assertEqual(self.store.get(self.item_id), completed)
         for status in ("open", "doing", "blocked", "done", "dropped"):
             with self.subTest(status=status), self.assertRaises(Denied):
-                self.change(status, expected_rev=3, reason="Reopen")
-        self.assertEqual(sorted(p.name for p in self.directory.iterdir()), ["2.json", "3.json"])
+                self.change(status, expected_rev=4, reason="Reopen")
+        self.assertEqual(sorted(p.name for p in self.directory.iterdir()), ["2.json", "3.json", "4.json"])
 
     def test_reconstruction_rejects_completion_copy_mismatched_to_snapshot(self):
         snapshot = self.snapshot("valid")
-        completed = self.change("done", snapshot_id=snapshot["id"])
-        path = self.directory / "2.json"
+        self.change()
+        self.bind(snapshot)
+        completed = self.change("done", expected_rev=3, snapshot_id=snapshot["id"])
+        path = self.directory / "4.json"
         tampered = copy.deepcopy(completed)
         tampered["verification"]["code_digest"] = "a" * 64
         write_json(path, tampered)

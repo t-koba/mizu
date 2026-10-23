@@ -308,3 +308,15 @@ separate Python process attempts every held exclusion during
 preflight, proving kernel exclusion of new entrants rather than only the
 process-local guard. Runtime/check-runner wiring is checked before execution
 locks are held. No installed deployment or private workspace is inspected.
+
+
+### Retained work-item delivery
+`test_retained_delivery.py` exercises explicit delivery revisions, retained
+membership, exact snapshot/scope bindings, completion after workspace changes,
+late receipt projection and exact-ID replay, corruption/digest/scope refusals,
+forward dropped correction, schema downgrade refusal, publication-lock ordering
+and storage protection of historical delivery manifests. The publication race
+uses bounded event synchronization and a 60-second host-cost backstop, not CPU
+saturation. Existing completion fixtures explicitly record doing and delivery
+revisions; legacy unmarked history remains tested separately. No real external
+CI or deployment is asserted by these offline tests.

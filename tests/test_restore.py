@@ -1,6 +1,6 @@
 import io
 import tarfile
-from support import Fixture
+from support import Fixture, bind_delivery
 from mizu.errors import Denied
 from mizu.project import Project
 from mizu.storage import backup, restore
@@ -34,8 +34,9 @@ class RestoreTests(Fixture):
             captured, goal=self.project.goal, state="Verified work item", run="run-restore",
             outcome="done", summary="Completion evidence", verification=verification)
         self.project.snapshots.publish(snapshot)
+        bind_delivery(self.project, decision["work_item"]["id"], snapshot["id"])
         completed = self.project.work_items.transition(
-            decision["work_item"]["id"], expected_rev=1, status="done", actor="worker",
+            decision["work_item"]["id"], expected_rev=3, status="done", actor="worker",
             snapshot_id=snapshot["id"])
         self.project.set_control(paused=True)
         archive = self.root / "work-items.tar.gz"

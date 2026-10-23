@@ -391,8 +391,8 @@ and in by-ID reads; it carries a reason naming what it supersedes, and it may
 stand at the same status, so a scope change is recorded as an event rather
 than absorbed into a closure. A `done` closure may not change the scope it
 inherits: it is refused unless it states the same scope, and the change must
-be recorded in an earlier transition. A closure of an item whose seed has no
-scope may state one, which becomes the scope in force. The compact page rows
+be recorded in an earlier transition. An item whose seed has no scope must record any scope before binding delivery;
+a new closure cannot introduce a scope. Older unmarked history remains readable. The compact page rows
 carry the scope in force as a bounded preview. Unsafe links, unknown IDs,
 malformed/oversized records, gaps and exhausted bounds fail closed; a stale
 CAS writes nothing and must be re-read, not blindly retried. `get()` and
@@ -401,15 +401,47 @@ regular `.new-<8-char>` atomic-write leftovers; an uncommitted temporary is
 never promoted, and a post-link alias
 is removed only when it matches one committed revision, direct creation record,
 or legacy sidecar inode. Unknown names and unsafe
-links still fail closed. Completion reads revalidate the cited manifest, require
-it to remain in the retained published history, and require its stored passing
-verification to match the copied evidence. A completion also states the tree
-that carries the delivery: the ledger derives the tree the workspace presents
-from the snapshot store's own capture, the bound snapshot must be the published
-snapshot that carries that tree, and a tree that cannot be derived is refused.
-The record keeps that tree in its `delivered_tree` field; a record written
-before the claim existed states no tree and stays readable history. Lock/I/O
-failures propagate; cancellation/process death releases the kernel lock.
+links still fail closed. Delivery is an explicit same-status `doing` revision
+with `delivery_snapshot_id`, unchanged accepted scope and normal revision CAS.
+It validates the exact immutable manifest and retained published membership
+under the snapshot store's `locks/publication.lock`
+then `insights.lock`, holding both through append. `Snapshots.publish` takes only
+the publication lock, never the insights lock. Thus eviction either precedes the
+binding and refuses it, or follows a committed binding.
+
+New transition records carry `delivery_schema: 1`, `delivery` (null before a
+binding), and `verification_scope` (null except for retained acceptance).
+A delivery holds exactly `snapshot_id`, `code_digest`, `scope_digest` (SHA-256
+of canonical accepted scope, or null) and `binding_rev`. Every subsequent
+revision inherits it, unless an explicit later doing-to-doing revision binds a
+new snapshot. Scope changes retain the old binding but require re-binding
+before completion. The schema cannot disappear; removing a binding's fields
+cannot turn that same-status event into a legacy no-op. Older unmarked chains
+and closures remain readable without rewriting them.
+
+New completion requires a prior binding, exactly its `snapshot_id` and scope,
+and revalidates its immutable manifest. It does not capture or compare the live
+workspace, nor require that an already-bound snapshot remain in the moving
+history index. `delivered_tree` is the bound snapshot code digest. Ordinary
+completion copies valid embedded passing digest-bound verification, or uses
+`Project.effective_verification(snapshot)` to select late retained acceptance.
+The latter stores exactly `{source: "retained_acceptance", receipt_id, passed,
+code_digest}` and separately pins the receipt's canonical acceptance-scope
+digest in `verification_scope`. Replay calls `acceptance.get` on that exact
+immutable receipt ID and validates code and scope, without reselecting through
+current indexes or configuration. Snapshots are never mutated. Storage audit
+and reclamation retain all historical delivery manifests, including bindings
+on still-doing or dropped items and superseded bindings needed for replay.
+
+Only a forward `dropped` -> `done` correction is possible: it requires a
+previously recorded valid delivery and independently retained acceptance,
+even if the snapshot already embeds passing verification. It appends a new
+revision and leaves the dropped event intact. No other terminal reopening is
+allowed. The binding is an attributed writer declaration of delivery for the
+accepted scope, not a semantic proof of arbitrary source changes. Missing,
+unsafe, corrupt or mismatched evidence refuses; lock/I/O errors propagate.
+Cancellation/process death releases kernel locks; stale CAS writes nothing and
+requires a fresh read, never an automatic retry.
 
 The separately granted `work_items_create` operation calls
 `Project.work_items.create(*, idempotency_key, title, actor, origin=None)` for
@@ -481,8 +513,10 @@ subscriptions); it never falls back to the creator, holder, parent actor or
 transition actor. Exact receipts still identify each terminal item/revision.
 
 Statuses are `open`, `doing`, `blocked`, `done`, `dropped`. Same-status changes
-and changes from terminal `done`/`dropped` are refused; other statuses can move
-to any different status. Title/origin/description/creation time stay fixed; every event
+require a scope change or an explicit doing-to-doing delivery binding. Done
+never reopens; dropped permits only the stronger forward done correction
+described above. Other statuses can move to any different status, subject to
+completion evidence and the ordinary constraints. Title/origin/description/creation time stay fixed; every event
 records its revision, update time, caller-supplied actor, from/to transition,
 and explicit reason/wait/snapshot/verification fields (null when absent).
 Actor is trusted internal attribution, not a new authorization grant. `doing`
@@ -491,13 +525,14 @@ actor, and other statuses clear it. A blocked transition may include an
 Insights-style wait (stored only, no scheduler wake), or a work-item-only `ci`
 wait pinned to a completed immutable publication receipt. The latter wakes only
 its current holder on retained terminal evidence, without changing item status.
-Dropping requires a nonempty reason. Completion requires `Snapshots.get()`
-validation and membership in retained published history. The stored
-verification must have `passed is True` and a code digest matching the
-snapshot. The snapshot ID
-and verification are copied into the immutable completion event, surviving
-later publication-history retention. Backup/restore includes these histories;
-storage audit/reclaim protects their cited snapshot manifests. Work-item
+Dropping requires a nonempty reason. A new completion revalidates the
+immutable snapshot manifest named by its earlier delivery binding; it need not
+remain in the moving publication-history index. Embedded verification must
+have `passed is True` and match the snapshot's code digest, or completion pins
+an exact retained acceptance receipt and scope digest. The binding and
+verification reference are copied into the immutable completion event.
+Backup/restore includes these histories; storage audit/reclaim protects every
+historical delivery and completion snapshot manifest. Work-item
 retention/expiration is not implemented, so those citations remain durable.
 
 Terminal `done`/`dropped` transitions can wake roles explicitly subscribed via
@@ -565,19 +600,17 @@ observational: it does not account progress or affect scheduling/wakeup.
 The separately granted `work_items_transition` operation exposes only
 `Project.work_items.transition`: required `id`, positive `expected_rev`, and
 status (`open`, `doing`, `blocked`, `done`, `dropped`), with optional nonempty
-reason (1–4000 characters), structured wait, and 64-character lowercase digest
-`snapshot_id`. The configured worker example role alone holds this grant;
-`work_items_read` does not imply it, and consultation/delegation roles are
-explicitly forbidden from holding it. The runtime binds `actor` to the role
-name and accepts no model-supplied actor. It returns the store's bounded record
-and preserves store errors. A stale CAS refuses without writing: re-read the
-fresh work-item projection and use its revision before retrying. `done` is
-accepted only for retained published snapshot history with passing verification
-bound to that snapshot's code digest, and only for the published snapshot that
-carries the tree the workspace presents: the ledger derives that tree itself, so
-use a snapshot ID of the published tree that carries the delivery. A snapshot
-carrying another tree is refused, and so is a closure made while the tree
-cannot be derived.
+reason (1–4000 characters), structured wait, accepted scope, and 64-character
+lowercase digest `snapshot_id` / `delivery_snapshot_id`. The configured worker
+example role alone holds this grant; `work_items_read` does not imply it, and
+consultation/delegation roles are explicitly forbidden from holding it. The
+runtime binds `actor` to the role name and accepts no model-supplied actor. It
+returns the store's bounded record and preserves store errors. A stale CAS
+refuses without writing: re-read the fresh work-item projection and use its
+revision before retrying. First record delivery with `delivery_snapshot_id`
+on a doing-to-doing transition with unchanged scope; then close with
+`snapshot_id` exactly equal to that binding and valid embedded or retained
+acceptance proof. The live workspace may have advanced independently.
 `dropped` requires a reason, and a `blocked` transition may include the same
 structured wait schema and normalization semantics as `decide`, or a
 work-item-only `{kind:"ci", publication_id, checks}` wait. Existing wait kinds

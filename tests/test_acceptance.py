@@ -6,7 +6,7 @@ import shutil
 import threading
 from unittest.mock import patch
 
-from support import Fixture
+from support import Fixture, bind_delivery
 from test_check_jobs import FakeSandbox
 from mizu import acceptance, check_jobs, storage
 from mizu.errors import Denied, LimitExceeded
@@ -55,6 +55,9 @@ class AcceptanceTests(Fixture):
         snapshot = ctx.snapshot
         manifest = self.project.root / 'snapshots' / (snapshot['id'] + '.json')
         raw = manifest.read_bytes()
+        item = self.project.work_items.create(actor='worker', idempotency_key='late-delivery',
+            title='Close the frozen delivered tree', scope='Retained delivery')['record']['work_item']
+        binding = bind_delivery(self.project, item['id'], snapshot['id'])
         job = check_jobs.submit(ctx)
         (ctx.workspace / 'app.py').write_bytes(b'VALUE = 3\n')
         self.run_job()
@@ -69,6 +72,11 @@ class AcceptanceTests(Fixture):
         self.assertNotIn('stdout', str(receipt))
         self.assertFalse(check_jobs.result(ctx, job['id'])['accepted_for_current_source'])
         self.assertIsNone(ctx.verification)
+        completed = self.project.work_items.transition(item['id'], expected_rev=binding['rev'],
+            status='done', actor='worker', snapshot_id=snapshot['id'])
+        self.assertEqual(completed['verification'], proof)
+        self.assertEqual(self.project.work_items.get(item['id']), completed)
+        self.assertEqual(manifest.read_bytes(), raw)
         b = self.project.snapshots.capture_files(ctx.workspace)
         self.assertIsNone(acceptance.effective(self.project, b))
         # Both prompt modes distinguish immutable publication proof from late proof.

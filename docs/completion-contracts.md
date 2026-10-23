@@ -228,14 +228,19 @@ Offline coverage is in `tests/test_deadlines.py` and the bridge/durable Node
 contract tests; these are synthetic clocks/RPC peers, not live-provider or OCI
 acceptance evidence.
 
-### Retained acceptance prerequisite (IMPLEMENTED SLICE)
+### Retained acceptance and explicit item delivery
 
 The digest-bound receipt/projection prerequisite is implemented; see
 [retained acceptance evidence](check-jobs.md#retained-acceptance-evidence--implemented-slice).
 A snapshot's embedded `verification` remains its immutable publication-time
 record. Its separately projected `effective_verification` can refer to a late,
 input-bound retained acceptance receipt, without importing current-source
-verification. This does **not** yet replace the existing delivery/current-tree
-or terminal-transition guards. Item delivery marks, actual publication witnesses
-and stronger forward dropped-to-done correction remain unimplemented parent
-scope; do not treat a retained receipt as delivery or permission to close.
+verification. Item completion now separately requires an explicit earlier
+doing-to-doing delivery revision, binding the accepted scope to an exact retained
+published snapshot under publication.lock then insights.lock. It uses that
+snapshot's embedded proof or pins a retained receipt by exact ID and acceptance
+scope digest, never live workspace equality. A receipt alone is not delivery.
+Only dropped-to-done correction is allowed, with a prior delivery binding and
+independently retained acceptance; the dropped revision remains immutable.
+Unit-finish verification and external VCS publication witnesses are unchanged.
+See ADR-050 and the WorkItems schema in architecture.md.

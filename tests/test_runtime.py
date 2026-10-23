@@ -384,12 +384,15 @@ class ContextTests(Fixture):
             captured, goal="Goal", state="Verified", run="runtime-test", outcome="done",
             summary="Verified completion", verification=verification)
         self.project.snapshots.publish(snapshot)
-        completed = ctx.handle("work_items_transition", {"id": item["id"], "expected_rev": 2,
+        ctx.handle("work_items_transition", {"id": item["id"], "expected_rev": 2, "status": "doing"})
+        ctx.handle("work_items_transition", {"id": item["id"], "expected_rev": 3, "status": "doing",
+                                              "delivery_snapshot_id": snapshot["id"]})
+        completed = ctx.handle("work_items_transition", {"id": item["id"], "expected_rev": 4,
                                                           "status": "done",
                                                           "snapshot_id": snapshot["id"]})
         self.assertEqual(completed["snapshot_id"], snapshot["id"])
         self.assertEqual(completed["verification"], verification)
-        # The delivery tree is derived by the ledger, never supplied by the caller.
+        # The delivery tree is taken from the exact bound immutable manifest.
         self.assertEqual(completed["delivered_tree"], captured["code_digest"])
 
     def test_work_items_read_protocol_grant_paging_and_observation(self):
@@ -448,7 +451,10 @@ class ContextTests(Fixture):
             captured, goal="Goal", state="Verified", run="runtime-test", outcome="done",
             summary="Verified completion", verification=verification)
         self.project.snapshots.publish(snapshot)
-        ctx.handle("work_items_transition", {"id": done_seed["id"], "expected_rev": 1,
+        ctx.handle("work_items_transition", {"id": done_seed["id"], "expected_rev": 1, "status": "doing"})
+        ctx.handle("work_items_transition", {"id": done_seed["id"], "expected_rev": 2, "status": "doing",
+                                              "delivery_snapshot_id": snapshot["id"]})
+        ctx.handle("work_items_transition", {"id": done_seed["id"], "expected_rev": 3,
                                               "status": "done", "snapshot_id": snapshot["id"]})
         dropped_seed = self._accepted_work_item("Runtime dropped read")
         ctx.handle("work_items_transition", {"id": dropped_seed["id"], "expected_rev": 1,
@@ -456,14 +462,14 @@ class ContextTests(Fixture):
 
         wake_generation = self.project.control().get("wake_generation")
         ctx.progress_tool = False
-        done = ctx.handle("work_items_read", {"id": done_seed["id"], "after_rev": 1})
+        done = ctx.handle("work_items_read", {"id": done_seed["id"], "after_rev": 3})
         dropped = ctx.handle("work_items_read", {"id": dropped_seed["id"]})
         self.assertEqual(done["item"]["status"], "done")
-        self.assertEqual(done["item"]["rev"], 2)
-        self.assertEqual(done["history"][0]["rev"], 2)
+        self.assertEqual(done["item"]["rev"], 4)
+        self.assertEqual(done["history"][0]["rev"], 4)
         self.assertEqual(done["history"][0]["snapshot_id"], snapshot["id"])
         self.assertEqual(done["history"][0]["verification"], verification)
-        self.assertEqual(done["cursor"], 1)
+        self.assertEqual(done["cursor"], 3)
         self.assertFalse(done["truncated"])
         self.assertEqual(dropped["item"]["status"], "dropped")
         self.assertEqual(dropped["history"][1]["reason"], "No longer needed")

@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import unittest
 from unittest import mock
-from support import Fixture
+from support import Fixture, bind_delivery
 from mizu.errors import Denied
 from mizu.fs import canonical, digest, write_json
 from mizu.storage import _AUDIT_JSON_BYTES, _session_accounting, audit, reclaim
@@ -156,8 +156,9 @@ class StorageAuditTests(Fixture):
             run="synthetic-run", outcome="done", summary="Synthetic completion evidence",
             verification=verification)
         self.project.snapshots.publish(snapshot)
+        bind_delivery(self.project, opened["id"], snapshot["id"])
         self.project.work_items.transition(
-            opened["id"], expected_rev=1, status="done", actor="worker",
+            opened["id"], expected_rev=3, status="done", actor="worker",
             snapshot_id=snapshot["id"])
 
         report = audit(self.project)
@@ -201,8 +202,9 @@ class StorageAuditTests(Fixture):
             captured, goal=self.project.goal, state="Verified work item", run="run-work-item",
             outcome="done", summary="Completion evidence", verification=verification)
         self.project.snapshots.publish(snapshot)
+        bind_delivery(self.project, decision["work_item"]["id"], snapshot["id"])
         completed = self.project.work_items.transition(
-            decision["work_item"]["id"], expected_rev=1, status="done", actor="worker",
+            decision["work_item"]["id"], expected_rev=3, status="done", actor="worker",
             snapshot_id=snapshot["id"])
         return decision["work_item"]["id"], snapshot, completed
 

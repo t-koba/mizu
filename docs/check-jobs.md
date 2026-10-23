@@ -356,10 +356,12 @@ validates the whole store before exposing a project, and storage audit counts
 `acceptance_receipts` and refuses corrupt/unsafe/dangling proof. Receipts are
 retained audit evidence, not reclaimable job cache.
 
-**Remaining parent scope:** this slice supplies evidence/projection only. It
-does not mark an item's delivery, prove publication-history membership, change
-work-item `done` guards, relax unit-finish verification, or permit dropped-to-done
-corrections. Those delivery-mark, publication-provenance and forward-correction
-mechanisms remain separate follow-up work. Retained proof alone authorizes none
-of them. Tests in `test_acceptance.py` use bounded fake runners; they are not a
-rootless-runtime or deployment smoke test.
+**Item completion:** retained acceptance alone is not delivery. WorkItems now
+requires an earlier explicit delivery revision bound to an exact retained
+published snapshot and accepted scope (ADR-050). Ordinary done may use embedded
+proof or this late projection; it pins the exact immutable receipt ID and
+acceptance-scope digest for replay independent of current configuration/index.
+Forward dropped-to-done correction requires that prior delivery plus retained
+acceptance, not embedded proof alone. No unit-finish verification or external
+VCS publication witness rule changes. Tests in `test_acceptance.py` use bounded
+fake runners; they are not a rootless-runtime or deployment smoke test.
