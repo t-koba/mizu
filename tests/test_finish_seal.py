@@ -210,7 +210,7 @@ class FinishSealTests(Fixture):
         Engine(self.config)._execute(ctx, driver, "Do the work")
         self.assertIsNotNone(ctx.finished)
         self.assertEqual(len(driver.calls), 2)
-        self.assertIn("Do not repeat the work", driver.calls[1])
+        self.assertIn("For the rest of this work unit only: do not repeat the work", driver.calls[1])
         self.assertNotIn("work unit has not started", driver.calls[1])
         self.assertEqual(driver.grants[0], self.config.roles["worker"].capabilities)
         self.assertEqual(driver.grants[1], ("finish",))
