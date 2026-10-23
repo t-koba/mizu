@@ -772,7 +772,8 @@ def work_inputs(project, role, snapshot, bounds):
     proposals with their current revisions, plus the latest snapshot
     verification and unacknowledged decisions routed to this role. Counts and
     text lengths follow the operator's classifier ``inputs`` bounds; unreadable
-    stores read as absent rather than failing selection. History beyond these
+    proposal/decision stores read as absent. Retained-proof integrity errors
+    refuse selection, rather than silently hiding evidence. History beyond these
     windows is never replayed.
     """
     cap = bounds['max_text_bytes']
@@ -797,10 +798,12 @@ def work_inputs(project, role, snapshot, bounds):
                   'at': _at(event.get('decided_at'))}
                  for event in events if isinstance(event, dict)][:bounds['max_decisions']]
     verification = snapshot.get('verification')
+    retained = project.effective_verification(snapshot)
     # Only the verification verdict is material: snapshot ids and outcomes
     # turn over on every publication and must not invalidate the cache.
     snapshot_evidence = {'verified': isinstance(verification, dict)
-                         and verification.get('passed') is True}
+                         and verification.get('passed') is True,
+                         'retained_verification': retained}
     # Both lists arrive oldest-first. Any validated bound combination must fit
     # the work-input budget, so over-budget documents shed oldest items first
     # (ties shed decisions before proposals, the actionable work) instead of

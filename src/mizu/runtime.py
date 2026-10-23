@@ -1325,21 +1325,33 @@ class Context:
             return check_jobs.submit(self)
         if not self.project.verify:
             raise Denied("No operator acceptance commands are configured")
+        from . import acceptance
+        bound = acceptance.scope(self.project)
+        if bound is not None and check_jobs.execution_key(self.config) != bound['execution']:
+            bound = None  # A context cannot attest another execution config.
         before = self.project.snapshots.capture_files(self.workspace)
         results = [self.sandbox.execute(self.workspace, command, writable=True)
                    for command in self.project.verify]
         after = self.project.snapshots.capture_files(self.workspace)
-        passed = all(r["exit_code"] == 0 and r["reason"] == "exited" for r in results)
+        passed = (all(r["exit_code"] == 0 and r["reason"] == "exited" for r in results)
+                  and [r["script"] for r in results] == list(self.project.verify))
         representable = not before["skipped"] and not after["skipped"]
         unchanged = before["code_digest"] == after["code_digest"]
-        self.verification = {"passed": passed and unchanged and representable,
+        dependencies_unchanged = bound is None or acceptance.scope(self.project) == bound
+        self.verification = {"passed": passed and unchanged and representable and dependencies_unchanged,
+                             "dependencies_unchanged": dependencies_unchanged,
                              "snapshot_representable": representable,
                              "code_digest": after["code_digest"], "image": self.config.sandbox.image,
                              "unchanged_during_verification": unchanged,
                              "commands": [{"id": r["id"], "exit_code": r["exit_code"], "reason": r["reason"],
                                            "script": r["script"]} for r in results],
                              "run": self.run_dir.name, "created_at": now()}
-        write_json(self.run_dir / "verification.json", self.verification)
+        producer_record = dict(self.verification)
+        if self.verification['passed'] and bound is not None and not self.tools_cancelled():
+            producer_record['acceptance_scope'] = bound
+        write_json(self.run_dir / "verification.json", producer_record)
+        if producer_record.get('acceptance_scope') is not None:
+            acceptance.recover_run(self.project, self.run_dir.name)
         return {**self.verification, 'commands':[
             {**command, 'script':text_preview(command['script'],512)[0],
              'script_truncated':text_preview(command['script'],512)[1]}
@@ -3376,8 +3388,9 @@ def prompt_for(context: Context) -> str:
     return json.dumps({"unit": UNIT_BEGINS_STATEMENT,
                        "unit_tool_surface": _prompt_tool_surface(context),
                        "goal_digest": context.goal_digest,
-                       "published_snapshot": {k: context.snapshot[k] for k in (
+                       "published_snapshot": {**{k: context.snapshot[k] for k in (
                            "id", "code_digest", "created_at", "state", "summary", "verification")},
+                           "effective_verification": context.project.effective_verification(context.snapshot)},
                        "recent_snapshots": [{k: s[k] for k in ("id", "created_at", "outcome", "summary", "code_digest")}
                                             for s in context.project.snapshots.history(
                                                 context.snapshot["id"], context.config.limits.prompt_snapshots)],
@@ -3454,8 +3467,9 @@ def prompt_delta_for(context: Context, pending: list) -> str:
     return json.dumps({"unit": UNIT_BEGINS_STATEMENT,
                        "unit_tool_surface": _prompt_tool_surface(context),
                        "goal_digest": context.goal_digest,
-                       "published_snapshot": {k: context.snapshot[k] for k in (
+                       "published_snapshot": {**{k: context.snapshot[k] for k in (
                            "id", "code_digest", "created_at", "state", "summary", "verification")},
+                           "effective_verification": context.project.effective_verification(context.snapshot)},
                        "snapshot_delta": {"id": context.snapshot["id"],
                                           "code_digest": context.snapshot["code_digest"]},
                        "pending_insights": pending,

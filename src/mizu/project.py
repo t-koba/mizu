@@ -197,6 +197,10 @@ class Project:
                 continue
         return reset
 
+    def effective_verification(self, snapshot):
+        from .acceptance import effective
+        return effective(self, snapshot)
+
     def status(self) -> dict:
         from .admission import waiting as admission_waiting
         from .check_jobs import deferrals
@@ -225,7 +229,8 @@ class Project:
         return {"project": self.name, "control": self.control(), "snapshot": snapshot["id"],
                 "code_digest": snapshot["code_digest"], "created_at": snapshot["created_at"],
                 "outcome": snapshot["outcome"], "summary": snapshot["summary"],
-                "verification": snapshot["verification"], "state": snapshot["state"],
+                "verification": snapshot["verification"],
+                "effective_verification": self.effective_verification(snapshot), "state": snapshot["state"],
                 "progress": {"status": "current" if progress is not None else "legacy",
                              "record": progress_projection(progress),
                              "disposition": progress_disposition_value,

@@ -190,3 +190,89 @@ success. Continue independent work when available; invoking that finish returns
 the model slot and workspace lock and resumes on completion or new input. The
 recipe disappears on terminal results. Normal ownership and finish validation
 still apply.
+
+## Retained acceptance evidence — IMPLEMENTED SLICE
+
+Passing input-bound acceptance now has a durable owner separate from the job
+cache and the live workspace: `evidence/acceptance/`. Both synchronous `verify`
+and the **original** detached verification producer retain normalized receipts.
+Subscribers and result collection do not mint receipts. The detached producer
+publishes its terminal state only after execution and cache cleanup; cancellation
+at that boundary prevents retention. No execution, experiment, failed,
+interrupted, cancelled, cleanup-failed, source-changing, dependency-changing or
+unrepresentable check can mint a passing receipt.
+
+The existing `sandbox.check_reuse` input-binding mechanism supplies the scope:
+full configured acceptance commands (not command previews), execution-key digest,
+observed dependency fingerprint and pinned image. An unbound environment (`None`),
+network-enabled execution or mutable image is not reusable evidence. No new
+policy switch is introduced. Scope is bounded to 512 KiB of canonical JSON;
+scopes that cannot fit are nonreusable. Each normalized receipt is at most 1 MiB,
+contains only source/scope, producer identity and successful command outcomes,
+and retains **no stdout, stderr or command-log bodies**. Existing producer
+records and ordinary command logs keep their own existing bounds and lifecycle.
+Producer records above the configured `file_bytes` read bound cannot be
+recovered into receipts. Detached finalization checks the exact serialized
+result against that bound before marking it for retention. Recovery of an
+already marked oversized result removes the pending scope and records
+`acceptance_retention_refusal: "result_file_bytes"` in `job.json`, as does
+finalization of an oversized result. This bounded, non-authoritative disposition
+mints no proof, leaves the result bytes and execution verdict intact, and
+permits normal acknowledged cache eviction without repeated retention retries.
+It cannot later promote raw result bytes, even if the read bound increases.
+Malformed, unsafe or integrity-failing evidence still fails closed.
+
+`objects/<receipt-id>.json` is immutable, keyed by SHA-256 of the canonical
+schema-1 receipt. `index/<code-digest>/<scope-digest>.json` is an immutable
+first-writer selection of an exact receipt ID. The object is synced before the
+index is published; retries are idempotent, and a later success does not replace
+that selection. Evidence consumers carry the selected immutable ID and can
+resolve it exactly; they never substitute a newer scope lookup for a recorded
+ID. Reads validate schema, digests, bindings and regular non-hardlinked paths;
+unsafe directories, malformed records and dangling indexes fail closed.
+
+`Project.status` and both full and delta prompt `published_snapshot` headers
+carry **separate** fields:
+
+- `verification`: unchanged raw verification embedded at snapshot publication;
+- `effective_verification`: `null`, or `{passed: true, code_digest,
+  source: "retained_acceptance", receipt_id}` for a matching representable tree
+  and the current exact configured scope.
+
+The latter is a read projection, not a manifest rewrite or a current-workspace
+import. Selector work inputs likewise keep their publication-time `verified`
+verdict separate from `retained_verification` (the exact projected reference).
+Immutable report artifact evidence continues to describe its publication-time
+snapshot verification; it is not retroactively rewritten by late results.
+An A check completing after the workspace moves to B can therefore become
+visible for retained A without republishing A, collecting the result or setting
+B's current verification. Current-source result import still applies its source,
+execution, environment and grant checks independently.
+
+Synchronous verification now also fails when otherwise successful, source-stable
+commands change their bound mounted dependencies or configured execution inputs
+(including acceptance commands) during execution. This intentionally tightens
+the prior source-only verdict to match detached input-bound authority:
+`dependencies_unchanged` must be true for synchronous success too. Unbound
+execution remains nonreusable; retained evidence does not relax any current-source
+import, capability or completion guard.
+
+Runner recovery retries validated finalized originals in the bounded job
+cache; backup maintenance also retries synchronous run records and re-indexes
+durable normalized objects after an object/index interruption. Old
+results without a bound scope marker are never upgraded. Check-job locks are
+released **before** acceptance retention takes its lock; finalized producers
+awaiting receipt acknowledgement cannot be evicted. After receipt retention,
+eviction is harmless. The existing backed-up `evidence` root includes all
+receipts/indexes; backup holds the acceptance lock while archiving, restore
+validates the whole store before exposing a project, and storage audit counts
+`acceptance_receipts` and refuses corrupt/unsafe/dangling proof. Receipts are
+retained audit evidence, not reclaimable job cache.
+
+**Remaining parent scope:** this slice supplies evidence/projection only. It
+does not mark an item's delivery, prove publication-history membership, change
+work-item `done` guards, relax unit-finish verification, or permit dropped-to-done
+corrections. Those delivery-mark, publication-provenance and forward-correction
+mechanisms remain separate follow-up work. Retained proof alone authorizes none
+of them. Tests in `test_acceptance.py` use bounded fake runners; they are not a
+rootless-runtime or deployment smoke test.

@@ -29,7 +29,7 @@ from .errors import Denied, LimitExceeded
 from .fs import (DIGEST, PREVIEW_BYTES, atomic_write, canonical, digest,
                  identifier, lock, mkdir, now, read_json, safe_read,
                  sync_dir, write_json, relative_parts)
-from . import insight_archive
+from . import acceptance, insight_archive
 from .project import Project, check_verify, read_goal
 from .snapshot import open_store
 
@@ -66,6 +66,8 @@ def backup(project: Project, destination: Path, *, verify: bool = False) -> dict
     # mutable worktree. A separate sealed snapshot captures uncommitted work.
     with quiescent(project):
         insight_archive.recover(project.root)
+        acceptance.recover_producers(project, include_runs=True)
+        acceptance.audit(project.root)
         captured = project.snapshots.capture_files(project.workspace)
         checkpoint = project.snapshots.create(captured, goal=project.goal, state=project.snapshots.get()["state"],
                                               run=None, outcome="wait", summary="Operator backup checkpoint; not published")
@@ -76,7 +78,7 @@ def backup(project: Project, destination: Path, *, verify: bool = False) -> dict
             # fsync the writable handle before linking: fsync on a
             # read-only descriptor fails on Windows, and durability must
             # precede the link so the new name never points at unwritten data.
-            with temporary.open("w+b") as raw:
+            with lock(project.root / "locks/acceptance.lock"), temporary.open("w+b") as raw:
                 with tarfile.open(fileobj=raw, mode="w:gz", format=tarfile.PAX_FORMAT) as archive:
                     # All members are regular files or directories; no symlink dereferencing.
                     # Regenerable render output (index.html) is not evidence: back it up never.
@@ -607,6 +609,7 @@ def _audit_collect(project: Project) -> dict:
     as audit(); see audit() for the contract.
     """
     root = project.root
+    acceptance_receipts = acceptance.audit(root)
     manifests: dict[str, dict] = {}
     manifest_bytes = 0
     manifest_skipped = 0
@@ -858,6 +861,7 @@ def _audit_collect(project: Project) -> dict:
         "history_ids": history_ids,
         "run_ids": run_ids,
         "artifact_ids": artifact_ids,
+        "acceptance_receipts": acceptance_receipts,
         "insight_ids": insight_ids,
         "work_item_ids": work_item_ids,
         "work_item_events_skipped": work_item_events_skipped,
@@ -932,6 +936,7 @@ def audit(project: Project) -> dict:
                      "expired_sample": [], "expired_truncated": False, "skipped": 0,
                      "cache_seconds": 1800}
     return {
+        "acceptance_receipts": collected["acceptance_receipts"],
         "sessions": sessions,
         "web_cache": web_cache,
         "snapshots": {
@@ -1156,6 +1161,7 @@ def restore(config, name: str, archive_path: Path, *, max_bytes: int = 107374182
                         os.fsync(output.fileno())
                     with contextlib.suppress(OSError, AttributeError, NotImplementedError):
                         target.chmod(0o600)
+            acceptance.audit(stage)
             metadata = read_json(stage / "backup.json")
             if not isinstance(metadata, dict):
                 raise Denied("Invalid backup metadata")

@@ -227,3 +227,15 @@ parent gets no renewed inference after the join, even if the child sealed.
 Offline coverage is in `tests/test_deadlines.py` and the bridge/durable Node
 contract tests; these are synthetic clocks/RPC peers, not live-provider or OCI
 acceptance evidence.
+
+### Retained acceptance prerequisite (IMPLEMENTED SLICE)
+
+The digest-bound receipt/projection prerequisite is implemented; see
+[retained acceptance evidence](check-jobs.md#retained-acceptance-evidence--implemented-slice).
+A snapshot's embedded `verification` remains its immutable publication-time
+record. Its separately projected `effective_verification` can refer to a late,
+input-bound retained acceptance receipt, without importing current-source
+verification. This does **not** yet replace the existing delivery/current-tree
+or terminal-transition guards. Item delivery marks, actual publication witnesses
+and stronger forward dropped-to-done correction remain unimplemented parent
+scope; do not treat a retained receipt as delivery or permission to close.

@@ -232,6 +232,8 @@ def _subscribe(context, original, *, purpose=None):
     job = {**original, 'id': job_id, 'shared_job': original['id'], 'role': owner,
            'producer_role': context.role.name, 'run': context.run_dir.name,
            'created_at': now(), 'acknowledged': False}
+    for key in ('acceptance_scope', 'acceptance_receipt_id', 'acceptance_retention_refusal'):
+        job.pop(key, None)  # Only the original execution produces proof.
     # The subscription states the subscriber's own demand. The shared job
     # keeps its own label, because a purpose never crosses a role boundary.
     if purpose is None:
@@ -253,7 +255,8 @@ def _make_room(project, *, protect=frozenset()):
         # A detached subscription is cancelled immediately; its physical runner
         # may still own the frozen inputs until it observes cancellation.
         executing = not value.get('shared_job') and value.get('status') in ('queued', 'running')
-        if (value.get('acknowledged') and not executing
+        pending_proof = value.get('acceptance_scope') is not None and not value.get('acceptance_receipt_id')
+        if (value.get('acknowledged') and not executing and not pending_proof
                 and value.get('id') not in protect and value.get('id') not in referenced
                 and read(project, value['id']).get('status') not in ('queued', 'running')):
             shutil.rmtree(old.parent)
@@ -588,6 +591,8 @@ def run_one(project, stop, *, sandbox_factory=Sandbox):
     The live per-job lock is crash ownership. A leftover running record is
     interrupted, never retried as successful; its requester can submit a new run.
     """
+    from . import acceptance
+    acceptance.recover_producers(project)  # Never while holding check-jobs.lock.
     from .workspace_cache import maintain
     maintain(project)  # No owner/cache/slot exclusion has been acquired yet.
     control = project.control()
@@ -726,8 +731,12 @@ def _execute(project, job, stop, sandbox_factory, slot):
         after = project.snapshots.capture_files(workspace)
         unchanged = after['code_digest'] == before['code_digest']
         representable = not after['skipped']
-        dependencies_unchanged = job.get('environment') is None or environment(project) == job['environment']
-        passed = unchanged and representable and dependencies_unchanged and all(r['exit_code'] == 0 and r['reason'] == 'exited' for r in results)
+        dependencies_unchanged = ((job.get('environment') is None or environment(project) == job['environment'])
+                                  and execution_key(project.config) == job['execution']
+                                  and (job['kind'] != 'verify' or list(project.verify) == job['commands']))
+        passed = (unchanged and representable and dependencies_unchanged
+                  and [r['script'] for r in results] == job['commands']
+                  and all(r['exit_code'] == 0 and r['reason'] == 'exited' for r in results))
         record = {'passed': passed, 'dependencies_unchanged': dependencies_unchanged, 'code_digest': job['code_digest'],
                   'snapshot_representable': representable, 'unchanged_during_verification': unchanged,
                   'image': project.config.sandbox.image, 'run': job['run'], 'job': job['id'],
@@ -750,7 +759,6 @@ def _execute(project, job, stop, sandbox_factory, slot):
             # The cleanup failed, so the container may still be running:
             # the job is recorded as needing recovery, never as finished.
             job.update(status='cleanup_failed', error=('Container cleanup requires recovery: ' + str(cleanup_exc))[:512])
-    save_execution(project, job)
     if job['status'] != 'cleanup_failed':
         # Move only configured, snapshot-excluded build trees after sandbox
         # cleanup. They are compiler inputs, never evidence of a passing check.
@@ -762,6 +770,30 @@ def _execute(project, job, stop, sandbox_factory, slot):
                 if project.snapshots.excluded(name) and artifact.is_dir() and not artifact.is_symlink():
                     artifact.replace(cache / name)
         shutil.rmtree(directory / 'input', ignore_errors=True)
+    # Finalize only after execution/cache cleanup. Until then the producer is
+    # running on disk and cannot be collected or evicted. Cancel and terminal
+    # publication serialize on check-jobs.lock. Retention never holds it.
+    with lock(project.root / 'locks/check-jobs.lock'):
+        latest = raw_read(project, job['id'])
+        for key in ('detached', 'acknowledged', 'replaced_by', 'purpose'):
+            if key in latest:
+                job[key] = latest[key]
+        if job['status'] == 'completed' and (stop.is_set() or (directory / 'cancel.json').exists()):
+            job.update(status='cancelled', passed=False)
+        if job['status'] == 'completed' and job.get('passed') and job['kind'] == 'verify' and job.get('environment') is not None:
+            bound = {'commands': job['commands'], 'execution': job['execution'],
+                     'environment': job['environment'], 'image': record['image']}
+            from .acceptance import MAX_BYTES
+            if len(canonical(record)) > project.config.limits.file_bytes:
+                # The exact canonical result bytes are what recovery reads.
+                # A fitting job/scope alone must not create a pinned producer.
+                job['acceptance_retention_refusal'] = 'result_file_bytes'
+            elif (len(canonical(bound)) <= MAX_BYTES // 2
+                    and len(canonical({**job, 'acceptance_scope': bound})) <= project.config.limits.file_bytes):
+                job['acceptance_scope'] = bound
+        write_json(path, job)
+    from .acceptance import recover_job
+    recover_job(project, job['id'])
     os.utime(root(project), None)
     return summary(job)
 

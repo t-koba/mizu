@@ -491,7 +491,9 @@ class RemainingTests(Fixture):
         self.assertLess(len(wire),MAX_FRAME)
         self.assertEqual(response['exit_code'],0)
         self.assertTrue(response['stdout_truncated'])
-        self.project.verify=tuple('x'*65536 for _ in range(32))
+        # Input-bound verification requires the returned script to match the
+        # configured command; keep this transport-bound test honest, escapes included.
+        self.project.verify=tuple(record['script'] for _ in range(32))
         with patch.object(ctx.sandbox,'execute',return_value=record):
             verification=ctx._op_verify({})
         self.assertTrue(verification['passed'])
