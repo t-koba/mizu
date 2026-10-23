@@ -280,19 +280,25 @@ and its admission still observes the writer's configured cooldown. See the
 [scheduling contract](scheduling.md) for precedence and the bounded prompt
 projection. Event delivery reaches scheduling two ways: the writer daemon
 re-checks `should_run` against event, wait, CI and ready-work state every idle
-tick, and `mizu service` additionally renders file triggers for any non-daemon
-role with `decision_events` or `work_item_events`, with or without a schedule
-(systemd path units on Linux, `WatchPaths` on macOS), that invoke the same
-`mizu run` before the next interval; the timers keep their own schedules. An
-event-triggered dispatch with nothing due returns `skipped: no-event` without
-consuming anything; a non-event `on_change` dispatch with an unchanged
-`code_digest` reports `unchanged`. A role with neither a schedule nor event
-subscriptions stays explicit-run only. Linux event triggers keep systemd
-defaults with no trigger limit (`Type=oneshot` with `StartLimitIntervalSec=0`
-on the event service only): a burst may dispatch more than once, which is
-cheap because admission is state-based, while a trigger limit fails the path
-unit and stops dispatching until reset by hand. A role with `on_change` alone
-and no `daemon`/`interval_seconds`/`calendar` runs only via explicit `mizu run`.
+tick, and `mizu service` renders event wakes for non-daemon roles with
+`decision_events` or `work_item_events`, plus unscheduled `on_change` roles.
+Linux systemd path units and macOS `WatchPaths` invoke `mizu run --event` on
+subscribed changes; scheduled timers retain their own cadence. Unscheduled
+watched roles also get periodic recovery at their effective per-role
+`event_poll_seconds` (default 60 seconds, 60–2,678,400 seconds). Windows has no file trigger: unscheduled watched roles
+get a `mizu run --event` polling task at that cadence, while scheduled roles
+recheck their event inputs on the scheduled trigger. Event-triggered dispatch
+with nothing due returns `skipped: no-event` without consuming anything; a
+non-event `on_change` dispatch with an unchanged `code_digest` reports
+`unchanged`. A role with neither a schedule, event subscriptions, nor
+unscheduled `on_change` stays explicit-run only. Linux event triggers keep
+systemd defaults with no trigger limit (`Type=oneshot` with
+`StartLimitIntervalSec=0` on the event service only): a burst may dispatch more
+than once, which is cheap because admission is state-based, while a trigger
+limit fails the path unit and stops dispatching until reset by hand. An
+unscheduled `on_change` role without decision/work-item subscriptions is still
+woken by published-code changes; see the [scheduling contract](scheduling.md)
+for its persisted cursor and recovery semantics.
 
 ## Sandbox
 
@@ -523,12 +529,14 @@ Linux/macOS service definitions also watch the work-items parent. After a
 terminal append or successful/partial receipt write the parent metadata is
 touched as a non-authoritative hint (nested directory writes alone are not
 assumed recursive platform watch events); this permits bounded-batch draining
-without requiring a receipt directory to pre-exist at service installation. No record schema or
-grant changes, assignments or automatic execution are implied. These are wake
-hints, not a transactional queue: a crash between append and metadata touch, a
-failed hint, or a platform-coalesced/busy dispatch can delay processing until
-another explicit/daemon/scheduled check. Windows keeps the existing scheduled
-checks (no file trigger in its current service schema). Re-render/reinstall
+without requiring a receipt directory to pre-exist at service installation. No
+record schema or grant changes, assignments or automatic execution are implied.
+These are wake hints, not a transactional queue: a crash between append and
+metadata touch, a failed hint, or a platform-coalesced/busy dispatch can delay
+processing until the next configured `event_poll_seconds` recovery for an
+unscheduled watched role, a daemon idle tick, or the next scheduled/explicit
+run. Windows has no file trigger: scheduled roles check at their scheduled
+firing, while unscheduled watched roles use the event poll task. Re-render/reinstall
 service definitions after enabling a subscription; rendering does not install
 or start services itself.
 
@@ -557,7 +565,11 @@ optional per-role spend overrides `requests_per_run` / `tools_per_run` /
 slots and rotation stay project/host policy), optional per-role event batch
 overrides `decision_events_limit` / `work_item_events_limit` (1–100 each; unset
 keeps the matching project `[limits]` value, so one role may take larger
-decision windows while another takes smaller terminal batches), and at most one
+decision windows while another takes smaller terminal batches), optional
+per-role event-only recovery poll override `event_poll_seconds` (60–2,678,400
+seconds, default 60; the Task Scheduler minimum/bounds; unscheduled watched
+roles recheck pending event inputs at this cadence on every platform while
+scheduled timers stay on their schedule), and at most one
 of `daemon`, `interval_seconds`, `calendar`. `policy` is a path
 string or an array of path strings (e.g. shared principles plus the role file);
 parts are read as UTF-8 in order and joined with one `\n` (trailing newline

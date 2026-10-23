@@ -15,10 +15,12 @@ wait, or an unobserved code change for that role and otherwise exits before any
 model use; the periodic timers invoke plain `mizu run` on their own schedules
 unchanged. Task Scheduler XML has no file trigger in this minimal schema, so
 scheduled roles still dispatch events when their timer fires, while event-only
-roles get a bounded 60-second poll task invoking `mizu run --event`. Linux/macOS
-unscheduled ``on_change`` event services retain fast file triggers and also
-reevaluate every 60 idle seconds to recover missed notifications. Persisted
-code state is rechecked; routing and admission still govern whether a run starts.
+roles get a bounded poll task invoking `mizu run --event` at the role's
+effective `event_poll_seconds` cadence (default 60 seconds). Linux/macOS
+unscheduled event services retain fast file triggers and also reevaluate at
+the effective `event_poll_seconds` cadence to recover missed notifications.
+Persisted code state is rechecked; routing and admission still govern whether a
+run starts.
 
 Event triggers use systemd defaults with no trigger limit: admission is
 state-based (`mizu run --event` exits before any model use when nothing is
@@ -36,7 +38,10 @@ from pathlib import Path
 from xml.sax.saxutils import escape as _escape
 
 from . import platform as _platform
-from .config import Config
+from .config import (
+    Config,
+    role_event_poll_seconds,
+)
 from .errors import Denied
 from .fs import atomic_write, identifier, mkdir, sync_dir, digest, read_json, write_json, lock
 from .project import Project
@@ -62,13 +67,11 @@ STOP_SEC = 45
 #: trigger limit is rendered here.
 WINDOWS_RESTART_INTERVAL = "PT1M"
 WINDOWS_RESTART_COUNT = 999
-#: Bounded event reevaluation (mechanism, not operator policy): Windows polls
+#: Bounded event reevaluation: Windows polls
 #: unscheduled watched roles because it has no file trigger; Linux/macOS also
-#: recover missed file notifications for unscheduled on_change roles. All use
+#: recover missed file notifications for unscheduled watched roles. All use
 #: ``mizu run --event`` and skip cheaply when nothing is due. This cadence is
 #: not a delivery deadline: a busy role or an admission gate can delay a run.
-EVENT_POLL_SECONDS = 60
-
 
 def quote(value: str) -> str:
     if any(c in value for c in ("\n", "\r", "\x00")):
@@ -224,13 +227,14 @@ def _render_systemd(config: Config, project: Project, executable: Path) -> dict[
                    f"Unit={event_base}.service", "", "[Install]", "WantedBy=default.target"]
         result[event_base + ".path"] = "\n".join(trigger) + "\n"
         role = config.roles[name]
-        if role.on_change and not (role.interval_seconds or role.calendar):
-            # Path notifications are only edges. Recheck persisted current.json
+        if not (role.interval_seconds or role.calendar or role.daemon):
+            # Path notifications are only edges. Recheck persisted state
             # after a lost/busy edge, using the same oneshot and admission gates.
+            poll = role_event_poll_seconds(role)
             result[event_base + ".timer"] = "\n".join([
-                "[Unit]", f"Description=Mizu code-change recovery for {project.name} / {name}",
-                "", "[Timer]", f"OnBootSec={EVENT_POLL_SECONDS}s",
-                f"OnUnitInactiveSec={EVENT_POLL_SECONDS}s", "AccuracySec=1s",
+                "[Unit]", f"Description=Mizu event recovery for {project.name} / {name}",
+                "", "[Timer]", f"OnBootSec={poll}s",
+                f"OnUnitInactiveSec={poll}s", "AccuracySec=1s",
                 f"Unit={event_base}.service", "", "[Install]", "WantedBy=timers.target", ""])
     return result
 
@@ -278,9 +282,10 @@ def _render_launchd(config: Config, project: Project, executable: Path) -> dict[
                       "".join(f"    <string>{_xml(watch)}</string>\n" for watch in watches[name]).rstrip("\n"),
                       "  </array>"]
         role = config.roles[name]
-        if role.on_change and not (role.interval_seconds or role.calendar):
+        if not (role.interval_seconds or role.calendar or role.daemon):
             # Combine recovery with WatchPaths, not a second concurrent job.
-            event_body.append(f"  <key>StartInterval</key><integer>{EVENT_POLL_SECONDS}</integer>")
+            poll = role_event_poll_seconds(role)
+            event_body.append(f"  <key>StartInterval</key><integer>{poll}</integer>")
         result[event_base + ".plist"] = ('<?xml version="1.0" encoding="UTF-8"?>\n'
                                '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
                                '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
@@ -346,10 +351,10 @@ def _render_windows(config: Config, project: Project, executable: Path) -> dict[
             f"<Arguments>{arguments}</Arguments></Exec></Actions>\n"
             "</Task>\n")
     # Event-only fallback: no file trigger on Windows, so watched roles without
-    # a schedule poll on a fixed 60-second cadence with ``mizu run --event``.
+    # a schedule poll with ``mizu run --event`` at the role's effective
+    # `event_poll_seconds` cadence (default 60 seconds).
     # Scheduled roles keep only their schedule trigger above; daemon roles
-    # need no poll (their loop rechecks admission). No configuration knob:
-    # EVENT_POLL_SECONDS is a mechanism floor.
+    # need no poll (their loop rechecks admission).
     watches = event_watches(config, project)
     scheduled_names = {name for name, _, _, _ in _scheduled_roles(config, project, executable)}
     for name in sorted(watches):
@@ -358,13 +363,14 @@ def _render_windows(config: Config, project: Project, executable: Path) -> dict[
         role = config.roles[name]
         if role.daemon:
             continue
+        poll = role_event_poll_seconds(role)
         base = _role_base(project, name)
         event_base = base + "-event"
         event_args = [resolved, "--config", str(config.file),
                       "run", project.name, "--role", name, "--event"]
         command, arguments = _xml(sys.executable), _windows_arguments(event_args)
         trigger = (f"<TimeTrigger><StartBoundary>2026-01-01T00:00:00{zone_suffix}</StartBoundary>"
-                   f"<Repetition><Interval>PT{EVENT_POLL_SECONDS}S</Interval>"
+                   f"<Repetition><Interval>PT{poll}S</Interval>"
                    "<StopAtDurationEnd>false</StopAtDurationEnd></Repetition>"
                    "<Enabled>true</Enabled></TimeTrigger>")
         settings = "<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"

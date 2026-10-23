@@ -259,6 +259,11 @@ daemon = true
 # as [limits].progress_signals; unset inherits the project list, explicit []
 # disables qualification for this role).
 # progress_signals = ["tool", "code", "decision", "insight", "input"]
+# Per-role event-only recovery poll override (optional, 60-2678400 seconds,
+# default 60; the Task Scheduler minimum/bounds). Applies to unscheduled watched
+# roles on all platforms: Linux/macOS recheck pending event inputs alongside
+# file triggers, Windows polls at this cadence; scheduled timers are unchanged.
+# event_poll_seconds = 60
 
 [roles.searcher]
 profile = "alternate"

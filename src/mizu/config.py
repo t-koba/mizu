@@ -43,6 +43,12 @@ MAX_INCLUDE_ENTRIES = 32
 MAX_ROLE_POLICY_PARTS = 16
 MAX_ROLE_POLICY_BYTES = 65536
 MAX_ROLE_POLICY_TOTAL = 262144
+#: Bounded event-only recovery poll cadence (Task Scheduler minimum/bounds):
+#: an unscheduled watched role rechecks pending event inputs this often when
+#: edge triggers are coalesced or lost. Fixed default; per-role override only.
+EVENT_POLL_SECONDS_DEFAULT = 60
+EVENT_POLL_SECONDS_MIN = 60
+EVENT_POLL_SECONDS_MAX = 31 * 86400
 
 
 def _tz_database_missing() -> bool:
@@ -482,6 +488,11 @@ class Role:
     #: qualification for that role) must hold unique supported signal
     #: names like the project bound.
     progress_signals: tuple[str, ...] | None = None
+    #: Per-role event-only recovery poll override. None keeps the fixed
+    #: 60-second default; a set value must lie in 60-2678400 like the
+    #: Task Scheduler repetition bound. Only unscheduled watched roles use
+    #: it for recovery reevaluation; scheduled timers stay on their schedule.
+    event_poll_seconds: int | None = None
 
 
 def role_requests_per_run(config: "Config", role: "Role") -> int:
@@ -635,6 +646,24 @@ def role_progress_signals(config, role):
         return tuple(config.limits.progress_signals)
     except Exception:
         return DEFAULT_PROGRESS_SIGNALS
+
+
+def role_event_poll_seconds(role: "Role") -> int:
+    """Effective event-only recovery poll for one role for one rendering.
+
+    Schema: role override when set, else the fixed 60-second default. There
+    is no project `[limits]` knob; the bounds mirror the Task Scheduler
+    repetition minimum/maximum (60-2678400). Trust: configuration. Failure:
+    never raises; malformed overrides read as the default (load already
+    refuses them fail-closed).
+    """
+    try:
+        value = getattr(role, "event_poll_seconds", None)
+    except Exception:
+        value = None
+    if type(value) is int and EVENT_POLL_SECONDS_MIN <= value <= EVENT_POLL_SECONDS_MAX:
+        return value
+    return EVENT_POLL_SECONDS_DEFAULT
 
 
 def role_policy_text(role: "Role") -> str:
@@ -982,7 +1011,7 @@ def load(file: Path) -> Config:
             raise ConfigError(f"Role name '{name}' is reserved for the operator channel")
         keys(role, {"profile", "policy", "workspace", "capabilities", "engine_tools", "on_change",
                     "interval_seconds", "calendar", "daemon", "selector", "attributes",
-                    "decision_events", "work_item_events", "decision_sources", "work_item_sources", "ci_wake", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds", "decision_events_limit", "work_item_events_limit", "no_progress_backoff_seconds", "cooldown_seconds", "progress_signals"}, f"roles.{name}")
+                    "decision_events", "work_item_events", "decision_sources", "work_item_sources", "ci_wake", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds", "decision_events_limit", "work_item_events_limit", "no_progress_backoff_seconds", "cooldown_seconds", "progress_signals", "event_poll_seconds"}, f"roles.{name}")
         profile = string(role.get("profile", ""), f"roles.{name}.profile")
         selector = string(role.get("selector", ""), f"roles.{name}.selector")
         if ("profile" in role) == ("selector" in role):
@@ -1134,6 +1163,10 @@ def load(file: Path) -> Config:
             role_progress = values
         else:
             role_progress = None
+        role_event_poll = role.get("event_poll_seconds")
+        if role_event_poll is not None:
+            number(role_event_poll, f"roles.{name}.event_poll_seconds",
+                   EVENT_POLL_SECONDS_MIN, EVENT_POLL_SECONDS_MAX)
         roles[name] = Role(name, profile, policy, workspace, caps,
                            strings(role.get("engine_tools", []), "engine_tools"),
                            boolean(role.get("on_change", False), "on_change"), interval, calendar, daemon, selector, attrs,
@@ -1146,7 +1179,8 @@ def load(file: Path) -> Config:
                            work_item_events_limit=role_work_item_limit,
                            no_progress_backoff_seconds=role_backoff,
                            cooldown_seconds=role_cooldown,
-                           progress_signals=role_progress)
+                           progress_signals=role_progress,
+                           event_poll_seconds=role_event_poll)
     if not roles:
         raise ConfigError("At least one role is required")
     consult_role = string(data.get("consult_role", ""), "consult_role")

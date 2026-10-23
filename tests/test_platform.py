@@ -537,20 +537,24 @@ class ServiceRendererTests(unittest.TestCase):
         self.assertEqual(sorted(watches), ["reporter"])
         base = "mizu-3-svc-reporter"
         units = render(config, self.project, ROOT / "bin/mizu", system="linux")
-        # Without on_change, Linux/macOS keep file triggers only.
+        # Every unscheduled watched role also gets recovery reevaluation at the
+        # effective event_poll_seconds cadence (default 60 seconds).
         self.assertIn(base + "-event.service", units)
         self.assertIn(base + "-event.path", units)
         self.assertNotIn(base + ".timer", units)
         self.assertNotIn(base + ".service", units)
         self.assertIn("--event", units[base + "-event.service"])
         self.assertIn("decision-history", units[base + "-event.path"])
-        self.assertNotIn(base + "-event.timer", units)
+        recovery = units[base + "-event.timer"]
+        self.assertIn("OnBootSec=60s", recovery)
+        self.assertIn("OnUnitInactiveSec=60s", recovery)
+        self.assertIn(f"Unit={base}-event.service", recovery)
         # macOS renders the WatchPaths event plist with no base schedule plist.
         mac = render(config, self.project, ROOT / "bin/mizu", system="macos")
         self.assertNotIn(base + ".plist", mac)
         event = plistlib.loads(mac[base + "-event.plist"].encode())
         self.assertIn("WatchPaths", str(event))
-        self.assertNotIn("StartInterval", event)
+        self.assertEqual(event["StartInterval"], 60)
         # A role with neither schedule nor subscriptions stays explicit-run only.
         roles["reporter"] = dataclasses.replace(
             roles["reporter"], interval_seconds=0, calendar=(), daemon=False,
@@ -634,6 +638,78 @@ class ServiceRendererTests(unittest.TestCase):
                     self.assertIn(str(self.project.root / "current.json"), event["WatchPaths"])
                 else:
                     self.assertIn(base + "-event.xml", result["enable_units"])
+
+    def test_event_poll_override_applies_on_all_platforms(self):
+        import dataclasses
+        import plistlib
+        import xml.etree.ElementTree as ET
+        from mizu.services import install, render
+        roles = dict(self.config.roles)
+        # Event-only subscribed role with an explicit poll override (no
+        # on_change, so the generalization itself is under test, not only the
+        # code-pointer path).
+        roles["reporter"] = dataclasses.replace(
+            roles["reporter"], interval_seconds=0, calendar=(), daemon=False,
+            decision_events=("defer",), decision_sources="any",
+            event_poll_seconds=300)
+        config = dataclasses.replace(self.config, roles=roles)
+        base = "mizu-3-svc-reporter"
+        linux = render(config, self.project, ROOT / "bin/mizu", system="linux")
+        recovery = linux[base + "-event.timer"]
+        self.assertIn("OnBootSec=300s", recovery)
+        self.assertIn("OnUnitInactiveSec=300s", recovery)
+        self.assertNotIn("OnBootSec=60s", recovery)
+        self.assertIn(f"Unit={base}-event.service", recovery)
+        mac = render(config, self.project, ROOT / "bin/mizu", system="macos")
+        event = plistlib.loads(mac[base + "-event.plist"].encode())
+        self.assertEqual(event["StartInterval"], 300)
+        windows = render(config, self.project, ROOT / "bin/mizu", system="windows")
+        task = ET.fromstring(windows[base + "-event.xml"])
+        ns = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
+        repetition = task.find("t:Triggers/t:TimeTrigger/t:Repetition/t:Interval", ns)
+        self.assertIsNotNone(repetition)
+        self.assertEqual(repetition.text, "PT300S")
+        for system in ("linux", "macos", "windows"):
+            with self.subTest(system=system):
+                directory = self.root / f"poll-override-{system}"
+                result = install(config, self.project, ROOT / "bin/mizu", directory, system=system)
+                expected = render(config, self.project, ROOT / "bin/mizu", system=system)
+                self.assertEqual(result["written"], sorted(expected))
+                if system == "linux":
+                    self.assertIn(base + "-event.timer", result["enable_units"])
+                    self.assertIn(base + "-event.path", result["enable_units"])
+                    self.assertNotIn(base + "-event.service", result["enable_units"])
+                else:
+                    suffix = ".plist" if system == "macos" else ".xml"
+                    self.assertIn(base + f"-event{suffix}", result["enable_units"])
+
+    def test_scheduled_trigger_ignores_event_poll_override(self):
+        import dataclasses
+        import plistlib
+        import xml.etree.ElementTree as ET
+        from mizu.services import render
+        roles = dict(self.config.roles)
+        # Scheduled subscribed role: the override must not add recovery or
+        # change the schedule trigger on any platform.
+        roles["reporter"] = dataclasses.replace(
+            roles["reporter"], interval_seconds=900, calendar=(),
+            on_change=True, decision_events=("reject", "defer"),
+            event_poll_seconds=300)
+        config = dataclasses.replace(self.config, roles=roles)
+        base = "mizu-3-svc-reporter"
+        linux = render(config, self.project, ROOT / "bin/mizu", system="linux")
+        self.assertIn("OnUnitInactiveSec=900s", linux[base + ".timer"])
+        self.assertNotIn(base + "-event.timer", linux)
+        self.assertNotIn("--event", linux[base + ".service"])
+        mac = render(config, self.project, ROOT / "bin/mizu", system="macos")
+        schedule = plistlib.loads(mac[base + ".plist"].encode())
+        self.assertEqual(schedule["StartInterval"], 900)
+        event = plistlib.loads(mac[base + "-event.plist"].encode())
+        self.assertNotIn("StartInterval", event)
+        windows = render(config, self.project, ROOT / "bin/mizu", system="windows")
+        self.assertIn(base + ".xml", windows)
+        self.assertNotIn(base + "-event.xml", windows)
+        self.assertNotIn("--event", windows[base + ".xml"])
 
     def test_scheduled_triggers_stay_unchanged_for_subscribed_roles(self):
         import dataclasses
