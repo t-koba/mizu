@@ -347,14 +347,16 @@ class Limits:
     free_disk_mb: int = 1024
     #: Operator-selected retention window (days) for budget day-files and
     #: decided (non-deferred) proposals. 0 disables time-based reaping;
-    #: snapshots, runs, decisions and evidence are never reaped.
+    #: this clock never expires runs, snapshots or permanent audit records.
     retention_days: int = 31
+    #: Completed, unreferenced run components; 0 retains indefinitely (0–3650).
+    run_retention_days: int = 31
     #: Operator-selected retention (days) for per-run diagnostics and dispatch
     #: measurements (``*-events.jsonl``, ``diagnostics.txt``, and
     #: ``dispatch-attempts.json``). Files older than
     #: ``event_log_compress_days`` gzip to ``.gz``; raw and compressed logs
     #: older than ``event_log_retention_days`` are dropped. 0 disables that
-    #: stage. Result/error/selection records are never candidates.
+    #: stage. Lifecycle records use run_retention_days, not these clocks.
     event_log_compress_days: int = 7
     event_log_retention_days: int = 31
     #: Operator-selected aggregate retention (bytes) for one run's engine
@@ -882,7 +884,7 @@ def load(file: Path) -> Config:
                      "delegate_wrap_up_requests": (0, 2),
                      "delegate_wrap_up_tools": (0, 4),
                      "insight_cursor_ttl_seconds": (60, 604800),
-                     "retention_days": (0, 3650), "pending_insights": (1, 1000),
+                     "retention_days": (0, 3650), "run_retention_days": (0, 3650), "pending_insights": (1, 1000),
                      "work_items_prompt": (1, 100), "decision_events_limit": (1, 100),
                      "work_item_events_limit": (1, 100),
                      "event_log_compress_days": (0, 3650), "event_log_retention_days": (0, 3650),

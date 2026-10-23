@@ -154,7 +154,7 @@ def parser() -> argparse.ArgumentParser:
     p = sub.add_parser("storage", help="Report snapshot/object retention accounting; dry-run preview unless --apply")
     p.add_argument("project", help="Managed project name")
     p.add_argument("--apply", action="store_true", help="Remove unreferenced manifests and orphan objects under quiescence")
-    p = sub.add_parser("prune", help="List (or apply) removal of reproducible inputs, bulky logs, and expired web cache")
+    p = sub.add_parser("prune", help="Preview (or apply) retention of completed runs, inputs, artifacts, logs and web cache")
     p.add_argument("project", help="Managed project name")
     p.add_argument("--apply", action="store_true", help="Actually remove candidates")
     from .storage import DEFAULT_KEEP_ARTIFACTS

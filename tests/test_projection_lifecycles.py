@@ -81,9 +81,9 @@ class ProjectionLifecycleTests(Fixture):
         with self.assertRaises(Denied):
             web.fetch(url)
 
-    def test_prune_requires_quiescence_for_projections(self):
-        with self.assertRaises(Denied):
-            prune(self.project, apply=False)
+    def test_prune_needs_exclusions_but_not_pause(self):
+        self.assertFalse(self.project.control()["paused"])
+        self.assertFalse(prune(self.project, apply=False)["applied"])
 
     def test_audit_reports_capacity_for_remaining_stores(self):
         self.project.set_control(paused=True)

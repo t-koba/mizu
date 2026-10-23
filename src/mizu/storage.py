@@ -1,11 +1,8 @@
-"""Conservative maintenance: backups at a quiescent boundary and safe pruning.
+"""Conservative storage maintenance with explicit policy and nonblocking locks.
 
-Evidence, snapshot manifests, objects and persistent sessions are never silently
-removed. Pruning removes only reproducible run inputs, old artifact documents,
-bulky per-run engine logs, and expired
-web-cache entries under operator-set retention; result, error,
-consultation, started, selection, and usage records are retained.
-Sessions are durable audit evidence: they are accounted, never reclaimed.
+Prune expires completed, unreferenced run components and disposable projections.
+Permanent ledgers and sessions remain. Backup and snapshot/object reclamation
+add a pause requirement; prune needs exclusions, not a paused project.
 """
 from __future__ import annotations
 
@@ -43,8 +40,8 @@ MEMBERS = (
 
 
 @contextlib.contextmanager
-def quiescent(project: Project):
-    if not project.control().get("paused"):
+def quiescent(project: Project, *, require_pause: bool = True):
+    if require_pause and not project.control().get("paused"):
         raise Denied("Pause the project before storage maintenance")
     with contextlib.ExitStack() as stack:
         stack.enter_context(lock(project.root / "locks" / "workspace.lock", blocking=False))
@@ -384,29 +381,22 @@ def _session_accounting(project: Project) -> dict:
 
 
 def prune(project: Project, *, apply: bool = False, keep_artifacts: int = DEFAULT_KEEP_ARTIFACTS) -> dict:
-    """List (or apply) removal of reproducible inputs, old artifacts, bulky logs, and expired web cache.
+    """Preview/apply run retention and existing projection cleanup.
 
-    Schema/bounds: ``keep_artifacts`` counts the live pointer when it exists.
-    ``[limits] event_log_compress_days`` (0 disables, 0-3650) gzips raw
-    ``*-events.jsonl``/``diagnostics.txt``/``dispatch-attempts.json``/
-    ``*-events-truncated.json`` at or
-    beyond N days old;
-    ``[limits] event_log_retention_days`` (0 disables, 0-3650) drops raw and
-    ``.gz`` logs at or beyond M days old. ``[web] cache_seconds`` decides web-cache expiry
-    from ``retrieved_epoch`` age (entries without a usable epoch fall back to mtime).
-    Age is file mtime vs now unless noted; the compressed copy keeps the raw
-    mtime so the drop clock does not restart.
-    Only top-level run-dir logs and expired
-    web-cache entries are candidates; result/error/consultation/
-    started/selection/admission/runtime-usage records, snapshots, objects, sessions,
-    decisions, proposals, and work-item histories are never candidates.
-    Trust: operator-invoked maintenance under quiescence (paused + locks);
-    paths are local recorded state, never model input. The web cache is
-    shared under ``data_dir``; the invoking project's TTL decides expiry and
-    removal is best-effort (a concurrent fetch recreates the entry).
-    Retry: dry-run by default; apply writes a maintenance audit record.
-    Evidence: returns candidates + audit path. Failure: Denied for negative
-    retention, symlinks, or non-quiescent state.
+    ``run_retention_days`` (default 31; 0 disables; 0–3650) expires only
+    complete, terminal, unreferenced connected components. Lifecycle age is
+    validated started_at versus now, never mtime. Typed references, bounds and
+    interruption recovery live in storage_runs and docs/configuration.md.
+    Existing log clocks use mtime (gzip preserves it); artifact count and web
+    TTL policies are unchanged. Snapshots, objects, permanent ledgers and
+    sessions are not candidates. No shared smoke artifacts are handled here.
+
+    Every invocation recomputes under workspace, sorted role, editor-ingest,
+    insights exclusions, nonblocking and without pause. Apply refuses any
+    incomplete reference scan before deletion; dry-run changes no evidence.
+    Apply records full bounded intent and completion audits; response lists
+    are previews (100 names, 256 serialized bytes each, counts/digests). I/O errors
+    propagate, leaving recoverable quarantine intent, never false success.
     """
     if keep_artifacts < 0:
         raise Denied("Artifact retention must not be negative")
@@ -425,9 +415,28 @@ def prune(project: Project, *, apply: bool = False, keep_artifacts: int = DEFAUL
     to_compress: list[Path] = []
     to_drop: list[Path] = []
     cache_seconds = _web_cache_seconds(project)
-    with quiescent(project):
+    from . import storage_runs
+    with quiescent(project, require_pause=False):
+        leftovers = storage_runs.quarantines(project)
+        if apply:
+            storage_runs.recover_staging(project, leftovers)
+            leftovers = storage_runs.quarantines(project)
+        run_plan = storage_runs.plan(project)
+        run_preview = storage_runs.preview(run_plan)
+        run_preview["quarantine_count"] = len(leftovers)
+        run_preview["quarantines"] = [p.name for p, _ in leftovers[:storage_runs.PREVIEW_ROWS]]
+        run_preview["quarantines_truncated"] = len(leftovers) > storage_runs.PREVIEW_ROWS
+        run_preview["restored_component_count"] = sum(p.name.startswith("staging-") for p, _ in leftovers) if apply else 0
+        if not apply and any(p.name.startswith("staging-") for p, _ in leftovers):
+            run_preview["complete"] = False
+            run_preview["reason"] = "Uncommitted quarantine; next apply restores it before rescanning"
+        if apply and not run_plan["complete"]:
+            raise Denied("Incomplete run-reference scan; prune refused: " + run_plan.get("reason", ""))
+        retiring = {run for component in run_plan["components"] for run in component}
         for run_dir in sorted((project.root / "runs").glob("*")):
             if not run_dir.is_dir() or run_dir.is_symlink():
+                continue
+            if run_dir.name in retiring:
                 continue
             finished = (run_dir / "result.json").exists() or (run_dir / "error.json").exists() or (run_dir / "consultation.json").exists()
             if finished and (run_dir / "input").is_dir():
@@ -465,7 +474,14 @@ def prune(project: Project, *, apply: bool = False, keep_artifacts: int = DEFAUL
                    "event_logs_compressed": [p.relative_to(project.root).as_posix() for p in to_compress],
                    "event_logs_removed": [p.relative_to(project.root).as_posix() for p in to_drop],
                    "web_cache": [p.relative_to(data_base).as_posix() for p in web_victims]}
+        if apply and len(canonical(removed)) > storage_runs.MAX_BYTES:
+            raise Denied("Prune audit exceeds byte bound")
         if apply:
+            # Persist the bounded complete plan before any destructive action.
+            intent = project.root / "maintenance" / f"prune-runs-{uuid.uuid4().hex}.json"
+            write_json(intent, run_plan)
+            run_preview["intent"] = intent.relative_to(project.root).as_posix()
+            storage_runs.retire(project, run_plan, leftovers)
             for candidate in candidates:
                 if candidate.is_symlink():
                     raise Denied("Refusing a symlink during prune")
@@ -491,26 +507,36 @@ def prune(project: Project, *, apply: bool = False, keep_artifacts: int = DEFAUL
                     raise Denied("Refusing a symlink during prune")
                 candidate.unlink()
             for parent in {c.parent for c in (*candidates, *victims, *to_compress, *to_drop, *web_victims)}:
-                try:
-                    sync_dir(parent)
-                except OSError:
-                    pass
+                sync_dir(parent)
             removed["event_logs_compressed"] = compressed_names
             removed["event_logs_removed"] = dropped_names
             audit = project.root / "maintenance" / f"prune-{int(time.time())}-{uuid.uuid4().hex[:8]}.json"
             write_json(audit, {"applied_at": now(), "keep_artifacts": keep_artifacts,
                                "event_log_compress_days": compress_days,
                                "event_log_retention_days": retention_days,
-                               "cache_seconds": cache_seconds, **removed})
+                               "cache_seconds": cache_seconds, "run_retention": run_preview, **removed})
             sync_dir(audit.parent)
             removed["audit"] = audit.relative_to(project.root).as_posix()
-    return {"applied": apply, **removed,
-            "retained": "All result/error/consultation/started/selection/usage records, snapshots, "
+    def path_preview(path):
+        short = path[:256]
+        while len(canonical(short)) > 256:
+            short = short[:-1]
+        return short
+
+    path_previews = {}
+    for key, paths in list(removed.items()):
+        if isinstance(paths, list):
+            names = [path_preview(p) for p in paths[:storage_runs.PREVIEW_ROWS]]
+            path_previews[key] = {"count": len(paths), "sha256": digest(canonical(paths)),
+                                  "truncated": len(paths) > len(names) or names != paths}
+            removed[key] = names
+    return {"applied": apply, "run_retention": run_preview, "path_previews": path_previews, **removed,
+            "retained": "Run evidence outside expired, unreferenced complete components; snapshots, "
                         "content objects, sessions, decisions, proposals, insight revisions, and work-item histories. "
                         "Artifact documents beyond the kept count, "
                         "bulky engine logs beyond operator retention, and "
                         "web-cache entries expired past cache_seconds are disposable projections; "
-                        "their evidence remains in snapshots and run records. "
+                        "their evidence remains in snapshots and retained run records where available. "
                         "Sessions are durable audit evidence and are accounted, never reclaimed."}
 
 

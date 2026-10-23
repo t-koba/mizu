@@ -149,8 +149,10 @@ same digest and observers keep skipping instead of looping model calls.
 
 ## ADR-024 — Bounded run-evidence retention for bulky engine logs
 Operator-set `[limits]` day counts gzip raw run event logs at N days and drop them at M days
-(0 disables a stage); `mizu prune` reports and applies both stages. Result, error, snapshot, and
-decision records are never candidates, so usage keeps working. Defaults
+(0 disables a stage); `mizu prune` reports and applies both stages. These log clocks do not
+expire lifecycle records, snapshots or decisions. Whole-run retention now uses the separate
+`run_retention_days` policy described in configuration; expired run output is no longer
+available to usage, while permanent ledgers remain. Defaults
 `event_log_compress_days` 7 / `event_log_retention_days` 31; age is file mtime, the `.gz`
 keeps the raw mtime so the drop clock does not restart, and only top-level
 `runs/*/` `*-events.jsonl` and `diagnostics.txt` (plus `.gz`) are candidates.

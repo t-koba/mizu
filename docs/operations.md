@@ -207,7 +207,22 @@ Workspace cache reclamation is separately opt-in via `[workspace_cache]`
 (see [configuration](configuration.md#regenerable-workspace-caches)). Empty
 roots keep it disabled. Due cleanup runs only at a quiescent execution boundary;
 it skips busy locks without pausing/draining and retains its latest result in
-`maintenance/workspace-cache.json`. Operator `prune` behavior is unchanged.
+`maintenance/workspace-cache.json`. Workspace-cache policy remains separate from operator `mizu prune`.
+
+Prune does not require pause, but refuses a busy workspace, configured/existing
+role, editor-ingest or insights exclusion. Backup and `storage --apply` still
+require pause. `[limits].run_retention_days` defaults to 31 (integer 0–3650;
+0 keeps indefinitely). Only terminal, valid, old and unreferenced connected
+run components expire. Current inbox/evidence, active-role, selector-wait and
+blocked WorkItem target-decision references pin entire parent/child components.
+Permanent ledgers remain, but historical run IDs and usage may lose full expired
+run output. Preview reports bounded IDs/counts/digests and scan completeness;
+apply refuses an incomplete scan. The full plan and successful completion are
+recorded under `maintenance/`. Interrupted quarantine staging is restored before
+the next apply rescan; committed quarantine deletion resumes instead. Dry-run
+only reports leftovers. See [the retention contract](configuration.md#operator-invoked-run-retention)
+for bounds, exact typed fields and interruption semantics. Shared smoke evidence
+is not pruned.
 
 `--keep-artifacts N` は最新の成果物を含め N 件を保持します。`[web] cache_seconds` を過ぎた共有 web-cache（`data_dir/web-cache/*.json`）の期限切れエントリも候補となり、次回 fetch で再取得されるため削除は安全に再試行できます。セッション（`sessions/`）は監査証跡として保持され、削除対象になりません（`mizu storage` で件数・バイト数を報告）。削除ログは `maintenance/prune-*.json` に記録され、バックアップ対象となります。
 

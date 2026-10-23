@@ -327,8 +327,9 @@ required). Operator tooling that concatenates configs
 | `role_state_bytes` | Maximum canonical JSON bytes of one role-owned current research state record (1,024–65,536; default 8,192) |
 | `role_state_prompt_bytes` | Maximum bytes of a role's own research state injected into its prompt (1–65,536; default 4,096); over-bound records inject status/generation/sizes only |
 | `retention_days` | Daily budget-file retention and decided insight live-inbox window (default 31 days; 0 disables; 0–3,650). Current-revision terminal insights move permanently to `insight-archive.sqlite3` before inbox removal; bodies/evidence are not deleted. Ingest still reports removed live copies as `reaped`. `insight list` remains live-only; explicit `insight page --scope archive` enumerates bodies and validated legacy identity-only tombstones (`body_unavailable: true`); ID reads include archived bodies and explicitly deny missing bodies. Archive retention is permanent, with no expiry/deletion knob (see operations for one-time migration and retry behavior). This setting never deletes snapshots, whole run directories, decisions, or archived insight bodies; bounded per-run dispatch measurements use the separate `event_log_*` retention below |
+| `run_retention_days` | Completed, unreferenced per-project run-component retention (default 31 days; 0 keeps indefinitely; integer 0–3,650). Uses validated `started_at`, not mtime; whole connected components expire only when every member is terminal and strictly older than the window. See the retention contract below |
 | `event_log_compress_days` | Compress per-run engine logs and bounded dispatch measurements (`*-events.jsonl`, `diagnostics.txt`, `dispatch-attempts.json`) at or beyond N days old to `.gz` (0 disables; 0–3,650; default 7) |
-| `event_log_retention_days` | Drop those raw/compressed logs and dispatch measurements at or beyond M days old (0 disables; 0–3,650; default 31). Result/error/consultation/started/selection/runtime-usage records, snapshots, objects, sessions, decisions, and proposals are never candidates |
+| `event_log_retention_days` | Drop those raw/compressed logs and dispatch measurements at or beyond M days old (0 disables; 0–3,650; default 31). Lifecycle records are not candidates for this log clock; whole runs use `run_retention_days`. Snapshots, objects, sessions and permanent ledgers are never pruned |
 | `event_stream_bytes` | Per-run engine event-stream retention in bytes (1 MiB–256 MiB; default 4 MiB). Bytes past the budget are dropped from `*-events.jsonl` with an explicit `*-events-truncated.json` marker while parsing and the run continue, so diagnostic volume can never discard sealed work. The per-record transport bound stays fixed mechanism |
 | `insight_cursor_ttl_seconds` | Absolute lifetime of `insight page` continuation cursors (60–604,800 seconds; default 86,400). Continuations never extend expiry. Expired cursors fail explicitly; restart enumeration. This is not archive retention |
 | `pending_insights` | Newest pending proposals offered in prompts (1–1,000; default 30). `mizu insight list` uses 1,000 |
@@ -367,9 +368,97 @@ failure behavior. A valid finish seal remains separate from adapter settlement
 and all final integrity/verification/publication checks still apply.
 
 
-All limits are positive integers except `daily_requests`, `shared_daily_requests`, `max_failures`, `busy_retry_seconds`, `admission_wait_seconds`, `missing_finish_followups`, `free_disk_mb`, `retention_days`, `event_log_compress_days`, `event_log_retention_days`, `session_max_tokens`, `session_max_age_seconds`, and adapter `diagnostic_bytes`, which may be zero. `missing_finish_counts_as_failure` and `drain_yield` are booleans. `session_max_cost_usd` is a number (integer or float) which may be zero.
+All limits are positive integers except `daily_requests`, `shared_daily_requests`, `max_failures`, `busy_retry_seconds`, `admission_wait_seconds`, `missing_finish_followups`, `free_disk_mb`, `retention_days`, `run_retention_days`, `event_log_compress_days`, `event_log_retention_days`, `session_max_tokens`, `session_max_age_seconds`, and adapter `diagnostic_bytes`, which may be zero. `missing_finish_counts_as_failure` and `drain_yield` are booleans. `session_max_cost_usd` is a number (integer or float) which may be zero.
 
-Run-evidence retention keeps growth bounded: `mizu prune` (paused project, dry-run by default, `--apply` writes a `maintenance/prune-*.json` audit) gzips raw engine logs older than `event_log_compress_days`, drops raw/`.gz` logs older than `event_log_retention_days`, and drops web-cache entries expired past `[web] cache_seconds` (`retrieved_epoch` age; entries without a usable epoch fall back to mtime). Age is file mtime versus now unless noted; the `.gz` keeps the raw mtime so the drop clock does not restart. Only top-level `runs/*/` `*-events.jsonl`, `diagnostics.txt`, bounded `dispatch-attempts.json`, and `*-events-truncated.json` markers (plus their `.gz`) and expired `data_dir/web-cache/*.json` entries are candidates — `result.json`, `error.json`, `consultation.json`, `started.json`, `selection.json`, `runtime-usage.json`, admission records, snapshots, objects, sessions, decisions, and proposals are always kept, so `mizu usage` and restores keep working. Sessions are durable audit evidence: `mizu storage` reports their counts/bytes and `mizu storage --apply` never reclaims them. `mizu storage --apply` removes only unreferenced snapshot manifests and orphan objects under quiescence; it refuses when the preview reports any skipped manifest (`snapshots.skipped`, including unreadable or over-1-MiB manifests), any skipped reference record (`reference_records_skipped`, covering present-but-unreadable, malformed, over-1-MiB, wrong-shape, or failed history/run/artifact/inbox/current-pointer scans), or any skipped work-item history (`work_item_events_skipped`), because reachability is then unknown. `reference_records_skipped` counts unique record/scan paths, not failed checks (the active generation is counted at most once). JSON `null` records, invalid non-null snapshot IDs, and malformed history names, entries, digests, or active endpoints are incomplete. Pointer and history reads share the 1 MiB bound and do not follow symlinks. Missing optional run records and an absent `artifacts/latest.json` pointer are normal and not counted; an artifact directory without `evidence.json` is incomplete. Usable valid IDs are still reported, but an incomplete scan never proves references are absent. The web cache is shared under `data_dir`; the invoking project's `cache_seconds` decides expiry and a concurrent fetch recreates a removed entry, so `prune --apply` is safe to retry. Snapshots reference workspace objects only, never run logs, so compressed/dropped logs are disposable projections absent from later backups by construction.
+### Operator-invoked run retention
+
+`mizu prune PROJECT` is a dry run; `--apply` recomputes the plan under the
+same nonblocking exclusions: workspace, sorted configured **and existing** role
+locks, editor-ingest, then insights. A busy lock refuses immediately. Pause is
+**not** required for prune; backup and snapshot/object reclamation still require
+pause. This changes no scheduling, admission, delivery or shared smoke policy.
+
+`[limits].run_retention_days = 31` expires only complete run components. `0`
+disables new run expiry and its live-reference scan; existing quarantine is still
+validated and recovered/deleted. Accepted integer range is 0–3,650. A local run ID
+is 32 lowercase hexadecimal characters. The scanner validates the known lifecycle
+envelope: matching run/role, a started snapshot digest and timezone-aware
+`started_at`, plus at least one known terminal result/error/consultation/delegation
+record with matching identity and a timezone-aware `finished_at` between start
+and now. Completed/waiting results require a snapshot digest, a known finish outcome and
+string summary/state, or the pre-execution selection-wait shape; interrupted/bounded
+records require an error string. Child completions require their parent ID,
+answer and snapshot digest. Opaque model/log payloads are not interpreted.
+The runtime's durable `prepared` result includes a finish seal but precedes
+publication/post-processing: a crash can leave this incomplete, recoverable
+evidence. Prepared, missing, malformed, future-dated and unknown-outcome
+envelopes remain.
+**Every** member must have started strictly more than N days ago; a young,
+incomplete member or any live pin preserves the whole component. A missing linked
+member or live pin target makes the entire scan incomplete, not just that component.
+
+Live pins are only current inbox `run` and `evidence[].run`, active role `run`,
+and valid selector `*-wait.json` pointers whose waiting audit result and
+selection record are intact. Blocked WorkItem insight/dependency waits pin their
+target's exact decision when it names a local Mizu run; the operator decision sentinel
+names no run. Dependency revision/action bindings also resolve retained decision
+history if the current target has moved. WorkItem chains are read with
+the existing schema validator without recovery or scheduling. Connections are
+only `parent_run` in lifecycle envelopes,
+`consultations/*.json` `answers[].run`, and `delegations/*.json` `run`.
+Nested children are transitive and components are undirected. Prose, VCS provider
+run names, snapshot run fields and historical audit run fields are **not** pins.
+Permanent decisions, insight archives, WorkItems, receipts and other audit
+records remain: an expired historical run ID may no longer resolve to full
+output, and usage reports can only aggregate surviving run output.
+
+The reference scan reuses `usage.py`'s 5,000 physical-run bound, separately from
+its 100,000 directory-entry and distinct-pin bounds. Individual JSON is capped at
+1 MiB; combined envelope-read and metadata-subtree-preflight bytes are capped at
+64 MiB. Preflight checks every file/directory in a candidate run's payload and
+any remaining quarantine payload with lstat only and no link following. Opaque
+payload sizes consume neither the JSON byte budget nor a per-file cap; their
+traversal is bounded by entries and depth. Subtree depth
+is at most eight. The existing ledger reader validates bounded ledger files after
+preflight. Quarantine validation has the same entry/byte/depth budgets. Missing optional lifecycle records
+and parseable but invalid/unknown lifecycle envelopes keep their runs ineligible without hiding
+references. Malformed reference JSON, unsafe links, unresolved seeds and exceeded bounds make
+the scan incomplete. Preview reports `run_retention.complete: false`
+and a bounded reason; **all apply deletion is refused**, including projection
+cleanup. Systemic I/O errors propagate instead of masquerading as an empty scan.
+A component whose quarantine manifest would exceed 1 MiB also refuses apply.
+
+Output `run_retention` carries policy, scan time, counts, up to 100 candidate IDs,
+a truncation flag and a SHA-256 of the canonical full component plan. Existing
+projection path lists are also previews (100 paths, 256 serialized JSON bytes each), with
+`path_previews` counts/truncation/digests. Apply writes the complete bounded plan
+to `maintenance/prune-runs-*.json` before any deletion and returns its `intent`
+path; `maintenance/prune-*.json` records a fully successful prune. Full projection
+audit content is capped at 64 MiB before deletion.
+
+Run removal uses `maintenance/run-quarantine/`: a durable per-component manifest,
+individual directory renames into `staging-<id>/runs/`, then one **atomic component
+commit rename** to `retired-<id>` before recursive deletion. Multi-directory
+staging is not itself atomic: interruption before commit is rolled back on the
+next apply, under locks, **before** rescanning current pins. Dry-run only reports
+leftovers and never restores or deletes them. After commit, deletion is retried
+rather than restoring possibly partial evidence. Intent survives partial I/O
+failure; completion/restoration has a separate permanent maintenance record.
+Unknown or unsafe leftovers refuse recovery rather than being treated as runs.
+The operation is per component, not an all-components transaction: earlier
+committed deletions may survive a later failure; no successful prune audit is
+written on partial failure. These exclusions coordinate Mizu writers, not
+uncoordinated external edits to project state.
+
+Prune also retains its independent projection policies: reproducible inputs,
+old artifact documents, raw engine logs older than `event_log_compress_days`,
+raw/`.gz` logs older than `event_log_retention_days`, and expired shared web cache
+(`[web] cache_seconds`, `retrieved_epoch` or mtime fallback). These clocks use
+file mtime unless stated; gzip preserves it. They do not expire lifecycle records
+individually. Keeping a run component does not disable its log/input cleanup.
+No shared smoke artifacts are candidates.
+
+Sessions are durable audit evidence: `mizu storage` reports their counts/bytes and `mizu storage --apply` never reclaims them. `mizu storage --apply` removes only unreferenced snapshot manifests and orphan objects under quiescence; it refuses when the preview reports any skipped manifest (`snapshots.skipped`, including unreadable or over-1-MiB manifests), any skipped reference record (`reference_records_skipped`, covering present-but-unreadable, malformed, over-1-MiB, wrong-shape, or failed history/run/artifact/inbox/current-pointer scans), or any skipped work-item history (`work_item_events_skipped`), because reachability is then unknown. `reference_records_skipped` counts unique record/scan paths, not failed checks (the active generation is counted at most once). JSON `null` records, invalid non-null snapshot IDs, and malformed history names, entries, digests, or active endpoints are incomplete. Pointer and history reads share the 1 MiB bound and do not follow symlinks. Missing optional run records and an absent `artifacts/latest.json` pointer are normal and not counted; an artifact directory without `evidence.json` is incomplete. Usable valid IDs are still reported, but an incomplete scan never proves references are absent. The web cache is shared under `data_dir`; the invoking project's `cache_seconds` decides expiry and a concurrent fetch recreates a removed entry, so `prune --apply` is safe to retry. Snapshots reference workspace objects only, never run logs, so compressed/dropped logs are disposable projections absent from later backups by construction.
 `daily_requests` counts logical admissions, not dollar amounts; enable a hard provider spend cap/pause by default (alert-only alarms are not sufficient for unattended runs). Use `mizu status` and `mizu budget` for per-project and shared day counts in the configured `timezone`, and `mizu usage` for token statistics.
 Day-files (`data/budget/YYYY-MM-DD.json`) keep the date in the configured `timezone` (UTC when unset) plus the shared aggregate, a per-project map, and the `zone` that wrote them, so two configs sharing `data_dir` with different `daily_requests` admit independently unless the optional shared total is reached. `mizu budget <project>` and `mizu status` report both numbers with the day and zone. Projects sharing one `data_dir` should share one `timezone`: different zones name different days for the same instant, splitting the shared total across day-files.
 
