@@ -3878,11 +3878,16 @@ class Engine:
         # but generic ledger readiness belongs to configured autonomous runs.
         autonomous = bool(role.daemon or role.interval_seconds or role.calendar
                           or role.decision_events or role.work_item_events)
+        unscheduled = not bool(role.daemon or role.interval_seconds or role.calendar)
+        has_code_event = bool(role.on_change and unscheduled and not code_unchanged)
         ready_work = (role.workspace == "write" and (not event_trigger or autonomous)
                       and _has_ready_work(project))
         if event_trigger:
             event_gate = _scheduling.evaluate(_scheduling.DispatchFacts(
                 event_trigger=True,
+                on_change=bool(role.on_change),
+                code_unchanged=bool(code_unchanged),
+                has_code_event=bool(has_code_event),
                 workspace_write=role.workspace == "write",
                 ready_work=ready_work,
                 has_decision=bool(substantive_events),
@@ -3913,6 +3918,7 @@ class Engine:
             event_trigger=bool(event_trigger),
             on_change=bool(role.on_change),
             code_unchanged=bool(code_unchanged),
+            has_code_event=bool(has_code_event),
             workspace_write=role.workspace == "write",
             ready_work=ready_work,
             has_decision=bool(substantive_events),

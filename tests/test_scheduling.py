@@ -28,6 +28,7 @@ def _daemon(**overrides):
 def _dispatch(**overrides):
     base = {
         "event_trigger": False, "on_change": False, "code_unchanged": False,
+        "has_code_event": False,
         "workspace_write": False, "has_decision": False, "has_work_item": False,
         "has_wait": False, "has_ci": False, "goal_changed": False,
         "inbox_changed": False, "operator_woke": False, "wait_expired": False,
@@ -200,6 +201,33 @@ class DispatchEvaluatorTests(unittest.TestCase):
         # Keep terminal event routing/labels independent and higher priority.
         self.assertEqual(evaluate(_dispatch(ready_work=True, workspace_write=True,
                          has_work_item=True, event_trigger=True)).admission, "work_item")
+
+    def test_event_trigger_treats_unobserved_code_change_as_event(self):
+        # Unscheduled on_change with unobserved code admits the probe with change.
+        decision = evaluate(_dispatch(event_trigger=True, on_change=True,
+                                      code_unchanged=False, has_code_event=True))
+        self.assertEqual((decision.admitted, decision.skipped, decision.admission),
+                         (True, None, "change"))
+        # A more-specific subscribed event keeps its own label.
+        for flag, label in (("has_decision", "decision"), ("has_work_item", "work_item"),
+                            ("has_wait", "wait"), ("has_ci", "ci")):
+            with self.subTest(flag=flag):
+                decision = evaluate(_dispatch(event_trigger=True, on_change=True,
+                                              code_unchanged=False, has_code_event=True,
+                                              **{flag: True}))
+                self.assertEqual((decision.admitted, decision.admission), (True, label))
+        # Observed code with no subscribed input still probes cheaply.
+        decision = evaluate(_dispatch(event_trigger=True, on_change=True,
+                                      code_unchanged=True, has_code_event=False))
+        self.assertEqual((decision.admitted, decision.skipped), (False, "no-event"))
+        # Roles without on_change never treat code as an event.
+        decision = evaluate(_dispatch(event_trigger=True, on_change=False,
+                                      code_unchanged=False, has_code_event=False))
+        self.assertEqual((decision.admitted, decision.skipped), (False, "no-event"))
+        # Scheduled on_change keeps timer discovery: --event stays no-event.
+        decision = evaluate(_dispatch(event_trigger=True, on_change=True,
+                                      code_unchanged=False, has_code_event=False))
+        self.assertEqual((decision.admitted, decision.skipped), (False, "no-event"))
 
     def test_change_vs_schedule(self):
         # Changed code dispatches for either workspace mode.

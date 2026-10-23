@@ -537,24 +537,137 @@ class ServiceRendererTests(unittest.TestCase):
         self.assertEqual(sorted(watches), ["reporter"])
         base = "mizu-3-svc-reporter"
         units = render(config, self.project, ROOT / "bin/mizu", system="linux")
-        # Event units only: no timer or plain service for an event-only role.
+        # Without on_change, Linux/macOS keep file triggers only.
         self.assertIn(base + "-event.service", units)
         self.assertIn(base + "-event.path", units)
         self.assertNotIn(base + ".timer", units)
         self.assertNotIn(base + ".service", units)
         self.assertIn("--event", units[base + "-event.service"])
         self.assertIn("decision-history", units[base + "-event.path"])
+        self.assertNotIn(base + "-event.timer", units)
         # macOS renders the WatchPaths event plist with no base schedule plist.
         mac = render(config, self.project, ROOT / "bin/mizu", system="macos")
         self.assertNotIn(base + ".plist", mac)
         event = plistlib.loads(mac[base + "-event.plist"].encode())
         self.assertIn("WatchPaths", str(event))
+        self.assertNotIn("StartInterval", event)
         # A role with neither schedule nor subscriptions stays explicit-run only.
         roles["reporter"] = dataclasses.replace(
             roles["reporter"], interval_seconds=0, calendar=(), daemon=False,
             decision_events=())
         bare = dataclasses.replace(config, roles=roles)
         self.assertEqual(event_watches(bare, self.project), {})
+
+    def test_unscheduled_on_change_watches_code_pointer_on_all_platforms(self):
+        import dataclasses
+        import plistlib
+        import xml.etree.ElementTree as ET
+        from mizu.services import event_watches, render
+        roles = dict(self.config.roles)
+        # Reporter is scheduled; clearing the schedule and enabling on_change
+        # makes it event-only for this project (worker/reporter only).
+        roles["reporter"] = dataclasses.replace(
+            roles["reporter"], interval_seconds=0, calendar=(), daemon=False,
+            decision_events=(), work_item_events=(), on_change=True)
+        config = dataclasses.replace(self.config, roles=roles)
+        watches = event_watches(config, self.project)
+        self.assertIn("reporter", watches)
+        pointer = str(self.project.root / "current.json")
+        self.assertIn(pointer, watches["reporter"])
+        base = "mizu-3-svc-reporter"
+        linux = render(config, self.project, ROOT / "bin/mizu", system="linux")
+        self.assertIn(base + "-event.service", linux)
+        self.assertIn(base + "-event.path", linux)
+        self.assertIn("current.json", linux[base + "-event.path"])
+        recovery = linux[base + "-event.timer"]
+        self.assertIn("OnBootSec=60s", recovery)
+        self.assertIn("OnUnitInactiveSec=60s", recovery)
+        self.assertIn("AccuracySec=1s", recovery)
+        self.assertIn(f"Unit={base}-event.service", recovery)
+        self.assertNotIn(base + ".service", linux)
+        self.assertNotIn(base + ".timer", linux)
+        mac = render(config, self.project, ROOT / "bin/mizu", system="macos")
+        self.assertNotIn(base + ".plist", mac)
+        event = plistlib.loads(mac[base + "-event.plist"].encode())
+        self.assertTrue(any("current.json" in path for path in event["WatchPaths"]))
+        self.assertEqual(event["StartInterval"], 60)
+        self.assertIn("--event", event["ProgramArguments"])
+        windows = render(config, self.project, ROOT / "bin/mizu", system="windows")
+        self.assertIn(base + "-event.xml", windows)
+        task = ET.fromstring(windows[base + "-event.xml"])
+        ns = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
+        repetition = task.find("t:Triggers/t:TimeTrigger/t:Repetition/t:Interval", ns)
+        self.assertIsNotNone(repetition)
+        self.assertEqual(repetition.text, "PT60S")
+        arguments = task.find("t:Actions/t:Exec/t:Arguments", ns).text
+        self.assertIn("--event", arguments)
+        self.assertIn("reporter", arguments)
+
+    def test_unscheduled_on_change_install_enables_recovery_not_oneshot(self):
+        import dataclasses
+        import plistlib
+        from mizu.services import install, render
+        roles = dict(self.config.roles)
+        roles["reporter"] = dataclasses.replace(
+            roles["reporter"], interval_seconds=0, calendar=(), daemon=False,
+            on_change=True, decision_events=("accept",))
+        config = dataclasses.replace(self.config, roles=roles)
+        base = "mizu-3-svc-reporter"
+        for system in ("linux", "macos", "windows"):
+            with self.subTest(system=system):
+                directory = self.root / f"recovery-{system}"
+                result = install(config, self.project, ROOT / "bin/mizu", directory, system=system)
+                expected = render(config, self.project, ROOT / "bin/mizu", system=system)
+                self.assertEqual(result["written"], sorted(expected))
+                for unit, content in expected.items():
+                    self.assertEqual((directory / unit).read_text(), content)
+                if system == "linux":
+                    self.assertIn(base + "-event.timer", result["enable_units"])
+                    self.assertIn(base + "-event.path", result["enable_units"])
+                    self.assertNotIn(base + "-event.service", result["enable_units"])
+                elif system == "macos":
+                    self.assertIn(base + "-event.plist", result["enable_units"])
+                    self.assertEqual([u for u in result["written"] if base in u],
+                                     [base + "-event.plist"])
+                    event = plistlib.loads((directory / (base + "-event.plist")).read_bytes())
+                    self.assertEqual(event["StartInterval"], 60)
+                    self.assertIn(str(self.project.root / "current.json"), event["WatchPaths"])
+                else:
+                    self.assertIn(base + "-event.xml", result["enable_units"])
+
+    def test_scheduled_triggers_stay_unchanged_for_subscribed_roles(self):
+        import dataclasses
+        import plistlib
+        from mizu.services import event_watches, render
+        base = "mizu-3-svc-reporter"
+        for interval, calendar in ((0, ("07:00", "19:00")), (900, ())):
+            with self.subTest(interval=interval, calendar=calendar):
+                roles = dict(self.config.roles)
+                roles["reporter"] = dataclasses.replace(
+                    roles["reporter"], interval_seconds=interval, calendar=calendar,
+                    on_change=True, decision_events=("reject", "defer"))
+                config = dataclasses.replace(self.config, roles=roles)
+                watches = event_watches(config, self.project)
+                self.assertNotIn(str(self.project.root / "current.json"), watches["reporter"])
+                linux = render(config, self.project, ROOT / "bin/mizu", system="linux")
+                self.assertIn("OnUnitInactiveSec=900s" if interval else "OnCalendar=",
+                              linux[base + ".timer"])
+                self.assertNotIn(base + "-event.timer", linux)
+                self.assertNotIn("--event", linux[base + ".service"])
+                mac = render(config, self.project, ROOT / "bin/mizu", system="macos")
+                event = plistlib.loads(mac[base + "-event.plist"].encode())
+                self.assertNotIn("StartInterval", event)
+                self.assertNotIn("StartCalendarInterval", event)
+                schedule = plistlib.loads(mac[base + ".plist"].encode())
+                if interval:
+                    self.assertEqual(schedule["StartInterval"], interval)
+                else:
+                    self.assertEqual(schedule["StartCalendarInterval"],
+                                     [{"Hour": 7, "Minute": 0}, {"Hour": 19, "Minute": 0}])
+                windows = render(config, self.project, ROOT / "bin/mizu", system="windows")
+                self.assertIn(base + ".xml", windows)
+                self.assertNotIn(base + "-event.xml", windows)
+                self.assertNotIn("--event", windows[base + ".xml"])
 
     def test_unknown_system_is_refused(self):
         from mizu.errors import Denied

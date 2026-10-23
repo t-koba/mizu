@@ -7,13 +7,18 @@ Scheduler XML on Windows. Each emitter is pure text over the same inputs;
 `system=` exists so tests cover all three spellings on any host. Nothing is
 started or enabled here on any platform.
 
-Decision/terminal work-item events and due structured waits wake subscribed roles before their
-next interval: systemd path units on Linux and WatchPaths on macOS invoke
-`mizu run --event`, which admits only on a subscribed decision/terminal event or a due
-wait for that role and otherwise exits before any model use; the periodic
-timers invoke plain `mizu run` on their own schedules unchanged. Task
-Scheduler XML has no file trigger in this minimal schema, so Windows still
-dispatches events when its timer fires.
+Decision/terminal work-item events, due structured waits, and unobserved
+published-code changes for unscheduled ``on_change`` roles wake subscribed roles before
+their next interval: systemd path units on Linux and WatchPaths on macOS invoke
+`mizu run --event`, which admits only on a subscribed decision/terminal event, a due
+wait, or an unobserved code change for that role and otherwise exits before any
+model use; the periodic timers invoke plain `mizu run` on their own schedules
+unchanged. Task Scheduler XML has no file trigger in this minimal schema, so
+scheduled roles still dispatch events when their timer fires, while event-only
+roles get a bounded 60-second poll task invoking `mizu run --event`. Linux/macOS
+unscheduled ``on_change`` event services retain fast file triggers and also
+reevaluate every 60 idle seconds to recover missed notifications. Persisted
+code state is rechecked; routing and admission still govern whether a run starts.
 
 Event triggers use systemd defaults with no trigger limit: admission is
 state-based (`mizu run --event` exits before any model use when nothing is
@@ -57,6 +62,12 @@ STOP_SEC = 45
 #: trigger limit is rendered here.
 WINDOWS_RESTART_INTERVAL = "PT1M"
 WINDOWS_RESTART_COUNT = 999
+#: Bounded event reevaluation (mechanism, not operator policy): Windows polls
+#: unscheduled watched roles because it has no file trigger; Linux/macOS also
+#: recover missed file notifications for unscheduled on_change roles. All use
+#: ``mizu run --event`` and skip cheaply when nothing is due. This cadence is
+#: not a delivery deadline: a busy role or an admission gate can delay a run.
+EVENT_POLL_SECONDS = 60
 
 
 def quote(value: str) -> str:
@@ -102,30 +113,50 @@ def event_watches(config: Config, project: Project) -> dict[str, list[str]]:
     while a role with decision_sources="any" admits once per new matching
     deferral from any source. Terminal admission separately uses work_item_sources
     and exact receipts; file watches are only coarse source-specific wake hints. Scheduled write roles
-    additionally wake when their own structured waits come due. Daemon roles need no file trigger (their loop
-    re-checks admission every idle tick via should_run); whether a role runs on
-    events, on a clock, or both is configuration, so an event-only role (event
-    subscriptions without any schedule) still gets a trigger, while a role with
-    neither a schedule nor event subscriptions stays explicit-run only.
+    additionally wake when their own structured waits come due. Unscheduled
+    ``on_change`` roles additionally watch the published pointer
+    (``current.json``); a published code change then wakes ``mizu run --event``,
+    which admits on the unobserved change with admission ``change``. Daemon roles
+    need no file trigger (their loop re-checks admission every idle tick via
+    should_run); whether a role runs on events, on a clock, or both is
+    configuration, so an event-only role (event subscriptions or unscheduled
+    ``on_change`` without any schedule) still gets a trigger, while a role with
+    neither a schedule nor event subscriptions nor unscheduled ``on_change``
+    stays explicit-run only.
     Periodic discovery stays independent policy: timers and
     calendar entries keep their own schedules unchanged.
     """
-    watches = {}
+    watches: dict[str, list[str]] = {}
     for name in project.roles:
         role = config.roles[name]
         if role.daemon:
             continue
-        if not (role.decision_events or role.work_item_events or "check_job" in role.capabilities) and not (
-                role.workspace == "write" and (role.interval_seconds or role.calendar)):
+        scheduled = bool(role.interval_seconds or role.calendar)
+        unscheduled_on_change = bool(role.on_change and not scheduled)
+        has_subscription = bool(
+            role.decision_events or role.work_item_events or "check_job" in role.capabilities)
+        scheduled_write = bool(
+            role.workspace == "write" and (role.interval_seconds or role.calendar))
+        if not (has_subscription or scheduled_write or unscheduled_on_change):
             continue
-        watches[name] = [str(project.root / "decision-history"), str(project.root / "waits")]
-        if "check_job" in role.capabilities:
-            watches[name].append(str(project.root / "check-jobs"))
-        if role.work_item_events:
-            # Terminal appends and successful receipt batches touch this parent
-            # as a non-authoritative hint; nested item/receipt writes are not
-            # assumed to be recursive platform watch events.
-            watches[name].append(str(project.root / "work-items"))
+        if has_subscription or scheduled_write:
+            watches[name] = [str(project.root / "decision-history"), str(project.root / "waits")]
+            if "check_job" in role.capabilities:
+                watches[name].append(str(project.root / "check-jobs"))
+            if role.work_item_events:
+                # Terminal appends and successful receipt batches touch this parent
+                # as a non-authoritative hint; nested item/receipt writes are not
+                # assumed to be recursive platform watch events.
+                watches[name].append(str(project.root / "work-items"))
+        else:
+            watches[name] = []
+        if unscheduled_on_change:
+            # Coarse published-code pointer: the persisted level state whose
+            # change wakes ``mizu run --event``; admission still compares the
+            # role's observed cursor against the published code digest.
+            pointer = str(project.root / "current.json")
+            if pointer not in watches[name]:
+                watches[name].append(pointer)
     return watches
 
 
@@ -192,6 +223,15 @@ def _render_systemd(config: Config, project: Project, executable: Path) -> dict[
                    *(f"PathChanged={watch}" for watch in watches[name]),
                    f"Unit={event_base}.service", "", "[Install]", "WantedBy=default.target"]
         result[event_base + ".path"] = "\n".join(trigger) + "\n"
+        role = config.roles[name]
+        if role.on_change and not (role.interval_seconds or role.calendar):
+            # Path notifications are only edges. Recheck persisted current.json
+            # after a lost/busy edge, using the same oneshot and admission gates.
+            result[event_base + ".timer"] = "\n".join([
+                "[Unit]", f"Description=Mizu code-change recovery for {project.name} / {name}",
+                "", "[Timer]", f"OnBootSec={EVENT_POLL_SECONDS}s",
+                f"OnUnitInactiveSec={EVENT_POLL_SECONDS}s", "AccuracySec=1s",
+                f"Unit={event_base}.service", "", "[Install]", "WantedBy=timers.target", ""])
     return result
 
 
@@ -237,6 +277,10 @@ def _render_launchd(config: Config, project: Project, executable: Path) -> dict[
                       "  <key>WatchPaths</key>", "  <array>",
                       "".join(f"    <string>{_xml(watch)}</string>\n" for watch in watches[name]).rstrip("\n"),
                       "  </array>"]
+        role = config.roles[name]
+        if role.on_change and not (role.interval_seconds or role.calendar):
+            # Combine recovery with WatchPaths, not a second concurrent job.
+            event_body.append(f"  <key>StartInterval</key><integer>{EVENT_POLL_SECONDS}</integer>")
         result[event_base + ".plist"] = ('<?xml version="1.0" encoding="UTF-8"?>\n'
                                '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
                                '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
@@ -253,11 +297,13 @@ def _windows_arguments(args: list[str]) -> str:
 
 
 def _render_windows(config: Config, project: Project, executable: Path) -> dict[str, str]:
-    # No file trigger in this minimal Task Scheduler schema: event admission
-    # still applies when the timer fires (Engine.run checks decisions and
-    # due waits on every dispatch); file-triggered wake before the interval
-    # is provided where the platform supports it (systemd path, launchd
-    # WatchPaths).
+    # No file trigger in this minimal Task Scheduler schema: scheduled roles
+    # still apply event admission when their timer fires (Engine.run checks
+    # decisions and due waits on every dispatch); file-triggered wake before
+    # the interval is provided where the platform supports it (systemd path,
+    # launchd WatchPaths). Event-only roles (watched but unscheduled) get a
+    # bounded poll task below invoking ``mizu run --event``; admission still
+    # exits cheaply with no-event/unchanged when nothing is due.
     result = {}
     entry = executable.resolve()
     if entry.suffix.lower() in (".cmd", ".bat"):
@@ -291,6 +337,41 @@ def _render_windows(config: Config, project: Project, executable: Path) -> dict[
             '<?xml version="1.0" encoding="UTF-8"?>\n'
             '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">\n'
             f"  <RegistrationInfo><Description>Mizu {project.name} / {name}</Description></RegistrationInfo>\n"
+            f"  <Triggers>{trigger}</Triggers>\n"
+            '  <Principals><Principal id="Author"><LogonType>InteractiveToken</LogonType>'
+            "<RunLevel>LeastPrivilege</RunLevel></Principal></Principals>\n"
+            f"  <Settings>{settings}<ExecutionTimeLimit>PT0S</ExecutionTimeLimit><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>"
+            "<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries></Settings>\n"
+            f'  <Actions Context="Author"><Exec><Command>{command}</Command>'
+            f"<Arguments>{arguments}</Arguments></Exec></Actions>\n"
+            "</Task>\n")
+    # Event-only fallback: no file trigger on Windows, so watched roles without
+    # a schedule poll on a fixed 60-second cadence with ``mizu run --event``.
+    # Scheduled roles keep only their schedule trigger above; daemon roles
+    # need no poll (their loop rechecks admission). No configuration knob:
+    # EVENT_POLL_SECONDS is a mechanism floor.
+    watches = event_watches(config, project)
+    scheduled_names = {name for name, _, _, _ in _scheduled_roles(config, project, executable)}
+    for name in sorted(watches):
+        if name in scheduled_names:
+            continue
+        role = config.roles[name]
+        if role.daemon:
+            continue
+        base = _role_base(project, name)
+        event_base = base + "-event"
+        event_args = [resolved, "--config", str(config.file),
+                      "run", project.name, "--role", name, "--event"]
+        command, arguments = _xml(sys.executable), _windows_arguments(event_args)
+        trigger = (f"<TimeTrigger><StartBoundary>2026-01-01T00:00:00{zone_suffix}</StartBoundary>"
+                   f"<Repetition><Interval>PT{EVENT_POLL_SECONDS}S</Interval>"
+                   "<StopAtDurationEnd>false</StopAtDurationEnd></Repetition>"
+                   "<Enabled>true</Enabled></TimeTrigger>")
+        settings = "<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"
+        result[event_base + ".xml"] = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">\n'
+            f"  <RegistrationInfo><Description>Mizu event poll for {project.name} / {name}</Description></RegistrationInfo>\n"
             f"  <Triggers>{trigger}</Triggers>\n"
             '  <Principals><Principal id="Author"><LogonType>InteractiveToken</LogonType>'
             "<RunLevel>LeastPrivilege</RunLevel></Principal></Principals>\n"
@@ -342,7 +423,7 @@ def install(config: Config, project: Project, executable: Path, destination: Pat
     mkdir(directory)
     units = render(config, project, executable, system=name)
     if not units:
-        raise Denied("No role has daemon/interval/calendar/event subscription; nothing to install")
+        raise Denied("No role has daemon/interval/calendar/event subscription/unscheduled on_change; nothing to install")
     owner = directory / (".mizu-" + digest(project.name.encode())[:24] + ".json")
     verification = "not_run: native validator unavailable"
     with lock(directory / ".mizu-services.lock"):

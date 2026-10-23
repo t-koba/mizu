@@ -64,6 +64,11 @@ class DispatchFacts:
     event_trigger: bool = False
     on_change: bool = False
     code_unchanged: bool = False
+    # Subscribed code-change event for --event probes: true only for
+    # unscheduled on_change roles with an unobserved code digest. Scheduled
+    # on_change roles keep timer-based discovery; their --event probes still
+    # exit with no-event when no subscribed decision/work/wait/CI is due.
+    has_code_event: bool = False
     workspace_write: bool = False
     has_decision: bool = False
     has_work_item: bool = False
@@ -156,7 +161,7 @@ def evaluate_daemon(facts: DaemonFacts) -> DaemonDecision:
 
 def evaluate_dispatch(facts: DispatchFacts) -> DispatchDecision:
     """Order dispatch facts exactly as ``Engine.run`` does."""
-    if facts.event_trigger and not _has_event(facts):
+    if facts.event_trigger and not _has_event(facts) and not facts.has_code_event:
         return DispatchDecision(admitted=False, skipped="no-event", admission=None)
     explicit_wake = bool(
         facts.workspace_write

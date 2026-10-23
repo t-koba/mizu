@@ -13,9 +13,10 @@ At most one of `daemon`, `interval_seconds`, `calendar` may be set per role
 (`decision_events`, `work_item_events` with their `*_sources` routes) are
 independent triggers: they may accompany a schedule or run event-only on
 platforms with file triggers; they do not count as a second schedule mode.
-`on_change` is a skip gate, not a trigger — `Engine.run` in
-`src/mizu/runtime.py` returns `skipped: unchanged` when the code snapshot is
-already observed and nothing else admits the run.
+`on_change` skips unchanged code on ordinary scheduled/explicit runs.
+For an unscheduled role, it also selects published-code event wake: service
+rendering watches the persisted snapshot pointer and invokes `mizu run --event`;
+the role runs only while its observed code digest is stale.
 
 The shipped example (`config/config.example.toml`) exercises each pattern:
 
@@ -29,10 +30,13 @@ The shipped example (`config/config.example.toml`) exercises each pattern:
 | maintainer | write | `interval_seconds = 21600` | none |
 | maintainer-searcher | read | `interval_seconds = 21600` | none |
 
-A role with neither a schedule nor subscriptions stays explicit-run only
-(`event_watches` in `src/mizu/services.py` returns no entry for it). An
-event-only role uses file triggers on Linux/macOS; Windows currently renders
-no task for an unscheduled event-only role, as noted below.
+A role with neither a schedule, subscriptions, nor unscheduled `on_change`
+stays explicit-run only (`event_watches` in `src/mizu/services.py` returns no
+entry for it). An event-only role uses file triggers on Linux/macOS, including
+a coarse `current.json` watch plus 60-second recovery reevaluation for
+unscheduled `on_change` roles; Windows has
+no file trigger and instead renders a bounded 60-second poll task invoking
+`mizu run --event` for event-only roles, as noted below.
 
 ## Wake sources versus delivered inputs
 
@@ -73,12 +77,15 @@ route, and batch policies.
 Scheduled timer dispatches are plain one-shot runs: `mizu run` without
 `--event` (`src/mizu/cli.py` passes `event_trigger` only for `--event`).
 Event-triggered dispatch (`mizu run --event`, invoked by the platform file
-triggers below) admits on a substantive decision event, a terminal
-`work_item_events` row, a due structured wait, a due CI red for that
-role, or ready work for a writable role, and otherwise exits with
-`skipped: no-event` before allocating a run directory or any model use. For `on_change` roles whose code snapshot is
-already observed, `Engine.run` otherwise skips unchanged-code dispatch unless
-there is a substantive decision, terminal event, due wait, or due CI red.
+triggers or the recovery/poll triggers below) admits on a substantive decision event, a
+terminal `work_item_events` row, a due structured wait, a due CI red for that
+role, ready work for a writable role, or an unobserved code change for an
+`on_change` role, and otherwise exits with `skipped: no-event` before
+allocating a run directory or any model use. The code-change event carries
+admission `change` when no more-specific event wins. For `on_change` roles
+whose code snapshot is already observed, `Engine.run` otherwise skips
+unchanged-code dispatch unless there is a substantive decision, terminal
+event, due wait, or due CI red.
 Writable roles additionally bypass that skip for changed goal, operator wake,
 inbox generation, prior-wait expiry, progress self-admission, or ready work;
 read-only on-change roles do not use those snapshot-wide wakes, progress or
@@ -320,7 +327,8 @@ excluding every VCS-derived input from a writable daemon's generic wake.
 One schedule model is rendered per platform by `src/mizu/services.py`
 (`event_watches`, `_render_systemd`, `_render_launchd`, `_render_windows`;
 covered across hosts with `system=` in `tests/test_platform.py`). `event_watches`
-selects non-daemon roles with event subscriptions and scheduled writable roles
+selects non-daemon roles with event subscriptions, unscheduled `on_change`
+roles, and scheduled writable roles
 (the latter also need to reevaluate their own structured waits); daemon roles
 recheck their wake policy on idle ticks instead of file triggers.
 
@@ -330,24 +338,41 @@ recheck their wake policy on idle ticks instead of file triggers.
   watched role additionally gets a `-event.service` (oneshot,
   `mizu run --event`) plus a `.path` unit with `PathChanged` watches on
   `decision-history`, `waits`, and — when `work_item_events` is set — the
-  `work-items` parent.
+  `work-items` parent; unscheduled `on_change` roles additionally watch the
+  published pointer `current.json` (the persisted level state). Those unscheduled
+  `on_change` roles also get an `-event.timer` with `OnBootSec=60s`,
+  `OnUnitInactiveSec=60s`, and `AccuracySec=1s`, targeting the same event
+  oneshot. The install result lists both path and recovery timer for enabling,
+  not the event oneshot itself.
 - macOS (launchd): `StartInterval` / `StartCalendarInterval` plists invoke
   plain `mizu run`; daemon roles get `KeepAlive` + `RunAtLoad`. Every watched
   role additionally gets an `-event.plist` with `WatchPaths` on the same
-  directories and `mizu run --event` arguments.
-- Windows (Task Scheduler XML): schedule triggers only — `TimeTrigger` with
-  repetition for intervals, `CalendarTrigger` per `calendar` entry,
-  `LogonTrigger` for daemons. There is no file trigger in the current
+  directories and `mizu run --event` arguments, likewise including
+  `current.json` for unscheduled `on_change` roles. That same event job also
+  has `StartInterval=60` for recovery; no second job is added.
+- Windows (Task Scheduler XML): schedule triggers only for scheduled roles —
+  `TimeTrigger` with repetition for intervals, `CalendarTrigger` per `calendar`
+  entry, `LogonTrigger` for daemons. There is no file trigger in the current
   schema: scheduled subscribers still see event inputs at the next timer
-  firing (admission applies on every dispatch), but **an event-only role
-  with no schedule currently gets no Windows task at all**. This gap is
-  current behavior to revisit, not a desired guarantee.
+  firing (admission applies on every dispatch). Each event-only role
+  (watched but unscheduled, including unscheduled `on_change`) instead gets
+  an `-event.xml` task invoking `mizu run --event` on a fixed 60-second
+  `TimeTrigger` repetition; admission still exits cheaply with
+  `skipped: no-event`/`unchanged` when nothing is due, so the poll cannot
+  change trigger semantics. There is no configuration knob for this cadence.
 
 Path/WatchPaths notifications are coarse reevaluation hints, not a
 durable transactional queue. If a write is coalesced or a dispatch is busy,
-there is no trigger record to replay; eventual pickup depends on a later
-evaluator call (for example, a daemon tick, a scheduled run, another path
-notification, or an explicit run; `src/mizu/services.py` and
+there is no trigger record to replay. For unscheduled `on_change` roles,
+60-second recovery reevaluation rechecks persisted `current.json` against the
+role's observed code cursor: a lost notification delays rather than loses the
+unobserved published-code input. This is not a 60-second model-start guarantee:
+service-manager availability, a busy job, and all routing/admission gates still
+apply; Linux's interval is measured after the event service becomes inactive,
+with up to one second of timer accuracy slack. Scheduled services are unchanged.
+Other event-only Linux/macOS roles without `on_change` still depend on a later
+evaluator call (another notification or an explicit run). Daemon ticks and
+scheduled runs likewise recheck their inputs (`src/mizu/services.py` and
 `docs/configuration.md` terminal-subscription section).
 
 ## Workspace and lock isolation
