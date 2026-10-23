@@ -251,6 +251,10 @@ daemon = true
 # work_item_events_limit = 10
 # Per-role no-progress timer-wake override (optional, 0-86400; unset keeps the project value).
 # no_progress_backoff_seconds = 0
+# Per-role writer-daemon cooldown override (optional, 1-1073741824; unset keeps
+# [limits].cooldown_seconds; applies to writable daemon spacing and deferred
+# re-evaluation, read-only cadence stays on idle_seconds).
+# cooldown_seconds = 5
 
 [roles.searcher]
 profile = "alternate"

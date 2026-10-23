@@ -25,10 +25,11 @@ from . import check_jobs
 from . import ci_waits, dispatch_evidence, work_item_events
 from .budget import Budget
 from .config import (MAX_CI_WAKE_EXTRA_BRANCHES, Config, Role, load,
-                     role_decision_events_limit, role_policy_bytes,
-                     role_requests_per_run, role_run_seconds,
-                     role_tools_per_run, role_work_item_events_limit,
-                     role_wrap_up_requests, role_wrap_up_tools)
+                     role_cooldown_seconds, role_decision_events_limit,
+                     role_policy_bytes, role_requests_per_run,
+                     role_run_seconds, role_tools_per_run,
+                     role_work_item_events_limit, role_wrap_up_requests,
+                     role_wrap_up_tools)
 from .doctor import container_runtime
 from .drivers import driver_for
 from .errors import RequestYieldExceeded
@@ -4609,10 +4610,13 @@ class Engine:
                                                resolved=resolved)
                     else:
                         _clear_missing_finish_streak(project, role_name)
+                    deferred_cooldown = (role_cooldown_seconds(self.config, role)
+                                             if role.workspace == "write"
+                                             else self.config.limits.cooldown_seconds)
                     return {"run": run_id, "role": role_name, "status": "deferred",
                             "error": str(exc), "selection": decision, "selection_action": handled,
                             **({"selection_retries": selection_retries} if selection_retries else {}),
-                            "next_evaluation_at": time.time() + self.config.limits.cooldown_seconds}
+                            "next_evaluation_at": time.time() + deferred_cooldown}
                 suppress_missing_finish_brake = (isinstance(exc, MissingFinish)
                                                  and not self.config.limits.missing_finish_counts_as_failure)
                 if is_deferred(exc, context):
@@ -5264,7 +5268,8 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                         result = Engine(config, stop=stop).run(project, role_name, probes_serviced=True,
                                         enqueue_busy=True)
                         print(json.dumps(result, ensure_ascii=False), flush=True)
-                        delay = config.limits.cooldown_seconds if role.workspace == "write" else config.limits.idle_seconds
+                        delay = (role_cooldown_seconds(config, role)
+                                 if role.workspace == "write" else config.limits.idle_seconds)
                         if result.get("status") in ("waiting", "deferred"):
                             # Poll at idle cadence as well, to observe operator fact/config updates.
                             delay = min(config.limits.idle_seconds, max(0.1, result["next_evaluation_at"] - time.time()))

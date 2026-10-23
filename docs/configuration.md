@@ -166,7 +166,7 @@ required). Operator tooling that concatenates configs
 | `model_request_seconds` | Positive finite logical-request deadline, default `1200`, integer 1–1,073,741,824 seconds; no role override. Host-enforced independently of the whole-unit wall. Pi/pi-durable: each admitted `model_request`; Claude: enclosing query; Codex: enclosing turn, not every opaque provider HTTP subcall |
 | `command_seconds` | Deadline for each individual container command (unchanged by role wall overrides) |
 | `work_items_prompt` | Maximum open work-item rows included in each full and delta prompt (1–100; default 20). Overflow and legacy-unseeded coverage are reported explicitly; the tool page limit is separately available through `work_items_read` |
-| `idle_seconds`, `cooldown_seconds` | Daemon sleep between poll iterations and pause between work units |
+| `idle_seconds`, `cooldown_seconds` | Daemon sleep between poll iterations and pause between work units. A writable role may override the cooldown with `roles.<name>.cooldown_seconds` (1–1,073,741,824; unset keeps the project value); read-only cadence stays on `idle_seconds` |
 | `default_wait_seconds`, `maximum_wait_seconds` | Default and maximum model-selected wait times (1–86,400s) |
 | `progress_signals` | Signals qualifying a writable `continue`/`bounded` unit as progress. Default `tool`, `code`, `decision`, `insight`, `input`; any selected true signal qualifies. `state` is supported but opt-in because a free-text rewording alone is not substantive progress. Names must be unique supported signals; `[]` means no unit can qualify. `tool` is a successfully completed non-finish Mizu operation except pure reads of existing state (`files`, `read`, `diff`, `insights`, `research_read`, `vcs_read`, `work_items_read`, `work_items_legacy_read`, retained-evidence reads, exact `work_items_create`/`work_items_reconcile` replays (`created: false`), and replay of an existing fetch/probe/search receipt), or a new native engine-tool authorization (not an idempotent replay), `decision` a successful `decide`, `insight` a successful submit/revise/withdraw/evidence attachment, `code` a changed final code digest, `state` an explicitly selected changed finish state (including paraphrases), and `input` a changed inbox/operator wake generation, consumed decision/terminal-work-item/wait events, CI failures due for this snapshot, or an expired prior wait. Persistent obligations and non-due cached red CI are not repeated input progress; a bounded identity digest distinguishes newly offered obligations from unchanged pending visibility. |
 | `no_progress_continuations` | Number of consecutive no-progress `continue`/`bounded` snapshots the same role may self-admit before parking (0–100; default 0 parks after its first no-progress finish). Selected progress, role change, or signal-policy change resets the streak. |
@@ -543,7 +543,11 @@ deferral) and `work_item_sources` (terminal routing by origin submitter;
 [terminal subscriptions](#terminal-work-item-subscriptions)),
 optional per-role no-progress backoff override `no_progress_backoff_seconds`
 (0–86,400; unset inherits the project `[limits]` value; 0 disables the timer
-wake), optional per-role spend overrides `requests_per_run` / `tools_per_run` /
+wake), optional per-role writer-daemon cooldown override `cooldown_seconds`
+(1–1,073,741,824; unset inherits the project `[limits]` value; writable daemon
+spacing and deferred re-evaluation only, read-only cadence stays on
+`idle_seconds` and read-only deferrals stay on the project cooldown),
+optional per-role spend overrides `requests_per_run` / `tools_per_run` /
 `wrap_up_requests` / `wrap_up_tools`
 (1–1,073,741,824; unset keeps the project `[limits]` value, so an auditor may run
 200/400 while other roles stay at the project default; storage, transport, budgets,

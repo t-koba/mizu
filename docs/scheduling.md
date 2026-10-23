@@ -86,7 +86,9 @@ ready work. A changed code snapshot bypasses the skip for either workspace mode.
 `change` / `schedule`. Existing event labels take precedence over ready work;
 ready work has its own label for event-triggered or unchanged-code admission.
 It does not add or consume terminal work-item events. The daemon's configured
-`cooldown_seconds` spacing still applies; ready work does not accelerate it.
+cooldown spacing still applies (writable roles use the role-effective
+`cooldown_seconds`: `roles.<name>.cooldown_seconds` when set, else the project
+`[limits]` value; read-only roles use `idle_seconds`); ready work does not accelerate it.
 
 ### Bounded ready-work input
 
@@ -286,7 +288,8 @@ receipt bindings still fail the whole scan; they are not per-waiter evidence
 errors. An acknowledgement error does not abort the remaining batch;
 unacknowledged valid events remain eligible for replay.
 
-Control and configured cooldown spacing remain in force. Daemons recheck on
+Control and configured cooldown spacing remain in force (writable roles use
+the role-effective cooldown, read-only roles use `idle_seconds`). Daemons recheck on
 idle ticks; observation also touches the existing `waits` directory as a
 best-effort hint to already-configured platform event watches. Those hints
 never carry authority: dispatch revalidates the exact waiter and evidence.
