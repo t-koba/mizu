@@ -70,9 +70,9 @@ class CacheRetentionTests(Fixture):
     def test_grant_binds_cache_retention(self):
         role = self.config.roles["worker"]
         model = {"provider": "p", "model": "m"}
-        base = pi_durable.grant_for({"options": {}}, role, model)
+        base = pi_durable.grant_for({"options": {}}, role, model, self.project.goal)
         for value in ("none", "short", "long"):
-            changed = pi_durable.grant_for({"options": {"cacheRetention": value}}, role, model)
+            changed = pi_durable.grant_for({"options": {"cacheRetention": value}}, role, model, self.project.goal)
             self.assertNotEqual(base, changed, value)
 
     def test_durable_effective_config_includes_omits(self):
