@@ -23,6 +23,24 @@ Create-only durable files publish by an atomic no-replace rename (Linux
 hard-link fallback that could expose a multiply-linked file to strict readers
 or leave one behind after a crash. Existing identical content remains an
 idempotent retry; conflicting content is never overwritten.
+
+Legacy upstream-ref cleanup is destructive but best-effort: fetch still updates
+its host-side `upstream-refs` store if obsolete workspace paths are unsafe or
+unavailable. Cleanup pins `workspace`, `refs`, `remotes`, `upstream` and nested
+directories from the trusted project root; static symlinks, Windows reparse
+points (including junctions), hardlinked files and special files are left alone.
+POSIX uses no-follow directory descriptors and relative unlink/rmdir, never
+chmod; a directory renamed after opening remains the cleanup authority, not a
+replacement symlink. A leaf substituted immediately before unlink can itself be
+unlinked, but is never followed and its target's data/permissions are not edited.
+Windows opens no-follow handles without write/delete sharing to pin ancestors,
+and deletes the opened object with `FileDispositionInfoEx` (including read-only
+refs, without path-based chmod). This requires Windows 10 1809+ and filesystem
+support; unsupported operations, sharing/I/O failures or Python recursion limits
+leave leftovers for a later refresh, with no weaker path-based deletion fallback. Cleanup prunes only
+empty ref-prefix parents, never the workspace or unrelated siblings. The project
+root and its ancestors remain trusted operator-owned state.
+
 Experiments get readonly source plus ephemeral writable work.
 Time/output bounds kill process groups and labelled containers. A finished unit
 cannot continue to call tools or acquire another provider admission.

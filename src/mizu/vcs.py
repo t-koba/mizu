@@ -166,67 +166,15 @@ def _store_base(project_root: Path) -> Path:
     return project_root.joinpath(REF_STORE_NAME)
 
 
-def _legacy_base(project_root: Path) -> Path:
-    """Return the legacy in-workspace ref subtree (pre-move, for cleanup)."""
-    base = project_root / "workspace"
-    for part in REF_PREFIX:
-        base = base / part
-    return base
-
-
 def _remove_legacy_tree(project_root: Path) -> None:
-    """Remove the legacy in-workspace ref subtree so Git never sees it.
+    """Best-effort, no-follow cleanup anchored at the trusted project root.
 
-    Schema: deletes files under ``workspace/refs/remotes/upstream/*``
-    then prunes newly-empty parent dirs (``upstream``, ``remotes``,
-    ``refs``). Refuses to follow symlinks: a symlinked legacy path is
-    left in place (fail closed, never delete through a link). Missing
-    or already-clean trees are a no-op. Failure: never raises; leftover
-    files are retried on the next refresh.
+    Links/unsafe or unavailable entries remain for a later refresh. Only the
+    obsolete subtree and empty prefix parents are removed, never workspace.
+    See ``_legacy_refs`` for the native handle guarantees and platform limits.
     """
-    legacy = _legacy_base(project_root)
-    try:
-        if legacy.is_symlink():
-            return
-    except OSError:
-        return
-    if not legacy.is_dir():
-        # Prune newly-empty parents left by an earlier file removal.
-        current = legacy
-        for _ in range(len(REF_PREFIX)):
-            try:
-                if current.is_symlink():
-                    return
-                current.rmdir()
-            except OSError:
-                return
-            current = current.parent
-        return
-    for directory, dirs, files in os.walk(legacy, topdown=False, followlinks=False):
-        here = Path(directory)
-        for entry in files:
-            target = here / entry
-            try:
-                if target.is_symlink():
-                    continue
-                _clear_readonly_for_windows(target)
-                target.unlink()
-            except OSError:
-                continue
-        for entry in dirs:
-            try:
-                (here / entry).rmdir()
-            except OSError:
-                continue
-    current = legacy
-    for _ in range(len(REF_PREFIX)):
-        try:
-            if current.is_symlink():
-                return
-            current.rmdir()
-        except OSError:
-            return
-        current = current.parent
+    from ._legacy_refs import remove_legacy_refs
+    remove_legacy_refs(project_root, REF_PREFIX)
 
 
 def split_ref_path(path: str) -> str | None:
@@ -288,9 +236,9 @@ def inject_refs(project_root: Path, refs: dict) -> dict:
     path stays ``refs/remotes/upstream/<name>``. Stale files under the
     store are removed so a fetch refreshes the view; stale empty
     directories are left in place. The legacy
-    ``workspace/refs/remotes/upstream`` subtree is removed when present
-    so product tooling never sees harness state. Bounds: at most 4096
-    refs. Trust: host side only (the daemon/operator fetch path), never
+    ``workspace/refs/remotes/upstream`` subtree is cleaned when safely
+    accessible (unsafe/busy paths remain), without following workspace links.
+    Bounds: at most 4096 refs. Trust: host side only (the daemon/operator fetch path), never
     model-invoked; content stays external-untrusted. Retry/cancellation:
     single pass, no retry. Evidence: returned receipt names the prefix
     and count. Failure: ``Denied`` on invalid refs, symlink escape, or
