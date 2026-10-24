@@ -588,6 +588,47 @@ print(json.dumps(response))
         self.assertFalse(event["ok"])
         self.assertIn("Could not persist proposal poll state", event["error"])
 
+    def test_partial_recording_failure_retries_and_deduplicates_first_row(self):
+        state = {"proposal_cursor": "input-token"}
+        first = proposal()
+        first["id"] = "forge:owner/repo#first"
+        second = proposal(head_sha=SHA_B)
+        second["id"] = "forge:owner/repo#second"
+        calls = []
+        original = vcs.record_proposal_state
+        fail_second = True
+
+        def record(project, row, *, origin):
+            nonlocal fail_second
+            calls.append(row["id"])
+            if row["id"].endswith("#second") and fail_second:
+                fail_second = False
+                raise OSError("second record failed")
+            return original(project, row, origin=origin)
+
+        def reader(settings, op, params):
+            return {"proposals": [first, second], "complete": False,
+                    "cursor": "next-token"}
+
+        with mock.patch("mizu.vcs.record_proposal_state", side_effect=record):
+            failed = poll_proposals(self._config(), self.project, state,
+                                    now=1.0, interval=15.0, reader=reader)
+            self.assertFalse(failed["ok"])
+            self.assertEqual(failed["recorded"], 1)
+            self.assertEqual(state["proposal_cursor"], "input-token")
+            retried = poll_proposals(self._config(), self.project, state,
+                                     now=20.0, interval=15.0, reader=reader)
+
+        self.assertTrue(retried["ok"], retried)
+        self.assertEqual(retried["recorded"], 2)
+        self.assertEqual(retried["changed"], 1)
+        self.assertEqual(state["proposal_cursor"], "next-token")
+        self.assertEqual(calls, [first["id"], second["id"], first["id"], second["id"]])
+        self.assertIsNotNone(self.project.insights.read(
+            vcs.proposal_insight_id(first["id"])))
+        self.assertIsNotNone(self.project.insights.read(
+            vcs.proposal_insight_id(second["id"])))
+
 
 if __name__ == "__main__":
     raise SystemExit(unittest.main())

@@ -31,6 +31,7 @@ inputs. The trusted host adapter never executes model-provided host commands.
 | `ci_observation.py` | Read-only cached-CI failure projection and wake-branch normalization (bounded, never raises) | Polling, wake policy, admission, dispatch, session lifecycle |
 | `ci_wake.py` | Per-role CI wake record/due helpers and wake-version/default constants (bounded, never raises) | Polling, admission, dispatch, session lifecycle |
 | `vcs_poll_policy.py` | Pure VCS poll bounds, timeout caps, cadence, settings capping, and due calculations | Poll orchestration, adapter calls, cache/wake state, admission, dispatch, session lifecycle |
+| `vcs_proposal_poll.py` | One-page opted-in VCS proposal polling, cursor validation, and proposal recording | Shared poll-state persistence, coordinator error conversion, admission, dispatch, session lifecycle |
 | `pi.py`, `adapters/pi/` | Version-specific RPC and session transport | Model selection policy |
 | `codex.py`, `claude.py` | Trusted CLI argv, isolated per-run config, event parsing | Research quality, host-tool absence |
 | `mcp_loop.py` | Shared LF-framed JSON-RPC stdio loop for MCP servers | Tool semantics or protocol extensions |
