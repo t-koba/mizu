@@ -730,9 +730,12 @@ include cached input, so its reported input total is used directly (see the
 The Pi formula matches the pinned Pi 1.3.0 [cache-stat implementation](https://github.com/earendil-works/pi/blob/v1.3.0/packages/coding-agent/src/core/cache-stats.ts);
 Anthropic documents the same sum for Messages input in its [rate-limit usage
 fields](https://platform.claude.com/docs/en/api/rate-limits). Unsupported
-engines, incomplete or invalid components, and nonpositive/overflowed totals
-produce a null `prompt_input_tokens`; a cache read greater than that denominator
-produces a null share rather than a guessed value. `cache_read_share_of_input` divides cache-read by
+engines, invalid input totals, nonpositive/overflowed prompt totals, or
+missing/invalid Pi/Claude buckets produce a null `prompt_input_tokens`; for
+Codex, `input_tokens` alone is sufficient, while missing or invalid cache-read
+detail leaves its share null. For every engine, a cache read greater than the
+derived denominator also produces a null share.
+`cache_read_share_of_input` divides cache-read by
 `prompt_input_tokens`, not by the raw `input_tokens` field when that field is only
 uncached input. Only a single known model is attributed: `provider`/`model` are
 copied only when the attempt reports exactly one valid pair (each a nonempty

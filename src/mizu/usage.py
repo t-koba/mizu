@@ -94,20 +94,20 @@ def attempt_usage(observations: list, engine: str | None) -> dict:
 def prompt_input_tokens(engine, input_tokens, cache_read_tokens, cache_write_tokens):
     """Return the documented total prompt-token denominator for one engine.
 
-    Pi's Usage and Anthropic Messages report mutually exclusive uncached,
-    cache-read, and cache-write buckets. Codex reports cached input as a subset
-    of its input total. Unknown engines and incomplete components stay unknown.
+    Pi's Usage and Anthropic Messages require mutually exclusive uncached,
+    cache-read, and cache-write buckets. Codex's input total alone determines
+    its denominator; cache-read remains necessary for the share. Unknown engines
+    and incomplete denominator components stay unknown.
     """
-    values = (input_tokens, cache_read_tokens)
-    if any(type(value) is not int or not 0 <= value <= 2**63 - 1 for value in values):
-        return None
-    if engine in ("pi", "pi-durable", "claude"):
-        if (type(cache_write_tokens) is not int
-                or not 0 <= cache_write_tokens <= 2**63 - 1):
+    if engine == "codex":
+        if type(input_tokens) is not int or not 0 <= input_tokens <= 2**63 - 1:
+            return None
+        total = input_tokens
+    elif engine in ("pi", "pi-durable", "claude"):
+        values = (input_tokens, cache_read_tokens, cache_write_tokens)
+        if any(type(value) is not int or not 0 <= value <= 2**63 - 1 for value in values):
             return None
         total = input_tokens + cache_read_tokens + cache_write_tokens
-    elif engine == "codex":
-        total = input_tokens
     else:
         return None
     return total if 0 < total <= 2**63 - 1 else None

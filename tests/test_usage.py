@@ -172,6 +172,9 @@ class CacheAffinityTests(Fixture):
         self.assertEqual(prompt_input_tokens("pi-durable", 5, 90, 5), 100)
         self.assertEqual(prompt_input_tokens("claude", 5, 90, 5), 100)
         self.assertEqual(prompt_input_tokens("codex", 100, 90, None), 100)
+        self.assertEqual(prompt_input_tokens("codex", 100, None, None), 100)
+        self.assertEqual(prompt_input_tokens("codex", 100, -1, None), 100)
+        self.assertIsNone(prompt_input_tokens("codex", True, None, None))
         self.assertIsNone(prompt_input_tokens("pi", 5, 90, None))
         self.assertIsNone(prompt_input_tokens("unknown", 100, 25, 0))
         self.assertIsNone(prompt_input_tokens("pi", 2**63 - 1, 1, 0))
@@ -183,7 +186,11 @@ class CacheAffinityTests(Fixture):
                        self.attempt(2, input_tokens=10, cache_read=20, cache_write=5),
                        self.attempt(3, input_tokens=10, cache_read=20, cache_write=None,
                                     engine="codex"),
-                       self.attempt(4, input_tokens=100, cache_read=25, engine="custom") ]})
+                       self.attempt(4, input_tokens=100, cache_read=25, engine="custom"),
+                       self.attempt(5, input_tokens=10, cache_read=None, cache_write=None,
+                                    engine="codex"),
+                       self.attempt(6, input_tokens=10, cache_read=-1, cache_write=None,
+                                    engine="codex") ]})
         facts = summarize(self.project)
         rows = {r["execution_attempt"]: r for r in facts["cache_affinity"]["attempts"]}
         self.assertEqual(rows[0]["prompt_input_tokens"], 100)
@@ -195,6 +202,12 @@ class CacheAffinityTests(Fixture):
         self.assertIsNone(rows[3]["cache_read_share_of_input"])
         self.assertIsNone(rows[4]["prompt_input_tokens"])
         self.assertIsNone(rows[4]["cache_read_share_of_input"])
+        self.assertEqual(rows[5]["prompt_input_tokens"], 10)
+        self.assertIsNone(rows[5]["cache_read_tokens"])
+        self.assertIsNone(rows[5]["cache_read_share_of_input"])
+        self.assertEqual(rows[6]["prompt_input_tokens"], 10)
+        self.assertIsNone(rows[6]["cache_read_tokens"])
+        self.assertIsNone(rows[6]["cache_read_share_of_input"])
 
     def test_invalid_and_unknown_identity(self):
         run_dir = self.write_usage_run("b" * 32)
