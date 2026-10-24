@@ -3913,7 +3913,7 @@ class Engine:
                     observation_sink=getattr(context, "_admission_observation_sink", None))
         context._slot_lease = True
 
-    def _dispatch_state(self, project, role_name, role, *, event_trigger):
+    def _dispatch_state(self, project, role_name, role, *, event_trigger, continuation=False):
         """Recompute scheduling inputs; a skipped attempt never claims execution.
 
         Used before queueing and again under dispatch locks. No events or
@@ -3990,6 +3990,7 @@ class Engine:
         if event_trigger:
             event_gate = _scheduling.evaluate(_scheduling.DispatchFacts(
                 event_trigger=True,
+                continuation=continuation,
                 on_change=bool(role.on_change),
                 code_unchanged=bool(code_unchanged),
                 has_code_event=bool(has_code_event),
@@ -4023,6 +4024,7 @@ class Engine:
             goal_changed or inbox_changed or prior_wait_expired))
         _dispatch = _scheduling.evaluate(_scheduling.DispatchFacts(
             event_trigger=bool(event_trigger),
+            continuation=continuation,
             on_change=bool(role.on_change),
             code_unchanged=bool(code_unchanged),
             has_code_event=bool(has_code_event),
@@ -4063,7 +4065,7 @@ class Engine:
                 _service_due_probes(self.config, project.name, self.stop)
             except (MizuError, OSError, ValueError):
                 pass
-        with contextlib.ExitStack() as stack:
+        with contextlib.ExitStack() as continuation_owner, contextlib.ExitStack() as stack:
             if "check_job" in role.capabilities:
                 hold = check_jobs.deferral(project, role_name)
                 if hold is not None:
@@ -4071,9 +4073,13 @@ class Engine:
                                + " until " + _epoch_text(hold["wait_until"])
                                + "; no model slot acquired")
             self._check_admission(project)
+            from . import continuations
+            intent = (continuations.ready(project.snapshots, role_name)
+                      if role.workspace == "write" else None)
             project.insights.ingest_editor(keep_days=project.config.limits.retention_days)
             if event_trigger or role.on_change:
-                dispatch_state = self._dispatch_state(project, role_name, role, event_trigger=event_trigger)
+                dispatch_state = self._dispatch_state(project, role_name, role, event_trigger=event_trigger,
+                                                      continuation=intent is not None)
                 if dispatch_state.get("skip"):
                     return dispatch_state["skip"]
             # Producer admission: hold only configured producer roles before
@@ -4107,9 +4113,26 @@ class Engine:
                 if started is not None:
                     started["queue_observations"] = queue_observations
                     write_json(run_dir / "started.json", started)
-            admission_elapsed = self._admit(project, role_name, role, stack, wait=retry_busy,
-                                           enqueue=enqueue_busy, observation_sink=record_admission)
-            dispatch_state = self._dispatch_state(project, role_name, role, event_trigger=event_trigger)
+            continuation = None
+            if intent is not None:
+                continuation = stack.enter_context(continuations.reservation(
+                    self, project, role_name, wait=retry_busy, enqueue=enqueue_busy,
+                    observation_sink=record_admission, expected=intent, owner_stack=continuation_owner))
+                if continuation is None:
+                    return {"skipped": "stale-continuation"}
+                admission_elapsed = continuation["admission_elapsed_seconds"]
+                recovered = continuations.recover(project.snapshots, continuation)
+                if recovered is not None:
+                    return recovered
+            else:
+                admission_elapsed = self._admit(project, role_name, role, stack, wait=retry_busy,
+                                               enqueue=enqueue_busy, observation_sink=record_admission)
+                # A yield may have committed while this ordinary wake queued.
+                # Do not allocate a different identity for the same demand.
+                if role.workspace == "write" and continuations.ready(project.snapshots, role_name):
+                    return {"skipped": "continuation-pending"}
+            dispatch_state = self._dispatch_state(project, role_name, role, event_trigger=event_trigger,
+                                                  continuation=continuation is not None)
             if dispatch_state.get("skip"):
                 return dispatch_state["skip"]
             snapshot = dispatch_state['snapshot']
@@ -4139,7 +4162,7 @@ class Engine:
                     if not probed["profile"]:
                         _fingerprint = _wait_fingerprint(probed)
                         _last = _read_wait(project, role_name)
-                        if (isinstance(_last, dict) and _last.get("fingerprint") == _fingerprint
+                        if (continuation is None and isinstance(_last, dict) and _last.get("fingerprint") == _fingerprint
                                 and isinstance(_last.get("run"), str)):
                             return {"run": _last["run"], "role": role_name, "status": "waiting",
                                     "finished_at": now(), "selection": probed,
@@ -4150,8 +4173,12 @@ class Engine:
                     if probed is not None:
                         raise
                     probe_error = exc
+            if continuation is not None:
+                captured = project.snapshots.capture_files(project.workspace)
+                if captured["skipped"] or captured["code_digest"] != snapshot["code_digest"]:
+                    raise Denied("Continuation requires the current published workspace tree")
             active = project.root / "active" / f"{role_name}.json"
-            run_id = uuid.uuid4().hex
+            run_id = continuation["successor"] if continuation is not None else uuid.uuid4().hex
             run_dir = project.root / "runs" / run_id
             mkdir(run_dir)
             context = None
@@ -4165,7 +4192,8 @@ class Engine:
             result = None
             workspace = project.workspace if role.workspace == "write" else run_dir / "input"
             try:
-                write_json(active, {"run": run_id, "role": role_name, "started_at": now()})
+                if continuation is None:
+                    write_json(active, {"run": run_id, "role": role_name, "started_at": now()})
                 admission = _dispatch.admission
                 _ci_wake_branches = effective_ci_wake_branches(self.config)
                 if ci_present:
@@ -4187,7 +4215,13 @@ class Engine:
                             "policy_sha256": digest(role_policy_bytes(role))}
                 if queue_observations["observations"]:
                     started["queue_observations"] = queue_observations
-                write_json(run_dir / "started.json", started)
+                if continuation is not None:
+                    continuations.start(project.snapshots, continuation, started)
+                    started["continuation"] = continuations.identity(continuation)
+                else:
+                    write_json(run_dir / "started.json", started)
+                if continuation is not None:
+                    write_json(active, {"run": run_id, "role": role_name, "started_at": now()})
                 if decision_events:
                     write_json(run_dir / "decision-events.json",
                                {"run": run_id, "role": role_name, "admission": admission,
@@ -4221,7 +4255,10 @@ class Engine:
                     if not decision["profile"]:
                         result = {"run": run_id, "role": role_name, "status": "waiting",
                                   "finished_at": now(), "selection": decision,
-                                  "next_evaluation_at": decision["next_evaluation_at"]}
+                                  "next_evaluation_at": decision["next_evaluation_at"],
+                                  **({"snapshot": snapshot["id"],
+                                      "continuation": continuations.identity(continuation)}
+                                     if continuation is not None else {})}
                         write_json(run_dir / "result.json", result)
                         with contextlib.suppress(OSError, ValueError, TypeError):
                             _write_wait(project, role_name, _wait_fingerprint2(decision),
@@ -4583,6 +4620,8 @@ class Engine:
                           "finish": finished, "model": model_result, "snapshot": snapshot["id"],
                           "activity": context.activity_summary(),
                           "ci_requests": context.ci_request_summary(),
+                          **({"continuation": continuations.identity(continuation)}
+                             if continuation is not None else {}),
                           **({"selection": decision} if decision else {})}
                 write_json(run_dir / "result.json", result)
                 if role.workspace == "write":
@@ -4679,10 +4718,16 @@ class Engine:
                             "last_run": run_id, "updated_at": now()})
                 return result
             except BaseException as exc:
+                if continuation is not None and context is None:
+                    # Before model setup, leave only the create-only start
+                    # (if any). A failed start must remain retryable.
+                    raise
                 if (isinstance(exc, (RunDeadlineExceeded, DrainYieldExceeded, RequestYieldExceeded, AuthorityGrantMismatch))
                         and context is not None
                         and context.finished is None and not context.host_cancelled()):
                     result = {"run": run_id, "role": role_name, "status": "bounded",
+                              **({"continuation": continuations.identity(continuation)}
+                                 if continuation is not None else {}),
                               "bound": ("drain" if isinstance(exc, DrainYieldExceeded)
                                         else ("authority" if isinstance(exc, AuthorityGrantMismatch)
                                               else ("requests" if isinstance(exc, RequestYieldExceeded) else "deadline"))),
@@ -4788,6 +4833,11 @@ class Engine:
                                            resolved=resolved)
                 raise exc
             finally:
+                if continuation is not None:
+                    # Failure leaves a pinned row for recovery. Never turn a
+                    # completed execution into an error over pointer cleanup.
+                    with contextlib.suppress(MizuError, OSError, ValueError):
+                        continuations.settle(project.snapshots, continuation)
                 if context is not None:
                     context._slot_lease = False
                     context.closed = True
@@ -5369,6 +5419,12 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
         draining=bool(control.get("draining")),
     )
     decision = _scheduling.evaluate(facts)
+    if (decision.ready is None and role_name in project.roles and role is not None
+            and role.workspace == "write"):
+        from .continuations import ready as continuation_ready
+        if continuation_ready(project.snapshots, role_name) is not None:
+            facts = dataclasses.replace(facts, continuation_ready=True)
+            decision = _scheduling.evaluate(facts)
     while decision.ready is None:
         needed = decision.needed
         if needed == "goal_changed":

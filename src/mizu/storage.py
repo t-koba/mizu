@@ -780,6 +780,14 @@ def _audit_collect(project: Project) -> dict:
     if pointer is not None and (generation is None or pointer_snapshot is None):
         skipped_references.add(current_path)
 
+    # Continuation seals remain live even after leaving the history window.
+    from .continuations import entries as continuation_entries
+    if pointer is not None:
+        try:
+            live_ids.update(row["snapshot"] for row in continuation_entries(pointer))
+        except Denied:
+            skipped_references.add(current_path)
+
     history_ids: set[str] = set()
     active_history: list | None = None
     generations = 0
@@ -827,7 +835,7 @@ def _audit_collect(project: Project) -> dict:
             if not active_history or active_history[-1] != pointer_snapshot:
                 skipped_references.add(history_path)
             elif history_path not in skipped_references:
-                live_ids = set(active_history)
+                live_ids |= set(active_history)
     history_ids |= live_ids
     run_ids: set[str] = set()
     for run_dir in reference_children(root / "runs"):

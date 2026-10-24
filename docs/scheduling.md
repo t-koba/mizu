@@ -43,8 +43,12 @@ no file trigger and instead renders a bounded poll task invoking
 ## Wake sources versus delivered inputs
 
 `should_run` (`src/mizu/runtime.py`) is the writer-daemon readiness gate. It
-first rejects unarmed/paused/draining control, then checks changed goal
-digest and operator wake-generation, then an independent ready-set change read.
+first rejects unarmed/paused/draining control (and deferred sandbox-check
+waits). For an enabled writer, an exact committed/reserved internal continuation
+then supplies readiness, subject to the producer veto. Prepared intents never
+supply readiness; see [the registry](#internal-writer-continuation-registry).
+Otherwise it checks changed goal digest and operator wake-generation, then an
+independent ready-set change read.
 Ready work for a named role requires the `work_items_transition` capability.
 It means an unheld `open` item the role can claim, or a `doing` item held by
 that role, with no structured wait. Satisfied blocked waits below are ready
@@ -53,7 +57,7 @@ Another role's held work never admits it. A changed eligible ID set admits the w
 even after `done`, an unexpired run-level `wait`, or a no-progress park. This
 is independent of terminal-event subscriptions, but filtered by role/holder
 before page selection and counting. Unnamed diagnostic callers retain the
-aggregate project view. Workspace mode is not a readiness capability.
+aggregate project view. Workspace mode is not a ready-work capability.
 
 Ready work is a change signal, not standing admission. The existing locked
 full-ledger scan computes a fixed 64-hex fingerprint of **all** eligible IDs,
@@ -81,7 +85,7 @@ control/goal/operator short-circuit behavior and other wake sources are unchange
 No mutable index, ordering policy or new configuration is added.
 Next, unacknowledged receipt-pinned CI wait evidence admits only its current
 blocked holder (daemon reason `ci_wait`), including after `done`. Without changed ready
-work or that evidence, `done` still ignores inbox, routed events, general CI,
+work, an internal continuation or that evidence, `done` still ignores inbox, routed events, general CI,
 `wake_at` and progress; a changed goal or operator wake continues to admit it.
 For other outcomes, it checks inbox generation; role-routed decision/terminal
 events and due structured waits (`_role_events_due`); due CI reds for opted-in
@@ -132,7 +136,10 @@ changes and progress-only continuation; writer probes retain their existing
 subscribed-event gate. A changed code snapshot bypasses the skip for either
 workspace mode. The recorded
 `admission` label is `decision` / `work_item` / `wait` / `ci` / `operator` /
-`ready_work` / `change` / `schedule`. Existing event labels take precedence over ready work;
+`ready_work` / `change` / `schedule`, or `continuation` for an exact internal
+committed/reserved intent. Such an intent bypasses both dispatch skips, not
+control/producer/check holds or fresh admission checks. Without that intent,
+existing event labels take precedence over ready work;
 ready work has its own label for event-triggered or unchanged-code admission.
 It does not add or consume terminal work-item events. The daemon's configured
 ordinary spacing still applies (`roles.<name>.daemon_spacing_seconds` when set,
@@ -581,3 +588,111 @@ or stale evidence is not proof of no contention. No resource/project paths,
 prompts, token payloads, native/provider session ids or arbitrary configuration
 are copied. Queue schema, ticket lifetime, pending reuse, FIFO and blocked-head
 bypass, lock order and cancellation remain unchanged.
+
+## Internal writer-continuation registry
+
+`mizu.continuations` provides preparation, atomic commit proof and single-use
+Engine admission for an **internal host-owned intent**. Ordinary `continue`
+seals, drain/deadline wrap-up and model arguments never create intents. There
+is no public tool, configuration knob, quantum or yield trigger. Safe-point
+preemption remains unavailable; this is its admission substrate only.
+
+The internal host API is intended for a future scheduler-owned yield marker:
+
+1. While owning the writer's role/workspace exclusions, create its normal
+   immutable `continue` snapshot. Call `prepare` before publishing, binding the
+   enabled writer's role, source run and exact snapshot ID. Its `started.json`
+   must name that role and current input snapshot; the new snapshot must name
+   that source run, outcome `continue`, and current parent. Other outcomes,
+   already-published seals and mismatched input identities are refused.
+2. Normal `Snapshots.publish` changes the matching entry from `prepared` to
+   `committed` in **the same atomic `current.json` replacement** that commits
+   the snapshot/history pointer. A prepared result, existing manifest or
+   orphan history generation is not commit evidence. A crash before pointer
+   replacement leaves preparation only; a crash after replacement retains
+   commit proof even when the caller never observed success.
+3. Every subsequent publication carries the pending entries forward. Commit
+   proof therefore survives restart and later writers advancing/truncating
+   the current history window; it does not depend on the source still being
+   head. Source manifests remain retention references.
+4. `reservation(engine, project, role, wait=...)` enters ordinary admission,
+   with its existing role/workspace/slot exclusions, stop checks, fresh
+   authority/budget/disk checks, capacity bounds, FIFO ordering and
+   resource-blocked-head behavior. With `wait=True` it joins the FIFO tail;
+   a failed or cancelled admission retains the same intent. No publication
+   lock is held while waiting. After admission it re-reads the pending entry
+   and current published snapshot, persists state `reserved`, and yields a
+   descriptor under the execution exclusions. That descriptor names the
+   **then-current** tree and the stable successor identity, not the old yield
+   tree. Engine uses this path instead of ordinary admission only when it
+   observes a committed/reserved intent. An ordinary wake that discovers a new
+   intent after queueing skips without allocating a random successor. Racing
+   consumers that find their exact intent already settled likewise skip.
+5. The enabled writer's committed/reserved intent admits daemon readiness even
+   when ordinary progress policy parks the published head; `prepared` is never
+   readiness. Armed, paused, draining, check-wait and producer gates remain in
+   force. Event/on-change dispatch also recognizes this exact intent, without
+   turning ordinary `continue` into an unconditional wake.
+6. Before executing, Engine verifies that the workspace is the then-current
+   published tree (dirty or uncapturable input refuses without discarding it).
+   It creates the deterministic successor directory and durably writes its
+   `started.json` **before** its active pointer or any model call. The start
+   carries `run`, `role`, current input `snapshot` and `continuation` containing
+   exactly `role`, `source_run`, source `snapshot`, and `successor`. Acceptance
+   is create-only. A pre-start crash retries the same ID; an empty directory
+   or abandoned regular single-link `.new-*` atomic-write temporaries can be
+   reused without overwriting files. Other unbound files fail closed.
+7. A matching existing start is an execution fence, not permission to replay a
+   provider session. Under execution exclusions, return its existing terminal
+   `result.json` unchanged (`completed`, `waiting`, `bounded`, `interrupted`).
+   Without a terminal result, write/report `interrupted`; a `prepared` result
+   is not terminal and does not authorize re-publication. Input snapshot and
+   exact continuation binding are validated before reconciliation. Mismatched,
+   malformed, unsafe or unreadable evidence fails closed, retaining the row.
+   Active pointers matching the recovered ID are cleared; no provider state
+   is invented or resumed by recovery.
+8. Only a durable matching start plus terminal result allows atomic retirement
+   of that exact row. Engine keeps it throughout execution; failed retirement
+   leaves the terminal record pinned for a later idempotent reconciliation.
+   A crash after start but before any later pointer update resolves from the
+   start, never from a guessed registry state. Run evidence and manifests stay
+   pinned until retirement. Existing run-envelope reads are bounded to 1 MiB.
+
+An invocation-lifetime, nonblocking `locks/continuation-<role>.lock` owns the
+identity from reservation through settlement, including selector retry waits
+that temporarily release execution admission. This lock holds no model slot;
+it prevents a racing wake from reporting a live start as interrupted. Lock
+order is identity ownership -> ordinary FIFO/execution exclusions ->
+publication. Engine retains identity ownership outside its releasable admission
+stack. Process death releases ownership; the durable start then fences recovery.
+
+The optional pointer member is exactly
+`continuations = {version: 1, entries: [...]}`. Each row contains `role`
+(a normal bounded role ID), `source_run` (32 lowercase hex), `snapshot`
+(64 lowercase hex), `successor` (32 lowercase hex), and `state`
+(`prepared`, `committed`, or `reserved`). The successor is the first 32 hex
+characters of SHA-256 over canonical JSON
+`["writer-continuation-v1", role, source_run, snapshot]`; validation recomputes
+it. Roles, source runs and successors must each be unique. There is at most
+one pending row per role and 64 per project; pointer reads are bounded to
+64 KiB and source run-envelope reads to 1 MiB. Missing metadata means no
+intent. Malformed, oversized, unsafe or unreadable local state fails closed;
+there is no repair-by-guessing or provider/network input. Registry overflow or
+a conflicting pending role is `Busy`. Identical preparation/reservation is
+idempotent, including after restart. All mutations use the existing publication
+lock after execution exclusions, never before admission. The pointer and run
+records are already covered by project backup/restore.
+
+Run retirement pins each pending source run and any existing successor run;
+an absent successor directory is normal because reservation precedes run
+creation. A missing source or invalid registry makes the retirement plan
+incomplete. Snapshot audit treats pending source snapshots as live even after
+they leave current history; an invalid registry is an incomplete reference
+scan. No new snapshot/object reclamation or smoke expiry is introduced.
+
+**Remaining integration gate:** nothing creates scheduler yields yet. A future
+host-owned safe-point marker must prepare before a successful normal seal;
+failed/uncommitted seals still cannot release the writer or authorize a
+continuation. Prepared entries intentionally remain pinned and block a new
+intent for that role; this slice provides no lossy repair/cancel API. Enabling
+preemption, a quantum, drain changes and hard-deadline changes are out of scope.

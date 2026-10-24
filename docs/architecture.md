@@ -95,10 +95,13 @@ set when a capture fails, kept while it applies, and cleared when a capture
 succeeds, so a later unit never reads a resolved cause as the current
 blocker.
 
-`current.json` is the publication commit point. A crash may leave a prepared
-result with or without publication; inspect the pointer rather than treating a
-prepared record as completed. The last published state remains readable while a
-writer is active. No rollback of uncommitted files happens automatically.
+`current.json` is the publication commit point. Its optional, bounded
+`continuations` member carries internal scheduler-intent commit evidence in
+that same replacement; see [the continuation registry](scheduling.md#internal-writer-continuation-registry)
+for schema, retention roots and single-use Engine acceptance/recovery. A crash
+may leave a prepared result with or without publication; inspect the pointer
+rather than treating a prepared record as completed. The last published state
+remains readable while a writer is active. No rollback of uncommitted files happens automatically.
 
 Atomic replace plus fsync and locks provide local filesystem durability under
 standard local filesystem semantics. Use a local filesystem, not NFS/object-store/FUSE mounts

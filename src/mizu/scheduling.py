@@ -30,6 +30,8 @@ class DaemonFacts:
     armed: bool = False
     paused: bool = False
     draining: bool = False
+    # Exact committed/reserved internal writer intent, never a prepared seal.
+    continuation_ready: bool = False
     # ``None`` means the runtime has not collected this next fact yet. The
     # evaluator returns which fact to collect, preserving short-circuit I/O.
     goal_changed: bool | None = None
@@ -63,6 +65,7 @@ class DispatchFacts:
     """Normalized facts for event-trigger and on-change dispatch gates."""
 
     event_trigger: bool = False
+    continuation: bool = False
     on_change: bool = False
     code_unchanged: bool = False
     # Subscribed code-change event for --event probes: true only for
@@ -113,6 +116,8 @@ def evaluate_daemon(facts: DaemonFacts) -> DaemonDecision:
     """Order daemon facts and request only the next signal needed."""
     if not facts.armed or facts.paused or facts.draining:
         return DaemonDecision(ready=False, reason="control")
+    if facts.continuation_ready:
+        return DaemonDecision(ready=True, reason="continuation")
     if facts.goal_changed is None:
         return DaemonDecision(ready=None, reason="collecting", needed="goal_changed")
     if facts.goal_changed:
@@ -161,6 +166,8 @@ def evaluate_daemon(facts: DaemonFacts) -> DaemonDecision:
 
 def evaluate_dispatch(facts: DispatchFacts) -> DispatchDecision:
     """Order dispatch facts exactly as ``Engine.run`` does."""
+    if facts.continuation:
+        return DispatchDecision(admitted=True, admission="continuation")
     if facts.event_trigger and not _has_event(facts) and not facts.has_code_event:
         return DispatchDecision(admitted=False, skipped="no-event", admission=None)
     if (

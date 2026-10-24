@@ -531,7 +531,10 @@ class Snapshots:
         lock first, then insights.lock through its immutable work-item append.
         """
         with lock(self.root / "locks" / "publication.lock"):
+            from .continuations import pointer_at, publication_metadata
+            pointer = pointer_at(self.root)
             record = self.get(snapshot["id"])
+            metadata = publication_metadata(pointer, record)
             history = self._history_ids()
             current = history[-1] if history else None
             if current == record["id"]:
@@ -551,7 +554,7 @@ class Snapshots:
                 history = [*history, record["id"]][-self.history_index:]
             generation = digest(canonical(history))
             write_json(self.root / "histories" / (generation + ".json"), history, exclusive=True)
-            publish_pointer(self.root, {"snapshot": record["id"], "history": generation}, name="current.json")
+            publish_pointer(self.root, {"snapshot": record["id"], "history": generation, **metadata}, name="current.json")
 
     def merge(self, base: str, head: str, target: str) -> tuple[dict | None, list[str]]:
         """Three-way path merge of exact stored IDs, without reading object bytes.

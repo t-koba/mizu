@@ -257,6 +257,16 @@ def plan(project):
                 if clock - _stamp(started["started_at"]) > days * 86400:
                     eligible.add(run)
 
+        # Pending scheduler continuations own both their source evidence and
+        # any already-created successor. The reserved ID can precede its run
+        # directory; source evidence, by contrast, must exist. Pointer metadata
+        # is bounded and validated by its single owner.
+        from .continuations import entries as continuation_entries, pointer_at
+        for intent in continuation_entries(pointer_at(root)):
+            pin(intent["source_run"])
+            if intent["successor"] in graph:
+                pin(intent["successor"])
+
         for path in scan.children(root / "inbox"):
             _evidence(scan.record(path), pin)
         for path in scan.children(root / "active"):

@@ -334,3 +334,24 @@ previews, pending rollback, committed partial-deletion recovery, and honest
 partial I/O failure. Legacy flat outputs and the fixed probe policy must survive
 apply unchanged. These tests are not live-provider or installed-state evidence;
 never run paid smoke as part of offline acceptance.
+
+### Internal continuation protocol
+
+`tests/test_continuations.py` exercises the host-owned preparation, atomic
+publication proof, FIFO reservation and single-use Engine admission/recovery.
+Fault injection before/after publication, start and active-pointer writes, and
+registry retirement distinguishes preparation, accepted execution and terminal
+reconciliation. Tests reopen projects, advance beyond the history window, and
+exercise real admission locks/capacity/FIFO. Engine tests use `ScriptDriver`
+only: they prove local admission, not live-provider/session replay or actual
+power-loss filesystem durability. A start without a terminal result is reported
+interrupted, never re-executed. Terminal-result recovery preserves stored bytes.
+
+Regressions cover committed-only no-progress readiness, control/producer/check
+holds, deterministic identity/current input, duplicate/stale wakes, refused
+admission, abandoned pre-start temporaries, mismatched run evidence, dirty
+workspace refusal, and identity ownership across slot-releasing selector waits.
+Run-retirement and snapshot-audit checks pin pending evidence. Ordinary
+`continue` remains one execution with no intent. No test creates a scheduler
+quantum/yield trigger; preemption remains unavailable. All tests are offline;
+none calls a provider.
