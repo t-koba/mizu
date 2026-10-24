@@ -178,6 +178,9 @@ def maintain(project):
             stack.enter_context(lock(project.root / 'locks/check-cache.lock', blocking=False))
             if not _due(state, instant, policy.check_interval_seconds):
                 return {'status': 'not-due'}
+            from . import safe_point
+            if safe_point.read(project.snapshots) is not None:
+                return {'status': 'fenced'}
             result = {'checked_at': instant, 'status': 'unsafe', 'removed_roots': 0, 'bytes': 0}
             try:
                 candidates, total = _preflight(project, policy.roots)

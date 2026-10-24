@@ -855,3 +855,53 @@ that metric's bound is enabled (invalid limits also hold fail-closed).
 Admission counting rejects unsafe, unreadable, oversized or malformed live
 rows and decisions, including ID/filename mismatches and invalid revisions
 or decision actions; tolerant prompt/list projections are unchanged.
+
+### Failed cooperative safe-point seals
+
+When configured safe-point preemption attempts its finish-only seal, the host
+first durably creates `safe-point.json` under the writer/workspace exclusions.
+After the checkpoint claim succeeds, a seal, continuation-preparation, or
+publication failure leaves that fence and all workspace files intact; the
+original run's terminal evidence is retained. If stop, authority, or a deadline
+wins before the claim succeeds, the host removes only that unsealed marker and
+keeps the existing path. Ordinary failures outside this optional handoff do not
+create the fence.
+
+Every later writer still takes ordinary FIFO admission. Before any dispatch or
+workspace use, an unresolved fence rejects a different writing role. The original
+role can run a single bounded recovery dispatch with only its currently granted
+`files`, `read`, `diff`, and `finish` operations: no mutation or engine tools,
+selector inference, fallback, or missing-finish follow-ups. It uses the existing
+workspace, not a materialization of the previous snapshot. The prior attempt's
+finish intent, if present, is supplied as data, not a prescribed outcome. Current
+stop, authority, budget and deadline checks still apply. A disabled quantum does
+not erase an existing fence or authorize ordinary work in its place.
+
+Recovery publishes the model's normal finish outcome; existing run-bound policy
+may record `bounded` instead. Only `continue` prepares a new continuation through
+existing exactly-once admission; `wait`, `blocked`, `done`, and `bounded` do not
+force re-entry (`done` still requires passing verification). An exact
+unpublished prepared continuation can be retired while starting recovery; a
+previously reserved successor is first reconciled by its existing admission
+owner, never replayed. It may therefore take a subsequent ordinary wake to begin
+recovery. No failed attempt's original evidence is rewritten by recovery.
+
+The fence clears only after the exact run's retained seal/snapshot is published
+and its `continue` intent, if any, is atomically committed. On restart after
+publication but before clearing, admission validates the current pointer/history, exact run,
+input parent, durable finish intent and continuation commitment before clearing;
+a result file or an unreferenced history generation alone is not proof.
+Malformed/ambiguous evidence, a moved head, revoked profile/finish authority, or
+an unsuccessful recovery leaves the fence unresolved. Run retention pins its
+source/current attempt, snapshot reclamation pins its base/target, and workspace
+cache cleanup skips fenced workspaces. Backup retains the marker. A restore
+publishes a separate operator checkpoint and remains paused; it does not
+implicitly resolve an old fence against that different head. If normal recovery
+is impossible, preserve the workspace and evidence for explicit operator review;
+do not delete the marker or reset the workspace merely to admit another writer.
+
+The local marker has a fixed version-1 schema (`version`, `role`, `profile`,
+`source_run`, `run`, `base`, nullable `snapshot`), a 4096-byte link-safe read bound,
+and no model-write API. Its owner serializes mutations under workspace exclusion
+then publication lock; creation/replacement and removal use durable filesystem
+primitives. No new configuration or external provider call is introduced.

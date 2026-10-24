@@ -365,6 +365,16 @@ holds, deterministic identity/current input, duplicate/stale wakes, refused
 admission, abandoned pre-start temporaries, mismatched run evidence, dirty
 workspace refusal, and identity ownership across slot-releasing selector waits.
 Run-retirement and snapshot-audit checks pin pending evidence. Ordinary
-`continue` remains one execution with no intent. No test creates a scheduler
-quantum/yield trigger; preemption remains unavailable. All tests are offline;
-none calls a provider.
+`continue` remains one execution with no intent. Safe-point tests configure the
+quantum and stub live FIFO demand; they do not exercise scheduler timing. The
+feature remains default-disabled. All tests are offline; none calls a provider.
+
+`tests/test_safe_point_preemption.py` also injects failed finish, preparation and
+publication boundaries using synthetic Claude protocol peers. It checks dirty
+and untracked file preservation, rejection after normal admission but before
+another writer dispatches, read/finish-only same-role recovery, restart after
+publication-before-clear, exact continuation commitment, interrupted successor
+reconciliation, malformed evidence, deadline-claim rollback, no-repeat deadline
+failure, bounded finish outcomes, maintenance pins and default-disabled ordinary
+failures. These are local durable-lifecycle/RPC tests, not provider or
+OCI evidence; they use no network and make no live inference claim.

@@ -22,6 +22,22 @@ def stall():
 
 
 def finish(bridge, *, resumed=False):
+    if scenario.startswith('recover-'):
+        assert set(tool['operation'] for tool in bridge['tools']) <= {'files', 'read', 'diff', 'finish'}
+        for operation, args in (('exec', {'script': 'false'}), ('research', {'state': {}}),
+                                ('_engine_tool', {'name': 'x', 'invocation_id': 'x'})):
+            try:
+                forward(bridge, operation, args)
+            except Exception:
+                pass
+            else:
+                raise AssertionError('Recovery admitted '+operation)
+        forward(bridge, 'read', {'path': 'app.py'})
+        if scenario == 'recover-missing':
+            return
+        forward(bridge, 'finish', {'outcome': scenario.removeprefix('recover-'),
+                                 'summary': 'Recovered existing workspace', 'state': 'Retained dirty work'})
+        return
     if scenario.startswith('seal-'):
         if len(bridge['tools']) != 1:
             return  # Initial ordinary unit establishes the checkpoint/session.

@@ -267,6 +267,12 @@ def plan(project):
             if intent["successor"] in graph:
                 pin(intent["successor"])
 
+        from . import safe_point
+        fence = safe_point.read(project.snapshots)
+        if fence is not None:
+            pin(fence["source_run"])
+            pin(fence["run"])
+
         for path in scan.children(root / "inbox"):
             _evidence(scan.record(path), pin)
         for path in scan.children(root / "active"):

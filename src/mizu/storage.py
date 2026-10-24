@@ -32,7 +32,7 @@ from .snapshot import open_store
 
 #: Project members covered by backup/restore (plus backup.json on restore).
 MEMBERS = (
-    "project.toml", "PROJECT.md", "control.json", "current.json", "snapshots", "objects",
+    "project.toml", "PROJECT.md", "control.json", "current.json", "safe-point.json", "snapshots", "objects",
     "inbox", "insight-ids", "insight-revisions", "insight-archive.sqlite3", "histories", ".ingest", "decisions",
     "decision-history", "decision-cursors", "decision-receipts", "work-items", "work-item-receipts", "waits", "runs", "sessions",
     "evidence", "artifacts", "health", "observed", "maintenance", "spool", "selection",
@@ -787,6 +787,16 @@ def _audit_collect(project: Project) -> dict:
             live_ids.update(row["snapshot"] for row in continuation_entries(pointer))
         except Denied:
             skipped_references.add(current_path)
+
+    from . import safe_point
+    try:
+        fence = safe_point.read(project.snapshots)
+        if fence is not None:
+            live_ids.add(fence["base"])
+            if fence["snapshot"] is not None:
+                live_ids.add(fence["snapshot"])
+    except (Denied, LimitExceeded, OSError, ValueError):
+        skipped_references.add(root / safe_point.NAME)
 
     history_ids: set[str] = set()
     active_history: list | None = None
