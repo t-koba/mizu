@@ -30,6 +30,31 @@ class IncludeTests(Fixture):
             with self.assertRaises(ConfigError):
                 load(self.file)
 
+    def test_admission_queue_capacity_default_and_override_are_independent_of_slots(self):
+        base = self.file.read_text()
+        self.assertIn('admission_queue_capacity = 16', base)
+        # Omission keeps the fixed default, regardless of the active slot cap.
+        omitted = _strip_line(base, 'admission_queue_capacity')
+        for slots in (1, 32):
+            with self.subTest(slots=slots):
+                self.file.write_text(omitted.replace('parallel_runs = 4', f'parallel_runs = {slots}'))
+                config = load(self.file)
+                self.assertEqual(config.limits.parallel_runs, slots)
+                self.assertEqual(config.limits.admission_queue_capacity, 16)
+        for value in (1, 17, 1073741824):
+            with self.subTest(capacity=value):
+                self.file.write_text(base.replace('admission_queue_capacity = 16',
+                                                 f'admission_queue_capacity = {value}'))
+                config = load(self.file)
+                self.assertEqual(config.limits.admission_queue_capacity, value)
+                self.assertEqual(config.limits.parallel_runs, 4)
+        for value in ('0', '-1', '1073741825', 'true', '1.5', '"16"'):
+            with self.subTest(invalid=value):
+                self.file.write_text(base.replace('admission_queue_capacity = 16',
+                                                 f'admission_queue_capacity = {value}'))
+                with self.assertRaisesRegex(ConfigError, 'limits.admission_queue_capacity'):
+                    load(self.file)
+
     def test_consult_fanout_bound_is_independent_of_caller_slots(self):
         base = self.file.read_text()
         self.assertIn("parallel_runs = 4", base)

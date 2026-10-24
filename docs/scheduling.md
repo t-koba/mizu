@@ -566,10 +566,13 @@ later tickets is unknown, and no other tickets' profiles or affinities are
 available from queue rows. Do not rank choices or attribute cache benefits from
 these observations alone.
 
-Bounds and failure behavior: each id list has at most `limits.parallel_runs`
-entries, each id is 32 hex characters, and all other fields are fixed-schema
-bounded scalars or fixed reasons. A run retains its first eight observed
-contended admissions (including later successful selection-retry re-admissions)
+Bounds and failure behavior: each id list normally has at most
+`limits.admission_queue_capacity` entries. While prior version-1 tickets drain,
+reads allow up to `max(admission_queue_capacity, parallel_runs)` entries; this
+does not increase new-enqueue capacity. Each id is 32 hex characters, and all
+other fields are fixed-schema bounded scalars or fixed reasons. A run retains
+its first eight observed contended admissions (including later successful
+selection-retry re-admissions)
 and counts further omissions instead of growing a log. Uncontended admissions
 with no live tickets, unsuccessful/cancelled admissions and failed dispatch
 revalidations emit nothing. A successful unqueued bypass does emit evidence,

@@ -36,12 +36,13 @@ CHILD_WAIT_SECONDS = 60
 CHILD_RELEASE_SECONDS = 600
 
 
-def _process(file, capacity, number, release, stop, results, active, peak):
+def _process(file, slots, capacity, number, release, stop, results, active, peak):
     """Exercise Engine's actual dispatch locks without launching a model."""
     try:
         config = load(file)
         config = dataclasses.replace(config, limits=dataclasses.replace(
-            config.limits, parallel_runs=capacity, idle_seconds=0.02, busy_retry_seconds=15))
+            config.limits, parallel_runs=slots, admission_queue_capacity=capacity,
+            idle_seconds=0.02, busy_retry_seconds=15))
         project = Project(config, 'sample')
         engine = Engine(config, stop=stop)
         with contextlib.ExitStack() as stack:
@@ -84,12 +85,12 @@ class QueueTests(Fixture):
         self.messages = []
 
     def tune(self, **changes):
-        limits = dict(parallel_runs=2, idle_seconds=0.02, busy_retry_seconds=15, admission_wait_seconds=0)
+        limits = dict(parallel_runs=2, admission_queue_capacity=2, idle_seconds=0.02, busy_retry_seconds=15, admission_wait_seconds=0)
         limits.update(changes)
         self.config = dataclasses.replace(self.config, limits=dataclasses.replace(self.config.limits, **limits))
 
     def test_shadow_queue_order_identity_bypass_and_unexamined_tail(self):
-        self.tune(parallel_runs=3)
+        self.tune(parallel_runs=3, admission_queue_capacity=3)
         current = (self.project.root / 'locks/run-reviewer.lock',)
         head_resources = (self.project.root / 'locks/run-worker.lock',
                           self.project.root / 'locks/workspace.lock')
@@ -248,7 +249,8 @@ class QueueTests(Fixture):
     def process(self, number):
         release, stop = self.mp.Event(), self.mp.Event()
         process = self.mp.Process(target=_process, args=(
-            self.file, self.config.limits.parallel_runs, number, release, stop,
+            self.file, self.config.limits.parallel_runs, self.config.limits.admission_queue_capacity,
+            number, release, stop,
             self.results, self.active, self.peak))
         def cleanup():
             # terminate() can strand multiprocessing.Event internals. Never
@@ -408,6 +410,105 @@ class QueueTests(Fixture):
         self.assertGreater(self.child_deadline() - time.monotonic(), CHILD_WAIT_SECONDS - 1)
         self.assertGreaterEqual(CHILD_RELEASE_SECONDS, CHILD_WAIT_SECONDS)
 
+    def test_pending_capacity_exceeds_active_slots_without_bypassing_fifo(self):
+        self.tune(parallel_runs=1, admission_queue_capacity=2)
+        with contextlib.closing(_Queue(self.config, self.resources('worker'))) as first, \
+                contextlib.closing(_Queue(self.config, self.resources('reporter'))) as second, \
+                contextlib.closing(_Queue(self.config, ())) as overflow:
+            with self.raw_slots():
+                for candidate in (first, second):
+                    with self.assertRaises(Busy) as caught:
+                        candidate.attempt(enqueue=True)
+                    self.assertNotIsInstance(caught.exception, _Full)
+                tickets = self.tickets()
+                self.assertEqual([t['id'] for t in tickets], [first.identity, second.identity])
+                self.assertEqual([t['owner'] for t in tickets], [0, 1])
+                # The operator view must accept owners beyond the active slot cap.
+                self.assertEqual([(v['roles'], v['slot']) for v in self.waiting_view()],
+                                 [(['worker'], 0), (['reporter'], 1)])
+                with self.assertRaises(_Full):
+                    overflow.attempt(enqueue=True)
+                with self.assertRaises(Busy), admission(self.config):
+                    pass  # Ordinary fail-fast callers never add a ticket.
+                self.assertEqual(self.tickets(), tickets)
+            # A ready older ticket cannot be bypassed even with a free slot.
+            with self.assertRaisesRegex(Busy, 'Older execution admission is ready'):
+                second.attempt(enqueue=True)
+            with first.attempt(enqueue=True):
+                self.assertEqual(self.tickets(), [tickets[1]])
+                with self.assertRaisesRegex(Busy, 'All configured execution slots are in use'):
+                    second.attempt(enqueue=True)
+                self.assertFalse((first.root / '1.lock').exists())
+            with second.attempt(enqueue=True):
+                self.assertEqual(self.tickets(), [])
+        self.assertEqual(self.waiting_view(), [])
+
+    def test_prior_capacity_tickets_drain_without_raising_new_enqueue_capacity(self):
+        self.tune(parallel_runs=32, admission_queue_capacity=16)
+        with contextlib.ExitStack() as cleanup:
+            # Old version-1 files used parallel_runs for both owner and count.
+            # Retain real pending locks, as live callers from that era would.
+            prior = []
+            for owner in range(18):
+                candidate = cleanup.enter_context(contextlib.closing(
+                    _Queue(self.config, self.resources(f'prior-{owner}'), observe=True)))
+                candidate.alive = candidate._pending(owner)
+                candidate.alive.__enter__()
+                prior.append(candidate)
+            tickets = [{'id': q.identity, 'owner': owner,
+                        'resources': list(q.resources)} for owner, q in enumerate(prior)]
+            # A dead old owner is omitted from status and reaped at admission.
+            dead = {'id': 'f' * 32, 'owner': 31,
+                    'resources': ['sample/locks/run-dead.lock']}
+            prior[0]._write(tickets + [dead])
+            self.assertEqual([(v['roles'], v['slot']) for v in self.waiting_view()],
+                             [([f'prior-{i}'], i) for i in range(18)])
+            self.assertNotIn('enqueued_at', self.waiting_view()[-1])
+            newcomer = cleanup.enter_context(contextlib.closing(
+                _Queue(self.config, self.resources('worker'))))
+            self.assertEqual(newcomer.read_capacity, 32)
+            with self.raw_slots():
+                with self.assertRaises(_Full):
+                    newcomer.attempt(enqueue=True)
+                self.assertEqual(self.tickets(), tickets)  # Dead owner reaped.
+            # Even with execution slots free, owner 17 cannot bypass the head.
+            with self.assertRaisesRegex(Busy, 'Older execution admission is ready'):
+                prior[17].attempt(enqueue=True)
+            for candidate in prior[:2]:
+                with candidate.attempt(enqueue=True):
+                    pass
+            self.assertEqual(prior[0].observation['live_ticket_ids'],
+                             [t['id'] for t in tickets])
+            self.assertEqual(len(self.tickets()), 16)
+            with self.raw_slots():
+                with self.assertRaises(_Full):
+                    newcomer.attempt(enqueue=True)
+            with prior[2].attempt(enqueue=True):
+                pass
+            with self.raw_slots():
+                with self.assertRaises(Busy) as caught:
+                    newcomer.attempt(enqueue=True)
+                self.assertNotIsInstance(caught.exception, _Full)
+                current = self.tickets()
+                self.assertEqual(len(current), 16)
+                self.assertEqual(current[:-1], tickets[3:])
+                self.assertEqual(current[-1]['owner'], 0)
+                self.assertEqual(current[-1]['id'], newcomer.identity)
+            for candidate in [*prior[3:], newcomer]:
+                with candidate.attempt(enqueue=True):
+                    pass
+            self.assertEqual(self.tickets(), [])
+            self.assertEqual(self.waiting_view(), [])
+
+    def test_pending_capacity_does_not_reduce_active_slot_cap(self):
+        self.tune(parallel_runs=2, admission_queue_capacity=1)
+        with admission(self.config), admission(self.config):
+            with self.assertRaises(Busy), admission(self.config):
+                pass
+            self.assertEqual(self.tickets(), [])
+        with self.raw_slots():
+            pass
+
     def test_multiprocess_fifo_overflow_and_active_slot_cap(self):
         held = [contextlib.ExitStack() for _ in range(2)]
         with contextlib.ExitStack() as initial:
@@ -465,7 +566,7 @@ class QueueTests(Fixture):
         self.assertLess(outcome[0][1], 5)
 
     def test_success_releases_single_pending_place_before_caller_cleanup(self):
-        self.tune(parallel_runs=1)
+        self.tune(parallel_runs=1, admission_queue_capacity=1)
         first, second = _Queue(self.config, ()), _Queue(self.config, ())
         self.addCleanup(first.close)
         self.addCleanup(second.close)
@@ -487,7 +588,7 @@ class QueueTests(Fixture):
             self.assertEqual(self.tickets(), [])
 
     def test_dead_process_ticket_is_reclaimed_before_capacity_check(self):
-        self.tune(parallel_runs=1)
+        self.tune(parallel_runs=1, admission_queue_capacity=1)
         with self.raw_slots():
             process, _, _ = self.process(0)
             self.until(lambda: len(self.tickets(synchronized=True)) == 1)
@@ -609,7 +710,7 @@ class QueueTests(Fixture):
     def test_blocked_full_queue_does_not_prevent_ready_dispatch(self):
         # One pending place is full, but its owner cannot use the free slot.
         # Exercise daemon/fail-fast and retrying dispatch without timing races.
-        self.tune(parallel_runs=1)
+        self.tune(parallel_runs=1, admission_queue_capacity=1)
         for blocked in ('run-worker.lock', 'workspace.lock'):
             for wait in (False, True):
                 with self.subTest(blocked=blocked, wait=wait):
@@ -773,7 +874,7 @@ class QueueTests(Fixture):
         # defers. Continuous one-shot arrivals queue behind it instead of
         # pushing it out of reach, and retrying admission dispatches that same
         # ticket once; no ticket is dispatched twice.
-        self.tune(parallel_runs=3, idle_seconds=0.01, admission_wait_seconds=1)
+        self.tune(parallel_runs=3, admission_queue_capacity=3, idle_seconds=0.01, admission_wait_seconds=1)
         daemon_outcome = []
         with self.raw_slots():
             def first_daemon_attempt():
@@ -1022,13 +1123,13 @@ class QueueTests(Fixture):
         ]
         states = [
             {'version': 1, 'tickets': [dict(ticket, owner=owner, resources=[])]}
-            for owner in (-1, self.config.limits.parallel_runs, 1000000, True, '0')
+            for owner in (-1, self.config.limits.admission_queue_capacity, 1000000, True, '0')
         ]
         states.extend({'version': 1, 'tickets': [dict(ticket, resources=[resource])]}
                       for resource in bad_resources)
         states.extend([
             {'version': 1, 'tickets': [dict(ticket, id=f'{i:032x}', owner=i, resources=[])
-                                     for i in range(self.config.limits.parallel_runs + 1)]},
+                                     for i in range(self.config.limits.admission_queue_capacity + 1)]},
             {'version': 1, 'tickets': [ticket, dict(ticket, id='b' * 32)]},
             {'version': 1, 'tickets': [ticket, dict(ticket, owner=1)]},
             {'version': 1, 'tickets': [dict(ticket, id='z' * 32)]},
@@ -1071,9 +1172,9 @@ class QueueTests(Fixture):
                 parse.assert_not_called()
                 self.assertEqual(locks.call_args_list, [call(path.parent / 'queue.lock', blocking=False)])
 
-    def test_huge_slot_limit_with_tiny_queue_uses_only_bounded_reads(self):
+    def test_huge_pending_limit_with_tiny_queue_uses_only_bounded_reads(self):
         for capacity in (1_000_000, 1_073_741_824):
-            self.tune(parallel_runs=capacity)
+            self.tune(admission_queue_capacity=capacity)
             candidate = _Queue(self.config, ())
             self.assertEqual(candidate.capacity, capacity)
             self.assertGreater(candidate.state_bytes, 64 * 1024)
@@ -1097,7 +1198,7 @@ class QueueTests(Fixture):
                     self.assertEqual(path.read_bytes(), raw)
 
     def test_queue_byte_boundary_round_trips_in_bounded_chunks(self):
-        self.tune(parallel_runs=512)
+        self.tune(admission_queue_capacity=512)
         candidate = _Queue(self.config, ())
         path = candidate.root / 'queue.json'
         raw = canonical({'version': 1, 'tickets': []})
@@ -1113,7 +1214,7 @@ class QueueTests(Fixture):
         self.assertEqual(path.read_bytes(), raw)
 
     def test_queue_growth_past_byte_bound_is_rejected_before_parsing(self):
-        self.tune(parallel_runs=512)
+        self.tune(admission_queue_capacity=512)
         candidate = _Queue(self.config, ())
         path = candidate.root / 'queue.json'
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1137,7 +1238,7 @@ class QueueTests(Fixture):
             self.assertTrue(all(0 < args[0][1] <= 64 * 1024 for args in reader.call_args_list))
 
     def test_recursive_queue_json_fails_closed(self):
-        self.tune(parallel_runs=8)
+        self.tune(admission_queue_capacity=8)
         candidate = _Queue(self.config, ())
         raw = b'[' * 1100 + b']' * 1100
         self.assertLess(len(raw), candidate.state_bytes)
@@ -1152,7 +1253,7 @@ class QueueTests(Fixture):
     def test_queue_byte_bound_fits_maximum_valid_tickets(self):
         # Multi-digit owner indices, longest project/role identifiers and two
         # resources per ticket must still round-trip at full pending capacity.
-        self.tune(parallel_runs=12)
+        self.tune(admission_queue_capacity=12)
         candidate = _Queue(self.config, ())
         project, role = 'a' * 63, 'b' * 63
         resources = [f'{project}/locks/run-{role}.lock', f'{project}/locks/workspace.lock']

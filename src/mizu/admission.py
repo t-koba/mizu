@@ -130,7 +130,9 @@ def _read_state(root: Path, capacity: int, state_bytes: int) -> list:
     identity, its pending-slot owner and the resources it waits for, and
     may carry the aware instant it was enqueued at. Bounds: the file is at
     most ``state_bytes``, the ticket list is at most ``capacity`` long, and
-    every field is bounded. Trust: local coordination state. Failure:
+    every field is bounded. Here ``capacity`` is the accepted owner/count
+    bound, which may exceed the new-enqueue limit while old tickets drain.
+    Trust: local coordination state. Failure:
     ``_Invalid`` for an unreadable, oversized or malformed file, so a
     caller never orders admissions from state nobody can read.
     """
@@ -218,7 +220,8 @@ class _Queue:
 
     def __init__(self, config, resources, *, reuse_pending=False, observe=False):
         self.root = config.data / "slots"
-        self.capacity = config.limits.parallel_runs
+        self.capacity = config.limits.admission_queue_capacity
+        self.slots = config.limits.parallel_runs
         self.projects = config.data / "projects"
         try:
             self.resources = tuple(Path(p).relative_to(self.projects).as_posix() for p in resources)
@@ -226,8 +229,11 @@ class _Queue:
             raise Busy("Execution admission resources are invalid") from None
         if len(self.resources) > 2 or any(not _valid_resource(p) for p in self.resources):
             raise Busy("Execution admission resources are invalid")
-        # Bound storage and parsing by the largest canonical ticket schema.
-        self.state_bytes = _state_bytes(self.capacity)
+        # Version-1 queues previously used parallel_runs for pending owners
+        # and count. Read those still-configured places so live tickets drain;
+        # only new enqueues use the independently configured capacity.
+        self.read_capacity = max(self.capacity, self.slots)
+        self.state_bytes = _state_bytes(self.read_capacity)
         self.identity = uuid.uuid4().hex
         self.alive = None
         self.reuse_pending = bool(reuse_pending)
@@ -245,7 +251,7 @@ class _Queue:
         return lock(self.root / f"pending-{owner}.lock", blocking=False)
 
     def _read(self):
-        tickets = _read_state(self.root, self.capacity, self.state_bytes)
+        tickets = _read_state(self.root, self.read_capacity, self.state_bytes)
         live = []
         for ticket in tickets:
             if ticket["id"] == self.identity and self.alive is not None:
@@ -311,7 +317,7 @@ class _Queue:
             stack.enter_context(lock(self.projects / path, blocking=False))
 
     def _slots(self, stack):
-        for index in range(self.capacity):
+        for index in range(self.slots):
             manager = lock(self.root / f"{index}.lock", blocking=False)
             try:
                 stack.enter_context(manager)
@@ -324,8 +330,9 @@ class _Queue:
         """Return a held ExitStack, or Busy with no dispatch locks held.
 
         All callers may skip older resource-blocked tickets, retaining their
-        original place. They never skip a ready ticket. Fail-fast callers do
-        not enqueue. A pending place is needed only if dispatch cannot proceed.
+        original place. They never skip a ready ticket. Ordinary fail-fast
+        callers do not enqueue; explicit enqueue requests may retain a ticket.
+        A pending place is needed only if dispatch cannot proceed.
         """
         with lock(self.root / "queue.lock", blocking=False):
             tickets = self._read()
@@ -414,13 +421,15 @@ def waiting(config, project: str) -> list:
 
     A ticket is live when its pending-slot lock is still held, so a ticket
     whose owner died is not reported as a waiter. Schema: one entry per
-    ticket, naming the roles it waits for, the slot it holds and the
-    instant it was enqueued. Bounds: at most one entry per configured
-    slot. Trust: local coordination state. Failure: an unreadable or
-    malformed queue reports nothing rather than a waiter nobody can verify.
+    ticket, naming the roles it waits for, its pending-slot index (not an
+    execution slot) and, if known, the instant it was enqueued. Bounds: at
+    most ``max(admission_queue_capacity, parallel_runs)`` entries, allowing
+    version-1 tickets from the prior parallel_runs-based capacity to drain.
+    Trust: local coordination state. Failure: an unreadable or malformed
+    queue reports nothing rather than a waiter nobody can verify.
     """
     root = config.data / "slots"
-    capacity = max(0, config.limits.parallel_runs)
+    capacity = max(config.limits.admission_queue_capacity, config.limits.parallel_runs)
     try:
         tickets = _read_state(root, capacity, _state_bytes(capacity))
     except _Invalid:
@@ -439,7 +448,7 @@ def waiting(config, project: str) -> list:
 
 
 def _wait_view(ticket: dict) -> dict | None:
-    """One waiting ticket, as the operator sees it, or None."""
+    """One waiter or None; ``slot`` is its pending index, not an execution slot."""
     projects = {path.split("/")[0] for path in ticket["resources"]}
     roles = sorted(path.split("/")[2][4:-5] for path in ticket["resources"]
                    if path.split("/")[2].startswith("run-"))
@@ -453,7 +462,7 @@ def _wait_view(ticket: dict) -> dict | None:
 
 
 def _state_bytes(capacity: int) -> int:
-    """The byte bound of the queue file for a given pending capacity."""
+    """The queue file byte bound for the accepted pending-owner/count bound."""
     longest = f"{'a' * 63}/locks/run-{'a' * 63}.lock"
     return len(canonical({"version": 1, "tickets": []})) + capacity * len(canonical(
         {"id": "f" * 32, "owner": capacity - 1, "resources": [longest, longest],
@@ -465,14 +474,16 @@ def admission(config, resources=(), *, wait=False, enqueue=False, stop=None, che
               observation_sink=None):
     """Admit one work unit; lend nothing and never preempt an active driver.
 
-    Pending capacity is derived from parallel_runs (one waiter per slot).
-    Overflow and invalid state are immediate Busy. The operator selects the
+    New-enqueue capacity is admission_queue_capacity, independent of
+    parallel_runs. Reads accept up to max(admission_queue_capacity, parallel_runs)
+    pending owners/tickets so prior version-1 queues can drain. Overflow and
+    invalid state are immediate Busy. The operator selects the
     admission_wait_seconds bound on the wait for capacity (0 means none);
     the bound starts when the wait starts, so a caller that is admitted
     without waiting is never refused as an expired wait, and an admitted
-    run is never refused by it. Poll at
-    idle_seconds with no role/workspace/slot locks; stop wakes the wait. check
-    revalidates normal authority/budget before each attempt and at dispatch,
+    run is never refused by it. Poll at idle_seconds with no role/workspace/
+    execution-slot locks; stop wakes the wait. check revalidates normal
+    authority/budget before each attempt and at dispatch,
     outside the queue transaction. Only Busy contention retries. Success
     removes the ticket and releases its pending lock in one transaction;
     cancellation and other errors invalidate it in finally.
@@ -480,8 +491,10 @@ def admission(config, resources=(), *, wait=False, enqueue=False, stop=None, che
     files remain the independent hard cap. Queue/slot files live under data/slots;
     lock inodes are never unlinked. Invalid state fails closed with Busy.
     Optional observation_sink receives one local dict only after successful
-    revalidation with live tickets. Its two id lists are bounded by parallel_runs;
-    it contains no paths/payloads, and later-ticket readiness remains unexamined.
+    revalidation with live tickets. Its two id lists are bounded by
+    max(admission_queue_capacity, parallel_runs), including prior version-1
+    tickets; it contains no paths/payloads, and later-ticket readiness remains
+    unexamined.
     Capture/sink exceptions are ignored; the yielded elapsed float is unchanged.
     """
     stop = stop if stop is not None else threading.Event()

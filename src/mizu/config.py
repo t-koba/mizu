@@ -315,7 +315,10 @@ class Limits:
     max_failures: int = 3
     parallel_checks: int = 2
     check_pending: int = 32
+    #: Active execution slots, independent of pending FIFO capacity.
     parallel_runs: int = 4
+    #: Pending FIFO tickets; fixed default independent of active slots.
+    admission_queue_capacity: int = 16
     parallel_consults: int = 2
     #: Operator-selected one-shot execution admission wait; 0 waits until
     #: dispatch or cancellation. Non-waiting callers still fail fast.

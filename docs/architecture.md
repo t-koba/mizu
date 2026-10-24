@@ -968,13 +968,16 @@ Consultation and delegation lend the already admitted caller's execution slot
 while it joins; no additional slot is acquired, even with `parallel_runs = 1`.
 
 Caller admission uses a bounded FIFO list in `data/slots/queue.json`, protected
-by a short, nonblocking `queue.lock` transaction. The pending cap is derived
-from `parallel_runs` (one waiter per configured slot), separate from the active
-`N.lock` file-lock cap. Only retrying callers enqueue; overflow and fail-fast
-contention remain `Busy` infrastructure deferrals. A retrying ticket may skip
-older tickets whose role/workspace locks are unavailable, but never a ready
-one. Skipped tickets retain their original FIFO position. Fail-fast callers,
-including recovery probes, refuse admission while any live ticket is pending.
+by a short, nonblocking `queue.lock` transaction.
+`limits.admission_queue_capacity` bounds pending FIFO tickets (default 16,
+integer range 1–1073741824), independently of `limits.parallel_runs`, which
+exclusively caps active execution slots via `N.lock` file locks. Waiting callers
+enqueue when blocked; ordinary fail-fast callers do not. The daemon uses the
+explicit `enqueue_busy` option to retain a reusable process-local ticket across
+fail-fast attempts, under the same capacity and FIFO rules. Overflow and
+fail-fast contention remain `Busy` infrastructure deferrals. All callers may
+skip older tickets whose role/workspace locks are unavailable, but never a
+ready one. Skipped tickets retain their original FIFO position.
 
 Waiting holds only a pending-liveness lock, never role, workspace or slot
 locks. Before attempting admission and after acquiring dispatch locks, normal
@@ -991,15 +994,21 @@ capacity checks. No PID-reuse test or provider-cache TTL is needed.
 
 Queue state is local coordination data, not authority: version 1 contains only
 `version` and FIFO `tickets`; each ticket contains a unique 32-character lowercase
-hex `id`, a unique integer `owner` in `[0, parallel_runs)`, and zero to two
-`resources`. Resources are canonical `project/locks/run-role.lock` or
-`project/locks/workspace.lock` names relative to `data/projects`, with project
-and role using the normal identifier schema (at most 63 characters). Absolute
-paths, traversal, aliases and other lock names are invalid. Ticket count and
-the file read/parser byte bound are derived from `parallel_runs` and the largest
-canonical ticket. Queue state is opened nonblocking and without following the
-final symlink where the OS supports those flags; `fstat` must identify a regular
-file before any read. FIFOs and other special files fail closed with generic
+hex `id`, a unique integer pending-slot `owner` (not an execution-slot index),
+and zero to two `resources`. New owners are in `[0, admission_queue_capacity)`.
+Version-1 queues previously bounded owners and ticket count by `parallel_runs`;
+reads accept owners in `[0, max(admission_queue_capacity, parallel_runs))` and
+at most that many tickets so existing valid tickets can drain. New enqueues
+still require a ticket count below `admission_queue_capacity` and a free owner
+within its range, never raising that limit to accommodate old tickets. Resources are canonical
+`project/locks/run-role.lock` or `project/locks/workspace.lock` names relative to
+`data/projects`, with project and role using the normal identifier schema
+(at most 63 characters). Absolute paths, traversal, aliases and other lock names
+are invalid. The file read/parser
+byte bound derives from the accepted owner/count bound and the largest canonical
+ticket. Queue state is opened nonblocking and without following the final
+symlink where the OS supports those flags; `fstat` must identify a regular file
+before any read. FIFOs and other special files fail closed with generic
 `Busy`, as do open/read errors (a missing state file alone means an empty queue).
 On systems without `O_NOFOLLOW` (notably Windows), a pre-open `lstat` rejects
 existing links and special files, but cannot prevent a concurrent replacement
@@ -1010,11 +1019,12 @@ before reading; individual reads request at most 65,536 bytes rather than
 allocating for the potentially enormous configured theoretical bound. Reading
 stops at EOF or after at most the byte bound plus one overflow-detection byte,
 also rejecting growth after the size check before parsing. This adds no separate
-pending-cap or total-state-byte policy; memory usage still scales with actual
+total-state-byte policy; memory usage still scales with actual
 state bytes. Oversized, unreadable or malformed state fails closed with `Busy`
 before liveness or resource probes or queue rewrites. This is local filesystem
-coordination, not a remote or network-filesystem scheduler. It does not rank cache affinity, preempt a
-running driver, or change caller slot lending or writer workspace ownership.
+coordination, not a remote or network-filesystem scheduler. It does not rank
+cache affinity, preempt a running driver, or change caller slot lending or writer
+workspace ownership.
 Only the live `Engine.run` caller owns that lease; unadmitted calls fail with
 `Busy` before child inference, and children cannot lend onward. Consultation
 fan-out stays bounded by `parallel_consults` and shares the daily budget;
