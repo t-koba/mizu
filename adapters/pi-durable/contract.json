@@ -17,5 +17,6 @@
   "bridge_client": "vendored copy of adapters/pi/bridge-client.mjs: the pinned adapter digest covers its own protocol bytes, so framing and caps stay inside this contract instead of a shared import",
   "request_bound": "requests_per_run is the single per-unit spend bound: every provider request passes _budget admission, and a per-run refusal aborts the submission (request_bound)",
   "store_compat": 1,
-  "store_compat_note": "Integer session-store format declared by the adapter. Session identity covers it instead of the adapter digest, so launcher changes that keep this value continue the same durable conversation; bump only on a store-incompatible adapter change"
+  "store_compat_note": "Integer session-store format declared by the adapter. Session identity covers it instead of the adapter digest, so launcher changes that keep this value continue the same durable conversation; bump only on a store-incompatible adapter change",
+  "cooperative_checkpoint": "unsupported: no quiescent model_request boundary or engine-tool completion acknowledgment; whole-run settlement is not a substitute"
 }

@@ -31,6 +31,7 @@ class PiDriver:
         return [*self.config.command("pi"), str(ROOT / "adapters/pi/launcher.mjs"), str(run_dir / "pi-effective.json")]
 
     def execute(self, context, prompt: str, *, profile: str | None = None) -> dict:
+        context.begin_driver('pi', 'model_request')
         profile = profile or context.role.profile
         settings = effective(self.config, context.role, profile)
         path, saved = session_record(context, profile, settings)

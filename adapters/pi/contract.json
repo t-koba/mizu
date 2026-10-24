@@ -7,5 +7,6 @@
   ],
   "completion": "agent_settled + mizu seal",
   "request_unit": "model_request",
-  "dependency_evidence": "package-lock.json"
+  "dependency_evidence": "package-lock.json",
+  "cooperative_checkpoint": "unsupported: no quiescent model_request boundary or engine-tool completion acknowledgment; whole-run settlement is not a substitute"
 }

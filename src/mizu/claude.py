@@ -60,6 +60,7 @@ class ClaudeDriver:
         self.config = config
 
     def execute(self, context, prompt, *, profile=None):
+        context.begin_driver('claude', 'query')
         profile = profile or context.role.profile
         settings = effective(self.config, context.role, profile)
         path, saved = session_record(context, profile, settings)
@@ -68,7 +69,7 @@ class ClaudeDriver:
                                   'requests': 0, 'request_unit': 'query', 'usage': [], 'usage_known': False}
         cwd = (path.parent if settings['session'] == 'persistent' and not context.ephemeral else context.run_dir)/'controller'
         mkdir(cwd)
-        with Bridge(context.handle, tool_definitions(context.role.capabilities), timeout=self.config.limits.model_request_seconds,
+        with Bridge(context.handle, tool_definitions(context.driver_capabilities), timeout=self.config.limits.model_request_seconds,
                     on_close=context.cancel_operations) as bridge:
             servers = connected_servers(context, settings)
             servers['mizu'] = mizu_server(bridge.config_file)
@@ -159,6 +160,8 @@ class ClaudeDriver:
                     channel.send({'type': 'interrupt'})
                 channel.close()
                 context.model_evidence['requests'] = context.request_count
+        if channel.quiescent:
+            context.complete_driver_checkpoint('claude', 'query')
         if getattr(context, 'recovery_probe', False):
             context.model_evidence['settled'] = True
         return {**context.model_evidence, 'session_id': result['session_id'], 'seconds': round(time.monotonic()-started, 3)}

@@ -1,9 +1,11 @@
 """Current engine contracts using synthetic peers, never live inference."""
 import dataclasses
+from contextlib import nullcontext
 import io
 import json
 import os
 import sys
+import threading
 import time
 import unittest
 import unittest.mock
@@ -13,10 +15,12 @@ from mizu.bridge import Bridge
 from mizu.claude import ClaudeDriver, model_delta, terminal_result
 from mizu.codex import CodexDriver, TokenUsage
 from mizu.config import load, role_policy_text, system_context_text
-from mizu.drivers import admit_invocation, command_for, driver_for
+from mizu.drivers import DriverCheckpoint, admit_invocation, command_for, driver_for
 from mizu.engine_config import effective, session_record, save_session
 from mizu.engine_channel import Channel
-from mizu.errors import ConfigError, Denied, LimitExceeded, ProtocolError, ModelFailure
+from mizu.errors import (Cancelled, ConfigError, Denied, LimitExceeded, ProtocolError, ModelFailure,
+                         InfraExceeded, RunDeadlineExceeded, DeadlineWrapUp)
+from mizu.runtime import Engine
 from mizu.fs import mkdir, read_json, write_json
 from mizu.mcp_proxy import forward, load_bridge, serve
 from mizu.pi import PiDriver
@@ -182,6 +186,429 @@ class SyntheticEngineTests(Fixture):
             self.assertIsNone(missing.finished)
             self.assertEqual(result['request_unit'],unit)
             self.assertEqual(missing.request_deadlines, {})
+
+    def test_checkpoint_is_inert_and_claim_is_finish_only(self):
+        for engine, unit in (('codex', 'turn'), ('claude', 'query')):
+            ctx, _ = self.execute(engine, 'missing-finish', context=self.context('worker'))
+            checkpoint = ctx.driver_checkpoint
+            self.assertEqual((checkpoint.engine, checkpoint.unit), (engine, unit))
+            self.assertEqual((checkpoint.execution_attempt, checkpoint.requests), (0, 1))
+            self.assertFalse(ctx.checkpoint_seal_only)
+            self.assertIsNone(ctx.finished)
+            self.assertFalse((ctx.run_dir/'finish-intent.json').exists())
+            with self.assertRaises(Denied):
+                ctx.claim_driver_checkpoint(dataclasses.replace(checkpoint))
+            ctx.claim_driver_checkpoint(checkpoint)
+            with self.assertRaises(Denied):
+                ctx.claim_driver_checkpoint(checkpoint)
+            # Even reopening the normal transport cannot reopen ordinary work.
+            ctx.operations_stopped.clear()
+            for operation, arguments in (('files', {}), ('_budget', {'sequence': 1}),
+                                         ('_engine_tool', {'name': 'x', 'invocation_id': 'x'})):
+                with self.assertRaisesRegex(Denied, 'Only finish'):
+                    ctx.handle(operation, arguments)
+            with self.assertRaisesRegex(ProtocolError, 'checkpoint seal'):
+                admit_invocation(ctx, unit=unit)
+            for driver in (PiDriver(ctx.config), CodexDriver(ctx.config), ClaudeDriver(ctx.config)):
+                with self.assertRaisesRegex(Denied, 'checkpoint seal'):
+                    driver.execute(ctx, 'must not launch')
+            with self.assertRaisesRegex(Denied, 'one admitted model unit'):
+                ctx.handle('finish', {'outcome': 'wait', 'summary': 'not a model-driven seal'})
+            self.assertIsNone(ctx.finished)
+
+    def seal_context(self, engine, scenario='seal-wait', *, role='worker'):
+        ctx, _ = self.execute(engine, scenario, persistent=True, context=self.context(role))
+        return ctx, Engine(ctx.config)
+
+    def test_checkpoint_seal_is_one_real_driver_unit_with_finish_only_grant(self):
+        for engine, unit in (('codex', 'turn'), ('claude', 'query')):
+            for outcome in ('wait', 'done', 'blocked', 'continue'):
+                with self.subTest(engine=engine, outcome=outcome):
+                    ctx, host = self.seal_context(engine, 'seal-'+outcome)
+                    role, snapshot = ctx.role, self.project.snapshots.get()['id']
+                    content = (ctx.workspace/'app.py').read_bytes()
+                    token = ctx.driver_checkpoint
+                    if outcome == 'done':
+                        ctx.verification = {'passed': True}
+                    result = host._seal_driver_checkpoint(ctx, token)
+                    self.assertEqual(result['request_unit'], unit)
+                    self.assertEqual(ctx.request_count, 2)
+                    self.assertEqual(ctx.execution_attempt, 1)
+                    self.assertEqual(ctx.finished['outcome'], outcome)
+                    self.assertEqual(ctx.finished['state'], 'Retain state')
+                    self.assertEqual(ctx.role, role)
+                    self.assertTrue(ctx.operations_stopped.is_set())
+                    self.assertEqual(ctx.request_deadlines, {})
+                    self.assertEqual(ctx.runtime_usage[(1, 1)], {'outputTokens': 5})
+                    self.assertIsNone(ctx.driver_checkpoint)
+                    self.assertEqual(self.project.snapshots.get()['id'], snapshot)
+                    self.assertEqual((ctx.workspace/'app.py').read_bytes(), content)
+                    self.assertFalse((ctx.run_dir/'continuation-intent.json').exists())
+                    self.assertIsNone(ctx.missing_finish_evidence)
+                    with self.assertRaises(Denied):
+                        host._seal_driver_checkpoint(ctx, token)
+                    with self.assertRaises(Denied):
+                        driver_for(ctx.config, ctx.role.profile, {}).execute(ctx, 'no more work')
+                    with self.assertRaises(ProtocolError):
+                        admit_invocation(ctx, unit=unit)
+                    self.assertEqual(ctx.request_count, 2)
+
+    def test_checkpoint_seal_missing_failed_and_unsettled_are_not_retried(self):
+        for engine in ('codex', 'claude'):
+            for scenario in ('seal-missing', 'seal-failed', 'seal-provider-error', 'seal-wait'):
+                with self.subTest(engine=engine, scenario=scenario):
+                    ctx, host = self.seal_context(engine, scenario)
+                    original = ctx.dispatch
+                    calls = []
+                    def dispatch(op, args):
+                        if op == 'finish':
+                            calls.append(args)
+                            if scenario == 'seal-failed':
+                                raise OSError('seal storage failure')
+                        return original(op, args)
+                    ctx.dispatch = dispatch
+                    with unittest.mock.patch.object(Channel, 'quiescent', scenario != 'seal-wait'):
+                        with self.assertRaises((ProtocolError, ModelFailure, OSError)):
+                            host._seal_driver_checkpoint(ctx, ctx.driver_checkpoint)
+                    self.assertEqual(ctx.request_count, 2)
+                    self.assertEqual(len(calls), 1 if scenario in ('seal-failed', 'seal-wait') else 0)
+                    self.assertEqual(ctx.finished is not None, scenario == 'seal-wait')
+                    self.assertTrue(ctx.checkpoint_seal_only)
+                    self.assertTrue(ctx.operations_stopped.is_set())
+                    self.assertFalse(ctx._checkpoint_launch_pending)
+                    self.assertFalse(ctx._checkpoint_driver_started)
+                    with self.assertRaises((Denied, Cancelled)):
+                        ctx.handle('finish', {'outcome': 'continue', 'summary': 'no retry'})
+                    with self.assertRaises(Denied):
+                        driver_for(ctx.config, ctx.role.profile, {}).execute(ctx, 'no retry')
+
+    def test_checkpoint_seal_checks_stop_authority_deadline_and_budget_without_retry(self):
+        for engine in ('codex', 'claude'):
+            for guard in ('stop', 'paused', 'grant', 'engine-tools', 'wall', 'deadline', 'daily', 'requests', 'tools'):
+                with self.subTest(engine=engine, guard=guard):
+                    ctx, host = self.seal_context(engine)
+                    token = ctx.driver_checkpoint
+                    expected = Denied
+                    if guard == 'stop':
+                        ctx.stop.set()
+                        expected = Cancelled
+                    elif guard == 'paused':
+                        self.project.set_control(paused=True)
+                        expected = Cancelled
+                    elif guard == 'grant':
+                        ctx.role = dataclasses.replace(ctx.role, capabilities=())
+                    elif guard == 'engine-tools':
+                        ctx.role = dataclasses.replace(ctx.role, engine_tools=('x',))
+                    elif guard == 'wall':
+                        ctx.deadline = time.monotonic()-1
+                        expected = RunDeadlineExceeded
+                    elif guard == 'deadline':
+                        ctx.wrap_up_at = time.monotonic()-1
+                        expected = DeadlineWrapUp
+                    elif guard == 'requests':
+                        ctx.config = dataclasses.replace(ctx.config, limits=dataclasses.replace(
+                            ctx.config.limits, requests_per_run=1, wrap_up_requests=0))
+                        expected = LimitExceeded
+                    elif guard == 'tools':
+                        ctx.config = dataclasses.replace(ctx.config, limits=dataclasses.replace(
+                            ctx.config.limits, tools_per_run=0, wrap_up_tools=0))
+                        expected = LimitExceeded
+                    patcher = (unittest.mock.patch('mizu.drivers.Budget.take', side_effect=InfraExceeded('daily cap'))
+                               if guard == 'daily' else nullcontext())
+                    if guard == 'daily':
+                        expected = InfraExceeded
+                    try:
+                        with patcher, self.assertRaises(expected):
+                            host._seal_driver_checkpoint(ctx, token)
+                        self.assertIsNone(ctx.finished)
+                        self.assertEqual(ctx.request_count, 2 if guard == 'tools' else 1)
+                    finally:
+                        self.project.set_control(paused=False)
+
+    def test_checkpoint_is_writer_only_and_ephemeral_runs_cannot_claim(self):
+        for engine in ('codex', 'claude'):
+            reader, host = self.seal_context(engine, 'missing-finish', role='consult')
+            self.assertIsNone(reader.driver_checkpoint)
+            with self.assertRaises(Denied):
+                host._seal_driver_checkpoint(reader, reader.driver_checkpoint)
+            writer, _ = self.execute(engine, 'missing-finish', context=self.context('worker'))
+            token = writer.driver_checkpoint
+            writer.ephemeral = True
+            with self.assertRaises(Denied):
+                writer.claim_driver_checkpoint(token)
+            self.assertFalse(writer.checkpoint_seal_only)
+
+    def test_checkpoint_seal_unsupported_engines_never_launch(self):
+        for engine in ('pi', 'pi-durable'):
+            ctx = self.context('consult')
+            profile = ctx.role.profile
+            ctx.config = dataclasses.replace(ctx.config, profiles={**ctx.config.profiles, profile:
+                {**ctx.config.profiles[profile], 'engine': engine}})
+            token = DriverCheckpoint(engine, 'model_request', 0, 1)
+            with unittest.mock.patch('mizu.runtime.driver_for') as launch:
+                with self.assertRaises(Denied):
+                    Engine(ctx.config)._seal_driver_checkpoint(ctx, token)
+            launch.assert_not_called()
+            self.assertEqual(ctx.request_count, 0)
+            self.assertFalse(ctx.checkpoint_seal_only)
+
+    def test_checkpoint_seal_preserves_existing_wrap_up_and_writable_finish_checks(self):
+        for engine in ('codex', 'claude'):
+            ctx, host = self.seal_context(engine)
+            ctx.config = dataclasses.replace(ctx.config, limits=dataclasses.replace(
+                ctx.config.limits, requests_per_run=1, wrap_up_requests=1, tools_per_run=0, wrap_up_tools=1))
+            host._seal_driver_checkpoint(ctx, ctx.driver_checkpoint)
+            self.assertEqual(ctx.wrap_up_requests, 1)
+            self.assertEqual(ctx.wrap_up_tools, 1)
+            self.assertEqual(ctx.finished['outcome'], 'bounded')
+            self.assertEqual(ctx.finished['bound'], 'requests')
+            ctx, host = self.seal_context(engine, 'seal-done', role='worker')
+            with self.assertRaisesRegex(Denied, 'acceptance commands'):
+                host._seal_driver_checkpoint(ctx, ctx.driver_checkpoint)
+            self.assertIsNone(ctx.finished)
+            self.assertEqual(ctx.request_count, 2)
+            self.assertFalse((ctx.run_dir/'finish-intent.json').exists())
+
+    def test_checkpoint_seal_stop_and_authority_win_at_inflight_boundaries(self):
+        for engine in ('codex', 'claude'):
+            for phase in ('startup', 'terminal'):
+                for guard in ('stop', 'authority', 'wall'):
+                    with self.subTest(engine=engine, phase=phase, guard=guard):
+                        ctx, host = self.seal_context(engine)
+                        original = Channel.receive
+                        changed = False
+                        def receive(channel, *args, **kwargs):
+                            nonlocal changed
+                            event = original(channel, *args, **kwargs)
+                            terminal = event.get('type') == 'result' or event.get('method') == 'turn/completed'
+                            if not changed and (phase == 'startup' or terminal):
+                                changed = True
+                                if guard == 'stop':
+                                    ctx.stop.set()
+                                elif guard == 'authority':
+                                    self.project.set_control(armed=False)
+                                else:
+                                    ctx.deadline = time.monotonic()-1
+                            return event
+                        try:
+                            with unittest.mock.patch.object(Channel, 'receive', receive):
+                                with self.assertRaises(RunDeadlineExceeded if guard == 'wall' else Cancelled):
+                                    host._seal_driver_checkpoint(ctx, ctx.driver_checkpoint)
+                            self.assertTrue(changed)
+                            self.assertEqual(ctx.request_count, 1 if phase == 'startup' else 2)
+                            self.assertEqual(ctx.finished is not None, phase == 'terminal')
+                            self.assertTrue(ctx.operations_stopped.is_set())
+                        finally:
+                            self.project.set_control(armed=True)
+
+    def test_checkpoint_launch_is_bound_to_its_engine_before_launch(self):
+        for engine, unit in (('codex', 'turn'), ('claude', 'query')):
+            ctx, _ = self.execute(engine, 'missing-finish', context=self.context('worker'))
+            token = ctx.driver_checkpoint
+            ctx.claim_driver_checkpoint(token)
+            ctx._checkpoint_launch_pending = True
+            with self.assertRaises(Denied):
+                PiDriver(ctx.config).execute(ctx, 'wrong adapter')
+            self.assertTrue(ctx._checkpoint_launch_pending)
+            wrong_engine, wrong_unit = (('claude', 'query') if engine == 'codex' else ('codex', 'turn'))
+            with self.assertRaises(Denied):
+                ctx.begin_driver(wrong_engine, wrong_unit)
+            self.assertTrue(ctx._checkpoint_launch_pending)
+            ctx.begin_driver(engine, unit)
+            self.assertFalse(ctx._checkpoint_launch_pending)
+            self.assertTrue(ctx._checkpoint_driver_started)
+
+    def test_checkpoint_seal_barriers_fence_launch_admission_and_post_finish(self):
+        for engine in ('codex', 'claude'):
+            for phase in ('startup', 'provider', 'sealed', 'teardown'):
+                with self.subTest(engine=engine, phase=phase):
+                    ctx, host = self.seal_context(engine)
+                    entered, release = threading.Event(), threading.Event()
+                    errors = []
+                    original_receive, original_close = Channel.receive, Channel.close
+                    def barrier():
+                        entered.set()
+                        if not release.wait(60):
+                            raise AssertionError('seal phase barrier timed out')
+                    def receive(channel, *args, **kwargs):
+                        if phase == 'startup' and not entered.is_set():
+                            barrier()
+                        event = original_receive(channel, *args, **kwargs)
+                        if phase == 'provider' and (event.get('type') == 'result' or event.get('method') == 'turn/completed'):
+                            barrier()
+                        return event
+                    def close(channel):
+                        if phase == 'teardown':
+                            barrier()
+                        return original_close(channel)
+                    original_dispatch = ctx.dispatch
+                    def dispatch(op, args):
+                        result = original_dispatch(op, args)
+                        if phase == 'sealed' and op == 'finish':
+                            barrier()
+                        return result
+                    ctx.dispatch = dispatch
+                    def run():
+                        try:
+                            host._seal_driver_checkpoint(ctx, ctx.driver_checkpoint)
+                        except Exception as exc:
+                            errors.append(exc)
+                    with unittest.mock.patch.object(Channel, 'receive', receive), unittest.mock.patch.object(Channel, 'close', close):
+                        thread = threading.Thread(target=run)
+                        thread.start()
+                        try:
+                            self.assertTrue(entered.wait(60))
+                            self.assertTrue(ctx.checkpoint_seal_only)
+                            self.assertFalse(ctx._checkpoint_launch_pending)
+                            self.assertIsNone(ctx.driver_checkpoint)
+                            # The sealed barrier holds Context's operation mutex:
+                            # no other host dispatch can pass it until it settles.
+                            if phase != 'sealed':
+                                with self.assertRaises(Denied):
+                                    ctx.begin_driver('claude', 'query')
+                                with self.assertRaises(ProtocolError):
+                                    admit_invocation(ctx, unit='turn' if engine == 'codex' else 'query')
+                                with self.assertRaises(Denied):
+                                    ctx.handle('files', {})
+                            if phase in ('provider', 'sealed', 'teardown'):
+                                self.assertIsNotNone(ctx.finished)
+                        finally:
+                            release.set()
+                            thread.join(60)
+                        self.assertFalse(thread.is_alive())
+                        self.assertEqual(errors, [])
+                    self.assertTrue(ctx._checkpoint_settled)
+
+    def test_checkpoint_fails_closed_for_stale_active_and_unproven_paths(self):
+        ctx, _ = self.execute('claude', 'missing-finish', context=self.context('worker'))
+        checkpoint = ctx.driver_checkpoint
+        for mutate, restore in (
+                (lambda: ctx.request_deadlines.update({(0, 1): time.monotonic()+60}), ctx.request_deadlines.clear),
+                (ctx.operation_active.set, ctx.operation_active.clear),
+                (ctx.joins_idle.clear, ctx.joins_idle.set),
+                (ctx.operations_stopped.clear, ctx.operations_stopped.set),
+                (lambda: setattr(ctx, 'execution_attempt', 1), lambda: setattr(ctx, 'execution_attempt', 0)),
+                (lambda: setattr(ctx, 'request_count', 2), lambda: setattr(ctx, 'request_count', 1)),
+                (lambda: setattr(ctx, 'request_failure_pending', True), lambda: setattr(ctx, 'request_failure_pending', False)),
+                (lambda: setattr(ctx, 'admission_error', 'request_ceiling'), lambda: setattr(ctx, 'admission_error', None)),
+                (lambda: setattr(ctx, 'admission_exception', LimitExceeded('stale admission')), lambda: setattr(ctx, 'admission_exception', None)),
+                (lambda: setattr(ctx, 'bound_hit', 'requests'), lambda: setattr(ctx, 'bound_hit', None))):
+            mutate()
+            try:
+                with self.assertRaises(Denied):
+                    ctx.claim_driver_checkpoint(checkpoint)
+                self.assertFalse(ctx.checkpoint_seal_only)
+            finally:
+                restore()
+        ctx.stop.set()
+        with self.assertRaises(Cancelled):
+            ctx.claim_driver_checkpoint(checkpoint)
+        ctx.stop.clear()
+        ctx.begin_driver('claude', 'query')
+        with self.assertRaises(Denied):
+            ctx.claim_driver_checkpoint(checkpoint)
+        for engine, unit in (('pi', 'model_request'), ('pi-durable', 'model_request')):
+            ctx.complete_driver_checkpoint(engine, unit)
+            self.assertIsNone(ctx.driver_checkpoint)
+        ctx.role = dataclasses.replace(ctx.role, engine_tools=('mcp__synthetic__search',))
+        ctx.complete_driver_checkpoint('claude', 'query')
+        self.assertIsNone(ctx.driver_checkpoint)
+        # Real driver's success with an engine-tool grant also stays unsupported.
+        ctx.operations_stopped.clear()
+        self.execute('claude', 'missing-finish', context=ctx)
+        self.assertIsNone(ctx.driver_checkpoint)
+        for engine, scenario in (('codex', 'failed'), ('claude', 'api-error')):
+            failed = self.context('consult')
+            with self.assertRaises((ModelFailure, ProtocolError)):
+                self.execute(engine, scenario, context=failed)
+            self.assertIsNone(failed.driver_checkpoint)
+
+    def test_channel_quiescence_requires_exited_process_and_stopped_readers(self):
+        channel = object.__new__(Channel)
+        channel.stop = threading.Event()
+        channel.process = unittest.mock.Mock()
+        reader = unittest.mock.Mock()
+        channel.readers = [reader]
+        channel.process.poll.return_value = None
+        reader.is_alive.return_value = True
+        self.assertFalse(channel.quiescent)
+        channel.stop.set()
+        self.assertFalse(channel.quiescent)
+        channel.process.poll.return_value = 0
+        self.assertFalse(channel.quiescent)
+        reader.is_alive.return_value = False
+        self.assertTrue(channel.quiescent)
+
+    def test_checkpoint_requires_proven_transport_teardown(self):
+        for engine in ('codex', 'claude'):
+            with unittest.mock.patch.object(Channel, 'quiescent', False):
+                ctx, _ = self.execute(engine, 'missing-finish', context=self.context('worker'))
+            self.assertIsNone(ctx.driver_checkpoint)
+
+    def test_checkpoint_waits_for_provider_tool_join_and_teardown(self):
+        # Actual Python drivers and authenticated Bridge, synthetic protocol
+        # peers (not live providers). Events, not sleeps, control completion.
+        for engine in ('codex', 'claude'):
+            for phase in ('provider', 'tool', 'join', 'teardown'):
+                with self.subTest(engine=engine, phase=phase):
+                    ctx = self.context('worker')
+                    ctx.role = dataclasses.replace(ctx.role, capabilities=tuple(dict.fromkeys((*ctx.role.capabilities, 'consult'))))
+                    entered, release = threading.Event(), threading.Event()
+                    errors = []
+                    def barrier():
+                        entered.set()
+                        if not release.wait(60):
+                            raise AssertionError('checkpoint test release timed out')
+                    def child(_ctx, _args):
+                        barrier()
+                        return {'summary': 'settled child'}
+                    ctx.consult = child
+                    original_dispatch = ctx.dispatch
+                    def dispatch(operation, args):
+                        if phase == 'tool' and operation == 'files':
+                            barrier()
+                        return original_dispatch(operation, args)
+                    ctx.dispatch = dispatch
+                    original_receive = Channel.receive
+                    def receive(channel, *args, **kwargs):
+                        event = original_receive(channel, *args, **kwargs)
+                        if phase == 'provider' and (event.get('type') == 'result' or event.get('method') == 'turn/completed'):
+                            barrier()
+                        return event
+                    original_exit = Bridge.__exit__
+                    def bridge_exit(bridge, *args):
+                        if phase == 'teardown':
+                            barrier()
+                        return original_exit(bridge, *args)
+                    def run():
+                        try:
+                            self.execute(engine, 'checkpoint-'+phase if phase in ('tool', 'join') else 'missing-finish', context=ctx)
+                        except BaseException as exc:
+                            errors.append(exc)
+                    with unittest.mock.patch.object(Channel, 'receive', receive), \
+                         unittest.mock.patch.object(Bridge, '__exit__', bridge_exit):
+                        thread = threading.Thread(target=run)
+                        thread.start()
+                        try:
+                            self.assertTrue(entered.wait(60), 'checkpoint boundary not reached')
+                            self.assertIsNone(ctx.driver_checkpoint)
+                            self.assertFalse(ctx.checkpoint_seal_only)
+                            if phase in ('provider', 'tool', 'join'):
+                                self.assertTrue(ctx.request_deadlines)
+                            if phase in ('tool', 'join'):
+                                self.assertTrue(ctx.operation_active.is_set())
+                            if phase == 'join':
+                                self.assertFalse(ctx.joins_idle.is_set())
+                        finally:
+                            release.set()
+                            thread.join(60)
+                    self.assertFalse(thread.is_alive())
+                    self.assertEqual(errors, [])
+                    self.assertIsNotNone(ctx.driver_checkpoint)
+                    self.assertEqual(ctx.request_deadlines, {})
+                    self.assertFalse(ctx.operation_active.is_set())
+                    self.assertTrue(ctx.joins_idle.is_set())
+                    ctx.claim_driver_checkpoint(ctx.driver_checkpoint)
 
     def test_host_relative_bound_is_only_for_initial_engine_startup(self):
         original_receive = Channel.receive

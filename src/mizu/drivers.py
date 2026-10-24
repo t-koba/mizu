@@ -6,6 +6,8 @@ one work unit. None of these counts represents HTTP requests or money.
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
+from dataclasses import dataclass
 
 from .budget import Budget
 from .config import role_requests_per_run
@@ -25,6 +27,15 @@ EVENT_STREAM_BYTES = 4 * 1024 * 1024
 EVENT_RECORD_BYTES = 1024 * 1024
 #: Failure-evidence tail attached to driver errors.
 ERROR_TAIL_CHARS = 4000
+
+
+@dataclass(frozen=True)
+class DriverCheckpoint:
+    """Host-local completion token, never model-supplied or durable authority."""
+    engine: str
+    unit: str
+    execution_attempt: int
+    requests: int
 
 
 def tool_names(capabilities: tuple[str, ...]) -> list[str]:
@@ -71,9 +82,24 @@ def admit_invocation(context, *, unit: str) -> dict:
     double-charging (see Budget.take). Enforces the role-effective
     `requests_per_run` (per-role override or project default).
     """
+    # The exceptional host-only phase serializes its one admission with
+    # begin_driver/handle. Ordinary query/turn admission is unchanged.
+    with context.mutex if context.checkpoint_seal_only else nullcontext():
+        return _admit_invocation(context, unit=unit)
+
+
+def _admit_invocation(context, *, unit: str) -> dict:
     if context.finished is not None:
         raise ProtocolError("No inference after the work unit is sealed")
     context.check_deadlines()
+    if context.checkpoint_seal_only:
+        if (not context._checkpoint_driver_started or not context.hello.is_set()
+                or context._checkpoint_invocation_attempted
+                or unit != context._checkpoint_unit or context.role.engine_tools):
+            raise ProtocolError("No inference in the checkpoint seal phase")
+        # Even a failed budget admission consumes this phase; never retry it.
+        context._checkpoint_invocation_attempted = True
+    context.driver_checkpoint = None
     if getattr(context, "invocation_admitted_attempt", None) == context.execution_attempt:
         return {"admitted": True}
     if getattr(context, 'recovery_probe', False):

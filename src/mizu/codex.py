@@ -61,6 +61,7 @@ class CodexDriver:
         self.config = config
 
     def execute(self, context, prompt, *, profile=None):
+        context.begin_driver('codex', 'turn')
         profile = profile or context.role.profile
         settings = effective(self.config, context.role, profile)
         if context.role.engine_tools:
@@ -85,7 +86,7 @@ class CodexDriver:
         link = home/'auth.json'
         if source.is_file() and not link.exists():
             os.symlink(source, link)
-        with Bridge(context.handle, tool_definitions(context.role.capabilities), timeout=self.config.limits.model_request_seconds,
+        with Bridge(context.handle, tool_definitions(context.driver_capabilities), timeout=self.config.limits.model_request_seconds,
                     on_close=context.cancel_operations) as bridge:
             options = dict(settings['options'])
             turn_options = options.pop('turn', {})
@@ -116,7 +117,7 @@ class CodexDriver:
                     raise ConfigError('MCP enabled_tools exceeds role grants')
                 server['enabled_tools'] = allowed
             servers['mizu'] = {**mizu_server(bridge.config_file), 'required': True,
-                               'enabled_tools': ['mizu_'+name for name in context.role.capabilities],
+                               'enabled_tools': ['mizu_'+name for name in context.driver_capabilities],
                                'default_tools_approval_mode': 'approve'}
             options['mcp_servers'] = servers
             options.setdefault('approval_policy', 'on-request')
@@ -216,7 +217,7 @@ class CodexDriver:
                 statuses = request('mcpServerStatus/list', {'threadId': identifier, 'serverName': 'mizu', 'detail': 'toolsAndAuthOnly'})
                 mizu = next((item for item in statuses.get('data', []) if item.get('name') == 'mizu'), None)
                 tools = mizu.get('tools', {}) if mizu else {}
-                if not mizu or not all('mizu_'+cap in tools for cap in context.role.capabilities):
+                if not mizu or not all('mizu_'+cap in tools for cap in context.driver_capabilities):
                     raise ProtocolError('Required mizu MCP tools are not connected')
                 context.handle('_hello', {})
                 # Resume notifications establish the pre-turn baseline, never count restored totals.
@@ -280,6 +281,8 @@ class CodexDriver:
                 finally:
                     with contextlib.suppress(OSError):
                         link.unlink()
+        if channel.quiescent:
+            context.complete_driver_checkpoint('codex', 'turn')
         if getattr(context, 'recovery_probe', False):
             context.model_evidence['settled'] = True
         return {**context.model_evidence, 'conversation_id': identifier, 'seconds': round(time.monotonic()-started, 3)}

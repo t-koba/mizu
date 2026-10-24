@@ -26,5 +26,6 @@
         "--listen"
       ]
     }
-  ]
+  ],
+  "cooperative_checkpoint": "host-only after successful turn/completed and proven channel/bridge teardown, for managed writer runs (not ephemeral execution) with no engine_tools grants; one host-armed bounded finish-only model unit may consume the checkpoint; no automatic yield or ordinary inference"
 }

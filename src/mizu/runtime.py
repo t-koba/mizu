@@ -31,7 +31,7 @@ from .config import (DAEMON_POLICIES, MAX_CI_WAKE_EXTRA_BRANCHES, Config, Role, 
                      role_work_item_events_limit, role_wrap_up_requests,
                      role_wrap_up_tools)
 from .doctor import container_runtime
-from .drivers import driver_for
+from .drivers import DriverCheckpoint, driver_for
 from .errors import RequestYieldExceeded
 from .errors import (AuthorityGrantMismatch, Busy, Cancelled, CaptureLimitExceeded,
                       ConfigError, Denied, InfraExceeded, LimitExceeded, RunDeadlineExceeded,
@@ -452,6 +452,16 @@ class Context:
         # Provider adapters restart their local sequence for each execute;
         # scope it to the reused Context's engine invocation.
         self.execution_attempt = 0
+        self.driver_checkpoint: DriverCheckpoint | None = None
+        self.checkpoint_seal_only = False
+        self._checkpoint_launch_pending = False
+        self._checkpoint_driver_started = False
+        self._checkpoint_invocation_attempted = False
+        self._checkpoint_finish_attempted = False
+        self._checkpoint_seal_error = None
+        self._checkpoint_settled = False
+        self._checkpoint_unit = None
+        self._checkpoint_engine = None
         self.request_sequences: set[tuple[int, int]] = set()
         self.runtime_usage: dict[tuple[int, int], dict] = {}
         self.runtime_models: dict[tuple[int, int], dict] = {}
@@ -519,6 +529,86 @@ class Context:
         self.ephemeral = False
         self.sandbox = Sandbox(config, project.root, role.name, run_dir, cancel=self.tools_cancelled)
         self.web = Web(config.web, config.data / "web-cache", run_dir / "sources", role.name)
+
+    @property
+    def driver_capabilities(self):
+        """Expose no ordinary operation in a claimed checkpoint seal phase."""
+        return tuple(c for c in self.role.capabilities if not self.checkpoint_seal_only or c == "finish")
+
+    def begin_driver(self, engine: str, unit: str):
+        """Invalidate a prior boundary before launch; a claimed one is final."""
+        with self.mutex:
+            if self.checkpoint_seal_only:
+                self.check_deadlines(wrap_up=True)
+                authority = self.turn_authority_role or self.role
+                if (not self._checkpoint_launch_pending or self.role.engine_tools or authority.engine_tools
+                        or (engine, unit) != (self._checkpoint_engine, self._checkpoint_unit)):
+                    raise Denied("No inference in the checkpoint seal phase")
+                self._checkpoint_launch_pending = False
+                self._checkpoint_driver_started = True
+            self.driver_checkpoint = None
+
+    def complete_driver_checkpoint(self, engine: str, unit: str):
+        """Called only after successful terminal completion AND bridge teardown.
+
+        Query/turn completion is not a Pi model_request boundary. Engine-tool
+        admission has no completion acknowledgment, so those paths fail closed.
+        This records a candidate only; no scheduler or automatic latch exists.
+        """
+        with self.mutex:
+            self.driver_checkpoint = None
+            authority = self.turn_authority_role or self.role
+            if self.checkpoint_seal_only:
+                self._checkpoint_settled = (
+                    self._checkpoint_driver_started and (engine, unit) == (self._checkpoint_engine, self._checkpoint_unit)
+                    and (engine, unit) in (("claude", "query"), ("codex", "turn"))
+                    and self.role.workspace == "write" and authority.workspace == "write"
+                    and not self.delegated_child and not self.ephemeral
+                    and not self.role.engine_tools and not authority.engine_tools and self.operations_stopped.is_set()
+                    and not self.request_deadlines and not self.request_failure_pending
+                    and self.admission_error is None and self.admission_exception is None
+                    and not self.operation_active.is_set() and self.joins_idle.is_set())
+                return
+            if ((engine, unit) not in (("claude", "query"), ("codex", "turn"))
+                    or self.role.workspace != "write" or authority.workspace != "write"
+                    or self.delegated_child or self.ephemeral
+                    or self.role.engine_tools or authority.engine_tools or self.finished is not None
+                    or self.checkpoint_seal_only or not self.operations_stopped.is_set()
+                    or self.request_deadlines or self.request_failure_pending
+                    or self.admission_error is not None or self.admission_exception is not None
+                    or self.operation_active.is_set() or not self.joins_idle.is_set() or not self.request_count):
+                return
+            self.driver_checkpoint = DriverCheckpoint(engine, unit, self.execution_attempt, self.request_count)
+
+    def claim_driver_checkpoint(self, checkpoint: DriverCheckpoint):
+        """Host-only, one-shot transition to finish-only, not a finish or yield.
+
+        The caller must already own any scheduling decision. No ordinary tools
+        or new inference may start after this latch, except the one host-armed
+        finish-only driver unit with normal grant, budget and seal checks.
+        Tokens cannot survive another dispatch, operation, attempt or restart.
+        """
+        with self.mutex:
+            self.check_deadlines(wrap_up=True)  # stop/authority and bounds win
+            if self.bound_hit is not None:
+                raise Denied(self._bound_message())
+            authority = self.turn_authority_role or self.role
+            if (checkpoint is None or checkpoint is not self.driver_checkpoint
+                    or (checkpoint.engine, checkpoint.unit) not in (("claude", "query"), ("codex", "turn"))
+                    or checkpoint.execution_attempt != self.execution_attempt
+                    or checkpoint.requests != self.request_count
+                    or self.role.workspace != "write" or authority.workspace != "write"
+                    or self.delegated_child or self.ephemeral
+                    or self.role.engine_tools or authority.engine_tools or self.finished is not None
+                    or self.checkpoint_seal_only or not self.operations_stopped.is_set()
+                    or self.request_deadlines or self.request_failure_pending
+                    or self.admission_error is not None or self.admission_exception is not None
+                    or self.operation_active.is_set() or not self.joins_idle.is_set()):
+                raise Denied("No quiescent driver checkpoint")
+            self.checkpoint_seal_only = True
+            self._checkpoint_engine = checkpoint.engine
+            self._checkpoint_unit = checkpoint.unit
+            self.driver_checkpoint = None
 
     def wait_for_joins(self):
         # Explicit stop is shared with children; still drain their cleanup
@@ -837,10 +927,24 @@ class Context:
                 f"bound reached; wrap-up only ({tools}) with {how} left")
 
     def handle(self, operation: str, arguments: dict) -> dict:
+        if not self.checkpoint_seal_only or operation != "finish":
+            return self._handle(operation, arguments)
+        with self.mutex:
+            try:
+                return self._handle(operation, arguments)
+            except Exception as exc:
+                # Preserve the first failed seal even if the adapter masks the
+                # tool error. Neither another finish nor a normal return repairs it.
+                if self._checkpoint_finish_attempted and self.finished is None and self._checkpoint_seal_error is None:
+                    self._checkpoint_seal_error = exc
+                raise
+
+    def _handle(self, operation: str, arguments: dict) -> dict:
         if not isinstance(operation, str) or not isinstance(arguments, dict):
             raise Denied("Invalid operation")
         with self.mutex:
-            if self.host_cancelled() or self.operations_stopped.is_set():
+            checkpoint_protocol = self.checkpoint_seal_only and operation in ("_model_usage", "_request_done")
+            if self.host_cancelled() or (self.operations_stopped.is_set() and not checkpoint_protocol):
                 raise Cancelled("Run is stopped or paused")
             post_seal_done = self.finished is not None and operation == "_request_done"
             if self.wall_expired() and not post_seal_done:
@@ -855,6 +959,18 @@ class Context:
             if self.finished is None:
                 self.check_deadlines()
             self.enter_deadline_wrap_up()
+            if self.checkpoint_seal_only:
+                handshake = (operation == "_hello" and self._checkpoint_driver_started
+                             and not self._checkpoint_invocation_attempted and not self.hello.is_set())
+                if operation != "finish" and not checkpoint_protocol and not handshake:
+                    raise Denied("Only finish is allowed in the checkpoint seal phase")
+                if operation == "finish":
+                    if (not self._checkpoint_driver_started
+                            or self.invocation_admitted_attempt != self.execution_attempt
+                            or self._checkpoint_finish_attempted):
+                        raise Denied("Checkpoint finish requires its one admitted model unit")
+                    self._checkpoint_finish_attempted = True
+            self.driver_checkpoint = None
             if operation == "_request_done":
                 sequence = arguments.get("sequence")
                 failed = arguments.get("failed", False)
@@ -3650,6 +3766,57 @@ class Engine:
             if isinstance(context.admission_exception, MizuError):
                 raise context.admission_exception from exc
             raise
+
+    def _seal_driver_checkpoint(self, context: Context, checkpoint: DriverCheckpoint, *, profile=None) -> dict:
+        """Consume a host-verified boundary for exactly one finish-only query/turn.
+
+        No normal caller/trigger exists. Never use _execute here: its missing-
+        finish and deadline follow-ups would authorize more than one model unit.
+        The caller retains its workspace/slot ownership and handles publication.
+        A seal's outcome is untouched; any failure propagates without retry.
+        """
+        with context.mutex:
+            context.check_deadlines(wrap_up=True)
+            profile = profile or context.role.profile
+            authority = context.turn_authority_role or context.role
+            if (checkpoint is None or context.config.engine(profile) != checkpoint.engine
+                    or context.role.workspace != "write" or authority.workspace != "write"
+                    or context.delegated_child or context.ephemeral
+                    or context.role.engine_tools or authority.engine_tools
+                    or "finish" not in context.role.capabilities):
+                raise Denied("Checkpoint seal requires a supported driver and finish grant")
+            context.claim_driver_checkpoint(checkpoint)
+            previous_continuation = context.turn_continuation
+            context.turn_continuation = True
+            context.execution_attempt += 1
+            context.hello.clear()
+            context.operations_stopped.clear()
+            context._checkpoint_launch_pending = True
+        try:
+            driver = driver_for(context.config, profile, self._drivers)
+            result = self._dispatch(context, driver,
+                "This is a finish-only seal phase for the completed work unit. "
+                "Call mizu_finish exactly once with an accurate outcome, summary and retained state. "
+                "Do no further work; no operation may follow the seal.", profile=profile)
+            context.check_deadlines(wrap_up=True)
+            if context._checkpoint_seal_error is not None:
+                raise context._checkpoint_seal_error
+            if context.finished is None:
+                raise ProtocolError("Checkpoint seal unit ended without finish")
+            if not context._checkpoint_settled:
+                raise ProtocolError("Checkpoint seal unit did not prove quiescent teardown")
+            return result
+        except Exception:
+            context.check_deadlines(wrap_up=True)
+            if context._checkpoint_seal_error is not None:
+                raise context._checkpoint_seal_error
+            raise
+        finally:
+            with context.mutex:
+                context._checkpoint_launch_pending = False
+                context._checkpoint_driver_started = False
+                context.operations_stopped.set()
+                context.turn_continuation = previous_continuation
 
     def _execute(self, context: Context, driver, prompt: str, **kwargs) -> dict:
         """Preserve a durable host seal and recover only normal unsealed returns.

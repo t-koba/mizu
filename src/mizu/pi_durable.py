@@ -169,6 +169,7 @@ class PiDurableDriver:
                 str(run_dir / "pi-durable-effective.json")]
 
     def execute(self, context, prompt: str, *, profile: str | None = None) -> dict:
+        context.begin_driver('pi-durable', 'model_request')
         profile = profile or context.role.profile
         authority = getattr(context, "turn_authority_role", None) or context.role
         settings = effective(self.config, authority, profile)

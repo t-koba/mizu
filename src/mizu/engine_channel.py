@@ -153,6 +153,16 @@ class Channel:
                 raise ProtocolError('Engine exited before terminal event')
             return item
 
+    @property
+    def quiescent(self):
+        """Teardown proof, not a provider-completion or request-unit claim.
+
+        Termination and reader joins are bounded; close returning alone does
+        not prove they succeeded. A driver checkpoint must fail closed here.
+        """
+        return (self.stop.is_set() and self.process.poll() is not None
+                and all(not thread.is_alive() for thread in self.readers))
+
     def close(self):
         self.context.wait_for_joins()
         self.stop.set()

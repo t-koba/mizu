@@ -10,5 +10,6 @@
   ],
   "completion": "terminal_reason completed + subtype success + no error + mizu seal",
   "request_unit": "query",
-  "dependency_evidence": "requirements.lock"
+  "dependency_evidence": "requirements.lock",
+  "cooperative_checkpoint": "host-only after successful query result and proven channel/bridge teardown, for managed writer runs (not ephemeral execution) with no engine_tools grants; one host-armed bounded finish-only model unit may consume the checkpoint; no automatic yield or ordinary inference"
 }

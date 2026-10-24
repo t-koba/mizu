@@ -108,6 +108,66 @@ standard local filesystem semantics. Use a local filesystem, not NFS/object-stor
 with weaker locking/rename guarantees. Disk/host failure recovery is not a
 substitute for independent backups. Snapshots have hashes, not digital signatures.
 
+### Inert driver quiescence checkpoints
+
+`Context.driver_checkpoint` is an optional, host-local `DriverCheckpoint`
+(engine, declared unit, execution attempt, cumulative admitted-unit count).
+It is not model input, a public tool, a persisted scheduling decision, or a
+finish seal. Only managed writer runs where `Context.ephemeral` is false,
+returning from successful Claude **query** and Codex **turn** units with no
+`engine_tools` grants, can issue one. These units are not physical provider
+request counts and are not equivalent across engines.
+
+The driver must first observe its existing successful terminal event, close
+its channel (including joined-child cleanup), and exit its authenticated
+Bridge (which stops admission and joins host-tool handler threads). Bounded
+channel teardown alone is insufficient: the process must be observed exited
+and all channel readers stopped. Context also verifies no request timer,
+host tool, or joined child remains active. Exceptions, incomplete teardown,
+already sealed units and unproven engine-tool paths issue no checkpoint.
+
+Pi and Pi-durable remain **unsupported** at their declared `model_request`
+unit. Current whole-agent/submission settlement cannot substitute for an
+individual request boundary. Their request-done and engine-tool admission
+messages do not establish an idle tool batch or prevent the agent from
+starting another request; engine-tool completion is not acknowledged. This
+needs a separate proven adapter/upstream boundary, not a coarser counter.
+
+A host caller may consume a token with `Engine._seal_driver_checkpoint` at
+this driver-return boundary, before normal continuation. It rechecks
+stop/authority/deadline, existing bounds, token identity, attempt/count and
+idle state under the Context mutex. A successful one-shot claim latches
+**finish-only**. The helper arms exactly one execution of the configured
+Claude/Codex driver and one query/turn admission, not the normal `_execute`
+missing-finish/deadline retry loop. The admission consumes existing daily, per-run and wrap-up allowances. It
+does not extend an existing request, idle or wall timer; the one seal unit
+receives only its ordinary per-unit request timer.
+All further driver launches and admissions are refused, including after failure.
+
+The real authenticated Bridge advertises only `finish`; host dispatch also
+refuses ordinary operations, engine tools and request-admission messages.
+The one startup handshake is internal, as are bounded usage/completion
+bookkeeping (which cannot admit requests or tools). After finish only that
+bookkeeping remains. Role authority and session identity are unchanged, so
+existing finish validation, check waits/releases, writable verification and
+capture bounds still apply; a claim alone cannot bypass model admission with
+a direct finish call. The helper returns the driver evidence only after an
+existing durable finish and proven quiescent teardown. It neither chooses
+`continue` nor prepares/publishes a continuation. Existing spend-bound finish
+normalization remains unchanged. Stop/cancellation, failed or missing seals,
+and failed settlement propagate without retry; they never reopen ordinary work
+or authorize handoff. The latch is not undone. Tokens are host-local and
+one-shot; another dispatch, admission or accepted operation invalidates an
+unclaimed token, and restart loses it entirely. The caller retains ownership
+of its workspace/slot and responsibility for integrity/publication; this
+helper releases neither and publishes nothing.
+
+There is no caller that claims checkpoints in normal execution, no demand
+probe, quantum, automatic yield, or change to ordinary `continue`, FIFO,
+drain/deadline behavior, workspace locking or publication. A future producer
+still needs its own validated demand, continuation and complete-seal/handoff
+integration before it can enable yielding.
+
 ## Activity evidence
 
 Each runtime context records a schema-1 `activity` aggregate in durable run

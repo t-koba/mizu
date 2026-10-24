@@ -22,6 +22,49 @@ def stall():
 
 
 def finish(bridge, *, resumed=False):
+    if scenario.startswith('seal-'):
+        if len(bridge['tools']) != 1:
+            return  # Initial ordinary unit establishes the checkpoint/session.
+        assert resumed, 'Finish-only phase forked the saved conversation'
+        assert [tool['operation'] for tool in bridge['tools']] == ['finish']
+        for operation, args in (('files', {}), ('_budget', {'sequence': 1}),
+                                ('_engine_tool', {'name': 'x', 'invocation_id': 'x'}), ('_hello', {})):
+            try:
+                forward(bridge, operation, args)
+            except Exception:
+                pass
+            else:
+                raise AssertionError('Finish-only phase admitted '+operation)
+        if scenario in ('seal-missing', 'seal-provider-error'):
+            return
+        if scenario == 'seal-failed':
+            for _ in range(2):
+                try:
+                    forward(bridge, 'finish', {'outcome': 'wait', 'summary': 'cannot seal'})
+                except Exception:
+                    pass
+                else:
+                    raise AssertionError('Failed finish was retried successfully')
+            return
+        outcome = scenario.removeprefix('seal-')
+        forward(bridge, 'finish', {'outcome': outcome, 'summary': 'Synthetic checkpoint seal', 'state': 'Retain state'})
+        forward(bridge, '_model_usage', {'sequence': 1, 'usage': {'outputTokens': 5}})
+        for operation, args in (('finish', {'outcome': 'continue', 'summary': 'must not overwrite'}),
+                                ('files', {}), ('_budget', {'sequence': 2}), ('_hello', {}),
+                                ('_request_done', {'sequence': 99})):
+            try:
+                forward(bridge, operation, args)
+            except Exception:
+                pass
+            else:
+                raise AssertionError('Post-finish operation admitted '+operation)
+        return
+    if scenario == 'checkpoint-tool':
+        forward(bridge, 'files', {})
+        return
+    if scenario == 'checkpoint-join':
+        forward(bridge, 'consult', {'question': 'synthetic child'})
+        return
     if scenario in ('missing-finish', 'provider-error-before-finish'):
         return
     if scenario == 'finish-on-resume' and not resumed:
@@ -60,7 +103,7 @@ if engine == 'claude':
         sys.stdin.readline()
         raise SystemExit(0)
     finish(bridge, resumed=bool(cfg.get('resume')))
-    emit({'type': 'result', 'terminal_reason': 'api_error' if scenario == 'api-error' else 'completed',
+    emit({'type': 'result', 'terminal_reason': 'api_error' if scenario == 'api-error' or (scenario == 'seal-provider-error' and cfg.get('resume')) else 'completed',
           'subtype': 'success', 'is_error': False, 'session_id': cfg.get('resume') or 'session',
           'model_usage': {'actual-model': {'inputTokens': 10, 'outputTokens': 5}}})
     sys.stdin.readline()
@@ -116,7 +159,7 @@ else:
             emit({'method': 'thread/tokenUsage/updated', 'params': {'threadId': 'thread', 'turnId': turn,
                   'tokenUsage': {'total': {'inputTokens': 10, 'outputTokens': 5}}}})
             emit({'method': 'turn/completed', 'params': {'threadId': 'thread', 'turn': {'id': turn,
-                  'status': 'failed' if scenario in ('failed', 'provider-error', 'provider-error-before-finish') else 'interrupted' if scenario == 'interrupted' else 'completed',
+                  'status': 'failed' if (scenario in ('failed', 'provider-error', 'provider-error-before-finish') or (scenario == 'seal-provider-error' and resumed)) else 'interrupted' if scenario == 'interrupted' else 'completed',
                   **({'error': {'message': 'synthetic failure', 'code': 'synthetic-code', 'codexErrorInfo': {'synthetic': {'httpStatusCode': 503}}}} if scenario in ('provider-error', 'provider-error-before-finish') else {})}}})
             emit({'id': identifier, 'result': {'turn': {'id': turn}}})
         elif method == 'turn/interrupt':
