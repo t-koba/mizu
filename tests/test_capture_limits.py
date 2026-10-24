@@ -9,7 +9,7 @@ from unittest.mock import patch
 from support import Fixture, ScriptDriver
 from mizu import snapshot as snapshot_module
 from mizu.errors import CaptureLimitExceeded, Denied, LimitExceeded
-from mizu.fs import read_json
+from mizu.fs import read_json, write_json
 from mizu.project import Project
 from mizu.runtime import Engine, _record_health_failure, prompt_for
 
@@ -63,6 +63,22 @@ class CaptureLimitTests(Fixture):
         self.assertEqual(ctx._op_finish({"summary": "Removed the stray profile",
                                          "state": "clean", "outcome": "continue"}),
                          {"sealed": True})
+
+    def test_non_object_health_json_does_not_interrupt_terminal_failure_recording(self):
+        for malformed_health in ([], None):
+            with self.subTest(health=malformed_health):
+                write_json(self.project.root / "health" / "worker.json", malformed_health)
+                failure = Denied("terminal failure")
+                # Exercise the runtime's terminal-failure helper directly: a
+                # valid non-object JSON record must not escape as AttributeError.
+                _record_health_failure(self.project, "worker", "run-malformed",
+                                       failure, 3)
+                health = read_json(self.project.root / "health" / "worker.json")
+                self.assertEqual(health["consecutive_failures"], 1)
+                self.assertEqual(health["consecutive_missing_finish"], 0)
+                self.assertEqual(health["last_run"], "run-malformed")
+                self.assertEqual(health["error"], str(failure))
+                self.assertFalse(self.project.control()["paused"])
 
     def test_cause_reaches_health_the_pause_reason_and_the_next_unit(self):
         ctx = self.context()

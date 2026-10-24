@@ -34,6 +34,8 @@ def _record_health_failure(project, role_name, run_id, exc, maximum, cause=None,
     """
     with contextlib.suppress(OSError, ValueError, TypeError):
         health = read_json(project.root / "health" / f"{role_name}.json", {})
+        if not isinstance(health, dict):
+            health = {}
         failures = health.get("consecutive_failures", 0) + 1
         if isinstance(exc, MissingFinish):
             streak = missing_finish_streak(health) + 1
