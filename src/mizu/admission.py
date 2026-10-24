@@ -416,6 +416,36 @@ class _Queue:
                 pass
 
 
+def has_live_demand(config) -> bool:
+    """Whether a verified live FIFO ticket exists at this instant.
+
+    This is a fail-closed scheduling observation, not an admission or a
+    reservation: it never edits ticket order or acquires execution resources.
+    The queue lock pins the bounded ticket list while pending-lock probes
+    distinguish live owners from stale rows. If queue state, attribution, or
+    the observation lock is ambiguous, report no demand.
+    """
+    root = config.data / "slots"
+    capacity = max(config.limits.admission_queue_capacity, config.limits.parallel_runs)
+    try:
+        with lock(root / "queue.lock", blocking=False):
+            tickets = _read_state(root, capacity, _state_bytes(capacity))
+            for ticket in tickets:
+                try:
+                    with lock(root / f"pending-{ticket['owner']}.lock", blocking=False):
+                        continue
+                except Busy:
+                    # A live ticket must name one unambiguous project/role
+                    # resource set before it can trigger a scheduler handoff.
+                    if (len(set(ticket["resources"])) != len(ticket["resources"])
+                            or _wait_view(ticket) is None):
+                        return False
+                    return True
+    except (Busy, OSError, ValueError, TypeError):
+        return False
+    return False
+
+
 def waiting(config, project: str) -> list:
     """Every live admission ticket of one project, for the operator's view.
 

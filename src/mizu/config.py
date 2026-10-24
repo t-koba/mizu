@@ -327,6 +327,9 @@ class Limits:
     busy_retry_seconds: int = 300
     #: Explicit drain yields persistent, non-ephemeral units at safe request boundaries.
     drain_yield: bool = True
+    #: Completed Claude query/Codex turn units between safe-yield opportunities;
+    #: 0 keeps cooperative preemption unavailable. Units remain adapter-specific.
+    safe_point_yield_quantum: int = 0
     #: Bounded continuations after a normal engine return without a seal; full
     #: work grant only until the first tool call, then finish-only.
     missing_finish_followups: int = 1
@@ -915,6 +918,7 @@ def load(file: Path) -> Config:
                      "no_progress_recovery_after": (1, 100),
                      "no_progress_backoff_seconds": (0, 86400),
                      "missing_finish_followups": (0, 3),
+                     "safe_point_yield_quantum": (0, 1000),
                      "missing_finish_recovery_after": (1, 100),
                      "free_disk_mb": (0, 1073741824)}
     allowed_progress_signals = ALLOWED_PROGRESS_SIGNALS

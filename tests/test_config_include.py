@@ -103,6 +103,21 @@ class IncludeTests(Fixture):
                 with self.assertRaises(ConfigError):
                     load(self.file)
 
+    def test_safe_point_yield_quantum_defaults_disabled_and_is_bounded(self):
+        self.assertEqual(load(self.file).limits.safe_point_yield_quantum, 0)
+        base = self.file.read_text()
+        for value in (0, 1, 1000):
+            with self.subTest(value=value):
+                self.file.write_text(base.replace("safe_point_yield_quantum = 0",
+                                                  f"safe_point_yield_quantum = {value}", 1))
+                self.assertEqual(load(self.file).limits.safe_point_yield_quantum, value)
+        for value in ("-1", "1001", "true"):
+            with self.subTest(value=value):
+                self.file.write_text(base.replace("safe_point_yield_quantum = 0",
+                                                  f"safe_point_yield_quantum = {value}", 1))
+                with self.assertRaises(ConfigError):
+                    load(self.file)
+
     def test_delegate_wrap_up_share_defaults_and_bounds(self):
         config = load(self.file)
         self.assertEqual(config.limits.delegate_wrap_up_requests, 2)

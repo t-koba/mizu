@@ -761,9 +761,14 @@ incomplete. Snapshot audit treats pending source snapshots as live even after
 they leave current history; an invalid registry is an incomplete reference
 scan. No new snapshot/object reclamation or smoke expiry is introduced.
 
-**Remaining integration gate:** nothing creates scheduler yields yet. A future
-host-owned safe-point marker must prepare before a successful normal seal;
-failed/uncommitted seals still cannot release the writer or authorize a
-continuation. Prepared entries intentionally remain pinned and block a new
-intent for that role; this slice provides no lossy repair/cancel API. Enabling
-preemption, a quantum, drain changes and hard-deadline changes are out of scope.
+**Safe-point handoff:** cooperative preemption is integrated but remains
+default-disabled by `[limits].safe_point_yield_quantum = 0`. A nonzero quantum
+permits an opportunity only at a supported, quiescent driver checkpoint when a
+live FIFO waiter is observed; the observation does not admit or prioritize any
+request. The host obtains one finish-only seal and preserves its chosen outcome.
+Only a published `continue` seal has a prepared continuation intent, written
+before normal snapshot publication and committed by that publication's atomic
+pointer update. Failed seals or preparations never authorize a handoff; prepared
+but unpublished entries remain unrunnable and pinned, and this design provides
+no lossy repair/cancel API. Final and wait outcomes are not requeued. Ordinary
+`continue`, FIFO admission, drain and deadline behavior remain unchanged.

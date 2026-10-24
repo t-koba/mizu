@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import platform as _platform
-from .admission import admission, role_exclusion
+from .admission import admission, has_live_demand, role_exclusion
 from . import check_jobs
 from . import ci_waits, dispatch_evidence, work_item_events
 from .budget import Budget
@@ -453,6 +453,8 @@ class Context:
         # scope it to the reused Context's engine invocation.
         self.execution_attempt = 0
         self.driver_checkpoint: DriverCheckpoint | None = None
+        self.completed_driver_units = 0
+        self.safe_point_yield_requested = False
         self.checkpoint_seal_only = False
         self._checkpoint_launch_pending = False
         self._checkpoint_driver_started = False
@@ -553,7 +555,7 @@ class Context:
 
         Query/turn completion is not a Pi model_request boundary. Engine-tool
         admission has no completion acknowledgment, so those paths fail closed.
-        This records a candidate only; no scheduler or automatic latch exists.
+        This records a candidate; only the configured host scheduler may consume it.
         """
         with self.mutex:
             self.driver_checkpoint = None
@@ -579,6 +581,8 @@ class Context:
                     or self.operation_active.is_set() or not self.joins_idle.is_set() or not self.request_count):
                 return
             self.driver_checkpoint = DriverCheckpoint(engine, unit, self.execution_attempt, self.request_count)
+            if self.config.limits.safe_point_yield_quantum:
+                self.completed_driver_units += 1
 
     def claim_driver_checkpoint(self, checkpoint: DriverCheckpoint):
         """Host-only, one-shot transition to finish-only, not a finish or yield.
@@ -3770,8 +3774,9 @@ class Engine:
     def _seal_driver_checkpoint(self, context: Context, checkpoint: DriverCheckpoint, *, profile=None) -> dict:
         """Consume a host-verified boundary for exactly one finish-only query/turn.
 
-        No normal caller/trigger exists. Never use _execute here: its missing-
-        finish and deadline follow-ups would authorize more than one model unit.
+        The caller must own the scheduling decision. Never use _execute here:
+        its missing-finish and deadline follow-ups would authorize more than one
+        model unit.
         The caller retains its workspace/slot ownership and handles publication.
         A seal's outcome is untouched; any failure propagates without retry.
         """
@@ -3818,6 +3823,38 @@ class Engine:
                 context.operations_stopped.set()
                 context.turn_continuation = previous_continuation
 
+    def _maybe_safe_point_yield(self, context: Context, *, profile=None) -> dict | None:
+        """Seal once only at a configured unit quantum with live FIFO demand.
+
+        The observation grants no admission or priority: the next invocation
+        still uses ordinary FIFO admission. Invalid/contended queue evidence is
+        no demand. Drain, deadline, stop and authority paths keep their existing
+        transitions and never enter this optional path.
+        """
+        quantum = context.config.limits.safe_point_yield_quantum
+        if (quantum == 0 or context.finished is not None or context.bound_hit is not None
+                or context.wrap_up_attempted or context.safe_point_yield_requested
+                or context.driver_checkpoint is None
+                or context.completed_driver_units % quantum != 0
+                or context.host_cancelled() or context.wall_expired()):
+            return None
+        # Drain remains a separate opt-in transition even when drain_yield is
+        # disabled for this role/session. A safe-point yield must not mask it.
+        if context.project.control().get("draining"):
+            return None
+        profile = profile or context.role.profile
+        checkpoint = context.driver_checkpoint
+        try:
+            if context.config.engine(profile) != checkpoint.engine:
+                return None
+        except (ConfigError, KeyError, TypeError, ValueError):
+            return None
+        if "finish" not in context.role.capabilities or not has_live_demand(context.config):
+            return None
+        result = self._seal_driver_checkpoint(context, checkpoint, profile=profile)
+        context.safe_point_yield_requested = True
+        return result
+
     def _execute(self, context: Context, driver, prompt: str, **kwargs) -> dict:
         """Preserve a durable host seal and recover only normal unsealed returns.
 
@@ -3842,6 +3879,9 @@ class Engine:
                     context.enter_drain_wrap_up()
                     if context.bound_hit == "drain" and not context.wrap_up_attempted:
                         context.drain_refusal(context._bound_message())
+                yielded = self._maybe_safe_point_yield(context, profile=kwargs.get("profile"))
+                if yielded is not None:
+                    model_result = yielded
             except DeadlineWrapUp:
                 if context.finished is not None:
                     raise
@@ -3944,6 +3984,9 @@ class Engine:
                     context.transport_idle_deadline = time.monotonic() + context.config.limits.model_request_seconds
                     try:
                         model_result = self._dispatch(context, driver, followup_prompt, **kwargs)
+                        yielded = self._maybe_safe_point_yield(context, profile=kwargs.get("profile"))
+                        if yielded is not None:
+                            model_result = yielded
                     finally:
                         context.role = base_role
                         context.turn_authority_role = previous_authority
@@ -4786,6 +4829,9 @@ class Engine:
                         inbox_seen=context.inbox_seen,
                         wake_generation=context.wake_generation, progress=progress,
                         parent=context.snapshot["id"])
+                    if (context.safe_point_yield_requested and finished["outcome"] == "continue"):
+                        continuations.prepare(project.snapshots, role=role_name, source_run=run_id,
+                                              snapshot=snapshot["id"])
                 if decision:
                     from .selection import State
                     State(self.config).result(decision, run=run_id, attempt=selection_attempt)

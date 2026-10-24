@@ -108,7 +108,7 @@ standard local filesystem semantics. Use a local filesystem, not NFS/object-stor
 with weaker locking/rename guarantees. Disk/host failure recovery is not a
 substitute for independent backups. Snapshots have hashes, not digital signatures.
 
-### Inert driver quiescence checkpoints
+### Driver quiescence checkpoints and safe-point handoff
 
 `Context.driver_checkpoint` is an optional, host-local `DriverCheckpoint`
 (engine, declared unit, execution attempt, cumulative admitted-unit count).
@@ -162,11 +162,28 @@ unclaimed token, and restart loses it entirely. The caller retains ownership
 of its workspace/slot and responsibility for integrity/publication; this
 helper releases neither and publishes nothing.
 
-There is no caller that claims checkpoints in normal execution, no demand
-probe, quantum, automatic yield, or change to ordinary `continue`, FIFO,
-drain/deadline behavior, workspace locking or publication. A future producer
-still needs its own validated demand, continuation and complete-seal/handoff
-integration before it can enable yielding.
+Cooperative handoff is controlled by `[limits].safe_point_yield_quantum`
+(default `0`, range 0–1000); zero leaves preemption unavailable. A nonzero
+quantum counts completed supported units, each in its adapter's declared unit
+(`query` for Claude, `turn` for Codex), not physical requests and not a
+cross-provider equivalent. At a quantum boundary the host takes a bounded,
+nonblocking observation of the global admission queue under `queue.lock`; it
+requires a live pending-owner lock and an attributable resource row. A busy,
+malformed, or ambiguous queue means no demand. The observation never edits a
+ticket, takes a slot, reorders the queue, or selects a role; any resumed unit
+uses normal FIFO admission. Drain, deadline, stop, authority, and unsupported
+driver/tool paths remain outside this trigger.
+
+When demand is observed, the host consumes the checkpoint through exactly one
+finish-only seal. The model's chosen outcome is authoritative. Only `continue`
+creates a continuation: after the immutable snapshot is created, the exact
+intent is prepared before publication, and the existing atomic snapshot
+pointer publication commits that intent. A prepared-but-unpublished row is
+not runnable and follows strict reconciliation; a failed seal or preparation
+never authorizes handoff. Final and wait outcomes are published normally with
+no continuation, and ordinary model-selected `continue` remains unchanged.
+The default keeps the mechanism inert; enabling it remains an explicit
+operator configuration choice, not a role-name or cache-affinity preference.
 
 ## Activity evidence
 

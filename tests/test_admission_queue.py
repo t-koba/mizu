@@ -16,7 +16,7 @@ import unittest
 from unittest.mock import Mock, call, patch
 
 from support import Fixture, ScriptDriver
-from mizu.admission import _Full, _Queue, admission, role_exclusion, waiting
+from mizu.admission import _Full, _Queue, admission, has_live_demand, role_exclusion, waiting
 from mizu.budget import Budget
 from mizu.config import load
 from mizu.errors import Busy, Cancelled, Denied, InfraExceeded
@@ -88,6 +88,36 @@ class QueueTests(Fixture):
         limits = dict(parallel_runs=2, admission_queue_capacity=2, idle_seconds=0.02, busy_retry_seconds=15, admission_wait_seconds=0)
         limits.update(changes)
         self.config = dataclasses.replace(self.config, limits=dataclasses.replace(self.config.limits, **limits))
+
+    def test_live_demand_is_locked_bounded_read_only_and_fail_closed(self):
+        queue_root = self.config.data / 'slots'
+        relative = self.project.root.relative_to(self.config.data / 'projects').as_posix()
+        ticket = {'id': 'a' * 32, 'owner': 0,
+                  'resources': [f'{relative}/locks/run-worker.lock',
+                                f'{relative}/locks/workspace.lock'],
+                  'enqueued_at': '2026-10-24T00:00:00+00:00'}
+        state = {'version': 1, 'tickets': [ticket]}
+        path = queue_root / 'queue.json'
+        write_json(path, state)
+        before = path.read_bytes()
+        with lock(queue_root / 'pending-0.lock', blocking=False):
+            self.assertTrue(has_live_demand(self.config))
+            self.assertEqual(path.read_bytes(), before)
+        # Once the fixed pending owner is released, the serialized row is stale.
+        self.assertFalse(has_live_demand(self.config))
+        self.assertEqual(path.read_bytes(), before)
+
+        # The observation never waits for admission's queue transaction.
+        with lock(queue_root / 'queue.lock', blocking=False):
+            self.assertFalse(has_live_demand(self.config))
+        with lock(queue_root / 'pending-0.lock', blocking=False):
+            write_json(path, {'version': 1, 'tickets': [dict(ticket, resources=[])]})
+            self.assertFalse(has_live_demand(self.config))
+            write_json(path, {'version': 1,
+                              'tickets': [dict(ticket, resources=[ticket['resources'][0]] * 2)]})
+            self.assertFalse(has_live_demand(self.config))
+        write_json(path, {'version': 99, 'tickets': [ticket]})
+        self.assertFalse(has_live_demand(self.config))
 
     def test_shadow_queue_order_identity_bypass_and_unexamined_tail(self):
         self.tune(parallel_runs=3, admission_queue_capacity=3)
