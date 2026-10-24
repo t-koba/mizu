@@ -193,8 +193,8 @@ def acknowledge(store, role, events):
 
 
 def poll(config, project, state, *, now, interval, reader=None):
-    from .runtime import (capped_vcs_settings, upstream_fetch_due, vcs_poll_max_branches,
-                          vcs_poll_status_timeout)
+    from .vcs_poll_policy import (capped_vcs_settings, upstream_fetch_due,
+                                  vcs_poll_max_branches, vcs_poll_status_timeout)
     from .vcs import read_via
     if not config.vcs.get("poll_enabled") or not config.vcs.get("command"):
         return None
