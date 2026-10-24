@@ -831,7 +831,7 @@ class CiFailureProjectionTests(Fixture):
         self.assertIsNone(no_capability["ci_failures"])
         self.assertIsNone(no_capability["ci_failures_may_be_truncated"])
         context = self._prompt_context()
-        with mock.patch("mizu.runtime.read_json", side_effect=OSError("unreadable")):
+        with mock.patch("mizu.ci_observation.read_json", side_effect=OSError("unreadable")):
             unreadable = json.loads(prompt_for(context))
         self.assertEqual(unreadable["ci_failures"], [])
         self.assertIsNone(unreadable["ci_failures_may_be_truncated"])
