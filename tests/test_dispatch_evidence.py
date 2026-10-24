@@ -192,3 +192,5 @@ class DispatchEvidenceTests(Fixture):
                 self.assertIsNone(usage["input_tokens"])
                 self.assertIsNone(usage["cache_read_tokens"])
         self.assertEqual(attempt_usage([{"cacheRead": 0}], "pi")["cache_read_tokens"], 0)
+        self.assertEqual(attempt_usage([{"input": 75, "cacheRead": 25, "cacheWrite": 10}],
+                                       "pi")["cache_write_tokens"], 10)

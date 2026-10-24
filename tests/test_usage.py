@@ -143,7 +143,7 @@ class CacheAffinityTests(Fixture):
         return run_dir
 
     def attempt(self, index, *, key=KEY, generation=3, mode="full",
-                status="partial", input_tokens=100, cache_read=25,
+                status="partial", input_tokens=100, cache_read=25, cache_write=0,
                 role="worker", engine="pi", extra_session=None, extra=None):
         session = {"key": key, "generation": generation, "prompt_mode": mode,
                    "rotation": None, "unknown_reason": None}
@@ -154,13 +154,13 @@ class CacheAffinityTests(Fixture):
                   "ended_at": "2026-09-10T00:01:00+00:00", "status": "returned",
                   "session": session,
                   "usage": {"input_tokens": input_tokens, "cache_read_tokens": cache_read,
-                            "status": status}}
+                            "cache_write_tokens": cache_write, "status": status}}
         if extra:
             record.update(extra)
         return record
 
     def test_share_math(self):
-        from mizu.usage import cache_read_share
+        from mizu.usage import cache_read_share, prompt_input_tokens
         self.assertEqual(cache_read_share(100, 25), 0.25)
         self.assertEqual(cache_read_share(8, 8), 1.0)
         self.assertIsNone(cache_read_share(0, 0))
@@ -168,17 +168,33 @@ class CacheAffinityTests(Fixture):
         self.assertIsNone(cache_read_share(None, 5))
         self.assertIsNone(cache_read_share(10.0, 2))
         self.assertIsNone(cache_read_share(True, 1))
+        self.assertEqual(prompt_input_tokens("pi", 5, 90, 5), 100)
+        self.assertEqual(prompt_input_tokens("pi-durable", 5, 90, 5), 100)
+        self.assertEqual(prompt_input_tokens("claude", 5, 90, 5), 100)
+        self.assertEqual(prompt_input_tokens("codex", 100, 90, None), 100)
+        self.assertIsNone(prompt_input_tokens("pi", 5, 90, None))
+        self.assertIsNone(prompt_input_tokens("unknown", 100, 25, 0))
+        self.assertIsNone(prompt_input_tokens("pi", 2**63 - 1, 1, 0))
         run_dir = self.write_usage_run("a" * 32)
         write_json(run_dir / "dispatch-attempts.json",
                    {"schema": 1, "dropped_attempts": 0, "attempts": [
-                       self.attempt(0, input_tokens=100, cache_read=25),
+                       self.attempt(0, input_tokens=75, cache_read=25),
                        self.attempt(1, input_tokens=0, cache_read=0),
-                       self.attempt(2, input_tokens=10, cache_read=20)]})
+                       self.attempt(2, input_tokens=10, cache_read=20, cache_write=5),
+                       self.attempt(3, input_tokens=10, cache_read=20, cache_write=None,
+                                    engine="codex"),
+                       self.attempt(4, input_tokens=100, cache_read=25, engine="custom") ]})
         facts = summarize(self.project)
         rows = {r["execution_attempt"]: r for r in facts["cache_affinity"]["attempts"]}
+        self.assertEqual(rows[0]["prompt_input_tokens"], 100)
         self.assertEqual(rows[0]["cache_read_share_of_input"], 0.25)
         self.assertIsNone(rows[1]["cache_read_share_of_input"])
-        self.assertIsNone(rows[2]["cache_read_share_of_input"])
+        self.assertEqual(rows[2]["prompt_input_tokens"], 35)
+        self.assertEqual(rows[2]["cache_read_share_of_input"], 20 / 35)
+        self.assertEqual(rows[3]["prompt_input_tokens"], 10)
+        self.assertIsNone(rows[3]["cache_read_share_of_input"])
+        self.assertIsNone(rows[4]["prompt_input_tokens"])
+        self.assertIsNone(rows[4]["cache_read_share_of_input"])
 
     def test_invalid_and_unknown_identity(self):
         run_dir = self.write_usage_run("b" * 32)
@@ -210,7 +226,8 @@ class CacheAffinityTests(Fixture):
                          {"run", "role", "execution_attempt", "started_at", "ended_at", "engine",
                           "profile", "provider", "model", "model_attribution_unknown",
                           "session_key", "session_generation", "prompt_mode", "usage_status",
-                          "input_tokens", "cache_read_tokens", "cache_read_share_of_input"})
+                          "input_tokens", "cache_read_tokens", "cache_write_tokens",
+                          "prompt_input_tokens", "cache_read_share_of_input"})
         for row in rows.values():
             self.assertIsNone(row["profile"])
             self.assertIsNone(row["provider"])

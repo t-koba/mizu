@@ -721,14 +721,25 @@ run id, role, execution-attempt index, start/end timestamps, engine, the dispatc
 `provider`/`model` pair, `model_attribution_unknown`, the local
 session key/generation and prompt mode when the key is a 64-character lowercase
 hex digest and the generation is a nonnegative exact integer (otherwise null),
-usage status, input/cache-read token counts, and `cache_read_share_of_input`
-(cache-read divided by input only when both are nonnegative exact integers, input
-is positive and cache-read does not exceed input; otherwise null). Only a single
-known model is attributed: `provider`/`model` are copied only when the attempt
-reports exactly one valid pair (each a nonempty string of at most 256 characters)
-with `models_unknown` false and `models_truncated` false; otherwise both are null
-and `model_attribution_unknown` is true. Native provider
-session identifiers, arbitrary model lists, and arbitrary usage payloads are never copied. Rows are ordered
+usage status, raw input/cache-read/cache-write token counts, the derived
+`prompt_input_tokens`, and `cache_read_share_of_input`. The denominator follows
+the built-in engine usage contracts: Pi/pi-durable and Claude sum mutually
+exclusive uncached-input, cache-read, and cache-write buckets; Codex input counts
+include cached input, so its reported input total is used directly (see the
+[Codex usage type](https://github.com/openai/codex/blob/main/codex-rs/exec/src/exec_events.rs)).
+The Pi formula matches the pinned Pi 1.3.0 [cache-stat implementation](https://github.com/earendil-works/pi/blob/v1.3.0/packages/coding-agent/src/core/cache-stats.ts);
+Anthropic documents the same sum for Messages input in its [rate-limit usage
+fields](https://platform.claude.com/docs/en/api/rate-limits). Unsupported
+engines, incomplete or invalid components, and nonpositive/overflowed totals
+produce a null `prompt_input_tokens`; a cache read greater than that denominator
+produces a null share rather than a guessed value. `cache_read_share_of_input` divides cache-read by
+`prompt_input_tokens`, not by the raw `input_tokens` field when that field is only
+uncached input. Only a single known model is attributed: `provider`/`model` are
+copied only when the attempt reports exactly one valid pair (each a nonempty
+string of at most 256 characters) with `models_unknown` false and
+`models_truncated` false; otherwise both are null and
+`model_attribution_unknown` is true. Native provider session identifiers,
+arbitrary model lists, and arbitrary usage payloads are never copied. Rows are ordered
 most-recent-run first (newest attempt first within a run), capped at 200 rows with
 `total`/`truncated` marking the loss. This is observed cache-read share and local
 session grouping only, not proof of provider cache residency or TTL, and it does

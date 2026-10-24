@@ -91,13 +91,35 @@ def attempt_usage(observations: list, engine: str | None) -> dict:
             "unrecognized_keys": sorted(unknown)[:MAX_UNKNOWN_KEYS]}
 
 
-def cache_read_share(input_tokens, cache_read_tokens):
-    """Observed cache-read share of input; null unless exactly computable."""
-    if type(input_tokens) is not int or type(cache_read_tokens) is not int:
+def prompt_input_tokens(engine, input_tokens, cache_read_tokens, cache_write_tokens):
+    """Return the documented total prompt-token denominator for one engine.
+
+    Pi's Usage and Anthropic Messages report mutually exclusive uncached,
+    cache-read, and cache-write buckets. Codex reports cached input as a subset
+    of its input total. Unknown engines and incomplete components stay unknown.
+    """
+    values = (input_tokens, cache_read_tokens)
+    if any(type(value) is not int or not 0 <= value <= 2**63 - 1 for value in values):
         return None
-    if input_tokens <= 0 or cache_read_tokens < 0 or cache_read_tokens > input_tokens:
+    if engine in ("pi", "pi-durable", "claude"):
+        if (type(cache_write_tokens) is not int
+                or not 0 <= cache_write_tokens <= 2**63 - 1):
+            return None
+        total = input_tokens + cache_read_tokens + cache_write_tokens
+    elif engine == "codex":
+        total = input_tokens
+    else:
         return None
-    return cache_read_tokens / input_tokens
+    return total if 0 < total <= 2**63 - 1 else None
+
+
+def cache_read_share(prompt_input, cache_read_tokens):
+    """Observed cache-read share of prompt input; null unless exactly computable."""
+    if type(prompt_input) is not int or type(cache_read_tokens) is not int:
+        return None
+    if prompt_input <= 0 or cache_read_tokens < 0 or cache_read_tokens > prompt_input:
+        return None
+    return cache_read_tokens / prompt_input
 
 
 def _dispatch_max_bytes() -> int:
@@ -144,11 +166,15 @@ def _affinity_row(run_id: str, attempt: dict):
     if isinstance(usage, dict):
         status = usage.get("status")
         usage_status = status if status in _CACHE_STATUSES else "unknown"
-        raw_input, raw_cache = usage.get("input_tokens"), usage.get("cache_read_tokens")
-        input_tokens = raw_input if type(raw_input) is int and raw_input >= 0 else None
-        cache_read = raw_cache if type(raw_cache) is int and raw_cache >= 0 else None
+        raw_input, raw_cache, raw_write = (usage.get("input_tokens"),
+                                           usage.get("cache_read_tokens"),
+                                           usage.get("cache_write_tokens"))
+        input_tokens = raw_input if type(raw_input) is int and 0 <= raw_input <= 2**63 - 1 else None
+        cache_read = raw_cache if type(raw_cache) is int and 0 <= raw_cache <= 2**63 - 1 else None
+        cache_write = raw_write if type(raw_write) is int and 0 <= raw_write <= 2**63 - 1 else None
     else:
-        usage_status, input_tokens, cache_read = "unknown", None, None
+        usage_status, input_tokens, cache_read, cache_write = "unknown", None, None, None
+    prompt_input = prompt_input_tokens(engine, input_tokens, cache_read, cache_write)
     return {"run": run_id, "role": role,
             "execution_attempt": attempt.get("execution_attempt"),
             "started_at": started, "ended_at": ended, "engine": engine,
@@ -157,7 +183,8 @@ def _affinity_row(run_id: str, attempt: dict):
             "session_key": session_key, "session_generation": session_generation,
             "prompt_mode": prompt_mode, "usage_status": usage_status,
             "input_tokens": input_tokens, "cache_read_tokens": cache_read,
-            "cache_read_share_of_input": cache_read_share(input_tokens, cache_read)}
+            "cache_write_tokens": cache_write, "prompt_input_tokens": prompt_input,
+            "cache_read_share_of_input": cache_read_share(prompt_input, cache_read)}
 
 
 def _collect_cache_affinity(candidates) -> dict:
