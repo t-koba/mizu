@@ -125,9 +125,14 @@ command and environment match. Command logs retain their original evidence ID.
 
 Every subscription has its own ID, wait notification, cancellation and durable
 acknowledgement. Cancelling one subscription does not cancel another role's
-check; execution is cancelled when the last subscriber leaves. Consuming a
-result acknowledges equivalent subscriptions only for the consuming role.
-Evidence is retained while any subscription references it; the existing 1024
+check; execution is cancelled when the last subscriber leaves. Reusing a result
+that is already completed and passing returns its terminal summary synchronously
+and records that new subscription as acknowledged, so a cache hit does not
+manufacture a later wake. The shared result remains readable through
+`action=result`/`action=logs`; queued or running subscriptions remain unread
+until their result is consumed. Consuming a result acknowledges equivalent
+subscriptions only for the consuming role. Evidence is retained while any
+subscription references it; the existing 1024
 record bound includes subscriptions and fails closed when nothing can be
 reaped. Subscriptions consume no compute slot or private source/build tree.
 

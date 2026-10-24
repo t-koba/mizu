@@ -233,9 +233,14 @@ def _subscribe(context, original, *, purpose=None):
     if path.exists():
         return summary(read(context.project, job_id))
     _make_room(context.project, protect={original['id']})
+    # A terminal reusable result is returned synchronously in this response;
+    # recording a second unread completion would manufacture a later wake.
+    # Queued/running subscriptions remain unread until the normal result path.
+    already_delivered = (original.get('status') == 'completed'
+                         and original.get('passed') is True)
     job = {**original, 'id': job_id, 'shared_job': original['id'], 'role': owner,
            'producer_role': context.role.name, 'run': context.run_dir.name,
-           'created_at': now(), 'acknowledged': False}
+           'created_at': now(), 'acknowledged': already_delivered}
     for key in ('acceptance_scope', 'acceptance_receipt_id', 'acceptance_retention_refusal'):
         job.pop(key, None)  # Only the original execution produces proof.
     # The subscription states the subscriber's own demand. The shared job

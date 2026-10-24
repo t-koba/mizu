@@ -728,6 +728,31 @@ class SharingTests(PurposeTests):
         self.assertEqual(check_jobs.read(self.project, first['id'])['status'], 'queued')
         self.assertEqual(check_jobs.read(self.project, shared['id'])['purpose'], 'acceptance')
 
+    def test_completed_result_reuse_is_synchronously_acknowledged(self):
+        owner, original = self.submit()
+        self.run_job()
+        check_jobs.result(owner, original['id'])
+        check_jobs.acknowledge(self.project, 'worker', owner.check_results_read)
+        self.assertFalse(check_jobs.pending(self.project, 'worker'))
+
+        # Both automatic reuse and explicit join return the terminal summary in
+        # this call, so neither should manufacture another unread wake.
+        later = self.context()
+        shared = check_jobs.submit(later)
+        self.assertEqual(shared['shared_job'], original['id'])
+        self.assertEqual(shared['status'], 'completed')
+        self.assertTrue(shared['passed'])
+        self.assertTrue(check_jobs.read(self.project, shared['id'])['acknowledged'])
+        self.assertFalse(check_jobs.pending(self.project, 'worker'))
+        self.assertTrue(check_jobs.result(later, shared['id'])['result']['passed'])
+
+        reader = self.context('reviewer')
+        joined = check_jobs.join(reader, original['id'])
+        self.assertEqual(joined['status'], 'completed')
+        self.assertTrue(check_jobs.read(self.project, joined['id'])['acknowledged'])
+        self.assertFalse(check_jobs.pending(self.project, 'reviewer'))
+        self.assertTrue(check_jobs.result(reader, joined['id'])['result']['passed'])
+
     def test_replaced_job_keeps_running_for_another_consumer(self):
         ctx = self.context()
         first = check_jobs.submit(ctx, 'echo first', kind='experiment', purpose='acceptance')
