@@ -174,6 +174,51 @@ class SyntheticEngineTests(Fixture):
         _evidence = self.execute('codex', 'other-thread-native', context=ctx)
         self.assertEqual(ctx.engine_tool_invocations, {})
 
+    def test_deadline_cutoff_yields_before_non_pi_reserve_and_followup_spends_once(self):
+        ctx = self.context('worker')
+        ctx.wrap_up_at = time.monotonic() - 1  # Past; absolute deadline remains live.
+        self.assertFalse(ctx.wall_expired())
+        with self.assertRaises(DeadlineWrapUp):
+            admit_invocation(ctx, unit='turn')
+        self.assertEqual(ctx.bound_hit, 'deadline')
+        self.assertFalse(ctx.wrap_up_attempted)
+        self.assertEqual((ctx.request_count, ctx.wrap_up_requests), (0, 0))
+        self.assertFalse((ctx.run_dir / 'admission.json').exists())
+
+        ctx.wrap_up_attempted = True
+        admit_invocation(ctx, unit='turn')
+        self.assertEqual((ctx.request_count, ctx.wrap_up_requests), (1, 1))
+
+    def test_engine_retries_non_pi_deadline_yield_with_reserved_attempt(self):
+        class AdmissionDriver:
+            requires_sandbox = False
+
+            def __init__(self): self.attempts = []
+
+            def execute(self, context, prompt, *, profile=None):
+                context.handle('_hello', {})
+                if not self.attempts:
+                    context.wrap_up_at = time.monotonic() - 1
+                try:
+                    admit_invocation(context, unit='query')
+                except DeadlineWrapUp:
+                    self.attempts.append((context.wrap_up_attempted, context.request_count,
+                                          context.wrap_up_requests))
+                    raise
+                self.attempts.append((context.wrap_up_attempted, context.request_count,
+                                      context.wrap_up_requests))
+                context.end_request(0)
+                context.handle('finish', {'outcome':'wait', 'summary':'Bounded result',
+                                          'state':'Next: continue later.'})
+                return {'requests':context.request_count}
+
+        ctx = self.context('worker')
+        driver = AdmissionDriver()
+        result = Engine(self.config, driver=driver)._execute(ctx, driver, 'original prompt')
+        self.assertEqual(driver.attempts, [(False, 0, 0), (True, 1, 1)])
+        self.assertEqual(ctx.finished['outcome'], 'bounded')
+        self.assertEqual(result['requests'], 1)
+
     def test_both_drivers_return_normal_unsealed_terminal_turns(self):
         for engine,unit in (('codex','turn'),('claude','query')):
             ctx,result=self.execute(engine)

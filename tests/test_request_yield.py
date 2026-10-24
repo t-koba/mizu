@@ -1,10 +1,11 @@
 """Offline local-admission boundaries; no provider or deployment claims."""
 import dataclasses
+import time
 from unittest.mock import patch
 from support import Fixture
 from test_deadlines import UnsealedDriver
 from mizu.config import role_requests_per_run
-from mizu.errors import DeadlineWrapUp, RequestYieldExceeded, InfraExceeded
+from mizu.errors import DeadlineWrapUp, RequestYieldExceeded, InfraExceeded, ModelFailure
 from mizu.fs import read_json
 from mizu.runtime import Engine
 
@@ -84,6 +85,63 @@ class RequestYieldTests(Fixture):
             with self.assertRaises(DeadlineWrapUp):
                 PiDriver(self.config).execute(ctx, '{}', profile=ctx.role.profile)
         self.assertEqual(ctx.wrap_up_requests, 0)
+
+    def test_pi_deadline_cutoff_yields_before_reserve_and_uses_host_evidence(self):
+        from mizu.pi import PiDriver
+
+        def dispatch_error(ctx, *, refuse):
+            model = self.config.model(ctx.role.profile)
+
+            class BridgeStub:
+                def __init__(self, *args, **kwargs):
+                    self.config_file = ctx.run_dir / 'bridge.json'
+                def __enter__(self): return self
+                def __exit__(self, *args): pass
+
+            class ChannelStub:
+                def __init__(self, *args, **kwargs): self.count = 0
+                def send(self, event): pass
+                def close(self): pass
+                def receive(self, **kwargs):
+                    self.count += 1
+                    if self.count == 1:
+                        ctx.handle('_hello', {})
+                        return {'id':'state','success':True,'data':{
+                            'model':{'id':model['model'],'provider':model['provider']},
+                            'sessionFile':'deadline-cutoff-session'}}
+                    if refuse:
+                        try:
+                            ctx.handle('_budget', {'sequence':1})
+                        except DeadlineWrapUp:
+                            pass
+                    return {'type':'message_end','message':{'role':'assistant',
+                        'stopReason':'error','errorMessage':'provider text is not local evidence'}}
+
+            driver = PiDriver(self.config)
+            with patch('mizu.pi.Bridge', BridgeStub), patch('mizu.pi.Channel', ChannelStub):
+                return Engine(self.config, driver=driver)._dispatch(
+                    ctx, driver, '{}', profile=ctx.role.profile)
+
+        local = self.context()
+        local.wrap_up_at = time.monotonic() - 1  # Past; absolute deadline remains live.
+        self.assertFalse(local.wall_expired())
+        with self.assertRaises(DeadlineWrapUp) as raised:
+            dispatch_error(local, refuse=True)
+        self.assertIs(raised.exception, local.admission_exception)
+        self.assertEqual(local.bound_hit, 'deadline')
+        self.assertFalse(local.wrap_up_attempted)
+        self.assertEqual((local.request_count, local.wrap_up_requests), (0, 0))
+        self.assertFalse((local.run_dir / 'admission.json').exists())
+
+        provider = self.context()
+        with self.assertRaises(ModelFailure):
+            dispatch_error(provider, refuse=False)
+        self.assertIsNone(provider.admission_exception)
+
+        # Only Engine's dedicated follow-up phase may spend the reserve.
+        local.wrap_up_attempted = True
+        local.handle('_budget', {'sequence':1})
+        self.assertEqual((local.request_count, local.wrap_up_requests), (1, 1))
 
     def test_durable_bound_settlement_preserves_wrapup_allowance(self):
         from mizu.pi_durable import interpret_result

@@ -213,20 +213,21 @@ class DelegateTests(Fixture):
                 seen["parent_bound"] = ctx.bound_hit
                 seen["child_requests"] = ctx.delegated_wrap_up_requests
                 seen["root_requests_before_seal"] = ctx.wrap_up_requests
+                # The exhausted child share leaves the third child bounded;
+                # it cannot consume the root's separate sealing allowance.
                 seen["third_status"] = responses[2].get("status", "completed")
+                seen["pool_exhausted"] = seen["third_status"] == "bounded"
                 ctx.handle("_budget", {"sequence": 2})
                 seen["root_requests_after_seal_request"] = ctx.wrap_up_requests
                 ctx.handle("finish", {"outcome": "continue", "summary": "root sealed",
                                       "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
             else:
-                seen["children"] += 1
-                ctx.bound_hit = "deadline"  # Child-local deadline only.
-                if seen["children"] <= 2:
+                if ctx.execution_attempt == 0:
+                    seen["children"] += 1
+                    ctx.bound_hit = "deadline"  # Child-local deadline only.
+                    # The normal invocation yields; Engine's separate
+                    # reduced-grant attempt spends the child's shared reserve.
                     ctx.handle("_budget", {"sequence": 2})
-                else:
-                    with self.assertRaises(RunDeadlineExceeded):
-                        ctx.handle("_budget", {"sequence": 2})
-                    seen["pool_exhausted"] = True
                 ctx.handle("finish", {"outcome": "continue", "summary": "child bounded",
                                       "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
 
@@ -234,7 +235,7 @@ class DelegateTests(Fixture):
         self.assertEqual(result["status"], "completed")
         self.assertEqual(seen["children"], 3)
         self.assertTrue(seen["pool_exhausted"])
-        self.assertEqual(seen["third_status"], "completed")
+        self.assertEqual(seen["third_status"], "bounded")
         self.assertIsNone(seen["parent_bound"])
         self.assertEqual(seen["child_requests"], config.limits.delegate_wrap_up_requests)
         self.assertEqual(seen["root_requests_before_seal"], 0)

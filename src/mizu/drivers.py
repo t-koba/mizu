@@ -114,6 +114,10 @@ def _admit_invocation(context, *, unit: str) -> dict:
         context.bound_hit = 'requests'
         context.admission_error = 'request_ceiling'
         raise LimitExceeded('Recovery request ceiling reached')
+    if (over and context.bound_hit == 'deadline' and not context.wrap_up_attempted):
+        # The reservation is for Engine's reduced-grant follow-up, not a new
+        # request admitted by the normal invocation at the cutoff.
+        raise DeadlineWrapUp(context._bound_message())
     if over:
         requests_used, requests_limit = context._wrap_up_request_used_limit()
         if requests_used >= requests_limit:

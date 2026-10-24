@@ -937,6 +937,12 @@ class Context:
                     if sequence_key not in self.request_sequences:
                         over = self.bound_hit in ("deadline", "drain") or self.request_count >= role_requests_per_run(
                             self.config, self.spend_role or self.role)
+                        if (over and self.bound_hit == "deadline"
+                                and not self.wrap_up_attempted):
+                            # The reserved allowance belongs to Engine's
+                            # reduced-grant follow-up, never the still-active
+                            # normal invocation that crossed the cutoff.
+                            raise DeadlineWrapUp(self._bound_message())
                         if (over and self.bound_hit in (None, "requests")
                                 and not self.wrap_up_attempted):
                             self.bound_hit = "requests"

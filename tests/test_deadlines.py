@@ -258,6 +258,10 @@ class DeadlineTests(Fixture):
             with self.assertRaises(DeadlineWrapUp):
                 ctx.check_deadlines(wrap_up=True)
             self.assertEqual(ctx.bound_hit, "deadline")
+            # Engine marks the separate reduced-grant dispatch before it can
+            # spend the deadline reserve. Model that lifecycle in this direct
+            # Context test.
+            ctx.wrap_up_attempted = True
             with self.assertRaises(Denied):
                 ctx.handle("read", {"path": "app.py"})
             for sequence in range(2, 2 + WRAP_UP_REQUESTS):
