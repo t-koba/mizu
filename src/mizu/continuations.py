@@ -15,6 +15,7 @@ from .errors import Denied, Busy, MizuError
 from .fs import DIGEST, ID, canonical, digest, lock, publish_pointer, read_json, write_json, now, mkdir, sync_dir
 
 MAX_PENDING = 64
+MAX_PER_ROLE = 2  # One reserved root plus its immediate, not-yet-eligible child.
 POINTER_BYTES = 64 * 1024
 RUN_BYTES = 1024 * 1024
 _RUN = re.compile(r"[0-9a-f]{32}\Z")
@@ -32,6 +33,11 @@ def _successor(role, source_run, snapshot):
 def entries(pointer):
     """Validate optional version-1 pointer metadata (64 rows, fixed fields).
 
+    A role has at most two rows: a reserved parent and its prepared/committed
+    child, linked by parent.successor == child.source_run. Return parents first
+    regardless of on-disk order. A child becomes a root only when the parent is
+    atomically retired; no separate promotion write or link field is needed.
+
     Local coordination data, never model input. Unknown shapes fail closed;
     absent metadata is the old, empty registry. Returned rows are copies.
     """
@@ -44,7 +50,8 @@ def entries(pointer):
             or type(value["version"]) is not int or value["version"] != 1
             or not isinstance(value["entries"], list) or len(value["entries"]) > MAX_PENDING):
         raise Denied("Invalid continuation registry")
-    roles, sources, successors = set(), set(), set()
+    sources, successors = set(), set()
+    roles = {}
     result = []
     for row in value["entries"]:
         if (not isinstance(row, dict) or set(row) != _FIELDS
@@ -54,14 +61,28 @@ def entries(pointer):
                 or not _matches(_RUN, row["successor"])
                 or row["successor"] != _successor(row["role"], row["source_run"], row["snapshot"])
                 or row["state"] not in ("prepared", "committed", "reserved")
-                or row["role"] in roles or row["source_run"] in sources
+                or row["source_run"] in sources
                 or row["successor"] in successors):
             raise Denied("Invalid continuation entry")
-        roles.add(row["role"])
+        roles.setdefault(row["role"], []).append(row)
         sources.add(row["source_run"])
         successors.add(row["successor"])
         result.append(dict(row))
-    return result
+    children = set()
+    for group in roles.values():
+        if len(group) > MAX_PER_ROLE:
+            raise Denied("Continuation chain is too deep")
+        roots = [r for r in group if r["source_run"] not in successors]
+        if len(roots) != 1:
+            raise Denied("Invalid continuation chain")
+        if len(group) == 2:
+            parent = roots[0]
+            child = next(r for r in group if r is not parent)
+            if (parent["state"] != "reserved" or child["state"] == "reserved"
+                    or child["source_run"] != parent["successor"]):
+                raise Denied("Invalid continuation child")
+            children.add(child["source_run"])
+    return sorted(result, key=lambda row: row["source_run"] in children)
 
 
 def pointer_at(root):
@@ -133,8 +154,8 @@ def _failed_source_seal(store, row):
 
 def _retire_prepared(store, pointer, rows, role):
     """Caller holds execution exclusions THEN publication.lock; no other locks."""
-    row = next((r for r in rows if r["role"] == role), None)
-    if row is None or row["state"] != "prepared":
+    row = next((r for r in rows if r["role"] == role and r["state"] == "prepared"), None)
+    if row is None:
         return False
     try:
         error = _failed_source_seal(store, row)
@@ -187,7 +208,9 @@ def prepare(store, *, role, source_run, snapshot):
     based on the current head and on its started.json input. Failed/CAS-losing
     publication leaves a prepared intent, never an admissible continuation.
     Repeated preparation of the same intent is a no-op, including after commit.
-    One pending entry per role and at most 64 per project; overflow is Busy.
+    At most two entries per role (reserved parent plus one exact child) and
+    64 per project; overflow/conflict is Busy. A child also requires its
+    parent's durable, exactly bound started.json execution fence.
     """
     if not _matches(ID, role) or not _matches(_RUN, source_run) or not _matches(DIGEST, snapshot):
         raise Denied("Invalid continuation identity")
@@ -198,11 +221,18 @@ def prepare(store, *, role, source_run, snapshot):
             pointer = _with_entries(pointer, rows)
         wanted = {"role": role, "source_run": source_run, "snapshot": snapshot,
                   "successor": _successor(role, source_run, snapshot), "state": "prepared"}
-        for row in rows:
-            if row["role"] == role:
-                if all(row[key] == wanted[key] for key in _FIELDS - {"state"}):
-                    return row
+        same_role = [row for row in rows if row["role"] == role]
+        for row in same_role:
+            if identity(row) == identity(wanted):
+                return row
+        if same_role:
+            parent = same_role[0]
+            if (len(same_role) >= MAX_PER_ROLE or parent["state"] != "reserved"
+                    or parent["successor"] != source_run):
                 raise Busy("Writer already has a pending continuation")
+            _, parent_started = _started(store, parent)
+            if parent_started is None:
+                raise Denied("Continuation child requires a durably started parent")
         if len(rows) >= MAX_PENDING:
             raise Busy("Continuation registry is full")
         # Even an error-only terminal source cannot be retried into a new
@@ -218,12 +248,14 @@ def prepare(store, *, role, source_run, snapshot):
                 or not isinstance(started, dict) or started.get("run") != source_run
                 or started.get("role") != role or started.get("snapshot") != current):
             raise Denied("Continuation requires a new writer continue seal")
-        publish_pointer(store.root, _with_entries(pointer, [*rows, wanted]), name="current.json")
+        updated = _with_entries(pointer, [*rows, wanted])
+        entries(updated)
+        publish_pointer(store.root, updated, name="current.json")
         return wanted
 
 
 def pending(store, role):
-    """Read one prepared/committed/reserved intent without mutating it."""
+    """Read the root intent only; a linked child is never independently ready."""
     return next((row for row in entries(pointer_at(store.root)) if row["role"] == role), None)
 
 
@@ -380,6 +412,12 @@ def _unstarted_directory(directory):
                 raise Denied("Continuation run has files without a durable start")
 
 
+def _require_reserved_root(store, row):
+    root = pending(store, row["role"])
+    if root is None or identity(root) != identity(row) or root["state"] != "reserved":
+        raise Denied("Continuation requires the reserved root")
+
+
 def recover(store, row):
     """Under execution exclusions, reconcile a start, never dispatch it twice.
 
@@ -388,6 +426,7 @@ def recover(store, row):
     records interruption without attempting publication or provider replay.
     The registry remains pinned if any evidence write or settlement fails.
     """
+    _require_reserved_root(store, row)
     directory, started = _started(store, row)
     if started is None:
         _unstarted_directory(directory)
@@ -425,6 +464,7 @@ def recover(store, row):
 
 def start(store, row, started):
     """Durable create-only acceptance before active pointer/model execution."""
+    _require_reserved_root(store, row)
     directory, previous = _started(store, row)
     if previous is not None:
         raise Denied("Continuation already started")
@@ -444,6 +484,9 @@ def settle(store, row):
 
     Caller holds execution exclusions. Keep the row throughout execution and
     until this atomic replacement, including across errors and later seals.
+    Only the root can retire; removing it exposes a committed child in this
+    same write. An absent exact identity is an already-retired no-op, even if
+    later rows of that role remain.
     """
     directory, started = _started(store, row)
     if started is None or _terminal(store, directory, row, started) is None:
@@ -451,10 +494,13 @@ def settle(store, row):
     with lock(store.root / "locks" / "publication.lock"):
         pointer = pointer_at(store.root)
         rows = entries(pointer)
-        current = next((r for r in rows if r["role"] == row["role"]), None)
+        current = next((r for r in rows if identity(r) == identity(row)), None)
         if current is None:
+            # A replay after retirement must not consume the now-root child
+            # (or any later row of the same role).
             return True
-        if identity(current) != identity(row) or current["state"] == "prepared":
+        root = next(r for r in rows if r["role"] == row["role"])
+        if current != root or current["state"] == "prepared":
             raise Denied("Continuation settlement binding mismatch")
         publish_pointer(store.root, _with_entries(pointer, [r for r in rows if r != current]),
                         name="current.json")

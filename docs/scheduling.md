@@ -651,12 +651,34 @@ The internal host API is intended for a future scheduler-owned yield marker:
    malformed, unsafe or unreadable evidence fails closed, retaining the row.
    Active pointers matching the recovered ID are cleared; no provider state
    is invented or resumed by recovery.
-8. For committed/reserved rows, only a durable matching start plus terminal
-   result allows atomic retirement of that exact row. Engine keeps it throughout execution; failed retirement
-   leaves the terminal record pinned for a later idempotent reconciliation.
+8. For committed/reserved root rows, only a durable matching start plus terminal
+   result allows atomic retirement of that exact row. Engine keeps it throughout
+   execution; failed retirement leaves the terminal record pinned for a later
+   idempotent reconciliation.
    A crash after start but before any later pointer update resolves from the
    start, never from a guessed registry state. Run evidence and manifests stay
    pinned until retirement. Existing run-envelope reads are bounded to 1 MiB.
+
+### One bounded next-yield child
+
+An executing continuation successor can prepare one same-role child intent.
+The parent row must be `reserved`, its `successor` must equal the child's
+`source_run`, and its durable `started.json` must carry the parent's exact
+continuation identity. The child still needs a new `continue` seal based on
+its own started input and the current head. Unrelated same-role preparation
+is refused; a second child or deeper pending chain is refused.
+
+Reads and reservation select the root first, regardless of on-disk row order.
+A committed child is not independently ready, reservable, startable, recoverable,
+or settleable while its parent remains. Recovery reconciles the parent first,
+without provider replay. Only validated parent terminal evidence permits atomic
+parent retirement; that same pointer replacement exposes the child as the new
+root. A still-prepared child remains non-runnable after parent retirement.
+Settlement matches the full identity, not merely the role: replaying settlement
+of an already-retired parent cannot consume its child or later same-role rows.
+Once the child is the reserved, executing root, it may prepare its own one child;
+there are never more than two pending rows for that role. This is bounded
+chaining support only, not a yield producer or a change to ordinary `continue`.
 
 ### Abandoned preparation proof
 
@@ -665,8 +687,11 @@ source or workspace repair. The caller owns the role/workspace exclusions
 **before** taking the publication lock. An ordinary writer attempts it after
 normal admission, before allocating its run; ineligible cleanup does not prevent
 normal progress. `prepare` also attempts it before refusing a conflicting row.
-Only that role's exact current-pointer row in state `prepared` can be retired.
-Committed/reserved rows use the successor settlement protocol above instead.
+Only that role's exact current-pointer row in state `prepared` can be retired,
+including a prepared child behind a reserved parent. Cleanup preserves the
+parent and all run evidence; ambiguous child failure remains pinned even after
+parent recovery/retirement. Committed/reserved rows use the successor settlement
+protocol above instead.
 
 Retirement requires all of the following positive evidence:
 
@@ -716,9 +741,12 @@ The optional pointer member is exactly
 (`prepared`, `committed`, or `reserved`). The successor is the first 32 hex
 characters of SHA-256 over canonical JSON
 `["writer-continuation-v1", role, source_run, snapshot]`; validation recomputes
-it. Roles, source runs and successors must each be unique. There is at most
-one pending row per role and 64 per project; pointer reads are bounded to
-64 KiB and source run-envelope reads to 1 MiB. Missing metadata means no
+it. Source runs and successors must each be unique. A role has one root and
+at most one immediate child (two pending rows); the parent must be reserved,
+the child prepared/committed, and the exact successor/source link must hold.
+Unrelated, cross-role, malformed or deeper chains fail closed. There are at
+most 64 rows per project; pointer reads are bounded to 64 KiB and source
+run-envelope reads to 1 MiB. Missing metadata means no
 intent. Malformed, oversized, unsafe or unreadable local state fails closed;
 there is no repair-by-guessing or provider/network input. Registry overflow or
 a conflicting pending role is `Busy`. Identical preparation/reservation is

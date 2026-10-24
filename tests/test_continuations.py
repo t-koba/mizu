@@ -1004,3 +1004,400 @@ class EngineContinuationTests(ContinuationFixture):
             self.engine.run(self.project, "worker")
         self.assertEqual((directory / "result.json").read_bytes(), before)
         self.assertEqual(self.engine.driver.calls, [])
+
+
+class ChainedContinuationTests(ContinuationFixture):
+    """One executing root plus one next yield; no scheduler yield producer."""
+
+    def running_parent(self):
+        self.committed()
+        with c.reservation(self.engine, self.project, "worker") as parent:
+            c.start(self.store, parent, {
+                "run": parent["successor"], "role": "worker",
+                "snapshot": parent["current_snapshot"],
+                "started_at": "2020-01-01T00:00:00+00:00"})
+        return parent
+
+    def next_seal(self, parent):
+        current = self.store.get()
+        return self.store.create(self.store.capture_files(self.project.workspace),
+            goal=current["goal"], state="state", run=parent["successor"],
+            outcome="continue", summary="next yield", parent=current["id"])
+
+    def child(self, parent, *, commit=True):
+        seal = self.next_seal(parent)
+        child = self.prepare(parent["successor"], seal)
+        if commit:
+            self.store.publish(seal)
+        return child, seal
+
+    def terminal(self, parent, seal):
+        result = {"run": parent["successor"], "role": "worker", "status": "completed",
+                  "finished_at": "2020-01-01T00:00:01+00:00",
+                  "snapshot": seal["id"],
+                  "continuation": c.identity(parent)}
+        result["finish"] = {"outcome": "continue", "summary": "next yield", "state": "state"}
+        write_json(self.store.root / "runs" / parent["successor"] / "result.json", result)
+        return result
+
+    def rows(self, store=None):
+        return c.entries(c.pointer_at((store or self.store).root))
+
+    def reverse_rows(self):
+        pointer = c.pointer_at(self.store.root)
+        pointer["continuations"]["entries"].reverse()
+        write_json(self.store.root / "current.json", pointer)
+
+    def test_child_creation_and_replay_leave_parent_first_even_in_reverse_disk_order(self):
+        parent = self.running_parent()
+        child, seal = self.child(parent, commit=False)
+        self.assertEqual(c.MAX_PER_ROLE, 2)
+        self.assertEqual(child["source_run"], parent["successor"])
+        self.assertEqual(self.prepare(child["source_run"], seal), child)
+        self.reverse_rows()
+        self.assertEqual([c.identity(r) for r in self.rows()],
+                         [c.identity(parent), c.identity(child)])
+        self.assertEqual(c.identity(c.ready(self.store, "worker")), c.identity(parent))
+        self.store.publish(seal)
+        committed_child = {**child, "state": "committed"}
+        self.assertEqual(self.prepare(child["source_run"], seal), committed_child)
+        # Replaying the original parent preparation must not conflict with its child.
+        self.assertEqual(self.prepare(parent["source_run"], self.store.get(parent["snapshot"])),
+                         {key: parent[key] for key in c._FIELDS})
+        with patch.object(self.engine, "_admit", side_effect=AssertionError("child admitted")):
+            with c.reservation(self.engine, self.project, "worker", expected=child) as stale:
+                self.assertIsNone(stale)
+        self.assertEqual(c.identity(c.pending(self.store, "worker")), c.identity(parent))
+
+    def test_only_atomic_terminal_parent_settlement_exposes_committed_child(self):
+        parent = self.running_parent()
+        child, seal = self.child(parent)
+        self.reverse_rows()
+        self.assertFalse(c.settle(self.store, parent))
+        self.assertEqual(c.identity(c.ready(self.store, "worker")), c.identity(parent))
+        self.terminal(parent, seal)
+        directory = self.store.root / "runs" / child["successor"]
+        with self.assertRaises(Denied):
+            c.recover(self.store, child)
+        with self.assertRaises(Denied):
+            c.start(self.store, {**child, "current_snapshot": seal["id"]}, {
+                "run": child["successor"], "role": "worker", "snapshot": seal["id"],
+                "started_at": now()})
+        self.assertFalse(directory.exists())
+        self.assertTrue(c.settle(self.store, parent))
+        self.assertEqual(c.ready(self.store, "worker"), {**child, "state": "committed"})
+        self.assertTrue(c.settle(self.store, parent))  # Exact identity, not first role match.
+        self.assertEqual(len(self.rows()), 1)
+        with c.reservation(self.engine, self.project, "worker", expected=parent) as stale:
+            self.assertIsNone(stale)
+        with c.reservation(self.engine, self.project, "worker", expected=child) as reserved:
+            self.assertEqual(c.identity(reserved), c.identity(child))
+
+    def test_malformed_parent_terminal_cannot_expose_child(self):
+        parent = self.running_parent()
+        _, seal = self.child(parent)
+        result = self.terminal(parent, seal)
+        path = self.store.root / "runs" / parent["successor"] / "result.json"
+        pointer = c.pointer_at(self.store.root)
+        for changed in ({"run": uuid.uuid4().hex}, {"snapshot": "a" * 64},
+                        {"continuation": {}}, {"finished_at": "not a time"}):
+            with self.subTest(changed=changed):
+                write_json(path, {**result, **changed})
+                with self.assertRaises(Denied):
+                    c.settle(self.store, parent)
+                self.assertEqual(c.pointer_at(self.store.root), pointer)
+
+    def test_settlement_faults_before_and_after_commit_restart_without_child_loss(self):
+        parent = self.running_parent()
+        child, seal = self.child(parent)
+        self.terminal(parent, seal)
+        original = c.pointer_at(self.store.root)
+        with patch.object(c, "publish_pointer", side_effect=OSError("before replacement")):
+            with self.assertRaises(OSError):
+                c.settle(self.store, parent)
+        self.assertEqual(c.pointer_at(self.store.root), original)
+        restarted = Project(self.config, self.project.name).snapshots
+        self.assertEqual(c.identity(c.ready(restarted, "worker")), c.identity(parent))
+        def after_commit(*args, **kwargs):
+            publish_pointer(*args, **kwargs)
+            raise OSError("after replacement")
+        with patch.object(c, "publish_pointer", side_effect=after_commit):
+            with self.assertRaises(OSError):
+                c.settle(restarted, parent)
+        reopened = Project(self.config, self.project.name).snapshots
+        self.assertEqual(c.ready(reopened, "worker"), {**child, "state": "committed"})
+        self.assertTrue(c.settle(reopened, parent))
+        self.assertEqual(len(self.rows(reopened)), 1)
+
+    def test_child_preparation_pointer_faults_are_idempotent(self):
+        parent = self.running_parent()
+        seal = self.next_seal(parent)
+        original = c.pointer_at(self.store.root)
+        with patch.object(c, "publish_pointer", side_effect=OSError("before replacement")):
+            with self.assertRaises(OSError):
+                self.prepare(parent["successor"], seal)
+        self.assertEqual(c.pointer_at(self.store.root), original)
+        def after_commit(*args, **kwargs):
+            publish_pointer(*args, **kwargs)
+            raise OSError("after replacement")
+        with patch.object(c, "publish_pointer", side_effect=after_commit):
+            with self.assertRaises(OSError):
+                self.prepare(parent["successor"], seal)
+        restarted = Project(self.config, self.project.name).snapshots
+        child = self.rows(restarted)[1]
+        self.assertEqual(c.prepare(restarted, role="worker", source_run=parent["successor"],
+                                   snapshot=seal["id"]), child)
+        self.assertEqual(len(self.rows()), 2)
+        self.assertEqual(c.identity(c.ready(restarted, "worker")), c.identity(parent))
+
+    def test_crash_before_child_publication_recovers_parent_but_never_readies_prepared_child(self):
+        parent = self.running_parent()
+        child, seal = self.child(parent, commit=False)
+        with patch.object(snapshot_module, "publish_pointer", side_effect=OSError("before commit")):
+            with self.assertRaises(OSError):
+                self.store.publish(seal)
+        restarted = Project(self.config, self.project.name)
+        with c.reservation(Engine(self.config), restarted, "worker") as root:
+            self.assertEqual(c.identity(root), c.identity(parent))
+            self.assertEqual(c.recover(restarted.snapshots, root)["status"], "interrupted")
+        self.assertEqual(c.pending(restarted.snapshots, "worker"), child)
+        self.assertIsNone(c.ready(restarted.snapshots, "worker"))
+        with c.reservation(Engine(self.config), restarted, "worker") as missing:
+            self.assertIsNone(missing)
+
+    def test_crash_after_child_publication_recovers_parent_then_reserves_child_once(self):
+        parent = self.running_parent()
+        child, seal = self.child(parent, commit=False)
+        def after_commit(*args, **kwargs):
+            publish_pointer(*args, **kwargs)
+            raise OSError("after commit")
+        with patch.object(snapshot_module, "publish_pointer", side_effect=after_commit):
+            with self.assertRaises(OSError):
+                self.store.publish(seal)
+        restarted = Project(self.config, self.project.name)
+        with c.reservation(Engine(self.config), restarted, "worker") as root:
+            self.assertEqual(c.identity(root), c.identity(parent))
+            c.recover(restarted.snapshots, root)
+        self.assertEqual(c.ready(restarted.snapshots, "worker"), {**child, "state": "committed"})
+        errors = []
+        def competing_wake():
+            try:
+                with c.reservation(Engine(self.config), restarted, "worker"):
+                    errors.append("unexpected admission")
+            except Busy:
+                errors.append("busy")
+        with c.reservation(Engine(self.config), restarted, "worker") as root:
+            self.assertEqual(c.identity(root), c.identity(child))
+            thread = threading.Thread(target=competing_wake)
+            thread.start()
+            thread.join(60)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(errors, ["busy"])
+            c.start(restarted.snapshots, root, {
+                "run": child["successor"], "role": "worker", "snapshot": seal["id"],
+                "started_at": now()})
+        with c.reservation(Engine(self.config), restarted, "worker") as root:
+            self.assertEqual(c.recover(restarted.snapshots, root)["status"], "interrupted")
+        self.assertEqual(self.rows(), [])
+
+    def test_child_requires_reserved_exact_and_durably_started_parent(self):
+        original, _ = self.committed()
+        seal = self.next_seal(original)
+        with self.assertRaises(Busy):
+            self.prepare(original["successor"], seal)
+        with c.reservation(self.engine, self.project, "worker") as parent:
+            pass
+        with self.assertRaisesRegex(Denied, "durably started"):
+            self.prepare(parent["successor"], seal)
+        write_json(self.store.root / "runs" / parent["successor"] / "started.json", {
+            "run": parent["successor"], "role": "worker", "snapshot": parent["current_snapshot"],
+            "started_at": now(), "continuation": {}})
+        with self.assertRaisesRegex(Denied, "start binding"):
+            self.prepare(parent["successor"], seal)
+        unrelated_source, unrelated_seal = self.seal()
+        with self.assertRaises(Busy):
+            self.prepare(unrelated_source, unrelated_seal)
+        self.assertEqual(len(self.rows()), 1)
+
+    def test_full_two_row_chain_refuses_another_intent_without_overwrite(self):
+        parent = self.running_parent()
+        child, seal = self.child(parent)
+        original = c.pointer_at(self.store.root)
+        for source in (child["source_run"], child["successor"], uuid.uuid4().hex):
+            different = self.next_seal({"successor": source})
+            with self.assertRaises(Busy):
+                self.prepare(source, different)
+        self.assertEqual(c.pointer_at(self.store.root), original)
+        self.assertEqual(self.prepare(child["source_run"], seal)["state"], "committed")
+
+    def test_malformed_unrelated_and_deep_chain_metadata_fail_closed(self):
+        parent = self.running_parent()
+        child, _ = self.child(parent)
+        parent = {key: parent[key] for key in c._FIELDS}
+        child = {**child, "state": "committed"}
+        def changed(row, **updates):
+            row = {**row, **updates}
+            row["successor"] = c._successor(row["role"], row["source_run"], row["snapshot"])
+            return row
+        grandchild = changed(child, source_run=child["successor"])
+        invalid = [
+            [parent, changed(child, source_run=uuid.uuid4().hex)],
+            [parent, changed(child, role="reporter")],
+            [{**parent, "state": "committed"}, child],
+            [{**parent, "state": "prepared"}, child],
+            [parent, {**child, "state": "reserved"}],
+            [parent, {**child, "extra": True}],
+            [parent, {**child, "successor": uuid.uuid4().hex}],
+            [parent, child, grandchild],
+        ]
+        self.assertEqual(c.entries({"continuations": {"version": 1, "entries": [child, parent]}}),
+                         [parent, child])
+        pointer = c.pointer_at(self.store.root)
+        for rows in invalid:
+            with self.subTest(rows=rows):
+                malformed = {**pointer, "continuations": {"version": 1, "entries": rows}}
+                with self.assertRaises(Denied):
+                    c.entries(malformed)
+                write_json(self.store.root / "current.json", malformed)
+                with self.assertRaises(Denied):
+                    c.ready(self.store, "worker")
+                self.assertFalse(storage_runs.plan(self.project)["complete"])
+        write_json(self.store.root / "current.json", pointer)
+
+    def test_parent_retirement_allows_the_next_bounded_pair(self):
+        parent = self.running_parent()
+        child, seal = self.child(parent)
+        self.terminal(parent, seal)
+        self.assertTrue(c.settle(self.store, parent))
+        with c.reservation(self.engine, self.project, "worker") as reserved:
+            c.start(self.store, reserved, {
+                "run": reserved["successor"], "role": "worker", "snapshot": seal["id"],
+                "started_at": "2020-01-01T00:00:00+00:00"})
+        grandchild, next_seal = self.child(reserved)
+        self.assertEqual(len(self.rows()), c.MAX_PER_ROLE)
+        self.assertEqual(c.identity(c.ready(self.store, "worker")), c.identity(child))
+        # Even an old-parent settlement replay must not consume either new row.
+        self.assertTrue(c.settle(self.store, parent))
+        self.terminal(reserved, next_seal)
+        self.assertTrue(c.settle(self.store, reserved))
+        self.assertEqual(c.ready(self.store, "worker"), {**grandchild, "state": "committed"})
+
+    def test_chain_retention_pins_both_seals_and_all_three_run_identities(self):
+        parent = self.running_parent()
+        child, seal = self.child(parent)
+        self.terminal(parent, seal)
+        write_json(self.store.root / "runs" / parent["source_run"] / "result.json", {
+            "run": parent["source_run"], "role": "worker", "snapshot": parent["snapshot"],
+            "status": "completed", "finished_at": "2020-01-01T00:00:01+00:00",
+            "finish": {"outcome": "continue", "summary": "yield", "state": "state"}})
+        with c.reservation(self.engine, self.project, "worker") as root:
+            self.assertEqual(c.identity(root), c.identity(parent))
+        # An existing third run directory must be pinned even before it is runnable.
+        write_json(self.store.root / "runs" / child["successor"] / "started.json", {
+            "run": child["successor"], "role": "worker", "snapshot": seal["id"],
+            "started_at": "2020-01-01T00:00:00+00:00"})
+        write_json(self.store.root / "runs" / child["successor"] / "result.json", {
+            "run": child["successor"], "role": "worker", "snapshot": seal["id"],
+            "status": "interrupted", "error": "interrupted", "finished_at": "2020-01-01T00:00:01+00:00"})
+        self.store.history_index = 1
+        _, later = self.seal(outcome="wait", role="reporter")
+        self.store.publish(later)
+        self.assertNotIn(parent["snapshot"], self.store._history_ids())
+        self.assertNotIn(seal["id"], self.store._history_ids())
+        planned = storage_runs.plan(self.project)
+        self.assertTrue(planned["complete"], planned)
+        self.assertEqual(planned["pinned_runs"], 3)
+        self.assertEqual(planned["components"], [])
+        self.assertEqual(audit(self.project)["snapshots"]["live"], 3)
+
+    def test_prepared_child_failure_cleanup_preserves_parent_and_exact_failure(self):
+        parent = self.running_parent()
+        child, seal = self.child(parent, commit=False)
+        directory = self.store.root / "runs" / child["source_run"]
+        error = {"run": child["source_run"], "role": "worker", "status": "interrupted",
+                 "error": "publication refused", "finished_at": now(),
+                 "publication": "not_published", "durability": "confirmed"}
+        write_json(directory / "error.json", error)
+        write_json(directory / "result.json", {**error, "snapshot": seal["id"],
+            "finish": {"outcome": "continue", "summary": "next yield", "state": "state"}})
+        original = c.pointer_at(self.store.root)
+        evidence = {p.name: p.read_bytes() for p in directory.iterdir()}
+        with patch.object(c, "publish_pointer", side_effect=OSError("before cleanup")):
+            with self.assertRaises(OSError):
+                c.reconcile_prepared(self.store, "worker")
+        self.assertEqual(c.pointer_at(self.store.root), original)
+        def after_commit(*args, **kwargs):
+            publish_pointer(*args, **kwargs)
+            raise OSError("after cleanup")
+        with patch.object(c, "publish_pointer", side_effect=after_commit):
+            with self.assertRaises(OSError):
+                c.reconcile_prepared(self.store, "worker")
+        restarted = Project(self.config, self.project.name).snapshots
+        self.assertFalse(c.reconcile_prepared(restarted, "worker"))
+        self.assertEqual([c.identity(r) for r in self.rows(restarted)], [c.identity(parent)])
+        self.assertEqual({p.name: p.read_bytes() for p in directory.iterdir()}, evidence)
+        with self.assertRaisesRegex(Denied, "Terminal failed source"):
+            self.prepare(child["source_run"], seal)
+        self.assertEqual(c.recover(restarted, parent)["status"], "interrupted")
+        self.assertEqual(self.rows(), [])
+        with self.assertRaisesRegex(Denied, "Terminal failed source"):
+            self.prepare(child["source_run"], seal)
+
+    def test_ambiguous_prepared_child_failure_stays_pinned_through_parent_recovery(self):
+        parent = self.running_parent()
+        child, seal = self.child(parent, commit=False)
+        directory = self.store.root / "runs" / child["source_run"]
+        write_json(directory / "result.json", {
+            "run": child["source_run"], "role": "worker", "status": "prepared",
+            "snapshot": seal["id"], "finished_at": now(),
+            "finish": {"outcome": "continue", "summary": "next yield", "state": "state"}})
+        self.assertFalse(c.reconcile_prepared(self.store, "worker"))
+        c.recover(self.store, parent)
+        self.assertEqual(c.pending(self.store, "worker"), child)
+        self.assertIsNone(c.ready(self.store, "worker"))
+        self.assertFalse(c.reconcile_prepared(self.store, "worker"))
+
+    def test_terminal_child_evidence_cannot_settle_a_nonroot_identity(self):
+        parent = self.running_parent()
+        child, seal = self.child(parent)
+        directory = self.store.root / "runs" / child["successor"]
+        write_json(directory / "started.json", {
+            "run": child["successor"], "role": "worker", "snapshot": seal["id"],
+            "started_at": "2020-01-01T00:00:00+00:00", "continuation": c.identity(child)})
+        write_json(directory / "result.json", {
+            "run": child["successor"], "role": "worker", "snapshot": seal["id"],
+            "status": "interrupted", "error": "interrupted", "finished_at": "2020-01-01T00:00:01+00:00",
+            "continuation": c.identity(child)})
+        self.reverse_rows()
+        original = c.pointer_at(self.store.root)
+        with self.assertRaisesRegex(Denied, "settlement binding"):
+            c.settle(self.store, child)
+        self.assertEqual(c.pointer_at(self.store.root), original)
+
+    def test_real_engine_repeated_host_preparations_settle_only_the_exact_parent(self):
+        original, _ = self.committed()
+        prepared = []
+        create = self.store.create
+        def host_prepare(*args, **kwargs):
+            # Test-only future-producer seam: prepare the retained Engine seal
+            # before publication. No ordinary continue is changed in production.
+            seal = create(*args, **kwargs)
+            if len(prepared) < 2:
+                prepared.append(c.prepare(self.store, role="worker", source_run=seal["run"],
+                                          snapshot=seal["id"]))
+            return seal
+        def work(context, *_):
+            context.handle("finish", {"outcome": "continue", "summary": "seal", "state": "state"})
+        driver = ScriptDriver(work)
+        engine = Engine(self.config, driver=driver)
+        with patch.object(self.store, "create", side_effect=host_prepare):
+            first = engine.run(self.project, "worker")
+            self.assertEqual(first["run"], original["successor"])
+            self.assertEqual(c.ready(self.store, "worker"), {**prepared[0], "state": "committed"})
+            second = engine.run(self.project, "worker")
+            self.assertEqual(second["run"], prepared[0]["successor"])
+            self.assertEqual(c.ready(self.store, "worker"), {**prepared[1], "state": "committed"})
+            third = engine.run(self.project, "worker")
+            self.assertEqual(third["run"], prepared[1]["successor"])
+        self.assertEqual(len(driver.calls), 3)
+        self.assertEqual(self.rows(), [])  # Last ordinary continue made no intent.
