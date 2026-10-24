@@ -79,6 +79,7 @@ prompt_snapshots = 6             # Recent anchored summaries offered to each wor
 retention_days = 31              # Operator-selected retention window (days) for budget day-files and decided proposals. 0 disables time-based reaping; this clock never expires runs, snapshots or permanent audit records.
 run_retention_days = 31        # Expire only complete, unreferenced run components (0 keeps indefinitely; 0–3650).
 automatic_prune_interval_seconds = 86400 # Opt-out cadence applying that run retention at safe execution boundaries (0 disables automatic runs, manual `mizu prune` stays; 0–2678400).
+automatic_smoke_retention_interval_seconds = 86400 # Opt-out cadence applying the shared smoke retention at safe execution boundaries (0 disables automatic sweeps, manual `mizu smoke-retention` stays; 0–2678400).
 event_log_compress_days = 7    # Compress bulky per-run engine logs (*-events.jsonl, diagnostics.txt) older than N days to .gz (0 disables).
 event_log_retention_days = 31   # Drop bulky per-run engine logs (raw and .gz) older than M days (0 disables); Lifecycle records follow run_retention_days, not this log clock.
 event_stream_bytes = 4194304  # Per-run engine event-stream retention in bytes (1 MiB-256 MiB); past-budget bytes are dropped with an explicit *-events-truncated.json marker while the run continues.

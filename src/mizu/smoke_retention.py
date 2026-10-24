@@ -13,10 +13,11 @@ import os
 import re
 import shutil
 import stat
+import time
 from pathlib import Path
 
-from .errors import Denied, LimitExceeded
-from .fs import canonical, digest, loads_finite, now, safe_read, sync_dir, write_json, identifier
+from .errors import Busy, Denied, LimitExceeded
+from .fs import canonical, digest, loads_finite, now, safe_read, safe_write, sync_dir, write_json, identifier
 from .smoke_refs import SMOKE_ID, shared_lock, validate_refs
 
 MAX_PROJECTS = 5000
@@ -613,51 +614,55 @@ def run(data: Path, *, apply=False, moment=None) -> dict:
     # Preview is advisory and strictly read-only, including lock inodes.
     # Apply always recomputes the complete plan under the global lock.
     with shared_lock(data) if apply else contextlib.nullcontext():
-        metadata = Metadata(data)
-        days = policy(data, metadata)
-        recovery = quarantine(data, metadata)
-        result = {"days": days, "apply": apply, "candidates": [], "pinned": [],
-                  "recovery": [p.name for p, _, _ in recovery], "retired": [], "recovered": []}
-        if days:
-            result.update(plan(data, days, moment, recovery, metadata))
-        audit_rows(data, metadata)
-        if not apply:
-            return bounded_result(result)
-        # Pending pairs participate in the scan above but never in this
-        # invocation's expiry candidates. Recovery does not bypass bad refs.
-        try:
-            for path, smoke_id, state in recovery:
-                if state == "pending":
-                    os.rename(path, data / "validation" / "pairs" / smoke_id)
-                    sync_dir(path.parent)
-                    sync_dir(data / "validation" / "pairs")
-                    action = "rollback"
-                else:
-                    _delete_committed(data, path, smoke_id)
-                    action = "recovered-deletion"
-                result["recovered"].append(smoke_id)
-                audit(data, smoke_id, action)
-            for smoke_id in result["candidates"]:
-                source = data / "validation" / "pairs" / smoke_id
-                qroot = data / "validation" / "quarantine"
-                qroot.mkdir(exist_ok=True, mode=0o700)
-                directory(qroot)
-                pending = qroot / f"{smoke_id}.pending"
-                committed = qroot / f"{smoke_id}.committed"
-                os.rename(source, pending)
-                sync_dir(source.parent)
-                sync_dir(qroot)
-                os.rename(pending, committed)  # irreversible deletion commit
-                sync_dir(qroot)
-                _delete_committed(data, committed, smoke_id)
-                result["retired"].append(smoke_id)
-                audit(data, smoke_id, "deleted")
-        except (OSError, Denied, LimitExceeded) as exc:
-            result.update(complete=False, error=type(exc).__name__, failed_id=smoke_id)
-            return bounded_result(result)
-        result["complete"] = True
-        return bounded_result(result)
+        return _run_locked(data, apply=apply, moment=moment)
 
+
+def _run_locked(data: Path, *, apply: bool, moment: dt.datetime) -> dict:
+    """Shared implementation; applying callers must already hold shared_lock."""
+    metadata = Metadata(data)
+    days = policy(data, metadata)
+    recovery = quarantine(data, metadata)
+    result = {"days": days, "apply": apply, "candidates": [], "pinned": [],
+              "recovery": [p.name for p, _, _ in recovery], "retired": [], "recovered": []}
+    if days:
+        result.update(plan(data, days, moment, recovery, metadata))
+    audit_rows(data, metadata)
+    if not apply:
+        return bounded_result(result)
+    # Pending pairs participate in the scan above but never in this
+    # invocation's expiry candidates. Recovery does not bypass bad refs.
+    try:
+        for path, smoke_id, state in recovery:
+            if state == "pending":
+                os.rename(path, data / "validation" / "pairs" / smoke_id)
+                sync_dir(path.parent)
+                sync_dir(data / "validation" / "pairs")
+                action = "rollback"
+            else:
+                _delete_committed(data, path, smoke_id)
+                action = "recovered-deletion"
+            result["recovered"].append(smoke_id)
+            audit(data, smoke_id, action)
+        for smoke_id in result["candidates"]:
+            source = data / "validation" / "pairs" / smoke_id
+            qroot = data / "validation" / "quarantine"
+            qroot.mkdir(exist_ok=True, mode=0o700)
+            directory(qroot)
+            pending = qroot / f"{smoke_id}.pending"
+            committed = qroot / f"{smoke_id}.committed"
+            os.rename(source, pending)
+            sync_dir(source.parent)
+            sync_dir(qroot)
+            os.rename(pending, committed)  # irreversible deletion commit
+            sync_dir(qroot)
+            _delete_committed(data, committed, smoke_id)
+            result["retired"].append(smoke_id)
+            audit(data, smoke_id, "deleted")
+    except (OSError, Denied, LimitExceeded) as exc:
+        result.update(complete=False, error=type(exc).__name__, failed_id=smoke_id)
+        return bounded_result(result)
+    result["complete"] = True
+    return bounded_result(result)
 
 def bounded_result(result):
     """Plans remain complete internally; CLI samples never exceed 100 IDs/list."""
@@ -667,6 +672,96 @@ def bounded_result(result):
         result[field + "_digest"] = digest(canonical(values))
         result[field] = values[:100]
     return result
+
+
+#: Default automatic shared-smoke cadence (seconds) when configuration
+#: omits the policy; the validated ``[limits]`` value normally applies.
+AUTOMATIC_SMOKE_RETENTION_INTERVAL_DEFAULT = 86400
+#: Maximum automatic shared-smoke cadence (31 days, mirroring run retention).
+AUTOMATIC_SMOKE_RETENTION_INTERVAL_MAX = 2678400
+#: Bound on the automatic shared-smoke due-state file; larger state is unavailable.
+_AUTOMATIC_SMOKE_RETENTION_STATE_BYTES = 4096
+
+
+def _automatic_smoke_due(data: Path, instant: int, interval: int) -> bool:
+    """Bounded, no-follow due-state read; malformed state refuses the sweep."""
+    parent = data / "maintenance"
+    if not directory(parent, optional=True):
+        return True
+    path = parent / "automatic-smoke-retention.json"
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return True
+    record = Metadata(data).read(path, _AUTOMATIC_SMOKE_RETENTION_STATE_BYTES)
+    valid = (type(record.get("checked_at")) is int
+             and 0 <= record["checked_at"] <= instant)
+    if record.get("status") == "completed":
+        valid = (valid and set(record) == {"checked_at", "status", "days", "retired_total", "recovered_total"}
+                 and type(record.get("days")) is int and 0 <= record["days"] <= MAX_DAYS
+                 and all(type(record.get(k)) is int and 0 <= record[k] <= MAX_PAIRS
+                         for k in ("retired_total", "recovered_total")))
+    elif record.get("status") == "refused":
+        valid = (valid and set(record) == {"checked_at", "status", "error"}
+                 and isinstance(record.get("error"), str)
+                 and re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", record["error"]) is not None)
+    else:
+        valid = False
+    if not valid:
+        raise Denied("Invalid automatic smoke retention record")
+    return instant - record["checked_at"] >= interval
+
+
+def maintain_automatic_smoke_retention(project) -> dict:
+    """Best-effort global cadence; call before any project execution locks.
+
+    The existing nonblocking shared lock serializes both cadence and sweep,
+    including reference writers and manual apply. No second lock/order exists.
+    Busy does not consume the cadence. Only a due attempt writes a bounded
+    result; refused plans consume the interval to avoid repeated costly scans.
+    Unsafe state refuses before expiry. Unexpected failures also stay local to
+    maintenance, never swallowing process cancellation (BaseException).
+    """
+    try:
+        interval = getattr(project.config.limits, "automatic_smoke_retention_interval_seconds",
+                           AUTOMATIC_SMOKE_RETENTION_INTERVAL_DEFAULT)
+        if type(interval) is not int or not 0 <= interval <= AUTOMATIC_SMOKE_RETENTION_INTERVAL_MAX:
+            return {"status": "unavailable"}
+        if interval == 0:
+            return {"status": "disabled"}
+        data = Path(project.config.data)
+        directory(data)  # Validate before any path-following lock/directory creation.
+        instant = int(time.time())
+        if not _automatic_smoke_due(data, instant, interval):
+            return {"status": "not-due"}
+        with shared_lock(data):
+            # Another project may have run since the fast check.
+            instant = int(time.time())
+            if not _automatic_smoke_due(data, instant, interval):
+                return {"status": "not-due"}
+            parent = data / "maintenance"
+            parent.mkdir(exist_ok=True, mode=0o700)
+            directory(parent)
+            result = {"checked_at": instant, "status": "refused"}
+            try:
+                outcome = _run_locked(data, apply=True, moment=dt.datetime.now(dt.timezone.utc))
+                if outcome.get("complete") is True:
+                    result.update(status="completed", days=outcome["days"],
+                                  retired_total=outcome["retired_total"],
+                                  recovered_total=outcome["recovered_total"])
+                else:
+                    result["error"] = outcome["error"]
+            except Busy:
+                return {"status": "busy"}
+            except Exception as exc:
+                result["error"] = type(exc).__name__[:64]
+            # Never follow linked parents/targets, including swaps after the due read.
+            safe_write(data, "maintenance/automatic-smoke-retention.json", canonical(result))
+            return result
+    except Busy:
+        return {"status": "busy"}
+    except Exception:
+        return {"status": "unavailable"}
 
 
 def validate_restored_refs(data: Path, root: Path):

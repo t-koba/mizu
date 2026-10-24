@@ -373,6 +373,7 @@ durable stores (see `docs/operations.md` and `docs/scheduling.md`).
 | `retention_days` | Daily budget-file retention and decided insight live-inbox window (default 31 days; 0 disables; 0–3,650). Current-revision terminal insights move permanently to `insight-archive.sqlite3` before inbox removal; bodies/evidence are not deleted. Ingest still reports removed live copies as `reaped`. `insight list` remains live-only; explicit `insight page --scope archive` enumerates bodies and validated legacy identity-only tombstones (`body_unavailable: true`); ID reads include archived bodies and explicitly deny missing bodies. Archive retention is permanent, with no expiry/deletion knob (see operations for one-time migration and retry behavior). This setting never deletes snapshots, whole run directories, decisions, or archived insight bodies; bounded per-run dispatch measurements use the separate `event_log_*` retention below |
 | `run_retention_days` | Completed, unreferenced per-project run-component retention (default 31 days; 0 keeps indefinitely; integer 0–3,650). Uses validated `started_at`, not mtime; whole connected components expire only when every member is terminal and strictly older than the window. See the retention contract below |
 | `automatic_prune_interval_seconds` | Opt-out cadence applying that run retention at safe execution boundaries (default 86,400 seconds / one day; 0 disables automatic runs while manual `mizu prune` stays; integer 0–2,678,400). Due checks run before a top-level execution acquires admission/execution locks, alongside workspace-cache maintenance; there is no background timer. On due the existing validated `prune(project, apply=True, keep_artifacts=0)` path runs, so count-based artifact deletion is never enabled implicitly and snapshots/objects/shared smoke bundles are untouched. Busy contention never consumes the cadence; incomplete scans and I/O failures never fail the requested run nor delete uncertain state. Latest bounded result is `maintenance/automatic-prune.json` |
+| `automatic_smoke_retention_interval_seconds` | Opt-out cadence applying the shared smoke retention at safe execution boundaries (default 86,400 seconds / one day; 0 disables automatic sweeps while manual `mizu smoke-retention` stays; integer 0–2,678,400). Due checks run before a top-level execution acquires admission/execution locks, alongside workspace-cache and run-retention maintenance; there is no background timer. On due the same validated implementation as `run(data, apply=True)` runs under the shared smoke lock, so only expired unpinned pairs retire and snapshots/objects stay untouched. Cadence state is global per `data_dir` (`maintenance/automatic-smoke-retention.json`) serialized with expiry under the existing nonblocking shared smoke lock, so at most one best-effort sweep runs due across projects. Busy contention never consumes the cadence; malformed due state returns `unavailable`; malformed/incomplete references refuse the whole plan without deleting uncertain state and without failing the requested run. Latest bounded result is `maintenance/automatic-smoke-retention.json` under `data_dir` |
 | `event_log_compress_days` | Compress per-run engine logs and bounded dispatch measurements (`*-events.jsonl`, `diagnostics.txt`, `dispatch-attempts.json`) at or beyond N days old to `.gz` (0 disables; 0–3,650; default 7) |
 | `event_log_retention_days` | Drop those raw/compressed logs and dispatch measurements at or beyond M days old (0 disables; 0–3,650; default 31). Lifecycle records are not candidates for this log clock; whole runs use `run_retention_days`. Snapshots, objects, sessions and permanent ledgers are never pruned |
 | `event_stream_bytes` | Per-run engine event-stream retention in bytes (1 MiB–256 MiB; default 4 MiB). Bytes past the budget are dropped from `*-events.jsonl` with an explicit `*-events-truncated.json` marker while parsing and the run continue, so diagnostic volume can never discard sealed work. The per-record transport bound stays fixed mechanism |
@@ -413,7 +414,7 @@ failure behavior. A valid finish seal remains separate from adapter settlement
 and all final integrity/verification/publication checks still apply.
 
 
-All limits are positive integers except `daily_requests`, `shared_daily_requests`, `max_failures`, `busy_retry_seconds`, `admission_wait_seconds`, `missing_finish_followups`, `safe_point_yield_quantum`, `free_disk_mb`, `retention_days`, `run_retention_days`, `automatic_prune_interval_seconds`, `event_log_compress_days`, `event_log_retention_days`, `session_max_tokens`, `session_max_age_seconds`, and adapter `diagnostic_bytes`, which may be zero. `missing_finish_counts_as_failure` and `drain_yield` are booleans. `session_max_cost_usd` is a number (integer or float) which may be zero.
+All limits are positive integers except `daily_requests`, `shared_daily_requests`, `max_failures`, `busy_retry_seconds`, `admission_wait_seconds`, `missing_finish_followups`, `safe_point_yield_quantum`, `free_disk_mb`, `retention_days`, `run_retention_days`, `automatic_prune_interval_seconds`, `automatic_smoke_retention_interval_seconds`, `event_log_compress_days`, `event_log_retention_days`, `session_max_tokens`, `session_max_age_seconds`, and adapter `diagnostic_bytes`, which may be zero. `missing_finish_counts_as_failure` and `drain_yield` are booleans. `session_max_cost_usd` is a number (integer or float) which may be zero.
 
 ### Operator-invoked run retention
 
@@ -521,6 +522,42 @@ recorded as `refused`/`unavailable` without deleting uncertain state and without
 failing the requested run. The latest bounded result is
 `maintenance/automatic-prune.json` (`checked_at` Unix seconds, `status`, and an
 `error` class on refusal). A later boundary retries when due.
+
+### Automatic shared smoke retention
+
+`[limits].automatic_smoke_retention_interval_seconds` (default 86,400; integer 0–2,678,400)
+schedules the same validated shared-smoke expiry without requiring pause. `0` disables
+automatic sweeps while manual `mizu smoke-retention` (preview, `--set-days`, `--apply`)
+stays available. The per-project `automatic_prune_interval_seconds` state must not drive
+this global sweep. A due check is attempted before a top-level role execution acquires
+admission/execution locks, alongside workspace-cache and run-retention maintenance; there
+is no background timer. On due the smoke-retention-owned `maintain_automatic_smoke_retention`
+uses the same reference-aware apply implementation as `run(data, apply=True)`, so expiry still fails closed on
+malformed, incomplete or uncertain reference state and snapshots/objects stay untouched.
+Serialization uses only the existing nonblocking shared
+`data_dir/locks/smoke-retention.lock` for both cadence and expiry (no second lock): busy contention returns `busy` without consuming the
+cadence. Malformed due state returns `unavailable`; a refused plan or I/O failure is
+recorded as `refused`/`unavailable` without deleting uncertain state and without failing
+the requested run. The latest bounded result is
+`data_dir/maintenance/automatic-smoke-retention.json` (`checked_at` Unix seconds, `status`,
+bounded `days`/`retired_total`/`recovered_total` on completion, and an `error` class on
+refusal). A refused plan consumes the interval to bound retry cost; busy does not.
+`disabled`, `not-due`, `busy` and `unavailable` are return-only statuses and leave cadence
+unchanged. State reads are limited to 4 KiB, reject duplicate/unknown fields and future
+or non-integer timestamps, and require either a `completed` record with integer `days`
+(0–36,500) and both counts (0–5,000), or a `refused` record with a bounded error-class
+name (1–64 characters, never an exception message). Unsafe linked directories, linked
+or special state files refuse before expiry; reads/writes use the no-follow safe-file
+primitives (POSIX component pinning; portable reparse/identity checks, not a claim of
+Windows TOCTOU pinning). Data and lock directories retain the shared-smoke owner's
+path validation and locking contract. State is atomically replaced only after an
+attempt, not an append-only audit. I/O failures can leave no new cadence result;
+the existing quarantine/recovery contract still governs interrupted expiry. Repair
+malformed state explicitly; maintenance never silently resets it. A later boundary
+retries when due; cancellation/process exit propagates normally. There is no background
+worker or separate cancellation/evidence stream. The one-day default bounds complete
+shared scans independently of the number of projects; per-project prune cadence would
+multiply those scans and is deliberately not reused.
 
 Sessions are durable audit evidence: `mizu storage` reports their counts/bytes and `mizu storage --apply` never reclaims them. `mizu storage --apply` removes only unreferenced snapshot manifests and orphan objects under quiescence; it refuses when the preview reports any skipped manifest (`snapshots.skipped`, including unreadable or over-1-MiB manifests), any skipped reference record (`reference_records_skipped`, covering present-but-unreadable, malformed, over-1-MiB, wrong-shape, or failed history/run/artifact/inbox/current-pointer scans), or any skipped work-item history (`work_item_events_skipped`), because reachability is then unknown. `reference_records_skipped` counts unique record/scan paths, not failed checks (the active generation is counted at most once). JSON `null` records, invalid non-null snapshot IDs, and malformed history names, entries, digests, or active endpoints are incomplete. Pointer and history reads share the 1 MiB bound and do not follow symlinks. Missing optional run records and an absent `artifacts/latest.json` pointer are normal and not counted; an artifact directory without `evidence.json` is incomplete. Usable valid IDs are still reported, but an incomplete scan never proves references are absent. The web cache is shared under `data_dir`; the invoking project's `cache_seconds` decides expiry and a concurrent fetch recreates a removed entry, so `prune --apply` is safe to retry. Snapshots reference workspace objects only, never run logs, so compressed/dropped logs are disposable projections absent from later backups by construction.
 `daily_requests` counts logical admissions, not dollar amounts; enable a hard provider spend cap/pause by default (alert-only alarms are not sufficient for unattended runs). Use `mizu status` and `mizu budget` for per-project and shared day counts in the configured `timezone`, and `mizu usage` for token statistics.

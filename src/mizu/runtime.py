@@ -4282,6 +4282,8 @@ class Engine:
         maintain(project)  # Before probes/admission take any execution locks.
         from .storage import maintain_automatic_prune
         maintain_automatic_prune(project)  # Due run retention; best-effort, never fails the run.
+        from .smoke_retention import maintain_automatic_smoke_retention
+        maintain_automatic_smoke_retention(project)  # Due shared-smoke sweep; best-effort, never fails the run.
         # Any top-level run services due recovery probes first — daemon,
         # one-shot, or smoke — so block recovery never depends on a resident
         # daemon for the sponsoring role or that role's execution mode. The

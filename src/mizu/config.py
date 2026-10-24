@@ -366,6 +366,12 @@ class Limits:
     #: run retention at safe execution boundaries; 0 disables automatic runs
     #: while manual ``mizu prune`` stays available (0–2678400; default 86400).
     automatic_prune_interval_seconds: int = 86400
+    #: Opt-out cadence (seconds) for automatic application of the shared
+    #: smoke retention at safe execution boundaries; 0 disables automatic
+    #: sweeps while manual ``mizu smoke-retention`` stays available
+    #: (0–2678400; default 86400). Per-project state must not drive
+    #: this global sweep; cadence lives under ``data_dir``.
+    automatic_smoke_retention_interval_seconds: int = 86400
     #: Operator-selected retention (days) for per-run diagnostics and dispatch
     #: measurements (``*-events.jsonl``, ``diagnostics.txt``, and
     #: ``dispatch-attempts.json``). Files older than
@@ -901,7 +907,7 @@ def load(file: Path) -> Config:
                      "delegate_wrap_up_requests": (0, 2),
                      "delegate_wrap_up_tools": (0, 4),
                      "insight_cursor_ttl_seconds": (60, 604800),
-                     "retention_days": (0, 3650), "run_retention_days": (0, 3650), "automatic_prune_interval_seconds": (0, 2678400), "pending_insights": (1, 1000),
+                     "retention_days": (0, 3650), "run_retention_days": (0, 3650), "automatic_prune_interval_seconds": (0, 2678400), "automatic_smoke_retention_interval_seconds": (0, 2678400), "pending_insights": (1, 1000),
                      "work_items_prompt": (1, 100), "decision_events_limit": (1, 100),
                      "work_item_events_limit": (1, 100),
                      "event_log_compress_days": (0, 3650), "event_log_retention_days": (0, 3650),

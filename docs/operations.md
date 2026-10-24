@@ -251,7 +251,24 @@ mizu smoke-retention --apply        # recompute under the global lock, then reti
 
 No project pause is needed. Apply is nonblocking on
 `data_dir/locks/smoke-retention.lock`; a busy lock refuses without changing
-pairs. Reference writers take this lock before their record-store lock (using
+pairs. A bounded automatic sweep also runs without pause: when
+`[limits].automatic_smoke_retention_interval_seconds` (default 86,400; 0 disables,
+0–2,678,400) is due, the next top-level role execution attempts one
+best-effort sweep using the same implementation as manual apply before it acquires admission/execution locks,
+alongside workspace-cache and run-retention maintenance. Cadence state is global per
+`data_dir` (`maintenance/automatic-smoke-retention.json`) serialized with expiry under
+the existing nonblocking shared smoke lock, so at most one sweep runs due across projects and
+busy contention never consumes the cadence. The automatic path changes no policy,
+takes no project locks, never fails the requested run, never deletes on malformed,
+incomplete or uncertain reference state, and leaves snapshots/objects untouched; the
+latest bounded result is `data_dir/maintenance/automatic-smoke-retention.json`. Manual
+preview, `--set-days` and `--apply` are unchanged. Refused plans consume the interval;
+busy does not. Malformed/unsafe cadence state returns `unavailable` without a sweep
+or automatic repair; inspect and repair it explicitly. The fixed-size result stores
+only timestamp, status, completion counts/policy or an error class, never error text.
+A write failure can leave no new result; normal quarantine recovery still applies to
+an interrupted sweep. There is no background timer: the next safe boundary retries
+when due. Reference writers take this lock before their record-store lock (using
 the existing bounded writer wait); provider execution never holds it. Preview
 neither creates lock files nor recovers quarantine and is advisory: apply never
 trusts a preview. Each output list is sampled to 100 IDs with its full count
