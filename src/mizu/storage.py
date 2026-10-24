@@ -22,7 +22,7 @@ from pathlib import Path
 
 from .admission import role_exclusions
 from .config import keys, strings
-from .errors import Denied, LimitExceeded
+from .errors import Busy, Denied, LimitExceeded
 from .fs import (DIGEST, PREVIEW_BYTES, atomic_write, canonical, digest,
                  identifier, lock, mkdir, now, read_json, safe_read,
                  sync_dir, write_json, relative_parts)
@@ -538,6 +538,76 @@ def prune(project: Project, *, apply: bool = False, keep_artifacts: int = DEFAUL
                         "web-cache entries expired past cache_seconds are disposable projections; "
                         "their evidence remains in snapshots and retained run records where available. "
                         "Sessions are durable audit evidence and are accounted, never reclaimed."}
+
+
+#: Default automatic run-retention cadence (seconds) when configuration
+#: omits the policy; the validated `[limits]` value normally applies.
+AUTOMATIC_PRUNE_INTERVAL_DEFAULT = 86400
+#: Maximum automatic run-retention cadence (31 days, mirroring workspace-cache).
+AUTOMATIC_PRUNE_INTERVAL_MAX = 2678400
+#: Bound on the automatic-prune due-state file; larger state is unavailable.
+_AUTOMATIC_PRUNE_STATE_BYTES = 4096
+
+
+def _automatic_prune_due(path: Path, instant: int, interval: int) -> bool:
+    """True when automatic prune is due; malformed state refuses the check."""
+    missing: object = object()
+    record = read_json(path, missing, max_bytes=_AUTOMATIC_PRUNE_STATE_BYTES)
+    if record is missing:
+        return True
+    if (not isinstance(record, dict) or type(record.get("checked_at")) is not int
+            or not 0 <= record["checked_at"] <= instant):
+        raise Denied("Invalid automatic prune maintenance record")
+    return instant - record["checked_at"] >= interval
+
+
+def maintain_automatic_prune(project: Project) -> dict:
+    """Attempt one due automatic run-retention sweep, or skip. Never fail the caller.
+
+    Storage-owned counterpart to manual ``prune``: on due, applies the existing
+    validated ``prune(project, apply=True, keep_artifacts=0)`` under its
+    nonblocking no-pause exclusions, so count-based artifact deletion is never
+    enabled implicitly and snapshots/objects/shared smoke bundles are untouched.
+    The latest bounded result is retained in
+    ``maintenance/automatic-prune.json``. Busy acquisition does not consume the
+    cadence. Incomplete scans, malformed references and I/O failures are
+    recorded as ``refused``/``unavailable`` without deleting uncertain state
+    and without failing the requested run. Call only before the caller acquires
+    its own admission/execution locks.
+    """
+    try:
+        limits = getattr(project.config, "limits", None)
+        interval = getattr(limits, "automatic_prune_interval_seconds",
+                           AUTOMATIC_PRUNE_INTERVAL_DEFAULT)
+    except Exception:
+        return {"status": "unavailable"}
+    if type(interval) is not int or not 0 <= interval <= AUTOMATIC_PRUNE_INTERVAL_MAX:
+        return {"status": "unavailable"}
+    if interval == 0:
+        return {"status": "disabled"}
+    state = project.root / "maintenance/automatic-prune.json"
+    instant = int(time.time())
+    try:
+        if not _automatic_prune_due(state, instant, interval):
+            return {"status": "not-due"}
+        with lock(project.root / "locks/automatic-prune.lock", blocking=False):
+            if not _automatic_prune_due(state, instant, interval):
+                return {"status": "not-due"}
+            result: dict = {"checked_at": instant, "status": "refused"}
+            try:
+                prune(project, apply=True, keep_artifacts=0)
+                result["status"] = "pruned"
+            except Busy:
+                return {"status": "busy"}
+            except (Denied, LimitExceeded, OSError, ValueError) as exc:
+                result["status"] = "refused"
+                result["error"] = type(exc).__name__
+            write_json(state, result)
+            return result
+    except Busy:
+        return {"status": "busy"}
+    except (Denied, LimitExceeded, OSError, ValueError):
+        return {"status": "unavailable"}
 
 
 #: Reference-aware storage accounting bounds (fixed mechanism, not knobs):

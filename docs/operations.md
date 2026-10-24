@@ -211,7 +211,14 @@ it skips busy locks without pausing/draining and retains its latest result in
 
 Prune does not require pause, but refuses a busy workspace, configured/existing
 role, editor-ingest or insights exclusion. Backup and `storage --apply` still
-require pause. `[limits].run_retention_days` defaults to 31 (integer 0–3650;
+require pause. `[limits].automatic_prune_interval_seconds` (default 86,400; 0 disables
+automatic runs, manual `mizu prune` stays) applies that same validated prune
+(`keep_artifacts=0`, so no count-based artifact deletion) at safe execution
+boundaries before admission/execution locks, alongside workspace-cache maintenance.
+There is no background timer. Busy contention never consumes the cadence; an
+incomplete scan or I/O failure never fails the requested run nor deletes uncertain
+state. The latest bounded result is `maintenance/automatic-prune.json`; snapshots,
+objects and shared smoke bundles are never automatic candidates. `[limits].run_retention_days` defaults to 31 (integer 0–3650;
 0 keeps indefinitely). Only terminal, valid, old and unreferenced connected
 run components expire. Current inbox/evidence, active-role, selector-wait and
 blocked WorkItem target-decision references pin entire parent/child components.
