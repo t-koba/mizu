@@ -30,6 +30,9 @@ operator = "none"
 vcs = "none"
 
 [limits]
+# Provisional project cap on open/doing/blocked work; 0 disables.
+# Existing over-limit items are preserved; only new seeds are refused.
+open_work_items = 100
 daily_requests = 0                 # Fail closed. Set a deliberate positive limit.
 shared_daily_requests = 0          # Optional shared total across projects sharing data_dir (0 disables, max 100,000).
 requests_per_run = 24

@@ -17,6 +17,21 @@ class Denied(MizuError):
     code = 77
 
 
+class OpenWorkItemsFull(Denied):
+    """A seed transaction would exceed the configured project open-work cap.
+
+    Not a run/spend limit: the caller can decide without creating new work.
+    No decision or seed has been committed by the refused transaction.
+    """
+    def __init__(self, *, current_count: int, limit: int, requested_delta: int):
+        self.current_count, self.limit, self.requested_delta = current_count, limit, requested_delta
+        self.evidence = {"type": type(self).__name__, "current_count": current_count,
+                         "limit": limit, "requested_delta": requested_delta}
+        super().__init__(f"OpenWorkItemsFull: current_count={current_count}, limit={limit}, "
+                         f"requested_delta={requested_delta}; no decision or seed committed. "
+                         "Defer, reject, or accept with no new item/merge into existing work.")
+
+
 class SnapshotConflict(MizuError):
     """Publication lost a parent compare-and-swap; recapture or merge before retry."""
     code = 75

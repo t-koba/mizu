@@ -587,3 +587,7 @@ class SharedSeedCreationTests(Fixture):
                 with self.assertRaises(Denied):
                     self.decide(proposal, work_item_intent="create")
                 self.assertEqual(pointer.read_bytes(), before)
+                # The next subtest creates new work. Capacity checks replay
+                # all committed chains, so restore this deliberately corrupt
+                # fixture rather than poisoning that unrelated transaction.
+                (directory / filename).unlink()

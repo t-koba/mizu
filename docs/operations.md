@@ -783,3 +783,23 @@ On stale CAS, re-read; on missing/corrupt evidence, stop and repair through
 operator evidence recovery rather than editing the ledger or snapshot. Retry
 after cancellation by reading the current revision first: an append may already
 have committed. These operations publish nothing and schedule no work.
+
+
+## Open-work capacity
+
+`[limits].open_work_items` caps new nonterminal WorkItems per project (provisional
+default **100**, **0 disables**). Open, doing, and blocked items count; done and
+dropped do not. Lowering the cap below the current backlog preserves all items
+and their lifecycle operations, but refuses new seeds until enough work closes.
+The cap is independent of prompt page size, FIFO admission, and producer polling.
+
+On `OpenWorkItemsFull`, inspect the reported `current_count`, `limit`, and
+`requested_delta`; the refused decision/create/reconcile committed no new work.
+Use the paginated `work_items_read` view to review existing work. Defer or reject
+the input, or accept with `work_item_intent="none"` and merge its scope into an
+existing item through the usual CAS transition. Multi-task decisions are
+all-or-nothing: do not assume any subset committed. An exact retry of an already
+committed request is safe even at capacity. Completing or dropping items releases
+capacity immediately for subsequent transactions; no separate quota reset is
+needed. This cap does not hold producers or add capacity status fields; those
+remain separate backpressure work.

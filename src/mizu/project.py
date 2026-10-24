@@ -138,6 +138,7 @@ class Project:
             raise ConfigError("Project roles must refer to configured roles")
         self.snapshots = open_store(self.root, config, create_dirs=not read_only)
         self.insights = Insights(self.root, retention_days=config.limits.retention_days,
+                                 open_work_items=config.limits.open_work_items,
                                  cursor_ttl_seconds=config.limits.insight_cursor_ttl_seconds,
                                  work_item_intent_default=config.insight_decisions["work_item_intent_default"],
                                  work_item_intent_by_source=config.insight_decisions["work_item_intent_by_source"])

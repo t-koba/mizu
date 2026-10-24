@@ -292,6 +292,26 @@ required). Operator tooling that concatenates configs
 
 ## Limits
 
+`open_work_items = 100` is a provisional congestion bound, not a measured
+optimum; tune it to project capacity or set it to 0 to disable. It is independent
+of prompt pagination and producer admission. The authoritative
+count is replayed from WorkItems seeds and current revision chains under the
+project insights record lock; there is no separate quota ledger. Multi-task
+manifests check their entire new-seed delta or commit nothing. Reducing the
+configured cap never deletes, drops, or changes existing items.
+
+A capacity refusal raises typed `OpenWorkItemsFull` (a `Denied`, not a run/spend
+limit), with `current_count`, `limit`, and `requested_delta` attributes and an
+`evidence` object containing those fields and `type`. Tool error text names the
+type and all three values. It commits neither a decision nor a seed and leaves
+the input unchanged. The writer must defer, reject, or accept with
+`work_item_intent="none"` and merge into existing work instead of creating more.
+Exact committed replays succeed even when full; conflicting retries still fail.
+Other storage/validation failures remain fail-closed. No automatic retry or
+background reservation is made; retry a refused request after capacity returns
+(or after an operator changes configuration). Tool calls retain their normal
+request/tool accounting. Terminal transitions remain available at capacity.
+
 | Key | Scope and description |
 |---|---|
 | `daily_requests` | Per-project provider admissions per day in the configured `timezone` (UTC default; 0 disables, max 100,000). Day-files older than `retention_days` are reaped. Pi counts logical model requests, Codex counts turns, Claude counts queries |
@@ -302,6 +322,7 @@ required). Operator tooling that concatenates configs
 | `run_seconds` | Whole-unit monotonic wall deadline, default `1200`, integer 1–1,073,741,824 seconds. `roles.<name>.run_seconds` inherits when unset; integer 0 disables only that role's whole-unit wall, and positive integers up to the same maximum override it. Resolved once per Context, never renewed by selector fallback |
 | `model_request_seconds` | Positive finite logical-request deadline, default `1200`, integer 1–1,073,741,824 seconds; no role override. Host-enforced independently of the whole-unit wall. Pi/pi-durable: each admitted `model_request`; Claude: enclosing query; Codex: enclosing turn, not every opaque provider HTTP subcall |
 | `command_seconds` | Deadline for each individual container command (unchanged by role wall overrides) |
+| `open_work_items` | Per-project cap on newly seeded nonterminal work (open/doing/blocked); integer 0–1,073,741,824, provisional default 100; 0 disables. Existing over-limit items are preserved. Done/dropped do not count. Checked atomically with direct creation, accept/modify single or multi-task decisions, and legacy reconciliation to open. Exact committed retries and zero-seed decisions remain allowed |
 | `work_items_prompt` | Maximum open work-item rows included in each full and delta prompt (1–100; default 20). Overflow and legacy-unseeded coverage are reported explicitly; the tool page limit is separately available through `work_items_read` |
 | `idle_seconds`, `cooldown_seconds` | Daemon sleep between poll iterations and pause between work units. A writable role may override the cooldown with `roles.<name>.cooldown_seconds` (1–1,073,741,824; unset keeps the project value); read-only cadence stays on `idle_seconds` |
 | `default_wait_seconds`, `maximum_wait_seconds` | Default and maximum model-selected wait times (1–86,400s) |

@@ -25,7 +25,7 @@ from pathlib import Path
 from .smoke_refs import record_lock, validate_refs, require_pairs
 from . import insight_archive
 from .work_item_waits import stored_wait
-from .errors import Denied, LimitExceeded
+from .errors import Denied, LimitExceeded, OpenWorkItemsFull
 from .fs import (DIGEST, PREVIEW_BYTES, canonical, digest, identifier, lock, now, safe_read,
                  sync_dir, text_preview, write_json)
 from .insights import _decision_key, _validate_keyed_substantive_event
@@ -151,6 +151,30 @@ class WorkItems:
         self.vcs = vcs or {}
         self.effective_verification = effective_verification
 
+    def require_open_capacity(self, requested_delta: int) -> None:
+        """Check a whole new-seed transaction while holding insights.lock.
+
+        WorkItems is the only count source: replay committed seeds and CAS
+        histories, including legacy open resolutions. No quota/index state.
+        Replays must return before this check; zero-seed decisions and a
+        disabled cap do not scan. Existing over-limit work stays unchanged.
+        """
+        limit = self.insights.open_work_items
+        if not requested_delta or not limit:
+            return
+        current_count = 0
+        for event_id, event in self._iter_item_events(recover=True):
+            kind, seed = self._seed_for_event(event_id, event, readonly=False)
+            if kind != "seed":
+                continue
+            revisions = self._history_revisions(seed["id"], recover=True)
+            item = self._get(seed["id"], seed_event=event, history_revisions=revisions)
+            if item["status"] in OPEN_STATUS_ORDER:
+                current_count += 1
+        if current_count + requested_delta > limit:
+            raise OpenWorkItemsFull(current_count=current_count, limit=limit,
+                                    requested_delta=requested_delta)
+
     def _read(self, name: str) -> dict:
         try:
             value = json.loads(safe_read(self.root, name, PREVIEW_BYTES),
@@ -219,7 +243,9 @@ class WorkItems:
         numeric revision history, direct/legacy record, unknown entry, or
         unsafe/ambiguous temporary still fails closed. This does not commit:
         direct callers commit create.json; decisions embed the seed in their
-        atomic event. Existing commits must use validate_seed_replay instead.
+        atomic event. The committing caller checks capacity for the entire
+        transaction; this preflight does not reserve slots. Existing commits
+        must use validate_seed_replay instead.
         """
         if smoke_refs is not None:
             validate_refs(smoke_refs)
@@ -348,6 +374,7 @@ class WorkItems:
                       "work_item": seed}
             if seed.get("smoke_refs") != smoke_refs and origin is not None and "insight_id" in origin:
                 record["requested_smoke_refs"] = smoke_refs
+            self.require_open_capacity(1)
             directory.mkdir(parents=True, exist_ok=True)
             write_json(directory / "create.json", record, exclusive=True)
             return {"record": record, "created": True}
@@ -565,6 +592,7 @@ class WorkItems:
                 return {"record": existing, "created": False}
             if len(canonical(record)) > PREVIEW_BYTES:
                 raise LimitExceeded("Legacy reconciliation exceeds byte bound")
+            self.require_open_capacity(1 if outcome == "open" else 0)
             write_json(self.root / "work-items" / f"wi_{event_id}" / "legacy.json",
                        record, exclusive=True)
             return {"record": record, "created": True}
