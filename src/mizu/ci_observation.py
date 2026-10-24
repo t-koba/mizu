@@ -1,7 +1,8 @@
 """Read-only validation and projection of cached CI observations.
 
 This module owns bounded normalization and presentation of the shared CI poll
-cache; polling and wake policy remain in runtime.
+cache. Status polling lives in ``ci_polling``; per-role wake records and due
+policy live in ``ci_wake``.
 """
 from __future__ import annotations
 
@@ -10,7 +11,8 @@ from .fs import read_json
 
 #: Shared per-project poll state filename (timestamps, cursors, bounded CI
 #: facts). Runtime persists it; this module only reads it. Single source so
-#: the read projection and the poll writer cannot disagree on the filename.
+#: the read projection and runtime poll-state persister cannot disagree on the
+#: filename; ``ci_polling`` only updates the bounded CI fields in memory.
 POLL_STATE_FILE = "vcs-poll.json"
 
 #: Fixed bound for the shared current-CI-failure fact (branches x checks).
