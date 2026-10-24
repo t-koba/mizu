@@ -1,6 +1,7 @@
 import dataclasses
 import threading
 import time
+from pathlib import Path
 from unittest.mock import patch
 from support import Fixture
 from mizu import check_jobs
@@ -86,6 +87,58 @@ class JobTests(Fixture):
         with lock(self.config.data / 'check-slots/0.lock'), lock(self.config.data / 'check-slots/1.lock'):
             self.assertEqual(self.run_job()['status'], 'busy')
         self.assertFalse(FakeSandbox.calls)
+    def test_slot_fault_releases_only_the_faulted_slot_lock(self):
+        self.config = dataclasses.replace(self.config,
+            exclude=(*self.config.exclude, 'target'),
+            limits=dataclasses.replace(self.config.limits, parallel_checks=2),
+            sandbox=dataclasses.replace(self.config.sandbox, check_cache_paths=('target',)))
+        self.project.config = self.config
+        self.project.snapshots.excludes = self.config.exclude
+        ctx, job = self.submit()
+        fault = self.config.data / 'check-slots/0.fault.json'
+        locks = {
+            'owner': check_jobs.root(self.project) / job['id'] / 'owner.lock',
+            'cache': self.project.root / 'locks/check-cache.lock',
+            'slot0': self.config.data / 'check-slots/0.lock',
+            'slot1': self.config.data / 'check-slots/1.lock',
+            'exclusion0': check_slot_exclusion(self.project.root, 0),
+            'exclusion1': check_slot_exclusion(self.project.root, 1),
+        }
+        exists = Path.exists
+        fault_checks = []
+
+        def fault_exists(path):
+            if path != fault:
+                return exists(path)
+            # Inject the race synchronously, between the two fault probes.
+            fault_checks.append(held(locks['slot0']))
+            if len(fault_checks) == 1:
+                self.assertFalse(exists(fault))
+                return False
+            self.assertEqual(len(fault_checks), 2)
+            self.assertTrue(held(locks['slot0']))
+            write_json(fault, {'job': job['id'], 'error': 'Synthetic slot fault'})
+            return True
+
+        class Inspecting(FakeSandbox):
+            def execute(inner, workspace, script, **kwargs):
+                for name, path in locks.items():
+                    with self.subTest(during_execution=name):
+                        self.assertEqual(held(path), name not in ('slot0', 'exclusion0'))
+                return super().execute(workspace, script, **kwargs)
+
+        with patch.object(Path, 'exists', fault_exists):
+            result = check_jobs.run_one(self.project, threading.Event(), sandbox_factory=Inspecting)
+        self.assertEqual(fault_checks, [False, True])
+        self.assertEqual(result['id'], job['id'])
+        self.assertEqual(result['status'], 'completed')
+        self.assertTrue(result['passed'])
+        self.assertTrue(FakeSandbox.calls)
+        self.assertTrue(fault.exists())
+        for name, path in locks.items():
+            with self.subTest(after_completion=name):
+                self.assertFalse(held(path))
+
     def test_pending_response_exposes_owned_slot_releasing_continuation(self):
         ctx, job = self.submit()
         self.assertFalse(job['accepted_for_current_source'])
