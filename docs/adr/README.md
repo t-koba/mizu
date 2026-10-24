@@ -764,3 +764,75 @@ delivery and the stronger independently retained acceptance proof; embedded
 verification alone cannot correct it. The dropped revision remains unchanged.
 Done cannot reopen, and dropped cannot return to open/doing/blocked. This is an
 append-only correction mechanism, not a reset or rewriting of terminal history.
+
+## ADR-051 — Shared smoke retention has one data-dir owner and typed pins
+
+`smoke.live` writes its JSON report and moved project beneath the shared
+`data_dir/validation`; each managed project's Insight and WorkItem records live
+under a separate `data_dir/projects/<name>`. The current producer has no typed
+smoke-artifact reference protocol, and a report path or identifier in prose
+cannot establish whether an artifact is still needed. A per-project setting
+cannot safely govern this shared root, and neither free-text parsing nor
+confusing smoke IDs with Mizu/VCS run IDs is permitted. Current flat smoke
+outputs therefore remain unchanged and are not retention candidates until the
+shared reference contract is implemented.
+
+The policy owner is the shared `data_dir`, not any project: a single
+`validation/retention-policy.json` controls the shared smoke lifecycle across
+all projects and all configurations that use that data directory. Its absent
+value defaults to 31 days; `0` keeps smoke evidence indefinitely. A project-free `mizu smoke-retention` operator command is the only way to
+change this data-dir policy; project settings and per-project overrides cannot
+compete with it.
+
+New smoke bundles use a full 128-bit ID and one directory under
+`validation/pairs/<id>/`, with a versioned manifest, report and (when the
+producer reached that stage) project evidence. The manifest binds the ID,
+terminal result, completion time and member identities; the producer stages a
+complete bundle and publishes it by same-filesystem directory rename. CLI
+results expose the pair ID and its member paths. The legacy flat
+`smoke-<16 hex>.json` / `.project` outputs have no typed reference provenance:
+they are preserved and never automatically migrated or deleted. This avoids
+claiming that no historical text citation exists when none can be discovered
+without parsing prose.
+
+Supported live references are explicit typed `smoke_refs` on current Insight
+evidence and active WorkItem/wait records, each carrying the exact smoke ID
+and its project/owner identity (an Insight reference also binds its revision).
+An open or deferred current Insight, or a nonterminal WorkItem, keeps its pair;
+a terminal owner leaves its audit ID in permanent history but no longer pins
+the full bundle, like an expired run ID. A blocked wait that needs the same
+smoke evidence must carry its own typed reference. All supported APIs that add
+or change these fields participate in retention coordination. Free-text
+citations, external copies, and provider run IDs are not pins; users attach a
+typed reference when they require durable access.
+
+The bounded collector enumerates every safe project root and every
+reference-bearing record, plus complete pair manifests. Any unsafe link,
+malformed or unreadable reference store, missing referenced project/pair,
+unknown schema, or bound exhaustion makes the global plan incomplete and
+refuses all deletion. Initial fixed bounds are 5,000 project roots, 5,000
+pairs, 20,000 live references and 64 MiB of reference/manifest metadata; pair
+payload bytes are not read into the metadata budget. Only complete terminal
+bundles with valid timezone-aware completion times strictly older than the
+configured window are candidates. Future, missing, intermediate, unknown or
+contradictory evidence is preserved. With `0`, no new expiry scan runs, but
+recognized quarantine recovery remains available.
+
+Pair publication, typed-reference changes and retirement share the
+nonblocking `data_dir/locks/smoke-retention.lock`; reference writers acquire it
+before the record-store lock they mutate. Retention never acquires workspace
+or role-execution locks, avoiding a cycle with live writers. The live provider
+call never holds this global lock. Prune needs no project pause, defaults to
+a bounded dry-run, and recomputes its plan under the lock for `--apply`; busy
+or incomplete scans do nothing. Each whole pair directory is atomically renamed into same-filesystem
+quarantine, with pre-commit rollback and committed-deletion recovery plus a
+bounded maintenance audit. Pair retirement is atomic; the whole batch is not,
+so partial I/O failure is reported and later pairs remain untouched.
+
+Synthetic regressions cover cross-project pins, current versus terminal
+owners, exact Insight revisions and waits, malformed/missing/oversized/link
+records, project/pair/reference overflows, age boundaries and zero, lock
+contention, default dry-run immutability, pair identity, and both quarantine
+recovery states. This ADR defines the implementation boundary only; it does
+not change today's smoke output or retention behavior, and it does not alter
+per-project run, snapshot, object, scheduling or receipt policy.

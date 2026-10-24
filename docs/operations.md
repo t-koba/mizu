@@ -222,7 +222,8 @@ recorded under `maintenance/`. Interrupted quarantine staging is restored before
 the next apply rescan; committed quarantine deletion resumes instead. Dry-run
 only reports leftovers. See [the retention contract](configuration.md#operator-invoked-run-retention)
 for bounds, exact typed fields and interruption semantics. Shared smoke evidence
-is not pruned.
+is not pruned; the separate, not-yet-implemented data-dir policy and typed-pin
+design is recorded in ADR-051.
 
 `--keep-artifacts N` は最新の成果物を含め N 件を保持します。`[web] cache_seconds` を過ぎた共有 web-cache（`data_dir/web-cache/*.json`）の期限切れエントリも候補となり、次回 fetch で再取得されるため削除は安全に再試行できます。セッション（`sessions/`）は監査証跡として保持され、削除対象になりません（`mizu storage` で件数・バイト数を報告）。削除ログは `maintenance/prune-*.json` に記録され、バックアップ対象となります。
 
