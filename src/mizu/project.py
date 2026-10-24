@@ -139,6 +139,7 @@ class Project:
         self.snapshots = open_store(self.root, config, create_dirs=not read_only)
         self.insights = Insights(self.root, retention_days=config.limits.retention_days,
                                  open_work_items=config.limits.open_work_items,
+                                 producer_inputs_per_source=config.limits.producer_inputs_per_source,
                                  cursor_ttl_seconds=config.limits.insight_cursor_ttl_seconds,
                                  work_item_intent_default=config.insight_decisions["work_item_intent_default"],
                                  work_item_intent_by_source=config.insight_decisions["work_item_intent_by_source"])
@@ -201,6 +202,85 @@ class Project:
         from .acceptance import effective
         return effective(self, snapshot)
 
+    def backpressure(self) -> dict:
+        """Report configured producer/open-work congestion and current load.
+
+        Both configured limits, the authoritative open/doing/blocked count,
+        per-producer unresolved live input counts (undecided plus deferred;
+        resolved and archive-only history excluded), and the currently held
+        producers with their hold reasons. Sources are generic role names; writable
+        roles (the project writer) and operator/vcs/editor channels are never
+        producers. Counts come only
+        from the current project's Insights live inbox and WorkItems ledger;
+        no private or ignored state is read. Both metrics are attempted
+        even with disabled bounds. An unreadable metric reports ``None``
+        and ``load_ok`` False, but holds admission only if its limit is
+        enabled. Invalid limits also hold fail-closed.
+        """
+        from .scheduling import ProducerFacts, evaluate_producer
+
+        def _checked_limit(name):
+            value = getattr(self.insights, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise Denied(f"Invalid {name}")
+            if not 0 <= value <= 1073741824:
+                raise Denied(f"Invalid {name}")
+            return value
+
+        def _raw_limit(name):
+            try:
+                return getattr(self.insights, name)
+            except Exception:
+                return None
+
+        producers = []
+        try:
+            for name in self.roles:
+                role = self.config.roles.get(name)
+                if (role is not None and getattr(role, "workspace", None) != "write"
+                        and "submit_insight" in set(getattr(role, "capabilities", ()) or ())):
+                    producers.append(name)
+            producers.sort()
+        except Exception:
+            producers = []
+        limits_ok = True
+        try:
+            per_source_limit = _checked_limit("producer_inputs_per_source")
+            open_limit = _checked_limit("open_work_items")
+        except Exception:
+            limits_ok = False
+            per_source_limit = _raw_limit("producer_inputs_per_source")
+            open_limit = _raw_limit("open_work_items")
+        counts: dict = {}
+        open_count = None
+        counts_ok = open_ok = True
+        try:
+            # One inbox scan for all configured producers, even when disabled.
+            counts = dict(self.insights.unresolved_counts(producers)) if producers else {}
+        except Exception:
+            counts_ok = False
+        try:
+            open_count = self.work_items.count_open_readonly()
+        except Exception:
+            open_ok = False
+        # Status readability is independent of the metrics admission needs.
+        admission_load_ok = (limits_ok and (not per_source_limit or counts_ok)
+                             and (not open_limit or open_ok))
+        held = []
+        for name in producers:
+            decision = evaluate_producer(ProducerFacts(
+                is_producer=True, per_source_limit=per_source_limit,
+                open_work_limit=open_limit, source_pending=counts.get(name, 0),
+                open_count=open_count or 0, load_ok=admission_load_ok))
+            if decision.held:
+                held.append({"source": name, "reasons": list(decision.reasons),
+                             "pending": counts.get(name)})
+        return {"limits": {"producer_inputs_per_source": per_source_limit,
+                           "open_work_items": open_limit},
+                "open_work_count": open_count,
+                "producer_inputs": [{"source": name, "pending": counts.get(name)} for name in producers],
+                "held": held, "load_ok": limits_ok and counts_ok and open_ok}
+
     def status(self) -> dict:
         from .admission import waiting as admission_waiting
         from .check_jobs import deferrals
@@ -249,6 +329,7 @@ class Project:
                 # never admitted.
                 "admission": admission_waiting(self.config, self.name),
                 "selection": project_status(self.config, self),
+                "backpressure": self.backpressure(),
                 "health": {p.stem: read_json(p) for p in (self.root / "health").glob("*.json") if not p.is_symlink()},
                 "active": {p.stem: read_json(p) for p in (self.root / "active").glob("*.json") if not p.is_symlink()},
                 "pending_insights": self.insights.list(limit=self.config.limits.pending_insights),

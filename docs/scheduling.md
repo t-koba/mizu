@@ -474,6 +474,28 @@ Daemon ticks and
 scheduled runs likewise recheck their inputs (`src/mizu/services.py` and
 `docs/configuration.md` terminal-subscription section).
 
+## Producer admission
+
+Producer admission (`src/mizu/scheduling.py` `ProducerFacts` /
+`evaluate_producer`, `src/mizu/runtime.py` `producer_hold`) holds only
+configured non-writer project roles that carry `submit_insight` (the writer
+can still resolve, merge, defer, or reject input at capacity), before any model
+or run-slot use, when their role-name source's unresolved live input count
+(undecided plus deferred; resolved and archive-only history excluded) reaches
+`[limits].producer_inputs_per_source` or the authoritative WorkItems
+open/doing/blocked count reaches `[limits].open_work_items`. It applies to
+direct, scheduled, event-triggered, and daemon admission: `Engine.run` checks
+before FIFO slot admission, and `should_run` vetoes an otherwise-ready daemon
+iteration. A held attempt returns `skipped: producer-held`, claims no run
+directory, slot, or lock, and acknowledges no event or cursor, so pending
+decision, terminal-work-item, wait, CI, and operator inputs stay durable. It
+fails closed when the load cannot be read; a running unit may finish. Release
+follows the wake-semantics default: no duplicate queue or implicit schedule
+is added, so a held producer resumes only through an existing schedule tick,
+interval/calendar firing, event trigger with pending input, or daemon
+readiness re-evaluation, with repeated state-based triggers coalescing
+through the existing durable stores.
+
 ## Workspace and lock isolation
 
 `Engine._admit` (`src/mizu/runtime.py`, lock resources asserted in

@@ -285,6 +285,9 @@ def trusted_command(data: dict, key: str, default: str) -> tuple[str, ...]:
 class Limits:
     # Provisional project-wide bound on newly seeded nonterminal work; 0 disables.
     open_work_items: int = 100
+    # Provisional per-source bound on unresolved live producer inputs; 0 disables.
+    # Congestion thresholds, not measured optima; see docs/configuration.md.
+    producer_inputs_per_source: int = 20
     daily_requests: int = 0
     shared_daily_requests: int = 0
     requests_per_run: int = 24
@@ -883,6 +886,7 @@ def load(file: Path) -> Config:
     # daily_requests 0 disables (fail-closed); max_failures 0 disables the
     # auto-pause brake only (budgets/deadlines still bound spend and time).
     _LIMIT_RANGES = {"open_work_items": (0, 1073741824),
+                     "producer_inputs_per_source": (0, 1073741824),
                      "parallel_checks": (1, 64), "check_pending": (1, 1024), "history_index": (8, 1000000), "prompt_snapshots": (1, 64),
                      "delegate_wrap_up_requests": (0, 2),
                      "delegate_wrap_up_tools": (0, 4),

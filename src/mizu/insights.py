@@ -263,10 +263,12 @@ MAX_EVIDENCE_CHARS = 8192
 class Insights:
     def __init__(self, root: Path, maximum: int = PREVIEW_BYTES, retention_days: int = 31, *,
                  work_item_intent_default: str = "create", work_item_intent_by_source: dict | None = None,
-                 cursor_ttl_seconds: int = 86400, open_work_items: int = 100):
+                 cursor_ttl_seconds: int = 86400, open_work_items: int = 100,
+                 producer_inputs_per_source: int = 20):
         self.root, self.maximum = root, maximum
         self.retention_days = retention_days
         self.open_work_items = open_work_items
+        self.producer_inputs_per_source = producer_inputs_per_source
         self.cursor_ttl_seconds = cursor_ttl_seconds
         self.work_item_intent_default = work_item_intent_default
         self.work_item_intent_by_source = dict(work_item_intent_by_source or {})
@@ -771,6 +773,76 @@ replacement insight without implying rejected substance.
             except (OSError, ValueError, KeyError, TypeError, AttributeError, Denied):
                 continue
         return out
+
+    def unresolved_counts(self, sources) -> dict:
+        """Count live unresolved inputs for each named source, fail-closed.
+
+        One bounded inbox scan under the Insights record lock for a
+        consistent snapshot; undecided plus deferred revisions count,
+        resolved and archive-only history do not. Each inbox row is safely
+        read within ``self.maximum`` and each decision within the decision
+        event bound. Unsafe, unreadable, vanished or malformed live entries
+        raise rather than undercount; a missing decision only leaves its
+        input unresolved. Unknown or malformed requested sources raise.
+        Tolerant prompt/list paths (``_live_entries``, ``generation``,
+        ``list``) are unchanged.
+        """
+        names = list(sources)
+        for name in names:
+            identifier(name)
+        wanted = set(names)
+        counts = {name: 0 for name in wanted}
+        with record_lock(self.root):
+            inbox = self.root / "inbox"
+            if not insight_archive._directory(inbox):
+                return counts
+            # iterdir propagates listing failures rather than glob's tolerant
+            # handling. Do not skip a vanished row: its source is unknown.
+            for path in sorted(inbox.iterdir()):
+                if path.suffix != ".json":
+                    continue
+                item = json.loads(safe_read(self.root, f"inbox/{path.name}", self.maximum))
+                if not isinstance(item, dict):
+                    raise Denied("Malformed live insight record")
+                identifier(item.get("id"))
+                if item["id"] != path.stem:
+                    raise Denied("Live insight filename does not match ID")
+                # Every live record carries a valid source and revision;
+                # otherwise admission must hold rather than guess.
+                identifier(item.get("source"))
+                item_rev = item.get("rev", 1)
+                if type(item_rev) is not int or item_rev < 1:
+                    raise Denied("Malformed live insight revision")
+                decision_path = self.root / "decisions" / path.name
+                try:
+                    decision_path.lstat()
+                except FileNotFoundError:
+                    # No decision cannot resolve (or hide) this input.
+                    decision = None
+                else:
+                    decision = json.loads(safe_read(
+                        self.root, f"decisions/{path.name}", MAX_DECISION_EVENT_BYTES))
+                    if (not isinstance(decision, dict) or decision.get("id") != item["id"]
+                            or decision.get("action") not in ("accept", "modify", "reject", "defer", "withdraw")):
+                        raise Denied("Malformed live insight decision")
+                    decision_rev = decision.get("rev", 1)
+                    if type(decision_rev) is not int or decision_rev < 1:
+                        raise Denied("Malformed live insight decision revision")
+                    if decision_rev != item_rev:
+                        decision = None
+                if decision is not None and decision["action"] != "defer":
+                    continue
+                source = item["source"]
+                if source in wanted:
+                    counts[source] += 1
+        return counts
+
+    def unresolved_count(self, source: str) -> int:
+        """Single-source wrapper over :meth:`unresolved_counts`.
+
+        Same fail-closed single scan; kept for single-producer callers.
+        """
+        return self.unresolved_counts([source])[source]
 
     def generation(self) -> str:
         parts = []

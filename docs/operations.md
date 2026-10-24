@@ -791,7 +791,7 @@ have committed. These operations publish nothing and schedule no work.
 default **100**, **0 disables**). Open, doing, and blocked items count; done and
 dropped do not. Lowering the cap below the current backlog preserves all items
 and their lifecycle operations, but refuses new seeds until enough work closes.
-The cap is independent of prompt page size, FIFO admission, and producer polling.
+The cap is independent of prompt page size and FIFO order; producer admission also enforces this same cap (see Producer admission below).
 
 On `OpenWorkItemsFull`, inspect the reported `current_count`, `limit`, and
 `requested_delta`; the refused decision/create/reconcile committed no new work.
@@ -801,5 +801,50 @@ existing item through the usual CAS transition. Multi-task decisions are
 all-or-nothing: do not assume any subset committed. An exact retry of an already
 committed request is safe even at capacity. Completing or dropping items releases
 capacity immediately for subsequent transactions; no separate quota reset is
-needed. This cap does not hold producers or add capacity status fields; those
-remain separate backpressure work.
+needed.
+
+## Producer admission
+
+`[limits].producer_inputs_per_source` holds congested producers (provisional
+default **20**, **0 disables**). Both numbers are congestion thresholds chosen
+from current project evidence, not measured optima: the default per-source
+bound 20 matches the highest observed per-source count among the current 53
+unresolved live proposals, and the open-work default 100 stays above the
+current 56 seeded open/doing/blocked items. Tune either to project capacity.
+
+Only configured non-writer project roles that hold `submit_insight` are gated;
+the writer remains free to resolve, merge, defer, or reject input at capacity.
+The gate runs before any model or run-slot use, when their role-name source's current unresolved live
+input count (undecided plus deferred; resolved and archive-only history
+excluded) reaches the per-source limit or the authoritative open/doing/blocked
+count reaches `open_work_items`. Operator, vcs, and editor input channels are
+never role names, so they are never held. The check applies to direct,
+scheduled, event-triggered, and daemon admission, and runs before any event or
+cursor is acknowledged; a held attempt (`skipped: producer-held`) claims no
+run directory, slot, or lock, consumes no event, and leaves every pending
+input durable. Fail closed: when the required load cannot be read, the
+producer is held. A run already in progress may finish; this is an admission
+threshold, never a cancellation.
+
+Release follows the documented wake-semantics default: held producers resume
+only through existing schedules or subscriptions. A skipped run consumes no
+decision, terminal-work-item, wait, CI, or operator event and advances no
+cursor, so repeated state-based triggers coalesce through the existing durable
+stores (decision history receipts, work-item events, waits, CI wake state)
+instead of a duplicate queue or an implicit schedule. The next ordinary
+schedule tick, interval/calendar firing, event trigger with pending input, or
+daemon readiness re-evaluation admits the producer once its counts drop below
+the limits (after inputs are decided or open work closes) or after an operator
+raises or disables a limit. No separate wake is added and none is needed.
+
+`mizu status` reports the congestion view under `backpressure`: both
+configured limits, the current open-work count, per-producer unresolved input
+counts, held producers, and hold reasons (`per_source_full`, `open_work_full`,
+`load_unavailable`). Counts come only from the current project's Insights live
+inbox and WorkItems ledger; no private or ignored state is read. Status
+attempts both current counts even when their bound is 0. An unreadable metric
+is reported as `null` with `load_ok: false`; it holds a producer only when
+that metric's bound is enabled (invalid limits also hold fail-closed).
+Admission counting rejects unsafe, unreadable, oversized or malformed live
+rows and decisions, including ID/filename mismatches and invalid revisions
+or decision actions; tolerant prompt/list projections are unchanged.

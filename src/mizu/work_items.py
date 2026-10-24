@@ -162,6 +162,19 @@ class WorkItems:
         limit = self.insights.open_work_items
         if not requested_delta or not limit:
             return
+        current_count = self.count_open()
+        if current_count + requested_delta > limit:
+            raise OpenWorkItemsFull(current_count=current_count, limit=limit,
+                                    requested_delta=requested_delta)
+
+    def count_open(self) -> int:
+        """Count seeded open/doing/blocked work while holding insights.lock.
+
+        WorkItems stays the only count source: replay committed seeds and
+        CAS histories, including legacy open resolutions. No quota/index
+        state. Malformed or unsafe records fail closed; systemic I/O
+        propagates so the caller can hold fail-closed.
+        """
         current_count = 0
         for event_id, event in self._iter_item_events(recover=True):
             kind, seed = self._seed_for_event(event_id, event, readonly=False)
@@ -171,9 +184,26 @@ class WorkItems:
             item = self._get(seed["id"], seed_event=event, history_revisions=revisions)
             if item["status"] in OPEN_STATUS_ORDER:
                 current_count += 1
-        if current_count + requested_delta > limit:
-            raise OpenWorkItemsFull(current_count=current_count, limit=limit,
-                                    requested_delta=requested_delta)
+        return current_count
+
+    def count_open_readonly(self) -> int:
+        """Count seeded open/doing/blocked work without taking the lock.
+
+        Same seed/history replay as :meth:`count_open` but never recovers
+        or deletes: validated temporaries are ignored and anything unsafe
+        or unexpected fails closed. Status and admission gates use this so
+        a held dispatch never mutates the ledger it is measuring.
+        """
+        current_count = 0
+        for event_id, event in self._iter_item_events(recover=False):
+            kind, seed = self._seed_for_event(event_id, event, readonly=True)
+            if kind != "seed":
+                continue
+            revisions = self._history_revisions(seed["id"], recover=False)
+            item = self._get(seed["id"], seed_event=event, history_revisions=revisions)
+            if item["status"] in OPEN_STATUS_ORDER:
+                current_count += 1
+        return current_count
 
     def _read(self, name: str) -> dict:
         try:

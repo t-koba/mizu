@@ -4074,6 +4074,25 @@ class Engine:
                 dispatch_state = self._dispatch_state(project, role_name, role, event_trigger=event_trigger)
                 if dispatch_state.get("skip"):
                     return dispatch_state["skip"]
+            # Producer admission: hold only configured producer roles before
+            # any model or run-slot use. A held attempt claims no run
+            # directory, slot, or lock and acknowledges no event or cursor;
+            # pending input stays durable until an existing schedule or
+            # subscription re-admits the producer. A running unit may finish.
+            held = producer_hold(project, role_name, role)
+            if held is not None:
+                try:
+                    current_snapshot = project.snapshots.get()
+                    snapshot_id = current_snapshot.get("id")
+                    code_digest = current_snapshot.get("code_digest")
+                except Exception:
+                    snapshot_id, code_digest = None, None
+                return {"skip": {"skipped": PRODUCER_HELD_SKIPPED, "snapshot": snapshot_id,
+                                 "code_digest": code_digest, "reason": held.get("reason"),
+                                 "reasons": list(held.get("reasons", ())),
+                                 "source_pending": held.get("source_pending"),
+                                 "open_count": held.get("open_count"),
+                                 "limits": dict(held.get("limits", {}))}}
             # Bounded run-local evidence, not a scheduling input. Keep the
             # first eight contended admissions, count any further omissions.
             queue_observations = {"version": 1, "observations": [], "omitted": 0}
@@ -5029,6 +5048,106 @@ class Engine:
                 ctx.closed = True
 
 
+#: Skip label for a held producer admission. The attempt claims no run
+#: directory, model slot, or execution lock, and acknowledges no event or
+#: cursor; pending input stays durable until an existing schedule or
+#: subscription re-admits the producer.
+PRODUCER_HELD_SKIPPED = "producer-held"
+
+
+def _producer_limit(project, name: str) -> int:
+    """Read one validated producer/open-work limit, fail-closed.
+
+    Limits are exact integers 0-1073741824 (0 disables); booleans and any
+    other type, range breach, or unreadable value raises so the caller
+    holds instead of silently disabling the bound.
+    """
+    value = getattr(project.insights, name)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise Denied(f"Invalid {name}")
+    if not 0 <= value <= 1073741824:
+        raise Denied(f"Invalid {name}")
+    return value
+
+
+def _producer_raw_limit(project, name: str):
+    """Best-effort raw limit for hold diagnostics; None when unreadable."""
+    try:
+        return getattr(project.insights, name)
+    except Exception:
+        return None
+
+
+def producer_hold(project, role_name: str, role=None) -> dict | None:
+    """Hold one producer role at a configured congestion threshold, if held.
+
+    Only configured non-writer project roles holding ``submit_insight`` are
+    gated; the writable role remains free to resolve, merge, defer, or reject
+    input at capacity. Operator/vcs/editor input channels are never role names
+    (config refuses them), so they are never held here. Reads only the metrics required by
+    enabled limits: the live unresolved input count for this role-name
+    source (undecided plus deferred; resolved and archive-only history
+    excluded) when the per-source bound is enabled, and the authoritative
+    WorkItems open/doing/blocked count when the open-work bound is enabled.
+    Disabling a bound never holds for its metric; when both bounds are 0
+    the producer is admitted without reading either store. Fail closed when
+    a required limit or load cannot be read. A running unit is never
+    cancelled; this only holds the next admission. Returns ``None`` when
+    admitted, else a bounded hold record with ``reasons``,
+    ``source_pending``, ``open_count`` and ``limits``.
+    """
+    try:
+        current = role if role is not None else project.config.roles.get(role_name)
+    except Exception:
+        current = None
+    if current is None:
+        return None
+    try:
+        if role_name not in project.roles:
+            return None
+        if (getattr(current, "workspace", None) == "write"
+                or "submit_insight" not in set(getattr(current, "capabilities", ()) or ())):
+            return None
+    except Exception:
+        return {"reasons": ("load_unavailable",), "reason": "load_unavailable",
+                "source_pending": None, "open_count": None,
+                "limits": {"producer_inputs_per_source": _producer_raw_limit(project, "producer_inputs_per_source"),
+                           "open_work_items": _producer_raw_limit(project, "open_work_items")}}
+    try:
+        per_source_limit = _producer_limit(project, "producer_inputs_per_source")
+        open_limit = _producer_limit(project, "open_work_items")
+    except Exception:
+        return {"reasons": ("load_unavailable",), "reason": "load_unavailable",
+                "source_pending": None, "open_count": None,
+                "limits": {"producer_inputs_per_source": _producer_raw_limit(project, "producer_inputs_per_source"),
+                           "open_work_items": _producer_raw_limit(project, "open_work_items")}}
+    if not per_source_limit and not open_limit:
+        return None
+    source_pending = None
+    open_count = None
+    try:
+        if per_source_limit:
+            source_pending = project.insights.unresolved_counts([role_name])[role_name]
+        if open_limit:
+            open_count = project.work_items.count_open_readonly()
+    except Exception:
+        return {"reasons": ("load_unavailable",), "reason": "load_unavailable",
+                "source_pending": source_pending, "open_count": open_count,
+                "limits": {"producer_inputs_per_source": per_source_limit,
+                           "open_work_items": open_limit}}
+    decision = _scheduling.evaluate(_scheduling.ProducerFacts(
+        is_producer=True, per_source_limit=per_source_limit,
+        open_work_limit=open_limit, source_pending=source_pending or 0,
+        open_count=open_count or 0, load_ok=True))
+    if not decision.held:
+        return None
+    reasons = tuple(decision.reasons)
+    return {"reasons": reasons, "reason": reasons[0] if reasons else "load_unavailable",
+            "source_pending": source_pending, "open_count": open_count,
+            "limits": {"producer_inputs_per_source": per_source_limit,
+                       "open_work_items": open_limit}}
+
+
 def _role_cursor(project, role_name) -> dict:
     """Read bounded local observation evidence; unsafe/malformed cursors close."""
     try:
@@ -5312,7 +5431,20 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
             raise RuntimeError(f"scheduler evaluator requested unknown fact: {needed!r}")
         facts = dataclasses.replace(facts, **{needed: value})
         decision = _scheduling.evaluate(facts)
-    return bool(decision.ready)
+    if not decision.ready:
+        return False
+    # Producer admission vetoes an otherwise-ready daemon iteration before
+    # any model or run-slot use. The check runs only here so an unready
+    # daemon never pays for load reads; a held producer simply stays
+    # unready until an existing schedule or subscription re-evaluates it.
+    # No event or cursor is acknowledged by this veto.
+    if role_name is not None and role is not None:
+        try:
+            if producer_hold(project, role_name, role) is not None:
+                return False
+        except Exception:
+            return False
+    return True
 
 
 def _wall(value):

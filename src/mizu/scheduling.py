@@ -179,10 +179,50 @@ def evaluate_dispatch(facts: DispatchFacts) -> DispatchDecision:
     return DispatchDecision(admitted=True, skipped=None, admission="schedule")
 
 
-def evaluate(facts: DaemonFacts | DispatchFacts) -> DaemonDecision | DispatchDecision:
+#: Hold reasons for producer admission. ``load_unavailable`` fails closed
+#: when the required load cannot be read; the producer thresholds never
+#: cancel a running unit, they only hold the next admission.
+PRODUCER_HOLD_REASONS = ("per_source_full", "open_work_full", "load_unavailable")
+
+
+@dataclasses.dataclass(frozen=True)
+class ProducerFacts:
+    """Normalized facts for per-source producer admission."""
+
+    is_producer: bool = False
+    per_source_limit: int = 0
+    open_work_limit: int = 0
+    source_pending: int = 0
+    open_count: int = 0
+    load_ok: bool = True
+
+
+@dataclasses.dataclass(frozen=True)
+class ProducerDecision:
+    held: bool
+    reasons: tuple = ()
+
+
+def evaluate_producer(facts: ProducerFacts) -> ProducerDecision:
+    """Hold only configured producers at a configured congestion threshold."""
+    if not facts.is_producer:
+        return ProducerDecision(held=False, reasons=())
+    if not facts.load_ok:
+        return ProducerDecision(held=True, reasons=("load_unavailable",))
+    reasons = []
+    if facts.per_source_limit and facts.source_pending >= facts.per_source_limit:
+        reasons.append("per_source_full")
+    if facts.open_work_limit and facts.open_count >= facts.open_work_limit:
+        reasons.append("open_work_full")
+    return ProducerDecision(held=bool(reasons), reasons=tuple(reasons))
+
+
+def evaluate(facts: DaemonFacts | DispatchFacts | ProducerFacts) -> DaemonDecision | DispatchDecision | ProducerDecision:
     """Evaluate one normalized fact set for its own call context."""
     if isinstance(facts, DaemonFacts):
         return evaluate_daemon(facts)
     if isinstance(facts, DispatchFacts):
         return evaluate_dispatch(facts)
+    if isinstance(facts, ProducerFacts):
+        return evaluate_producer(facts)
     raise TypeError("evaluate requires DaemonFacts or DispatchFacts")
