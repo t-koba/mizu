@@ -1,12 +1,13 @@
 """Conservative storage maintenance with explicit policy and nonblocking locks.
 
 Prune expires completed, unreferenced run components and disposable projections.
-Permanent ledgers and sessions remain. Backup and snapshot/object reclamation
+Permanent ledgers and sessions remain. Backup and manual snapshot/object reclamation
 add a pause requirement; prune needs exclusions, not a paused project.
 """
 from __future__ import annotations
 
 import contextlib
+import datetime as dt
 import gzip
 import io
 import json
@@ -20,7 +21,7 @@ import tomllib
 import uuid
 from pathlib import Path
 
-from .admission import role_exclusions
+from .admission import check_slot_exclusions, role_exclusions
 from .config import keys, strings
 from .errors import Busy, Denied, LimitExceeded
 from .fs import (DIGEST, PREVIEW_BYTES, atomic_write, canonical, digest,
@@ -40,14 +41,28 @@ MEMBERS = (
 
 
 @contextlib.contextmanager
-def quiescent(project: Project, *, require_pause: bool = True):
+def quiescent(project: Project, *, require_pause: bool = True, snapshot_gc: bool = False):
     if require_pause and not project.control().get("paused"):
         raise Denied("Pause the project before storage maintenance")
     with contextlib.ExitStack() as stack:
         stack.enter_context(lock(project.root / "locks" / "workspace.lock", blocking=False))
-        for path in role_exclusions(project.root, tuple(project.config.roles)):
+        exclusions = role_exclusions(project.root, tuple(project.config.roles))
+        if snapshot_gc:
+            # Include never-used slots: a runner must not start a capture during GC.
+            exclusions = sorted(set(exclusions + check_slot_exclusions(
+                project.root, project.config.limits.parallel_checks)))
+        for path in exclusions:
             stack.enter_context(lock(path, blocking=False))
         stack.enter_context(lock(project.root / "locks" / "editor-ingest.lock", blocking=False))
+        if snapshot_gc:
+            # Capsule writers share only the outbox mount, not project locks.
+            for directory in (project.root / "spool", project.root / "spool/editor"):
+                _, skipped = _audit_list_dir(directory)
+                if skipped:
+                    raise Denied("Unsafe editor outbox during snapshot retention")
+            stack.enter_context(lock(project.root / "spool/editor/.submit.lock", blocking=False))
+            # Delivery binding takes publication before insights.
+            stack.enter_context(lock(project.root / "locks" / "publication.lock", blocking=False))
         stack.enter_context(lock(project.root / "locks" / "insights.lock", blocking=False))
         yield
 
@@ -540,10 +555,10 @@ def prune(project: Project, *, apply: bool = False, keep_artifacts: int = DEFAUL
                         "Sessions are durable audit evidence and are accounted, never reclaimed."}
 
 
-#: Default automatic run-retention cadence (seconds) when configuration
+#: Default automatic run/snapshot-retention cadence (seconds) when configuration
 #: omits the policy; the validated `[limits]` value normally applies.
 AUTOMATIC_PRUNE_INTERVAL_DEFAULT = 86400
-#: Maximum automatic run-retention cadence (31 days, mirroring workspace-cache).
+#: Maximum automatic run/snapshot-retention cadence (31 days, mirroring workspace-cache).
 AUTOMATIC_PRUNE_INTERVAL_MAX = 2678400
 #: Bound on the automatic-prune due-state file; larger state is unavailable.
 _AUTOMATIC_PRUNE_STATE_BYTES = 4096
@@ -562,12 +577,13 @@ def _automatic_prune_due(path: Path, instant: int, interval: int) -> bool:
 
 
 def maintain_automatic_prune(project: Project) -> dict:
-    """Attempt one due automatic run-retention sweep, or skip. Never fail the caller.
+    """Attempt one due automatic run/snapshot-retention sweep, or skip. Never fail the caller.
 
     Storage-owned counterpart to manual ``prune``: on due, applies the existing
     validated ``prune(project, apply=True, keep_artifacts=0)`` under its
     nonblocking no-pause exclusions, so count-based artifact deletion is never
-    enabled implicitly and snapshots/objects/shared smoke bundles are untouched.
+    enabled implicitly. Snapshot GC then uses its separate retention policy;
+    shared smoke bundles are untouched.
     The latest bounded result is retained in
     ``maintenance/automatic-prune.json``. Busy acquisition does not consume the
     cadence. Incomplete scans, malformed references and I/O failures are
@@ -597,6 +613,7 @@ def maintain_automatic_prune(project: Project) -> dict:
             try:
                 prune(project, apply=True, keep_artifacts=0)
                 result["status"] = "pruned"
+                result["snapshots"] = _automatic_snapshot_gc(project, instant)
             except Busy:
                 return {"status": "busy"}
             except (Denied, LimitExceeded, OSError, ValueError) as exc:
@@ -688,7 +705,8 @@ def _audit_list_dir(directory: Path, *, required: bool = False) -> tuple[list[Pa
             info = directory.lstat()
         except FileNotFoundError:
             return [], required
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        if (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode)
+                or getattr(info, "st_file_attributes", 0) & 0x400):
             return [], True
         try:
             # glob can suppress listing errors and falsely look like no refs.
@@ -700,15 +718,46 @@ def _audit_list_dir(directory: Path, *, required: bool = False) -> tuple[list[Pa
         return [], True
 
 
-def _audit_collect(project: Project) -> dict:
+def _snapshot_ancestry(manifests: dict[str, dict], roots: set[str],
+                       history_index: int) -> tuple[set[str], set[str]]:
+    """Protect merge dependencies up to history_index parent edges per root.
+
+    Multi-source breadth-first traversal visits each available manifest once,
+    without recursion or extending the bound from dependency-only manifests.
+    Cycles terminate; absent/invalid parents mark their child incomplete, never
+    count as protected. Callers must refuse deletion on any incomplete child.
+    """
+    protected = roots & manifests.keys()
+    frontier = protected.copy()
+    incomplete: set[str] = set()
+    for _ in range(history_index):
+        if not frontier:
+            break
+        following = set()
+        for sid in frontier:
+            parent = manifests[sid].get("parent")
+            if parent is None:
+                continue
+            if _audit_digest(parent) is None or parent not in manifests:
+                incomplete.add(sid)
+            elif parent not in protected:
+                following.add(parent)
+        protected.update(following)
+        frontier = following
+    return protected, incomplete
+
+
+def _audit_collect(project: Project, *, history_cutoff: float | None = None) -> dict:
     """Full reference-aware collection; internal helper for audit/reclaim.
 
     Returns exact full sorted ID lists (no truncation) plus sizes; callers
     truncate for display. Same roots, bounds, and symlink/corrupt skipping
-    as audit(); see audit() for the contract.
+    as audit(); see audit() for the contract. With history_cutoff, validate all
+    generations but omit expired non-current generations from roots and return
+    their paths; use a nonblocking acceptance audit. Manual calls omit it.
     """
     root = project.root
-    acceptance_receipts = acceptance.audit(root)
+    acceptance_receipts = acceptance.audit(root, blocking=history_cutoff is None)
     manifests: dict[str, dict] = {}
     manifest_bytes = 0
     manifest_skipped = 0
@@ -802,6 +851,7 @@ def _audit_collect(project: Project) -> dict:
     active_history: list | None = None
     generations = 0
     histories_bytes = 0
+    expired_histories: list[Path] = []
     histories_dir = root / "histories"
     for child in reference_children(histories_dir):
         if child.suffix != ".json":
@@ -810,6 +860,8 @@ def _audit_collect(project: Project) -> dict:
             info = child.lstat()
             histories_bytes += info.st_size
         except FileNotFoundError:
+            if history_cutoff is not None:
+                skipped_references.add(child)
             continue
         except OSError:
             skipped_references.add(child)
@@ -825,16 +877,24 @@ def _audit_collect(project: Project) -> dict:
         if skipped:
             skipped_references.add(child)
         if record is None:
+            if history_cutoff is not None:
+                skipped_references.add(child)
             continue
+        expired = (history_cutoff is not None and child.stem != generation
+                   and info.st_mtime < history_cutoff)
         for sid in record:
             digest_id = _audit_digest(sid)
             if digest_id is None:
                 skipped_references.add(child)
-            else:
+            elif not expired:
                 history_ids.add(digest_id)
         if child not in skipped_references and (not record or digest(canonical(record)) != child.stem):
             skipped_references.add(child)
+        if expired and child not in skipped_references:
+            expired_histories.append(child)
 
+    if history_cutoff is not None and (pointer is None or generation is None):
+        skipped_references.add(current_path)
     if generation is not None and histories_dir not in skipped_references:
         history_path = histories_dir / (generation + ".json")
         # Missing required generations are incomplete, unlike missing optional
@@ -851,18 +911,25 @@ def _audit_collect(project: Project) -> dict:
     for run_dir in reference_children(root / "runs"):
         try:
             info = run_dir.lstat()
-            if stat.S_ISLNK(info.st_mode):
+            if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
                 skipped_references.add(run_dir)
                 continue
             if not stat.S_ISDIR(info.st_mode):
                 continue
         except FileNotFoundError:
+            if history_cutoff is not None:
+                skipped_references.add(run_dir)
             continue
         except OSError:
             skipped_references.add(run_dir)
             continue
-        for name in ("started.json", "result.json", "consultation.json", "error.json", "prompt_projection.json"):
+        for name in ("started.json", "result.json", "consultation.json", "delegation.json", "error.json", "prompt_projection.json"):
             reference_dict(run_dir / name, "snapshot", run_ids)
+        # Parent-held records remain citations even if a child directory is absent.
+        for name in ("consultations", "delegations"):
+            for child in reference_children(run_dir / name):
+                if child.suffix == ".json":
+                    reference_dict(child, "snapshot", run_ids, required=True, must_exist=True)
     artifact_ids: set[str] = set()
     artifacts_dir = root / "artifacts"
     artifact_children = reference_children(artifacts_dir)
@@ -873,12 +940,14 @@ def _audit_collect(project: Project) -> dict:
     for child in artifact_children:
         try:
             info = child.lstat()
-            if stat.S_ISLNK(info.st_mode):
+            if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
                 skipped_references.add(child)
                 continue
             if not stat.S_ISDIR(info.st_mode):
                 continue
         except FileNotFoundError:
+            if history_cutoff is not None:
+                skipped_references.add(child)
             continue
         except OSError:
             skipped_references.add(child)
@@ -886,9 +955,17 @@ def _audit_collect(project: Project) -> dict:
         reference_dict(child / "evidence.json", "snapshot", artifact_ids,
                        required=True, must_exist=True)
     insight_ids: set[str] = set()
-    for child in reference_children(root / "inbox"):
-        if child.suffix == ".json":
-            reference_dict(child, "base_snapshot", insight_ids)
+    # Superseded revisions and queued editor submissions are durable citations too.
+    # Validate the spool parent too; lstat of a nested path follows parents.
+    reference_children(root / "spool")
+    insight_directories = [root / "inbox", root / "insight-revisions", root / ".ingest"]
+    if root / "spool" not in skipped_references:
+        insight_directories.append(root / "spool/editor")
+    for directory in insight_directories:
+        for child in reference_children(directory):
+            if child.suffix == ".json":
+                reference_dict(child, "base_snapshot", insight_ids,
+                               must_exist=history_cutoff is not None)
     # Archive bodies remain durable references after leaving the live inbox.
     # An unreadable archive refuses maintenance rather than hiding references.
     for reference in insight_archive.snapshot_references(root):
@@ -945,6 +1022,11 @@ def _audit_collect(project: Project) -> dict:
         work_item_events_skipped += 1
     referenced_ids = (set(history_ids) | set(run_ids) | set(artifact_ids)
                       | set(insight_ids) | set(work_item_ids))
+    reference_roots = referenced_ids.copy()
+    ancestors, incomplete = _snapshot_ancestry(
+        manifests, reference_roots, project.snapshots.history_index)
+    referenced_ids.update(ancestors)
+    skipped_references.update(snapshots_dir / f"{sid}.json" for sid in incomplete)
     unreferenced = sorted(sid for sid in manifests if sid not in referenced_ids)
     unreferenced_bytes = 0
     for sid in unreferenced:
@@ -981,6 +1063,7 @@ def _audit_collect(project: Project) -> dict:
         "manifest_objects": manifest_objects,
         "live_ids": live_ids,
         "referenced_ids": referenced_ids,
+        "reference_roots": reference_roots,
         "history_ids": history_ids,
         "run_ids": run_ids,
         "artifact_ids": artifact_ids,
@@ -991,6 +1074,7 @@ def _audit_collect(project: Project) -> dict:
         "reference_records_skipped": len(skipped_references),
         "generations": generations,
         "histories_bytes": histories_bytes,
+        "expired_histories": expired_histories,
         "unreferenced": unreferenced,
         "unreferenced_bytes": unreferenced_bytes,
         "live_objects": live_objects,
@@ -1109,7 +1193,8 @@ def reclaim(project: Project, *, apply: bool = False) -> dict:
     manifest_skipped, work_item_events_skipped, reference_records_skipped,
     audit?}``.
     The candidate sets are exactly what ``audit()`` reports in full: manifests
-    outside every durable reference (live/history/run/artifact/insight/work-item) and
+    outside every durable reference (live/history/run/artifact/insight/work-item)
+    and its bounded merge ancestry (up to history_index parent edges), and
     objects referenced by no manifest on disk. Full ID lists are returned
     (sorted); use ``audit()`` for the bounded display samples.
     Bounds: same bounded reads, digest checks, and symlink skipping as
@@ -1206,6 +1291,81 @@ def reclaim(project: Project, *, apply: bool = False) -> dict:
             "manifest_skipped": 0,
             "work_item_events_skipped": 0,
             "reference_records_skipped": 0}
+
+
+def _automatic_snapshot_gc(project: Project, instant: int) -> dict:
+    """Expire unreferenced snapshots at the existing automatic-prune boundary.
+
+    No pause and no waiting for locks. Every scan must be complete before any
+    unlink. History generations have no embedded time: their immutable file
+    mtime is their age; manifests use timezone-aware created_at. Strictly older
+    than the cutoff only. Current history/continuations and durable citations
+    remain roots, as do recent manifests. Preserve up to history_index parent
+    edges from each root for merge; dependency-only ancestors do not restart
+    that bound. Missing/invalid dependencies refuse deletion. Delete histories,
+    then manifests, then objects used by no retained manifest, so interruption
+    leaves only extra unreachable data. Counts/digests keep due-state bounded.
+    Busy propagates so the shared cadence is not consumed; other failures are
+    reported without failing requested work or changing run-retention behavior.
+    """
+    days = getattr(project.config.limits, "snapshot_retention_days", 31)
+    if type(days) is not int or not 0 <= days <= 3650:
+        return {"status": "unavailable"}
+    if not days:
+        return {"status": "disabled"}
+    cutoff = instant - days * 86400
+    try:
+        with quiescent(project, require_pause=False, snapshot_gc=True):
+            collected = _audit_collect(project, history_cutoff=cutoff)
+            if any(collected[key] for key in ("manifest_skipped", "reference_records_skipped",
+                                              "work_item_events_skipped", "objects_skipped")):
+                raise Denied("Incomplete snapshot retention scan")
+            expired = set()
+            for sid, manifest in collected["manifests"].items():
+                value = manifest.get("created_at")
+                if not isinstance(value, str) or len(value) > 64:
+                    raise Denied("Invalid snapshot creation time")
+                stamp = dt.datetime.fromisoformat(value)
+                if stamp.tzinfo is None:
+                    raise Denied("Snapshot creation time requires a timezone")
+                if stamp.timestamp() < cutoff and sid not in collected["reference_roots"]:
+                    expired.add(sid)
+            # Recent unreferenced branches are roots too. Dependency-only
+            # ancestors do not restart the bound; the walk remains bounded.
+            roots = set(collected["manifests"]) - expired
+            protected, incomplete = _snapshot_ancestry(
+                collected["manifests"], roots, project.snapshots.history_index)
+            if incomplete:
+                raise Denied("Incomplete snapshot parent ancestry")
+            expired.difference_update(protected)
+            retained_objects = set()
+            for sid, objects in collected["manifest_objects"].items():
+                if sid not in expired:
+                    retained_objects.update(objects)
+            objects = sorted(set(collected["object_sizes"]) - retained_objects)
+            paths = (collected["expired_histories"]
+                     + [project.root / "snapshots" / f"{sid}.json" for sid in sorted(expired)]
+                     + [project.root / "objects" / name for name in objects])
+            # All checks precede deletion; cooperating writers hold exclusions.
+            for path in paths:
+                info = path.lstat()
+                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                        or getattr(info, "st_file_attributes", 0) & 0x400):
+                    raise Denied("Unsafe snapshot retention candidate")
+            for path in paths:
+                path.unlink()
+            for directory in {path.parent for path in paths}:
+                sync_dir(directory)
+            return {"status": "collected", "retention_days": days,
+                    "histories": len(collected["expired_histories"]),
+                    "snapshots": len(expired), "objects": len(objects),
+                    "paths_sha256": digest(canonical([p.relative_to(project.root).as_posix() for p in paths]))}
+    except Busy:
+        raise
+    except Exception as exc:
+        # Maintenance must not fail the requested execution, including malformed
+        # archive records and unexpected local I/O failures. No success claim.
+        return {"status": "refused", "error": type(exc).__name__[:64]}
 
 
 def artifact_candidates(project: Project, keep: int) -> list[Path]:

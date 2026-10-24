@@ -14,7 +14,7 @@ from . import __version__
 from . import platform as _platform
 from .config import load
 from .errors import ConfigError, Denied, MizuError
-from .fs import PREVIEW_BYTES, atomic_write, mkdir
+from .fs import PREVIEW_BYTES, atomic_write, mkdir, lock
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -342,9 +342,12 @@ def _cmd_insight(config, project, args):
             if args.body.stat().st_size > PREVIEW_BYTES:
                 raise Denied("Insight body file exceeds byte limit")
             body = args.body.read_text(encoding="utf-8")
-        return project.insights.revise(args.id, source="operator", title=args.title, body=body,
-                                       base_snapshot=project.snapshots.get()["id"],
-                                       expected_rev=args.expected_rev)
+        # Keep the observed snapshot alive until its durable reference is written.
+        # Refuse as Busy on contention; retry the command after maintenance.
+        with lock(project.root / "locks/publication.lock", blocking=False):
+            return project.insights.revise(args.id, source="operator", title=args.title, body=body,
+                                           base_snapshot=project.snapshots.get()["id"],
+                                           expected_rev=args.expected_rev)
     if args.action == "decide":
         if not args.id or not args.decision:
             raise ConfigError("Insight decide requires --id and --decision")
@@ -377,14 +380,18 @@ def _cmd_insight(config, project, args):
         if args.body.stat().st_size > PREVIEW_BYTES:
             raise Denied("Insight body file exceeds byte limit")
         body = args.body.read_text(encoding="utf-8")
-    return project.insights.submit(source="operator", title=args.title, body=body,
-                                   base_snapshot=project.snapshots.get()["id"], insight_id=args.id,
-                                   origin=args.origin)
+    # Keep the observed snapshot alive until its durable reference is written.
+    # Refuse as Busy on contention; retry the command after maintenance.
+    with lock(project.root / "locks/publication.lock", blocking=False):
+        return project.insights.submit(source="operator", title=args.title, body=body,
+                                       base_snapshot=project.snapshots.get()["id"], insight_id=args.id,
+                                       origin=args.origin)
 
 
 def _cmd_editor_export(config, project, args):
     from .editor import export
-    return export(project, args.destination)
+    with lock(project.root / "locks/publication.lock", blocking=False):
+        return export(project, args.destination)
 
 
 def _cmd_service(config, project, args):
@@ -394,7 +401,8 @@ def _cmd_service(config, project, args):
 
 def _cmd_report(config, project, args):
     from .report import publish
-    return publish(project, project.snapshots.get(), None, run_id=None)
+    with lock(project.root / "locks/publication.lock", blocking=False):
+        return publish(project, project.snapshots.get(), None, run_id=None)
 
 
 def _cmd_usage(config, project, args):

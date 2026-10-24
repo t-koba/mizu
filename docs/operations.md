@@ -211,14 +211,16 @@ it skips busy locks without pausing/draining and retains its latest result in
 
 Prune does not require pause, but refuses a busy workspace, configured/existing
 role, editor-ingest or insights exclusion. Backup and `storage --apply` still
-require pause. `[limits].automatic_prune_interval_seconds` (default 86,400; 0 disables
-automatic runs, manual `mizu prune` stays) applies that same validated prune
+require pause. `[limits].automatic_prune_interval_seconds` (default 86,400; 0 disables both
+automatic run pruning and snapshot GC; manual `mizu prune`/`mizu storage` stay) applies that same validated prune
 (`keep_artifacts=0`, so no count-based artifact deletion) at safe execution
 boundaries before admission/execution locks, alongside workspace-cache maintenance.
 There is no background timer. Busy contention never consumes the cadence; an
 incomplete scan or I/O failure never fails the requested run nor deletes uncertain
-state. The latest bounded result is `maintenance/automatic-prune.json`; snapshots,
-objects and shared smoke bundles are never automatic candidates. `[limits].run_retention_days` defaults to 31 (integer 0–3650;
+state. The latest bounded result is `maintenance/automatic-prune.json`; shared
+smoke bundles use their independent cadence. Snapshot GC shares this per-project
+due check but has a separate retention policy (below).
+`[limits].run_retention_days` defaults to 31 (integer 0–3650;
 0 keeps indefinitely). Only terminal, valid, old and unreferenced connected
 run components expire. Current inbox/evidence, active-role, selector-wait and
 blocked WorkItem target-decision references pin entire parent/child components.
@@ -230,6 +232,33 @@ the next apply rescan; committed quarantine deletion resumes instead. Dry-run
 only reports leftovers. See [the retention contract](configuration.md#operator-invoked-run-retention)
 for bounds, exact typed fields and interruption semantics. Shared smoke evidence has a separate data-dir-owned lifecycle (below); project
 run retention never prunes it.
+
+`[limits].snapshot_retention_days` defaults to 31 (integer 0–3650; 0 disables
+snapshot GC only). At the same due boundary, without pause, GC keeps `current.json`,
+its active bounded history window, continuations/fences and all durable citations
+(runs, artifact evidence, live/revised/archived insights, queued/claimed editor
+submissions, and every historical work-item delivery/done binding). Superseded
+history generations use immutable file mtime; manifests use timezone-aware
+`created_at`. Only strictly older, unreferenced entries expire. Objects are removed
+only if no retained manifest uses them. The manual `storage` preview/apply still
+does not expire history generations and apply still requires pause.
+
+The automatic snapshot scan fails closed on incomplete/malformed references,
+manifest timestamps, unsafe storage roots or unavailable coordination. It takes
+workspace/role/check-slot/editor/outbox/publication/insights exclusions nonblocking;
+busy skips without consuming the cadence. Capsule writers share the outbox
+`.submit.lock`; provision access for both accounts in separated editor setups and
+never unlink its live inode. CLI reference writers hold publication through their
+read-to-write interval. Requested work never fails because GC refused. Inspect the
+bounded `snapshots` subrecord in `maintenance/automatic-prune.json` for status,
+removed history/manifest/object counts and path-set digest (or an error class),
+separately from the existing run-prune result. Deletion order is histories →
+manifests → unused objects; an interrupted/refused sweep may be partial and the
+next due sweep rescans. External bundles remain self-contained; newly submitting
+an already-expired ID cannot resurrect its project manifest. See the
+[full contract](configuration.md#automatic-snapshot-retention) for roots, bounds
+and age semantics.
+
 
 ### Shared smoke evidence retention
 

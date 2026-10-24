@@ -13,7 +13,7 @@ import uuid
 from pathlib import Path
 
 from .errors import Denied
-from .fs import PREVIEW_BYTES, atomic_write, canonical, digest, mkdir, relative_parts, safe_read, write_json, page
+from .fs import PREVIEW_BYTES, atomic_write, canonical, digest, mkdir, relative_parts, safe_read, write_json, page, lock
 from .project import Project
 from .protocol import DEFINITIONS, MCP_VERSIONS, PAGE_FIELDS, obj, text, validate
 assert MCP_VERSIONS is not None  # re-exported: single-sourced in protocol.py, framed in mcp_loop.py
@@ -181,7 +181,11 @@ class Capsule:
         record = {**arguments, "base_snapshot": self.snapshot["id"]}
         if len(canonical(record)) > PREVIEW_BYTES:
             raise Denied("Insight exceeds outbox ingest byte bound")
-        write_json(self.outbox / f"{insight_id}.json", record, exclusive=True)
+        # The outbox is the only shared mount with the project. Serialize the
+        # durable citation with snapshot GC without granting project access.
+        # Busy refuses before writing; the caller can retry after maintenance.
+        with lock(self.outbox / ".submit.lock", blocking=False):
+            write_json(self.outbox / f"{insight_id}.json", record, exclusive=True)
         return {"id": insight_id, "status": "submitted_to_outbox", "base_snapshot": self.snapshot["id"]}
 
 

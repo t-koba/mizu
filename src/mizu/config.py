@@ -362,9 +362,11 @@ class Limits:
     retention_days: int = 31
     #: Completed, unreferenced run components; 0 retains indefinitely (0–3650).
     run_retention_days: int = 31
+    #: Unreferenced snapshot/history retention; 0 disables automatic GC (0–3650).
+    snapshot_retention_days: int = 31
     #: Opt-out cadence (seconds) for automatic application of the configured
-    #: run retention at safe execution boundaries; 0 disables automatic runs
-    #: while manual ``mizu prune`` stays available (0–2678400; default 86400).
+    #: run/snapshot retention at safe execution boundaries; 0 disables both automatic
+    #: passes while manual ``mizu prune`` and ``mizu storage`` stay available (0–2678400; default 86400).
     automatic_prune_interval_seconds: int = 86400
     #: Opt-out cadence (seconds) for automatic application of the shared
     #: smoke retention at safe execution boundaries; 0 disables automatic
@@ -907,7 +909,7 @@ def load(file: Path) -> Config:
                      "delegate_wrap_up_requests": (0, 2),
                      "delegate_wrap_up_tools": (0, 4),
                      "insight_cursor_ttl_seconds": (60, 604800),
-                     "retention_days": (0, 3650), "run_retention_days": (0, 3650), "automatic_prune_interval_seconds": (0, 2678400), "automatic_smoke_retention_interval_seconds": (0, 2678400), "pending_insights": (1, 1000),
+                     "retention_days": (0, 3650), "run_retention_days": (0, 3650), "snapshot_retention_days": (0, 3650), "automatic_prune_interval_seconds": (0, 2678400), "automatic_smoke_retention_interval_seconds": (0, 2678400), "pending_insights": (1, 1000),
                      "work_items_prompt": (1, 100), "decision_events_limit": (1, 100),
                      "work_item_events_limit": (1, 100),
                      "event_log_compress_days": (0, 3650), "event_log_retention_days": (0, 3650),

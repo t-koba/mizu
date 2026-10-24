@@ -231,9 +231,45 @@ the code digest. Symlinks, hardlinks and special files are not materialized as
 ordinary source. Plain-directory import refuses unsupported skipped entries;
 verification cannot pass if the captured tree contains them.
 
+Snapshot retention is storage-owned policy, not a publication side effect.
+At the existing per-project automatic-prune boundary, `snapshot_retention_days`
+(default 31; 0 disables) permits removal of old superseded history generations
+and unreferenced manifests; no timer or pause is added. Current history,
+continuations/fences, runs, artifacts, live/revised/archived insights, pending
+editor submissions/claims, and every historical work-item delivery/done citation
+remain roots. Recent superseded histories also pin their IDs until expiry.
+Generation age uses immutable file mtime; manifest age uses validated
+`created_at`, strictly older than cutoff. Every reference root and recent manifest
+also retains up to `history_index` parent edges for merge, using a cycle-safe,
+nonrecursive traversal. Dependency-only ancestors do not restart the bound;
+missing/invalid required parents refuse deletion, never count as protected.
+Observed/session delta cursors are not retention roots. Objects survive while any retained
+manifest uses them. Manual storage accounting/reclaim keeps its preview schema,
+all-history roots and pause requirement.
+
+The existing collector validates all generations, including expired ones, before
+allowing deletion; incomplete scans fail closed. Automatic GC takes the existing
+workspace/role/editor/insights quiescence exclusions nonblocking, plus publication,
+all check-slot exclusions and the editor outbox submission lock. Check runners
+capture content outside role units, so even never-used configured slots must be
+excluded. CLI submit/revise/report/export take publication before observing a
+snapshot and hold it through storing its citation/export. Capsule writers have
+only the outbox mount and serialize submissions on `.submit.lock`; no project
+access is added. These writers acquire nonblocking and refuse as Busy on
+contention before observing/storing a reference; callers can retry later (CLI
+exit 75, editor tool error), rather than waiting for a maintenance scan. Publication precedes insights, as in delivery binding. The
+acceptance audit also opts into nonblocking locking for this sweep. There is no
+new snapshot-write locking layer or changed publication authorization. Unlink
+histories before manifests before unused objects; interruption leaves extra data
+for a later rescan, not deleted retained dependencies. A bounded result joins
+`maintenance/automatic-prune.json`; GC failures never fail requested work. Run
+and shared-smoke retention are independent and unchanged. See
+[configuration](configuration.md#automatic-snapshot-retention) for the exact
+root/age/result contract and outbox lock permissions.
+
 The history index retains published IDs up to the configured limit (default
-128, tunable 8–1000000 via `limits.history_index`); full manifests/objects remain on
-disk. Prompts carry a bounded, capability-gated projection: up to
+128, tunable 8–1000000 via `limits.history_index`). The active generation/window
+is always retained; older storage follows reference-aware retention below. Prompts carry a bounded, capability-gated projection: up to
 `limits.prompt_snapshots` recent anchored summaries with exact IDs and code
 digests, plus only the actionable context the role is granted to use.
 `pending_insights` is offered only to roles with `insights`/`decide`, newest

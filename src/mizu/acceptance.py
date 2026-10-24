@@ -369,9 +369,9 @@ def effective(project, snapshot):
             'source': 'retained_acceptance', 'receipt_id': receipt_id}
 
 
-def audit(root):
-    """Validate the whole durable store, including every index reference."""
-    with lock(root / 'locks/acceptance.lock'):
+def audit(root, *, blocking=True):
+    """Validate the durable store; maintenance may opt out of waiting for its lock."""
+    with lock(root / 'locks/acceptance.lock', blocking=blocking):
         return _audit(root)
 
 
