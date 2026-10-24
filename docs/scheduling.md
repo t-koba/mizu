@@ -651,12 +651,55 @@ The internal host API is intended for a future scheduler-owned yield marker:
    malformed, unsafe or unreadable evidence fails closed, retaining the row.
    Active pointers matching the recovered ID are cleared; no provider state
    is invented or resumed by recovery.
-8. Only a durable matching start plus terminal result allows atomic retirement
-   of that exact row. Engine keeps it throughout execution; failed retirement
+8. For committed/reserved rows, only a durable matching start plus terminal
+   result allows atomic retirement of that exact row. Engine keeps it throughout execution; failed retirement
    leaves the terminal record pinned for a later idempotent reconciliation.
    A crash after start but before any later pointer update resolves from the
    start, never from a guessed registry state. Run evidence and manifests stay
    pinned until retirement. Existing run-envelope reads are bounded to 1 MiB.
+
+### Abandoned preparation proof
+
+`reconcile_prepared(store, role)` is an internal cleanup attempt, not a wake
+source or workspace repair. The caller owns the role/workspace exclusions
+**before** taking the publication lock. An ordinary writer attempts it after
+normal admission, before allocating its run; ineligible cleanup does not prevent
+normal progress. `prepare` also attempts it before refusing a conflicting row.
+Only that role's exact current-pointer row in state `prepared` can be retired.
+Committed/reserved rows use the successor settlement protocol above instead.
+
+Retirement requires all of the following positive evidence:
+
+- Bounded, link-safe source `started.json`, `result.json` and `error.json` reads
+  (1 MiB per record), with the exact source run and role, validated together by
+  the existing `storage_runs._terminal` lifecycle validator. Other terminal
+  sidecars must not contradict that envelope. A lone error or merely prepared
+  result is insufficient. The validator currently permits an interrupted
+  result/error pair, not a bounded pair.
+- The terminal failure result identifies the row's exact snapshot and a valid
+  `finish` with outcome `continue`. Its error matches `error.json`, whose status
+  is terminal interrupted/bounded, `publication` is `not_published`, and
+  `durability` is `confirmed`.
+- The immutable seal still names that source run and `continue`, with its parent
+  bound to the source's started input. Under the publication lock the current
+  pointer/history generation must be consistent and must not contain the seal.
+  The atomic row must still be prepared: publication commits it in the same
+  pointer replacement, and later publications carry that proof forward.
+- No active source pointer, successor start, or unbound successor-run files
+  contradict abandonment (only the same safe pre-start temporary forms allowed
+  by `start` may remain).
+
+Missing, malformed, unsafe, unreadable, active, contradictory, or
+durability-unconfirmed evidence leaves preparation pinned and non-runnable.
+Absence from the current head or a truncated history is **never** proof; no
+age, timeout, or orphan history generation authorizes cleanup. Later
+publications therefore neither authorize cleanup on their own nor invalidate
+an exact confirmed failure. Cleanup atomically removes only the row, preserving
+other roles, run/error evidence, manifests and the unsealed workspace. It is
+idempotent after restart or an uncertain cleanup write. A new source may prepare
+after retirement; an exact retry of a terminal failed source cannot recreate
+its intent. There is still no yield producer, preemption setting, reset, or
+change to drain/deadline semantics.
 
 An invocation-lifetime, nonblocking `locks/continuation-<role>.lock` owns the
 identity from reservation through settlement, including selector retry waits

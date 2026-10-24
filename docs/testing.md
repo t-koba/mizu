@@ -347,6 +347,19 @@ only: they prove local admission, not live-provider/session replay or actual
 power-loss filesystem durability. A start without a terminal result is reported
 interrupted, never re-executed. Terminal-result recovery preserves stored bytes.
 
+Prepared-intent reconciliation regressions use exact interrupted source
+result/error envelopes and the production bounded `storage_runs._terminal`
+validator. They cover confirmed non-publication, later/truncated publications,
+restart and before/after retirement-pointer faults, idempotent cleanup and new
+preparation, and refusal to recreate a terminal failed source. Missing/crashed
+or prepared-only results, malformed/oversized/unreadable or mismatched evidence,
+unconfirmed durability, active sources, contradictory successor starts,
+inconsistent history, and committed/reserved rows remain pinned. The tests
+assert unrelated rows, failure evidence and dirty workspace bytes are unchanged.
+Normal Engine admission is exercised with real role/workspace locks: eligible
+cleanup runs after admission; ambiguous preparation still permits ordinary work.
+These are deterministic local fault tests, not power-loss durability claims.
+
 Regressions cover committed-only no-progress readiness, control/producer/check
 holds, deterministic identity/current input, duplicate/stale wakes, refused
 admission, abandoned pre-start temporaries, mismatched run evidence, dirty

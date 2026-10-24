@@ -11,7 +11,7 @@ import stat
 import time
 from datetime import datetime
 
-from .errors import Denied, Busy
+from .errors import Denied, Busy, MizuError
 from .fs import DIGEST, ID, canonical, digest, lock, publish_pointer, read_json, write_json, now, mkdir, sync_dir
 
 MAX_PENDING = 64
@@ -92,6 +92,92 @@ def publication_metadata(pointer, snapshot):
     return {"continuations": {"version": 1, "entries": rows}} if rows else {}
 
 
+def _source_failure(store, role, source_run):
+    """Return exact terminal failure envelopes; missing evidence is not failure."""
+    from .storage_runs import Scan, _terminal as valid_run_terminal
+    scan = Scan(store.root)
+    directory = store.root / "runs" / source_run
+    started = scan.optional(directory / "started.json")
+    records = {name: scan.optional(directory / name) for name in
+               ("result.json", "error.json", "consultation.json", "delegation.json")}
+    result, error = records["result.json"], records["error.json"]
+    if (not valid_run_terminal(source_run, started, records, time.time())
+            or started["role"] != role
+            or not any(record is not None and record.get("status") in ("interrupted", "bounded")
+                       for record in (result, error))):
+        return None
+    return started, result, error
+
+
+def _failed_source_seal(store, row):
+    """Exact terminal seal failure, not a prepared result or error sidecar alone."""
+    evidence = _source_failure(store, row["role"], row["source_run"])
+    if evidence is None:
+        return None
+    started, result, error = evidence
+    if (result is None or error is None
+            or result.get("status") not in ("interrupted", "bounded")
+            or error.get("status") not in ("interrupted", "bounded")
+            or result.get("snapshot") != row["snapshot"]
+            or ("snapshot" in error and error["snapshot"] != row["snapshot"])):
+        return None
+    finish = result.get("finish")
+    seal = store.get(row["snapshot"])
+    if (not isinstance(finish, dict) or finish.get("outcome") != "continue"
+            or not isinstance(finish.get("summary"), str) or not isinstance(finish.get("state"), str)
+            or seal.get("run") != row["source_run"] or seal.get("outcome") != "continue"
+            or seal.get("parent") != started["snapshot"]):
+        return None
+    return error
+
+
+def _retire_prepared(store, pointer, rows, role):
+    """Caller holds execution exclusions THEN publication.lock; no other locks."""
+    row = next((r for r in rows if r["role"] == role), None)
+    if row is None or row["state"] != "prepared":
+        return False
+    try:
+        error = _failed_source_seal(store, row)
+        if (error is None or error.get("publication") != "not_published"
+                or error.get("durability") != "confirmed"):
+            return False
+        # Absence from a bounded history is NOT the proof. The exact failure
+        # envelope and atomic prepared state are; history only detects conflict.
+        history = store._history_ids()
+        if (not history or history[-1] != pointer.get("snapshot")
+                or row["snapshot"] in history or store.get()["id"] != history[-1]):
+            return False
+        from .storage_runs import Scan
+        scan = Scan(store.root)
+        active = scan.optional(store.root / "active" / (role + ".json"))
+        if active is not None and (active.get("role") != role
+                or not _matches(_RUN, active.get("run"))
+                or not _aware_time(active.get("started_at"))
+                or active["run"] == row["source_run"]):
+            return False
+        successor_directory, successor_started = _started(store, row)
+        if successor_started is not None:
+            return False
+        _unstarted_directory(successor_directory)
+    except (MizuError, OSError, ValueError, TypeError, KeyError):
+        # Unknown evidence remains pinned, including unsafe/unreadable paths.
+        return False
+    rows.remove(row)
+    publish_pointer(store.root, _with_entries(pointer, rows), name="current.json")
+    return True
+
+
+def reconcile_prepared(store, role):
+    """Best-effort retirement of this role's conclusively unpublished failure.
+
+    Caller must own role/workspace exclusions. Never modifies run evidence or
+    workspace, and never turns ambiguous preparation into runnable demand.
+    """
+    with lock(store.root / "locks" / "publication.lock"):
+        pointer = pointer_at(store.root)
+        return _retire_prepared(store, pointer, entries(pointer), role)
+
+
 def prepare(store, *, role, source_run, snapshot):
     """Prepare one host-requested yield, before the writer publishes its seal.
 
@@ -108,6 +194,8 @@ def prepare(store, *, role, source_run, snapshot):
     with lock(store.root / "locks" / "publication.lock"):
         pointer = pointer_at(store.root)
         rows = entries(pointer)
+        if _retire_prepared(store, pointer, rows, role):
+            pointer = _with_entries(pointer, rows)
         wanted = {"role": role, "source_run": source_run, "snapshot": snapshot,
                   "successor": _successor(role, source_run, snapshot), "state": "prepared"}
         for row in rows:
@@ -117,6 +205,10 @@ def prepare(store, *, role, source_run, snapshot):
                 raise Busy("Writer already has a pending continuation")
         if len(rows) >= MAX_PENDING:
             raise Busy("Continuation registry is full")
+        # Even an error-only terminal source cannot be retried into a new
+        # intent. Retirement requires the stronger exact seal/result binding.
+        if _source_failure(store, role, source_run) is not None:
+            raise Denied("Terminal failed source cannot prepare a continuation")
         record = store.get(snapshot)
         started = read_json(store.root / "runs" / source_run / "started.json", {}, max_bytes=RUN_BYTES)
         history = store._history_ids()

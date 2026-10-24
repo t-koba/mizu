@@ -4131,6 +4131,12 @@ class Engine:
                 # Do not allocate a different identity for the same demand.
                 if role.workspace == "write" and continuations.ready(project.snapshots, role_name):
                     return {"skipped": "continuation-pending"}
+                if role.workspace == "write":
+                    # Admission already owns role/workspace exclusions. Cleanup
+                    # takes publication last; ambiguous evidence cannot hold up
+                    # this ordinary writer or discard its unsealed workspace.
+                    with contextlib.suppress(MizuError, OSError, ValueError):
+                        continuations.reconcile_prepared(project.snapshots, role_name)
             dispatch_state = self._dispatch_state(project, role_name, role, event_trigger=event_trigger,
                                                   continuation=continuation is not None)
             if dispatch_state.get("skip"):

@@ -410,6 +410,241 @@ class ContinuationTests(ContinuationFixture):
         self.assertEqual(c.pending(self.store, "worker"), original)
 
 
+class PreparedReconciliationTests(ContinuationFixture):
+    def failed_preparation(self):
+        source, snapshot = self.seal()
+        row = self.prepare(source, snapshot)
+        directory = self.store.root / "runs" / source
+        error = {"run": source, "role": "worker", "status": "interrupted",
+                 "error": "publication refused", "finished_at": now(),
+                 "publication": "not_published", "durability": "confirmed"}
+        result = {**error, "snapshot": snapshot["id"],
+                  "finish": {"outcome": "continue", "summary": "yield", "state": "state"}}
+        write_json(directory / "error.json", error)
+        write_json(directory / "result.json", result)
+        return row, snapshot, directory
+
+    def reconcile(self, store=None, role="worker"):
+        with lock(role_exclusion(self.project.root, role)), \
+                lock(self.project.root / "locks/workspace.lock"):
+            return c.reconcile_prepared(store or self.store, role)
+
+    def test_positive_cleanup_preserves_unrelated_rows_workspace_and_failure(self):
+        row, _, directory = self.failed_preparation()
+        other_source, other_seal = self.seal(role="reporter")
+        other = self.prepare(other_source, other_seal, role="reporter")
+        pointer = c.pointer_at(self.store.root)
+        evidence = {p.name: p.read_bytes() for p in directory.iterdir()}
+        dirty = self.project.workspace / "app.py"
+        dirty.write_bytes(b"unsealed work must survive\n")
+        self.assertTrue(self.reconcile())
+        self.assertFalse(self.reconcile())
+        self.assertEqual(c.entries(c.pointer_at(self.store.root)), [other])
+        self.assertEqual(c.pointer_at(self.store.root)["snapshot"], pointer["snapshot"])
+        self.assertEqual(c.pointer_at(self.store.root)["history"], pointer["history"])
+        self.assertEqual(dirty.read_bytes(), b"unsealed work must survive\n")
+        self.assertEqual({p.name: p.read_bytes() for p in directory.iterdir()}, evidence)
+        self.assertNotEqual(row["snapshot"], self.store.get()["id"])
+
+    def test_later_publications_and_restart_do_not_replace_exact_failure_proof(self):
+        row, _, _ = self.failed_preparation()
+        self.store.history_index = 1
+        for _ in range(2):
+            _, later = self.seal(outcome="wait")
+            self.store.publish(later)
+        reopened = Project(self.config, self.project.name).snapshots
+        self.assertEqual(c.pending(reopened, "worker"), row)
+        self.assertTrue(self.reconcile(reopened))
+        self.assertEqual(reopened.get()["id"], later["id"])
+        self.assertFalse(self.reconcile(reopened))
+
+    def test_prepare_retires_old_failure_and_terminal_retry_cannot_recreate_it(self):
+        _, snapshot, _ = self.failed_preparation()
+        source = snapshot["run"]
+        with self.assertRaisesRegex(Denied, "Terminal failed source"):
+            self.prepare(source, snapshot)
+        self.assertIsNone(c.pending(self.store, "worker"))
+        with self.assertRaisesRegex(Denied, "Terminal failed source"):
+            self.prepare(source, snapshot)
+        next_source, next_seal = self.seal()
+        next_row = self.prepare(next_source, next_seal)
+        self.assertEqual(self.prepare(next_source, next_seal), next_row)
+        self.assertFalse(self.reconcile())
+        self.assertEqual(c.pending(self.store, "worker"), next_row)
+
+    def test_error_only_terminal_source_cannot_recreate_a_retired_intent(self):
+        source, snapshot = self.seal()
+        directory = self.store.root / "runs" / source
+        write_json(directory / "error.json", {
+            "run": source, "role": "worker", "status": "interrupted",
+            "error": "failed before result write", "finished_at": now(),
+            "publication": "not_published", "durability": "confirmed"})
+        with self.assertRaisesRegex(Denied, "Terminal failed source"):
+            self.prepare(source, snapshot)
+        self.assertIsNone(c.pending(self.store, "worker"))
+
+    def test_new_prepare_cleans_a_different_failed_source_before_busy(self):
+        self.failed_preparation()
+        source, snapshot = self.seal()
+        row = self.prepare(source, snapshot)
+        self.assertEqual(c.pending(self.store, "worker"), row)
+        self.assertEqual(row["source_run"], source)
+
+    def test_missing_crashed_prepared_and_invalid_envelopes_stay_pinned(self):
+        row, _, directory = self.failed_preparation()
+        started = read_json(directory / "started.json")
+        result = read_json(directory / "result.json")
+        error = read_json(directory / "error.json")
+        cases = [
+            ("no terminal", started, None, None),
+            ("error only", started, None, error),
+            ("result only", started, result, None),
+            ("prepared only", started, {**result, "status": "prepared"}, None),
+            ("crash between error and result", started, {**result, "status": "prepared"}, error),
+            ("wrong source", {**started, "run": uuid.uuid4().hex}, result, error),
+            ("wrong role", {**started, "role": "reporter"}, result, error),
+            ("wrong input", {**started, "snapshot": row["snapshot"]}, result, error),
+            ("naive time", {**started, "started_at": "2020-01-01"}, result, error),
+            ("future terminal", started, {**result, "finished_at": "2999-01-01T00:00:00+00:00"}, error),
+            ("wrong result run", started, {**result, "run": uuid.uuid4().hex}, error),
+            ("wrong result role", started, {**result, "role": "reporter"}, error),
+            ("wrong output", started, {**result, "snapshot": started["snapshot"]}, error),
+            ("missing output", started, {k: v for k, v in result.items() if k != "snapshot"}, error),
+            ("wrong finish", started, {**result, "finish": {"outcome": "wait"}}, error),
+            ("malformed finish", started, {**result, "finish": []}, error),
+            ("successful result", started, {**result, "status": "completed"}, error),
+            ("mismatched error", started, result, {**error, "error": "different failure"}),
+            ("unconfirmed", started, {**result, "durability": "unconfirmed"},
+             {**error, "durability": "unconfirmed"}),
+            ("unknown publication", started, {**result, "publication": "unknown"},
+             {**error, "publication": "unknown"}),
+            ("published", started, {**result, "publication": "published"},
+             {**error, "publication": "published"}),
+            ("bounded inconsistent pair", started, {**result, "status": "bounded"},
+             {**error, "status": "bounded"}),
+        ]
+        pointer = c.pointer_at(self.store.root)
+        for label, start, res, err in cases:
+            with self.subTest(label=label):
+                for name, value in (("started.json", start), ("result.json", res), ("error.json", err)):
+                    path = directory / name
+                    path.unlink(missing_ok=True)
+                    if value is not None:
+                        write_json(path, value)
+                self.assertFalse(self.reconcile())
+                self.assertEqual(c.pointer_at(self.store.root), pointer)
+        # None of these cases turns a prepared row into readiness.
+        self.assertIsNone(c.ready(self.store, "worker"))
+        self.assertEqual(c.pending(self.store, "worker"), row)
+
+    def test_malformed_oversized_unreadable_and_contradictory_evidence_is_preserved(self):
+        row, snapshot, directory = self.failed_preparation()
+        path = directory / "result.json"
+        original = path.read_bytes()
+        for payload in (b"{", b"[]", b" " * (storage_runs.RECORD_BYTES + 1)):
+            with self.subTest(payload_bytes=len(payload)):
+                path.write_bytes(payload)
+                self.assertFalse(self.reconcile())
+                self.assertEqual(path.read_bytes(), payload)
+        path.write_bytes(original)
+        with patch.object(storage_runs.Scan, "record", side_effect=PermissionError("unreadable")):
+            self.assertFalse(self.reconcile())
+        write_json(directory / "delegation.json", {"status": "completed"})
+        self.assertFalse(self.reconcile())
+        (directory / "delegation.json").unlink()
+        manifest = self.store.root / "snapshots" / (snapshot["id"] + ".json")
+        manifest_bytes = manifest.read_bytes()
+        write_json(manifest, {**snapshot, "run": uuid.uuid4().hex})
+        self.assertFalse(self.reconcile())
+        manifest.write_bytes(manifest_bytes)
+        # A valid envelope is still insufficient when the immutable seal binds
+        # a different run/outcome (mock only bypasses content-address validation).
+        get = self.store.get
+        for change in ({"run": uuid.uuid4().hex}, {"outcome": "wait"}):
+            with patch.object(self.store, "get", side_effect=lambda sid=None: (
+                    {**snapshot, **change} if sid == snapshot["id"] else get(sid))):
+                self.assertFalse(self.reconcile())
+        self.assertEqual(c.pending(self.store, "worker"), row)
+
+    def test_active_successor_and_inconsistent_history_stay_pinned(self):
+        row, _, _ = self.failed_preparation()
+        active = self.store.root / "active/worker.json"
+        write_json(active, {"run": row["source_run"], "role": "worker", "started_at": now()})
+        self.assertFalse(self.reconcile())
+        write_json(active, {})
+        self.assertFalse(self.reconcile())
+        active.unlink()
+        successor_start = self.store.root / "runs" / row["successor"] / "started.json"
+        write_json(successor_start, {"run": row["successor"]})
+        self.assertFalse(self.reconcile())
+        successor_start.unlink()
+        successor_result = successor_start.parent / "result.json"
+        write_json(successor_result, {"run": row["successor"]})
+        self.assertFalse(self.reconcile())
+        successor_result.unlink()
+        pointer = c.pointer_at(self.store.root)
+        publish_pointer(self.store.root, {**pointer, "snapshot": row["snapshot"]}, name="current.json")
+        self.assertFalse(self.reconcile())
+        publish_pointer(self.store.root, pointer, name="current.json")
+        with patch.object(self.store, "_history_ids", return_value=[row["snapshot"], pointer["snapshot"]]):
+            self.assertFalse(self.reconcile())
+        self.assertEqual(c.pending(self.store, "worker"), row)
+
+    def test_committed_and_reserved_rows_never_retire_from_source_failure(self):
+        row, snapshot, _ = self.failed_preparation()
+        self.store.publish(snapshot)
+        self.assertFalse(self.reconcile())
+        with c.reservation(self.engine, self.project, "worker"):
+            pass
+        self.assertFalse(self.reconcile())
+        self.assertEqual(c.pending(self.store, "worker")["state"], "reserved")
+        self.assertEqual(c.pending(self.store, "worker")["successor"], row["successor"])
+
+    def test_retirement_fault_and_restart_are_idempotent(self):
+        row, _, _ = self.failed_preparation()
+        with patch.object(c, "publish_pointer", side_effect=OSError("before pointer")):
+            with self.assertRaises(OSError):
+                self.reconcile()
+        self.assertEqual(c.pending(self.store, "worker"), row)
+        def after_commit(*args, **kwargs):
+            publish_pointer(*args, **kwargs)
+            raise OSError("after pointer")
+        with patch.object(c, "publish_pointer", side_effect=after_commit):
+            with self.assertRaises(OSError):
+                self.reconcile()
+        reopened = Project(self.config, self.project.name).snapshots
+        self.assertFalse(self.reconcile(reopened))
+        self.assertIsNone(c.pending(reopened, "worker"))
+
+    def test_normal_writer_attempts_cleanup_after_admission_and_can_progress(self):
+        row, _, _ = self.failed_preparation()
+        reconcile = c.reconcile_prepared
+        attempted = []
+        def cleanup(store, role):
+            for exclusion in (role_exclusion(self.project.root, role),
+                              self.project.root / "locks/workspace.lock"):
+                with self.assertRaises(Busy), lock(exclusion, blocking=False):
+                    pass
+            attempted.append(role)
+            return reconcile(store, role)
+        driver = ScriptDriver(lambda *_: self.assertIsNone(c.pending(self.store, "worker")))
+        with patch.object(c, "reconcile_prepared", side_effect=cleanup):
+            result = Engine(self.config, driver=driver).run(self.project, "worker")
+        self.assertEqual(attempted, ["worker"])
+        self.assertNotEqual(result["run"], row["source_run"])
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(len(driver.calls), 1)
+
+    def test_normal_writer_can_progress_without_cleaning_ambiguous_intent(self):
+        source, snapshot = self.seal()
+        row = self.prepare(source, snapshot)
+        driver = ScriptDriver(lambda *_: self.assertEqual(c.pending(self.store, "worker"), row))
+        result = Engine(self.config, driver=driver).run(self.project, "worker")
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(c.pending(self.store, "worker"), row)
+        self.assertEqual(len(driver.calls), 1)
+
+
 class EngineContinuationTests(ContinuationFixture):
     """Real Engine/queue with a local ScriptDriver, never provider replay."""
     def quiet_head(self, *, source=None, outcome="continue"):
