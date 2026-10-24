@@ -72,6 +72,7 @@ from .vcs_poll_policy import (MAX_CI_BRANCHES, POLL_CALL_TIMEOUT_CAP,
                               vcs_poll_proposals_enabled, vcs_poll_status_timeout)
 from .vcs_proposal_poll import (MAX_PROPOSAL_CURSOR, _valid_proposal_cursor,
                                 poll_proposals)
+from .vcs_upstream_poll import poll_upstream, refresh_upstream
 
 
 def _normalized_wake_generation(value) -> str:
@@ -2407,53 +2408,6 @@ def _epoch_text(epoch) -> str:
         return str(epoch)
 
 
-def refresh_upstream(config, project) -> dict:
-    """Host-side upstream refresh: fetch refs and inject them read-only.
-
-    Schema: returns ``{"injected": n, "prefix": ..., "trust": ...}``.
-    Bounds: adapter bounds from ``config.vcs``; at most 4096 refs.
-    Trust: operator-owned adapter; refs stay external-untrusted.
-    Failure: ``Denied`` on adapter/shape errors; ``OSError`` on host I/O.
-    No capability check here; the ``sync`` tool adds the grant gate.
-    """
-    fetched = _vcs.fetch_refs(capped_vcs_settings(config.vcs, vcs_poll_fetch_timeout(config)))
-    receipt = _vcs.inject_refs(project.root, fetched["refs"])
-    return {"injected": receipt["injected"], "prefix": receipt["prefix"],
-            "trust": "external-untrusted", "refs": dict(fetched["refs"])}
-
-
-def poll_upstream(config, project, state: dict, *, now: float, interval: float,
-                  refresh=None) -> dict | None:
-    """Best-effort periodic upstream refresh for the daemon loop.
-
-    Schema: ``state`` holds ``last_fetch`` (wall-clock) across calls; returns
-    an ``upstream_fetch`` event dict or ``None`` when skipped (disabled or not
-    due). Bounds: one ``refresh`` invocation per due poll under the adapter
-    timeout. Trust: host side only via ``refresh_upstream``; refs stay
-    external-untrusted. Retry/cancellation: no retry; ``last_fetch`` advances
-    on failure too so one bad adapter cannot busy-loop. Evidence: the
-    returned event names ok/injected or error; this helper never publishes a
-    snapshot (injected refs are digest-excluded). Failure: ``Denied``,
-    ``OSError`` and ``ValueError`` become ``ok=False`` events, never raised.
-    """
-    if not config.vcs.get("command"):
-        return None
-    if not upstream_fetch_due(state.get("last_fetch"), now, interval):
-        return None
-    state["last_fetch"] = now
-    do_refresh = refresh if refresh is not None else refresh_upstream
-    try:
-        receipt = do_refresh(config, project)
-    except (Denied, OSError, ValueError) as exc:
-        state["last_error"] = str(exc)
-        return {"event": "upstream_fetch", "ok": False,
-                "error": str(exc), "time": now_iso()}
-    state["last_error"] = ""
-    state["last_ok"] = now
-    return {"event": "upstream_fetch", "ok": True,
-            "injected": receipt["injected"], "prefix": receipt["prefix"],
-            "trust": "external-untrusted", "time": now_iso()}
-
 
 #: Shared per-project poll lock name (state filename lives in ci_observation).
 POLL_LOCK_NAME = "vcs-poll.lock"
@@ -2652,7 +2606,7 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
 
 
 def now_iso() -> str:
-    """Wall-clock event stamp for ``poll_upstream``."""
+    """Wall-clock event stamp for CI polling."""
     return now()
 
 

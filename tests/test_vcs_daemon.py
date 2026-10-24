@@ -98,6 +98,34 @@ class DaemonPeriodicFetchTests(Fixture):
         self.assertEqual(vcs.list_refs(self.project.root), [])
 
 
+    def test_poll_default_refresh_caps_fetch_injects_and_stamps_event(self):
+        from unittest.mock import patch
+        from mizu import vcs_upstream_poll
+
+        config = dataclasses.replace(
+            self.config,
+            vcs={"command": ["fake-vcs"], "timeout_seconds": 120,
+                 "max_bytes": 524288, "poll_fetch_timeout_seconds": 7})
+        refs = {"main": SHA_A}
+        state: dict = {"last_fetch": None}
+        with patch.object(vcs_upstream_poll._vcs, "fetch_refs",
+                          return_value={"refs": refs}) as fetch, \
+                patch.object(vcs_upstream_poll._vcs, "inject_refs",
+                             return_value={"injected": 1, "prefix": "refs/mizu/"}) as inject, \
+                patch.object(vcs_upstream_poll, "now_iso", return_value="2026-01-02T03:04:05+00:00"):
+            event = poll_upstream(config, self.project, state, now=123.0,
+                                  interval=15.0)
+
+        fetch.assert_called_once()
+        settings = fetch.call_args.args[0]
+        self.assertEqual(settings["timeout_seconds"], 7)
+        inject.assert_called_once_with(self.project.root, refs)
+        self.assertEqual(state, {"last_fetch": 123.0, "last_error": "", "last_ok": 123.0})
+        self.assertEqual(event, {"event": "upstream_fetch", "ok": True,
+                                 "injected": 1, "prefix": "refs/mizu/",
+                                 "trust": "external-untrusted",
+                                 "time": "2026-01-02T03:04:05+00:00"})
+
     def test_future_timestamp_is_due_after_clock_reset(self):
         # Persisted wall-clock in the future (or stale monotonic above the new
         # clock after a reboot) must not suppress polling.
