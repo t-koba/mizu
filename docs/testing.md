@@ -320,3 +320,17 @@ uses bounded event synchronization and a 60-second host-cost backstop, not CPU
 saturation. Existing completion fixtures explicitly record doing and delivery
 revisions; legacy unmarked history remains tested separately. No real external
 CI or deployment is asserted by these offline tests.
+
+### Shared smoke retention (synthetic only)
+
+`PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_smoke*.py' -q`
+checks the paid-probe caps with fake engines and the shared lifecycle without
+calling a provider. `test_smoke_retention.py` constructs disposable pairs and
+project record stores to cover atomic publication and member identity,
+cross-project typed pins, exact Insight revisions, inherited task seeds,
+blocked waits, active versus terminal owners, missing/malformed/oversized/linked
+metadata, scan caps, strict age boundaries and zero, busy coordination, immutable
+previews, pending rollback, committed partial-deletion recovery, and honest
+partial I/O failure. Legacy flat outputs and the fixed probe policy must survive
+apply unchanged. These tests are not live-provider or installed-state evidence;
+never run paid smoke as part of offline acceptance.

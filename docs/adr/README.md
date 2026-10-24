@@ -773,9 +773,9 @@ under a separate `data_dir/projects/<name>`. The current producer has no typed
 smoke-artifact reference protocol, and a report path or identifier in prose
 cannot establish whether an artifact is still needed. A per-project setting
 cannot safely govern this shared root, and neither free-text parsing nor
-confusing smoke IDs with Mizu/VCS run IDs is permitted. Current flat smoke
-outputs therefore remain unchanged and are not retention candidates until the
-shared reference contract is implemented.
+confusing smoke IDs with Mizu/VCS run IDs is not permitted. Legacy flat smoke
+outputs remain unchanged and are never retention candidates; new complete
+bundles implement the shared reference contract below.
 
 The policy owner is the shared `data_dir`, not any project: a single
 `validation/retention-policy.json` controls the shared smoke lifecycle across
@@ -818,10 +818,13 @@ configured window are candidates. Future, missing, intermediate, unknown or
 contradictory evidence is preserved. With `0`, no new expiry scan runs, but
 recognized quarantine recovery remains available.
 
-Pair publication, typed-reference changes and retirement share the
-nonblocking `data_dir/locks/smoke-retention.lock`; reference writers acquire it
-before the record-store lock they mutate. Retention never acquires workspace
-or role-execution locks, avoiding a cycle with live writers. The live provider
+Pair publication, typed-reference changes and retirement share
+`data_dir/locks/smoke-retention.lock`; prune/publication acquire it nonblocking,
+while record writers retain the existing bounded writer wait; reference writers acquire it
+before the record-store lock they mutate. Delivery binding nests it between
+`publication.lock` and `insights.lock`; snapshot and smoke-bundle publishers take
+only their own lock. Retention never acquires workspace or role-execution locks,
+avoiding a cycle with live writers. The live provider
 call never holds this global lock. Prune needs no project pause, defaults to
 a bounded dry-run, and recomputes its plan under the lock for `--apply`; busy
 or incomplete scans do nothing. Each whole pair directory is atomically renamed into same-filesystem
@@ -833,6 +836,5 @@ Synthetic regressions cover cross-project pins, current versus terminal
 owners, exact Insight revisions and waits, malformed/missing/oversized/link
 records, project/pair/reference overflows, age boundaries and zero, lock
 contention, default dry-run immutability, pair identity, and both quarantine
-recovery states. This ADR defines the implementation boundary only; it does
-not change today's smoke output or retention behavior, and it does not alter
+recovery states. This lifecycle applies only to new manifest-bound smoke bundles; it does not alter
 per-project run, snapshot, object, scheduling or receipt policy.

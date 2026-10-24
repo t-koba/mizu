@@ -462,6 +462,56 @@ Sessions are durable audit evidence: `mizu storage` reports their counts/bytes a
 `daily_requests` counts logical admissions, not dollar amounts; enable a hard provider spend cap/pause by default (alert-only alarms are not sufficient for unattended runs). Use `mizu status` and `mizu budget` for per-project and shared day counts in the configured `timezone`, and `mizu usage` for token statistics.
 Day-files (`data/budget/YYYY-MM-DD.json`) keep the date in the configured `timezone` (UTC when unset) plus the shared aggregate, a per-project map, and the `zone` that wrote them, so two configs sharing `data_dir` with different `daily_requests` admit independently unless the optional shared total is reached. `mizu budget <project>` and `mizu status` report both numbers with the day and zone. Projects sharing one `data_dir` should share one `timezone`: different zones name different days for the same instant, splitting the shared total across day-files.
 
+## Shared smoke retention
+
+This policy belongs to `data_dir`, not a project or config overlay. The only
+setter is the operator CLI `mizu smoke-retention --set-days N`; no model tool or
+project-level override exists. `validation/retention-policy.json`, when present,
+is an exact JSON object `{"version":1,"days":31}` (at most 1 KiB). Both values
+are integers, not booleans; version is exactly 1 and days is 0–36,500. Absence
+means 31 days; 0 keeps indefinitely. Unsafe/malformed policy refuses, including
+setter requests (repair is an explicit operator action, not silent replacement).
+
+New `validation/pairs/<id>/manifest.json` is at most 4 KiB, exact version-1
+fields: `version`, `smoke_id` (full 128-bit lowercase hex), `status` (`pass` or
+`fail`), timezone-aware `completed_at`, `report` (`sha256`, `bytes`), and `project`
+(null or the moved directory's `device`/`inode` identity). `report.json` is bounded
+to 16 MiB, preserves the smoke result, and must agree on ID/status/completion.
+The manifest binds its exact bytes; missing, additional, linked, changed or
+contradictory members refuse expiry. Project payload contents are not parsed as
+reference metadata. Legacy flat pairs and the fixed probe policy are excluded.
+
+`smoke_refs` is an optional array of at most 64 unique exact 32-lowercase-hex IDs
+on an Insight evidence entry, WorkItem seed/current state, or structured wait.
+Project/owner identity is the containing record's identity, never a path supplied
+by a model; Insight evidence also stores `rev` equal to its current revision.
+Revision CAS, owner identity and pair existence are checked by the host. A
+meaningful Insight revision archives prior evidence rather than inheriting its
+pins. Seeded WorkItems copy refs into their own immutable creation record, so a
+terminal Insight does not prematurely release active work. Audit/history keeps
+IDs after owner termination without pinning payload. Current blocked waits own
+separate refs and lose them on replacement/consumption or owner termination.
+A changed WorkItem ref list may be recorded as a same-status CAS revision.
+A direct creation that inherits extra refs stores `requested_smoke_refs` (the
+original optional request, null for omission) beside its seed. This provenance
+field is not a pin; it preserves exact retry identity after the origin changes.
+
+The collector scans all project roots and new pair manifests, with fixed caps:
+5,000 roots, 5,000 published-plus-pending pair manifests, and 5,000 quarantine
+entries; 20,000 live reference occurrences; and 64 MiB of shared reference,
+manifest, policy, and audit metadata. Each reference
+record is at most 128 KiB. Enumeration also caps reference-store entries at
+100,000 and each WorkItem directory at 260 entries; existing ledger revision
+bounds still apply. No links are followed; linked metadata, unknown schemas,
+missing live owners/pairs and exhausted bounds refuse the entire new-expiry
+apply. Report payload bytes are validated separately and are not charged to the
+metadata budget. Scans do not take project workspace/role locks. Apply recomputes
+under the shared lock; dry-run is strictly read-only and never performs recovery.
+With 0, only policy, audit and recognized quarantine recovery are examined.
+
+See [operations](operations.md#shared-smoke-evidence-retention) for commands,
+quarantine recovery, partial-failure results and bounded maintenance audit.
+
 ## Fixed mechanism bounds
 
 Safety-critical bounds are fixed in code rather than exposed as configuration knobs:

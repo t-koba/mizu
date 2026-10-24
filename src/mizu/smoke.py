@@ -10,13 +10,14 @@ prompt is the fixed ``SMOKE_PROBE_POLICY`` written per run under
 ``<data>/validation/smoke-probe-policy.md``; operator consult policy text
 is never offered, so smoke tests the engine/provider path only.
 Retry/cancellation: single run under the run deadline; no retry.
-Evidence: pass/fail JSON plus the moved project under ``<data>/validation``.
+Evidence: one manifest-bound pass/fail pair (JSON and the moved project when
+initialized) under ``<data>/validation/pairs/<128-bit-id>``. Legacy flat outputs
+are never migrated or expired. See ``smoke_retention`` for the shared policy.
 Failure: ``Denied`` when the engine does not return the probe contents.
 """
 from __future__ import annotations
 
 import dataclasses
-import shutil
 import tempfile
 import uuid
 from pathlib import Path
@@ -24,7 +25,7 @@ from pathlib import Path
 from . import platform as _platform
 from .config import Config
 from .errors import ConfigError, Denied
-from .fs import mkdir, now, write_json
+from .fs import mkdir, now
 from .project import initialize
 from .runtime import Engine
 
@@ -92,7 +93,8 @@ def live(config: Config, profile: str | None = None, role_name: str | None = Non
     role = dataclasses.replace(role, run_seconds=min(limits.run_seconds, role.run_seconds or limits.run_seconds))
     config = dataclasses.replace(config, roles={**config.roles, role_name: role}, limits=limits)
     challenge = "mizu-probe-" + uuid.uuid4().hex[:12]
-    name = "smoke-" + uuid.uuid4().hex[:16]
+    smoke_id = uuid.uuid4().hex
+    name = "smoke-" + smoke_id
     mkdir(config.data)
     project = None
     with tempfile.TemporaryDirectory(prefix="smoke-source-", dir=config.data) as temporary:
@@ -103,7 +105,7 @@ def live(config: Config, profile: str | None = None, role_name: str | None = Non
         goal = root / "goal.md"
         # Test-only probe vector, not operator policy.
         goal.write_text("Read the file probe.txt in the workspace root (exact path probe.txt) with a single read. Do not list files first; the workspace contains only probe.txt. Then call mizu_finish alone with outcome 'wait' and summary exactly the file contents. Do nothing else.")
-        evidence = config.data / "validation" / (name + ".project")
+        evidence = config.data / "validation" / "pairs" / smoke_id / "project"
         try:
             project = initialize(config, name, source, goal, [role_name], [], armed=True)
             result = Engine(config, ephemeral=True).run(project, role_name)
@@ -126,13 +128,12 @@ def live(config: Config, profile: str | None = None, role_name: str | None = Non
             }[engine]
             report = {"status": "pass", "time": now(), "engine": engine, "checks": checks,
                       "result": result, "evidence": str(evidence)}
-            write_json(config.data / "validation" / f"{name}.json", report)
-            return report
         except BaseException as exc:
-            write_json(config.data / "validation" / f"{name}.json", {"status": "fail", "time": now(), "error": str(exc), "evidence": str(evidence) if project else None})
+            report = {"status": "fail", "time": now(), "error": str(exc)}
             raise
         finally:
             if project:
                 project.set_control(armed=False, paused=True)
-                mkdir(evidence.parent)
-                shutil.move(str(project.root), str(evidence))
+            from .smoke_retention import publish
+            report = publish(config.data, smoke_id, report, project.root if project else None)
+        return report

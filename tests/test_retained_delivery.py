@@ -215,9 +215,10 @@ class RetainedDeliveryTests(Fixture):
         def track(path, **kwargs):
             paths.append(path.name)
             return lock(path, **kwargs)
-        with patch("mizu.work_items.lock", side_effect=track):
+        with patch("mizu.work_items.lock", side_effect=track), \
+                patch("mizu.smoke_refs.lock", side_effect=track):
             self.bind(snapshot)
-        self.assertEqual(paths[:2], ["publication.lock", "insights.lock"])
+        self.assertEqual(paths[:3], ["publication.lock", "smoke-retention.lock", "insights.lock"])
         paths.clear()
         newer = self.snapshot(publish=False)
         with patch("mizu.snapshot.lock", side_effect=track):

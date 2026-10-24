@@ -221,9 +221,66 @@ apply refuses an incomplete scan. The full plan and successful completion are
 recorded under `maintenance/`. Interrupted quarantine staging is restored before
 the next apply rescan; committed quarantine deletion resumes instead. Dry-run
 only reports leftovers. See [the retention contract](configuration.md#operator-invoked-run-retention)
-for bounds, exact typed fields and interruption semantics. Shared smoke evidence
-is not pruned; the separate, not-yet-implemented data-dir policy and typed-pin
-design is recorded in ADR-051.
+for bounds, exact typed fields and interruption semantics. Shared smoke evidence has a separate data-dir-owned lifecycle (below); project
+run retention never prunes it.
+
+### Shared smoke evidence retention
+
+`mizu smoke --live` still requires explicit paid-probe consent and keeps its
+4-request / 5-tool / 120-second caps. New outputs are a complete bundle at
+`data_dir/validation/pairs/<32-lowercase-hex smoke_id>/`: `manifest.json`,
+`report.json`, and `project/` when initialization succeeded. The CLI report
+retains the probe result and adds `smoke_id`, `pair`, and `report` paths. A
+failed probe also publishes a terminal fail bundle before raising the probe
+error. Publication stages the bundle and renames its directory once; interrupted
+unpublished staging is diagnostic evidence, never an expiry candidate.
+
+```sh
+mizu smoke-retention                 # project-free, read-only advisory preview
+mizu smoke-retention --set-days 31   # operator CLI only; one shared data-dir policy
+mizu smoke-retention --set-days 0    # keep indefinitely (recovery still available)
+mizu smoke-retention --apply        # recompute under the global lock, then retire
+```
+
+No project pause is needed. Apply is nonblocking on
+`data_dir/locks/smoke-retention.lock`; a busy lock refuses without changing
+pairs. Reference writers take this lock before their record-store lock (using
+the existing bounded writer wait); provider execution never holds it. Preview
+neither creates lock files nor recovers quarantine and is advisory: apply never
+trusts a preview. Each output list is sampled to 100 IDs with its full count
+and digest; the internal scan and apply are complete, not sampled.
+
+Only current open/deferred Insight evidence or nonterminal WorkItems/waits with
+explicit `smoke_refs` pin bundles. Attach IDs with the host `attach_evidence`
+API bound to the Insight revision read, or the WorkItem create/transition/wait
+APIs. Insight decision seeds inherit evidence refs, including task-group seeds;
+direct Insight-origin creation also inherits them. Omitting refs on a WorkItem transition inherits the item's pins; `[]` releases
+its item-level pins. A blocked wait carries its own refs.
+Terminal owner history retains the IDs but no longer retains the payload. A
+path, prose citation, or provider/VCS run ID is **not** a pin. Restore validates
+imported live refs under the same lock before exposing the new project; backups
+do not include shared smoke payloads, so restore requires those pairs to exist.
+
+Apply refuses all new retirement on unsafe, unreadable, missing, malformed,
+unknown or over-bound relevant metadata in any project. Only complete terminal
+pass/fail pairs strictly older than the window expire. `0` skips the new expiry
+scan, not recognized quarantine recovery. Whole directories move atomically to
+`validation/quarantine/<id>.pending`; pending means rollback to `pairs/<id>`.
+Renaming to `<id>.committed` commits deletion. Recovery validates the retained
+manifest and any remaining known members; deletion keeps that manifest until
+last, so unknown or unmarked contents fail closed. A fully removed bundle with
+an empty committed directory is also recoverable. Dry-run only reports these
+states.
+Partial I/O failure returns `complete:false`, the error class and the IDs that
+actually completed; it stops before later pairs. Retry apply after resolving
+the fault. `validation/retention-audit.json` retains the latest 128 successful
+pair-level deletion/recovery events, never a success for a partial deletion.
+Project audit/history is unaffected and permanent.
+
+Legacy flat `validation/smoke-<16-hex>.json` and `.project` artifacts remain
+untouched indefinitely: there is no migration or inferred citation scan. The
+shared fixed `validation/smoke-probe-policy.md` is outside retention too. See
+[configuration](configuration.md#shared-smoke-retention) for schemas and bounds.
 
 `--keep-artifacts N` は最新の成果物を含め N 件を保持します。`[web] cache_seconds` を過ぎた共有 web-cache（`data_dir/web-cache/*.json`）の期限切れエントリも候補となり、次回 fetch で再取得されるため削除は安全に再試行できます。セッション（`sessions/`）は監査証跡として保持され、削除対象になりません（`mizu storage` で件数・バイト数を報告）。削除ログは `maintenance/prune-*.json` に記録され、バックアップ対象となります。
 

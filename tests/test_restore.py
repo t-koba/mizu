@@ -46,6 +46,25 @@ class RestoreTests(Fixture):
         self.assertEqual(restored.work_items.get(decision["work_item"]["id"]), completed)
         self.assertTrue((restored.root / "snapshots" / f"{snapshot['id']}.json").is_file())
 
+    def test_shared_smoke_refs_restore_only_with_complete_shared_pairs(self):
+        from mizu.smoke_retention import publish
+        import shutil
+        (self.config.data / "validation").mkdir()
+        smoke_id = "a" * 32
+        result = publish(self.config.data, smoke_id, {"status": "pass", "time": "2020-01-01T00:00:00+00:00"}, None)
+        proposal = self.project.insights.submit(source="worker", title="Shared evidence", body="Keep it", base_snapshot=None)
+        self.project.insights.attach_evidence(proposal["id"], source="worker", text="Pin", expected_rev=1, smoke_refs=[smoke_id])
+        self.project.set_control(paused=True)
+        archive = self.root / "smoke-refs.tar.gz"
+        backup(self.project, archive)
+        restore(self.config, "restored", archive)
+        restored = Project(self.config, "restored")
+        self.assertEqual(restored.insights.read(proposal["id"])["evidence"][0]["smoke_refs"], [smoke_id])
+        shutil.rmtree(result["pair"])
+        with self.assertRaises(Denied):
+            restore(self.config, "missing-pair", archive)
+        self.assertFalse((self.config.data / "projects/missing-pair").exists())
+
     def malicious(self, name, kind=None):
         archive = self.root / 'malicious.tar.gz'
         with tarfile.open(archive, 'w:gz') as tar:

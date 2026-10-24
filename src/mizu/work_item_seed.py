@@ -5,6 +5,7 @@ import datetime as dt
 import re
 
 from .errors import Denied
+from .smoke_refs import validate_refs
 from .work_item_waits import normalize_wait, stored_wait
 from .fs import PREVIEW_BYTES, canonical, digest, identifier
 
@@ -61,7 +62,9 @@ def validate_seed(seed, *, decision_task=False) -> dict:
     if not isinstance(seed, dict):
         raise Denied("Invalid work-item seed fields")
     blocked = decision_task and "wait" in seed
-    fields = frozenset(set(seed) - {"wait"}) if blocked else frozenset(seed)
+    fields = frozenset(set(seed) - ({"wait"} if blocked else set()) - {"smoke_refs"})
+    if "smoke_refs" in seed:
+        validate_refs(seed["smoke_refs"])
     if fields not in SEED_SHAPES:
         raise Denied("Invalid work-item seed fields")
     if blocked:
@@ -85,12 +88,14 @@ def validate_seed(seed, *, decision_task=False) -> dict:
 
 
 def make_seed(item_id: str, title: str, origin, stamp: str, *,
-              description=DESCRIPTION_UNSET, scope=SCOPE_UNSET, wait=None) -> dict:
+              description=DESCRIPTION_UNSET, scope=SCOPE_UNSET, wait=None, smoke_refs=None) -> dict:
     # Absence is part of the immutable v1 shape, not a null description or a
     # null scope: a seed states an accepted scope only when one was accepted.
     seed = {"id": item_id, "title": title, "origin": origin,
             "status": "open", "rev": 1, "holder": None,
             "created_at": stamp, "updated_at": stamp}
+    if smoke_refs is not None:
+        seed["smoke_refs"] = validate_refs(smoke_refs)
     if description is not DESCRIPTION_UNSET:
         seed["description"] = description
     if scope is not SCOPE_UNSET:
@@ -131,8 +136,10 @@ def validate_task_wait(wait) -> None:
               "insight_decided": {"kind", "insight"},
               "dependency": {"kind", "recipient", "requires"}}
     if (not isinstance(wait, dict) or not isinstance(wait.get("kind"), str)
-            or set(wait) != fields.get(wait["kind"], set())):
+            or set(wait) - {"smoke_refs"} != fields.get(wait["kind"], set())):
         raise Denied("Invalid decision task wait")
+    if "smoke_refs" in wait:
+        validate_refs(wait["smoke_refs"])
     # The shared normalizer validates values. Code-change has only its kind;
     # its baseline must be captured at commit, not during request/replay checks.
     if wait["kind"] != "code_change":
@@ -171,6 +178,7 @@ def task_seeds(event: dict) -> list:
         expected = make_seed(item_id, task["title"],
                              {"insight_id": event["id"], "rev": event["rev"]}, event["created_at"],
                              description=task["description"],
+                             **({"smoke_refs": event["smoke_refs"]} if "smoke_refs" in event else {}),
                              **({"scope": event["scope"]} if "scope" in event else {}))
         if "wait" in task:
             normalized = stored_wait(normalized)

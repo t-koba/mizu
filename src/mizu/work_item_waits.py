@@ -4,13 +4,14 @@ from __future__ import annotations
 import datetime as dt
 
 from .errors import Denied
+from .smoke_refs import validate_refs
 from .fs import DIGEST, identifier
 
 #: Locally observable defer/task conditions, reevaluated from recorded state.
 WAIT_KINDS = ("deadline", "code_change", "insight_decided", "dependency")
 
 
-def normalize_wait(wait, action: str, baseline=None) -> dict | None:
+def _normalize_wait(wait, action: str, baseline=None) -> dict | None:
     """Normalize raw defer/work-item waits; capture code baseline only on creation."""
     if wait is None:
         return None
@@ -72,7 +73,7 @@ def normalize_wait(wait, action: str, baseline=None) -> dict | None:
 
 
 
-def stored_wait(value) -> dict:
+def _stored_wait(value) -> dict:
     """Validate normalized observable waits without rebasing code evidence."""
     if not isinstance(value, dict):
         raise Denied("Blocked work items require a structured wait")
@@ -87,3 +88,25 @@ def stored_wait(value) -> dict:
     if value != normalized:
         raise Denied("Invalid normalized work-item wait")
     return normalized
+
+
+def normalize_wait(wait, action, baseline=None):
+    refs = wait.get("smoke_refs") if isinstance(wait, dict) else None
+    raw = {k: v for k, v in wait.items() if k != "smoke_refs"} if isinstance(wait, dict) else wait
+    result = _normalize_wait(raw, action, baseline)
+    if refs is not None:
+        result = {**result, "smoke_refs": validate_refs(refs)}
+    elif isinstance(wait, dict) and "smoke_refs" in wait:
+        validate_refs(refs)
+    return result
+
+
+def stored_wait(value):
+    refs = value.get("smoke_refs") if isinstance(value, dict) else None
+    raw = {k: v for k, v in value.items() if k != "smoke_refs"} if isinstance(value, dict) else value
+    result = _stored_wait(raw)
+    if refs is not None:
+        result = {**result, "smoke_refs": validate_refs(refs)}
+    elif isinstance(value, dict) and "smoke_refs" in value:
+        validate_refs(refs)
+    return result

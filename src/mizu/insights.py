@@ -48,6 +48,7 @@ import uuid
 import os
 from pathlib import Path
 
+from .smoke_refs import record_lock, validate_refs, require_pairs
 from . import insight_archive
 from .work_item_waits import WAIT_KINDS, normalize_wait
 from .errors import Denied, LimitExceeded
@@ -125,6 +126,9 @@ def _validate_keyed_substantive_event(event, insight_id: str, rev: int, key: str
         raise Denied("Decision event ID collision")
     # A decision written before the accepted scope existed keeps the older
     # field set; a decision that states one carries the extra key.
+    if "smoke_refs" in event:
+        validate_refs(event["smoke_refs"])
+        fields.add("smoke_refs")
     present = set(event)
     shape_ok = present == fields or (action in ("accept", "modify")
                                       and present == fields | {"scope"})
@@ -150,6 +154,7 @@ def _validate_keyed_substantive_event(event, insight_id: str, rev: int, key: str
         seed = event.get("work_item")
         validate_seed(seed)
         if seed != make_seed(f"wi_{key}", title, {"insight_id": insight_id, "rev": rev}, stamp,
+                             **({"smoke_refs": event["smoke_refs"]} if "smoke_refs" in event else {}),
                              **({"description": event["reason"]} if "description" in seed else {}),
                              **({"scope": event.get("scope")} if "scope" in seed else {})):
             raise Denied("Malformed keyed work-item seed")
@@ -188,6 +193,11 @@ def _normalize(record: dict) -> dict:
         out["origin"] = None
     if not isinstance(out.get("evidence"), list):
         out["evidence"] = []
+    for entry in out["evidence"]:
+        if isinstance(entry, dict) and "smoke_refs" in entry:
+            validate_refs(entry["smoke_refs"])
+            if type(entry.get("rev")) is not int or entry["rev"] != out["rev"]:
+                raise Denied("Smoke evidence must bind its exact Insight revision")
     if not out.get("updated_at"):
         out["updated_at"] = out.get("created_at")
     return out
@@ -309,7 +319,7 @@ class Insights:
                  "base_snapshot": base_snapshot, "run": run, "origin": origin}
         if len(canonical(probe)) > self.maximum:
             raise Denied("Insight exceeds byte limit")
-        with lock(self.root / "locks" / "insights.lock"):
+        with record_lock(self.root):
             if not explicit:
                 best = None
                 best_key = None
@@ -411,7 +421,7 @@ replacement insight without implying rejected substance.
             raise Denied("base_snapshot must be a SHA-256 ID or null")
         if expected_rev is not None and (type(expected_rev) is not int or expected_rev < 1):
             raise Denied("expected_rev must be a positive integer")
-        with lock(self.root / "locks" / "insights.lock"):
+        with record_lock(self.root):
             path = self.root / "inbox" / f"{insight_id}.json"
             old = read_json(path)
             if old is None:
@@ -502,7 +512,7 @@ replacement insight without implying rejected substance.
 
     def attach_evidence(self, insight_id: str, *, source: str, text: str,
                         run: str | None = None,
-                        expected_rev: int | None = None) -> dict:
+                        expected_rev: int | None = None, smoke_refs=None) -> dict:
         """Append an attributed evidence entry to an open insight.
 
         Schema: ``text`` is 1-8192 chars of evidence prose plus receipt or
@@ -532,7 +542,7 @@ replacement insight without implying rejected substance.
             raise Denied("Evidence attach requires the revision read (expected_rev)")
         if isinstance(expected_rev, bool) or not isinstance(expected_rev, int) or expected_rev < 1:
             raise Denied("Evidence revision must be a positive revision number")
-        with lock(self.root / "locks" / "insights.lock"):
+        with record_lock(self.root):
             current = self.read(insight_id)
             rev = _rev_of(current)
             if expected_rev != rev:
@@ -547,6 +557,9 @@ replacement insight without implying rejected substance.
             if len(entries) >= MAX_EVIDENCE_ENTRIES:
                 raise Denied("Insight evidence is full; decide the topic to make room")
             entry = {"author": source, "run": run, "created_at": now(), "text": text}
+            if smoke_refs is not None:
+                require_pairs(self.root, smoke_refs)
+                entry.update(smoke_refs=smoke_refs, rev=rev)
             entries.append(entry)
             record = {**current, "evidence": entries, "updated_at": entry["created_at"]}
             write_json(self.root / "inbox" / f"{insight_id}.json", record)
@@ -807,7 +820,7 @@ replacement insight without implying rejected substance.
         if isinstance(expected_rev, bool) or not isinstance(expected_rev, int) or expected_rev < 1:
             raise Denied("Decision revision must be a positive revision number")
         registered = self._normalize_wait(wait, action)
-        with lock(self.root / "locks" / "insights.lock"):
+        with record_lock(self.root):
             store = self._work_item_store()
             store.prepare_decision_write(need_wait=False)
             current = self.read(insight_id)
@@ -868,6 +881,9 @@ replacement insight without implying rejected substance.
                         raise Denied("Insight already decided at this revision; revise the topic to reopen it")
             event_id = key if action in ("accept", "modify", "reject") else uuid.uuid4().hex
             stamped = now()
+            inherited_refs = sorted({ref for entry in current.get("evidence", [])
+                                     for ref in validate_refs(entry.get("smoke_refs", []))})
+            validate_refs(inherited_refs)
             record = {"id": insight_id, "action": action, "reason": reason, "revisit": revisit,
                       "run": run, "created_at": stamped, "rev": rev, "decision_key": key}
             if action in ("accept", "modify"):
@@ -876,6 +892,10 @@ replacement insight without implying rejected substance.
                     record["scope"] = scope
             if action in ("accept", "modify") and len(canonical(record)) > PREVIEW_BYTES:
                 raise LimitExceeded("Decision event with work-item intent exceeds byte bound")
+            if registered is not None:
+                require_pairs(self.root, registered.get("smoke_refs", []))
+            if inherited_refs and action in ("accept", "modify"):
+                record["smoke_refs"] = inherited_refs
             if work_items is not None:
                 normalized_waits = [self._normalize_wait(task.get("wait"), "defer")
                                     for task in work_items]
@@ -888,13 +908,13 @@ replacement insight without implying rejected substance.
                     task_id(key, work_items, index), task["title"],
                     {"insight_id": insight_id, "rev": rev}, stamped, decision_key=key,
                     task_specs=work_items, task_index=index, description=task["description"],
-                    wait=normalized_waits[index],
+                    wait=normalized_waits[index], smoke_refs=inherited_refs or None,
                     **({"scope": scope} if scope is not None else {}))
                     for index, task in enumerate(work_items)]
             elif work_item_intent == "create":
                 record["work_item"] = store.create_seed(
                     f"wi_{event_id}", current["title"], {"insight_id": insight_id, "rev": rev},
-                    stamped, decision_key=key, description=reason,
+                    stamped, decision_key=key, description=reason, smoke_refs=inherited_refs or None,
                     **({"scope": scope} if scope is not None else {}))
             if action in ("accept", "modify") and len(canonical(record)) > PREVIEW_BYTES:
                 raise LimitExceeded("Decision event with work-item intent exceeds byte bound")
@@ -1157,6 +1177,11 @@ replacement insight without implying rejected substance.
             return False
 
     def consume_waits(self, role_name: str, events) -> int:
+        """Release consumed wait pins under global-before-record coordination."""
+        with record_lock(self.root):
+            return self._consume_waits(role_name, events)
+
+    def _consume_waits(self, role_name: str, events) -> int:
         """Remove acknowledged waits only if untouched since delivery.
 
         Schema: ``events`` are payloads from ``due_waits``. Trust: called
@@ -1217,7 +1242,7 @@ replacement insight without implying rejected substance.
             raise Denied("expected_rev must be a positive integer")
         if type(allow_decided) is not bool:
             raise Denied("allow_decided must be a boolean permission")
-        with lock(self.root / "locks" / "insights.lock"):
+        with record_lock(self.root):
             current = self.read(insight_id)
             if current.get("source") != source and source != "operator":
                 raise Denied("Only the submitter or operator may withdraw this insight")
@@ -1539,7 +1564,7 @@ replacement insight without implying rejected substance.
             return 0
         removed = 0
         cutoff = time.time() - keep_days * 86400
-        with lock(self.root / "locks" / "insights.lock"):
+        with record_lock(self.root):
             for path in sorted((self.root / "inbox").glob("*.json")):
                 if path.is_symlink():
                     continue

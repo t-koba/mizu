@@ -22,6 +22,7 @@ import re
 import stat
 from pathlib import Path
 
+from .smoke_refs import record_lock, validate_refs, require_pairs
 from . import insight_archive
 from .work_item_waits import stored_wait
 from .errors import Denied, LimitExceeded
@@ -182,9 +183,14 @@ class WorkItems:
         else:
             raise Denied("Direct work item carries legacy reconciliation")
         record = self._read(f"work-items/{item_id}/create.json")
-        if set(record) != {"kind", "actor", "idempotency_key", "work_item"} or record["kind"] != "direct":
+        if set(record) - {"requested_smoke_refs"} != {"kind", "actor", "idempotency_key", "work_item"} or record["kind"] != "direct":
             raise Denied("Invalid direct work-item creation record")
         seed = validate_seed(record["work_item"])
+        if "requested_smoke_refs" in record:
+            if record["requested_smoke_refs"] is not None:
+                validate_refs(record["requested_smoke_refs"])
+            if "smoke_refs" not in seed or not set(record["requested_smoke_refs"] or []).issubset(seed["smoke_refs"]):
+                raise Denied("Invalid inherited smoke reference request")
         if (self._create_id(record["actor"], record["idempotency_key"]) != item_id
                 or seed["id"] != item_id
                 or seed["origin"] is not None and seed["origin"].get("work_item_id") == item_id):
@@ -203,7 +209,7 @@ class WorkItems:
     def create_seed(self, item_id: str, title: str, origin, stamp: str, *,
                     actor=None, idempotency_key=None, decision_key=None,
                     task_specs=None, task_index=None, wait=None,
-                    description=DESCRIPTION_UNSET, scope=SCOPE_UNSET) -> dict:
+                    description=DESCRIPTION_UNSET, scope=SCOPE_UNSET, smoke_refs=None) -> dict:
         """Preflight a new immutable seed while the caller holds insights.lock.
 
         Validate the source's ID binding, an empty safe storage slot, the
@@ -215,10 +221,22 @@ class WorkItems:
         direct callers commit create.json; decisions embed the seed in their
         atomic event. Existing commits must use validate_seed_replay instead.
         """
+        if smoke_refs is not None:
+            validate_refs(smoke_refs)
         if wait is not None and (task_specs is None or decision_key is None):
             raise Denied("Only decision task seeds carry waits")
+        if decision_key is None and origin is not None and "insight_id" in origin:
+            insight = self.insights.read(origin["insight_id"])
+            inherited = {ref for entry in insight.get("evidence", [])
+                         for ref in validate_refs(entry.get("smoke_refs", []))}
+            if inherited:
+                smoke_refs = sorted(inherited | set(validate_refs(smoke_refs or [])))
         seed = make_seed(item_id, title, origin, stamp, description=description, scope=scope,
-                         wait=wait)
+                         wait=wait, smoke_refs=smoke_refs)
+        if smoke_refs is not None:
+            require_pairs(self.root, smoke_refs)
+        if wait is not None:
+            require_pairs(self.root, wait.get("smoke_refs", []))
         if task_specs is not None:
             validate_tasks(task_specs)
             if type(task_index) is not int or not 0 <= task_index < len(task_specs):
@@ -288,7 +306,7 @@ class WorkItems:
                 raise Denied("Conflicting work-item seed replay")
 
     def create(self, *, idempotency_key, title, actor, origin=None,
-               description=DESCRIPTION_UNSET, scope=SCOPE_UNSET) -> dict:
+               description=DESCRIPTION_UNSET, scope=SCOPE_UNSET, smoke_refs=None) -> dict:
         """Commit one immutable seed; exact retries return the original record.
 
         Keys are actor-scoped, 1-128 characters. Reference revisions must be
@@ -299,7 +317,7 @@ class WorkItems:
         """
         item_id = self._create_id(actor, idempotency_key)
         validate_origin(origin)
-        with lock(self.root / "locks" / "insights.lock"):
+        with record_lock(self.root):
             directory = self.root / "work-items" / item_id
             existing = None
             if _directory(directory.parent) and _directory(directory):
@@ -313,18 +331,23 @@ class WorkItems:
                     existing = self._direct_record(item_id)
             if existing is not None:
                 seed = make_seed(item_id, title, origin, existing["work_item"]["created_at"],
-                                 description=description, scope=scope)
+                                 description=description, scope=scope,
+                                 smoke_refs=existing["work_item"].get("smoke_refs") if "requested_smoke_refs" in existing else smoke_refs)
                 record = {"kind": "direct", "actor": actor, "idempotency_key": idempotency_key,
                           "work_item": seed}
+                if "requested_smoke_refs" in existing:
+                    record["requested_smoke_refs"] = smoke_refs
                 if existing != record:
                     raise Denied("Conflicting work-item creation retry")
                 self.validate_seed_replay(seed, seed_event=existing)
                 return {"record": existing, "created": False}
             seed = self.create_seed(item_id, title, origin, now(), actor=actor,
                                     idempotency_key=idempotency_key, description=description,
-                                    scope=scope)
+                                    scope=scope, smoke_refs=smoke_refs)
             record = {"kind": "direct", "actor": actor, "idempotency_key": idempotency_key,
                       "work_item": seed}
+            if seed.get("smoke_refs") != smoke_refs and origin is not None and "insight_id" in origin:
+                record["requested_smoke_refs"] = smoke_refs
             directory.mkdir(parents=True, exist_ok=True)
             write_json(directory / "create.json", record, exclusive=True)
             return {"record": record, "created": True}
@@ -408,7 +431,8 @@ class WorkItems:
                 or not isinstance(title, str) or not 1 <= len(title) <= 200):
             raise Denied("Opening legacy work requires valid origin and a 1-200 character title")
         return make_seed(f"wi_{event_id}", title,
-                         {"insight_id": source["insight_id"], "rev": source["rev"]}, source["created_at"])
+                         {"insight_id": source["insight_id"], "rev": source["rev"]}, source["created_at"],
+                         smoke_refs=event.get("smoke_refs"))
 
     def _legacy_resolution(self, event_id: str, event: dict, *, recover=False,
                            history_revisions=_HISTORY_UNSET) -> dict | None:
@@ -518,7 +542,7 @@ class WorkItems:
                 or (outcome == "drop" and title is not None)):
             raise Denied("Invalid legacy reconciliation request")
         identifier(actor)
-        with lock(self.root / "locks" / "insights.lock"):
+        with record_lock(self.root):
             self._recover_decision_history_temporaries(self.root / "decision-history")
             event = self._read(f"decision-history/{event_id}.json")
             if (event.get("action") != expected_action or "work_item" in event
@@ -534,6 +558,7 @@ class WorkItems:
                       "created_at": existing["created_at"] if existing else now()}
             if outcome == "open":
                 record["work_item"] = self._legacy_seed(event_id, event, title)
+                require_pairs(self.root, record["work_item"].get("smoke_refs", []))
             if existing is not None:
                 if record != existing:
                     raise Denied("Conflicting legacy reconciliation retry")
@@ -714,6 +739,7 @@ class WorkItems:
         validate_seed(seed)
         if seed != make_seed(item_id, seed["title"], {"insight_id": event["id"], "rev": event["rev"]},
                              event["created_at"],
+                             **({"smoke_refs": event["smoke_refs"]} if "smoke_refs" in event else {}),
                              **({"description": event.get("reason")} if "description" in seed else {}),
                              **({"scope": event.get("scope")} if "scope" in seed else {})):
             raise Denied("Work-item seed does not match decision event")
@@ -768,10 +794,15 @@ class WorkItems:
                 fields.add("work_item")
             if "work_items" in decision or "work_item_specs" in decision:
                 fields.update({"work_items", "work_item_specs"})
+                if "work_item_waits" in decision:
+                    fields.add("work_item_waits")
         elif action == "withdraw":
             fields.add("actor")
         elif action not in ("defer", "reject"):
             raise Denied("Invalid current work-item origin decision")
+        if "smoke_refs" in decision:
+            validate_refs(decision["smoke_refs"])
+            fields.add("smoke_refs")
         revision = decision.get("rev")
         WorkItems._validate_decision_key(None, decision)
         if "decision_key" in decision:
@@ -965,7 +996,9 @@ class WorkItems:
         kind = value.get("kind")
         if kind == "ci":
             from .ci_waits import normalize
-            return normalize(self.root, value, stored=True)
+            refs = validate_refs(value.get("smoke_refs", []))
+            result = normalize(self.root, {k: v for k, v in value.items() if k != "smoke_refs"}, stored=True)
+            return {**result, "smoke_refs": refs} if "smoke_refs" in value else result
         return stored_wait(value)
 
     @staticmethod
@@ -1022,7 +1055,11 @@ class WorkItems:
             raise Denied("Completion acceptance receipt code or scope mismatch")
 
     def _validate_transition(self, previous: dict, record: dict) -> None:
-        fields = set(record)
+        fields = set(record) - {"smoke_refs"}
+        if "smoke_refs" in record:
+            validate_refs(record["smoke_refs"])
+        if "smoke_refs" in previous and "smoke_refs" not in record:
+            raise Denied("A transition cannot remove its smoke reference field")
         # A record written now always carries the scope in force; a record
         # written before the scope existed keeps the older field set and stays
         # readable history.
@@ -1040,10 +1077,13 @@ class WorkItems:
         if record_scope is not None:
             validate_scope(record_scope)
         scope_changed = record_scope != previous_scope
+        refs_changed = (record.get("smoke_refs", []) != previous.get("smoke_refs", [])
+                        or (record.get("wait") or {}).get("smoke_refs", []) !=
+                           (previous.get("wait") or {}).get("smoke_refs", []))
         binding = self._validate_delivery(previous, record)
         if (status not in STATUSES or previous["status"] == "done"
                 or (previous["status"] == "dropped" and status != "done")
-                or (status == previous["status"] and not scope_changed and not binding)):
+                or (status == previous["status"] and not scope_changed and not refs_changed and not binding)):
             raise Denied("Invalid work-item status transition")
         # The scope in force is inherited by every revision; it is never
         # cleared, and a closure may not change it.
@@ -1734,7 +1774,7 @@ class WorkItems:
         return self._page_closed_impl(limit=limit, readonly=True)
 
     def transition(self, item_id: str, *, expected_rev, status, actor, reason=None,
-                   wait=None, snapshot_id=None, scope=None) -> dict:
+                   wait=None, snapshot_id=None, scope=None, smoke_refs=None) -> dict:
         """Append one immutable full-state CAS event; terminal metadata wakes subscribers.
 
         The event states the scope in force for the item at that revision: a
@@ -1746,7 +1786,8 @@ class WorkItems:
         transition carrying snapshot_id records that delivery binding (event
         snapshot_id stays null); done carrying snapshot_id must equal it.
         Delivery binding validates retained membership under publication.lock,
-        then insights.lock through append. Completion copies valid embedded proof or
+        then smoke-retention.lock and insights.lock through append. Completion
+        copies valid embedded proof or
         pins an independently retained acceptance receipt by immutable ID.
         All validation precedes the exclusive atomic
         write. Stale CAS writes nothing; cancellation/process death releases
@@ -1754,12 +1795,13 @@ class WorkItems:
         """
         if type(expected_rev) is not int or expected_rev < 1:
             raise Denied("Expected revision must be a positive integer")
-        # Global ordering: publication -> insights. Publishers never acquire
-        # insights.lock. Keep membership validation and append in one critical section.
+        # Global order is publication -> smoke-retention -> insights. Snapshot
+        # and smoke-bundle publishers take only their own lock, so neither
+        # acquires the other's lock. Keep membership validation and append together.
         binding_request = (status == "doing" and snapshot_id is not None)
         publication = (lock(self.snapshots.root / "locks" / "publication.lock")
                        if binding_request else contextlib.nullcontext())
-        with publication, lock(self.root / "locks" / "insights.lock"):
+        with publication, record_lock(self.root):
             history_revisions = self._recover_temporary_writes(item_id)
             current = self._get(item_id, history_revisions=history_revisions)
             if current["rev"] != expected_rev:
@@ -1772,7 +1814,9 @@ class WorkItems:
                     from .ci_waits import normalize
                     if not self.vcs.get("poll_enabled") or not self.vcs.get("command"):
                         raise Denied("CI waits require automatic VCS polling and an adapter")
-                    registered = normalize(self.root, wait)
+                    registered = normalize(self.root, {k: v for k, v in wait.items() if k != "smoke_refs"})
+                    if "smoke_refs" in wait:
+                        registered["smoke_refs"] = validate_refs(wait["smoke_refs"])
                 else:
                     registered = self.insights._normalize_wait(wait, "defer")
             verification = None
@@ -1833,6 +1877,13 @@ class WorkItems:
                       "verification": verification, "delivered_tree": delivered_tree,
                       "scope": in_force, "delivery_schema": 1, "delivery": delivery,
                       "verification_scope": verification_scope}
+            effective_smoke_refs = (current.get("smoke_refs") if smoke_refs is None else smoke_refs)
+            if effective_smoke_refs is not None:
+                validate_refs(effective_smoke_refs)
+                require_pairs(self.root, effective_smoke_refs)
+                record["smoke_refs"] = effective_smoke_refs
+            if registered is not None:
+                require_pairs(self.root, registered.get("smoke_refs", []))
             self._validate_transition(current, record)
             if len(canonical(record)) > PREVIEW_BYTES:
                 raise LimitExceeded("Work-item event exceeds byte bound")

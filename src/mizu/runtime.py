@@ -1451,7 +1451,7 @@ class Context:
     def _op_work_items_create(self, args: dict) -> dict:
         return self.project.work_items.create(
             idempotency_key=args["idempotency_key"], title=args["title"],
-            origin=args.get("origin"), actor=self.role.name,
+            origin=args.get("origin"), actor=self.role.name, smoke_refs=args.get("smoke_refs"),
             **({"description": args["description"]} if "description" in args else {}),
             **({"scope": args["scope"]} if "scope" in args else {}))
 
@@ -1459,7 +1459,7 @@ class Context:
         return self.project.work_items.transition(
             args["id"], expected_rev=args["expected_rev"], status=args["status"],
             actor=self.role.name, reason=args.get("reason"), wait=args.get("wait"),
-            snapshot_id=args.get("snapshot_id"), scope=args.get("scope"))
+            snapshot_id=args.get("snapshot_id"), scope=args.get("scope"), smoke_refs=args.get("smoke_refs"))
 
     def _op_insights(self, args: dict) -> dict:
         if args.get("id"):
@@ -1533,7 +1533,7 @@ class Context:
         # revise/withdraw rights stay with the submitter only.
         record = self.project.insights.attach_evidence(
             args["id"], source=self.role.name, text=args["text"],
-            run=self.run_dir.name, expected_rev=args["rev"])
+            run=self.run_dir.name, expected_rev=args["rev"], smoke_refs=args.get("smoke_refs"))
         write_json(self.run_dir / "evidence-attach.json",
                    {"insight": record["id"], "rev": record["rev"],
                     "author": self.role.name, "run": self.run_dir.name,

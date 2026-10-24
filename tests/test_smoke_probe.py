@@ -181,6 +181,38 @@ class SmokeProbeTests(Fixture):
             with self.assertRaisesRegex(Denied, "did not return the requested evidence"):
                 smoke.live(self.config, role_name="consult")
 
+    def test_new_bundle_preserves_result_and_provider_has_no_retention_lock(self):
+        from pathlib import Path
+        from mizu.smoke_refs import shared_lock
+        from mizu.smoke_retention import Metadata, read_pair
+        def fake_run(engine, project, role_name):
+            # This would be Busy if paid execution held the global lock.
+            with shared_lock(engine.config.data):
+                pass
+            return {"finish": {"summary": (project.workspace / "probe.txt").read_text()}}
+        with unittest.mock.patch.object(Engine, "run", fake_run), \
+                unittest.mock.patch("mizu.smoke._platform.is_root", return_value=False):
+            result = smoke.live(self.config, role_name="consult")
+        self.assertRegex(result["smoke_id"], r"^[0-9a-f]{32}$")
+        pair = Path(result["pair"])
+        self.assertEqual(pair, self.config.data / "validation/pairs" / result["smoke_id"])
+        self.assertEqual(set(p.name for p in pair.iterdir()), {"manifest.json", "report.json", "project"})
+        self.assertEqual(read_pair(Metadata(self.config.data), result["smoke_id"])["status"], "pass")
+        self.assertTrue(result["result"]["finish"]["summary"])
+        self.assertEqual(Path(result["evidence"]), pair / "project")
+
+    def test_initialization_failure_publishes_complete_report_without_project(self):
+        from mizu.smoke_retention import Metadata, read_pair
+        with unittest.mock.patch("mizu.smoke.initialize", side_effect=Denied("synthetic init failure")), \
+                unittest.mock.patch("mizu.smoke._platform.is_root", return_value=False):
+            with self.assertRaisesRegex(Denied, "synthetic init failure"):
+                smoke.live(self.config, role_name="consult")
+        pairs = list((self.config.data / "validation/pairs").iterdir())
+        self.assertEqual(len(pairs), 1)
+        manifest = read_pair(Metadata(self.config.data), pairs[0].name)
+        self.assertEqual(manifest["status"], "fail")
+        self.assertIsNone(manifest["project"])
+
 
 if __name__ == "__main__":
     raise SystemExit(unittest.main())

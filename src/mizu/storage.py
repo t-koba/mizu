@@ -1226,8 +1226,12 @@ def restore(config, name: str, archive_path: Path, *, max_bytes: int = 107374182
                        "wake_generation": uuid.uuid4().hex, "reason": "Restored checkpoint; operator review required"})
             atomic_write(stage / "spool/editor/.mizu-outbox", b"Mizu Editor proposal outbox\n")
             store.publish(checkpoint)
-            os.rename(stage, destination)
-            sync_dir(parent)
+            from .smoke_refs import shared_lock
+            from .smoke_retention import validate_restored_refs
+            with shared_lock(config.data, blocking=True):
+                validate_restored_refs(config.data, stage)
+                os.rename(stage, destination)
+                sync_dir(parent)
         finally:
             if stage.exists():
                 shutil.rmtree(stage)

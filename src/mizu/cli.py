@@ -82,6 +82,10 @@ def parser() -> argparse.ArgumentParser:
     p = sub.add_parser("doctor", help="Check platform, versions, isolation prerequisites and budget file")
     p.add_argument("--sandbox", action="store_true", help="Actually execute the rootless isolation smoke")
     p.add_argument("--sandbox-image", default=None, help="Ephemeral candidate image for this check only; never writes config")
+    p = sub.add_parser("smoke-retention", help="Preview or apply shared smoke evidence expiry (no project)")
+    group = p.add_mutually_exclusive_group()
+    group.add_argument("--apply", action="store_true", help="Recompute and retire expired unpinned pairs")
+    group.add_argument("--set-days", type=int, help="Set shared retention days (0 keeps indefinitely; default 31)")
     p = sub.add_parser("smoke", help="Paid read-only live probe; never touches a real project")
     p.add_argument("--live", action="store_true", required=True, help="Explicit consent to a paid, read-only Pi/provider probe")
     p.add_argument("--profile", help="Model profile for the probe")
@@ -580,6 +584,9 @@ def execute(args):
     if args.command == "doctor":
         from .doctor import check
         return check(_with_sandbox_image(config, getattr(args, "sandbox_image", None)), sandbox=args.sandbox)
+    if args.command == "smoke-retention":
+        from .smoke_retention import run, set_days
+        return set_days(config.data, args.set_days) if args.set_days is not None else run(config.data, apply=args.apply)
     if args.command == "smoke":
         from .smoke import live
         return live(config, args.profile, _resolve_role(config, args.role, probe=True))
