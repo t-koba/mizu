@@ -70,15 +70,31 @@ class SmokeRetentionTests(unittest.TestCase):
             self.run_retention(apply=True)
         self.assertTrue(pair.exists())
 
-    def test_publish_does_not_move_owner_project_when_retention_lock_is_busy(self):
+    def test_publish_does_not_stage_on_busy_and_same_id_retry_succeeds(self):
         project = self.data / 'projects' / 'smoke-owner'
         project.mkdir(parents=True)
+        report = {'status': 'pass', 'time': self.moment.isoformat()}
         with shared_lock(self.data):
             with self.assertRaises(Busy):
-                retention.publish(self.data, self.a, {'status': 'pass',
-                    'time': self.moment.isoformat()}, project)
+                retention.publish(self.data, self.a, report, project)
+        stage = self.data / 'validation' / 'staging' / self.a
         self.assertTrue(project.is_dir())
-        self.assertFalse((self.data / 'validation/staging' / self.a / 'project').exists())
+        self.assertFalse(stage.exists())
+        result = retention.publish(self.data, self.a, report, project)
+        self.assertTrue(Path(result['pair']).is_dir())
+        self.assertFalse(project.exists())
+
+    def test_publish_refuses_preexisting_staging_without_mutation(self):
+        stage = self.data / 'validation' / 'staging' / self.a
+        stage.mkdir(parents=True)
+        evidence = stage / 'report.json'
+        evidence.write_bytes(b'suspect staging evidence')
+        before = evidence.read_bytes()
+        with self.assertRaises(Denied):
+            retention.publish(self.data, self.a, {'status': 'pass',
+                'time': self.moment.isoformat()}, None)
+        self.assertEqual(evidence.read_bytes(), before)
+        self.assertEqual({path.name for path in stage.iterdir()}, {'report.json'})
 
     def test_publish_is_one_directory_rename_and_failure_never_partial_pair(self):
         rename = os.rename
@@ -94,8 +110,28 @@ class SmokeRetentionTests(unittest.TestCase):
         with patch.object(retention.os, 'rename', side_effect=OSError('synthetic interruption')):
             with self.assertRaises(OSError):
                 self.pair(self.b)
+        stage = self.data / 'validation' / 'staging' / self.b
         self.assertFalse((self.data / 'validation/pairs' / self.b).exists())
-        self.assertTrue((self.data / 'validation/staging' / self.b).is_dir())
+        self.assertFalse(stage.exists())
+
+        project = self.data / 'projects' / 'smoke-owner'
+        project.mkdir(parents=True)
+        (project / 'probe.txt').write_text('synthetic')
+        report = {'status': 'pass', 'time': self.moment.isoformat()}
+        def fail_pair(source, destination):
+            if Path(destination).parent.name == 'pairs':
+                raise OSError('synthetic final rename failure')
+            return rename(source, destination)
+        with patch.object(retention.os, 'rename', side_effect=fail_pair):
+            with self.assertRaises(OSError):
+                retention.publish(self.data, self.b, report, project)
+        self.assertTrue(project.is_dir())
+        self.assertEqual((project / 'probe.txt').read_text(), 'synthetic')
+        self.assertFalse(stage.exists())
+        self.assertFalse((self.data / 'validation/pairs' / self.b).exists())
+        result = retention.publish(self.data, self.b, report, project)
+        self.assertTrue(Path(result['pair']).is_dir())
+        self.assertFalse(project.exists())
 
     def test_default_preview_is_immutable_and_legacy_is_untouched(self):
         pair = self.pair()

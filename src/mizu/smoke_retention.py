@@ -240,12 +240,60 @@ def _delete_committed(data: Path, path: Path, smoke_id: str) -> None:
     sync_dir(path.parent)
 
 
+def _remove_unpublished_stage(data: Path, stage: Path, staging: Path, project: Path | None,
+                             project_identity_before: dict | None, project_moved: bool,
+                             expected_files: dict[str, bytes]) -> None:
+    """Restore this call's moved project and remove only its known stage files."""
+    try:
+        stage.lstat()
+    except FileNotFoundError:
+        if project_moved:
+            raise Denied("Smoke staging disappeared before project restore") from None
+        return
+    directory(stage)
+    names = {path.name for path in entries(stage, 4)}
+    if project_moved:
+        member = stage / "project"
+        if (project is None or project_identity_before is None or "project" not in names
+                or project_identity(member) != project_identity_before):
+            raise Denied("Moved smoke project identity changed before restore")
+        try:
+            project.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            raise Denied("Smoke project restore destination already exists")
+        os.rename(member, project)
+        sync_dir(stage)
+        sync_dir(project.parent)
+        names.remove("project")
+    elif "project" in names:
+        raise Denied("Unexpected smoke project in staging")
+    if not names.issubset(expected_files):
+        raise Denied("Unknown smoke staging member")
+    for name in sorted(names):
+        path = stage / name
+        expected = expected_files[name]
+        info = path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or path.is_symlink()
+                or getattr(info, "st_reparse_tag", 0) or info.st_size != len(expected)):
+            raise Denied("Unsafe smoke staging member")
+        raw = safe_read(data, path.relative_to(data).as_posix(), len(expected))
+        if raw != expected:
+            raise Denied("Smoke staging member changed before cleanup")
+        path.unlink()
+        sync_dir(stage)
+    stage.rmdir()
+    sync_dir(staging)
+
+
 def publish(data: Path, smoke_id: str, report: dict, project: Path | None) -> dict:
     """Stage complete evidence, then publish with exactly one directory rename.
 
-    Provider execution is complete before this call. Moving its project root
-    and publishing the finished pair share the global retention lock, so a
-    reference scan sees either the owner project or the completed bundle.
+    Provider execution is complete before this call. Staging creation, owner
+    project movement, and pair publication share the global retention lock, so
+    contention cannot leave a partial stage and a reference scan sees either
+    the owner project or the completed bundle.
     """
     if not SMOKE_ID.fullmatch(smoke_id):
         raise Denied("Invalid smoke pair ID")
@@ -253,48 +301,77 @@ def publish(data: Path, smoke_id: str, report: dict, project: Path | None) -> di
         raise Denied("Smoke report needs a terminal pass/fail status")
     timestamp(report.get("time"))
     directory(data)
-    validation = data / "validation"
-    validation.mkdir(exist_ok=True, mode=0o700)
-    directory(validation)
-    staging = validation / "staging"
-    staging.mkdir(exist_ok=True, mode=0o700)
-    directory(staging)
     if project is not None:
         project = Path(project)
-        projects = data / "projects"
-        directory(projects)
-        if project.parent != projects:
-            raise Denied("Smoke project must be a direct child of the shared projects directory")
-        directory(project)
-    stage = staging / smoke_id
-    stage.mkdir(mode=0o700)
-    destination = validation / "pairs" / smoke_id
+    destination = data / "validation" / "pairs" / smoke_id
     result = {**report, "smoke_id": smoke_id, "pair": str(destination),
               "evidence": str(destination / "project") if project else None,
               "report": str(destination / "report.json")}
-    write_json(stage / "report.json", result)
+    report_bytes = canonical(result)
+    if len(report_bytes) > 16 * 1024 * 1024:
+        raise LimitExceeded("Smoke report size bound exceeded")
     with shared_lock(data):
+        validation = data / "validation"
+        validation.mkdir(exist_ok=True, mode=0o700)
+        directory(validation)
+        staging = validation / "staging"
+        staging.mkdir(exist_ok=True, mode=0o700)
+        directory(staging)
         pairs = validation / "pairs"
         pairs.mkdir(exist_ok=True, mode=0o700)
         directory(pairs)
         sync_dir(validation)
+        destination = pairs / smoke_id
         if destination.exists() or destination.is_symlink():
             raise Denied("Smoke pair already exists")
+        stage = staging / smoke_id
+        try:
+            stage.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            raise Denied("Smoke staging ID already exists")
+        project_identity_before = None
         if project is not None:
-            os.rename(project, stage / "project")
-            sync_dir(project.parent)
-        raw_report = safe_read(data, (stage / "report.json").relative_to(data).as_posix(),
-                               16 * 1024 * 1024)
-        manifest = {"version": 1, "smoke_id": smoke_id, "status": result["status"],
-                    "completed_at": result["time"],
-                    "report": {"sha256": digest(raw_report), "bytes": len(raw_report)},
-                    "project": project_identity(stage / "project") if project else None}
-        write_json(stage / "manifest.json", manifest)
-        sync_dir(stage)
-        read_pair(Metadata(data), smoke_id, path=stage)
-        os.rename(stage, destination)
-        sync_dir(staging)
-        sync_dir(pairs)
+            projects = data / "projects"
+            directory(projects)
+            if project.parent != projects:
+                raise Denied("Smoke project must be a direct child of the shared projects directory")
+            project_identity_before = project_identity(project)
+        expected_files = {"report.json": report_bytes}
+        stage_created = False
+        project_moved = False
+        published = False
+        try:
+            try:
+                stage.mkdir(mode=0o700)
+            except FileExistsError as exc:
+                raise Denied("Smoke staging ID already exists") from exc
+            stage_created = True
+            write_json(stage / "report.json", result)
+            raw_report = safe_read(data, (stage / "report.json").relative_to(data).as_posix(),
+                                   16 * 1024 * 1024)
+            manifest = {"version": 1, "smoke_id": smoke_id, "status": result["status"],
+                        "completed_at": result["time"],
+                        "report": {"sha256": digest(raw_report), "bytes": len(raw_report)},
+                        "project": project_identity_before}
+            manifest_bytes = canonical(manifest)
+            expected_files["manifest.json"] = manifest_bytes
+            write_json(stage / "manifest.json", manifest)
+            sync_dir(stage)
+            if project is not None:
+                os.rename(project, stage / "project")
+                project_moved = True
+                sync_dir(project.parent)
+            read_pair(Metadata(data), smoke_id, path=stage)
+            os.rename(stage, destination)
+            published = True
+            sync_dir(staging)
+            sync_dir(pairs)
+        finally:
+            if stage_created and not published:
+                _remove_unpublished_stage(data, stage, staging, project, project_identity_before,
+                                          project_moved, expected_files)
     return result
 
 
