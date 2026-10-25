@@ -19,6 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import platform as _platform
+from . import run_activity as _run_activity
 from . import evidence_records, workspace_reads
 from .admission import admission, has_live_demand, role_exclusion
 from . import check_jobs
@@ -590,114 +591,23 @@ class Context:
         raise DeadlineWrapUp(message)
 
     def _activity_bucket(self) -> str:
-        if self._activity_join is not None:
-            return "join:" + self._activity_join
-        if self._activity_operation is not None:
-            kind = "local_exec" if self._activity_operation in ("exec", "experiment", "verify") else "tool"
-            return kind + ":" + self._activity_operation
-        if self.request_deadlines:
-            return "model_request"
-        return "other"
+        return _run_activity.activity_bucket(self)
 
     def _activity_change(self, change, *, count: str | None = None) -> None:
-        current = time.monotonic()
-        self._activity_seconds[self._activity_current] = (
-            self._activity_seconds.get(self._activity_current, 0.0)
-            + max(0.0, current - self._activity_last))
-        # Advance the accounting boundary even if a state mutation fails, then
-        # derive the bucket from the state that actually remains. This prevents
-        # an exception from charging the same interval again on the next read.
-        self._activity_last = current
-        try:
-            change()
-        finally:
-            self._activity_current = self._activity_bucket()
-        if self._activity_current != self._activity_published:
-            self._publish_activity()
-        if count is not None:
-            self._activity_counts[count] = self._activity_counts.get(count, 0) + 1
+        return _run_activity.activity_change(self, change, count=count)
 
     def _publish_activity(self) -> None:
-        """Publish the same bounded live gauge for top-level and child runs.
-
-        runs/<id>/activity.json is local observational evidence (schema 1),
-        not authority. Updates atomically replace one record on bucket changes;
-        no prompt, command or model content is included. Failure is best-effort,
-        never blocks cancellation or changes admission. Terminal run evidence
-        determines whether this retained gauge is still live.
-        """
-        try:
-            from .fs import read_json as _read, write_json as _write
-            path = self.project.root / "active" / f"{self.role.name}.json"
-            record = _read(path, {})
-            owns_active = isinstance(record, dict) and record.get("run") == self.run_dir.name
-            if not owns_active and not getattr(self, "parent_run", None):
-                return
-            seconds = dict(self._activity_seconds)
-            total = sum(seconds.values())
-            seconds[self._activity_current] = seconds.get(self._activity_current, 0.0)
-            gauge = {"activity": self._activity_current,
-                     "activity_since": now(),
-                     "activity_seconds": {key: round(value, 3) for key, value in sorted(seconds.items())},
-                     "activity_total_seconds": round(total, 3)}
-            _write(self.run_dir / "activity.json", {
-                "schema": 1, "run": self.run_dir.name, "role": self.role.name,
-                "parent_run": getattr(self, "parent_run", None), **gauge})
-            self._activity_published = self._activity_current
-            if owns_active:
-                _write(path, {**record, **gauge})
-        except Exception:
-            return
+        return _run_activity.publish_activity(self)
 
     def activity_summary(self) -> dict:
-        """Return bounded exclusive wall-time totals for this Context only."""
-        with self.mutex:
-            current = time.monotonic()
-            seconds = dict(self._activity_seconds)
-            seconds[self._activity_current] = (
-                seconds.get(self._activity_current, 0.0)
-                + max(0.0, current - self._activity_last))
-            return {"schema": 1, "elapsed_seconds": round(current - self._activity_origin, 6),
-                    "exclusive_seconds": {key: round(value, 6)
-                                          for key, value in sorted(seconds.items())},
-                    "counts": dict(sorted(self._activity_counts.items())),
-                    "max_concurrent_model_requests": self._activity_max_requests,
-                    "open_model_requests": len(self.request_deadlines),
-                    "reaped_model_requests": self._activity_reaped_requests}
+        return _run_activity.activity_summary(self)
 
     def record_ci_request(self, request_id, date, workflows, covered, *, state="unresolved"):
-        """Record one CI request this run made, for the run's own record.
-
-        Schema: one entry per request, ``{"request_id", "date", "workflows",
-        "covered", "state"}``; the date is the UTC day the request was made
-        and the state is ``unresolved`` while only the dispatch is known and
-        ``resolved`` once the outcome is durable. A request is recorded when
-        it is dispatched, because from that moment the run may have spent a
-        CI run; the same request is updated, not repeated, when its outcome
-        arrives. The day a request was made is fixed at the dispatch and
-        never moves: a later answer does not move the request to the day it
-        was answered, so an update keeps the day that was recorded first.
-        The list is bounded: at most 16 entries are kept and the count of all
-        requests is reported beside them, so a truncated list is visible.
-        """
-        with self.mutex:
-            entry = {"request_id": request_id, "date": date,
-                     "workflows": list(workflows), "covered": list(covered),
-                     "state": state}
-            for existing in self.ci_requests:
-                if existing["request_id"] == request_id:
-                    # The day is the day the request was made, and it was
-                    # fixed when the dispatch was recorded. Keeping it here
-                    # makes it impossible for a later update to move it.
-                    existing.update({**entry, "date": existing["date"]})
-                    return
-            self.ci_requests.append(entry)
+        return _run_activity.record_ci_request(
+            self, request_id, date, workflows, covered, state=state)
 
     def ci_request_summary(self) -> dict:
-        """The CI requests this run made, bounded for the run record."""
-        with self.mutex:
-            entries = list(self.ci_requests)
-        return {"requests": entries[-16:], "total": len(entries)}
+        return _run_activity.ci_request_summary(self)
 
     def clear_request_deadlines(self):
         with self.mutex:
