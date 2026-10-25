@@ -175,16 +175,23 @@ def lock_fd(fd: int, *, blocking: bool = True) -> bool:
             # is served by a bounded non-blocking retry loop: the same shape
             # the Windows path uses, and the same bound on both.
             deadline = time.monotonic() + LOCK_TIMEOUT
+            attempted = False
             while True:
+                # Let the first non-blocking attempt succeed immediately, but
+                # never make a new acquisition attempt after the deadline.
+                if attempted and time.monotonic() >= deadline:
+                    raise BlockingIOError("Lock contention") from None
+                attempted = True
                 try:
                     _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
                     return True
                 except OSError as exc:
                     if exc.errno not in (errno.EACCES, errno.EAGAIN):
                         raise
-                    if time.monotonic() >= deadline:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
                         raise BlockingIOError("Lock contention") from None
-                    time.sleep(0.05)
+                    time.sleep(min(0.05, remaining))
         _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
         return True
     if _msvcrt is not None:
@@ -193,14 +200,21 @@ def lock_fd(fd: int, *, blocking: bool = True) -> bool:
         mode = _msvcrt.LK_NBLCK  # type: ignore[attr-defined]
         if blocking:
             deadline = time.monotonic() + LOCK_TIMEOUT
+            attempted = False
             while True:
+                # Match the POSIX retry contract: allow one immediate probe,
+                # then refuse a late retry even if the lock became free.
+                if attempted and time.monotonic() >= deadline:
+                    raise BlockingIOError("Lock contention") from None
+                attempted = True
                 try:
                     _msvcrt.locking(fd, mode, 1)  # type: ignore[attr-defined]
                     return True
                 except OSError:
-                    if time.monotonic() >= deadline:
-                        raise BlockingIOError("Lock contention")
-                    time.sleep(0.05)
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise BlockingIOError("Lock contention") from None
+                    time.sleep(min(0.05, remaining))
         try:
             _msvcrt.locking(fd, mode, 1)  # type: ignore[attr-defined]
             return True

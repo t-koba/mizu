@@ -11,12 +11,15 @@ process is a worse failure than a failing one.
 """
 from __future__ import annotations
 
+import errno
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -112,6 +115,33 @@ class LockBoundTests(unittest.TestCase):
         child.wait(timeout=60)
         with fs.lock(self.path):
             pass
+
+    def test_retry_does_not_acquire_after_deadline_even_if_lock_frees(self):
+        for primitive in ("posix", "windows"):
+            with self.subTest(primitive=primitive):
+                attempts = []
+
+                def acquire(*args):
+                    attempts.append(args)
+                    if len(attempts) == 1:
+                        raise OSError(errno.EAGAIN, "contended")
+
+                if primitive == "posix":
+                    fcntl = SimpleNamespace(LOCK_EX=1, LOCK_NB=2, flock=acquire)
+                    msvcrt = None
+                else:
+                    fcntl = None
+                    msvcrt = SimpleNamespace(LK_NBLCK=1, locking=acquire)
+                # Initial deadline, first contention before expiry, then a
+                # late poll after expiry where the fake lock would be free.
+                with patch.object(platform, "_fcntl", fcntl), \
+                     patch.object(platform, "_msvcrt", msvcrt), \
+                     patch.object(platform, "LOCK_TIMEOUT", 1.0), \
+                     patch.object(platform.time, "monotonic", side_effect=[0.0, 0.1, 2.0]), \
+                     patch.object(platform.time, "sleep", return_value=None):
+                    with self.assertRaises(BlockingIOError):
+                        platform.lock_fd(7, blocking=True)
+                self.assertEqual(len(attempts), 1)
 
     def test_both_halves_share_one_bound(self):
         self.assertEqual(platform.LOCK_TIMEOUT, 30.0)
