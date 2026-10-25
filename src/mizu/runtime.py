@@ -4020,24 +4020,21 @@ class Engine:
                 parent.tool_count = ctx.tool_count
                 parent.delegated_wrap_up_requests = ctx.delegated_wrap_up_requests
                 parent.delegated_wrap_up_tools = ctx.delegated_wrap_up_tools
-                # Spend state the child tripped belongs to the unit:
-                # a bound the delegation exceeded must coerce the
-                # parent's seal too, and daily-refusal flags must
-                # survive for the parent's own error handling.
+                # Shared spend bounds still constrain the caller's seal (a
+                # child's deadline is local). Pending admission refusals are
+                # invocation-local: the returned child result is their evidence,
+                # not authority to relabel a later caller provider failure.
                 if ctx.bound_hit != "deadline":
                     parent.bound_hit = parent.bound_hit or ctx.bound_hit
-                parent.admission_wait = parent.admission_wait or ctx.admission_wait
-                if ctx.admission_error:
-                    parent.admission_error = ctx.admission_error
-                    if ctx.bound_hit != "deadline":
-                        parent.admission_exception = ctx.admission_exception
             if ctx.host_cancelled() or (ctx.finished is None and ctx.cancelled()):
                 raise Cancelled("Delegation cancelled before completion")
             if ctx.finished is None:
                 raise Denied("Delegation did not finish")
             result = {"run": run_dir.name, "parent_run": parent.run_dir.name,
-                      "role": role.name, "status": "completed", "finished_at": now(),
-                      "profile": profile, "snapshot": snap["id"],
+                      "role": role.name,
+                      "status": "bounded" if ctx.finished["outcome"] == "bounded" else "completed",
+                      **({"bound": ctx.finished["bound"]} if "bound" in ctx.finished else {}),
+                      "finished_at": now(), "profile": profile, "snapshot": snap["id"],
                       "answer": ctx.finished["summary"], "model": model,
                       "activity": ctx.activity_summary(),
                       "ci_requests": ctx.ci_request_summary()}
@@ -4045,12 +4042,19 @@ class Engine:
             write_json(run_dir / "delegation.json", result)
             record = {"task": task, "role": role.name, "run": run_dir.name,
                       "snapshot": snap["id"], "profile": profile, "answer": ctx.finished["summary"],
+                      "status": result["status"],
+                      **({"bound": result["bound"]} if "bound" in result else {}),
                       "check_jobs": result["check_jobs"]}
             write_json(parent.run_dir / "delegations" / f"{uuid.uuid4().hex}.json", record)
             return record
         except Exception as exc:
+            bound = next((kind for error, kind in (
+                (RunDeadlineExceeded, "deadline"), (RequestYieldExceeded, "requests"),
+                (ToolYieldExceeded, "tools"), (DrainYieldExceeded, "drain"),
+                (AuthorityGrantMismatch, "authority")) if isinstance(exc, error)), None)
             result = {"run": run_dir.name, "parent_run": parent.run_dir.name,
-                      "role": role_name, "status": "bounded" if isinstance(exc, (RunDeadlineExceeded, AuthorityGrantMismatch)) else "interrupted",
+                      "role": role_name, "status": "bounded" if bound is not None else "interrupted",
+                      **({"bound": bound} if bound is not None else {}),
                       "finished_at": now(), "profile": profile, "snapshot": snap["id"], "error": str(exc)}
             if ctx is not None:
                 result["activity"] = ctx.activity_summary()

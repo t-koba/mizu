@@ -2,11 +2,15 @@
 import dataclasses
 import json
 import unittest
+from unittest.mock import patch
 from support import Fixture, ScriptDriver
-from mizu.errors import ConfigError, Denied, LimitExceeded, RunDeadlineExceeded
+from mizu.errors import (AuthorityGrantMismatch, Cancelled, ConfigError, Denied,
+                         DeadlineWrapUp, DrainYieldExceeded, InfraExceeded, LimitExceeded,
+                         ModelFailure, RequestYieldExceeded, RunDeadlineExceeded,
+                         ToolYieldExceeded)
 from mizu.admission import role_exclusion
 from mizu.drivers import admit_invocation
-from mizu.fs import held, lock, read_json
+from mizu.fs import held, lock, read_json, write_json
 from mizu.runtime import Engine, check_delegate_role
 
 
@@ -170,7 +174,7 @@ class DelegateTests(Fixture):
                     ctx.handle("finish", {"outcome": "continue", "summary": "parent seals",
                                           "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
                     return
-                ctx.handle("delegate", {"role": "helper", "task": "spend"})
+                seen["response"] = ctx.handle("delegate", {"role": "helper", "task": "spend"})
                 seen["bound"] = ctx.bound_hit
                 seen["child_requests"] = ctx.delegated_wrap_up_requests
                 # Child used its full share; the root retains one request.
@@ -188,6 +192,11 @@ class DelegateTests(Fixture):
 
         result = Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
         self.assertEqual(result["status"], "completed")
+        self.assertEqual(seen["response"]["status"], "bounded")
+        self.assertEqual(seen["response"]["bound"], "requests")
+        stored = read_json(self.project.root / "runs" / seen["response"]["run"] / "delegation.json")
+        self.assertEqual(stored["status"], "bounded")
+        self.assertEqual(stored["bound"], "requests")
         self.assertEqual(seen["child_bound"], "requests")
         self.assertEqual(seen["bound"], "requests")
         self.assertEqual(seen["child_requests"], config.limits.delegate_wrap_up_requests)
@@ -210,6 +219,9 @@ class DelegateTests(Fixture):
                     return
                 responses = [ctx.handle("delegate", {"role": "helper", "task": str(i)})
                              for i in range(3)]
+                for response in responses:
+                    self.assertEqual(response["status"], "bounded")
+                    self.assertEqual(response["bound"], "deadline")
                 seen["parent_bound"] = ctx.bound_hit
                 seen["child_requests"] = ctx.delegated_wrap_up_requests
                 seen["root_requests_before_seal"] = ctx.wrap_up_requests
@@ -243,6 +255,12 @@ class DelegateTests(Fixture):
         self.assertEqual(result["finish"]["outcome"], "bounded")
 
     def test_tool_bound_child_leaves_root_finish_tool(self):
+        self._tool_bound_child_leaves_root_finish_tool(exhaust=False)
+
+    def test_exhausted_tool_bound_child_leaves_root_finish_tool(self):
+        self._tool_bound_child_leaves_root_finish_tool(exhaust=True)
+
+    def _tool_bound_child_leaves_root_finish_tool(self, *, exhaust):
         config = _configured(self)
         roles = dict(config.roles)
         roles["worker"] = dataclasses.replace(roles["worker"], tools_per_run=2)
@@ -253,26 +271,37 @@ class DelegateTests(Fixture):
 
         def callback(ctx, prompt, profile):
             if ctx.role.name == "worker":
-                ctx.handle("delegate", {"role": "helper", "task": "spend tools"})
+                seen["response"] = ctx.handle("delegate", {"role": "helper", "task": "spend tools"})
+                self.assertIsNone(ctx.tool_admission_exception)
+                self.assertIsNone(ctx.admission_exception)
+                self.assertIsNone(ctx.admission_error)
+                self.assertFalse(ctx.admission_wait)
                 seen["bound"] = ctx.bound_hit
                 seen["child_tools"] = ctx.delegated_wrap_up_tools
                 ctx.handle("finish", {"outcome": "continue", "summary": "root seals",
                                       "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
                 seen["root_tools"] = ctx.wrap_up_tools
             else:
-                ctx.handle("files", {"limit": 1, "offset": 0})
-                with self.assertRaises(LimitExceeded):
-                    ctx.handle("read", {})
+                if not ctx.wrap_up_attempted:
+                    ctx.handle("files", {"limit": 1, "offset": 0})
+                    with self.assertRaises(LimitExceeded):
+                        ctx.handle("read", {})
+                    # Model the adapter's initial tool-bound yield, so the
+                    # reserve is spent only by Engine's reduced-grant turn.
+                    if exhaust:
+                        raise DeadlineWrapUp(ctx._bound_message())
                 dispatch = ctx.dispatch
                 ctx.dispatch = lambda operation, arguments: ({} if operation == "research"
                                                              else dispatch(operation, arguments))
-                for _ in range(config.limits.delegate_wrap_up_tools - 1):
+                for _ in range(config.limits.delegate_wrap_up_tools - (0 if exhaust else 1)):
                     ctx.handle("research", {"state": "{}", "expected_generation": 0})
                 ctx.handle("finish", {"outcome": "continue", "summary": "child seals",
                                       "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
 
         result = Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
         self.assertEqual(result["status"], "completed")
+        self.assertEqual(seen["response"]["status"], "bounded")
+        self.assertEqual(seen["response"]["bound"], "tools")
         self.assertEqual(seen["bound"], "tools")
         self.assertEqual(seen["child_tools"], config.limits.delegate_wrap_up_tools)
         self.assertEqual(seen["root_tools"], 1)
@@ -534,6 +563,112 @@ class DelegateTests(Fixture):
         result = Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
         self.assertEqual(result["status"], "completed")
         self.assertIn("synthetic child failure", result["finish"]["summary"])
+
+    def test_typed_child_failures_report_exact_bound_not_provider_text(self):
+        config = _configured(self)
+        for error, bound in ((ToolYieldExceeded("local"), "tools"),
+                             (RequestYieldExceeded("local"), "requests"),
+                             (DrainYieldExceeded("local"), "drain"),
+                             (RunDeadlineExceeded("local"), "deadline"),
+                             (AuthorityGrantMismatch("local"), "authority"),
+                             (InfraExceeded("daily budget"), None),
+                             (ModelFailure("test", message="ToolYieldExceeded"), None),
+                             (Cancelled("child cancelled"), None)):
+            with self.subTest(error=type(error).__name__):
+                seen = {}
+                def callback(ctx, *_):
+                    if ctx.role.name == "helper":
+                        raise error
+                    seen.update(ctx.handle("delegate", {"role": "helper", "task": "probe"}))
+                    ctx.handle("finish", {"outcome": "continue", "summary": "caller sealed", "state": "Caller sealed"})
+                result = Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
+                self.assertEqual(result["status"], "completed")
+                self.assertEqual(seen["status"], "bounded" if bound else "interrupted")
+                self.assertEqual(seen.get("bound"), bound)
+                stored = read_json(self.project.root / "runs" / seen["run"] / "error.json")
+                self.assertEqual(stored["status"], seen["status"])
+                self.assertEqual(stored.get("bound"), bound)
+
+    def test_child_admission_refusal_does_not_mask_later_parent_provider_failure(self):
+        config = _configured(self)
+        for refusal in (InfraExceeded("child daily budget"), Denied("child admission")):
+            with self.subTest(refusal=type(refusal).__name__):
+                fault = ModelFailure("test-provider", message="independent provider fault")
+                seen = {}
+                def callback(ctx, *_):
+                    if ctx.role.name == "helper":
+                        with patch("mizu.runtime.Budget.take", side_effect=refusal):
+                            ctx.handle("_budget", {"sequence": 2})
+                    seen.update(ctx.handle("delegate", {"role": "helper", "task": "probe"}))
+                    self.assertFalse(ctx.admission_wait)
+                    self.assertIsNone(ctx.admission_error)
+                    self.assertIsNone(ctx.admission_exception)
+                    self.assertIsNone(ctx.tool_admission_exception)
+                    raise fault
+                with self.assertRaises(ModelFailure) as raised:
+                    Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
+                self.assertIs(raised.exception, fault)
+                self.assertEqual(seen["status"], "interrupted")
+                self.assertEqual(seen["error"], str(refusal))
+
+    def test_parent_admission_refusal_after_child_still_has_host_identity(self):
+        config = _configured(self)
+        refusal = InfraExceeded("parent daily budget")
+        def callback(ctx, *_):
+            if ctx.role.name == "helper":
+                ctx.handle("finish", {"outcome": "continue", "summary": "child sealed", "state": "Child sealed"})
+                return
+            ctx.handle("delegate", {"role": "helper", "task": "probe"})
+            with patch("mizu.runtime.Budget.take", side_effect=refusal):
+                with self.assertRaises(InfraExceeded):
+                    ctx.handle("_budget", {"sequence": 2})
+            self.assertTrue(ctx.admission_wait)
+            self.assertIs(ctx.admission_exception, refusal)
+            raise ModelFailure("test-adapter", message="admission bridge failure")
+        with self.assertRaises(InfraExceeded) as raised:
+            Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
+        self.assertIs(raised.exception, refusal)
+
+    def test_host_cancellation_after_child_seal_still_interrupts_delegation(self):
+        config = _configured(self)
+        engine = Engine(config)
+        seen = {}
+        def callback(ctx, *_):
+            if ctx.role.name == "helper":
+                ctx.handle("finish", {"outcome": "continue", "summary": "child sealed",
+                                      "state": "Child sealed"})
+                engine.stop.set()
+                return
+            seen.update(ctx.handle("delegate", {"role": "helper", "task": "probe"}))
+        engine.driver = ScriptDriver(callback)
+        with self.assertRaises(Cancelled):
+            engine.run(self.project, "worker")
+        self.assertEqual(seen["status"], "interrupted")
+        self.assertNotIn("bound", seen)
+
+    def test_child_result_storage_failure_remains_interrupted(self):
+        config = _configured(self)
+        for filename in ("delegation.json", "parent-reference"):
+            with self.subTest(filename=filename):
+                seen = {}
+                def failing_write(path, value):
+                    if (path.name == filename or
+                            (filename == "parent-reference" and path.parent.name == "delegations")):
+                        raise OSError("child result storage failed")
+                    write_json(path, value)
+                def callback(ctx, *_):
+                    if ctx.role.name == "helper":
+                        ctx.bound_hit = "tools"
+                        ctx.handle("finish", {"outcome": "continue", "summary": "child bounded", "state": "Child bounded"})
+                        return
+                    with patch("mizu.runtime.write_json", side_effect=failing_write):
+                        seen.update(ctx.handle("delegate", {"role": "helper", "task": "probe"}))
+                    ctx.handle("finish", {"outcome": "continue", "summary": "caller sealed", "state": "Caller sealed"})
+                result = Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
+                self.assertEqual(result["status"], "completed")
+                self.assertEqual(seen["status"], "interrupted")
+                self.assertNotIn("bound", seen)
+                self.assertIn("child result storage failed", seen["error"])
 
     def test_selector_delegate_resolves_without_inference(self):
         import copy

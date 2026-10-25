@@ -1153,6 +1153,15 @@ Only the live `Engine.run` caller owns that lease; unadmitted calls fail with
 fan-out stays bounded by `parallel_consults` and shares the daily budget;
 answers fail independently and cannot edit code. Delegation retains the caller's
 workspace lock throughout the join, preserving one writer.
+Delegation results and retained child records report `status = "bounded"` for a
+bounded child seal or typed local exhaustion, with the host-known `bound`
+(`requests`, `tools`, `deadline`, `drain`, or `authority`) when present. Other
+child faults, infrastructure refusals, cancellation, and result-storage failures
+retain the interrupted path. Shared spend counters and non-deadline spend bounds
+still constrain the caller's seal, with its final request/tool reserve intact;
+pending child admission/tool refusals stay invocation-local. The returned child
+result is the evidence, not grounds to reclassify a later caller provider fault.
+The caller's own subsequent admissions retain their own host refusal evidence.
 A resumed persistent session receives only an append-only delta (goal pin,
 current snapshot pin, proposals not yet offered, plus an `open_insights`
 statement of the still-undecided backlog with ids, total, and explicit
