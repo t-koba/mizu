@@ -61,6 +61,10 @@ class RequestYieldExceeded(LimitExceeded):
     """Local request wrap-up exhausted; preserve work without counting a fault."""
 
 
+class ToolYieldExceeded(LimitExceeded):
+    """Local tool wrap-up exhausted; preserve work without counting a fault."""
+
+
 class DrainYieldExceeded(LimitExceeded):
     """Explicit drain wrap-up ended without a seal; bounded, not a fault."""
 
@@ -76,9 +80,9 @@ class InfraExceeded(LimitExceeded):
     admission handling still catches it, while the consecutive-failure
     brake can distinguish it from model/local bound faults by type alone
     (no message parsing). Only budget/disk guards raise this; engine
-    deadlines, event-stream bounds, RPC deadlines, per-run tool
-    bounds, file-count/snapshot bounds stay plain ``LimitExceeded`` and
-    still count toward the brake.
+    event-stream bounds, RPC deadlines and file-count/snapshot bounds
+    stay plain ``LimitExceeded`` and still count toward the brake.
+    Expected local wrap-up exhaustion has its own typed bounded errors.
     """
 
 

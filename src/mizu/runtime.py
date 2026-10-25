@@ -42,7 +42,7 @@ from .config import (DAEMON_POLICIES, Config, Role, load,
                      role_wrap_up_tools)
 from .doctor import container_runtime
 from .drivers import DriverCheckpoint, driver_for
-from .errors import RequestYieldExceeded
+from .errors import RequestYieldExceeded, ToolYieldExceeded
 from .errors import (AuthorityGrantMismatch, Busy, Cancelled, CaptureLimitExceeded,
                       ConfigError, Denied, InfraExceeded, LimitExceeded, RunDeadlineExceeded,
                       DeadlineWrapUp, DrainYieldExceeded, MissingFinish, MizuError, ModelFailure,
@@ -397,6 +397,9 @@ class Context:
         self.turn_continuation = False
         self.admission_error: str | None = None
         self.admission_exception: MizuError | None = None
+        # Pending host tool refusal for this adapter invocation only. Successful
+        # admission/work clears it; provider text never creates this evidence.
+        self.tool_admission_exception: LimitExceeded | None = None
         self.read_content_ids: dict[str, str] = {}
         self.admission_wait = False
         # Selector failover identity for durable submissions. Retries and
@@ -908,6 +911,7 @@ class Context:
                 if key in self.engine_tool_invocations:
                     if self.engine_tool_invocations[key] != name:
                         raise Denied("Engine tool invocation id reused for a different name")
+                    self.tool_admission_exception = None
                     return {"allowed": True}
                 if len(self.engine_tool_invocations) >= MAX_ENGINE_TOOL_INVOCATIONS:
                     raise LimitExceeded("Engine tool invocation evidence bound exceeded")
@@ -916,7 +920,9 @@ class Context:
                     # Native tools are never wrap-up operations: record the
                     # bound and refuse without drawing the allowance.
                     self.bound_hit = self.bound_hit or "tools"
-                    raise LimitExceeded("Per-run tool limit exceeded")
+                    self.tool_admission_exception = LimitExceeded("Per-run tool limit exceeded")
+                    raise self.tool_admission_exception
+                self.tool_admission_exception = None
                 self.engine_tool_invocations[key] = name
                 self.progress_tool = True
                 return {"allowed": True}
@@ -993,6 +999,7 @@ class Context:
                     self.admission_error = None
                     self.admission_exception = None
                     self.admission_wait = False
+                    self.tool_admission_exception = None
                     return {"admitted": True}
                 except MizuError as exc:
                     self.admission_error = str(exc)
@@ -1017,11 +1024,19 @@ class Context:
                     tools_used = self.wrap_up_tools + self.delegated_wrap_up_tools
                     tools_limit = role_wrap_up_tools(self.config, self.spend_role or self.role)
                 if operation not in WRAP_UP_OPS or tools_used >= tools_limit:
-                    if self.bound_hit == "drain" and tools_used >= tools_limit:
-                        raise DrainYieldExceeded("Drain wrap-up tool allowance exhausted")
-                    if self.bound_hit == "deadline" and tools_used >= tools_limit:
-                        raise RunDeadlineExceeded("Deadline wrap-up tool allowance exhausted")
-                    raise LimitExceeded("Per-run tool limit exceeded")
+                    refusal = LimitExceeded("Per-run tool limit exceeded")
+                    if tools_used >= tools_limit:
+                        if self.bound_hit == "drain":
+                            refusal = DrainYieldExceeded("Drain wrap-up tool allowance exhausted")
+                        elif self.bound_hit == "deadline":
+                            refusal = RunDeadlineExceeded("Deadline wrap-up tool allowance exhausted")
+                        elif self.wrap_up_attempted:
+                            if self.bound_hit == "requests":
+                                refusal = RequestYieldExceeded("Request wrap-up tool allowance exhausted")
+                            else:
+                                refusal = ToolYieldExceeded("Tool wrap-up allowance exhausted")
+                    self.tool_admission_exception = refusal
+                    raise refusal
                 if self.delegated_child:
                     self.delegated_wrap_up_tools += 1
                 else:
@@ -1042,6 +1057,7 @@ class Context:
                     self.progress_decision = True
                 if operation in {"submit_insight", "revise_insight", "withdraw_insight", "attach_evidence"}:
                     self.progress_insight = True
+                self.tool_admission_exception = None
                 return result
             finally:
                 # Completion of actual admitted work is not a heartbeat and
@@ -2424,11 +2440,20 @@ class Engine:
         context.admission_error = None
         context.admission_exception = None
         context.admission_wait = False
+        context.tool_admission_exception = None
         try:
-            return dispatch_evidence.execute(context, driver, prompt, **kwargs)
+            result = dispatch_evidence.execute(context, driver, prompt, **kwargs)
+            if (context.finished is None and isinstance(context.tool_admission_exception,
+                    (ToolYieldExceeded, RequestYieldExceeded, RunDeadlineExceeded, DrainYieldExceeded))):
+                # A normally settled but unsealed exhausted reserve is still
+                # bounded, not a reason to start missing-finish follow-ups.
+                raise context.tool_admission_exception
+            return result
         except ModelFailure as exc:
             if isinstance(context.admission_exception, MizuError):
                 raise context.admission_exception from exc
+            if context.tool_admission_exception is not None:
+                raise context.tool_admission_exception from exc
             raise
 
     def _seal_driver_checkpoint(self, context: Context, checkpoint: DriverCheckpoint, *, profile=None,
@@ -3455,7 +3480,7 @@ class Engine:
                         # already-spent allowance still fail exactly as before.
                         # Sealed driver errors were retained by _execute.
                         if (context.safe_point_yield_requested
-                                or isinstance(exc, (InfraExceeded, RunDeadlineExceeded, DrainYieldExceeded))
+                                or isinstance(exc, (InfraExceeded, RunDeadlineExceeded, DrainYieldExceeded, ToolYieldExceeded))
                                 or getattr(context, "bound_hit", None) is None
                                 or getattr(context, "wrap_up_attempted", False)
                                 or context.finished is not None):
@@ -3665,7 +3690,7 @@ class Engine:
                     # Before model setup, leave only the create-only start
                     # (if any). A failed start must remain retryable.
                     raise
-                if (isinstance(exc, (RunDeadlineExceeded, DrainYieldExceeded, RequestYieldExceeded, AuthorityGrantMismatch))
+                if (isinstance(exc, (RunDeadlineExceeded, DrainYieldExceeded, RequestYieldExceeded, ToolYieldExceeded, AuthorityGrantMismatch))
                         and context is not None
                         and context.finished is None and not context.host_cancelled()):
                     result = {"run": run_id, "role": role_name, "status": "bounded",
@@ -3673,7 +3698,8 @@ class Engine:
                                  if continuation is not None else {}),
                               "bound": ("drain" if isinstance(exc, DrainYieldExceeded)
                                         else ("authority" if isinstance(exc, AuthorityGrantMismatch)
-                                              else ("requests" if isinstance(exc, RequestYieldExceeded) else "deadline"))),
+                                              else ("tools" if isinstance(exc, ToolYieldExceeded)
+                                                    else ("requests" if isinstance(exc, RequestYieldExceeded) else "deadline")))),
                               "finished_at": now(), "error": str(exc),
                               "publication": "not_published", "snapshot": snapshot["id"],
                               "code_digest": snapshot["code_digest"],
