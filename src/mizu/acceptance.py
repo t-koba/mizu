@@ -238,8 +238,10 @@ def _read(root, relative, maximum=MAX_BYTES):
         raise Denied('Malformed acceptance evidence') from exc
 
 
-def scope(project):
+def scope(project, *, _cache_locked=False):
     from .check_jobs import cache_guard
+    if _cache_locked:
+        return _current_scope(project)
     with cache_guard(project):
         return _current_scope(project)
 
@@ -382,10 +384,10 @@ def effective(project, snapshot):
         return None
     from .check_jobs import cache_guard
     # Keep the observed cache input stable through the final receipt selection.
-    # This takes neither queue nor acceptance exclusion, and does not call the
-    # standalone scope wrapper (the cache lock is not reentrant).
+    # This takes neither queue nor acceptance exclusion; scope is told not to
+    # reacquire the non-reentrant cache lock already held here.
     with cache_guard(project):
-        bound = _current_scope(project)
+        bound = scope(project, _cache_locked=True)
         if bound is None:
             return None
         name = _index(project.root, snapshot['code_digest'], bound)
