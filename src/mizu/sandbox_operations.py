@@ -6,8 +6,28 @@ from .errors import Denied
 from .fs import text_preview, write_json
 
 
+#: Caller-selected execution mode for ordinary exec/experiment calls.
+#: Omission keeps the historical routing; sync bypasses only the implicit
+#: queue; async selects the queued path under the existing grants.
+MODES = ("sync", "async")
+
+
 def exec_experiment(context, op: str, args: dict) -> dict:
-    if "check_job" in context.role.capabilities and "source_receipt" not in args and (op == "experiment" or context.role.workspace == "read"):
+    mode = args.get("mode")
+    if mode is not None and mode not in MODES:
+        raise Denied("Unsupported execution mode")
+    if mode == "async":
+        if "check_job" not in context.role.capabilities:
+            raise Denied("Async mode requires check_job")
+        if "source_receipt" in args:
+            raise Denied("Async mode cannot carry a source receipt")
+        if not (op == "experiment" or context.role.workspace == "read"):
+            raise Denied("Cannot detach live workspace writes")
+        return check_jobs.submit(context, args["script"], kind=op)
+    queue_by_default = ("check_job" in context.role.capabilities
+                        and "source_receipt" not in args
+                        and (op == "experiment" or context.role.workspace == "read"))
+    if mode is None and queue_by_default:
         return check_jobs.submit(context, args["script"], kind=op)
     if context.role.workspace == "none":
         raise Denied("This role has no workspace")

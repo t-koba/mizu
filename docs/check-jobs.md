@@ -7,6 +7,18 @@ a fetched `source_receipt` retain their existing synchronous behavior. Arbitrary
 workspace-mutating `exec` remains synchronous; it is not safe to detach writes
 to a workspace that the caller can continue modifying.
 
+Ordinary `exec` and `experiment` calls accept an optional `mode` of `sync` or
+`async`. Omitting `mode` keeps the routing above exactly: with `check_job`,
+read-workspace `exec` and experiments without `source_receipt` queue, while
+writable `exec` and `source_receipt` experiments run synchronously; without
+`check_job`, ordinary execution stays synchronous. `mode=sync` bypasses only
+the implicit queue and runs on the existing sandbox path under the same role
+grants, without bypassing workspace denial or changing sandbox permissions.
+`mode=async` requires the `check_job` grant and uses only the already-safe
+queued paths, so writable-workspace `exec` and `source_receipt` experiments are
+refused instead of detached, and `verify` behavior is unchanged (queued and
+frozen when `check_job` is granted). Queue identity and sharing are unchanged.
+
 The role can continue independent work, inspect `check_job` with `action=list`,
 request cancellation with `action=cancel,id=<full digest>`,
 and retrieve a completion with `action=result,id=<full digest>`. Results carry
