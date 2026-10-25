@@ -75,7 +75,7 @@ def _too_deep(raw: bytes) -> bool:
             depth += 1
             if depth > MAX_JSON_DEPTH:
                 return True
-        else:
+        elif token[:1] in (b"}", b"]"):
             depth -= 1
     return False
 

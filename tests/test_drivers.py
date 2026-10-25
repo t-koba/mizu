@@ -1161,13 +1161,27 @@ class McpProxyTests(unittest.TestCase):
         with self.assertRaises(ValueError) as refused:
             loads_finite(beyond)
         self.assertEqual(str(refused.exception), JSON_DEPTH_REFUSED)
-        # A bracket inside a string is text, not nesting.
+        def nested(depth, kind):
+            value = b"0"
+            for index in range(depth):
+                if kind == "object" or index % 2 == 0:
+                    value = b'{"a":' + value + b"}"
+                else:
+                    value = b"[" + value + b"]"
+            return value
+
+        for kind in ("object", "mixed"):
+            self.assertIsNotNone(loads_finite(nested(MAX_JSON_DEPTH, kind)), kind)
+            with self.assertRaises(ValueError) as refused:
+                loads_finite(nested(MAX_JSON_DEPTH + 1, kind))
+            self.assertEqual(str(refused.exception), JSON_DEPTH_REFUSED)
+        # Brackets inside strings remain text, not nesting.
         self.assertEqual(loads_finite(b'{"a": "' + b"[" * 500 + b'"}'),
                          {"a": "[" * 500})
 
-    def test_deeply_nested_bridge_frame_is_bounded_parse_failure(self):
+    def test_deeply_nested_bridge_frames_are_bounded_parse_failures(self):
         from mizu.bridge import connect
-        from mizu.fs import JSON_DEPTH_REFUSED, loads_finite
+        from mizu.fs import JSON_DEPTH_REFUSED, MAX_JSON_DEPTH, loads_finite
         calls = []
 
         def handle(operation, arguments):
@@ -1178,33 +1192,39 @@ class McpProxyTests(unittest.TestCase):
         bridge.__enter__()
         self.addCleanup(bridge.__exit__, None, None, None)
         config = read_json(bridge.config_file)
-        depth = 20000
-        frame = (b'{"token": ' + json.dumps(config["token"]).encode()
-                 + b', "operation": "finish", "arguments": {"nested": '
-                 + b"[" * depth + b"0" + b"]" * depth + b"}}\n")
-        self.assertLess(len(frame), 1024 * 1024)
-        # The product refuses the frame by its own depth bound, before the
-        # document is parsed, so the outcome is the same on every supported
-        # Python version instead of following that runtime's recursion limit.
-        with self.assertRaises(ValueError) as refused:
-            loads_finite(frame)
-        self.assertEqual(str(refused.exception), JSON_DEPTH_REFUSED)
-        client = connect(config)
-        try:
-            client.settimeout(10)
-            client.sendall(frame)
-            data = bytearray()
-            while b"\n" not in data:
-                chunk = client.recv(65536)
-                if not chunk:
-                    break
-                data.extend(chunk)
-        finally:
-            client.close()
-        response = json.loads(data[:data.index(b"\n")].decode("utf-8"))
-        self.assertNotIn("Internal tool failure", str(response))
-        self.assertFalse(response["ok"])
-        self.assertEqual(response["error"], JSON_DEPTH_REFUSED)
+        object_depth = MAX_JSON_DEPTH + 1
+        frames = (
+            b'{"token": ' + json.dumps(config["token"]).encode()
+            + b', "operation": "finish", "arguments": {"nested": '
+            + b"[" * 20000 + b"0" + b"]" * 20000 + b"}}\n",
+            b'{"token": ' + json.dumps(config["token"]).encode()
+            + b', "operation": "finish", "arguments": {"nested": '
+            + b'{"a":' * object_depth + b"0" + b"}" * object_depth + b"}}\n",
+        )
+        for frame in frames:
+            with self.subTest(frame_size=len(frame)):
+                self.assertLess(len(frame), 1024 * 1024)
+                # The product refuses each frame by its own depth bound,
+                # before parsing, independent of Python's recursion limit.
+                with self.assertRaises(ValueError) as refused:
+                    loads_finite(frame)
+                self.assertEqual(str(refused.exception), JSON_DEPTH_REFUSED)
+                client = connect(config)
+                try:
+                    client.settimeout(10)
+                    client.sendall(frame)
+                    data = bytearray()
+                    while b"\n" not in data:
+                        chunk = client.recv(65536)
+                        if not chunk:
+                            break
+                        data.extend(chunk)
+                finally:
+                    client.close()
+                response = json.loads(data[:data.index(b"\n")].decode("utf-8"))
+                self.assertNotIn("Internal tool failure", str(response))
+                self.assertFalse(response["ok"])
+                self.assertEqual(response["error"], JSON_DEPTH_REFUSED)
         self.assertEqual(calls, [])
 
     def test_forced_decoder_recursion_error_is_bounded_parse_failure(self):
