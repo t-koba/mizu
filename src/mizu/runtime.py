@@ -70,6 +70,8 @@ from .web import Web
 from . import web_operations
 from . import role_state_ops
 from .role_state_ops import _reject_constant  # preserve the established runtime seam
+from . import insight_operations
+from .insight_operations import INSIGHT_RETRIEVAL_LIMIT  # preserve the established runtime seam
 from .web_worker import bounded
 from .vcs_poll_policy import (MAX_CI_BRANCHES, POLL_CALL_TIMEOUT_CAP,
                               POLL_FETCH_TIMEOUT_CAP, _vcs_poll_number,
@@ -122,10 +124,6 @@ def slot(config: Config):
 #: as a run_deferred event.
 INFRA_WAIT = (Busy, InfraExceeded)
 
-#: Explicit paged insight retrieval may walk the whole pending set (tool
-#: page limit, same bound as `mizu insight list`); prompt
-#: selection stays bounded by `[limits] pending_insights`.
-INSIGHT_RETRIEVAL_LIMIT = 1000
 #: Run-local shadow queue evidence retains the first few contended admissions.
 MAX_QUEUE_OBSERVATIONS = 8
 #: Fixed memory bounds for run-local pre-send admission identities.
@@ -1139,83 +1137,22 @@ class Context:
             snapshot_id=args.get("snapshot_id"), scope=args.get("scope"), smoke_refs=args.get("smoke_refs"))
 
     def _op_insights(self, args: dict) -> dict:
-        if args.get("id"):
-            record = self.project.insights.read(args["id"])
-            # The original submitter may follow an accepted proposal into its
-            # current item without receiving a separate work-item capability.
-            # This is a read-only projection; all item validation remains in
-            # WorkItems, and list paths/non-owners keep their existing shape.
-            if record.get("source") == self.role.name:
-                status = self.project.work_items.submitter_status(record["id"])
-                if status is not None:
-                    record["work_item_status"] = status
-            return record
-        # Prompt selection stays at pending_insights; explicit retrieval pages
-        # a stable offset-independent selection capped at INSIGHT_RETRIEVAL_LIMIT,
-        # so overflow items remain discoverable and small pages enumerate each
-        # item once. An explicit action instead pages decided insights (accepted
-        # work stays retrievable after it leaves the pending projection).
-        action = args.get("action")
-        if action is not None:
-            if action not in ("accept", "modify", "defer", "reject"):
-                raise Denied("Insight listing needs a supported action: accept, modify, defer, or reject")
-        projection = self.project.insights.projection(
-            limit=INSIGHT_RETRIEVAL_LIMIT, pending=action is None, action=action)
-        response = page(projection['items'],args.get('offset',0),args.get('limit',1000),maximum=PREVIEW_BYTES*2)
-        response['insights'] = response.pop('items')
-        response['total'] = projection['total']
-        response['selection_truncated'] = projection['truncated']
-        return response
+        return insight_operations.insights(self, args)
 
     def _op_decide(self, args: dict) -> dict:
-        return self.project.insights.decide(args["id"], args["action"], args["reason"],
-                                            args.get("revisit", ""), self.run_dir.name,
-                                            wait=args.get("wait"),
-                                            expected_rev=args["rev"], work_item_intent=args.get("work_item_intent"),
-                                            scope=args.get("scope"), work_items=args.get("work_items"))
+        return insight_operations.decide(self, args)
 
     def _op_submit_insight(self, args: dict) -> dict:
-        # Model submissions carry runtime-bound provenance only (source/run);
-        # no origin field is exposed, so stored origin stays unknown and can
-        # never elevate to operator authority.
-        return self.project.insights.submit(source=self.role.name, title=args["title"], body=args["body"],
-                                             base_snapshot=self.snapshot["id"], run=self.run_dir.name,
-                                             origin=None)
+        return insight_operations.submit_insight(self, args)
 
     def _op_revise_insight(self, args: dict) -> dict:
-        # Owner-only revision: source is fixed to the caller's role and the
-        # mechanism (insights.revise) enforces the source match plus
-        # compare-and-swap on the read rev. The revision is rebased onto the
-        # current snapshot, like a fresh submission about the current tree.
-        return self.project.insights.revise(args["id"], source=self.role.name, title=args["title"],
-                                             body=args["body"], base_snapshot=self.snapshot["id"],
-                                             run=self.run_dir.name, expected_rev=args["rev"])
+        return insight_operations.revise_insight(self, args)
 
     def _op_withdraw_insight(self, args: dict) -> dict:
-        # Owner-only withdrawal: source is fixed to the caller's role and the
-        # mechanism enforces source match plus compare-and-swap on the read rev.
-        # Hiding a current accept/modify additionally needs the supplemental
-        # withdraw_decided grant; the operator CLI passes no such permission.
-        capabilities = set(self.role.capabilities)
-        allow_decided = ("withdraw_insight" in capabilities
-                         and "withdraw_decided" in capabilities)
-        return self.project.insights.withdraw(args["id"], source=self.role.name, reason=args["reason"],
-                                               expected_rev=args["rev"], run=self.run_dir.name,
-                                               allow_decided=allow_decided)
+        return insight_operations.withdraw_insight(self, args)
 
     def _op_attach_evidence(self, args: dict) -> dict:
-        # Attributed annotation of another insight: source is fixed to the
-        # caller's role and the mechanism (insights.attach_evidence) binds to
-        # the read rev without changing title, body, or rev, so ownership and
-        # revise/withdraw rights stay with the submitter only.
-        record = self.project.insights.attach_evidence(
-            args["id"], source=self.role.name, text=args["text"],
-            run=self.run_dir.name, expected_rev=args["rev"], smoke_refs=args.get("smoke_refs"))
-        write_json(self.run_dir / "evidence-attach.json",
-                   {"insight": record["id"], "rev": record["rev"],
-                    "author": self.role.name, "run": self.run_dir.name,
-                    "evidence_count": len(record.get("evidence") or [])})
-        return record
+        return insight_operations.attach_evidence(self, args)
 
     def _op_sync(self, args: dict) -> dict:
         # Host-side refresh only: fetch upstream refs via the trusted adapter
