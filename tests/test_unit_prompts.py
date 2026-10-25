@@ -1,4 +1,5 @@
 """Unit prompt projections live in mizu.unit_prompts; runtime re-exports them."""
+import json
 import unittest
 from unittest.mock import patch
 
@@ -49,6 +50,21 @@ class UnitPromptSeamTests(Fixture):
             with patch.object(unit_prompts, "_prompt_clock", return_value=clock):
                 self.assertEqual(runtime.prompt_delta_for(ctx, []),
                                  unit_prompts.prompt_delta_for(ctx, []))
+
+    def test_delta_clock_boundary_changes_only_the_clock_projection(self):
+        import mizu.unit_prompts as unit_prompts
+        ctx = self.context("worker")
+        first_clock = {"now": "2026-10-25T05:00:00+00:00",
+                       "timezone": str(ctx.config.timezone)}
+        second_clock = {"now": "2026-10-25T05:00:01+00:00",
+                        "timezone": str(ctx.config.timezone)}
+        with patch.object(unit_prompts, "_prompt_clock",
+                          side_effect=[first_clock, second_clock]):
+            first = json.loads(unit_prompts.prompt_delta_for(ctx, []))
+            second = json.loads(unit_prompts.prompt_delta_for(ctx, []))
+        self.assertEqual(first.pop("now"), first_clock["now"])
+        self.assertEqual(second.pop("now"), second_clock["now"])
+        self.assertEqual(first, second)
 
     def test_moved_builders_still_set_the_ready_work_signature(self):
         import mizu.unit_prompts as unit_prompts
