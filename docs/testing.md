@@ -104,7 +104,10 @@ that holds none of them is absent, and the install does not run over the tree
 it has either. An installed version that differs from the pin is a contract
 violation, never reinstalled over. A missing npm, a missing lockfile, a failed install or an elapsed 300 s
 bound leaves the gate's verdict unchanged and the previous installation
-untouched, and names npm's own output.
+untouched, and names npm's own output. Because `npm ci` creates `node_modules`
+under the adapter source directory, that directory must be writable whenever
+pinned dependencies are absent. A permission failure names this precondition;
+the gate does not change permissions or redirect the installation elsewhere.
 
 The install resolves from npm's own cache, as selected by `npm_config_cache`
 (npm's default is `~/.npm`). That cache is the mechanism's input and must hold

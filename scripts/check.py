@@ -891,6 +891,9 @@ def provision_pinned_dependencies(adapter: Path, *, timeout: int = NPM_PROVISION
     over an adapter that holds no installed dependencies at all. A tree that
     holds some of the pinned packages is left exactly as it is and fails
     closed, so a failed install never destroys what the operator provisioned.
+    When dependencies are absent, the adapter source directory must be
+    writable because npm creates `node_modules` there; EACCES/EPERM failures
+    name that precondition.
 
     Schema: the same shape as `pi_sdk_deps_status` -- ("ready", detail),
     ("absent", reason), ("partial", reason) or ("mismatch", reason). Bounds:
@@ -944,8 +947,12 @@ def provision_pinned_dependencies(adapter: Path, *, timeout: int = NPM_PROVISION
             reason = reasons[-1]
         else:
             reason = f'exit {installed.returncode}'
+        permission_note = ''
+        if any(code in '\n'.join(lines) for code in ('EACCES', 'EPERM')):
+            permission_note = ('; the adapter source directory must be writable to create '
+                               'node_modules')
         return (state, details + '; the offline install failed: ' + reason[:400]
-                + ' (the install resolves from ' + NPM_CACHE_INPUT
+                + permission_note + ' (the install resolves from ' + NPM_CACHE_INPUT
                 + ', which must hold the pinned tarballs)')
     final, final_details = pi_sdk_deps_status(adapter)
     if final == 'ready':

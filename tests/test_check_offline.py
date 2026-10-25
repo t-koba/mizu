@@ -1880,7 +1880,22 @@ class PinnedDependencyProvisionTests(unittest.TestCase):
             self.assertEqual(state, 'absent')
             self.assertIn('the offline install failed', details)
             self.assertIn('ENOTCACHED', details)
+            self.assertNotIn('adapter source directory must be writable', details)
             self.assertNotIn('A complete log', details)
+
+    def test_permission_failure_names_writable_source_precondition(self):
+        for code in ('EACCES', 'EPERM'):
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as td:
+                self.calls.clear()
+                adapter = self.adapter(Path(td))
+                failure = f'npm error code {code}\nnpm error syscall mkdir\n'
+                with mock.patch.object(CHECK.subprocess, 'run',
+                                       self.fake_npm(returncode=1, stderr=failure)):
+                    state, details = CHECK.provision_pinned_dependencies(adapter)
+                self.assertEqual(state, 'absent')
+                self.assertIn(code, details)
+                self.assertIn('adapter source directory must be writable', details)
+                self.assertEqual(len(self.calls), 1)
 
     def test_failed_install_names_the_cause_behind_npm_log_pointer(self):
         # npm's pointer to its own log file is not a reason: the gate must
