@@ -374,6 +374,89 @@ class ContainerArgvTests(unittest.TestCase):
         self.assertEqual(podman[-3:], ["--force", "--ignore", "mizu-x"])
         self.assertIsNone(remove_argv(self.config("docker"), "mizu-x"))
 
+    def test_entrypoint_args_default_empty_keeps_command(self):
+        from mizu.sandbox import Sandbox
+        work = self.root / "work"
+        work.mkdir()
+        base = self.config()
+        self.assertEqual(base.sandbox.entrypoint_args, ())
+        args = Sandbox(base, self.root, "worker", self.root / "run").argv("n", work, "echo hi", writable=True)
+        self.assertEqual(args[-3:], [base.sandbox.image, "-c", "echo hi"])
+
+    def test_entrypoint_args_ordering_and_no_split(self):
+        import dataclasses
+        from mizu.sandbox import Sandbox
+        work = self.root / "work"
+        work.mkdir()
+        base = self.config()
+        sandbox = dataclasses.replace(base.sandbox, entrypoint="/bin/bash",
+                                      entrypoint_args=("-o", "pipefail"))
+        args = Sandbox(dataclasses.replace(base, sandbox=sandbox), self.root, "worker",
+                       self.root / "run").argv("n", work, "echo hi", writable=True)
+        image = base.sandbox.image
+        self.assertEqual(args[args.index(image) + 1:args.index(image) + 5],
+                         ["-o", "pipefail", "-c", "echo hi"])
+        # One argv item each: an entry containing a space is not shell-split.
+        sandbox2 = dataclasses.replace(base.sandbox, entrypoint_args=("a b",))
+        args2 = Sandbox(dataclasses.replace(base, sandbox=sandbox2), self.root, "worker",
+                        self.root / "run").argv("n", work, "echo hi", writable=True)
+        self.assertIn("a b", args2)
+        self.assertNotIn("a", args2[args2.index(image) + 1:])
+
+    def test_entrypoint_args_malformed_refused_at_load(self):
+        from mizu.cli import configure
+        from mizu.config import load
+        from mizu.errors import ConfigError
+        bad_fragments = [
+            'entrypoint_args = "o pipefail"\n',
+            'entrypoint_args = [42]\n',
+            'entrypoint_args = [""]\n',
+            'entrypoint_args = ["a\\nb"]\n',
+            'entrypoint_args = ["a\\u0000b"]\n',
+            'entrypoint_args = ["' + 'x' * 4097 + '"]\n',
+            'entrypoint_args = [' + ', '.join('"a' + str(i) + '"' for i in range(33)) + ']\n',
+        ]
+        for fragment in bad_fragments:
+            with self.subTest(fragment=fragment[:48]):
+                config_file = self.root / "owned.toml"
+                if config_file.exists():
+                    config_file.unlink()
+                configure(config_file, None)
+                body = config_file.read_text()
+                body = body.replace('entrypoint = "/bin/sh"',
+                                    'entrypoint = "/bin/sh"\n' + fragment.rstrip("\n"), 1)
+                config_file.write_text(body)
+                with self.assertRaises(ConfigError):
+                    load(config_file)
+
+    def test_entrypoint_args_recorded_in_command_evidence(self):
+        import dataclasses
+        from unittest.mock import patch
+        from mizu.process import Result
+        from mizu.sandbox import Sandbox
+        work = self.root / "work"
+        work.mkdir()
+        run_dir = self.root / "run"
+        run_dir.mkdir()
+        base = self.config()
+        # Default record carries the empty list.
+        box = Sandbox(base, self.root, "worker", run_dir)
+        with patch("mizu.sandbox.run", side_effect=[Result(0, "[]", "", "exited", 0.0),
+                                                    Result(0, "", "", "exited", 0.0),
+                                                    Result(0, "", "", "exited", 0.0)]):
+            record = box.execute(work, "echo hi", writable=True)
+        self.assertEqual(record["entrypoint_args"], [])
+        # Configured arguments are visible verbatim in the record.
+        sandbox = dataclasses.replace(base.sandbox, entrypoint="/bin/bash",
+                                      entrypoint_args=("-o", "pipefail"))
+        box = Sandbox(dataclasses.replace(base, sandbox=sandbox), self.root, "worker", run_dir)
+        with patch("mizu.sandbox.run", side_effect=[Result(0, "[]", "", "exited", 0.0),
+                                                    Result(0, "", "", "exited", 0.0),
+                                                    Result(0, "", "", "exited", 0.0)]):
+            record = box.execute(work, "echo hi", writable=True)
+        self.assertEqual(record["entrypoint"], "/bin/bash")
+        self.assertEqual(record["entrypoint_args"], ["-o", "pipefail"])
+
     def test_execute_refuses_launch_without_runtime(self):
         # Fail closed: an unverifiable inspect (missing runtime) denies
         # launch instead of recording a startup_error run.

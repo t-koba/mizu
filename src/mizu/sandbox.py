@@ -322,7 +322,7 @@ class Sandbox:
 
         Schema/bounds: fixed floor (read-only root, cap-drop, no-new-privs,
         seccomp, user mapping, resource bounds) is non-negotiable; policy
-        selections (network, entrypoint, mounts, env) come from `[sandbox]`
+        selections (network, entrypoint, entrypoint_args, mounts, env) come from `[sandbox]`
         and are recorded per command. Trust: config only, never model input.
         Retry: none (argv construction). Evidence: argv-adjacent record in
         execute(). Failure: ConfigError for missing image/paths.
@@ -362,7 +362,7 @@ class Sandbox:
                                      selinux=selinux, linux=linux)
         else:
             command.extend(["--workdir", "/workspace"])
-        command.extend(["--entrypoint", cfg.entrypoint, cfg.image, "-c", script])
+        command.extend(["--entrypoint", cfg.entrypoint, cfg.image, *cfg.entrypoint_args, "-c", script])
         return command
 
     def execute(self, workspace: Path, script: str, *, writable: bool,
@@ -390,6 +390,7 @@ class Sandbox:
                   "image": self.config.sandbox.image, "container": name,
                   "network": self.config.sandbox.network, "writable": writable and not experiment,
                   "entrypoint": self.config.sandbox.entrypoint,
+                  "entrypoint_args": list(self.config.sandbox.entrypoint_args),
                   "mounts": [{"source": m["source"], "target": m["target"]}
                              for m in self.config.sandbox.mounts],
                   "env_keys": sorted(self.config.sandbox.env)}

@@ -109,6 +109,7 @@ temporary_mb = 256
 file_mb = 128                     # Per-file limit, NOT a whole-workspace disk quota.
 selinux_label = true              # Linux-only :z relabeling of dedicated mounts.
 entrypoint = "/bin/sh"            # Policy-selected container entrypoint; the image must provide it.
+entrypoint_args = []              # Ordered runner argv after the image, before `-c` script (one argv item each, never shell-split). Empty keeps the existing command; e.g. entrypoint_args = ["-o", "pipefail"] with entrypoint = "/bin/bash".
 # Extra read-only host mounts, selected by policy. Model code can read but
 # never write through these. Never mount sockets, credentials, or secret
 # material; system and harness paths are refused.

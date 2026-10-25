@@ -769,6 +769,7 @@ The container interior is always Linux. The runtime must support standard flags 
 | `image` | `""` | Local `sha256:<hex>` or digest-pinned image reference (runtime pulls are forbidden) |
 | `network` | `"none"` | Container network name; `"none"` ensures networkless isolation |
 | `entrypoint` | `"/bin/sh"` | Container entrypoint; the image must provide it |
+| `entrypoint_args` | `[]` | Ordered runner arguments appended after the image and before the harness-managed `-c` script arguments; one argv item each, never shell-split or exported. Empty keeps the existing command. Example: `entrypoint = "/bin/bash"` with `entrypoint_args = ["-o", "pipefail"]` keeps `pipefail` out of child shells (unlike exported `SHELLOPTS`) |
 | `memory_mb`, `cpus`, `pids` | `2048`, `2`, `256` | Container resource limits |
 | `temporary_mb`, `file_mb` | `256`, `128` | Temporary storage size and per-file write limit (`RLIMIT_FSIZE`) |
 | `selinux_label` | `true` | Linux-only `:z` volume relabeling |

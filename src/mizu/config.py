@@ -439,6 +439,12 @@ class Sandbox:
     network: str = "none"
     #: Container entrypoint selected by policy (the image must provide it).
     entrypoint: str = "/bin/sh"
+    #: Ordered runner arguments appended after the image and before the
+    #: harness-managed `-c` script arguments. Each entry is one argv item
+    #: (never shell-split); empty by default so the effective command is
+    #: unchanged. Example `["-o", "pipefail"]` with `/bin/bash` keeps the
+    #: option out of child shells (unlike exported `SHELLOPTS`).
+    entrypoint_args: tuple[str, ...] = ()
     #: Extra read-only host mounts selected by policy. Model code can read but
     #: never write the host through these; system and harness paths are refused.
     mounts: tuple = ()
@@ -971,6 +977,13 @@ def load(file: Path) -> Config:
     if not entrypoint.startswith("/") or re.search(r"\s", entrypoint) or "\x00" in entrypoint:
         raise ConfigError("sandbox.entrypoint must be an absolute container path without whitespace")
     sb["entrypoint"] = entrypoint
+    entrypoint_args = strings(sb.get("entrypoint_args", []), "sandbox.entrypoint_args")
+    if len(entrypoint_args) > 32:
+        raise ConfigError("sandbox.entrypoint_args permits at most 32 arguments")
+    for arg in entrypoint_args:
+        if not arg or len(arg) > 4096 or "\n" in arg:
+            raise ConfigError("sandbox.entrypoint_args entries must be nonempty single-line strings of at most 4096 chars")
+    sb["entrypoint_args"] = entrypoint_args
     for key in ("check_input_files", "check_input_bytes"):
         if key in sb:
             number(sb[key], "sandbox." + key, 1, 1099511627776)
