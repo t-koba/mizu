@@ -2,19 +2,21 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import shutil
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
 
 from . import platform as _platform
 from .budget import Budget
-from .config import Config, resolve_timezone
+from .config import Config, keys, resolve_timezone, strings
 from .drivers import command_for
-from .errors import ConfigError, Denied, MizuError
-from .fs import digest, mkdir, read_json
+from .errors import ConfigError, Denied, LimitExceeded, MizuError
+from .fs import digest, identifier, mkdir, read_json, safe_read
 from .pi import credentials
 from .process import run, stop_note
 from .sandbox import CHECKPOINT_ANNOTATION, CHECKPOINT_INSPECT_MAXIMUM, Sandbox, ensure_single, inspect_text_has_valueless_env, inspect_text_is_checkpoint, runtime_base, runtime_env
@@ -329,6 +331,7 @@ def check(config: Config, *, sandbox: bool = False) -> dict:
     checked("free disk reserve", lambda: free_disk(config))
     checked("budget file", lambda: budget_file(config))
     checked("service units", lambda: service_units())
+    checks.append(check_runner_row(config))
     checked("proposal stores", lambda: proposal_stores(config))
     engines = {config.engine(p) for p in config.profiles}
     if "pi" in engines or "pi-durable" in engines:
@@ -508,6 +511,143 @@ def proposal_stores(config: Config) -> dict:
             bad += 1
             raise ConfigError(f"{project.name}: {exc}") from exc
     return {"projects": checked, "unreadable": bad}
+
+
+#: Bounded project-settings read for the check-runner diagnostic. The doctor
+#: reads untrusted local files, so the settings stay under the same bound the
+#: project lifecycle enforces; anything unreadable or malformed fails closed.
+_CHECK_RUNNER_SETTINGS_MAXIMUM = 65536
+
+
+def _check_job_projects(config: Config) -> list[str]:
+    """Initialized projects with an active role granting ``check_job``.
+
+    Schema/bounds: ``config.data/projects/*/project.toml`` under a 64 KiB
+    bound. Trust: local project settings plus configured roles. Retry: none.
+    Evidence: project names. Failure: ConfigError names the project whose
+    settings are unreadable, malformed or refer to unknown roles, so a broken
+    project is never silently read as having no grant.
+    """
+    projects_root = config.data / "projects"
+    try:
+        with os.scandir(projects_root) as scan:
+            entries = sorted((entry for entry in scan if not entry.name.startswith(".")),
+                             key=lambda entry: entry.name)
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise ConfigError(f"Cannot list initialized projects: {exc}") from exc
+    needing: list[str] = []
+    from .project import check_verify
+    from .selection import attributes
+
+    for candidate in entries:
+        try:
+            if candidate.is_symlink():
+                raise ConfigError(f"{candidate.name}: project directory must not be a symlink")
+            if not candidate.is_dir(follow_symlinks=False):
+                continue
+        except OSError as exc:
+            raise ConfigError(f"{candidate.name}: cannot inspect project directory: {exc}") from exc
+        entry = Path(candidate.path)
+        settings_path = entry / "project.toml"
+        try:
+            settings_path.lstat()
+        except FileNotFoundError:
+            # A directory without project.toml is not an initialized project.
+            continue
+        except OSError as exc:
+            raise ConfigError(f"{entry.name}: cannot stat project settings: {exc}") from exc
+        try:
+            raw = safe_read(entry, "project.toml", _CHECK_RUNNER_SETTINGS_MAXIMUM)
+        except (OSError, ValueError, Denied, LimitExceeded) as exc:
+            raise ConfigError(f"{entry.name}: cannot read bounded project settings: {exc}") from exc
+        try:
+            settings = tomllib.loads(raw.decode("utf-8"))
+            keys(settings, {"roles", "verify", "attributes"}, "project")
+            roles = strings(settings.get("roles", []), "project.roles")
+            if not roles:
+                raise ConfigError("Project roles must refer to configured roles")
+            check_verify(settings.get("verify", []))
+            attributes(settings.get("attributes", {}))
+        except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError,
+                MizuError, TypeError) as exc:
+            raise ConfigError(f"{entry.name}: malformed project settings: {exc}") from exc
+        unknown = [role for role in roles if role not in config.roles]
+        if unknown:
+            raise ConfigError(f"{entry.name}: unknown configured role: " + ", ".join(sorted(unknown)))
+        try:
+            name = identifier(entry.name)
+        except Denied as exc:
+            raise ConfigError(f"{entry.name}: invalid project name: {exc}") from exc
+        if any("check_job" in config.roles[role].capabilities for role in roles):
+            needing.append(name)
+    return sorted(needing)
+
+
+def check_runner(config: Config, directory: Path | None = None, *, system: str | None = None) -> dict:
+    """Check-job runner presence for projects that grant ``check_job``.
+
+    No service manager is contacted and neither grants nor generated units
+    change here; this only inspects initialized projects and the standard
+    platform service directory. On Linux every granted project needs its full
+    generated runner set (check ``.service``, notification ``.path`` and
+    recovery ``.timer``); a missing file fails with the exact unit names.
+    On macOS/Windows the runner is operator-managed and generated service
+    definitions are absent by design (``docs/check-jobs.md``), so the result
+    carries ``state: manual`` and the caller reports ``not_run`` instead of
+    passing or failing on generated units. With no grant the result carries
+    ``state: no_grant``.
+    """
+    from .services import check_runner_units
+
+    name = system or _platform.SYSTEM
+    if name not in ("linux", "macos", "windows"):
+        raise ConfigError(f"Unsupported service platform: {name}")
+    needing = _check_job_projects(config)
+    if not needing:
+        return {"state": "no_grant", "projects": [],
+                "detail": "No initialized project grants check_job; no check-job runner is required."}
+    if name in ("macos", "windows"):
+        return {"state": "manual", "system": name, "projects": needing,
+                "detail": ("Check-job runner is operator-managed on " + name + "; "
+                           "generated service definitions are absent by design "
+                           "(docs/check-jobs.md). Operate `mizu check-jobs PROJECT` "
+                           "from an operator-managed runner; doctor cannot verify it.")}
+    service_dir = directory or _platform.service_dir(name)
+    missing: list[str] = []
+    installed: list[str] = []
+    for project in needing:
+        for unit in check_runner_units(project):
+            try:
+                present = (service_dir / unit).is_file()
+            except OSError as exc:
+                raise ConfigError(f"Cannot inspect service directory {service_dir}: {exc}") from exc
+            (installed if present else missing).append(unit)
+    if missing:
+        raise ConfigError(
+            "Missing check-job runner units in " + str(service_dir) + ": "
+            + ", ".join(sorted(missing))
+            + "; install and enable them before check_job use (docs/check-jobs.md).")
+    return {"state": "ready", "system": name, "projects": needing,
+            "directory": str(service_dir), "units": sorted(installed)}
+
+
+def check_runner_row(config: Config, directory: Path | None = None, *,
+                     system: str | None = None) -> dict:
+    """One doctor row for the check-job runner diagnostic.
+
+    ``pass`` carries the installed Linux definitions, ``fail`` names the
+    exact missing unit files (or the malformed project that fails closed),
+    and ``not_run`` carries the explicit no-grant or manual-runner state.
+    """
+    try:
+        details = check_runner(config, directory, system=system)
+    except (MizuError, OSError, ValueError, TypeError, KeyError) as exc:
+        return {"name": "check-job runner", "status": "fail", "details": str(exc)}
+    if details.get("state") in ("no_grant", "manual"):
+        return {"name": "check-job runner", "status": "not_run", "details": details}
+    return {"name": "check-job runner", "status": "pass", "details": details}
 
 
 def service_units(directory: Path | None = None, *, system: str | None = None) -> dict:

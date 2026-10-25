@@ -57,6 +57,14 @@ and enable those units before enabling model use of the capability. Other
 platforms can invoke the same bounded command from an operator-managed runner;
 they do not yet have generated check-runner services.
 
+`mizu doctor` reports a `check-job runner` row for this runner. With no
+initialized project granting `check_job` the row is `not_run`. On Linux the
+row passes when every granted project's check service, notification path and
+recovery timer are installed in the standard service directory, and fails
+naming the exact missing unit files. On macOS/Windows the row is `not_run`:
+the runner is operator-managed there and generated definitions are absent by
+design, so there is nothing for the doctor to verify.
+
 `limits.parallel_checks` (default 2, range 1–64) is a shared compute semaphore,
 separate from model admission. `limits.check_pending` (default 32, range 1–1024)
 bounds unfinished jobs per project. At most 32 acceptance commands belong to one

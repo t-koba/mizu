@@ -107,6 +107,22 @@ def _role_base(project: Project, name: str) -> str:
     return f"mizu-{len(project.name)}-{identifier(project.name)}-{identifier(name)}"
 
 
+def check_runner_base(project_name: str) -> str:
+    """Unit basename for a project's check-job runner (service/path/timer).
+
+    Single source of truth for the generated check-runner unit names shared
+    with the doctor diagnostic: the service, notification path and recovery
+    timer are ``<base>.service``, ``<base>.path`` and ``<base>.timer``.
+    """
+    return f"mizu-{len(project_name)}-{project_name}-checks"
+
+
+def check_runner_units(project_name: str) -> tuple[str, ...]:
+    """Full generated check-runner unit set for one project on Linux."""
+    base = check_runner_base(project_name)
+    return (base + ".service", base + ".path", base + ".timer")
+
+
 def event_watches(config: Config, project: Project) -> dict[str, list[str]]:
     """Event-trigger watch directories per subscribed role.
 
@@ -189,7 +205,7 @@ def _render_systemd(config: Config, project: Project, executable: Path) -> dict[
         timer.extend(["", "[Install]", "WantedBy=timers.target"])
         result[base + ".timer"] = "\n".join(timer) + "\n"
     if any("check_job" in config.roles[name].capabilities for name in project.roles):
-        base = f"mizu-{len(project.name)}-{project.name}-checks"
+        base = check_runner_base(project.name)
         argv = [str(executable.resolve()), "--config", str(config.file), "check-jobs", project.name]
         result[base + ".service"] = "\n".join([
             "[Unit]", f"Description=Mizu {project.name} sandbox checks", "StartLimitIntervalSec=0",
