@@ -20,6 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import platform as _platform
+from . import workspace_reads
 from .admission import admission, has_live_demand, role_exclusion
 from . import check_jobs
 from . import ci_waits, dispatch_evidence, safe_point, work_item_events
@@ -127,7 +128,7 @@ MAX_QUEUE_OBSERVATIONS = 8
 #: Fixed memory bounds for run-local pre-send admission identities.
 MAX_ENGINE_TOOL_INVOCATIONS = 4096
 MAX_ENGINE_TOOL_ID = 256
-MAX_READ_IDENTITIES = 1024
+MAX_READ_IDENTITIES = workspace_reads.MAX_READ_IDENTITIES
 #: Bound for role cursors: snapshot/code, wake generation, and (for read-only
 #: completion) state digest, outcome and validated compact progress evidence.
 OBSERVED_CURSOR_MAX_BYTES = 4096
@@ -1073,142 +1074,21 @@ class Context:
         return handler(self, args)
 
     def _op_diff(self, args: dict) -> dict:
-        base = self._observed_diff_base()
-        if base is not None:
-            try:
-                return self.project.snapshots.changes(self.snapshot["id"], base=base)
-            except Denied:
-                pass
-        return self.project.snapshots.changes(self.snapshot["id"])
+        return workspace_reads.op_diff(self, args)
 
     def _observed_diff_base(self) -> str | None:
-        """Return this role's observed snapshot ID when it is usable as a diff base.
-
-        Schema: the ``observed/<role>.json`` cursor the engine writes, holding
-        ``snapshot`` and ``code_digest`` (and read-only scheduling evidence). Bounds: the cursor is read under
-        ``OBSERVED_CURSOR_MAX_BYTES``. Trust: local recorded state, never a
-        claim about the tree, so an absent, malformed, digest-mismatched or
-        no-longer-retained cursor is unusable and yields None; ancestry is
-        rechecked by the snapshot store at diff time and falls back there.
-        Failure: never raises for cursor problems; a valid cursor naming the
-        current snapshot is usable and renders an empty diff.
-        """
-        try:
-            cursor = read_json(
-                self.project.root / "observed" / f"{self.role.name}.json",
-                {}, max_bytes=OBSERVED_CURSOR_MAX_BYTES)
-        except (OSError, ValueError, Busy, Denied, LimitExceeded):
-            return None
-        if not isinstance(cursor, dict):
-            return None
-        snapshot_id = cursor.get("snapshot")
-        code_digest = cursor.get("code_digest")
-        if (not isinstance(snapshot_id, str) or not DIGEST.fullmatch(snapshot_id)
-                or not isinstance(code_digest, str) or not DIGEST.fullmatch(code_digest)):
-            return None
-        try:
-            record = self.project.snapshots.get(snapshot_id)
-        except (OSError, ValueError, Busy, Denied, LimitExceeded):
-            return None
-        if record.get("code_digest") != code_digest:
-            return None
-        return snapshot_id
+        return workspace_reads.observed_diff_base(
+            self, max_bytes=OBSERVED_CURSOR_MAX_BYTES)
 
     def _op_files(self, args: dict) -> dict:
-        if self.role.workspace == "none":
-            names = []
-        elif self.role.workspace != "write":
-            names = sorted(self.snapshot["files"])
-            names = sorted(names + self._injected_ref_paths())
-            result = page(names, args.get("offset", 0), args.get("limit", 1000))
-            result["files"] = result.pop("items")
-            return result
-        else:
-            names = []
-            for directory, dirs, files in os.walk(self.workspace, followlinks=False):
-                rel = Path(directory).relative_to(self.workspace)
-                dirs[:] = sorted(d for d in dirs if not self.project.snapshots.excluded((rel / d).as_posix()))
-                for name in sorted(files):
-                    path = (rel / name).as_posix()
-                    if not self.project.snapshots.excluded(path):
-                        names.append(path)
-                        if len(names) > self.config.limits.snapshot_files:
-                            raise LimitExceeded("Workspace file count exceeded")
-            names.sort()
-            names = names + self._injected_ref_paths()
-            names.sort()
-        result = page(names, args.get("offset", 0), args.get("limit", 1000))
-        result["files"] = result.pop("items")
-        return result
+        return workspace_reads.op_files(self, args)
 
     def _injected_ref_paths(self) -> list[str]:
-        # Injected refs live in the project harness store outside the
-        # working tree, served under the virtual refs/remotes/upstream/*
-        # prefix even for read roles (snapshots capture the workspace
-        # only, so materialized inputs lack them by construction).
-        try:
-            refs = _vcs.list_refs(self.project.root)
-        except OSError as exc:
-            raise Denied(f"Upstream refs are unavailable: {exc}") from exc
-        return [_vcs.REF_PREFIX_PATH + "/" + name for name in refs]
+        return workspace_reads.injected_ref_paths(self)
 
     def _op_read(self, args: dict) -> dict:
-        path = args["path"]
-        offset, limit = args.get("offset", 0), args.get("limit", READ_PAGE_CHARS)
-        expected = args.get("content_id")
-        if offset and expected is None:
-            expected = self.read_content_ids.get(path)
-        if expected is not None and (not isinstance(expected, str) or not DIGEST.fullmatch(expected)):
-            raise Denied("Invalid read content_id")
-        ref = _vcs.split_ref_path(path)
-        if ref is not None:
-            if self.role.workspace == "none":
-                raise Denied("Path is not exposed to this role")
-            # Existence probe, not a read: any workspace entry at the
-            # virtual path collides, even a symlink, directory, special
-            # file or hardlink that safe_read would refuse. Only a
-            # missing path falls through to the virtual ref. Unreadable
-            # states fail closed toward refusal.
-            try:
-                target = self.workspace.joinpath(*relative_parts(path))
-            except (ValueError, Denied, OSError):
-                collision = False
-            else:
-                try:
-                    os.lstat(target)
-                except FileNotFoundError:
-                    collision = False
-                except NotADirectoryError:
-                    collision = False
-                except OSError:
-                    collision = True
-                else:
-                    collision = True
-            if collision:
-                raise Denied("Path collides with the reserved virtual upstream-ref prefix; "
-                             "relocate genuine files out of refs/remotes/upstream/")
-            try:
-                text = _vcs.read_ref(self.project.root, ref)
-            except OSError as exc:
-                raise Denied(f"Upstream refs are unavailable: {exc}") from exc
-            data = text.encode("utf-8")
-        else:
-            if self.role.workspace == "none" or self.project.snapshots.excluded(path):
-                raise Denied("Path is not exposed to this role")
-            # file_bytes bounds the complete file; READ_PAGE_CHARS separately
-            # bounds the decoded text returned in one protocol response.
-            data = safe_read(self.workspace, path, self.config.limits.file_bytes)
-            text = data.decode("utf-8", "replace")
-        content_id = digest(data)
-        if expected is not None and expected != content_id:
-            raise Denied("Read file changed since the previous page")
-        if path not in self.read_content_ids and len(self.read_content_ids) >= MAX_READ_IDENTITIES:
-            raise LimitExceeded("Read identity retention bound exceeded")
-        self.read_content_ids[path] = content_id
-        end = min(len(text), offset + limit)
-        return {"path": path, "text": text[offset:end], "content_id": content_id,
-                "offset": offset, "next_offset": end if end < len(text) else None,
-                "truncated": end < len(text)}
+        return workspace_reads.op_read(
+            self, args, max_identities=MAX_READ_IDENTITIES)
 
     def _read_retained_evidence(self, kind: str, args: dict) -> dict:
         """Read exactly two bounded files; no discovery, fallback or writes.
