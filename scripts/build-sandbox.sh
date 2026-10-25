@@ -62,6 +62,9 @@ BASE_ID=$("$EXE" image inspect --format '{{.Id}}' "$BASE")
 refuse_checkpoint "$TAG"
 refuse_valueless_env "$TAG"
 IMAGE=$("$EXE" image inspect --format '{{.Id}}' "$TAG")
+# Podman can print the same content ID as bare hex; normalize it to the
+# sha256 form the product's sandbox.image setting accepts.
+[[ $IMAGE =~ ^[0-9a-f]{64}$ ]] && IMAGE="sha256:$IMAGE"
 [[ $IMAGE =~ ^sha256:[0-9a-f]{64}$ ]] || { echo 'Unexpected image ID' >&2; exit 76; }
 printf 'Base resolved to %s\nSet sandbox.image to the image ID printed on stdout. Archive build logs for provenance.\n' "$BASE_ID" >&2
 printf '%s\n' "$IMAGE"
