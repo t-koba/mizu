@@ -422,8 +422,27 @@ class Context:
         self.consult = consult
         self.delegate = delegate
         self.ephemeral = False
+        self.exec_session = None
         self.sandbox = Sandbox(config, project.root, role.name, run_dir, cancel=self.tools_cancelled)
         self.web = Web(config.web, config.data / "web-cache", run_dir / "sources", role.name)
+
+    def close_exec(self):
+        # Keep a poisoned session attached: cleanup failure must not let a
+        # subsequent call launch another container or publish a snapshot.
+        if self.exec_session is not None:
+            self.exec_session.close()
+            self.exec_session = None
+
+    def persistent_execute(self, script):
+        from .persistent_exec import ExecSession
+        if not self.role.persistent_exec or "exec" not in self.role.capabilities:
+            raise Denied("Persistent exec requires explicit role opt-in and exec grant")
+        if self.exec_session is not None and self.exec_session.closed:
+            self.close_exec()
+        if self.exec_session is None:
+            self.exec_session = ExecSession(self.sandbox, self.workspace,
+                                            writable=self.role.workspace == "write")
+        return self.exec_session.execute(script)
 
     @property
     def driver_capabilities(self):
@@ -517,6 +536,7 @@ class Context:
         # before releasing the writer lock or cleaning up their shared tree.
         self.wait_for_joins()
         self.operations_stopped.set()
+        self.close_exec()
 
     def tools_cancelled(self):
         return self.operations_stopped.is_set() or self.cancelled()
@@ -1047,6 +1067,7 @@ class Context:
         bound = acceptance.scope(self.project)
         if bound is not None and check_jobs.execution_key(self.config) != bound['execution']:
             bound = None  # A context cannot attest another execution config.
+        self.close_exec()
         before = self.project.snapshots.capture_files(self.workspace)
         results = [self.sandbox.execute(self.workspace, command, writable=True)
                    for command in self.project.verify]
@@ -1287,6 +1308,7 @@ class Context:
         # workspace edits + verify; this only ships the approved tree.
         if self.role.workspace != "write":
             raise Denied("Publication requires a writable workspace")
+        self.close_exec()
         captured = self.project.snapshots.capture_files(self.workspace)
         if captured.get("skipped"):
             raise Denied("Publication requires a representable snapshot")
@@ -1603,6 +1625,7 @@ class Context:
         approval = None
         code_digest = None
         if op == "merge":
+            self.close_exec()
             captured = self.project.snapshots.capture_files(self.workspace)
             if captured.get("skipped"):
                 raise Denied("Proposal disposition requires a representable snapshot")
@@ -1726,6 +1749,7 @@ class Context:
             # A seal after a spend bound is a bounded end, never a fresh
             # verdict: the unit saved what it could and runs again.
             args = {**args, "outcome": "bounded"}
+        self.close_exec()
         finished = {**args, "wait_seconds": wait, "recorded_at": now(),
                     **({"bound": self.bound_hit} if self.bound_hit is not None else {})}
         write_json(self.run_dir / "finish-intent.json", finished)
@@ -3002,6 +3026,7 @@ class Engine:
                                   "wait_until": time.time() + float(
                                       finished.get("wait_seconds")
                                       or self.config.limits.default_wait_seconds)}
+                context.close_exec()
                 if role.workspace == "write":
                     captured = project.snapshots.capture_files(workspace)
                     verification = context.verification
@@ -3275,6 +3300,7 @@ class Engine:
                 if context is not None:
                     context._slot_lease = False
                     context.closed = True
+                    context.close_exec()
                 with contextlib.suppress(OSError):
                     active.unlink(missing_ok=True)
                 # Read-only inputs are reproducible from the content-addressed snapshot.
@@ -3306,6 +3332,7 @@ class Engine:
             check_consult_role(role_name, self.config.roles[role_name])
         if not parent._slot_lease or parent.closed:
             raise Busy("Consultation requires a live admitted caller execution slot")
+        parent.close_exec()
         capture = parent.project.snapshots.capture_files(parent.workspace)
         snap = parent.project.snapshots.create(capture, goal=parent.goal, state=parent.snapshot["state"],
                                               run=parent.run_dir.name, outcome="wait", summary="Consultation input")
@@ -3374,6 +3401,7 @@ class Engine:
             finally:
                 if ctx is not None:
                     ctx.closed = True
+                    ctx.close_exec()
                 shutil.rmtree(workspace, ignore_errors=True)
         with ThreadPoolExecutor(max_workers=self.config.limits.parallel_consults) as pool:
             results = list(pool.map(ask, role_names))
@@ -3421,6 +3449,7 @@ class Engine:
         # configured role already carries finish for its own top-level runs).
         role = dataclasses.replace(role, workspace=parent.role.workspace,
                                    capabilities=tuple(dict.fromkeys([*role.capabilities, "finish"])))
+        parent.close_exec()
         capture = parent.project.snapshots.capture_files(parent.workspace)
         snap = parent.project.snapshots.create(capture, goal=parent.goal, state=parent.snapshot["state"],
                                               run=parent.run_dir.name, outcome="wait", summary="Delegation input")
@@ -3533,9 +3562,12 @@ class Engine:
                 pass
             return result
         finally:
-            guard.close()
-            if ctx is not None:
-                ctx.closed = True
+            try:
+                if ctx is not None:
+                    ctx.closed = True
+                    ctx.close_exec()
+            finally:
+                guard.close()
 
 
 #: Skip label for a held producer admission. The attempt claims no run

@@ -1,4 +1,7 @@
-"""One container per command. No privileged fallback.
+"""One-shot container execution and shared OCI construction. No privileged fallback.
+
+Direct exec may opt into the unit-owned transport in persistent_exec.py;
+execute() itself always creates a fresh one-shot context.
 
 Network isolation is policy, not a hardcoded ban: `[sandbox] network` defaults
 to `none` and any other value is passed to the runtime explicitly, with the

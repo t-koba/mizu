@@ -487,6 +487,8 @@ class Role:
     #: false otherwise, so event-only/read roles never spend runs on CI they
     #: never subscribed to unless the operator opts them in.
     ci_wake: bool = False
+    #: Direct exec shell state is confined to one role unit; never acceptance.
+    persistent_exec: bool = False
     #: Explicit opt-in to holding this non-writer producer when project
     #: open/doing/blocked work reaches the configured cap. Per-source limits
     #: are independent and remain effective when this is false.
@@ -1146,7 +1148,7 @@ def load(file: Path) -> Config:
             raise ConfigError(f"Role name '{name}' is reserved for the operator channel")
         keys(role, {"profile", "policy", "workspace", "capabilities", "engine_tools", "on_change",
                     "interval_seconds", "calendar", "daemon", "selector", "attributes",
-                    "decision_events", "work_item_events", "decision_sources", "work_item_sources", "ci_wake", "held_at_capacity", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds", "decision_events_limit", "work_item_events_limit", "no_progress_backoff_seconds", "cooldown_seconds", "progress_signals", "event_poll_seconds", "daemon_policy", "daemon_spacing_seconds"}, f"roles.{name}")
+                    "decision_events", "work_item_events", "decision_sources", "work_item_sources", "ci_wake", "held_at_capacity", "persistent_exec", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds", "decision_events_limit", "work_item_events_limit", "no_progress_backoff_seconds", "cooldown_seconds", "progress_signals", "event_poll_seconds", "daemon_policy", "daemon_spacing_seconds"}, f"roles.{name}")
         profile = string(role.get("profile", ""), f"roles.{name}.profile")
         selector = string(role.get("selector", ""), f"roles.{name}.selector")
         if ("profile" in role) == ("selector" in role):
@@ -1265,6 +1267,9 @@ def load(file: Path) -> Config:
         ci_wake = boolean(role.get("ci_wake", workspace == "write"), f"roles.{name}.ci_wake")
         held_at_capacity = boolean(role.get("held_at_capacity", False),
                                    f"roles.{name}.held_at_capacity")
+        persistent_exec = boolean(role.get("persistent_exec", False), f"roles.{name}.persistent_exec")
+        if persistent_exec and "exec" not in caps:
+            raise ConfigError(f"roles.{name}.persistent_exec requires the exec capability")
         role_requests = role.get("requests_per_run")
         if role_requests is not None:
             number(role_requests, f"roles.{name}.requests_per_run", 1, 1073741824)
@@ -1319,7 +1324,7 @@ def load(file: Path) -> Config:
                            boolean(role.get("on_change", False), "on_change"), interval, calendar, daemon, selector, attrs,
                            decision_events=events, work_item_events=work_events, decision_sources=raw_sources,
                            work_item_sources=work_sources, ci_wake=ci_wake,
-                           held_at_capacity=held_at_capacity,
+                           held_at_capacity=held_at_capacity, persistent_exec=persistent_exec,
                            requests_per_run=role_requests, tools_per_run=role_tools,
                            wrap_up_requests=role_wrap_requests, wrap_up_tools=role_wrap_tools,
                            run_seconds=role_seconds,

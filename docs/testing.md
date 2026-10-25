@@ -381,3 +381,14 @@ reconciliation, malformed evidence, deadline-claim rollback, no-repeat deadline
 failure, bounded finish outcomes, maintenance pins and default-disabled ordinary
 failures. These are local durable-lifecycle/RPC tests, not provider or
 OCI evidence; they use no network and make no live inference claim.
+
+Persistent exec transport/fault tests (`tests/test_persistent_exec.py`) use a local
+shell double, not OCI isolation evidence. The ordinary offline gate skips
+`tests/test_persistent_exec_oci.py` unless a trusted test host explicitly supplies
+`MIZU_OCI_IMAGE`. The existing Ubuntu 24.04/Python 3.13 core CI cell builds a local
+sandbox with `scripts/build-sandbox.sh`, then runs that bounded integration under
+rootless Podman. It tests live state/background-job reuse, nonzero status, the
+security floor, fresh one-shot verification/check commands, timeout/no replay,
+reset and container removal. It does not expose the runtime/socket inside a role
+sandbox. Local acceptance alone is not runtime proof: require the integration's
+success on the exact published SHA before claiming real-OCI validation.

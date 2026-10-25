@@ -1743,3 +1743,41 @@ configuration. No common provider or effort allowlist is imposed. Consultation
 and smoke never reuse persistent sessions.
 
 Workspace read pagination retains at most 1024 path-to-content identities in one work unit. The first read of a path in a unit may start at any offset and establishes its pin. Later offset continuations may omit `content_id` to use that same retained identity. An explicit identity is required to demand continuity across units; a first read in another unit is a new independent read. Every page still hashes the current safe-read bytes and refuses a changed file. Reading offset zero starts a new version. Reaching the identity bound refuses a new path without evicting existing pins. Identities grant no file access and are discarded with the unit.
+
+### Persistent direct exec (role opt-in)
+
+`roles.<name>.persistent_exec` is a strict boolean, default `false`. `true`
+requires that role's existing `exec` capability; it grants no capability by
+itself. For example, add `persistent_exec = true` inside an exec-enabled role's
+TOML table. All other role and sandbox defaults are unchanged.
+
+Only direct `exec` calls use the lazily started, sequential shell owned by that
+role-unit Context. Cwd, exported variables, functions and background jobs survive
+normal calls (including nonzero exits). The configured `sandbox.entrypoint` and
+`entrypoint_args` must support POSIX shell `-s`, `eval`, assignments and `printf`;
+this is a pipe protocol, not a terminal emulator. Shell options, traps, stdin
+consumption or redirections that prevent completion can invalidate a session.
+The fixed sandbox security floor, configured runtime, mounts, network policy,
+resource limits and per-call time/output bounds remain effective. Output from
+background jobs may appear in a later call; idle background output is bounded,
+and overflow invalidates the session at the next call.
+
+Each cooperative command returns an explicit `exit_code` and `reason`, with a
+per-call `commands/<id>.json` evidence record (environment key names only, no
+credential injection). Completion frames on stdout/stderr are best-effort, **not
+authentication against code in the same shell**: a deliberately self-spoofing
+command can falsify its status. **Exec output is not acceptance evidence.**
+Missing/malformed completion, shell death, timeout, cancellation, output overflow,
+uncertain/partial delivery or failure to persist command evidence removes the
+container and reports `state_lost`,
+`execution_may_be_partial` and a status note. Commands are never replayed; the
+next direct call starts a new shell. Cleanup failure poisons the Context and
+refuses further execution/publication until operator recovery.
+
+The shell is closed before verification/check handoffs, workspace snapshot
+capture/publication, delegation/consultation handoffs and unit teardown (also on
+failure). Its state never spans units or model conversation sessions. Verification
+and check jobs always use fresh, independent, stateless one-shot contexts for
+each command; `Sandbox.execute()` and experiments remain one-shot regardless of
+the role option. Read-only exec routed through `check_job` stays on that existing
+frozen-input route, not in a persistent session.

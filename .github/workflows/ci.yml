@@ -11,7 +11,8 @@ concurrency:
 jobs:
   core:
     # Portable development plane: offline unit/contract checks on all three OSes.
-    # Native service operation, live inference and OCI isolation are never asserted here.
+    # Native service operation and live inference are not asserted here. Only
+    # Ubuntu 24.04/Python 3.13 additionally exercises real rootless OCI isolation.
     runs-on: ${{ matrix.os }}
     # The suite costs about 923 s on the development host, about 1050 s on a
     # loaded verification host (the 2026-10-21 run was still running when the
@@ -31,7 +32,8 @@ jobs:
     # neither install runs a second gate. The cell's scope still holds the
     # source gate's path plus the installer's own bounded staging call, so
     # the cell is not cut off while the installer works, whether or not an
-    # install reaches its staged gate.
+    # install reaches its staged gate. The OCI step is capped at another 600 s:
+    # 3246 + 3300 + 600 = 7146 s still fits the unchanged 7200 s cell scope.
     timeout-minutes: ${{ matrix.os == 'windows-latest' && 60 || (matrix.os == 'ubuntu-24.04' && matrix.python == '3.13' && 120 || 60) }}
     strategy:
       fail-fast: false
@@ -59,6 +61,17 @@ jobs:
         # receipt: the installer still verifies the staged manifest, and the
         # receipt must bind to this exact source/runtime/schema/waiver set.
         run: ./scripts/test-install.sh private-validation/offline.json
+      - name: Rootless OCI persistent exec integration
+        if: matrix.os == 'ubuntu-24.04' && matrix.python == '3.13'
+        # Trusted test host only: no runtime/socket is exposed to role sandboxes.
+        # This bounded addition uses the existing cell's scope, not a new job.
+        timeout-minutes: 10
+        run: |
+          timeout 60 sudo apt-get update
+          timeout 90 sudo apt-get install -y podman uidmap slirp4netns fuse-overlayfs
+          trap 'timeout 60 sh -c "podman ps -aq --filter label=io.mizu.project | xargs -r podman rm --force"' EXIT
+          IMAGE=$(timeout 210 ./scripts/build-sandbox.sh --base docker.io/library/python:3.13-slim-bookworm)
+          MIZU_OCI_IMAGE="$IMAGE" timeout 150 python -m unittest discover -s tests -p test_persistent_exec_oci.py -v
       - name: Source distribution build
         if: runner.os == 'Linux' && matrix.python == '3.13'
         run: python scripts/package.py --output dist

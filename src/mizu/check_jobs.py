@@ -198,6 +198,7 @@ def available(context, *, validate=True, discovery=None):
                   and j.get('environment') is not None and j.get('execution') == key]
     if not candidates:
         return []
+    context.close_exec()
     capture = context.project.snapshots.capture_files(context.workspace)
     if capture['skipped']:
         return []
@@ -295,6 +296,7 @@ def submit(context, script=None, *, kind="experiment", fresh=False, purpose=None
     purpose = purpose_label(purpose)
     if shutil.disk_usage(project.root).free < context.config.limits.free_disk_mb * 1048576:
         raise Busy('Free disk space is below the check input reserve')
+    context.close_exec()
     capture = project.snapshots.capture_files(context.workspace)
     if capture['skipped']:
         raise Denied('Check job input is not representable')
@@ -462,6 +464,7 @@ def result(context, job_id):
         if job['kind'] == 'verify' and job['status'] in ('completed', 'refused', 'interrupted', 'cleanup_failed'):
             output['accepted_for_current_source'] = False
         if job['kind'] == 'verify' and job['status'] == 'completed' and record.get('passed'):
+            context.close_exec()
             capture = project.snapshots.capture_files(context.workspace)
             matches = (not capture['skipped'] and capture['code_digest'] == job['code_digest']
                        and execution_key(context.config) == job['execution']
