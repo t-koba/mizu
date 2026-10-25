@@ -1,12 +1,25 @@
 from __future__ import annotations
 import dataclasses
 import json
+import shutil
 import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
+_default_config = None
+_default_config_temporary = None
+
+
+def default_config_tree() -> Path:
+    """Create the real default configuration tree once for this test process."""
+    global _default_config, _default_config_temporary
+    if _default_config is None:
+        _default_config_temporary = tempfile.TemporaryDirectory(prefix="mizu-test-config-")
+        _default_config = Path(_default_config_temporary.name) / "config" / "config.toml"
+        configure(_default_config, None)
+    return _default_config.parent
 sys.path.insert(0, str(ROOT / "src"))
 from mizu.cli import configure
 from mizu.errors import Denied
@@ -47,7 +60,7 @@ class Fixture(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.file = self.root / "config/config.toml"
-        configure(self.file, None)
+        shutil.copytree(default_config_tree(), self.file.parent)
         text = self.file.read_text().replace('data_dir = "~/.local/state/mizu"', 'data_dir = ' + json.dumps(str(self.root / "data")))
         text = text.replace('provider = ""', 'provider = "test-provider"').replace('model = ""', 'model = "test-model"')
         text = text.replace('\ndaily_requests = 0', '\ndaily_requests = 100').replace('free_disk_mb = 1024', 'free_disk_mb = 0')
