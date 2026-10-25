@@ -4,7 +4,7 @@ import threading
 from unittest.mock import patch
 
 from support import Fixture
-from mizu import acceptance, check_jobs
+from mizu import acceptance, check_jobs, platform as host_platform
 from mizu.errors import Denied
 from mizu.fs import held, lock, read_json, write_json
 from mizu.process import Result
@@ -325,26 +325,33 @@ class ScratchTests(Fixture):
         self.assertEqual(record['kind'], 'experiment')
         self.assertEqual(read_json(directory / 'commands' / (record['id'] + '.json'))['scratch_paths'], ['target'])
 
+    def test_bind_args_uses_separator_safe_platform_spellings(self):
+        self.assertEqual(bind_args('/host/input', '/workspace', readonly=True,
+                                   selinux=True, linux=True),
+                         ['--volume', '/host/input:/workspace:ro,z'])
+        self.assertEqual(bind_args(r'C:\host\input', '/workspace', readonly=True,
+                                   selinux=True, linux=False),
+                         ['--mount', r'type=bind,src=C:\host\input,dst=/workspace,readonly'])
+
     def test_argv_binds_private_staging_only_and_keeps_source_readonly(self):
         job = self.submit()
         directory = check_jobs.root(self.project) / job['id']
         workspace = directory / 'input'
         (workspace / 'target').mkdir()
         box = Sandbox(self.config, self.project.root, check_jobs.job_role(job['id']), directory)
-        for linux in (True, False):
-            with self.subTest(linux=linux), patch('mizu.sandbox._platform.IS_LINUX', linux):
-                args = box.argv('test', workspace, 'compile', writable=False, experiment=True,
-                                scratch_paths=('target',))
-                for readonly, source, target in [(True, workspace, '/workspace'),
-                                                  (False, workspace / 'target', '/work/target')]:
-                    expected = bind_args(str(source), target, readonly=readonly,
-                                         selinux=bool(self.config.sandbox.selinux_label) and linux, linux=linux)
-                    self.assertIn(expected[1], args)
-                self.assertIn(f'/work:rw,nosuid,nodev,size={self.config.sandbox.temporary_mb}m,mode=1777', args)
-                self.assertFalse(any(str(self.cache) in arg for arg in args))
-                self.assertFalse(any('/work/cache' in arg for arg in args))
-                plain = box.argv('test', workspace, 'compile', writable=False, experiment=True)
-                self.assertFalse(any('/work/target' in arg for arg in plain))
+        linux = host_platform.IS_LINUX
+        args = box.argv('test', workspace, 'compile', writable=False, experiment=True,
+                        scratch_paths=('target',))
+        for readonly, source, target in [(True, workspace, '/workspace'),
+                                          (False, workspace / 'target', '/work/target')]:
+            expected = bind_args(str(source), target, readonly=readonly,
+                                 selinux=bool(self.config.sandbox.selinux_label) and linux, linux=linux)
+            self.assertIn(expected[1], args)
+        self.assertIn(f'/work:rw,nosuid,nodev,size={self.config.sandbox.temporary_mb}m,mode=1777', args)
+        self.assertFalse(any(str(self.cache) in arg for arg in args))
+        self.assertFalse(any('/work/cache' in arg for arg in args))
+        plain = box.argv('test', workspace, 'compile', writable=False, experiment=True)
+        self.assertFalse(any('/work/target' in arg for arg in plain))
         for extra in ({'experiment': False}, {'experiment': True, 'source_receipt': 'a' * 64}):
             with self.assertRaises(Denied):
                 box.argv('test', workspace, 'compile', writable=False, scratch_paths=('target',), **extra)
