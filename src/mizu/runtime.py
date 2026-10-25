@@ -1595,11 +1595,23 @@ class Context:
             params["base_sha"] = args["base_sha"]
         if "artifact" in args:
             params["artifact"] = args["artifact"]
+        diagnose_waits = (publication is not None
+                          and {"vcs_read", "work_items_read"} <= set(self.role.capabilities))
         try:
+            # Keep the one adapter response for diagnostics, then restore the
+            # ordinary exact-SHA checks view. No extra network observation.
             data = _vcs.read_via(self.config.vcs, args["op"], params,
-                             cancel=self.tools_cancelled)
+                             cancel=self.tools_cancelled,
+                             **({"preserve_status_rows": True} if diagnose_waits else {}))
         except OSError as exc:
             raise Denied(f"VCS read is unavailable: {exc}") from exc
+        if diagnose_waits:
+            diagnostics = ci_waits.status_diagnostics(
+                self.project.work_items, self.role.name, publication, data)
+            data = {**data, "checks": [row for row in data["checks"]
+                                       if row["sha"] == publication["published_sha"]]}
+            if diagnostics is not None:
+                data["ci_waits"] = diagnostics
         if publication is not None:
             observed = {
                 "publication_id": publication["publication_id"],

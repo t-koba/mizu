@@ -1,6 +1,7 @@
 """Offline receipt-pinned CI waits: no publication or real network adapter."""
 import dataclasses
 import json
+import uuid
 from unittest.mock import Mock, patch
 
 from support import Fixture, ScriptDriver
@@ -11,7 +12,7 @@ from mizu.project import Project
 from mizu.protocol import DEFINITIONS, validate
 from mizu.publication import Publication
 from mizu.distribution import public_source_identity
-from mizu.runtime import Engine, _role_events_due, poll_project_vcs, refresh_poll_state, should_run
+from mizu.runtime import Context, Engine, _role_events_due, poll_project_vcs, refresh_poll_state, should_run
 
 SHA = "b" * 40
 
@@ -48,6 +49,130 @@ class CiWaitTests(Fixture):
         result = ci_waits.poll(self.config, self.project, self.state,
                               now=self.clock, interval=15, reader=reader)
         return result, reader
+
+    def reader(self, capabilities=("vcs_read", "work_items_read")):
+        role = dataclasses.replace(self.config.roles["worker"], capabilities=capabilities)
+        run = self.project.root / "runs" / uuid.uuid4().hex
+        run.mkdir(parents=True)
+        return Context(self.config, self.project, role, run,
+                       self.project.snapshots.get(), self.project.workspace)
+
+    def test_diagnosis_is_exact_current_bounded_and_pure(self):
+        name = "Offline checks / core (windows-latest, 3.13)"
+        wait = self.block(wait={**self.wait, "checks": [name]})["wait"]
+        exact = {"check": name, "sha": SHA, "state": "success", "run": "run-1"}
+        cases = [
+            ([], "absent", 0, 0),
+            ([{**exact, "check": "core (windows-latest, 3.13)"}], "absent", 0, 0),
+            ([exact, exact], "duplicate", 2, 0),
+            ([exact, {**exact, "sha": "d" * 40}], "duplicate", 2, 1),
+            ([{**exact, "state": "queued"}], "nonterminal", 1, 0),
+            ([{**exact, "state": "running"}], "nonterminal", 1, 0),
+            ([{**exact, "sha": "d" * 40}], "wrong_sha", 1, 1),
+            ([exact], "terminal", 1, 0),
+            ([{**exact, "state": "failure"}], "terminal", 1, 0),
+        ]
+        for rows, observation, count, wrong in cases:
+            with self.subTest(observation=observation, rows=rows):
+                data = {"checks": rows}
+                before = canonical([wait, data])
+                self.assertEqual(ci_waits.diagnose(wait, data), [{
+                    "check": name, "observation": observation,
+                    "exact_name_count": count, "wrong_sha_count": wrong}])
+                self.assertEqual(ci_waits.terminal(wait, data) is not None,
+                                 observation == "terminal")
+                self.assertEqual(canonical([wait, data]), before)
+        self.assertEqual(ci_waits.diagnose(wait, {"checks": [exact], "branch": "other"})
+                         [0]["observation"], "branch_mismatch")
+        for bad_wait, data in (({**wait, "checks": ["x"] * 65}, {"checks": []}),
+                               (wait, {"checks": [{**exact, "check": "unsafe\nname"}]}),
+                               (wait, {"checks": [exact] * 1025})):
+            with self.assertRaises(Denied):
+                ci_waits.diagnose(bad_wait, data)
+
+    def test_publication_status_reuses_response_and_only_explains_current_holder_waits(self):
+        name = "Offline checks / unit"
+        item = self.block(wait={**self.wait, "checks": [name]})
+        foreign = self.block("foreign", actor="editor", wait={**self.wait, "checks": ["private"]})
+        inactive = self.block("inactive")
+        self.store.transition(inactive["id"], expected_rev=2, status="doing", actor="worker")
+        reader = self.reader()
+        args = {"op": "status", "publication_id": self.publication.id}
+        rows = [{"check": "unit", "sha": SHA, "state": "success"},
+                {"check": name, "sha": "d" * 40, "state": "success"}]
+        for current_rows, expected in ((rows, "wrong_sha"), (rows[:1], "absent"),
+                                       ([{**rows[1], "sha": SHA}], "terminal")):
+            with self.subTest(expected=expected):
+                with patch.object(vcs, "invoke", return_value={"checks": current_rows}) as adapter:
+                    observed = reader.handle("vcs_read", args)
+                adapter.assert_called_once()
+                self.assertEqual(adapter.call_args.args[1],
+                                 {"op": "status", "branch": "published", "sha": SHA})
+                result = observed["result"]
+                self.assertEqual(result["checks"], [row for row in vcs.parse_status_checks(
+                    {"checks": current_rows}) if row["sha"] == SHA])
+                diagnostics = result["ci_waits"]
+                self.assertEqual(diagnostics["items"], [{"work_item": item["id"], "rev": 2,
+                    "checks": [{"check": name, "observation": expected,
+                                "exact_name_count": int(expected != "absent"),
+                                "wrong_sha_count": int(expected == "wrong_sha")}]}])
+                self.assertEqual(diagnostics["observed_checks"], current_rows)
+                self.assertNotIn(foreign["id"], canonical(diagnostics).decode())
+                self.assertNotIn(inactive["id"], canonical(diagnostics).decode())
+                self.assertEqual(read_json(reader.run_dir / observed["evidence"]), observed)
+                self.assertEqual(self.store.get(item["id"]), item)
+                self.assertFalse(ci_waits._path(self.store, item).exists())
+                if expected != "terminal":
+                    polled, _ = self.poll(rows=current_rows)
+                    self.assertEqual(polled["observed"], 0)
+        self.assertFalse((self.project.root / "waits").exists())
+        # A later normal poll can still retain exact terminal evidence.
+        result, _ = self.poll(rows=[{**rows[1], "sha": SHA}])
+        self.assertEqual(result["observed"], 1)
+        self.assertEqual(self.store.get(item["id"]), item)
+
+    def test_status_diagnostics_require_both_grants_and_receipt_locator(self):
+        self.block()
+        rows = self.rows() + self.rows(sha="d" * 40)
+        for caps in (("vcs_read",), ("vcs_read", "work_items_read")):
+            reader = self.reader(caps)
+            with patch.object(vcs, "invoke", return_value={"checks": rows}) as adapter:
+                observed = reader.handle("vcs_read", {"op": "status", "branch": "published", "sha": SHA})
+            adapter.assert_called_once()
+            self.assertEqual(observed["result"], {
+                "op": "status", "branch": "published", "trust": "external-untrusted",
+                "checks": vcs.parse_status_checks({"checks": self.rows()})})
+        reader = self.reader(("vcs_read",))
+        with patch.object(vcs, "invoke", return_value={"checks": rows}), \
+                patch.object(ci_waits, "status_diagnostics", side_effect=AssertionError("not granted")):
+            observed = reader.handle("vcs_read", {"op": "status", "publication_id": self.publication.id})
+        self.assertNotIn("ci_waits", observed["result"])
+        self.assertEqual(observed["result"]["checks"], vcs.parse_status_checks({"checks": self.rows()}))
+        reader = self.reader(("work_items_read",))
+        with patch.object(vcs, "invoke") as adapter:
+            with self.assertRaisesRegex(Denied, "no capability"):
+                reader.handle("vcs_read", {"op": "status", "publication_id": self.publication.id})
+            adapter.assert_not_called()
+
+    def test_diagnostic_projection_is_bounded_and_filters_receipt_pins(self):
+        wait = self.block()["wait"]
+        items = [{"id": "wi_" + f"{index:032x}", "rev": 2, "holder": "worker", "wait": wait}
+                 for index in range(ci_waits.MAX_DIAGNOSTIC_ITEMS + 2)]
+        other = [{**items[0], "wait": {**wait, key: value}} for key, value in (
+            ("publication_id", "f" * 64), ("branch", "other"), ("sha", "d" * 40))]
+        rows = [{"check": "界" * 256, "state": "x" * 64, "sha": SHA, "run": "r" * 128}
+                for _ in range(ci_waits.MAX_DIAGNOSTIC_ROWS + 1)]
+        with patch.object(ci_waits, "_items", return_value=iter(other + list(reversed(items)))):
+            result = ci_waits.status_diagnostics(self.store, "worker", self.receipt, {"checks": rows})
+        self.assertEqual(len(result["items"]), ci_waits.MAX_DIAGNOSTIC_ITEMS)
+        self.assertEqual([item["work_item"] for item in result["items"]],
+                         [item["id"] for item in items[:ci_waits.MAX_DIAGNOSTIC_ITEMS]])
+        self.assertTrue(result["items_truncated"])
+        self.assertEqual(len(result["observed_checks"]), ci_waits.MAX_DIAGNOSTIC_ROWS)
+        self.assertTrue(result["observed_checks_truncated"])
+        self.assertLess(len(canonical(result)), PREVIEW_BYTES)
+        with patch.object(ci_waits, "_items", return_value=iter(other)):
+            self.assertIsNone(ci_waits.status_diagnostics(self.store, "worker", self.receipt, {"checks": rows}))
 
     def test_registration_is_work_item_only_and_pins_valid_receipt(self):
         item = self.block()

@@ -30,6 +30,17 @@ def normalize(root, value, *, stored=False):
     if not isinstance(value, dict) or set(value) != fields or value.get("kind") != "ci":
         raise Denied("Invalid work-item CI wait fields")
     checks = value["checks"]
+    _check_names(checks)
+    receipt = Publication.read_receipt(root, value["publication_id"])
+    result = {"kind": "ci", "publication_id": receipt["publication_id"],
+              "branch": receipt["branch"], "sha": receipt["published_sha"],
+              "checks": sorted(checks)}
+    if stored and result != value:
+        raise Denied("CI wait differs from its immutable publication receipt")
+    return result
+
+
+def _check_names(checks):
     if (not isinstance(checks, list) or not 1 <= len(checks) <= 64
             or any(not isinstance(c, str) or not c or len(c) > 256
                    for c in checks)):
@@ -44,13 +55,6 @@ def normalize(root, value, *, stored=False):
         raise Denied("Serialized CI check set exceeds 2048 UTF-8 bytes")
     if len(set(checks)) != len(checks):
         raise Denied("Duplicate CI wait check name")
-    receipt = Publication.read_receipt(root, value["publication_id"])
-    result = {"kind": "ci", "publication_id": receipt["publication_id"],
-              "branch": receipt["branch"], "sha": receipt["published_sha"],
-              "checks": sorted(checks)}
-    if stored and result != value:
-        raise Denied("CI wait differs from its immutable publication receipt")
-    return result
 
 
 def _items(store):
@@ -101,6 +105,67 @@ def terminal(wait, data):
                          **{key: row[key] for key in ("started_at", "completed_at", "job_seconds")
                             if key in row}})
     return selected
+
+
+# Bounds on the additional status projection, independent of the ordinary checks.
+MAX_DIAGNOSTIC_ITEMS = 10
+MAX_DIAGNOSTIC_ROWS = 32
+
+
+def diagnose(wait, data):
+    """Pure current observation, not terminal evidence or a permanent failure.
+
+    The wait is receipt-normalized by the caller. Validate check-name bounds
+    here too so the returned rows are bounded independently of the adapter.
+    A supplied branch mismatch is informative; read_via normally synthesizes
+    the requested branch, so equality is not proof of an observed branch.
+    """
+    _check_names(wait["checks"])
+    rows = parse_status_checks(data)
+    result = []
+    for name in wait["checks"]:
+        matches = [row for row in rows if row["check"] == name]
+        pinned = [row for row in matches if row["sha"] == wait["sha"]]
+        if data.get("branch", wait["branch"]) != wait["branch"]:
+            observation = "branch_mismatch"
+        elif not matches:
+            observation = "absent"
+        elif len(matches) != 1:
+            observation = "duplicate"
+        elif not pinned:
+            observation = "wrong_sha"
+        elif pinned[0]["state"] not in ("success", "failure"):
+            observation = "nonterminal"
+        else:
+            observation = "terminal"
+        result.append({"check": name, "observation": observation,
+                       "exact_name_count": len(matches),
+                       "wrong_sha_count": len(matches) - len(pinned)})
+    return result
+
+
+def status_diagnostics(store, role, publication, data):
+    """Read-only, holder-only bounded projection using this status response.
+
+    Stream local waits with bounded retention; no evidence reads/writes, adapter
+    calls, acknowledgements or transitions. Omitted items/rows are explicit.
+    """
+    waits = (item for item in _items(store)
+             if item["holder"] == role
+             and all(item["wait"][key] == publication[receipt_key]
+                     for key, receipt_key in (("publication_id", "publication_id"),
+                                              ("branch", "branch"), ("sha", "published_sha"))))
+    selected = heapq.nsmallest(MAX_DIAGNOSTIC_ITEMS + 1, waits, key=lambda item: item["id"])
+    if not selected:
+        return None
+    rows = parse_status_checks(data)
+    return {"items": [{"work_item": item["id"], "rev": item["rev"],
+                       "checks": diagnose(item["wait"], data)}
+                      for item in selected[:MAX_DIAGNOSTIC_ITEMS]],
+            "items_truncated": len(selected) > MAX_DIAGNOSTIC_ITEMS,
+            "observed_checks": [{key: row[key] for key in ("check", "sha", "state", "run")
+                                 if key in row} for row in rows[:MAX_DIAGNOSTIC_ROWS]],
+            "observed_checks_truncated": len(rows) > MAX_DIAGNOSTIC_ROWS}
 
 
 def _evidence(store, item):

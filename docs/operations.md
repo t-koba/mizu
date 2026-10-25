@@ -591,6 +591,24 @@ external-untrusted and the product recomputes the job time itself. Neither chang
 checks remain unresolved even if the branch has moved. After a successful run
 the exact evidence is acknowledged once; for a new CI attempt or changed
 predicate, use the normal CAS transitions to leave `blocked` and block again.
+
+For a read-only explanation, call `vcs_read` with `op:"status"` and the exact
+`publication_id`. With both `vcs_read` and `work_items_read` grants, `result.ci_waits`
+explains only the caller's current blocked waits for that receipt (up to 10,
+by item ID). Each declared check reports `absent`, `duplicate`, `wrong_sha`,
+`nonterminal` or `terminal`, plus exact-name and wrong-SHA counts. A supplied
+branch mismatch reports `branch_mismatch`; the default adapter wrapper echoes
+the requested branch, so its equality is not proof of an observed branch.
+`observed_checks` lists up to 32 validated check/SHA/state/run identities
+from the same response, including other SHAs; both lists have truncation flags.
+Names are exact: a raw job name never aliases a workflow-qualified name.
+Absence describes only this response, not failure: the exact name may appear
+on a later poll. Normal `checks` stay filtered to the receipt SHA. Diagnostics
+are external-untrusted invocation evidence only: they neither persist poll state
+nor wake, acknowledge or transition work, and status reads make no extra adapter
+call. Callers without either grant and ordinary branch/SHA status reads get no
+diagnostics. Existing status validation bounds and refusals still apply.
+
 See [the full wait contract](scheduling.md#exact-sha-work-item-ci-waits) for
 bounds, restart/replay and failure behavior.
 
