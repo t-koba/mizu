@@ -68,6 +68,8 @@ from .ci_requests import CiRequests, request_id as ci_request_id
 from .publication import Publication, source_commit
 from .web import Web
 from . import web_operations
+from . import role_state_ops
+from .role_state_ops import _reject_constant  # preserve the established runtime seam
 from .web_worker import bounded
 from .vcs_poll_policy import (MAX_CI_BRANCHES, POLL_CALL_TIMEOUT_CAP,
                               POLL_FETCH_TIMEOUT_CAP, _vcs_poll_number,
@@ -1243,34 +1245,10 @@ class Context:
         return record
 
     def _op_research_read(self, args: dict) -> dict:
-        # Own role's current research record with its generation: the
-        # read half of the replace cycle. No evidence file: read-only,
-        # and the run already records the call. Other roles' records
-        # are never addressable; the role name is the caller's own.
-        seen = self.project.role_state.read(self.role.name)
-        return {"role": self.role.name, **seen}
+        return role_state_ops.research_read(self, args)
 
     def _op_research(self, args: dict) -> dict:
-        # Replacement-only update of the own role's record: the state
-        # arrives as a JSON string (protocol schemas cannot express a
-        # free-form bounded object), parses here, then replaces under
-        # the generation the caller read. Stale, invalid, or
-        # unavailable states are Denied with the stored record
-        # untouched; the receipt carries the new generation plus the
-        # stored state as run-record audit.
-        try:
-            state = json.loads(args["state"], parse_constant=_reject_constant)
-        except ValueError as exc:
-            raise Denied("Research state must parse as JSON") from exc
-        out = self.project.role_state.replace(
-            self.role.name, state,
-            expected_generation=args["expected_generation"],
-            run=self.run_dir.name)
-        record = {"role": self.role.name, "generation": out["generation"],
-                  "updated_at": out["updated_at"], "state": state,
-                  "evidence": "research-state.json"}
-        write_json(self.run_dir / "research-state.json", record)
-        return record
+        return role_state_ops.research(self, args)
 
     def _op_vcs_read_publications(self, args: dict) -> dict:
         # Local listing of the project's recorded publication receipts.
@@ -1897,11 +1875,6 @@ POLL_LOCK_NAME = "vcs-poll.lock"
 def now_iso() -> str:
     """Wall-clock event stamp for CI polling."""
     return now()
-
-
-def _reject_constant(value: str):
-    """Reject non-finite JSON constants at parse time (matches ``fs``)."""
-    raise ValueError(f"Non-finite JSON value: {value}")
 
 
 def session_prompt(context: Context, role, run_dir: Path) -> tuple:
