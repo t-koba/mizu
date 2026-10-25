@@ -658,8 +658,18 @@ def parse_unittest_timings(sidecar: Path, *, elapsed_seconds: float) -> list:
         return []
 
 
+TIMING_SUMMARY_MAX_UNFINISHED = 20
+
+
 def _timing_artifact_summary(tests: list) -> dict:
-    """Return a bounded, sanitized view that keeps hotspots readable in CI."""
+    """Return a bounded, sanitized view that keeps hotspots readable in CI.
+
+    Existing fields and ordering are preserved. The added
+    ``unfinished_tests`` names the interrupted tests (``completed`` False)
+    as sanitized IDs only, slowest first then by ID, capped at
+    ``TIMING_SUMMARY_MAX_UNFINISHED``, so a killed-child report identifies
+    the cut-off test without scanning the full per-test array.
+    """
     valid = []
     for entry in tests:
         if not isinstance(entry, dict):
@@ -680,6 +690,8 @@ def _timing_artifact_summary(tests: list) -> dict:
         rank = (len(completed_durations) * numerator + denominator - 1) // denominator
         return completed_durations[max(0, rank - 1)]
 
+    unfinished = sorted((item for item in valid if not item['completed']),
+                      key=lambda item: (-item['duration_seconds'], item['test']))
     return {'tests_recorded': len(valid),
             'tests_completed': len(completed_durations),
             'completed_duration_seconds': round(sum(completed_durations), 3),
@@ -687,7 +699,8 @@ def _timing_artifact_summary(tests: list) -> dict:
                 'p50': percentile(50, 100), 'p90': percentile(90, 100),
                 'p95': percentile(95, 100), 'p99': percentile(99, 100)},
             'slowest_tests': sorted(valid,
-                                    key=lambda item: (-item['duration_seconds'], item['test']))[:20]}
+                                    key=lambda item: (-item['duration_seconds'], item['test']))[:20],
+            'unfinished_tests': [item['test'] for item in unfinished][:TIMING_SUMMARY_MAX_UNFINISHED]}
 
 
 TIMING_PHASE_MAX_ENTRIES = 200

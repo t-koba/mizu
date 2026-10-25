@@ -198,10 +198,13 @@ empty or oversized sidecars yield no timing entries. Collection, parsing and
 artifact writing are best-effort diagnostics only, never a test pass/failure
 signal. There is no retry protocol; temporary sidecars are removed after use.
 
-The dedicated artifact contains only sanitized test IDs,
-`duration_seconds`/`completed` flags, and minimal runtime metadata (suite,
-versions, platform, child timeout, total suite elapsed time, gate status). It never
-carries failure details, output tails or diagnostics; do not substitute the general
+The dedicated artifact contains only sanitized per-test IDs and
+`duration_seconds`/`completed` flags, a bounded summary (recorded/completed
+counts, completed-duration totals and percentiles, up to 20 slowest test
+records, and up to 20 unfinished test IDs ordered longest first), and minimal
+runtime metadata (suite, versions, platform, child timeout, total suite elapsed
+time, gate status). It never carries failure details, output tails or
+diagnostics; do not substitute the general
 `offline.json` receipt. Every CI cell supplies `--test-timings` and uploads
 only this dedicated file, one artifact per cell (`actions/upload-artifact`
 v4.6.2, 7-day retention, `if: always()` with missing-file tolerance), and the

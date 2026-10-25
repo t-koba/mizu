@@ -1407,6 +1407,74 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
             self.assertEqual(many_summary['slowest_tests'][0]['test'],
                              'sample.Suite.test_24')
 
+    def test_timing_summary_names_unfinished_tests_bounded_and_sanitized(self):
+        # The summary must name the test a kill cut off, so a timeout
+        # review reads the summary instead of scanning the per-test array.
+        summary = CHECK._timing_artifact_summary([
+            {'test': 'sample.Suite.test_fast', 'duration_seconds': 1.0, 'completed': True},
+            {'test': 'sample.Suite.test_hung', 'duration_seconds': 9.5, 'completed': False},
+            {'test': 'sample.Suite.test_slow', 'duration_seconds': 4.0, 'completed': True},
+        ])
+        self.assertEqual(summary['unfinished_tests'], ['sample.Suite.test_hung'])
+        # Existing fields, ordering and values are unchanged.
+        self.assertEqual(summary['tests_recorded'], 3)
+        self.assertEqual(summary['tests_completed'], 2)
+        self.assertEqual(list(summary), ['tests_recorded', 'tests_completed',
+                                         'completed_duration_seconds',
+                                         'completed_duration_percentiles_seconds',
+                                         'slowest_tests', 'unfinished_tests'])
+        # No unfinished tests: empty, never missing.
+        clean = CHECK._timing_artifact_summary([
+            {'test': 'sample.Suite.test_ok', 'duration_seconds': 0.5, 'completed': True},
+        ])
+        self.assertEqual(clean['unfinished_tests'], [])
+        # Unsafe IDs never reach the summary; only sanitized IDs are named.
+        dirty = CHECK._timing_artifact_summary([
+            {'test': '/private-host/evil', 'duration_seconds': 9.0, 'completed': False},
+            {'test': 'sample.Suite.test_hung', 'duration_seconds': 8.0, 'completed': False},
+        ])
+        self.assertEqual(dirty['unfinished_tests'], ['sample.Suite.test_hung'])
+        self.assertNotIn('/private-host/evil', json.dumps(dirty))
+        # Bounded: slowest unfinished first, capped like the hotspot list.
+        many = CHECK._timing_artifact_summary([
+            {'test': f'sample.Suite.test_{index:02}',
+             'duration_seconds': float(index), 'completed': False}
+            for index in range(25)
+        ])
+        self.assertEqual(len(many['unfinished_tests']), 20)
+        self.assertEqual(many['unfinished_tests'][0], 'sample.Suite.test_24')
+        self.assertEqual(many['unfinished_tests'],
+                         sorted(many['unfinished_tests'],
+                                key=lambda name: (-float(name.rsplit('_', 1)[1]), name)))
+
+    def test_killed_child_summary_names_interrupted_test(self):
+        # A killed child leaves a start without a stop; the written
+        # artifact's summary must name that unfinished test without
+        # scanning the full per-test array, carrying IDs only.
+        with tempfile.TemporaryDirectory() as temporary:
+            sidecar = Path(temporary) / 'timings.jsonl'
+            artifact = Path(temporary) / 'test-timings.json'
+            sidecar.write_text(
+                json.dumps({'test': 'tests.RealTests.test_done', 'event': 'start', 't': 0.0})
+                + '\n'
+                + json.dumps({'test': 'tests.RealTests.test_done', 'event': 'stop',
+                              't': 0.5}) + '\n'
+                + json.dumps({'test': 'tests.RealTests.test_hung', 'event': 'start',
+                              't': 0.6}) + '\n',
+                encoding='utf-8')
+            parsed = CHECK.parse_unittest_timings(sidecar, elapsed_seconds=8.0)
+            CHECK.write_timings_artifact(artifact, tests=parsed, status='fail', exit_code=1,
+                                         elapsed_seconds=8.0)
+            payload = json.loads(artifact.read_text(encoding='utf-8'))
+            self.assertEqual(payload['summary']['unfinished_tests'],
+                             ['tests.RealTests.test_hung'])
+            by_test = {entry['test']: entry for entry in payload['tests']}
+            self.assertFalse(by_test['tests.RealTests.test_hung']['completed'])
+            blob = json.dumps(payload['summary'])
+            self.assertIn('tests.RealTests.test_hung', blob)
+            self.assertNotIn('details', blob)
+            self.assertNotIn('output tail', blob)
+
     def test_child_cli_writes_both_sidecars_privately(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
