@@ -79,6 +79,14 @@ def read_job(project, job_id):
             or len(job.get('commands', [])) > 32
             or any(not isinstance(c, str) for c in job.get('commands', []))):
         raise InvalidProducer(job_id, 'job_schema')
+    scratch = job.get('scratch_paths', [])
+    if (not isinstance(scratch, list) or len(scratch) > 32
+            or any(not isinstance(name, str) or len(name) > 255
+                   or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', name) for name in scratch)
+            or len(set(scratch)) != len(scratch)
+            or scratch and (job.get('kind') != 'experiment' or job.get('shared_job')
+                            or job.get('shared_key') is not None or job.get('acceptance_scope') is not None)):
+        raise InvalidProducer(job_id, 'job_schema')
     try:
         canonical(job)  # Reject non-finite numbers and unencodable JSON strings.
     except (ValueError, UnicodeError, RecursionError) as exc:

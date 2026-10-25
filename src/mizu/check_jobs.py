@@ -20,7 +20,7 @@ from pathlib import Path
 from .admission import check_slot_exclusion
 from .errors import Busy, Denied
 from .fs import text_preview, canonical, digest, lock, mkdir, now, read_json, write_json, DIGEST
-from .sandbox import Sandbox, cleanup, cleanup_refused
+from .sandbox import Sandbox, cleanup, cleanup_refused, scratch_selection
 
 
 def execution_key(config):
@@ -180,7 +180,7 @@ def environment(project):
 
 
 def reusable(job):
-    return (not job.get('shared_job') and not job.get('detached')
+    return (not job.get('scratch_paths') and not job.get('shared_job') and not job.get('detached')
             and (job.get('status') in ('queued', 'running')
                  or job.get('status') == 'completed' and job.get('passed')))
 
@@ -274,8 +274,13 @@ def _make_room(project, *, protect=frozenset()):
     raise Busy('Retained check evidence is full; inspect and acknowledge results')
 
 
-def submit(context, script=None, *, kind="experiment", fresh=False, purpose=None):
+def submit(context, script=None, *, kind="experiment", fresh=False, purpose=None, scratch_paths=None):
     project = context.project
+    scratch_paths = scratch_selection(project.config, scratch_paths)
+    if scratch_paths and (script is None or kind != 'experiment'):
+        raise Denied('Scratch requires a custom queued experiment')
+    if any(not project.snapshots.excluded(name) for name in scratch_paths):
+        raise Denied('Build cache must be excluded from source')
     receiver = getattr(context, 'spend_role', None) if getattr(context, 'delegated_child', False) else None
     owner = receiver.name if receiver is not None else context.role.name
     if receiver is not None and 'check_job' not in receiver.capabilities:
@@ -309,10 +314,12 @@ def submit(context, script=None, *, kind="experiment", fresh=False, purpose=None
     # separate decisions.
     shared_key = digest(canonical({'source': capture['code_digest'], 'execution': execution_key(context.config),
                                    'commands': commands, 'kind': 'verify' if script is None else kind,
-                                   'environment': env})) if env is not None else None
+                                   'environment': env})) if env is not None and not scratch_paths else None
     identity = {'run': context.run_dir.name, 'source': capture['code_digest'],
                 'execution': execution_key(context.config), 'commands': commands,
                 'kind': 'verify' if script is None else kind, 'environment': env, 'fresh': fresh}
+    if scratch_paths:
+        identity['scratch_paths'] = list(scratch_paths)
     job_id = digest(canonical(identity))
     directory = root(project) / job_id
     with lock(project.root / 'locks/check-jobs.lock'):
@@ -354,6 +361,8 @@ def submit(context, script=None, *, kind="experiment", fresh=False, purpose=None
                    'commands': commands, 'status': 'queued', 'created_at': now(),
                    'acknowledged': False, 'environment': env, 'shared_key': shared_key,
                    'inputs_bound_required': context.config.sandbox.check_reuse}
+            if scratch_paths:
+                job['scratch_paths'] = list(scratch_paths)
             if purpose is not None:
                 job['purpose'] = purpose
             write_json(directory / 'job.json', job)
@@ -393,7 +402,7 @@ def summary(job):
             **{k: text_preview(job[k], 512)[0] if isinstance(job[k], str) else job[k]
                for k in ('id', 'role', 'run', 'kind', 'code_digest', 'status',
                                'created_at', 'finished_at', 'passed', 'error', 'shared_job',
-                               'purpose', 'replaced_by') if k in job}}
+                               'purpose', 'replaced_by', 'scratch_paths') if k in job}}
 
 
 def pending(project, role, *, discovery=None):
@@ -680,7 +689,8 @@ def _run_one(project, stop, sandbox_factory, invalid):
         with contextlib.ExitStack() as stack:
             try:
                 stack.enter_context(lock(path.parent / 'owner.lock', blocking=False))
-                if job.get('kind') == 'verify' and project.config.sandbox.check_cache_paths:
+                if ((job.get('kind') == 'verify' and project.config.sandbox.check_cache_paths)
+                        or job.get('scratch_paths')):
                     stack.enter_context(lock(project.root / 'locks/check-cache.lock', blocking=False))
             except Busy:
                 blocked = True
@@ -797,20 +807,26 @@ def _execute(project, job, stop, sandbox_factory, slot):
         if before['code_digest'] != job['code_digest'] or before['skipped']:
             raise Denied('Check job source changed before execution')
         cache = project.root / 'check-cache' / job['execution']
-        cache_names = project.config.sandbox.check_cache_paths if job['kind'] == 'verify' else ()
+        scratch_paths = scratch_selection(project.config, job.get('scratch_paths'))
+        if scratch_paths and job['kind'] != 'experiment':
+            raise Denied('Scratch requires a custom queued experiment')
+        cache_names = project.config.sandbox.check_cache_paths if job['kind'] == 'verify' else scratch_paths
         for name in cache_names:
-            if not project.snapshots.excluded(name) or (workspace / name).exists():
+            if not project.snapshots.excluded(name) or (workspace / name).exists() or (workspace / name).is_symlink():
                 raise Denied('Build cache must be excluded from source: ' + name)
             previous = cache / name
             if previous.exists() or previous.is_symlink():
                 if previous.is_symlink() or not previous.is_dir():
                     raise Denied('Build cache is not a directory')
                 previous.replace(workspace / name)
+            if scratch_paths:
+                mkdir(workspace / name)
         results = []
         for command in job['commands']:
             if stop.is_set():
                 raise Denied('Check job interrupted')
-            results.append(sandbox.execute(workspace, command, writable=job['kind'] == 'verify', experiment=job['kind'] == 'experiment'))
+            scratch = {'scratch_paths': scratch_paths} if scratch_paths else {}
+            results.append(sandbox.execute(workspace, command, writable=job['kind'] == 'verify', experiment=job['kind'] == 'experiment', **scratch))
         after = project.snapshots.capture_files(workspace)
         unchanged = after['code_digest'] == before['code_digest']
         representable = not after['skipped']
@@ -852,29 +868,70 @@ def _execute(project, job, stop, sandbox_factory, slot):
                 artifact = workspace / name
                 if project.snapshots.excluded(name) and artifact.is_dir() and not artifact.is_symlink():
                     artifact.replace(cache / name)
-        shutil.rmtree(directory / 'input', ignore_errors=True)
+        if not job.get('scratch_paths'):
+            shutil.rmtree(directory / 'input', ignore_errors=True)
+    clean_scratch = (bool(job.get('scratch_paths')) and job['status'] == 'completed'
+                     and all(r['reason'] == 'exited' for r in results))
+    if clean_scratch:
+        try:
+            # Delete frozen source before committing artifacts. Neither source
+            # cleanup nor potentially large scratch discards hold the queue lock.
+            for child in workspace.iterdir():
+                if child.name not in scratch_paths:
+                    if child.is_dir() and not child.is_symlink():
+                        shutil.rmtree(child)
+                    else:
+                        child.unlink()
+        except OSError as exc:
+            job.update(status='cleanup_failed', passed=False,
+                       error=('Scratch cleanup requires recovery: ' + str(exc))[:512])
     # Finalize only after execution/cache cleanup. Until then the producer is
-    # running on disk and cannot be collected or evicted. Cancel and terminal
-    # publication serialize on check-jobs.lock. Retention never holds it.
-    with lock(project.root / 'locks/check-jobs.lock'):
-        latest = raw_read(project, job['id'])
-        for key in ('detached', 'acknowledged', 'replaced_by', 'purpose'):
-            if key in latest:
-                job[key] = latest[key]
-        if job['status'] == 'completed' and (stop.is_set() or (directory / 'cancel.json').exists()):
-            job.update(status='cancelled', passed=False)
-        if job['status'] == 'completed' and job.get('passed') and job['kind'] == 'verify' and job.get('environment') is not None:
-            bound = {'commands': job['commands'], 'execution': job['execution'],
-                     'environment': job['environment'], 'image': record['image']}
-            from .acceptance import MAX_BYTES
-            if len(canonical(record)) > project.config.limits.file_bytes:
-                # The exact canonical result bytes are what recovery reads.
-                # A fitting job/scope alone must not create a pinned producer.
-                job['acceptance_retention_refusal'] = 'result_file_bytes'
-            elif (len(canonical(bound)) <= MAX_BYTES // 2
-                    and len(canonical({**job, 'acceptance_scope': bound})) <= project.config.limits.file_bytes):
-                job['acceptance_scope'] = bound
-        write_json(path, job)
+    # running on disk and cannot be collected or evicted. Cancel, artifact
+    # commit and terminal publication serialize on check-jobs.lock.
+    while True:
+        discard_scratch = False
+        with lock(project.root / 'locks/check-jobs.lock'):
+            latest = raw_read(project, job['id'])
+            for key in ('detached', 'acknowledged', 'replaced_by', 'purpose'):
+                if key in latest:
+                    job[key] = latest[key]
+            if job['status'] == 'completed' and (stop.is_set() or (directory / 'cancel.json').exists()):
+                job.update(status='cancelled', passed=False)
+            if job.get('scratch_paths') and job['status'] != 'cleanup_failed' and workspace.exists():
+                if job['status'] == 'completed' and clean_scratch:
+                    try:
+                        cache = project.root / 'check-cache' / job['execution']
+                        mkdir(cache)
+                        for name in scratch_paths:
+                            artifact = workspace / name
+                            if artifact.is_dir() and not artifact.is_symlink():
+                                artifact.replace(cache / name)
+                        workspace.rmdir()
+                    except OSError as exc:
+                        job.update(status='cleanup_failed', passed=False,
+                                   error=('Scratch cleanup requires recovery: ' + str(exc))[:512])
+                else:
+                    discard_scratch = True
+            if not discard_scratch:
+                if job['status'] == 'completed' and job.get('passed') and job['kind'] == 'verify' and job.get('environment') is not None:
+                    bound = {'commands': job['commands'], 'execution': job['execution'],
+                             'environment': job['environment'], 'image': record['image']}
+                    from .acceptance import MAX_BYTES
+                    if len(canonical(record)) > project.config.limits.file_bytes:
+                        # The exact canonical result bytes are what recovery reads.
+                        # A fitting job/scope alone must not create a pinned producer.
+                        job['acceptance_retention_refusal'] = 'result_file_bytes'
+                    elif (len(canonical(bound)) <= MAX_BYTES // 2
+                            and len(canonical({**job, 'acceptance_scope': bound})) <= project.config.limits.file_bytes):
+                        job['acceptance_scope'] = bound
+                write_json(path, job)
+        if not discard_scratch:
+            break
+        try:
+            shutil.rmtree(workspace)
+        except OSError as exc:
+            job.update(status='cleanup_failed', passed=False,
+                       error=('Scratch cleanup requires recovery: ' + str(exc))[:512])
     from .acceptance import recover_job
     recover_job(project, job['id'])
     os.utime(root(project), None)

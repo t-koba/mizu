@@ -265,6 +265,18 @@ def ensure_single(config: Config) -> dict:
     return {"mode": "single", "prepared": made, "cgroup_parent": str(parent)}
 
 
+
+def scratch_selection(config, paths):
+    """Canonical configured top-level names, never caller-selected host paths."""
+    if paths is None:
+        return ()
+    if (not isinstance(paths, (list, tuple)) or len(paths) > 32
+            or any(not isinstance(name, str) or len(name) > 255
+                   or name not in config.sandbox.check_cache_paths for name in paths)
+            or len(set(paths)) != len(paths)):
+        raise Denied("scratch_paths must be a unique subset of sandbox.check_cache_paths")
+    return tuple(sorted(paths))
+
 class Sandbox:
     def __init__(self, config: Config, project: Path, role: str, run_dir: Path,
                  *, cancel: Callable[[], bool] = lambda: False):
@@ -320,7 +332,8 @@ class Sandbox:
         return command
 
     def argv(self, name: str, workspace: Path, script: str, *, writable: bool,
-             experiment: bool = False, source_receipt: str | None = None) -> list[str]:
+             experiment: bool = False, source_receipt: str | None = None,
+             scratch_paths: tuple[str, ...] = ()) -> list[str]:
         """Build the container argv from fixed floors plus policy selections.
 
         Schema/bounds: fixed floor (read-only root, cap-drop, no-new-privs,
@@ -331,6 +344,9 @@ class Sandbox:
         execute(). Failure: ConfigError for missing image/paths.
         """
         cfg = self.config.sandbox
+        scratch_paths = scratch_selection(self.config, scratch_paths)
+        if scratch_paths and (not experiment or source_receipt is not None):
+            raise Denied("Scratch requires a queued custom experiment without source_receipt")
         if source_receipt is not None and (not experiment or not isinstance(source_receipt, str)
                                            or not DIGEST.fullmatch(source_receipt)):
             raise Denied("Experiment source requires a valid fetch receipt ID")
@@ -358,6 +374,13 @@ class Sandbox:
         if experiment:
             command.extend(["--tmpfs", f"/work:rw,nosuid,nodev,size={cfg.temporary_mb}m,mode=1777",
                             "--workdir", "/work"])
+            for scratch in scratch_paths:
+                artifact = workspace / scratch
+                if artifact.is_symlink() or not artifact.is_dir():
+                    raise Denied("Scratch must be a staged directory")
+                self._validate_mount_paths(str(artifact), rejected)
+                command += bind_args(str(artifact), "/work/" + scratch, readonly=False,
+                                     selinux=selinux, linux=linux)
             if source_receipt is not None:
                 source_payload = self.run_dir / "sources" / source_receipt / "payload"
                 self._validate_mount_paths(str(source_payload), rejected)
@@ -370,7 +393,7 @@ class Sandbox:
 
     def execute(self, workspace: Path, script: str, *, writable: bool,
                 experiment: bool = False, timeout: int | None = None,
-                source_receipt: str | None = None) -> dict:
+                source_receipt: str | None = None, scratch_paths: tuple[str, ...] = ()) -> dict:
         if not isinstance(script, str) or not script.strip() or len(script.encode()) > SCRIPT_MAX:
             raise Denied("Command must be nonempty and at most 64 KiB")
         if source_receipt is not None and not experiment:
@@ -385,6 +408,7 @@ class Sandbox:
             # the bytes once more immediately before launch below.
             web = Web(self.config.web, self.config.data / "web-cache", self.run_dir / "sources")
             _, source_metadata = web.raw_source(source_receipt)
+        scratch_paths = scratch_selection(self.config, scratch_paths)
         operation = uuid.uuid4().hex
         name = f"mizu-{self.label}-{operation[:12]}"
         env = runtime_env(self.config)
@@ -397,11 +421,13 @@ class Sandbox:
                   "mounts": [{"source": m["source"], "target": m["target"]}
                              for m in self.config.sandbox.mounts],
                   "env_keys": sorted(self.config.sandbox.env)}
+        if scratch_paths:
+            record["scratch_paths"] = list(scratch_paths)
         write_json(self.run_dir / "commands" / f"{operation}.started.json", record)
         try:
             assert_no_checkpoint(self.config, env)
             argv = self.argv(name, workspace, script, writable=writable,
-                             experiment=experiment, source_receipt=source_receipt)
+                             experiment=experiment, source_receipt=source_receipt, scratch_paths=scratch_paths)
             if source_receipt is not None:
                 # This only reads run-local evidence. No URL, model path, cache,
                 # adapter, extraction or execution of source content is involved.

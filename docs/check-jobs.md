@@ -17,7 +17,56 @@ grants, without bypassing workspace denial or changing sandbox permissions.
 `mode=async` requires the `check_job` grant and uses only the already-safe
 queued paths, so writable-workspace `exec` and `source_receipt` experiments are
 refused instead of detached, and `verify` behavior is unchanged (queued and
-frozen when `check_job` is granted). Queue identity and sharing are unchanged.
+frozen when `check_job` is granted). Mode alone does not change queue identity or sharing.
+
+## Opt-in disk-backed experiment scratch
+
+Queued custom experiments accept `scratch_paths`, an array of unique names from
+`sandbox.check_cache_paths`. Both `experiment` (default queued routing or
+`mode=async`) and `check_job` (`action=start` with `script`) expose it under the
+existing grants. Names are configured top-level artifact directories, not host
+paths; duplicate, unconfigured and malformed names are refused. The tool schema
+bounds each name to 255 ASCII characters and the array to 32 entries. Omission or
+`[]` keeps ordinary tmpfs-only execution and the existing job identity. A
+nonempty selection is canonicalized into the run-local job identity and appears
+in job summaries and command evidence. For `experiment`, an empty selection is
+always equivalent to omission; nonempty selection on synchronous or
+source-receipt experiments is refused. For `check_job`, supply the field only
+with `action=start`; an empty selection there is equivalent to omission, while a
+nonempty selection requires a custom experiment script. `exec` never accepts
+scratch paths. This grants no new execution authority.
+
+At execution time the runner takes the project's existing `check-cache.lock`
+**before** a compute slot, just as for verification. A blocked scratch job
+cannot hold a compute slot or stop unrelated no-cache work. Selected paths must
+be excluded from snapshots. The runner moves only those trees from
+`check-cache/<execution>` into the job-private frozen `input/<name>`, creating
+empty directories when no prior artifact exists. Persistent cache directories
+are never container mounts. `/workspace` remains read-only and `/work` remains
+the configured size-bounded tmpfs; only selected `input/<name>` directories are
+bound read-write at `/work/<name>`. For example, with a configured, excluded
+`build` path, an experiment can use `scratch_paths=["build"]` and write to
+`build/object` from its ordinary `/work` working directory. Other temporary
+files still consume tmpfs. Disk-backed scratch uses the existing harness-owned
+cache storage/reserve and cleanup policy, not the tmpfs size allowance.
+
+After commands exit and sandbox cleanup succeeds, selected trees return to the
+same persistent cache owner (even when an exited command returns nonzero).
+Cancellation, interruption, timeout or launcher failure discards staged scratch
+rather than persisting partial work; container cleanup failure retains the
+private input for operator recovery under the existing slot quarantine. A
+cancelled job may therefore discard artifacts it had staged from a prior run.
+There is no automatic retry. Verification's cache behavior is unchanged.
+
+Scratch contents are mutable and are selected at execution time, not pinned at
+submission. Consequently scratch-enabled jobs never share command results:
+no automatic cross-job reuse, discovery or explicit join, even with
+`check_reuse=true` or `fresh=false`. Repeating the identical request within the
+same run still names one demand. Frozen source, command and environment checks
+remain in force, but a completed scratch experiment is **custom evidence only**:
+it cannot import `context.verification` or produce an acceptance receipt.
+
+## Results and waiting
 
 The role can continue independent work, inspect `check_job` with `action=list`,
 request cancellation with `action=cancel,id=<full digest>`,
@@ -73,10 +122,14 @@ another; if none can be evicted the submission is refused. Frozen source obeys
 the existing snapshot size/file/exclusion bounds. Private source/build trees are
 removed after terminal execution; only bounded evidence is retained. Cleanup
 failures retain the tree until operator recovery confirms container removal. Operators may configure `sandbox.check_cache_paths = ["target"]` to preserve
-incremental compiler artifacts for acceptance jobs. Entries are unique top-level
-directory names and must be excluded from the source snapshot. Only verification jobs using configured cache directories take the project cache exclusion. Other checks can pass a cache-blocked verification without consuming that cache or bypassing the shared compute bound. One project cache
-owner moves these directories into the frozen workspace and back after clean
-completion; waiting for ownership consumes no compute slot. The live writer's
+incremental compiler artifacts. Entries are unique top-level directory names
+and must be excluded from the source snapshot. Verification jobs use all
+configured cache directories; a queued custom experiment may explicitly select
+a subset through `scratch_paths`. Every job using a cache takes the same project
+cache exclusion; unrelated checks can pass a cache-blocked job without consuming
+that cache or bypassing the shared compute bound. One project cache owner moves
+selected directories into the frozen workspace and back after clean completion;
+waiting for ownership consumes no compute slot. The live writer's
 build tree is never accessed. Environment changes select a separate cache, and
 interrupted jobs discard their private artifacts. Cache storage requires ordinary
 operator disk maintenance and remains subject to the free-space admission reserve.

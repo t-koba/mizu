@@ -1039,9 +1039,11 @@ class Context:
 
     def _op_check_job(self, args: dict) -> dict:
         action = args['action']
+        if ('scratch_paths' in args and action != 'start') or (args.get('scratch_paths') and args.get('script') is None):
+            raise Denied('scratch_paths requires action=start with a custom experiment script')
         if action == 'start':
             return check_jobs.submit(self, args.get('script'), fresh=args.get('fresh', False),
-                                     purpose=args.get('purpose'))
+                                     purpose=args.get('purpose'), scratch_paths=args.get('scratch_paths'))
         if action == 'list':
             from .acceptance import discover, producer_diagnostics
             discovery = discover(self.project)

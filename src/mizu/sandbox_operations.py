@@ -16,6 +16,12 @@ def exec_experiment(context, op: str, args: dict) -> dict:
     mode = args.get("mode")
     if mode is not None and mode not in MODES:
         raise Denied("Unsupported execution mode")
+    scratch_requested = bool(args.get("scratch_paths"))
+    if scratch_requested and (op != "experiment" or mode == "sync"
+                              or "source_receipt" in args
+                              or "check_job" not in context.role.capabilities):
+        raise Denied("scratch_paths requires an async custom experiment without source_receipt")
+    scratch = {"scratch_paths": args["scratch_paths"]} if scratch_requested else {}
     if mode == "async":
         if "check_job" not in context.role.capabilities:
             raise Denied("Async mode requires check_job")
@@ -23,12 +29,12 @@ def exec_experiment(context, op: str, args: dict) -> dict:
             raise Denied("Async mode cannot carry a source receipt")
         if not (op == "experiment" or context.role.workspace == "read"):
             raise Denied("Cannot detach live workspace writes")
-        return check_jobs.submit(context, args["script"], kind=op)
+        return check_jobs.submit(context, args["script"], kind=op, **scratch)
     queue_by_default = ("check_job" in context.role.capabilities
                         and "source_receipt" not in args
                         and (op == "experiment" or context.role.workspace == "read"))
     if mode is None and queue_by_default:
-        return check_jobs.submit(context, args["script"], kind=op)
+        return check_jobs.submit(context, args["script"], kind=op, **scratch)
     if context.role.workspace == "none":
         raise Denied("This role has no workspace")
     source = {"source_receipt": args["source_receipt"]} if "source_receipt" in args else {}
