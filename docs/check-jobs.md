@@ -56,7 +56,8 @@ Cancellation, interruption, timeout or launcher failure discards staged scratch
 rather than persisting partial work; container cleanup failure retains the
 private input for operator recovery under the existing slot quarantine. A
 cancelled job may therefore discard artifacts it had staged from a prior run.
-There is no automatic retry. Verification's cache behavior is unchanged.
+There is no automatic retry. Verification continues to move configured cache
+trees under the same exclusion.
 
 Scratch contents are mutable and are selected at execution time, not pinned at
 submission. Consequently scratch-enabled jobs never share command results:
@@ -179,7 +180,8 @@ remains interrupted, never passed.
 
 `sandbox.check_reuse = true` explicitly enables project-local sharing. It is
 false by default. Matching source bytes, exact command list and execution kind,
-sandbox configuration and observed dependency inputs share one queued/running
+sandbox configuration, observed dependency inputs and configured verification
+cache inputs share one queued/running
 execution or a completed passing result. Failures and interruptions are not
 cached for new units. `check_job action=start fresh=true` requests a fresh run
 when remeasurement is needed (for example time-sensitive or nondeterministic
@@ -230,6 +232,37 @@ and `sandbox.check_input_bytes` (8 GiB of regular file contents), configurable
 positive integers up to 1 TiB. Exceeding a bound disables sharing. Warm matching
 uses cached content hashes but still checks filesystem identities. Neither build
 artifacts nor command text alone can establish passed validation.
+
+Configured verification caches have a separate `cache_input` fingerprint, not
+part of the external-dependency `environment`. It binds every configured name,
+absence or directory presence, nested names, file bytes, permissions and mtimes
+under `check-cache/<execution>`. Inode/ctime observations detect concurrent edits
+but are not part of the content key, so staging an unchanged tree out and back
+does not invalidate it. Traversal independently uses the same `check_input_files`
+and `check_input_bytes` bounds; directories and absent configured names count as
+entries. Symlinks (including internal ones), reparse points, hardlinked files,
+special files, unreadable/unstable trees and exceeded bounds are **unbound**, not
+empty. POSIX traversal pins path components without following links; the portable
+fallback checks components and identities before/after access.
+
+Cache fingerprinting and the reuse/enqueue decision hold `check-cache.lock` in
+that order before queue exclusion; cache users can wait for the current cache
+owner, but hashing never holds `check-jobs.lock`. Dispatch revalidates the queued
+fingerprint under the same cache lock before moving any cache tree into frozen
+source. A changed or unbound verification cache refuses the queued execution,
+even with sharing disabled. Unbound requests never return an earlier same-unit
+result. No retry is automatic; after correcting inputs, submit again. Custom
+checks without configured verification caches retain their independent behavior.
+
+Checks may legitimately mutate caches and still produce a passing result. Their
+proof binds the **pre-execution** cache input, not the staged-back output. Result
+import and retained-acceptance lookup compare the current fingerprint with that
+input while holding `check-cache.lock` through import or final index/receipt
+selection: cache mutation therefore requires a new check before current acceptance
+can be imported. Old receipts lacking `cache_input` remain auditable, but cannot
+match when verification caches are configured. No-cache scopes retain their
+existing form. Experiments, including cache-backed custom scratch, never mint
+configured verification acceptance.
 
 Development and CI can use `python scripts/check.py --fail-fast` to report a
 Python contract failure immediately instead of spending minutes running the
@@ -282,7 +315,8 @@ unrepresentable check can mint a passing receipt.
 
 The existing `sandbox.check_reuse` input-binding mechanism supplies the scope:
 full configured acceptance commands (not command previews), execution-key digest,
-observed dependency fingerprint and pinned image. An unbound environment (`None`),
+observed dependency fingerprint, configured verification cache-input fingerprint
+(when present), and pinned image. An unbound environment (`None`),
 network-enabled execution or mutable image is not reusable evidence. No new
 policy switch is introduced. Scope is bounded to 512 KiB of canonical JSON;
 scopes that cannot fit are nonreusable. Each normalized receipt is at most 1 MiB,

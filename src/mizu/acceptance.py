@@ -68,7 +68,7 @@ def read_job(project, job_id):
     # one-hop subscription overlay. Missing legacy fields retain their defaults.
     strings = ('role', 'run', 'kind', 'status', 'created_at', 'finished_at', 'error',
                'purpose')
-    identities = ('code_digest', 'execution', 'environment', 'shared_key',
+    identities = ('code_digest', 'execution', 'environment', 'cache_input', 'shared_key',
                   'shared_job', 'replaced_by', 'acceptance_receipt_id')
     flags = ('acknowledged', 'detached', 'passed')
     if (not isinstance(job, dict) or job.get('id') != job_id
@@ -140,7 +140,7 @@ def _inspect_evidence(project, job):
     if (not isinstance(bound, dict) or job.get('shared_job') or job.get('kind') != 'verify'
             or job.get('status') != 'completed' or job.get('passed') is not True
             or _present(project.root, f'check-jobs/{job_id}/cancel.json')
-            or any(bound.get(k) != job.get(k) for k in ('commands', 'execution', 'environment'))):
+            or any(bound.get(k) != job.get(k) for k in ('commands', 'execution', 'environment', 'cache_input'))):
         raise InvalidProducer(job_id, 'job_integrity')
     try:
         _scope(bound)
@@ -239,7 +239,14 @@ def _read(root, relative, maximum=MAX_BYTES):
 
 
 def scope(project):
-    from .check_jobs import environment, execution_key
+    from .check_jobs import cache_guard
+    with cache_guard(project):
+        return _current_scope(project)
+
+
+def _current_scope(project):
+    """Build a scope with cache_guard already held; never reacquire it."""
+    from .check_jobs import environment, execution_key, cache_input
     if not project.verify:
         return None
     env = environment(project)
@@ -247,6 +254,11 @@ def scope(project):
         return None
     value = {'commands': list(project.verify), 'execution': execution_key(project.config),
              'environment': env, 'image': project.config.sandbox.image}
+    if project.config.sandbox.check_cache_paths:
+        current = cache_input(project)
+        if current is None:
+            return None
+        value['cache_input'] = current
     try:
         _scope(value)
     except Denied:
@@ -255,7 +267,9 @@ def scope(project):
 
 
 def _scope(value):
-    if (not isinstance(value, dict) or set(value) != {'commands', 'execution', 'environment', 'image'}
+    if (not isinstance(value, dict) or set(value) not in ({'commands', 'execution', 'environment', 'image'},
+                                                         {'commands', 'execution', 'environment', 'image', 'cache_input'})
+            or 'cache_input' in value and not _digest(value['cache_input'])
             or not _digest(value['execution']) or not _digest(value['environment'])
             or not isinstance(value['image'], str)
             or not re.fullmatch(r'(?:.*@)?sha256:[a-f0-9]{64}', value['image'])
@@ -366,15 +380,20 @@ def effective(project, snapshot):
     """Separate projection; never mutates a snapshot or imports current proof."""
     if snapshot.get("skipped"):
         return None
-    bound = scope(project)
-    if bound is None:
-        return None
-    name = _index(project.root, snapshot['code_digest'], bound)
-    if not _present(project.root, name):
-        return None
-    receipt_id = _selected(project.root, name, snapshot['code_digest'], bound)
-    return {'passed': True, 'code_digest': snapshot['code_digest'],
-            'source': 'retained_acceptance', 'receipt_id': receipt_id}
+    from .check_jobs import cache_guard
+    # Keep the observed cache input stable through the final receipt selection.
+    # This takes neither queue nor acceptance exclusion, and does not call the
+    # standalone scope wrapper (the cache lock is not reentrant).
+    with cache_guard(project):
+        bound = _current_scope(project)
+        if bound is None:
+            return None
+        name = _index(project.root, snapshot['code_digest'], bound)
+        if not _present(project.root, name):
+            return None
+        receipt_id = _selected(project.root, name, snapshot['code_digest'], bound)
+        return {'passed': True, 'code_digest': snapshot['code_digest'],
+                'source': 'retained_acceptance', 'receipt_id': receipt_id}
 
 
 def audit(root, *, blocking=True):

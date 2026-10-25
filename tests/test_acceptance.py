@@ -9,8 +9,8 @@ from unittest.mock import patch
 from support import Fixture, bind_delivery
 from test_check_jobs import FakeSandbox
 from mizu import acceptance, check_jobs, storage
-from mizu.errors import Denied, LimitExceeded
-from mizu.fs import canonical, digest, held, write_json
+from mizu.errors import Busy, Denied, LimitExceeded
+from mizu.fs import canonical, digest, held, lock, write_json
 from mizu.project import Project
 from mizu.runtime import prompt_for, prompt_delta_for
 
@@ -1011,3 +1011,179 @@ class AcceptanceTests(Fixture):
         self.assertEqual(index.read_bytes(), b'not json')
         with self.assertRaises(Denied):
             acceptance.audit(self.project.root)
+
+    def configure_cache(self):
+        self.configure(check_cache_paths=('target',))
+        self.config = dataclasses.replace(self.config, exclude=(*self.config.exclude, 'target'))
+        self.project.config = self.config
+        self.project.snapshots.excludes = self.config.exclude
+        return self.project.root / 'check-cache' / check_jobs.execution_key(self.config) / 'target'
+
+    def test_cache_input_is_bound_to_retained_scope_and_current_import(self):
+        cache = self.configure_cache()
+        ctx, job, proof = self.produce()
+        receipt = acceptance.get(self.project.root, proof['receipt_id'])
+        original = check_jobs.read(self.project, job['id'])
+        self.assertEqual(receipt['scope']['cache_input'], original['cache_input'])
+        self.assertTrue(check_jobs.result(ctx, job['id'])['accepted_for_current_source'])
+        cache.mkdir(parents=True)
+        (cache / 'object').write_text('different input')
+        self.assertIsNone(acceptance.effective(self.project, ctx.snapshot))
+        later = self.context()
+        self.assertFalse(check_jobs.result(later, job['id'])['accepted_for_current_source'])
+        self.assertIsNone(later.verification)
+        # The old receipt remains auditable but cannot attest the new inputs.
+        self.assertEqual(acceptance.get(self.project.root, proof['receipt_id']), receipt)
+        self.assertEqual(acceptance.audit(self.project.root), 1)
+
+    def test_retained_selection_excludes_cache_mutation_until_receipt_selected(self):
+        cache = self.configure_cache()
+        ctx, job, proof = self.produce()
+        attempted, mutated = threading.Event(), threading.Event()
+        outcomes = []
+        cache_lock = self.project.root / 'locks/check-cache.lock'
+
+        def mutate():
+            try:
+                with lock(cache_lock, blocking=False):
+                    outcomes.append('unlocked')
+            except Busy:
+                outcomes.append('blocked')
+            finally:
+                attempted.set()
+            with check_jobs.cache_guard(self.project):
+                cache.mkdir(parents=True)
+                (cache / 'object').write_text('changed by another cache owner')
+                mutated.set()
+
+        worker = threading.Thread(target=mutate)
+        original_index = acceptance._index
+        original_present = acceptance._present
+        original_selected = acceptance._selected
+
+        def index(*args):
+            # Start a competing owner immediately after the fingerprint, before
+            # even looking up the immutable index for that old cache input.
+            worker.start()
+            self.assertTrue(attempted.wait(10), 'cache contender did not run')
+            self.assertEqual(outcomes, ['blocked'])
+            self.assertFalse(mutated.is_set())
+            return original_index(*args)
+
+        def present(*args):
+            self.assertTrue(held(cache_lock))
+            self.assertFalse(mutated.is_set())
+            return original_present(*args)
+
+        def selected(*args):
+            self.assertTrue(held(cache_lock))
+            self.assertFalse(mutated.is_set())
+            result = original_selected(*args)
+            self.assertFalse(mutated.is_set())
+            return result
+
+        try:
+            with patch('mizu.acceptance._index', side_effect=index), \
+                    patch('mizu.acceptance._present', side_effect=present), \
+                    patch('mizu.acceptance._selected', side_effect=selected):
+                self.assertEqual(acceptance.effective(self.project, ctx.snapshot), proof)
+        finally:
+            if worker.ident is not None:
+                worker.join(10)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(mutated.is_set())
+        self.assertIsNone(acceptance.effective(self.project, ctx.snapshot))
+
+    def test_no_cache_scope_and_selection_need_no_cache_lock_or_fingerprint(self):
+        ctx, job, proof = self.produce()
+        original_selected = acceptance._selected
+
+        def selected(*args):
+            self.assertFalse(held(self.project.root / 'locks/check-cache.lock'))
+            return original_selected(*args)
+
+        with patch('mizu.check_jobs.cache_input', side_effect=AssertionError('unexpected cache fingerprint')), \
+                patch('mizu.acceptance._selected', side_effect=selected):
+            self.assertNotIn('cache_input', acceptance.scope(self.project))
+            self.assertEqual(acceptance.effective(self.project, ctx.snapshot), proof)
+        self.assertFalse((self.project.root / 'locks/check-cache.lock').exists())
+
+    def test_present_cache_pass_reuses_only_unchanged_cache_bytes(self):
+        cache = self.configure_cache()
+        cache.mkdir(parents=True)
+        (cache / 'object').write_text('one')
+        ctx, job, proof = self.produce()
+        self.assertTrue(check_jobs.result(ctx, job['id'])['accepted_for_current_source'])
+        self.assertEqual(check_jobs.submit(self.context())['shared_job'], job['id'])
+        (cache / 'object').write_text('two')
+        self.assertIsNone(acceptance.effective(self.project, ctx.snapshot))
+        new = check_jobs.submit(self.context())
+        self.assertNotIn('shared_job', new)
+        self.assertEqual(self.run_job()['status'], 'completed')
+        new_proof = acceptance.effective(self.project, ctx.snapshot)
+        self.assertNotEqual(new_proof['receipt_id'], proof['receipt_id'])
+
+    def test_mutated_cache_retains_pre_execution_proof_not_post_execution_pass(self):
+        cache = self.configure_cache()
+        ctx = self.context()
+        job = check_jobs.submit(ctx)
+        before = check_jobs.read(self.project, job['id'])['cache_input']
+        class Compiler(FakeSandbox):
+            def execute(inner, workspace, script, **kwargs):
+                (workspace / 'target').mkdir()
+                (workspace / 'target/object').write_text('compiled')
+                return super().execute(workspace, script, **kwargs)
+        self.assertTrue(self.run_job(Compiler)['passed'])
+        original = check_jobs.read(self.project, job['id'])
+        receipt = acceptance.get(self.project.root, original['acceptance_receipt_id'])
+        self.assertEqual(receipt['scope']['cache_input'], before)
+        self.assertNotEqual(acceptance.scope(self.project)['cache_input'], before)
+        self.assertIsNone(acceptance.effective(self.project, ctx.snapshot))
+        self.assertEqual((cache / 'object').read_text(), 'compiled')
+        self.assertFalse(check_jobs.result(ctx, job['id'])['accepted_for_current_source'])
+
+    def test_legacy_unbound_scope_does_not_match_configured_cache(self):
+        self.configure_cache()
+        ctx, job, proof = self.produce()
+        # An old proof is valid historical evidence, but omits this input.
+        raw = check_jobs.read(self.project, job['id'])
+        legacy = dict(raw['acceptance_scope'])
+        legacy.pop('cache_input')
+        record = json.loads((check_jobs.root(self.project) / job['id'] / 'result.json').read_bytes())
+        legacy_id = acceptance.retain(self.project, record, legacy,
+            producer={'kind': 'check_verify', 'id': job['id'], 'run': ctx.run_dir.name})
+        self.assertNotEqual(proof['receipt_id'], legacy_id)
+        current_index = self.project.root / acceptance._index(self.project.root, raw['code_digest'], raw['acceptance_scope'])
+        current_index.unlink()
+        self.assertIsNone(acceptance.effective(self.project, ctx.snapshot))
+        self.assertIsNotNone(acceptance.get(self.project.root, legacy_id))
+
+    def test_unbound_cache_disables_scope_and_current_acceptance(self):
+        cache = self.configure_cache()
+        ctx, job, proof = self.produce()
+        cache.mkdir(parents=True)
+        (cache / 'object').write_text('too big')
+        self.configure(check_input_bytes=1)
+        self.assertIsNone(acceptance.scope(self.project))
+        self.assertIsNone(acceptance.effective(self.project, ctx.snapshot))
+        self.assertFalse(check_jobs.result(ctx, job['id'])['accepted_for_current_source'])
+        self.assertIsNotNone(acceptance.get(self.project.root, proof['receipt_id']))
+        self.configure(check_input_bytes=8589934592)
+        (cache / 'object').unlink()
+        self.symlink(self.root / 'outside', cache / 'object')
+        self.assertIsNone(acceptance.scope(self.project))
+        self.assertFalse(check_jobs.result(ctx, job['id'])['accepted_for_current_source'])
+
+    def test_cache_scope_must_match_producer_and_be_a_digest(self):
+        self.configure_cache()
+        ctx, job, proof = self.produce()
+        path = check_jobs.root(self.project) / job['id'] / 'job.json'
+        raw = check_jobs.raw_read(self.project, job['id'])
+        raw['acceptance_scope']['cache_input'] = 'f' * 64
+        write_json(path, raw)
+        with self.assertRaises(acceptance.InvalidProducer):
+            acceptance.recover_job(self.project, job['id'])
+        bound = acceptance.scope(self.project)
+        for bad in (None, 'invalid', 2):
+            with self.subTest(bad=bad), self.assertRaises(Denied):
+                acceptance._scope({**bound, 'cache_input': bad})

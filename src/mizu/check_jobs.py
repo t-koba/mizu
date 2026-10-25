@@ -179,6 +179,137 @@ def environment(project):
         return digest(canonical(entries))
 
 
+def cache_guard(project):
+    """Cache precedes queue exclusion everywhere; never hash under queue lock."""
+    return (lock(project.root / 'locks/check-cache.lock')
+            if project.config.sandbox.check_cache_paths else contextlib.nullcontext())
+
+
+def cache_input(project):
+    """Fingerprint configured pre-execution trees while holding cache_guard.
+
+    None means unbound, never empty. Count directories and absent names as
+    entries too, and stream file bytes within the existing dependency bounds.
+    Permissions and mtimes participate as command-visible inputs; inode/ctime
+    only detect concurrent edits. Moving an otherwise unchanged tree into/out
+    of a workspace must not change its identity.
+    """
+    from . import platform
+    from .fs import _same_file
+    names = project.config.sandbox.check_cache_paths
+    if not names:
+        return None  # Preserve scopes/identities for no-cache configurations.
+    base = Path('check-cache') / execution_key(project.config)
+    configured = {base / name for name in names}
+    observed, entries = {}, {}
+    total = 0
+
+    def stamp(info):
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink,
+                info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+    def inspect(relative):
+        path = project.root
+        for part in relative.parts:
+            path /= part
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                observed.setdefault(path, None)
+                return None
+            if (stat.S_ISLNK(info.st_mode)
+                    or getattr(info, 'st_file_attributes', 0) & 0x400
+                    or path != project.root / relative and not stat.S_ISDIR(info.st_mode)):
+                raise Denied('Unsafe build cache path')
+            observed.setdefault(path, stamp(info))
+        return info
+
+    @contextlib.contextmanager
+    def opened(relative, directory):
+        # Pin every component on POSIX. The portable fallback checks named
+        # components before/after use, like safe_read's documented fallback.
+        if platform.HAS_OPENAT and platform.HAS_DIR_FD:
+            fd = os.open(project.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                for index, part in enumerate(relative.parts):
+                    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                    if directory or index < len(relative.parts) - 1:
+                        flags |= os.O_DIRECTORY
+                    child = os.open(part, flags, dir_fd=fd)
+                    os.close(fd)
+                    fd = child
+                yield fd
+            finally:
+                os.close(fd)
+        else:
+            inspect(relative)
+            yield project.root / relative
+            inspect(relative)
+
+    try:
+        pending = [base / name for name in reversed(names)]
+        while pending:
+            relative = pending.pop()
+            if len(entries) >= project.config.sandbox.check_input_files:
+                return None
+            info = inspect(relative)
+            key = relative.relative_to(base).as_posix()
+            if info is None:
+                entries[key] = {'absent': True}
+                continue
+            value = {'mode': stat.S_IMODE(info.st_mode), 'mtime_ns': info.st_mtime_ns}
+            if stat.S_ISDIR(info.st_mode):
+                children = []
+                with opened(relative, True) as node, os.scandir(node) as listing:
+                    if isinstance(node, int) and not _same_file(info, os.fstat(node)):
+                        return None
+                    for child in listing:
+                        if len(entries) + len(pending) + len(children) + 1 >= project.config.sandbox.check_input_files:
+                            return None
+                        children.append(child.name)
+                children.sort()
+                value['children'] = children
+                pending.extend(relative / name for name in reversed(children))
+            elif stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and relative not in configured:
+                total += info.st_size
+                if total > project.config.sandbox.check_input_bytes:
+                    return None
+                with opened(relative, False) as node:
+                    stream = os.fdopen(os.dup(node), 'rb') if isinstance(node, int) else node.open('rb')
+                    with stream:
+                        before = os.fstat(stream.fileno())
+                        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or not _same_file(info, before):
+                            return None
+                        hasher, remaining = hashlib.sha256(), info.st_size
+                        while remaining:
+                            data = stream.read(min(remaining, 1048576))
+                            if not data:
+                                return None
+                            remaining -= len(data)
+                            hasher.update(data)
+                        if stream.read(1) or stamp(os.fstat(stream.fileno())) != stamp(before):
+                            return None
+                        value['digest'] = hasher.hexdigest()
+            else:
+                return None
+            entries[key] = value
+        for path, before in observed.items():
+            try:
+                after = stamp(path.lstat())
+            except FileNotFoundError:
+                after = None
+            if after != before:
+                return None
+        return digest(canonical({'names': list(names), 'entries': entries}))
+    except (OSError, Denied, ValueError, UnicodeError):
+        return None
+
+
+def cache_matches(project, job, current):
+    return (job.get('kind') != 'verify' or not project.config.sandbox.check_cache_paths
+            or current is not None and job.get('cache_input') == current)
+
+
 def reusable(job):
     return (not job.get('scratch_paths') and not job.get('shared_job') and not job.get('detached')
             and (job.get('status') in ('queued', 'running')
@@ -207,7 +338,10 @@ def available(context, *, validate=True, discovery=None):
         return []
     if validate:
         env = environment(context.project)
-        candidates = [j for j in candidates if env is not None and j['environment'] == env]
+        with cache_guard(context.project):
+            current = cache_input(context.project)
+            candidates = [j for j in candidates if env is not None and j['environment'] == env
+                          and cache_matches(context.project, j, current)]
     return [{**summary(j), 'requires_input_check': not validate} for j in candidates[:32]]
 
 
@@ -215,11 +349,14 @@ def join(context, job_id):
     if job_id not in {j['id'] for j in available(context)}:
         raise Denied('No matching reusable check')
     project = context.project
-    with lock(project.root / 'locks/check-jobs.lock'):
-        original = raw_read(project, job_id)
-        if not reusable(original) or (root(project) / job_id / 'cancel.json').exists():
-            raise Denied('Check no longer reusable')
-        return _subscribe(context, original)
+    with cache_guard(project):
+        current = cache_input(project)
+        with lock(project.root / 'locks/check-jobs.lock'):
+            original = raw_read(project, job_id)
+            if (not reusable(original) or not cache_matches(project, original, current)
+                    or (root(project) / job_id / 'cancel.json').exists()):
+                raise Denied('Check no longer reusable')
+            return _subscribe(context, original)
 
 
 def _subscribe(context, original, *, purpose=None):
@@ -307,72 +444,87 @@ def submit(context, script=None, *, kind="experiment", fresh=False, purpose=None
         raise Denied('Check job input is not representable')
     # Run-local identity remains the fallback when observed inputs cannot be shared.
     env = environment(project)
-    # A fresh request asks for a measurement of its own: it never joins an
-    # existing execution. Its own result still carries the shared key, so a
-    # later request with the same inputs reuses that measurement instead of
-    # repeating it. Asking for a remeasurement and sharing the result are
-    # separate decisions.
-    shared_key = digest(canonical({'source': capture['code_digest'], 'execution': execution_key(context.config),
-                                   'commands': commands, 'kind': 'verify' if script is None else kind,
-                                   'environment': env})) if env is not None and not scratch_paths else None
-    identity = {'run': context.run_dir.name, 'source': capture['code_digest'],
-                'execution': execution_key(context.config), 'commands': commands,
-                'kind': 'verify' if script is None else kind, 'environment': env, 'fresh': fresh}
-    if scratch_paths:
-        identity['scratch_paths'] = list(scratch_paths)
-    job_id = digest(canonical(identity))
-    directory = root(project) / job_id
-    with lock(project.root / 'locks/check-jobs.lock'):
-        if (directory / 'job.json').exists():
-            # The same request in the same unit is one demand: state its
-            # purpose and retire the role's other demand for that purpose.
-            _state_purpose(project, job_id, purpose)
-            _retire_superseded(project, owner, purpose, keep={job_id}, replaced_by=job_id)
-            return summary(read(project, job_id))
-        if shared_key is not None and not fresh:
-            for path in sorted(root(project).glob('*/job.json')):
-                other = read_json(path, {})
-                if other.get('shared_key') == shared_key and reusable(other) and not (path.parent / 'cancel.json').exists():
-                    job = _subscribe(context, other, purpose=purpose)
-                    # The shared job is the surviving work, so it is never
-                    # the one this request replaces.
-                    _retire_superseded(project, owner, purpose,
-                                       keep={other['id'], job['id']}, replaced_by=job['id'])
-                    return job
-        pending = _pending_jobs(project)
-        counted = {job['id'] for job in pending}
-        superseded = _superseded(project, owner, purpose, keep={job_id})
-        # Only demand the queue still counts can be credited. A job that was
-        # already replaced holds no capacity, so crediting it a second time
-        # would let the queue grow past its cap while an earlier cancellation
-        # is still outstanding.
-        freed = [job for job in superseded
-                 if job['id'] in counted and _withdrawable(project, job)]
-        unfinished = len(pending) - len(freed)
-        _make_room(project)
-        if unfinished >= context.config.limits.check_pending:
-            raise Busy('Check job queue is full')
-        mkdir(directory)
-        try:
-            project.snapshots.materialize(capture, directory / 'input')
-            job = {'id': job_id, 'role': owner, 'producer_role': context.role.name, 'run': context.run_dir.name,
-                   'kind': identity['kind'],
-                   'code_digest': capture['code_digest'], 'execution': identity['execution'],
-                   'commands': commands, 'status': 'queued', 'created_at': now(),
-                   'acknowledged': False, 'environment': env, 'shared_key': shared_key,
-                   'inputs_bound_required': context.config.sandbox.check_reuse}
-            if scratch_paths:
-                job['scratch_paths'] = list(scratch_paths)
-            if purpose is not None:
-                job['purpose'] = purpose
-            write_json(directory / 'job.json', job)
-            os.utime(root(project), None)
-        except BaseException:
-            shutil.rmtree(directory, ignore_errors=True)
-            raise
-        for record in superseded:
-            _withdraw_locked(project, record['id'], role=owner, replaced_by=job_id)
-    return summary(job)
+    with cache_guard(project) if script is None else contextlib.nullcontext():
+        current = cache_input(project) if script is None else None
+        cache_binding = ({'cache_input': current}
+                         if script is None and project.config.sandbox.check_cache_paths else {})
+        # A fresh request asks for a measurement of its own: it never joins an
+        # existing execution. Its own result still carries the shared key, so a
+        # later request with the same inputs reuses that measurement instead of
+        # repeating it. Asking for a remeasurement and sharing the result are
+        # separate decisions.
+        shared_key = digest(canonical({'source': capture['code_digest'], 'execution': execution_key(context.config),
+                                       'commands': commands, 'kind': 'verify' if script is None else kind,
+                                       'environment': env, **cache_binding})) if (env is not None and not scratch_paths
+                                       and (not cache_binding or current is not None)) else None
+        identity = {'run': context.run_dir.name, 'source': capture['code_digest'],
+                    'execution': execution_key(context.config), 'commands': commands,
+                    'kind': 'verify' if script is None else kind, 'environment': env, 'fresh': fresh}
+        if script is None and project.config.sandbox.check_cache_paths:
+            identity['cache_input'] = current
+            if current is None:
+                identity['unbound_cache_request'] = uuid.uuid4().hex
+        if scratch_paths:
+            identity['scratch_paths'] = list(scratch_paths)
+        job_id = digest(canonical(identity))
+        directory = root(project) / job_id
+        with lock(project.root / 'locks/check-jobs.lock'):
+            if (directory / 'job.json').exists():
+                if not cache_matches(project, read(project, job_id), current):
+                    raise Denied('Existing check lacks matching cache inputs')
+                # The same request in the same unit is one demand: state its
+                # purpose and retire the role's other demand for that purpose.
+                _state_purpose(project, job_id, purpose)
+                _retire_superseded(project, owner, purpose, keep={job_id}, replaced_by=job_id)
+                return summary(read(project, job_id))
+            if shared_key is not None and not fresh:
+                for path in sorted(root(project).glob('*/job.json')):
+                    other = read_json(path, {})
+                    if (other.get('shared_key') == shared_key and reusable(other)
+                            and cache_matches(project, other, current)
+                            and not (path.parent / 'cancel.json').exists()):
+                        job = _subscribe(context, other, purpose=purpose)
+                        # The shared job is the surviving work, so it is never
+                        # the one this request replaces.
+                        _retire_superseded(project, owner, purpose,
+                                           keep={other['id'], job['id']}, replaced_by=job['id'])
+                        return job
+            pending = _pending_jobs(project)
+            counted = {job['id'] for job in pending}
+            superseded = _superseded(project, owner, purpose, keep={job_id})
+            # Only demand the queue still counts can be credited. A job that was
+            # already replaced holds no capacity, so crediting it a second time
+            # would let the queue grow past its cap while an earlier cancellation
+            # is still outstanding.
+            freed = [job for job in superseded
+                     if job['id'] in counted and _withdrawable(project, job)]
+            unfinished = len(pending) - len(freed)
+            _make_room(project)
+            if unfinished >= context.config.limits.check_pending:
+                raise Busy('Check job queue is full')
+            mkdir(directory)
+            try:
+                project.snapshots.materialize(capture, directory / 'input')
+                job = {'id': job_id, 'role': owner, 'producer_role': context.role.name, 'run': context.run_dir.name,
+                       'kind': identity['kind'],
+                       'code_digest': capture['code_digest'], 'execution': identity['execution'],
+                       'commands': commands, 'status': 'queued', 'created_at': now(),
+                       'acknowledged': False, 'environment': env, 'shared_key': shared_key,
+                       'inputs_bound_required': context.config.sandbox.check_reuse}
+                if cache_binding:
+                    job.update(cache_binding)
+                if scratch_paths:
+                    job['scratch_paths'] = list(scratch_paths)
+                if purpose is not None:
+                    job['purpose'] = purpose
+                write_json(directory / 'job.json', job)
+                os.utime(root(project), None)
+            except BaseException:
+                shutil.rmtree(directory, ignore_errors=True)
+                raise
+            for record in superseded:
+                _withdraw_locked(project, record['id'], role=owner, replaced_by=job_id)
+        return summary(job)
 
 
 def _withdrawable(project, job):
@@ -463,11 +615,12 @@ def result(context, job_id):
     project = context.project
     with lock(project.root / 'locks/check-jobs.lock'):
         job = read(project, job_id)
-        if context.role.name not in (job['role'], job.get('producer_role')):
-            raise Denied('Check job belongs to another role')
-        output = summary(job)
-        if job['status'] not in ('completed', 'interrupted', 'refused', 'cancelled', 'cleanup_failed'):
-            return output
+    if context.role.name not in (job['role'], job.get('producer_role')):
+        raise Denied('Check job belongs to another role')
+    output = summary(job)
+    if job['status'] not in ('completed', 'interrupted', 'refused', 'cancelled', 'cleanup_failed'):
+        return output
+    with cache_guard(project) if job['kind'] == 'verify' and job['status'] == 'completed' else contextlib.nullcontext():
         record = read_json(root(project) / job.get('shared_job', job_id) / 'result.json', {})
         output['result'] = record
         if job['kind'] == 'verify' and job['status'] in ('completed', 'refused', 'interrupted', 'cleanup_failed'):
@@ -478,13 +631,17 @@ def result(context, job_id):
             matches = (not capture['skipped'] and capture['code_digest'] == job['code_digest']
                        and execution_key(context.config) == job['execution']
                        and list(project.verify) == job['commands']
+                       and cache_matches(project, job, cache_input(project))
                        and (not job.get('inputs_bound_required') or job.get('environment') is not None)
                        and (job.get('environment') is None or environment(project) == job['environment'])
                        and 'verify' in context.role.capabilities)
-            output['accepted_for_current_source'] = matches
-            if matches:
-                context.verification = record
-                write_json(context.run_dir / 'verification.json', record)
+            with lock(project.root / 'locks/check-jobs.lock'):
+                # A subscriber may have detached while inputs were inspected.
+                matches = matches and read(project, job_id)['status'] == 'completed'
+                output['accepted_for_current_source'] = matches
+                if matches:
+                    context.verification = record
+                    write_json(context.run_dir / 'verification.json', record)
         consumed = getattr(context, 'check_results_read', set())
         consumed.add(job_id)
         context.check_results_read = consumed
@@ -781,10 +938,11 @@ def _execute(project, job, stop, sandbox_factory, slot):
         shutil.rmtree(directory / 'input', ignore_errors=True)
         os.utime(root(project), None)
         return summary(job)
-    if (job['kind'] == 'verify' and job.get('inputs_bound_required') and job.get('environment') is None) or (job.get('environment') is not None and environment(project) != job['environment']) or job['execution'] != execution_key(project.config) or (job['kind'] == 'verify' and list(project.verify) != job['commands']):
+    cache_changed = (job['kind'] == 'verify' and not cache_matches(project, job, cache_input(project)))
+    if cache_changed or (job['kind'] == 'verify' and job.get('inputs_bound_required') and job.get('environment') is None) or (job.get('environment') is not None and environment(project) != job['environment']) or job['execution'] != execution_key(project.config) or (job['kind'] == 'verify' and list(project.verify) != job['commands']):
         job.update(status='refused', error=('Dependency inputs could not be bound for reusable acceptance'
                    if job.get('inputs_bound_required') and job.get('environment') is None
-                   else 'Execution configuration or dependency inputs changed'), finished_at=now())
+                   else 'Execution configuration, dependency or cache inputs changed'), finished_at=now())
         save_execution(project, job)
         shutil.rmtree(directory / 'input', ignore_errors=True)
         os.utime(root(project), None)
@@ -916,6 +1074,8 @@ def _execute(project, job, stop, sandbox_factory, slot):
                 if job['status'] == 'completed' and job.get('passed') and job['kind'] == 'verify' and job.get('environment') is not None:
                     bound = {'commands': job['commands'], 'execution': job['execution'],
                              'environment': job['environment'], 'image': record['image']}
+                    if 'cache_input' in job:
+                        bound['cache_input'] = job['cache_input']
                     from .acceptance import MAX_BYTES
                     if len(canonical(record)) > project.config.limits.file_bytes:
                         # The exact canonical result bytes are what recovery reads.

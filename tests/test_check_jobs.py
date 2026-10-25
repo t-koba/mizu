@@ -1119,3 +1119,259 @@ class SweepProtectionTests(Fixture):
         found = [path.name for path in locks.glob('run-check-*.lock')]
         self.assertLessEqual(len(found), self.config.limits.parallel_checks)
         self.assertEqual(self._exclusions(), [])
+
+
+class CacheInputTests(Fixture):
+    """Bounded fake execution of preserved inputs, independent of dependencies."""
+    def setUp(self):
+        super().setUp()
+        roles = {k: dataclasses.replace(v, capabilities=(*v.capabilities, 'check_job'))
+                 for k, v in self.config.roles.items()}
+        self.config = dataclasses.replace(self.config, roles=roles,
+            exclude=(*self.config.exclude, 'target'),
+            sandbox=dataclasses.replace(self.config.sandbox, check_reuse=True, check_cache_paths=('target',)))
+        self.project.config = self.config
+        self.project.snapshots.excludes = self.config.exclude
+        self.cache = self.project.root / 'check-cache' / check_jobs.execution_key(self.config) / 'target'
+        FakeSandbox.calls = []
+
+    def fingerprint(self):
+        with check_jobs.cache_guard(self.project):
+            return check_jobs.cache_input(self.project)
+
+    def run_job(self, factory=FakeSandbox):
+        return check_jobs.run_one(self.project, threading.Event(), sandbox_factory=factory)
+
+    def seed(self, content='one'):
+        self.cache.mkdir(parents=True, exist_ok=True)
+        (self.cache / 'object').write_text(content)
+
+    def test_absent_empty_and_changed_bytes_are_distinct_inputs(self):
+        environment = check_jobs.environment(self.project)
+        absent = self.fingerprint()
+        self.assertIsNotNone(absent)
+        # Parent directory presence is not presence of a configured input.
+        self.cache.parent.mkdir(parents=True)
+        self.assertEqual(self.fingerprint(), absent)
+        self.cache.mkdir()
+        empty = self.fingerprint()
+        self.seed()
+        present = self.fingerprint()
+        (self.cache / 'object').write_text('two')
+        changed = self.fingerprint()
+        self.assertEqual(len({absent, empty, present, changed}), 4)
+        self.assertEqual(check_jobs.environment(self.project), environment)
+        self.assertEqual(self.fingerprint(), changed)
+        # Exercise the portable read fallback even on POSIX.
+        with patch('mizu.platform.HAS_OPENAT', False):
+            self.assertEqual(self.fingerprint(), changed)
+
+    def test_same_run_replay_only_matches_the_same_cache_input(self):
+        ctx = self.context()
+        absent = check_jobs.submit(ctx)
+        self.assertEqual(check_jobs.submit(ctx)['id'], absent['id'])
+        self.seed()
+        present = check_jobs.submit(ctx)
+        self.assertNotEqual(present['id'], absent['id'])
+        self.assertNotIn('shared_job', present)
+        self.assertEqual(check_jobs.submit(ctx)['id'], present['id'])
+        (self.cache / 'object').write_text('two')
+        changed = check_jobs.submit(ctx)
+        self.assertNotEqual(changed['id'], present['id'])
+        self.assertNotIn('shared_job', changed)
+
+    def test_shared_candidates_and_join_revalidate_cache_input(self):
+        self.seed()
+        first = check_jobs.submit(self.context())
+        reader = self.context('reviewer')
+        self.assertEqual(check_jobs.available(reader)[0]['id'], first['id'])
+        self.assertEqual(check_jobs.join(reader, first['id'])['shared_job'], first['id'])
+        (self.cache / 'object').write_text('two')
+        self.assertEqual(check_jobs.available(reader), [])
+        with self.assertRaises(Denied):
+            check_jobs.join(reader, first['id'])
+        new = check_jobs.submit(self.context())
+        self.assertNotIn('shared_job', new)
+
+    def test_join_rechecks_after_discovery_before_queue_lookup(self):
+        first = check_jobs.submit(self.context())
+        reader = self.context('reviewer')
+        available = check_jobs.available
+        def changed(*args, **kwargs):
+            candidates = available(*args, **kwargs)
+            self.seed()
+            return candidates
+        with patch.object(check_jobs, 'available', side_effect=changed):
+            with self.assertRaises(Denied):
+                check_jobs.join(reader, first['id'])
+
+    def test_changed_queued_input_is_refused_before_cache_moves(self):
+        self.seed()
+        job = check_jobs.submit(self.context())
+        (self.cache / 'object').write_text('two')
+        self.assertEqual(self.run_job()['status'], 'refused')
+        self.assertEqual((self.cache / 'object').read_text(), 'two')
+        self.assertFalse(FakeSandbox.calls)
+        self.assertNotIn('acceptance_scope', check_jobs.read(self.project, job['id']))
+
+    def test_old_unbound_job_cannot_execute_or_join(self):
+        owner = self.context()
+        job = check_jobs.submit(owner)
+        path = check_jobs.root(self.project) / job['id'] / 'job.json'
+        old = read_json(path)
+        old.pop('cache_input')
+        write_json(path, old)
+        reader = self.context('reviewer')
+        self.assertEqual(check_jobs.available(reader), [])
+        with self.assertRaises(Denied):
+            check_jobs.join(reader, job['id'])
+        with self.assertRaises(Denied):
+            check_jobs.submit(owner)
+        # Run the old job before creating another queued demand: job timestamps
+        # have second precision, so relying on their order would make this test
+        # nondeterministic when both submissions happen in one second.
+        self.assertEqual(self.run_job()['status'], 'refused')
+        self.assertFalse(FakeSandbox.calls)
+        later = self.context()
+        independent = check_jobs.submit(later)
+        self.assertNotIn('shared_job', independent)
+        check_jobs.cancel(later, independent['id'])
+
+    def test_over_bound_inputs_are_unbound_not_empty_or_idempotent(self):
+        self.seed()
+        for limits in ({'check_input_files': 1}, {'check_input_bytes': 2}):
+            with self.subTest(limits=limits):
+                config = dataclasses.replace(self.config,
+                    sandbox=dataclasses.replace(self.config.sandbox, **limits))
+                self.project.config = config
+                self.assertIsNone(self.fingerprint())
+                ctx = self.context()
+                one = check_jobs.submit(ctx)
+                two = check_jobs.submit(ctx)
+                self.assertNotEqual(one['id'], two['id'])
+                raw = check_jobs.read(self.project, one['id'])
+                self.assertIsNone(raw['shared_key'])
+                self.assertIsNone(raw['cache_input'])
+                self.assertEqual(self.run_job()['status'], 'refused')
+                self.assertEqual(self.run_job()['status'], 'refused')
+                custom = check_jobs.submit(ctx, 'echo ' + next(iter(limits)))
+                self.assertEqual(self.run_job()['status'], 'completed')
+                self.assertNotIn('acceptance_scope', check_jobs.read(self.project, custom['id']))
+
+    def test_unsafe_and_unreadable_inputs_never_hash_as_absent(self):
+        import os
+        self.seed()
+        with patch.object(check_jobs.os, 'scandir', side_effect=PermissionError('unreadable')):
+            self.assertIsNone(self.fingerprint())
+        artifact = self.cache / 'object'
+        artifact.unlink()
+        try:
+            artifact.symlink_to(self.root / 'outside')
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest('Symlinks unavailable: ' + str(exc))
+        self.assertIsNone(self.fingerprint())
+        artifact.unlink()
+        external = self.root / 'outside'
+        external.write_text('not a cache input')
+        os.link(external, artifact)
+        self.assertIsNone(self.fingerprint())
+        artifact.unlink()
+        if hasattr(os, 'mkfifo'):
+            os.mkfifo(artifact)
+            self.assertIsNone(self.fingerprint())
+            artifact.unlink()
+        self.cache.rmdir()
+        self.cache.symlink_to(external.parent, target_is_directory=True)
+        self.assertIsNone(self.fingerprint())
+
+    def test_cache_lock_spans_input_hash_and_reuse_or_enqueue_decision(self):
+        ctx = self.context()
+        real_input = check_jobs.cache_input
+        real_lock = check_jobs.lock
+        cache_lock = self.project.root / 'locks/check-cache.lock'
+        queue_lock = self.project.root / 'locks/check-jobs.lock'
+        def fingerprint(project):
+            self.assertTrue(held(cache_lock))
+            self.assertFalse(held(queue_lock))
+            return real_input(project)
+        import contextlib
+        @contextlib.contextmanager
+        def guarded(path, **kwargs):
+            if path == queue_lock:
+                self.assertTrue(held(cache_lock))
+                # A concurrent cache owner cannot slip in at queue lookup.
+                with self.assertRaises(Busy):
+                    with real_lock(cache_lock, blocking=False):
+                        pass
+            with real_lock(path, **kwargs):
+                yield
+        with patch.object(check_jobs, 'cache_input', side_effect=fingerprint), patch.object(check_jobs, 'lock', guarded):
+            first = check_jobs.submit(ctx)
+            self.assertEqual(check_jobs.submit(ctx)['id'], first['id'])
+            self.assertEqual(check_jobs.submit(self.context())['shared_job'], first['id'])
+        # Dispatch revalidates under cache exclusion, without queue exclusion.
+        with patch.object(check_jobs, 'cache_input', side_effect=fingerprint):
+            self.run_job()
+        # Result's dependency/cache work also runs outside the queue lock.
+        real_environment = check_jobs.environment
+        def environment(project):
+            self.assertFalse(held(queue_lock))
+            return real_environment(project)
+        with patch.object(check_jobs, 'cache_input', side_effect=fingerprint), patch.object(check_jobs, 'environment', side_effect=environment):
+            self.assertTrue(check_jobs.result(ctx, first['id'])['accepted_for_current_source'])
+
+    def test_mutating_build_cache_still_moves_back_and_is_next_input(self):
+        observed = []
+        class Compiler(FakeSandbox):
+            def execute(inner, workspace, script, **kwargs):
+                artifact = workspace / 'target/object'
+                observed.append(artifact.read_text() if artifact.exists() else None)
+                artifact.parent.mkdir(exist_ok=True)
+                artifact.write_text('built ' + str(len(observed)))
+                return super().execute(workspace, script, **kwargs)
+        ctx = self.context()
+        first = check_jobs.submit(ctx)
+        self.assertTrue(self.run_job(Compiler)['passed'])
+        self.assertFalse(check_jobs.result(ctx, first['id'])['accepted_for_current_source'])
+        self.assertEqual((self.cache / 'object').read_text(), 'built 1')
+        second = check_jobs.submit(ctx)
+        self.assertNotEqual(first['id'], second['id'])
+        self.assertTrue(self.run_job(Compiler)['passed'])
+        self.assertEqual(observed, [None, 'built 1'])
+        self.assertEqual((self.cache / 'object').read_text(), 'built 2')
+        self.assertFalse((ctx.workspace / 'target').exists())
+
+
+    def test_running_result_does_not_wait_for_its_cache_owner(self):
+        ctx = self.context()
+        job = check_jobs.submit(ctx)
+        path = check_jobs.root(self.project) / job['id'] / 'job.json'
+        write_json(path, {**read_json(path), 'status': 'running'})
+        with lock(self.project.root / 'locks/check-cache.lock'):
+            self.assertEqual(check_jobs.result(ctx, job['id'])['status'], 'running')
+
+    def test_changed_cache_is_refused_even_with_sharing_disabled(self):
+        self.config = dataclasses.replace(self.config,
+            sandbox=dataclasses.replace(self.config.sandbox, check_reuse=False))
+        self.project.config = self.config
+        ctx = self.context()
+        job = check_jobs.submit(ctx)
+        self.assertIsNone(check_jobs.read(self.project, job['id'])['environment'])
+        self.seed()
+        self.assertEqual(self.run_job()['status'], 'refused')
+        self.assertFalse(FakeSandbox.calls)
+
+    def test_concurrent_edit_of_an_already_hashed_subtree_is_unbound(self):
+        self.seed()
+        (self.cache / 'z').mkdir()
+        real_scandir = check_jobs.os.scandir
+        calls = []
+        def changed(node):
+            calls.append(node)
+            if len(calls) == 2:
+                # object sorts before z, so this edit follows its file hash.
+                (self.cache / 'object').write_text('changed during traversal')
+            return real_scandir(node)
+        with patch.object(check_jobs.os, 'scandir', side_effect=changed):
+            self.assertIsNone(self.fingerprint())
+        self.assertEqual(len(calls), 2)
