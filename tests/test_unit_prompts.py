@@ -1,5 +1,6 @@
 """Unit prompt projections live in mizu.unit_prompts; runtime re-exports them."""
 import unittest
+from unittest.mock import patch
 
 from support import Fixture
 
@@ -40,10 +41,14 @@ class UnitPromptSeamTests(Fixture):
         import mizu.unit_prompts as unit_prompts
         for role in ("worker", "reporter", "consult"):
             ctx = self.context(role)
-            self.assertEqual(runtime.prompt_for(ctx), unit_prompts.prompt_for(ctx))
+            clock = unit_prompts._prompt_clock(ctx)
+            with patch.object(unit_prompts, "_prompt_clock", return_value=clock):
+                self.assertEqual(runtime.prompt_for(ctx), unit_prompts.prompt_for(ctx))
             ctx = self.context(role)
-            self.assertEqual(runtime.prompt_delta_for(ctx, []),
-                             unit_prompts.prompt_delta_for(ctx, []))
+            clock = unit_prompts._prompt_clock(ctx)
+            with patch.object(unit_prompts, "_prompt_clock", return_value=clock):
+                self.assertEqual(runtime.prompt_delta_for(ctx, []),
+                                 unit_prompts.prompt_delta_for(ctx, []))
 
     def test_moved_builders_still_set_the_ready_work_signature(self):
         import mizu.unit_prompts as unit_prompts
