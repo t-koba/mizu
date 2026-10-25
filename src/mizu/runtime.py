@@ -71,6 +71,7 @@ from . import web_operations
 from . import role_state_ops
 from .role_state_ops import _reject_constant  # preserve the established runtime seam
 from . import insight_operations
+from . import work_item_operations
 from .insight_operations import INSIGHT_RETRIEVAL_LIMIT  # preserve the established runtime seam
 from .web_worker import bounded
 from .vcs_poll_policy import (MAX_CI_BRANCHES, POLL_CALL_TIMEOUT_CAP,
@@ -1103,38 +1104,19 @@ class Context:
         return web_operations.search(self, args)
 
     def _op_work_items_read(self, args: dict) -> dict:
-        if "id" in args:
-            if "cursor" in args:
-                raise Denied("Work-item by-ID history cannot be combined with open-page cursor")
-            return self.project.work_items.explain(
-                args["id"], after_rev=args.get("after_rev", 0), limit=args.get("limit", 25))
-        if "after_rev" in args:
-            raise Denied("Work-item after_rev requires id")
-        return self.project.work_items.page_open(cursor=args.get("cursor"),
-                                                 limit=args.get("limit", 25))
+        return work_item_operations.read(self, args)
 
     def _op_work_items_legacy_read(self, args: dict) -> dict:
-        return self.project.work_items.page_legacy(cursor=args.get("cursor"),
-                                                   limit=args.get("limit", 25))
+        return work_item_operations.legacy_read(self, args)
 
     def _op_work_items_reconcile(self, args: dict) -> dict:
-        return self.project.work_items.reconcile(
-            args["event_id"], expected_action=args["expected_action"],
-            expected_rev=args.get("expected_rev"), outcome=args["outcome"],
-            reason=args["reason"], title=args.get("title"), actor=self.role.name)
+        return work_item_operations.reconcile(self, args)
 
     def _op_work_items_create(self, args: dict) -> dict:
-        return self.project.work_items.create(
-            idempotency_key=args["idempotency_key"], title=args["title"],
-            origin=args.get("origin"), actor=self.role.name, smoke_refs=args.get("smoke_refs"),
-            **({"description": args["description"]} if "description" in args else {}),
-            **({"scope": args["scope"]} if "scope" in args else {}))
+        return work_item_operations.create(self, args)
 
     def _op_work_items_transition(self, args: dict) -> dict:
-        return self.project.work_items.transition(
-            args["id"], expected_rev=args["expected_rev"], status=args["status"],
-            actor=self.role.name, reason=args.get("reason"), wait=args.get("wait"),
-            snapshot_id=args.get("snapshot_id"), scope=args.get("scope"), smoke_refs=args.get("smoke_refs"))
+        return work_item_operations.transition(self, args)
 
     def _op_insights(self, args: dict) -> dict:
         return insight_operations.insights(self, args)
