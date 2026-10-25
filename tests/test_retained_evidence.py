@@ -274,8 +274,8 @@ class RetainedEvidenceTests(Fixture):
             return {str(p.relative_to(self.project.root)): (p.read_bytes(), p.stat().st_mtime_ns)
                     for p in self.project.root.rglob("*") if p.is_file()}
         before = inventory()
-        with patch("mizu.runtime.safe_read", wraps=safe_read) as reader, \
-                patch("mizu.runtime.write_json", side_effect=AssertionError("write")), \
+        with patch("mizu.evidence_records.safe_read", wraps=safe_read) as reader, \
+                patch("mizu.evidence_records.write_json", side_effect=AssertionError("write")), \
                 patch("os.walk", side_effect=AssertionError("scan")), \
                 patch("os.listdir", side_effect=AssertionError("scan")), \
                 patch("os.scandir", side_effect=AssertionError("scan")), \

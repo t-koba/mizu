@@ -99,7 +99,7 @@ class MutationIntentTests(Fixture):
                     return self.reply(json.loads(kwargs["input_data"]), case)
 
                 with patch.object(vcs, "run", side_effect=dispatch) as run, patch(
-                        "mizu.runtime.sync_dir", wraps=fs.sync_dir) as sync:
+                        "mizu.evidence_records.sync_dir", wraps=fs.sync_dir) as sync:
                     out = ctx.handle(capability, args)
                 sync.assert_called_once_with(ctx.run_dir)
                 run.assert_called_once()
@@ -161,7 +161,7 @@ class MutationIntentTests(Fixture):
                         write_json(path, record, **kwargs)
 
                     with patch.object(vcs, "run", side_effect=dispatch) as run, patch(
-                            "mizu.runtime.write_json", side_effect=fail_observation):
+                            "mizu.evidence_records.write_json", side_effect=fail_observation):
                         with self.assertRaisesRegex(OSError, "final evidence write failed"):
                             ctx.handle(capability, args)
                     run.assert_called_once()
@@ -182,7 +182,7 @@ class MutationIntentTests(Fixture):
                     with patch.object(fs.os, "fsync", side_effect=OSError("storage failed")):
                         write_json(path, value, **kwargs)
 
-                with patch("mizu.runtime.write_json", side_effect=fail_intent), patch.object(vcs, "run") as run:
+                with patch("mizu.evidence_records.write_json", side_effect=fail_intent), patch.object(vcs, "run") as run:
                     with self.assertRaisesRegex(Denied, "storage failed"):
                         ctx.handle(capability, args)
                 run.assert_not_called()

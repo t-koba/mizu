@@ -596,7 +596,7 @@ class PublicationReceiptTests(PublishFixture):
                 raise OSError("observation failed")
             write_json(path, record, **kwargs)
         with patch.object(vcs, "run", side_effect=self.reply), patch(
-                "mizu.runtime.write_json", side_effect=fail_observation):
+                "mizu.evidence_records.write_json", side_effect=fail_observation):
             with self.assertRaisesRegex(OSError, "observation failed"):
                 ctx.handle("vcs_publish", args)
         with patch.object(vcs, "run") as adapter:

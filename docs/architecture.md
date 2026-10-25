@@ -30,6 +30,7 @@ inputs. The trusted host adapter never executes model-provided host commands.
 | `runtime.py` | Admission, locks, capability dispatch, publication | Which algorithm is best |
 | `unit_prompts.py` | Full unit prompt, resumed-session delta, and bounded display projections for ready work, decisions, research, and CI | Session selection/rotation/recovery, admission, scheduling, or lifecycle policy |
 | `workspace_reads.py` | Role-scoped workspace file listing, paged reads, and snapshot diff projections, including virtual upstream refs | Role grants, workspace write policy, or publication semantics |
+| `evidence_records.py` | Exact role-bound retained-evidence reads and durable per-invocation/mutation evidence records | Adapter retries, reconciliation, or evidence truth |
 | `run_health.py` | Role-health failure/streak bookkeeping and capture-cause persistence; runtime re-exports its helpers | Terminal outcome classification, recovery/rotation, or successful-run lifecycle decisions |
 | `ci_observation.py` | Read-only cached-CI failure projection and wake-branch normalization (bounded, never raises) | Polling, wake policy, admission, dispatch, session lifecycle |
 | `ci_wake.py` | Per-role CI wake record/due helpers and wake-version/default constants (bounded, never raises) | Polling, admission, dispatch, session lifecycle |
