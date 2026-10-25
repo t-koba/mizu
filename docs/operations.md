@@ -862,7 +862,7 @@ have committed. These operations publish nothing and schedule no work.
 default **100**, **0 disables**). Open, doing, and blocked items count; done and
 dropped do not. Lowering the cap below the current backlog preserves all items
 and their lifecycle operations, but refuses new seeds until enough work closes.
-The cap is independent of prompt page size and FIFO order; producer admission also enforces this same cap (see Producer admission below).
+The cap is independent of prompt page size and FIFO order; producer admission can also hold explicitly opted-in roles at this cap (see Producer admission below).
 
 On `OpenWorkItemsFull`, inspect the reported `current_count`, `limit`, and
 `requested_delta`; the refused decision/create/reconcile committed no new work.
@@ -888,8 +888,13 @@ the writer remains free to resolve, merge, defer, or reject input at capacity.
 The gate runs before any model or run-slot use, when their role-name source's current unresolved live
 input count (undecided plus deferred; resolved and archive-only history
 excluded) reaches the per-source limit or the authoritative open/doing/blocked
-count reaches `open_work_items`. Operator, vcs, and editor input channels are
-never role names, so they are never held. The check applies to direct,
+count reaches `open_work_items` only for a role with the explicit
+`roles.<name>.held_at_capacity = true` opt-in (default false). The per-source
+threshold remains independent; disabling the open-work hold does not disable
+it, and the work-item seed cap still applies to all roles. `mizu status`
+reports each held role in `backpressure.held` with its reason and a `thresholds`
+map containing the exact configured bound(s). Operator, vcs, and
+editor input channels are never role names, so they are never held. The check applies to direct,
 scheduled, event-triggered, and daemon admission, and runs before any event or
 cursor is acknowledged; a held attempt (`skipped: producer-held`) claims no
 run directory, slot, or lock, consumes no event, and leaves every pending

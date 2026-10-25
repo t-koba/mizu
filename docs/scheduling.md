@@ -489,9 +489,13 @@ configured non-writer project roles that carry `submit_insight` (the writer
 can still resolve, merge, defer, or reject input at capacity), before any model
 or run-slot use, when their role-name source's unresolved live input count
 (undecided plus deferred; resolved and archive-only history excluded) reaches
-`[limits].producer_inputs_per_source` or the authoritative WorkItems
-open/doing/blocked count reaches `[limits].open_work_items`. It applies to
-direct, scheduled, event-triggered, and daemon admission: `Engine.run` checks
+`[limits].producer_inputs_per_source`. The open/doing/blocked WorkItems
+count reaches `[limits].open_work_items` only for a role that explicitly opts in
+with `roles.<name>.held_at_capacity = true` (default false); the project
+work-item seed cap itself remains active for every role. Per-source holds are
+unaffected by this opt-in. Status reports each held source (role name), reason,
+and exact `thresholds` map in `backpressure.held`. The policy applies to direct, scheduled,
+event-triggered, and daemon admission: `Engine.run` checks
 before FIFO slot admission, and `should_run` vetoes an otherwise-ready daemon
 iteration. A held attempt returns `skipped: producer-held`, claims no run
 directory, slot, or lock, and acknowledges no event or cursor, so pending

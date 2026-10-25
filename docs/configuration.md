@@ -294,8 +294,9 @@ required). Operator tooling that concatenates configs
 
 `open_work_items = 100` is a provisional congestion bound, not a measured
 optimum; tune it to project capacity or set it to 0 to disable. It is independent
-of prompt pagination. It is not independent of producer admission: reaching this
-count also holds configured producer roles at admission (see below). The authoritative
+of prompt pagination or producer admission: the work-item cap always refuses
+new seeds at capacity, while a role is held before execution only when its
+`held_at_capacity` policy is enabled (see below). The authoritative
 count is replayed from WorkItems seeds and current revision chains under the
 project insights record lock; there is no separate quota ledger. Multi-task
 manifests check their entire new-seed delta or commit nothing. Reducing the
@@ -320,14 +321,19 @@ holds only configured non-writer project roles that carry the
 defer, or reject input at capacity), before any model or run-slot use, when the
 role-name source's current unresolved live input count (undecided plus deferred revisions;
 resolved revisions and archive-only history excluded) reaches the per-source
-limit or the authoritative open/doing/blocked count reaches `open_work_items`.
-Operator, vcs, and editor input channels are never role names, so they are
-never held. The check applies to direct, scheduled, event-triggered, and
-daemon admission, and runs before any event or cursor is acknowledged; a
-held attempt claims no run directory, slot, or lock, consumes no event, and
-leaves every pending input durable. Fail closed: when the required load
-cannot be read, the producer is held. A run already in progress may finish;
-this is an admission threshold, never a cancellation. Held producers resume
+limit. This per-source bound remains independent of the role's open-work
+policy. A non-writer producer is also held when the authoritative
+open/doing/blocked count reaches `open_work_items` only if that role sets
+`roles.<name>.held_at_capacity = true`; the boolean defaults to false. The
+work-item cap still refuses new seeds regardless of this setting. Operator,
+vcs, and editor input channels are never role names, so they are never held.
+The check applies to direct, scheduled, event-triggered, and daemon admission,
+and runs before any event or cursor is acknowledged; a held attempt claims no
+run directory, slot, or lock, consumes no event, and leaves every pending input
+durable. Fail closed when a required enabled metric cannot be read. A run
+already in progress may finish; this is an admission threshold, never a
+cancellation. `mizu status` reports each held source (the role name), reason codes, and a
+`thresholds` map with its exact configured bound(s) in `backpressure.held`. Held producers resume
 only through existing schedules or subscriptions; skipped runs consume no
 events, and repeated state-based triggers coalesce through the existing
 durable stores (see `docs/operations.md` and `docs/scheduling.md`).
@@ -343,7 +349,8 @@ durable stores (see `docs/operations.md` and `docs/scheduling.md`).
 | `model_request_seconds` | Positive finite logical-request deadline, default `1200`, integer 1–1,073,741,824 seconds; no role override. Host-enforced independently of the whole-unit wall. Pi/pi-durable: each admitted `model_request`; Claude: enclosing query; Codex: enclosing turn, not every opaque provider HTTP subcall |
 | `command_seconds` | Deadline for each individual container command (unchanged by role wall overrides) |
 | `open_work_items` | Per-project cap on newly seeded nonterminal work (open/doing/blocked); integer 0–1,073,741,824, provisional default 100; 0 disables. Existing over-limit items are preserved. Done/dropped do not count. Checked atomically with direct creation, accept/modify single or multi-task decisions, and legacy reconciliation to open. Exact committed retries and zero-seed decisions remain allowed |
-| `producer_inputs_per_source` | Per-source cap on unresolved live producer inputs per configured `submit_insight` role (undecided plus deferred; resolved and archive-only history excluded); integer 0–1,073,741,824, provisional default 20; 0 disables. Existing over-limit inputs are preserved; only the next direct, scheduled, event-triggered, or daemon admission for that role is held. Also holds that role when the `open_work_items` count is reached. Held attempts consume no events; resume happens only through existing schedules or subscriptions |
+| `producer_inputs_per_source` | Per-source cap on unresolved live producer inputs per configured `submit_insight` role (undecided plus deferred; resolved and archive-only history excluded); integer 0–1,073,741,824, provisional default 20; 0 disables. Existing over-limit inputs are preserved; only the next direct, scheduled, event-triggered, or daemon admission for that role is held. This limit is independent of the open-work hold policy. Held attempts consume no events; resume happens only through existing schedules or subscriptions |
+| `roles.<name>.held_at_capacity` | Explicit boolean opt-in (default `false`) for a non-writable role with `submit_insight`: also hold its next admission when open/doing/blocked WorkItems reach `open_work_items`. Does not affect per-source holds or the work-item seed cap; invalid/non-boolean values fail configuration load |
 | `work_items_prompt` | Maximum open work-item rows included in each full and delta prompt (1–100; default 20). Overflow and legacy-unseeded coverage are reported explicitly; the tool page limit is separately available through `work_items_read` |
 | `idle_seconds`, `cooldown_seconds` | Daemon sleep between poll iterations and pause between work units. A writable role may override the cooldown with `roles.<name>.cooldown_seconds` (1–1,073,741,824; unset keeps the project value); read-only cadence stays on `idle_seconds` |
 | `default_wait_seconds`, `maximum_wait_seconds` | Default and maximum model-selected wait times (1–86,400s) |
@@ -1080,7 +1087,7 @@ A role has exactly one of `profile` or `selector`, plus `policy`, `workspace` (`
 `capabilities`, `engine_tools` (maximum 128 explicit names), `on_change`,
 `decision_events` (at most 8 unique lowercase decision actions, never
 `withdraw`), `work_item_events` (unique `done`/`dropped` values, default `[]`) plus `ci_wake` (whether a red on the configured CI wake set wakes
-this role: default true for writable roles, false otherwise) plus `decision_sources` (`own` default routing only this role's findings,
+this role: default true for writable roles, false otherwise), `held_at_capacity` (whether this non-writable `submit_insight` role opts into an open-work producer hold; default false, independent of per-source holds), and `decision_sources` (`own` default routing only this role's findings,
 `any` routing matching actions from any source so a resolver runs on each new
 deferral) and `work_item_sources` (terminal routing by origin submitter;
 `own`/`any`, default/migration rules in

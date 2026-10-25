@@ -194,7 +194,7 @@ PRODUCER_HOLD_REASONS = ("per_source_full", "open_work_full", "load_unavailable"
 
 @dataclasses.dataclass(frozen=True)
 class ProducerFacts:
-    """Normalized facts for per-source producer admission."""
+    """Normalized facts for producer limits and role-specific open-work policy."""
 
     is_producer: bool = False
     per_source_limit: int = 0
@@ -202,6 +202,7 @@ class ProducerFacts:
     source_pending: int = 0
     open_count: int = 0
     load_ok: bool = True
+    held_at_capacity: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -211,7 +212,7 @@ class ProducerDecision:
 
 
 def evaluate_producer(facts: ProducerFacts) -> ProducerDecision:
-    """Hold only configured producers at a configured congestion threshold."""
+    """Hold producers at per-source limits, or at open-work capacity when opted in."""
     if not facts.is_producer:
         return ProducerDecision(held=False, reasons=())
     if not facts.load_ok:
@@ -219,7 +220,8 @@ def evaluate_producer(facts: ProducerFacts) -> ProducerDecision:
     reasons = []
     if facts.per_source_limit and facts.source_pending >= facts.per_source_limit:
         reasons.append("per_source_full")
-    if facts.open_work_limit and facts.open_count >= facts.open_work_limit:
+    if (facts.held_at_capacity and facts.open_work_limit
+            and facts.open_count >= facts.open_work_limit):
         reasons.append("open_work_full")
     return ProducerDecision(held=bool(reasons), reasons=tuple(reasons))
 

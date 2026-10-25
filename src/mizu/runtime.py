@@ -3911,7 +3911,8 @@ def producer_hold(project, role_name: str, role=None) -> dict | None:
     enabled limits: the live unresolved input count for this role-name
     source (undecided plus deferred; resolved and archive-only history
     excluded) when the per-source bound is enabled, and the authoritative
-    WorkItems open/doing/blocked count when the open-work bound is enabled.
+    WorkItems open/doing/blocked count only when this role opts in with
+    ``held_at_capacity`` and the open-work bound is enabled.
     Disabling a bound never holds for its metric; when both bounds are 0
     the producer is admitted without reading either store. Fail closed when
     a required limit or load cannot be read. A running unit is never
@@ -3931,6 +3932,9 @@ def producer_hold(project, role_name: str, role=None) -> dict | None:
         if (getattr(current, "workspace", None) == "write"
                 or "submit_insight" not in set(getattr(current, "capabilities", ()) or ())):
             return None
+        held_at_capacity = getattr(current, "held_at_capacity", False)
+        if type(held_at_capacity) is not bool:
+            raise Denied("Invalid held_at_capacity")
     except Exception:
         return {"reasons": ("load_unavailable",), "reason": "load_unavailable",
                 "source_pending": None, "open_count": None,
@@ -3938,7 +3942,8 @@ def producer_hold(project, role_name: str, role=None) -> dict | None:
                            "open_work_items": _producer_raw_limit(project, "open_work_items")}}
     try:
         per_source_limit = _producer_limit(project, "producer_inputs_per_source")
-        open_limit = _producer_limit(project, "open_work_items")
+        open_limit = (_producer_limit(project, "open_work_items")
+                      if held_at_capacity else 0)
     except Exception:
         return {"reasons": ("load_unavailable",), "reason": "load_unavailable",
                 "source_pending": None, "open_count": None,
@@ -3960,7 +3965,8 @@ def producer_hold(project, role_name: str, role=None) -> dict | None:
                            "open_work_items": open_limit}}
     decision = _scheduling.evaluate(_scheduling.ProducerFacts(
         is_producer=True, per_source_limit=per_source_limit,
-        open_work_limit=open_limit, source_pending=source_pending or 0,
+        open_work_limit=open_limit, held_at_capacity=held_at_capacity,
+        source_pending=source_pending or 0,
         open_count=open_count or 0, load_ok=True))
     if not decision.held:
         return None

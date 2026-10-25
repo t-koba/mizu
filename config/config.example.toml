@@ -298,6 +298,8 @@ daemon = true
 
 [roles.searcher]
 profile = "alternate"
+# Opt in to an open-work producer hold (default false; per-source holds remain independent).
+# held_at_capacity = true
 policy = ["policies/shared.md", "policies/searcher.md"]
 workspace = "read"
 # Add "withdraw_decided" here only to allow retracting proposals with a current accept/modify disposition.
