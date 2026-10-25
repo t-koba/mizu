@@ -5,7 +5,8 @@ from unittest.mock import patch
 from support import Fixture
 from test_deadlines import UnsealedDriver
 from mizu.config import role_requests_per_run
-from mizu.errors import DeadlineWrapUp, RequestYieldExceeded, InfraExceeded, ModelFailure
+from mizu.errors import (DeadlineWrapUp, RequestYieldExceeded, InfraExceeded,
+                         ModelFailure, RunDeadlineExceeded)
 from mizu.fs import read_json
 from mizu.runtime import Engine, WRAP_UP_OPS
 
@@ -142,6 +143,89 @@ class RequestYieldTests(Fixture):
         local.wrap_up_attempted = True
         local.handle('_budget', {'sequence':1})
         self.assertEqual((local.request_count, local.wrap_up_requests), (1, 1))
+
+    def test_pi_exhausted_request_reserves_survive_error_event_and_dispatch(self):
+        from mizu.pi import PiDriver
+
+        def dispatch_error(ctx):
+            model = self.config.model(ctx.role.profile)
+
+            class BridgeStub:
+                def __init__(self, *args, **kwargs):
+                    self.config_file = ctx.run_dir / "bridge.json"
+                def __enter__(self): return self
+                def __exit__(self, *args): pass
+
+            class ChannelStub:
+                def __init__(self, *args, **kwargs): self.count = 0
+                def send(self, event): pass
+                def close(self): pass
+                def receive(self, **kwargs):
+                    self.count += 1
+                    if self.count == 1:
+                        ctx.handle("_hello", {})
+                        return {"id": "state", "success": True, "data": {
+                            "model": {"id": model["model"], "provider": model["provider"]},
+                            "sessionFile": "request-reserve-session"}}
+                    if self.count != 2:
+                        raise AssertionError("Unexpected extra Pi event read")
+                    try:
+                        ctx.handle("_budget", {"sequence": 1})
+                    except (RequestYieldExceeded, RunDeadlineExceeded):
+                        pass
+                    return {"type": "message_end", "message": {"role": "assistant",
+                        "stopReason": "error", "errorMessage": "provider-like error text"}}
+
+            driver = PiDriver(self.config)
+            with patch("mizu.pi.Bridge", BridgeStub), patch("mizu.pi.Channel", ChannelStub):
+                return Engine(self.config, driver=driver)._dispatch(
+                    ctx, driver, "{}", profile=ctx.role.profile)
+
+        for bound, error in (("requests", RequestYieldExceeded),
+                             ("deadline", RunDeadlineExceeded)):
+            with self.subTest(bound=bound):
+                ctx = self.context()
+                ctx.bound_hit = bound
+                ctx.wrap_up_attempted = True
+                if bound == "requests":
+                    ctx.request_count = role_requests_per_run(self.config, ctx.role)
+                initial_count = ctx.request_count
+                ctx.wrap_up_requests = ctx._wrap_up_request_used_limit()[1]
+                # The exhausted in-RPC refusal must not reach daily admission.
+                with patch("mizu.runtime.Budget.take") as take:
+                    with self.assertRaises(error) as raised:
+                        dispatch_error(ctx)
+                    take.assert_not_called()
+                if bound == "deadline":
+                    self.assertIs(raised.exception, ctx.admission_exception)
+                self.assertEqual((ctx.request_count, ctx.wrap_up_requests), (initial_count, ctx._wrap_up_request_used_limit()[1]))
+                self.assertFalse((ctx.run_dir / "admission.json").exists())
+
+        # The error event alone is not evidence of local request exhaustion.
+        provider = self.context()
+        model = self.config.model(provider.role.profile)
+        class BridgeStub:
+            def __init__(self, *args, **kwargs): self.config_file = provider.run_dir / "bridge.json"
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+        class ChannelStub:
+            def __init__(self, *args, **kwargs): self.count = 0
+            def send(self, event): pass
+            def close(self): pass
+            def receive(self, **kwargs):
+                self.count += 1
+                if self.count == 1:
+                    provider.handle("_hello", {})
+                    return {"id": "state", "success": True, "data": {
+                        "model": {"id": model["model"], "provider": model["provider"]},
+                        "sessionFile": "provider-error-session"}}
+                return {"type": "message_end", "message": {"role": "assistant",
+                    "stopReason": "error", "errorMessage": "provider text only"}}
+        driver = PiDriver(self.config)
+        with patch("mizu.pi.Bridge", BridgeStub), patch("mizu.pi.Channel", ChannelStub):
+            with self.assertRaises(ModelFailure):
+                Engine(self.config, driver=driver)._dispatch(provider, driver, "{}", profile=provider.role.profile)
+        self.assertIsNone(provider.admission_exception)
 
     def test_durable_bound_settlement_preserves_wrapup_allowance(self):
         from mizu.pi_durable import interpret_result
