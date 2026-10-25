@@ -1398,6 +1398,33 @@ class WrapUpTests(Fixture):
         self.assertEqual(health["consecutive_failures"], 0)
         self.assertFalse(self.project.control()["paused"])
 
+    def test_script_driver_propagates_capture_refusal_after_request_bound(self):
+        from mizu.errors import Denied, LimitExceeded
+        from mizu.runtime import Engine
+        from support import ScriptDriver
+
+        roles = dict(self.config.roles)
+        roles["worker"] = dataclasses.replace(roles["worker"], requests_per_run=1)
+        config = dataclasses.replace(self.config, roles=roles)
+        reached = [False]
+        original_check_bounds = self.project.snapshots.check_bounds
+
+        def check_bounds(workspace):
+            if reached[0]:
+                raise LimitExceeded("synthetic workspace capture refusal")
+            return original_check_bounds(workspace)
+
+        def callback(ctx, *_):
+            if ctx.bound_hit is None:
+                # The second request reaches the per-run bound and yields to
+                # the reduced-grant invocation, where finish is attempted.
+                ctx.handle("_budget", {"sequence": 2})
+            reached[0] = True
+
+        with patch.object(self.project.snapshots, "check_bounds", side_effect=check_bounds):
+            with self.assertRaisesRegex(Denied, "synthetic workspace capture refusal"):
+                Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
+
     def test_escaped_bound_gets_one_reduced_wrap_up_attempt(self):
         from mizu.errors import LimitExceeded
         from mizu.runtime import Engine, WRAP_UP_OPS

@@ -123,14 +123,12 @@ class ScriptDriver:
         if context.finished is None:
             try:
                 context.handle("finish", {"outcome": "wait", "summary": "One observed result", "state": "Next step is explicit."})
-            except Denied:
-                # The engine returns a refused seal as a tool result and lets
-                # the unit wrap up under the bound it reached; the double
-                # does the same for a reached bound, so a bound is not an
-                # unhandled error here. Every other refusal — an empty
-                # summary, an unknown profile, a missing state, an
-                # unrepresentable workspace — still fails the test loudly.
-                if context.bound_hit is None:
+            except Denied as exc:
+                # Only the explicit refusal naming the reached-bound wrap-up
+                # is expected here. A bound does not excuse a different
+                # product refusal (for example a missing state or an
+                # unrepresentable workspace); the double must fail loudly.
+                if context.bound_hit is None or str(exc) != context._bound_message():
                     raise
         if not context.operations_stopped.is_set():
             for attempt, sequence in tuple(context.request_deadlines):
