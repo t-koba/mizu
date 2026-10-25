@@ -501,7 +501,10 @@ follows the wake-semantics default: no duplicate queue or implicit schedule
 is added, so a held producer resumes only through an existing schedule tick,
 interval/calendar firing, event trigger with pending input, or daemon
 readiness re-evaluation, with repeated state-based triggers coalescing
-through the existing durable stores.
+through the existing durable stores. `submit_insight` does not implicitly
+subscribe its sender to decision events for its proposals. A role without a
+schedule or declared event subscription has no subscribed events pending to
+lose; its proposals remain durable, but submission creates no wake path.
 
 ## Workspace and lock isolation
 
