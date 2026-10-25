@@ -160,8 +160,20 @@ class Project:
         return read_json(self.root / "control.json", {"armed": False, "paused": True, "wake_generation": "", "draining": False})
 
     def set_control(self, **updates) -> dict:
+        """Merge control updates, owning the ``pause_cause`` lifecycle.
+
+        ``pause_cause`` is present only for the current automatic
+        failure-brake pause written by the health brake (``kind``
+        ``failure_brake`` with bounded ``error_class`` and ``roles``; no
+        error message). Any explicit ``paused`` update without a new
+        ``pause_cause`` clears a prior field, so a manual pause and a
+        resume never retain a stale cause; unrelated control updates
+        preserve it.
+        """
         with lock(self.root / "locks" / "control.lock"):
             value = {**self.control(), **updates, "updated_at": now()}
+            if "paused" in updates and "pause_cause" not in updates:
+                value.pop("pause_cause", None)
             write_json(self.root / "control.json", value)
             return value
 

@@ -23,7 +23,7 @@ mizu cleanup demo  # 終了後に残存したラベル付きコンテナを停�
 - **cleanup の排他**: `mizu cleanup` はロールの実行中排他ロック (`locks/run-<role>.lock`) の下でコンテナを列挙・削除します。実行中のロールのコンテナは削除されず、掃除は `{"removed": 0, "skipped": "role-active"}` を返します。ロールの実行が終われば、次の掃除が残存コンテナを削除します。プロジェクト全体の掃除は、設定されたすべてのロール、プロジェクト内に存在するすべての排他ロック（プロジェクトで有効化されていない委譲先ロールも含む）、および check runner が占有中の計算スロット (`locks/run-check-slot-<n>.lock`) の両方を除外します。実行中の check job はそのスロットの排他ロックを保持するため、掃除は check job のコンテナを削除せず `{"removed": 0, "skipped": "role-active"}` を返します。委譲された子も自ロールの排他ロックを保持するため、同一プロジェクトでは同じロールの実行は一つだけです。委譲先のロールが実行中の場合、その委譲は拒否されます。
 - **drain と委譲された子**: 委譲された子は drain に応じ、安全な論理リクエスト境界で停止して中断を呼出側に報告します（放棄はせず、既におこなった変更は作業空間に残ります）。したがって drain 中の親は、完了できない子に待たされません。
 - **drain の意味**: drain による bound は drain として記録される（request budget を使い切ったことではない）。共有ハンドシェイクが bound の種別を運ぶので、durable 側は `drain` として報告し、pi 側も drain 拒否を wrap-up として扱う（単位は finish を記録して yield し、admission failure として中断されない）。 新規受付を止めます。`[limits].drain_yield = true` (厳密な boolean、既定値) では、永続セッションかつ非 ephemeral の実行は、進行中の provider request・tool dispatch・join 済み子実行を終えた次の安全な論理リクエスト境界で既存の縮小権限 wrap-up に移ります。通常枠を追加で認めず、最大 3 requests / 5 wrap-up tools (日次 admission は継続) で finish を求めます。seal に成功すれば通常の outcome (通常 `continue`) で公開し、セッションと workspace を保ったまま実行・workspace ロックを解放します。seal なしの正常終了・wrap-up 枠消費は `status="bounded", bound="drain"` を永続記録し、未 seal の snapshot は公開せず、health を変更しません。この記録の storage 障害や provider/protocol/公開の障害は従来どおり障害です。非永続・ephemeral 実行はそのまま完了させます（ただし委譲された子は drain に応じ停止します。前の項を参照）。`drain_yield = false` では全実行が従来どおりそのまま完了します。通常の queued waiter では yield せず、FIFO admission や wall deadline も変えません。実行中の移管・再配置や即時停止ではなく、全体の完了待ち timeout はないため、`mizu status` の active が空になるまで待ってから promote/保守へ進みます。再開には `resume` を使います。協調的キャンセルが必要なら `pause`、arm 解除が必要なら `disarm` を使います。
-- **自動停止**: 連続失敗回数が `max_failures`（既定値 3）に達すると自動的に pause されます（`0` で自動 pause 無効化）。`mizu resume` は counters を 0 に戻します（ADR-016、ADR-017）。日次予算・ディスク予約・ロック待ち（`Busy`/`InfraExceeded`）は数えず延期し、`error.json` と `run_deferred` に残ります。エンジン期限・証跡上限などの `LimitExceeded` は数えます。Pi 経路の実行中予算拒否も `admission_wait` により延期します。
+- **自動停止**: 連続失敗回数が `max_failures`（既定値 3）に達すると自動的に pause されます（`0` で自動 pause 無効化）。`mizu resume` は counters を 0 に戻します（ADR-016、ADR-017）。日次予算・ディスク予約・ロック待ち（`Busy`/`InfraExceeded`）は数えず延期し、`error.json` と `run_deferred` に残ります。エンジン期限・証跡上限などの `LimitExceeded` は数えます。Pi 経路の実行中予算拒否も `admission_wait` により延期します。自動 pause 時は人間可読 `reason` を保ったまま、機械可読 `pause_cause`（`kind: failure_brake`、`error_class`（例外クラス名のみ）、`roles`（対象ロール名のみ）；エラーメッセージは含まない）を `control.json` に記録します。`paused` を伴う明示更新（手動 pause・resume）は古い `pause_cause` を消去し、`paused` を伴わない更新は保持します。
 
 ### タスクの実行
 
@@ -185,7 +185,7 @@ external calls or recursive reference traversals.
 | コマンド時間超過・出力サイズ超過 | プロセス群を強制終了し、コンテナを削除。結果は失敗として記録 |
 | Worker プロセスのクラッシュ | 未確定差分は保持され、次回実行時に実際のファイル実態から安全に再開 |
 | 同一役割または Writer の二重起動 | 排他ロックにより後続の起動を拒否 |
-| 連続失敗（`max_failures` 到達） | 自動的に一時停止（pause）。原因解消後に手動で `mizu resume`（counters を 0 に戻す） |
+| 連続失敗（`max_failures` 到達） | 自動的に一時停止（pause）し、`control.json` に `pause_cause`（`failure_brake`／例外クラス名／対象ロール）を記録。原因解消後に手動で `mizu resume`（counters を 0 に戻し、`pause_cause` を消去） |
 | 成果物の生成失敗 | 直前の有効な成果物を維持。Worker の作業には影響なし |
 | ディスク空き容量不足 | 新規タスクの実行を停止（監査証跡などの自動削除は行いません） |
 

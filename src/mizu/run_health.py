@@ -60,7 +60,9 @@ def _record_health_failure(project, role_name, run_id, exc, maximum, cause=None,
             reason = "Repeated failures; inspect health and run records"
             if recorded:
                 reason = f"{reason}: {recorded}"
-            project.set_control(paused=True, reason=reason)
+            pause_cause = {"kind": "failure_brake", "error_class": type(exc).__name__,
+                           "roles": [role_name]}
+            project.set_control(paused=True, reason=reason, pause_cause=pause_cause)
 
 
 def _record_missing_finish_only(project, role_name, run_id, exc, cause=None,
