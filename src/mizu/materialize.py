@@ -45,7 +45,7 @@ import re
 from pathlib import Path
 
 from .errors import Denied
-from .fs import DIGEST, canonical, digest, relative_parts, safe_read
+from .fs import DIGEST, canonical, digest, relative_parts, safe_read, safe_write, write_json
 from .process import (
     ADAPTER_DIAGNOSTIC_BYTES_DEFAULT, adapter_failure_diagnostic, run,
 )
@@ -308,3 +308,75 @@ def load_source(settings: dict, project_root: Path, run: str, evidence_id: str,
     return {"output": output, "content": content, "digest": expected,
             "cache": cache, "source_run": run,
             "source_evidence": f"materialize/{evidence_id}.json"}
+
+
+def op_materialize(context, args: dict) -> dict:
+    """Run the single `materialize` tool grant in its two exclusive forms.
+
+    `{spec}` invokes the trusted host adapter (warming pre-mounted
+    read-only caches and/or returning digest-bound content plus the
+    policy-checked output), while `{apply: {run, evidence_id}}` writes
+    one retained receipt byte-exactly only when the retained adapter
+    `result.output` equals the retained JSON spec `output` exactly.
+    Invoke needs a visible workspace; apply needs a writable one.
+    The mechanism never mounts adapter paths and never grants network
+    to the sandbox. Fail closed without configuration or grant.
+    """
+    has_spec = "spec" in args
+    has_apply = "apply" in args
+    if has_spec == has_apply:
+        raise Denied("Supply spec or apply, not both or neither")
+    if has_spec:
+        if context.role.workspace == "none":
+            raise Denied("This role has no workspace")
+        spec = args["spec"]
+        if not isinstance(spec, str):
+            raise Denied("Materialize spec must be a string")
+        try:
+            data = invoke(context.config.materialize, spec,
+                          cancel=context.tools_cancelled)
+        except OSError as exc:
+            raise Denied(f"Materialization is unavailable: {exc}") from exc
+        evidence_id, evidence = context._new_invocation_evidence("materialize")
+        record = {"run": context.run_dir.name, "role": context.role.name,
+                  "kind": "materialize", "evidence_id": evidence_id,
+                  "evidence": evidence, "spec": spec, "digest": data["digest"],
+                  "cache": data["cache"], "trust": "external-untrusted",
+                  "result": data}
+        write_json(context.run_dir / evidence, record)
+        return record
+    # Apply mode: caller supplies only retained locators; the path and
+    # bytes come solely from the retained receipt. Failed validation
+    # never touches the destination; success stages an audit receipt.
+    if context.role.workspace != "write":
+        raise Denied("Materialize apply requires a writable workspace")
+    apply = args["apply"]
+    if (not isinstance(apply, dict) or set(apply) != {"run", "evidence_id"}
+            or not isinstance(apply["run"], str)
+            or not isinstance(apply["evidence_id"], str)):
+        raise Denied("Materialize apply requires run and evidence_id")
+    try:
+        source = load_source(
+            context.config.materialize, context.project.root,
+            apply["run"], apply["evidence_id"], context.role.name,
+            context.config.limits.file_bytes)
+    except OSError as exc:
+        raise Denied(f"Materialize apply is unavailable: {exc}") from exc
+    path = source["output"]
+    if context.project.snapshots.excluded(path):
+        raise Denied("Materialize output path is not allowed")
+    data = source["content"].encode("utf-8")
+    if len(data) > context.config.limits.file_bytes:
+        raise Denied("Materialize evidence content exceeds the byte limit")
+    safe_write(context.workspace, path, data)
+    evidence_id, evidence = context._new_invocation_evidence("materialize")
+    record = {"kind": "materialize-apply",
+              "run": context.run_dir.name, "role": context.role.name,
+              "source_run": source["source_run"],
+              "source_evidence": source["source_evidence"],
+              "path": path, "digest": source["digest"],
+              "bytes": len(data), "cache": source["cache"],
+              "trust": "external-untrusted",
+              "evidence_id": evidence_id, "evidence": evidence}
+    write_json(context.run_dir / evidence, record)
+    return record
