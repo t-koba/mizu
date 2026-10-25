@@ -68,6 +68,7 @@ from .ci_requests import CiRequests, request_id as ci_request_id
 from .publication import Publication, source_commit
 from .web import Web
 from . import web_operations
+from . import sandbox_operations
 from . import role_state_ops
 from .role_state_ops import _reject_constant  # preserve the established runtime seam
 from . import insight_operations
@@ -1014,24 +1015,7 @@ class Context:
         return self._read_retained_evidence("experiments", args)
 
     def _op_exec_experiment(self, op: str, args: dict) -> dict:
-        if "check_job" in self.role.capabilities and "source_receipt" not in args and (op == "experiment" or self.role.workspace == "read"):
-            return check_jobs.submit(self, args["script"], kind=op)
-        if self.role.workspace == "none":
-            raise Denied("This role has no workspace")
-        source = {"source_receipt": args["source_receipt"]} if "source_receipt" in args else {}
-        result = self.sandbox.execute(self.workspace, args["script"],
-                                      writable=self.role.workspace == "write", experiment=op == "experiment", **source)
-        if op == "experiment":
-            science = {key: args.get(key, "") for key in ("question", "comparison", "measure")}
-            write_json(self.run_dir / "experiments" / f"{result['id']}.json", {**science, "command": result})
-        # The command record is complete on disk. Tool results have a fixed
-        # small shape before execution; escaped output cannot invalidate success.
-        response = {key:result[key] for key in ('id','kind','exit_code','reason','seconds','writable') if key in result}
-        for key in ('script','stdout','stderr'):
-            response[key],response[key+'_truncated'] = text_preview(result.get(key,''))
-        response['run'] = self.run_dir.name
-        response['evidence'] = ('experiments/' if op == 'experiment' else 'commands/')+result['id']+'.json'
-        return response
+        return sandbox_operations.exec_experiment(self, op, args)
 
     def _op_check_job(self, args: dict) -> dict:
         action = args['action']
