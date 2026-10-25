@@ -94,7 +94,7 @@ class RetainedDeliveryTests(Fixture):
         original = canonical(self.project.snapshots.get(snapshot["id"]))
         self.bind(snapshot)
         reference, bound = self.receipt(snapshot)
-        with patch("mizu.acceptance.scope", return_value=bound):
+        with patch("mizu.acceptance._current_scope", return_value=bound):
             completed = self.step("done", snapshot_id=snapshot["id"])
         self.assertEqual(completed["verification"], reference)
         with patch.object(self.store, "effective_verification", side_effect=AssertionError("reselection")):
@@ -112,7 +112,7 @@ class RetainedDeliveryTests(Fixture):
         self.bind(snapshot)
         reference, bound = self.receipt(snapshot)
         wrong = {**bound, "commands": ["different"]}
-        with patch("mizu.acceptance.scope", return_value=wrong), self.assertRaises(Denied):
+        with patch("mizu.acceptance._current_scope", return_value=wrong), self.assertRaises(Denied):
             self.step("done", snapshot_id=snapshot["id"])
         with patch.object(self.store, "effective_verification", return_value={**reference, "code_digest": "a" * 64}):
             with self.assertRaises(Denied):
@@ -130,7 +130,7 @@ class RetainedDeliveryTests(Fixture):
         with self.assertRaises(Denied):
             self.step("done", snapshot_id=snapshot["id"])
         reference, bound = self.receipt(snapshot)
-        with patch("mizu.acceptance.scope", return_value=bound):
+        with patch("mizu.acceptance._current_scope", return_value=bound):
             self.step("done", snapshot_id=snapshot["id"])
         self.assertEqual(self.item["verification"], reference)
         self.assertEqual(path.read_bytes(), original)
@@ -144,7 +144,7 @@ class RetainedDeliveryTests(Fixture):
         reference, bound = self.receipt(snapshot)
         with self.assertRaises(Denied):
             self.bind(snapshot)
-        with patch("mizu.acceptance.scope", return_value=bound), self.assertRaises(Denied):
+        with patch("mizu.acceptance._current_scope", return_value=bound), self.assertRaises(Denied):
             self.step("done", snapshot_id=snapshot["id"])
 
     def test_marked_chain_cannot_lose_delivery_or_schema(self):
@@ -247,7 +247,7 @@ class RetainedDeliveryTests(Fixture):
         snapshot = self.snapshot(embedded=False)
         self.bind(snapshot)
         reference, bound = self.receipt(snapshot)
-        with patch("mizu.acceptance.scope", return_value=bound):
+        with patch("mizu.acceptance._current_scope", return_value=bound):
             completed = self.step("done", snapshot_id=snapshot["id"])
         path = self.project.root / "work-items" / self.item["id"] / f'{completed["rev"]}.json'
         for field, value in (("code_digest", "a" * 64), ("receipt_id", "b" * 64),

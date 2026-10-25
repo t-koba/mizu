@@ -1019,6 +1019,20 @@ class AcceptanceTests(Fixture):
         self.project.snapshots.excludes = self.config.exclude
         return self.project.root / 'check-cache' / check_jobs.execution_key(self.config) / 'target'
 
+    def test_scope_has_no_caller_controlled_cache_lock_bypass(self):
+        self.configure_cache()
+        cache_lock = self.project.root / 'locks/check-cache.lock'
+        original = check_jobs.cache_input
+
+        def fingerprint(project):
+            self.assertTrue(held(cache_lock))
+            return original(project)
+
+        with patch('mizu.check_jobs.cache_input', side_effect=fingerprint):
+            self.assertIsNotNone(acceptance.scope(self.project))
+        with self.assertRaises(TypeError):
+            acceptance.scope(self.project, _cache_locked=True)
+
     def test_cache_input_is_bound_to_retained_scope_and_current_import(self):
         cache = self.configure_cache()
         ctx, job, proof = self.produce()
