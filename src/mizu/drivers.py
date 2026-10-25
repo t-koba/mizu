@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from .budget import Budget
 from .config import role_requests_per_run
 from .errors import (Cancelled, ConfigError, DeadlineWrapUp, DrainYieldExceeded, InfraExceeded,
-                     LimitExceeded, ProtocolError, RunDeadlineExceeded)
+                     LimitExceeded, ProtocolError, RequestYieldExceeded, RunDeadlineExceeded)
 from .fs import write_json, canonical, now
 
 #: Driver stderr tail retained per run (bounded failure evidence).
@@ -118,6 +118,15 @@ def _admit_invocation(context, *, unit: str) -> dict:
         # The reservation is for Engine's reduced-grant follow-up, not a new
         # request admitted by the normal invocation at the cutoff.
         raise DeadlineWrapUp(context._bound_message())
+    if (over and not context.checkpoint_seal_only
+            and context.bound_hit in (None, 'requests') and not context.wrap_up_attempted):
+        # Parity with Context._handle('_budget'): the ordinary request cap
+        # yields before daily admission or reserve debit, so Engine's
+        # reduced-grant follow-up owns the reserve. The host-armed
+        # checkpoint seal is already a one-shot follow-up and keeps its
+        # direct reserve spend.
+        context.bound_hit = 'requests'
+        raise DeadlineWrapUp(context._bound_message())
     if over:
         requests_used, requests_limit = context._wrap_up_request_used_limit()
         if requests_used >= requests_limit:
@@ -125,7 +134,7 @@ def _admit_invocation(context, *, unit: str) -> dict:
                 raise DrainYieldExceeded("Drain wrap-up request allowance exhausted")
             if context.bound_hit == "deadline":
                 raise RunDeadlineExceeded("Deadline wrap-up request allowance exhausted")
-            raise LimitExceeded("Per-run provider request budget exhausted")
+            raise RequestYieldExceeded("Per-run provider request budget exhausted")
     project_name = getattr(getattr(context, "project", None), "name", "")
     try:
         Budget(context.config.data / "budget", context.config.limits.daily_requests,

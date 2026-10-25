@@ -722,6 +722,9 @@ class PerRoleSpendTests(Fixture):
                 ctx.config = config
                 ctx.role = config.roles["worker"]
                 ctx.request_count = 1  # over the per-run bound of 1
+                # These direct admissions model Engine's reduced-grant
+                # follow-up; the ordinary invocation now yields first.
+                ctx.wrap_up_attempted = True
                 for used in range(allowed_extra + 1):
                     ctx.wrap_up_requests = used
                     ctx.execution_attempt = used
@@ -747,6 +750,8 @@ class PerRoleSpendTests(Fixture):
         ctx.spend_role = config.roles["worker"]
         ctx.delegated_child = True
         ctx.request_count = 1  # over the per-run bound of 1
+        # Model the delegated child's separate reduced-grant follow-up.
+        ctx.wrap_up_attempted = True
         for used in range(2):
             ctx.execution_attempt = used
             admit_invocation(ctx, unit="query")

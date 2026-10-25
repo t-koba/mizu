@@ -7,7 +7,7 @@ from test_deadlines import UnsealedDriver
 from mizu.config import role_requests_per_run
 from mizu.errors import DeadlineWrapUp, RequestYieldExceeded, InfraExceeded, ModelFailure
 from mizu.fs import read_json
-from mizu.runtime import Engine
+from mizu.runtime import Engine, WRAP_UP_OPS
 
 
 class RequestYieldTests(Fixture):
@@ -157,3 +157,93 @@ class RequestYieldTests(Fixture):
             ctx.request_bound_exhausted = True
             with self.assertRaises(RequestYieldExceeded):
                 interpret_result(report, ctx, {}, None)
+
+
+class NonPiRequestCeilingTests(Fixture):
+    def test_cap_yields_before_daily_charge_for_query_and_turn(self):
+        from mizu.drivers import admit_invocation
+        for unit in ("query", "turn"):
+            with self.subTest(unit=unit):
+                ctx = self.context()
+                cap = role_requests_per_run(self.config, ctx.role)
+                ctx.request_count = cap
+                with patch("mizu.drivers.Budget.take") as take:
+                    with self.assertRaises(DeadlineWrapUp):
+                        admit_invocation(ctx, unit=unit)
+                    take.assert_not_called()
+                self.assertEqual(ctx.bound_hit, "requests")
+                self.assertEqual(ctx.request_count, cap)
+                self.assertEqual(ctx.wrap_up_requests, 0)
+                self.assertFalse(ctx.request_deadlines)
+                self.assertFalse((ctx.run_dir / "admission.json").exists())
+                # Engine's reduced-grant follow-up owns the reserve.
+                ctx.wrap_up_attempted = True
+                ctx.execution_attempt += 1
+                with patch("mizu.drivers.Budget.take", return_value=1) as take:
+                    self.assertEqual(admit_invocation(ctx, unit=unit), {"admitted": True})
+                    self.assertEqual(take.call_count, 1)
+                self.assertEqual(ctx.wrap_up_requests, 1)
+                self.assertEqual(ctx.request_count, cap + 1)
+                # Close the admitted request timer like a settled turn.
+                ctx.end_request(0)
+                # Next attempt exhausts without another daily charge.
+                ctx.execution_attempt += 1
+                ctx.wrap_up_requests = ctx._wrap_up_request_used_limit()[1]
+                with patch("mizu.drivers.Budget.take") as take:
+                    with self.assertRaises(RequestYieldExceeded) as raised:
+                        admit_invocation(ctx, unit=unit)
+                    take.assert_not_called()
+                self.assertIs(type(raised.exception), RequestYieldExceeded)
+                self.assertEqual(ctx.wrap_up_requests, ctx._wrap_up_request_used_limit()[1])
+                self.assertEqual(ctx.request_count, cap + 1)
+
+    def test_under_cap_daily_infra_stays_infra(self):
+        from mizu.drivers import admit_invocation
+        ctx = self.context()
+        self.assertLess(ctx.request_count, role_requests_per_run(self.config, ctx.role))
+        with patch("mizu.drivers.Budget.take", side_effect=InfraExceeded("daily quota")):
+            with self.assertRaises(InfraExceeded):
+                admit_invocation(ctx, unit="query")
+        self.assertIsNone(ctx.bound_hit)
+        self.assertEqual(ctx.wrap_up_requests, 0)
+
+    def test_engine_unsealed_uses_one_ordinary_then_one_reduced_grant(self):
+        from mizu.drivers import admit_invocation
+        before = self.project.snapshots.get()["id"]
+
+        class NonPiUnsealedDriver:
+            requires_sandbox = False
+
+            def __init__(self):
+                self.calls = []
+
+            def execute(self, context, prompt, *, profile=None):
+                self.calls.append((context.execution_attempt, context.wrap_up_attempted,
+                                   context.role.capabilities, context.role.engine_tools))
+                if not context.wrap_up_attempted:
+                    (context.workspace / "app.py").write_text("VALUE = 3\n")
+                    context.request_count = role_requests_per_run(
+                        context.config, context.spend_role or context.role)
+                    admit_invocation(context, unit="query")
+                    raise AssertionError("capped invocation must yield before spending reserve")
+                admit_invocation(context, unit="query")
+                context.end_request(0)
+                return {"requests": 1}
+
+        driver = NonPiUnsealedDriver()
+        result = Engine(self.config, driver=driver).run(self.project, "worker")
+        self.assertEqual(len(driver.calls), 2)
+        self.assertEqual(driver.calls[0][1], False)
+        self.assertEqual(driver.calls[1][1], True)
+        self.assertNotEqual(driver.calls[0][2], driver.calls[1][2])
+        self.assertEqual(driver.calls[1][2], tuple(
+            capability for capability in driver.calls[0][2] if capability in WRAP_UP_OPS))
+        self.assertEqual(driver.calls[1][3], ())
+        self.assertEqual(result["status"], "bounded")
+        self.assertEqual(result["bound"], "requests")
+        self.assertEqual(result["publication"], "not_published")
+        self.assertEqual(self.project.snapshots.get()["id"], before)
+        self.assertEqual((self.project.workspace / "app.py").read_text(), "VALUE = 3\n")
+        self.assertFalse(self.project.control()["paused"])
+        health = read_json(self.project.root / "health/worker.json", {})
+        self.assertEqual(health.get("consecutive_failures", 0), 0)
