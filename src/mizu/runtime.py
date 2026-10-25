@@ -67,6 +67,7 @@ from . import materialize as _materialize
 from .ci_requests import CiRequests, request_id as ci_request_id
 from .publication import Publication, source_commit
 from .web import Web
+from . import web_operations
 from .web_worker import bounded
 from .vcs_poll_policy import (MAX_CI_BRANCHES, POLL_CALL_TIMEOUT_CAP,
                               POLL_FETCH_TIMEOUT_CAP, _vcs_poll_number,
@@ -1089,70 +1090,17 @@ class Context:
              'script_truncated':text_preview(command['script'],512)[1]}
             for command in self.verification['commands']], 'evidence':'verification.json'}
 
+    def _bounded_web_operation(self, *args):
+        return bounded(*args)
+
     def _op_fetch(self, args: dict) -> dict:
-        if "receipt_id" in args:
-            if "url" in args:
-                raise Denied("Supply receipt_id or url, not both")
-            record = self.web.replay(args["receipt_id"], "fetch")
-        else:
-            if "url" not in args:
-                raise Denied("Fetch requires url or receipt_id")
-            record = bounded(self.config, self.run_dir, "fetch", args["url"], self.tools_cancelled,
-                             self.role.name)
-        text = record.get('text','')
-        offset,limit = args.get('offset',0),args.get('limit',8192)
-        end = min(len(text),offset+limit)
-        return {**record,'text':text[offset:end],'offset':offset,
-                'next_offset':end if end<len(text) else None,'truncated':end<len(text)}
+        return web_operations.fetch(self, args)
 
     def _op_probe(self, args: dict) -> dict:
-        if "receipt_id" in args:
-            if any(key in args for key in ("url", "method", "headers", "body")):
-                raise Denied("Supply receipt_id or a new probe request, not both")
-            record = self.web.replay(args["receipt_id"], "probe")
-        else:
-            if "url" not in args or "method" not in args:
-                raise Denied("Probe requires url and method, or receipt_id")
-            payload = {"url": args["url"], "method": args["method"],
-                       "headers": args.get("headers", []), "body": args.get("body", "")}
-            record = bounded(self.config, self.run_dir, "probe", payload, self.tools_cancelled,
-                             self.role.name)
-        text = record.get('text','')
-        offset,limit = args.get('offset',0),args.get('limit',8192)
-        end = min(len(text),offset+limit)
-        return {**record,'text':text[offset:end],'offset':offset,
-                'next_offset':end if end<len(text) else None,'truncated':end<len(text)}
+        return web_operations.probe(self, args)
 
     def _op_search(self, args: dict) -> dict:
-        if "result_id" in args:
-            if "query" in args:
-                raise Denied("Supply result_id or query, not both")
-            record = self.web.replay(args["result_id"], "search")
-        else:
-            if "query" not in args:
-                raise Denied("Search requires query or result_id")
-            record = bounded(self.config, self.run_dir, "search", args["query"], self.tools_cancelled,
-                             self.role.name)
-            record = self.web.retain("search", record)
-        evidence_id = record["result_id"]
-        rows=[]
-        for item in record.get('results',[]):
-            row={}
-            for key,bound in (('title',300),('url',4096),('summary',1500),('source',4096)):
-                row[key],row[key+'_truncated']=text_preview(item.get(key,''),bound)
-            receipt=item.get('source_receipt')
-            if isinstance(receipt,str) and DIGEST.fullmatch(receipt):row['source_receipt']=receipt
-            score=item.get('score')
-            if type(score) in (int,float) and -2**63 <= score <= 2**63:row['score']=score
-            rows.append(row)
-        response=page(rows,args.get('offset',0),args.get('limit',1000),maximum=PREVIEW_BYTES*2)
-        response['results']=response.pop('items')
-        response['result_id'] = evidence_id
-        response['evidence']='sources/search-'+evidence_id+'.json'
-        for key in ('scope','trust','feeds_total','feeds_consulted'):
-            if key in record:response[key]=record[key]
-        response['source_truncated']=record.get('truncated',False)
-        return response
+        return web_operations.search(self, args)
 
     def _op_work_items_read(self, args: dict) -> dict:
         if "id" in args:
