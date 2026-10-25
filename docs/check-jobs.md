@@ -17,15 +17,17 @@ grants, without bypassing workspace denial or changing sandbox permissions.
 `mode=async` requires the `check_job` grant and uses only the already-safe
 queued paths, so writable-workspace `exec` and `source_receipt` experiments are
 refused instead of detached, and `verify` behavior is unchanged (queued and
-frozen when `check_job` is granted). Mode alone does not change queue identity or sharing.
+frozen when `check_job` is granted). Mode alone does not change queue
+identity or sharing.
 
 ## Opt-in disk-backed experiment scratch
 
 Queued custom experiments accept `scratch_paths`, an array of unique names from
 `sandbox.check_cache_paths`. Both `experiment` (default queued routing or
-`mode=async`) and `check_job` (`action=start` with `script`) expose it under the
-existing grants. Names are configured top-level artifact directories, not host
-paths; duplicate, unconfigured and malformed names are refused. The tool schema
+`mode=async`) and `check_job` (`action=start` with `script`, `commands` or
+`batch_name`) expose it under the existing grants. Names are configured
+top-level artifact directories, not host paths; duplicate, unconfigured and
+malformed names are refused. The tool schema
 bounds each name to 255 ASCII characters and the array to 32 entries. Omission or
 `[]` keeps ordinary tmpfs-only execution and the existing job identity. A
 nonempty selection is canonicalized into the run-local job identity and appears
@@ -33,8 +35,9 @@ in job summaries and command evidence. For `experiment`, an empty selection is
 always equivalent to omission; nonempty selection on synchronous or
 source-receipt experiments is refused. For `check_job`, supply the field only
 with `action=start`; an empty selection there is equivalent to omission, while a
-nonempty selection requires a custom experiment script. `exec` never accepts
-scratch paths. This grants no new execution authority.
+nonempty selection requires a custom experiment script, `commands` or a named
+`batch_name`. `exec` never accepts scratch paths. This grants no new execution
+authority.
 
 At execution time the runner takes the project's existing `check-cache.lock`
 **before** a compute slot, just as for verification. A blocked scratch job
@@ -66,6 +69,68 @@ no automatic cross-job reuse, discovery or explicit join, even with
 same run still names one demand. Frozen source, command and environment checks
 remain in force, but a completed scratch experiment is **custom evidence only**:
 it cannot import `context.verification` or produce an acceptance receipt.
+
+## Ordered custom-command batches
+
+`check_job` (`action=start`) accepts one ad-hoc custom experiment as either
+`script` (a single command) or `commands` (an ordered list of 1-32 commands); a
+named configured batch is a third selector described below. Each batch entry is
+nonblank and must fit the existing 64 KiB UTF-8 command bound. The selectors
+are exclusive; omitting all custom selectors submits the configured acceptance
+commands. Each custom selection resolves to an ordered command list and reuses
+the existing one-job frozen-source lifecycle: one frozen input, sequential
+execution in listed order, per-command recorded evidence, and the existing
+purpose/`fresh`/identity/sharing/owner/wait/compute-slot/cancellation/cleanup
+behavior. Order is part of the identity: changing, adding, removing or
+reordering entries selects a different job.
+
+Each command runs in its own separate sandbox context. Ordinary `/work` is a
+fresh size-bounded tmpfs per command, not a persistent shell session: exports,
+working-directory changes and other shell state do not carry from one command
+to the next. Sequence work as explicit ordered commands rather than relying on
+carry-over state. Selected disk-backed scratch (`scratch_paths`) follows the
+existing job lifecycle for batches exactly as for a single custom script
+(staging before execution, commit after clean completion, discard on
+cancellation/interruption/timeout/launcher failure, quarantine on cleanup
+failure).
+
+A custom batch is always kind `experiment`, never acceptance, even when its
+entries equal the configured verification commands. It cannot mint an
+acceptance receipt or import `context.verification`. Multiple custom selectors,
+empty or oversized lists, non-string/blank/oversized entries, and custom
+`script`/`commands`/`batch_name`/`scratch_paths` on non-`start` actions are
+refused before execution.
+
+## Named recorded batches
+
+Operator-owned `project.toml` `[recorded_batches]` definitions are selectable
+through `check_job` (`action=start`) as `batch_name` (text, at most 63
+characters), an alternative to ad-hoc `script` or `commands`. Use
+`action=list` to inspect the available names; it does not expose command text.
+The three custom forms are mutually exclusive; omitting all three submits the configured
+acceptance commands, and existing ad-hoc `script`/`commands` and omitted-mode
+routing are unchanged. `batch_name` on any non-`start` action, an unknown
+name, a malformed name, or any combination of two custom forms is refused
+before any job submission.
+
+The name resolves at submission from the trusted loaded project settings to
+its exact ordered command list, then runs through the existing
+`check_jobs.submit(commands=...)` custom-experiment path with no new runner:
+the complete representable frozen workspace snapshot (configured exclusions
+apply) plus the existing execution/environment binding, one frozen input,
+sequential execution in listed order, per-command recorded evidence, and the
+existing `fresh`/purpose/identity/sharing/ownership/wait/compute-slot/
+cancellation/cleanup behavior. Job identity keys on the actual resolved
+commands plus the current full frozen source/environment, never on the
+definition name alone, so renaming a batch without changing its commands
+selects the same job, while editing, adding, removing, or reordering entries
+selects a different one. `check_reuse` remains the global cross-job sharing
+gate; selecting a name does not enable sharing by itself. `scratch_paths` works
+with a named batch exactly as with an ad-hoc batch. A named batch is custom
+evidence only even when its resolved commands equal the configured acceptance
+commands, and a submitted
+job keeps its resolved commands while later configuration edits affect new
+submissions only.
 
 ## Results and waiting
 

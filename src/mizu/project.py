@@ -12,7 +12,7 @@ from pathlib import Path
 from .budget import Budget
 from .config import Config, keys, strings
 from .errors import ConfigError, Denied, LimitExceeded
-from .fs import atomic_write, identifier, lock, mkdir, now, read_json, safe_read, sync_dir, write_json
+from .fs import ID, SCRIPT_MAX, atomic_write, identifier, lock, mkdir, now, read_json, safe_read, sync_dir, write_json
 from .insights import Insights
 from .process import environment, run, stop_note
 from .snapshot import (no_progress_recovery_due, open_store,
@@ -129,11 +129,12 @@ class Project:
         except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, Denied, LimitExceeded) as exc:
             complaint = "Cannot read bounded project settings" if read_only else f"Project is not initialized: {name}"
             raise ConfigError(complaint) from exc
-        keys(self.settings, {"roles", "verify", "attributes"}, "project")
+        keys(self.settings, {"roles", "verify", "attributes", "recorded_batches"}, "project")
         from .selection import attributes
         attributes(self.settings.get("attributes", {}))
         self.roles = strings(self.settings.get("roles", []), "project.roles")
         self.verify = check_verify(self.settings.get("verify", []))
+        self.recorded_batches = check_recorded_batches(self.settings.get("recorded_batches"))
         if not self.roles or any(r not in config.roles for r in self.roles):
             raise ConfigError("Project roles must refer to configured roles")
         self.snapshots = open_store(self.root, config, create_dirs=not read_only)
@@ -389,6 +390,49 @@ def check_verify(value) -> tuple[str, ...]:
     if any("\x00" in command or "\n" in command for command in commands):
         raise ConfigError("project.verify commands must not contain NUL or newlines")
     return commands
+
+
+#: Maximum named recorded batches per project (operator-owned reusable batch definitions).
+MAX_RECORDED_BATCHES = 32
+
+#: Maximum commands per named recorded batch (matches the ordered-batch bound).
+MAX_RECORDED_BATCH_COMMANDS = 32
+
+
+def check_recorded_batches(value) -> dict[str, tuple[str, ...]]:
+    """Validate operator-owned named custom batches: typed, counted, TOML-safe.
+
+    The table maps lowercase identifiers (the existing ``ID`` convention) to
+    nonempty ordered lists of 1-32 shell commands. Each command is nonblank,
+    NUL-free, valid UTF-8 and at most ``SCRIPT_MAX`` UTF-8 bytes. Missing
+    (``None``) means no named batches. Anything malformed fails closed with
+    ``ConfigError``; the ``project.toml`` 64 KiB size bound is unchanged.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigError("project.recorded_batches must be a table")
+    if len(value) > MAX_RECORDED_BATCHES:
+        raise ConfigError("project.recorded_batches holds too many definitions")
+    batches: dict[str, tuple[str, ...]] = {}
+    for name, commands in value.items():
+        if not isinstance(name, str) or ID.fullmatch(name) is None:
+            raise ConfigError("project.recorded_batches names must be lowercase identifiers")
+        if not isinstance(commands, list) or not 1 <= len(commands) <= MAX_RECORDED_BATCH_COMMANDS:
+            raise ConfigError(f"project.recorded_batches[{name}] must list 1-32 commands")
+        normalized: list[str] = []
+        for entry in commands:
+            if not isinstance(entry, str):
+                raise ConfigError(f"project.recorded_batches[{name}] commands must be strings")
+            try:
+                encoded = entry.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise ConfigError(f"project.recorded_batches[{name}] commands must be valid UTF-8") from exc
+            if "\x00" in entry or not entry.strip() or len(encoded) > SCRIPT_MAX:
+                raise ConfigError(f"project.recorded_batches[{name}] commands must be nonblank within 64 KiB")
+            normalized.append(entry)
+        batches[name] = tuple(normalized)
+    return batches
 
 
 def read_goal(path: Path, complaint: str) -> str:

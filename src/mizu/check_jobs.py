@@ -19,7 +19,7 @@ import uuid
 from pathlib import Path
 from .admission import check_slot_exclusion
 from .errors import Busy, Denied
-from .fs import text_preview, canonical, digest, lock, mkdir, now, read_json, write_json, DIGEST
+from .fs import text_preview, canonical, digest, lock, mkdir, now, read_json, write_json, DIGEST, SCRIPT_MAX
 from .sandbox import Sandbox, cleanup, cleanup_refused, scratch_selection
 
 
@@ -411,10 +411,30 @@ def _make_room(project, *, protect=frozenset()):
     raise Busy('Retained check evidence is full; inspect and acknowledge results')
 
 
-def submit(context, script=None, *, kind="experiment", fresh=False, purpose=None, scratch_paths=None):
+def submit(context, script=None, *, commands=None, kind="experiment", fresh=False, purpose=None, scratch_paths=None):
     project = context.project
+    has_script = script is not None
+    has_commands = commands is not None
+    if has_script and has_commands:
+        raise Denied('script and commands are exclusive')
+    if has_commands:
+        if not isinstance(commands, (list, tuple)) or not 1 <= len(commands) <= 32:
+            raise Denied('commands must list 1-32 commands')
+        normalized = []
+        for entry in commands:
+            if not isinstance(entry, str):
+                raise Denied('Invalid check commands')
+            try:
+                encoded = entry.encode('utf-8')
+            except UnicodeEncodeError as exc:
+                raise Denied('Invalid check commands') from exc
+            if chr(0) in entry or not entry.strip() or len(encoded) > SCRIPT_MAX:
+                raise Denied('Invalid check commands')
+            normalized.append(entry)
+        commands = normalized
+    custom = has_script or has_commands
     scratch_paths = scratch_selection(project.config, scratch_paths)
-    if scratch_paths and (script is None or kind != 'experiment'):
+    if scratch_paths and (not custom or kind != 'experiment'):
         raise Denied('Scratch requires a custom queued experiment')
     if any(not project.snapshots.excluded(name) for name in scratch_paths):
         raise Denied('Build cache must be excluded from source')
@@ -424,16 +444,16 @@ def submit(context, script=None, *, kind="experiment", fresh=False, purpose=None
         raise Denied('Delegated checks require check_job on the receiving parent')
     if context.role.workspace == 'none':
         raise Denied('Check jobs require visible source')
-    commands = list(project.verify) if script is None else [script]
-    if len(commands) > 32:
+    job_commands = list(project.verify) if not custom else ([script] if has_script else list(commands))
+    if len(job_commands) > 32:
         raise Denied("At most 32 commands per check job")
-    if not commands:
+    if not job_commands:
         raise Denied('No acceptance commands configured')
     if kind not in ('experiment', 'exec') or (kind == 'exec' and context.role.workspace == 'write'):
         raise Denied('Cannot detach live workspace writes')
-    if script is not None and kind not in context.role.capabilities:
+    if custom and kind not in context.role.capabilities:
         raise Denied('Custom check jobs require the corresponding sandbox capability')
-    if script is None and 'verify' not in context.role.capabilities:
+    if not custom and 'verify' not in context.role.capabilities:
         raise Denied('Acceptance check jobs require verify capability')
     purpose = purpose_label(purpose)
     if shutil.disk_usage(project.root).free < context.config.limits.free_disk_mb * 1048576:
@@ -444,23 +464,23 @@ def submit(context, script=None, *, kind="experiment", fresh=False, purpose=None
         raise Denied('Check job input is not representable')
     # Run-local identity remains the fallback when observed inputs cannot be shared.
     env = environment(project)
-    with cache_guard(project) if script is None else contextlib.nullcontext():
-        current = cache_input(project) if script is None else None
+    with cache_guard(project) if not custom else contextlib.nullcontext():
+        current = cache_input(project) if not custom else None
         cache_binding = ({'cache_input': current}
-                         if script is None and project.config.sandbox.check_cache_paths else {})
+                         if not custom and project.config.sandbox.check_cache_paths else {})
         # A fresh request asks for a measurement of its own: it never joins an
         # existing execution. Its own result still carries the shared key, so a
         # later request with the same inputs reuses that measurement instead of
         # repeating it. Asking for a remeasurement and sharing the result are
         # separate decisions.
         shared_key = digest(canonical({'source': capture['code_digest'], 'execution': execution_key(context.config),
-                                       'commands': commands, 'kind': 'verify' if script is None else kind,
+                                       'commands': job_commands, 'kind': 'verify' if not custom else kind,
                                        'environment': env, **cache_binding})) if (env is not None and not scratch_paths
                                        and (not cache_binding or current is not None)) else None
         identity = {'run': context.run_dir.name, 'source': capture['code_digest'],
-                    'execution': execution_key(context.config), 'commands': commands,
-                    'kind': 'verify' if script is None else kind, 'environment': env, 'fresh': fresh}
-        if script is None and project.config.sandbox.check_cache_paths:
+                    'execution': execution_key(context.config), 'commands': job_commands,
+                    'kind': 'verify' if not custom else kind, 'environment': env, 'fresh': fresh}
+        if not custom and project.config.sandbox.check_cache_paths:
             identity['cache_input'] = current
             if current is None:
                 identity['unbound_cache_request'] = uuid.uuid4().hex
@@ -508,7 +528,7 @@ def submit(context, script=None, *, kind="experiment", fresh=False, purpose=None
                 job = {'id': job_id, 'role': owner, 'producer_role': context.role.name, 'run': context.run_dir.name,
                        'kind': identity['kind'],
                        'code_digest': capture['code_digest'], 'execution': identity['execution'],
-                       'commands': commands, 'status': 'queued', 'created_at': now(),
+                       'commands': job_commands, 'status': 'queued', 'created_at': now(),
                        'acknowledged': False, 'environment': env, 'shared_key': shared_key,
                        'inputs_bound_required': context.config.sandbox.check_reuse}
                 if cache_binding:
@@ -983,6 +1003,8 @@ def _execute(project, job, stop, sandbox_factory, slot):
         for command in job['commands']:
             if stop.is_set():
                 raise Denied('Check job interrupted')
+            if (directory / 'cancel.json').exists():
+                break
             scratch = {'scratch_paths': scratch_paths} if scratch_paths else {}
             results.append(sandbox.execute(workspace, command, writable=job['kind'] == 'verify', experiment=job['kind'] == 'experiment', **scratch))
         after = project.snapshots.capture_files(workspace)

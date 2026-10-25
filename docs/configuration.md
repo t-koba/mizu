@@ -1730,12 +1730,30 @@ Each role may hold one current research record under `role-state/<role>.json`: i
 
 ## Project metadata
 
-`projects/NAME/PROJECT.md` is the human goal. `project.toml` has `roles`
-and repeatable `verify` command strings. These are outside the workspace and
+`projects/NAME/PROJECT.md` is the human goal. `project.toml` has `roles`,
+repeatable `verify` command strings, and an optional `recorded_batches` table
+of operator-owned named custom batches. These are outside the workspace and
 are not exposed as writable model tools. Alter them as operator while paused.
 Verification command exit status alone does not prove semantic correctness,
 particularly when the repository's tests are editable. Use independent review
 and external acceptance fixtures for critical requirements.
+
+`recorded_batches` maps a lowercase batch name (the existing bounded
+identifier convention, at most 63 characters) to a nonempty ordered list of
+1-32 shell command strings. Each command must be nonblank, NUL-free valid
+UTF-8, and at most 64 KiB (`SCRIPT_MAX`) UTF-8 bytes. At most 32 named
+definitions are allowed. Malformed shapes, names, or commands fail
+configuration loading with `ConfigError`. For example:
+
+```toml
+[recorded_batches]
+test = ["python3 /workspace/scripts/check.py"]
+```
+
+Choose descriptive names; `check_job` `action=list` shows the names without
+disclosing command text. A submitted job keeps its resolved commands; later
+`recorded_batches` edits affect new submissions only, never an already-queued
+job.
 
 Thinking and effort values belong to each engine's native options. Codex custom
 providers use native model_providers; Claude provider endpoints use explicit SDK

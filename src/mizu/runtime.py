@@ -1039,16 +1039,35 @@ class Context:
 
     def _op_check_job(self, args: dict) -> dict:
         action = args['action']
-        if ('scratch_paths' in args and action != 'start') or (args.get('scratch_paths') and args.get('script') is None):
-            raise Denied('scratch_paths requires action=start with a custom experiment script')
+        has_script = args.get('script') is not None
+        has_commands = args.get('commands') is not None
+        has_batch = args.get('batch_name') is not None
+        custom = has_script or has_commands or has_batch
+        if sum((has_script, has_commands, has_batch)) > 1:
+            raise Denied('script, commands and batch_name are exclusive')
+        if action != 'start' and (custom or 'scratch_paths' in args or 'batch_name' in args):
+            raise Denied('Custom check input requires action=start')
+        if action == 'start' and args.get('scratch_paths') and not custom:
+            raise Denied('scratch_paths requires a custom experiment script, commands or batch_name')
         if action == 'start':
-            return check_jobs.submit(self, args.get('script'), fresh=args.get('fresh', False),
+            commands = args.get('commands')
+            if has_batch:
+                raw = args.get('batch_name')
+                if not isinstance(raw, str) or ID.fullmatch(raw) is None:
+                    raise Denied('Unknown check batch')
+                batches = getattr(self.project, 'recorded_batches', {})
+                if not isinstance(batches, dict) or raw not in batches:
+                    raise Denied('Unknown check batch')
+                commands = list(batches[raw])
+            return check_jobs.submit(self, args.get('script'), commands=commands,
+                                     fresh=args.get('fresh', False),
                                      purpose=args.get('purpose'), scratch_paths=args.get('scratch_paths'))
         if action == 'list':
             from .acceptance import discover, producer_diagnostics
             discovery = discover(self.project)
             return {'jobs': check_jobs.list_jobs(self.project, self.role.name, discovery=discovery),
                     'available': check_jobs.available(self, discovery=discovery),
+                    'batch_names': sorted(self.project.recorded_batches),
                     **producer_diagnostics(discovery[1])}
         if not args.get('id'):
             raise Denied('Check result requires id')
