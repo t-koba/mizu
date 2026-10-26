@@ -31,6 +31,16 @@ ADAPTER_STARTUP_CEILING_SECONDS = 150
 #: measurement. If it does not finish, the probe uses the 60 s floor.
 ADAPTER_STARTUP_MEASURE_CEILING_SECONDS = 150
 
+#: Finite combined stdout/stderr capture limit for one adapter probe run.
+#: Both the doctor and the installed-adapter contract check hold the
+#: identical child to this bound, so an oversized child is refused by both
+#: instead of being accepted by one of them.
+ADAPTER_PROBE_MAXIMUM_BYTES = 8192
+
+#: The app-server help probe reports its flags as text and needs a larger
+#: capture than a JSON contract report; it is still finite and still shared.
+ADAPTER_CODEX_PROBE_MAXIMUM_BYTES = 262144
+
 #: The measurement endpoints an interval can come from. A one-shot probe
 #: measures spawn through process exit; a managed runtime measures spawn
 #: through its first protocol response.

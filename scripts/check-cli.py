@@ -6,12 +6,13 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
-import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT/'src'))
 from mizu.config import load
-from mizu.doctor import (ADAPTER_STARTUP_FLOOR_SECONDS,
+from mizu.doctor import (ADAPTER_CODEX_PROBE_MAXIMUM_BYTES,
+                         ADAPTER_PROBE_MAXIMUM_BYTES,
+                         ADAPTER_STARTUP_FLOOR_SECONDS,
                          ADAPTER_STARTUP_MEASURE_CEILING_SECONDS,
                          probe_answer,
                          probe_label,
@@ -21,6 +22,7 @@ from mizu.doctor import (ADAPTER_STARTUP_FLOOR_SECONDS,
 from mizu.engine_config import adapter_contract
 from mizu.errors import ConfigError
 from mizu.platform import default_config_file
+from mizu.process import run as bounded_run, stop_note
 from mizu.startup import PROBE_ENDPOINT, observed_startup
 
 
@@ -45,6 +47,36 @@ class ProbeTimeout(ConfigError):
     """The adapter child outlived the host-relative probe bound."""
 
 
+def probe_maximum(engine=None, maximum=None):
+    """The finite combined capture limit for one adapter probe run.
+
+    The launcher JSON report and the app-server help text need different
+    finite caps; both surfaces hold the identical child to the cap for
+    that command, so an oversized child is refused by both.
+    """
+    if maximum is not None:
+        return maximum
+    if engine == "codex":
+        return ADAPTER_CODEX_PROBE_MAXIMUM_BYTES
+    return ADAPTER_PROBE_MAXIMUM_BYTES
+
+
+def probe_refusal(reason, exit_code, detail, bound, engine=None):
+    """The shared classification of a child that did not answer.
+
+    The doctor and this check share probe classification and engine labels.
+    The reason, exit code and stderr are preserved without treating a stopped
+    child as evidence of a missing capability.
+    """
+    if isinstance(detail, bytes):
+        detail = detail.decode("utf-8", "replace")
+    label = probe_label(engine)
+    try:
+        probe_outcome(reason, exit_code, detail, label, bound)
+    except ConfigError as refusal:
+        raise ProbeTimeout(str(refusal))
+
+
 def bound_refusal(exc, bound, engine=None):
     """The shared classification of a child that did not answer.
 
@@ -55,11 +87,10 @@ def bound_refusal(exc, bound, engine=None):
     detail = getattr(exc, "stderr", None)
     if isinstance(detail, bytes):
         detail = detail.decode("utf-8", "replace")
-    label = probe_label(engine)
     try:
-        probe_outcome("timeout", None, detail, label, bound)
-    except ConfigError as refusal:
-        raise ProbeTimeout(str(refusal)) from exc
+        probe_refusal("timeout", None, detail, bound, engine)
+    except ProbeTimeout as refusal:
+        raise refusal from exc
 
 
 def host_config():
@@ -75,7 +106,7 @@ def host_config():
         return None
 
 
-def run_probe(command, engine=None, config=None):
+def run_probe(command, engine=None, config=None, *, maximum=None):
     """Run one adapter child under this host's bound.
 
     Returns (result, cost_seconds, bound_seconds). The measuring run spans
@@ -85,20 +116,21 @@ def run_probe(command, engine=None, config=None):
     and the larger recorded interval supplies the conservative bound. If the
     measurement does not complete, this check uses the 60 s floor. A child
     stopped before reporting is not evidence of a missing capability.
+
+    Both runs hold the child to the finite combined stdout/stderr cap for
+    that command, the same cap the doctor holds it to, so an oversized
+    child is refused here exactly as it is there.
     """
-    started = time.monotonic()
-    try:
-        measured = subprocess.run(command, capture_output=True, text=True,
-                                  timeout=ADAPTER_STARTUP_MEASURE_CEILING_SECONDS)
-    except subprocess.TimeoutExpired:
-        measured = None
-    startup = round(time.monotonic() - started, 3)
-    if measured is not None and measured.returncode is not None and measured.returncode >= 0:
+    cap = probe_maximum(engine, maximum)
+    measured = bounded_run(command, timeout=ADAPTER_STARTUP_MEASURE_CEILING_SECONDS,
+                           maximum=cap)
+    if (measured.reason == "exited" and measured.exit_code is not None
+            and measured.exit_code >= 0):
         # A completed command contributes its full spawn-to-exit interval;
         # the shared record retains the largest per-engine interval.
         if config is None and engine is not None:
             config = host_config()
-        cost, bound, endpoint = observed_startup(config, engine, startup,
+        cost, bound, endpoint = observed_startup(config, engine, measured.seconds,
                                                  PROBE_ENDPOINT)
     else:
         # The measuring command did not complete within its ceiling. No
@@ -106,10 +138,17 @@ def run_probe(command, engine=None, config=None):
         bound = ADAPTER_STARTUP_FLOOR_SECONDS
         cost = None
         endpoint = None
-    try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=bound)
-    except subprocess.TimeoutExpired as exc:
-        bound_refusal(exc, bound, engine)
+    probed = bounded_run(command, timeout=bound, maximum=cap)
+    if probed.reason != "exited" or probed.exit_code is None:
+        # The child did not answer (timeout, over-cap output, or another
+        # stop): refuse it under the shared classification, the same text
+        # the doctor reports for the identical child. A child that exited
+        # with a signal returns so the caller names the kill the same way
+        # both surfaces do.
+        probe_refusal(probed.reason, probed.exit_code,
+                      stop_note(probed) or probed.stderr, bound, engine)
+    result = subprocess.CompletedProcess(command, probed.exit_code,
+                                         probed.stdout, probed.stderr)
     return result, cost, bound, endpoint
 
 

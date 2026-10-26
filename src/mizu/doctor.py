@@ -24,7 +24,8 @@ from .sandbox import CHECKPOINT_ANNOTATION, CHECKPOINT_INSPECT_MAXIMUM, Sandbox,
 # re-exported here: the installed-adapter contract check and the
 # regressions read the one shape from the product, so no surface keeps a
 # second copy of it.
-from .startup import (ADAPTER_STARTUP_CEILING_SECONDS, ADAPTER_STARTUP_FLOOR_SECONDS,
+from .startup import (ADAPTER_CODEX_PROBE_MAXIMUM_BYTES, ADAPTER_PROBE_MAXIMUM_BYTES,
+                      ADAPTER_STARTUP_CEILING_SECONDS, ADAPTER_STARTUP_FLOOR_SECONDS,
                       ADAPTER_STARTUP_MEASURE_CEILING_SECONDS, ADAPTER_STARTUP_MULTIPLIER,
                       PROBE_ENDPOINT, adapter_startup_bound, measured_startup,
                       observed_startup, record_startup, startup_bound)
@@ -215,7 +216,7 @@ def engine_contract(config: Config, engine: str) -> dict:
     if engine == "codex":
         result, bound, cost, endpoint = adapter_probe(
             config, engine, [*command, contract["command"][0], "--help"],
-            maximum=262144, label=probe_label(engine))
+            maximum=ADAPTER_CODEX_PROBE_MAXIMUM_BYTES, label=probe_label(engine))
         flags = list(contract["required_flags"])
         for item in contract.get("contracts", []):
             flags.extend(item["required_flags"])
@@ -235,7 +236,7 @@ def engine_contract(config: Config, engine: str) -> dict:
     launcher = ROOT / "adapters" / engine / contract["entrypoint"]
     result, bound, cost, endpoint = adapter_probe(
         config, engine, [*command, str(launcher), "--check-contract"],
-        maximum=8192, label=probe_label(engine))
+        maximum=ADAPTER_PROBE_MAXIMUM_BYTES, label=probe_label(engine))
     if result.exit_code:
         # The child answered and reported a failure, so its own answer is
         # named: the exit code, its stop fault and the text it produced.

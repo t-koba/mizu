@@ -9,7 +9,6 @@ reported as a bound refusal that names its own reason.
 """
 import importlib.util
 import json
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -290,11 +289,11 @@ class CheckCliProbeTests(unittest.TestCase):
 
         def fake_run(command, **kwargs):
             seen.append(kwargs.get("timeout"))
-            return subprocess.CompletedProcess(command, 0, "", "")
+            return Result(0, "", "", "exited", 0.5)
 
-        original = self.module.subprocess.run
-        self.module.subprocess.run = fake_run
-        self.addCleanup(setattr, self.module.subprocess, "run", original)
+        original = self.module.bounded_run
+        self.module.bounded_run = fake_run
+        self.addCleanup(setattr, self.module, "bounded_run", original)
         result, startup, bound, endpoint = self.module.run_probe(["node", "launcher.mjs"])
         # The measurement carries the measuring ceiling and the probe the
         # bound that measurement requires, the same shape the doctor uses.
@@ -314,11 +313,11 @@ class CheckCliProbeTests(unittest.TestCase):
 
             def fake_run(command, **kwargs):
                 seen.append(kwargs.get("timeout"))
-                return subprocess.CompletedProcess(command, 0, "", "")
+                return Result(0, "", "", "exited", 0.5)
 
-            original = self.module.subprocess.run
-            self.module.subprocess.run = fake_run
-            self.addCleanup(setattr, self.module.subprocess, "run", original)
+            original = self.module.bounded_run
+            self.module.bounded_run = fake_run
+            self.addCleanup(setattr, self.module, "bounded_run", original)
             result, cost, bound, endpoint = self.module.run_probe(
                 ["node", "launcher.mjs"], engine="pi", config=config)
             # The host's recorded cost of 20 s requires the ceiling, and the
@@ -331,11 +330,11 @@ class CheckCliProbeTests(unittest.TestCase):
 
     def test_a_killed_child_is_not_read_as_missing_exports(self):
         def fake_run(command, **kwargs):
-            return subprocess.CompletedProcess(command, -9, "", "")
+            return Result(-9, "", "", "exited", 0.5)
 
-        original = self.module.subprocess.run
-        self.module.subprocess.run = fake_run
-        self.addCleanup(setattr, self.module.subprocess, "run", original)
+        original = self.module.bounded_run
+        self.module.bounded_run = fake_run
+        self.addCleanup(setattr, self.module, "bounded_run", original)
         record = self.module.probe_engine("pi", ["node", "launcher.mjs"], ["ModelRuntime"])
         # The child was killed before it could report: it never said the
         # export was missing.
@@ -345,22 +344,22 @@ class CheckCliProbeTests(unittest.TestCase):
 
     def test_a_child_that_outlives_its_bound_is_a_bound_refusal(self):
         def fake_run(command, **kwargs):
-            raise subprocess.TimeoutExpired(cmd=command, timeout=kwargs.get("timeout"))
+            return Result(None, "", "", "timeout", float(kwargs.get("timeout") or 0.0))
 
-        original = self.module.subprocess.run
-        self.module.subprocess.run = fake_run
-        self.addCleanup(setattr, self.module.subprocess, "run", original)
+        original = self.module.bounded_run
+        self.module.bounded_run = fake_run
+        self.addCleanup(setattr, self.module, "bounded_run", original)
         with self.assertRaises(self.module.ProbeTimeout) as caught:
             self.module.run_probe(["node", "launcher.mjs"])
         self.assertIn("bound", str(caught.exception))
 
     def test_the_refusal_is_recorded_as_a_failure_naming_the_bound(self):
         def fake_run(command, **kwargs):
-            raise subprocess.TimeoutExpired(cmd=command, timeout=kwargs.get("timeout"))
+            return Result(None, "", "", "timeout", float(kwargs.get("timeout") or 0.0))
 
-        original = self.module.subprocess.run
-        self.module.subprocess.run = fake_run
-        self.addCleanup(setattr, self.module.subprocess, "run", original)
+        original = self.module.bounded_run
+        self.module.bounded_run = fake_run
+        self.addCleanup(setattr, self.module, "bounded_run", original)
         record = self.module.probe_engine("pi", ["node", "launcher.mjs"], ["ModelRuntime"])
         self.assertEqual(record["status"], "fail")
         self.assertIn("bound", record["reason"])
@@ -381,11 +380,11 @@ class SharedProbeClassificationTests(unittest.TestCase):
 
     def test_the_refusal_is_the_shared_one(self):
         def fake_run(command, **kwargs):
-            raise subprocess.TimeoutExpired(cmd=command, timeout=kwargs.get("timeout"))
+            return Result(None, "", "", "timeout", float(kwargs.get("timeout") or 0.0))
 
-        original = self.module.subprocess.run
-        self.module.subprocess.run = fake_run
-        self.addCleanup(setattr, self.module.subprocess, "run", original)
+        original = self.module.bounded_run
+        self.module.bounded_run = fake_run
+        self.addCleanup(setattr, self.module, "bounded_run", original)
         with self.assertRaises(self.module.ProbeTimeout) as caught:
             self.module.run_probe(["node", "launcher.mjs"], engine="pi")
         # The measurement could not be taken, so the floor answers for the
@@ -405,11 +404,11 @@ class SharedProbeClassificationTests(unittest.TestCase):
 
         def fake_run(command, **kwargs):
             seen.append(kwargs.get("timeout"))
-            raise subprocess.TimeoutExpired(cmd=command, timeout=kwargs.get("timeout"))
+            return Result(None, "", "", "timeout", float(kwargs.get("timeout") or 0.0))
 
-        original = self.module.subprocess.run
-        self.module.subprocess.run = fake_run
-        self.addCleanup(setattr, self.module.subprocess, "run", original)
+        original = self.module.bounded_run
+        self.module.bounded_run = fake_run
+        self.addCleanup(setattr, self.module, "bounded_run", original)
         with self.assertRaises(self.module.ProbeTimeout) as caught:
             self.module.run_probe(["node", "launcher.mjs"], engine="pi")
         # The measurement could not be taken, so the floor is the bound the
@@ -419,9 +418,9 @@ class SharedProbeClassificationTests(unittest.TestCase):
         self.assertIn("60 s bound", str(caught.exception))
 
     def test_a_killed_child_reads_the_same_way_in_both_surfaces(self):
-        original = self.module.subprocess.run
-        self.module.subprocess.run = lambda command, **kwargs: subprocess.CompletedProcess(command, -9, "", "")
-        self.addCleanup(setattr, self.module.subprocess, "run", original)
+        original = self.module.bounded_run
+        self.module.bounded_run = lambda command, **kwargs: Result(-9, "", "", "exited", 0.5)
+        self.addCleanup(setattr, self.module, "bounded_run", original)
         record = self.module.probe_engine("pi", ["node", "launcher.mjs"], ["ModelRuntime"])
         original_run = doctor.run
         self.addCleanup(setattr, doctor, "run", original_run)
@@ -436,11 +435,11 @@ class SharedProbeClassificationTests(unittest.TestCase):
         # way wherever it is probed: one helper formats the answer, so the
         # two surfaces cannot drift into two texts for one child.
         def fake_run(command, **kwargs):
-            return subprocess.CompletedProcess(command, 1, "", "boom")
+            return Result(1, "", "boom", "exited", 0.5)
 
-        original = self.module.subprocess.run
-        self.module.subprocess.run = fake_run
-        self.addCleanup(setattr, self.module.subprocess, "run", original)
+        original = self.module.bounded_run
+        self.module.bounded_run = fake_run
+        self.addCleanup(setattr, self.module, "bounded_run", original)
         with tempfile.TemporaryDirectory() as td:
             config = SimpleNamespace(data=Path(td))
             record = self.module.probe_engine("pi", ["node", "launcher.mjs"],
@@ -528,11 +527,11 @@ class AnsweredChildIsAMeasurementTests(unittest.TestCase):
 
     def test_the_contract_check_names_the_answer_of_a_failing_child(self):
         def fake_run(command, **kwargs):
-            return subprocess.CompletedProcess(command, 1, "", "boom")
+            return Result(1, "", "boom", "exited", 0.5)
 
-        original = self.module.subprocess.run
-        self.module.subprocess.run = fake_run
-        self.addCleanup(setattr, self.module.subprocess, "run", original)
+        original = self.module.bounded_run
+        self.module.bounded_run = fake_run
+        self.addCleanup(setattr, self.module, "bounded_run", original)
         with tempfile.TemporaryDirectory() as td:
             record = self.module.probe_engine("pi", ["node", "launcher.mjs"],
                                               ["ModelRuntime"],
@@ -553,12 +552,11 @@ class AnsweredChildIsAMeasurementTests(unittest.TestCase):
         # export it did not declare is still named as missing. The failing
         # side must not be the only side that names anything.
         def fake_run(command, **kwargs):
-            return subprocess.CompletedProcess(
-                command, 0, json.dumps({"exports": ["ModelRuntime"]}), "")
+            return Result(0, json.dumps({"exports": ["ModelRuntime"]}), "", "exited", 0.5)
 
-        original = self.module.subprocess.run
-        self.module.subprocess.run = fake_run
-        self.addCleanup(setattr, self.module.subprocess, "run", original)
+        original = self.module.bounded_run
+        self.module.bounded_run = fake_run
+        self.addCleanup(setattr, self.module, "bounded_run", original)
         with tempfile.TemporaryDirectory() as td:
             record = self.module.probe_engine("pi", ["node", "launcher.mjs"],
                                               ["ModelRuntime", "createAgentSession"],
@@ -576,11 +574,11 @@ class AnsweredChildIsAMeasurementTests(unittest.TestCase):
 
         def fake_run(command, **kwargs):
             seen.append(kwargs.get("timeout"))
-            return subprocess.CompletedProcess(command, 1, "", "boom")
+            return Result(1, "", "boom", "exited", 0.5)
 
-        original = self.module.subprocess.run
-        self.module.subprocess.run = fake_run
-        self.addCleanup(setattr, self.module.subprocess, "run", original)
+        original = self.module.bounded_run
+        self.module.bounded_run = fake_run
+        self.addCleanup(setattr, self.module, "bounded_run", original)
         with tempfile.TemporaryDirectory() as td:
             config = SimpleNamespace(data=Path(td))
             record = self.module.probe_engine("pi", ["node", "launcher.mjs"],
@@ -610,12 +608,11 @@ class AnsweredChildIsAMeasurementTests(unittest.TestCase):
             doctor.record_startup(config, "pi", 20.0, doctor.PROBE_ENDPOINT)
 
             def fake_run(command, **kwargs):
-                return subprocess.CompletedProcess(command, 0,
-                                                   json.dumps({"exports": ["ModelRuntime"]}), "")
+                return Result(0, json.dumps({"exports": ["ModelRuntime"]}), "", "exited", 0.5)
 
-            original = self.module.subprocess.run
-            self.module.subprocess.run = fake_run
-            self.addCleanup(setattr, self.module.subprocess, "run", original)
+            original = self.module.bounded_run
+            self.module.bounded_run = fake_run
+            self.addCleanup(setattr, self.module, "bounded_run", original)
             record = self.module.probe_engine("pi", ["node", "launcher.mjs"],
                                               ["ModelRuntime"], config=config)
             contract = record["contract"]
@@ -625,17 +622,131 @@ class AnsweredChildIsAMeasurementTests(unittest.TestCase):
 
     def test_a_child_that_did_not_answer_publishes_no_cost(self):
         def fake_run(command, **kwargs):
-            raise subprocess.TimeoutExpired(cmd=command, timeout=kwargs.get("timeout"))
+            return Result(None, "", "", "timeout", float(kwargs.get("timeout") or 0.0))
 
-        original = self.module.subprocess.run
-        self.module.subprocess.run = fake_run
-        self.addCleanup(setattr, self.module.subprocess, "run", original)
+        original = self.module.bounded_run
+        self.module.bounded_run = fake_run
+        self.addCleanup(setattr, self.module, "bounded_run", original)
         record = self.module.probe_engine("pi", ["node", "launcher.mjs"], ["ModelRuntime"])
         # The child did not answer, so no cost is published for it: the
         # refusal names the bound it was held to.
         self.assertEqual(record["status"], "fail")
         self.assertIn("bound", record["reason"])
         self.assertNotIn("contract", record)
+
+
+class ProbeOutputCapParityTests(unittest.TestCase):
+    """One finite cap for the identical child in both surfaces.
+
+    The doctor held an oversized launcher child to an 8192-byte combined
+    cap while the contract check accepted it without any cap, so the two
+    surfaces disagreed about one child. Both now hold it to the same
+    finite cap with the same timeout/termination classification, and a
+    small valid report is still accepted by both.
+    """
+
+    def setUp(self):
+        self.module = load_check_cli()
+
+    def test_the_cap_is_finite_and_shared(self):
+        # The cap is one product fact, not two answers for one child.
+        self.assertEqual(doctor.ADAPTER_PROBE_MAXIMUM_BYTES, 8192)
+        self.assertEqual(self.module.ADAPTER_PROBE_MAXIMUM_BYTES, 8192)
+        self.assertEqual(self.module.probe_maximum("pi"), 8192)
+        self.assertEqual(self.module.probe_maximum(None), 8192)
+        # The app-server help probe needs a larger but still finite cap,
+        # and both surfaces agree on it for that command.
+        self.assertEqual(doctor.ADAPTER_CODEX_PROBE_MAXIMUM_BYTES, 262144)
+        self.assertEqual(self.module.probe_maximum("codex"), 262144)
+
+    def oversized_stdout_command(self):
+        return [sys.executable, "-c",
+                "import sys; sys.stdout.write('x' * 20000)"]
+
+    def oversized_stderr_command(self):
+        return [sys.executable, "-c",
+                "import sys; sys.stderr.write('e' * 20000)"]
+
+    def test_oversized_stdout_is_refused_by_both(self):
+        command = self.oversized_stdout_command()
+        with self.assertRaises(ConfigError) as doctor_caught:
+            doctor.adapter_probe(config_for(), "pi", command,
+                                 maximum=doctor.ADAPTER_PROBE_MAXIMUM_BYTES,
+                                 label=doctor.probe_label("pi"))
+        with tempfile.TemporaryDirectory() as td:
+            config = SimpleNamespace(data=Path(td))
+            with self.assertRaises(self.module.ProbeTimeout) as check_caught:
+                self.module.run_probe(command, engine="pi", config=config)
+        # The identical child is refused under the shared classification:
+        # the same label, the same over-cap reason and the same bound,
+        # never a missing export. The trailing signal note races with the
+        # stop (the child may or may not have been reaped as killed yet),
+        # so the two texts are compared on their shared core, not byte
+        # for byte.
+        for message in (str(check_caught.exception), str(doctor_caught.exception)):
+            self.assertIn("pi adapter contract probe", message)
+            self.assertIn("output_limit", message)
+            self.assertNotIn("missing", message)
+        with tempfile.TemporaryDirectory() as td:
+            record = self.module.probe_engine(
+                "pi", command, ["ModelRuntime"],
+                config=SimpleNamespace(data=Path(td)))
+        self.assertEqual(record["status"], "fail")
+        self.assertIn("output_limit", record["reason"])
+        self.assertNotIn("missing", record["reason"])
+        self.assertNotIn("contract", record)
+
+    def test_oversized_stderr_is_refused_by_both(self):
+        command = self.oversized_stderr_command()
+        with self.assertRaises(ConfigError) as doctor_caught:
+            doctor.adapter_probe(config_for(), "pi", command,
+                                 maximum=doctor.ADAPTER_PROBE_MAXIMUM_BYTES,
+                                 label=doctor.probe_label("pi"))
+        with tempfile.TemporaryDirectory() as td:
+            config = SimpleNamespace(data=Path(td))
+            with self.assertRaises(self.module.ProbeTimeout) as check_caught:
+                self.module.run_probe(command, engine="pi", config=config)
+        # Both streams share the one combined cap, so an oversized stderr
+        # reads the same way as an oversized stdout (same core; the signal
+        # note races with the stop, as above).
+        for message in (str(check_caught.exception), str(doctor_caught.exception)):
+            self.assertIn("pi adapter contract probe", message)
+            self.assertIn("output_limit", message)
+            self.assertNotIn("missing", message)
+        with tempfile.TemporaryDirectory() as td:
+            record = self.module.probe_engine(
+                "pi", command, ["ModelRuntime"],
+                config=SimpleNamespace(data=Path(td)))
+        self.assertEqual(record["status"], "fail")
+        self.assertIn("output_limit", record["reason"])
+        self.assertNotIn("missing", record["reason"])
+        self.assertNotIn("contract", record)
+
+    def test_a_small_valid_report_is_accepted_by_both(self):
+        report = json.dumps({"exports": ["ModelRuntime"]})
+        command = [sys.executable, "-c",
+                   "import json; print(%r)" % report]
+        result, bound, cost, endpoint = doctor.adapter_probe(
+            config_for(), "pi", command,
+            maximum=doctor.ADAPTER_PROBE_MAXIMUM_BYTES,
+            label=doctor.probe_label("pi"))
+        self.assertEqual(result.reason, "exited")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("ModelRuntime", result.stdout)
+        with tempfile.TemporaryDirectory() as td:
+            config = SimpleNamespace(data=Path(td))
+            check_result, check_cost, check_bound, check_endpoint = (
+                self.module.run_probe(command, engine="pi", config=config))
+        self.assertEqual(check_result.returncode, 0)
+        self.assertIn("ModelRuntime", check_result.stdout)
+        # The small report fits the shared cap, so it is kept whole.
+        self.assertEqual(check_result.stdout.strip(), result.stdout.strip())
+        with tempfile.TemporaryDirectory() as td:
+            record = self.module.probe_engine(
+                "pi", command, ["ModelRuntime"],
+                config=SimpleNamespace(data=Path(td)))
+        self.assertEqual(record["status"], "pass")
+        self.assertEqual(record["contract"]["missing"], [])
 
 
 if __name__ == "__main__":
