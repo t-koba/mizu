@@ -349,8 +349,8 @@ class Limits:
     history_index: int = 128
     prompt_snapshots: int = 6
     #: Maximum canonical JSON bytes of one role-owned current research
-    #: state record (1 KiB-64 KiB; default 8 KiB).
-    role_state_bytes: int = 8192
+    #: state record (1 KiB-64 KiB; default 4 KiB).
+    role_state_bytes: int = 4096
     #: Maximum bytes of a role's own research state injected into its
     #: prompt (1-64 KiB; default 4 KiB). Records over the bound inject
     #: status/generation/sizes only, never partial content.

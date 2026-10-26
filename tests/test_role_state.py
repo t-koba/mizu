@@ -288,8 +288,19 @@ class RoleStateTests(Fixture):
 
 
 class RoleStateConfigTests(Fixture):
-    def test_default_bound(self):
-        self.assertEqual(self.config.limits.role_state_bytes, 8192)
+    def test_default_bounds_match(self):
+        self.assertEqual(self.config.limits.role_state_bytes, 4096)
+        self.assertEqual(self.config.limits.role_state_prompt_bytes, 4096)
+
+    def test_explicit_larger_record_bound_remains_valid(self):
+        text = self.file.read_text().replace(
+            "role_state_bytes = 4096", "role_state_bytes = 8192")
+        path = self.root / "config/role-state-larger.toml"
+        path.write_text(text)
+        from mizu.config import load
+        config = load(path)
+        self.assertEqual(config.limits.role_state_bytes, 8192)
+        self.assertEqual(config.limits.role_state_prompt_bytes, 4096)
 
     def test_out_of_range_refused_at_load(self):
         text = self.file.read_text()
@@ -432,6 +443,9 @@ class ResearchPromptTests(Fixture):
 
     def test_prompt_truncates_without_partial_content(self):
         import json as _json
+        from mizu.role_state import RoleStateStore
+        self.project.role_state = RoleStateStore(
+            self.project.root / "role-state", max_bytes=8192)
         big = {"pad": "x" * 5000}
         self.project.role_state.replace("searcher", big, expected_generation=0)
         from mizu.runtime import prompt_for
@@ -599,12 +613,15 @@ class RoleStateSessionTests(Fixture):
         # both full and delta prompts: generation and sizes travel,
         # content never does.
         import json as _json
+        from mizu.role_state import RoleStateStore
+        self.project.role_state = RoleStateStore(
+            self.project.root / "role-state", max_bytes=8192)
         big = {"pad": "x" * 5000}
         self.project.role_state.replace("searcher", big, expected_generation=0)
         import dataclasses as _dc2
         config = _dc2.replace(
             self.config,
-            limits=_dc2.replace(self.config.limits,
+            limits=_dc2.replace(self.config.limits, role_state_bytes=8192,
                                 role_state_prompt_bytes=64))
         # A fresh session under tightened bounds: same disk, new stack.
         real_config, self.config = self.config, config
