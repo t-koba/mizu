@@ -119,9 +119,13 @@ if engine == 'claude':
         sys.stdin.readline()
         raise SystemExit(0)
     finish(bridge, resumed=bool(cfg.get('resume')))
-    emit({'type': 'result', 'terminal_reason': 'api_error' if scenario == 'api-error' or (scenario == 'seal-provider-error' and cfg.get('resume')) else 'completed',
-          'subtype': 'success', 'is_error': False, 'session_id': cfg.get('resume') or 'session',
-          'model_usage': {'actual-model': {'inputTokens': 10, 'outputTokens': 5}}})
+    api_error = scenario == 'api-error' or (scenario == 'seal-provider-error' and cfg.get('resume'))
+    result = {'type': 'result', 'terminal_reason': 'api_error' if api_error else 'completed',
+              'subtype': 'success', 'is_error': api_error, 'session_id': cfg.get('resume') or 'session',
+              'model_usage': {'actual-model': {'inputTokens': 10, 'outputTokens': 5}}}
+    if scenario == 'api-error':
+        result['api_error_status'] = 429
+    emit(result)
     sys.stdin.readline()
 else:
     bridge = None

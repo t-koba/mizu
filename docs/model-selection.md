@@ -470,6 +470,11 @@ match provider text without inferring a status code. Codex
 provides failed-turn error details or a `turn/start` RPC error. Its structured
 `codexErrorInfo` is retained under `error.details.codex_error_info`. Claude
 provides terminal reason/subtype/errors, or query-stage exception class/message.
+A validated SDK-supplied `api_error_status` (exact `int` in `100..599`) is
+retained under `error.details.api_error_status` for selector predicates; the
+subtype stays separately in `error.code`. Absent or malformed values leave no
+status fact, and query-stage exceptions never gain an inferred status. No
+retry or fallback classification is derived from the status.
 Unavailable codes and retry times remain null. Only explicit numeric retry times
 are accepted; none of the current adapters derives them from prose or headers.
 Cancellation, native turn/cost/tool-abort limits, invalid handshakes, missing seals and local authorization failures

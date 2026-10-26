@@ -48,11 +48,26 @@ def model_delta(current, baseline):
     return result
 
 
+def validated_api_error_status(event):
+    """SDK-supplied HTTP status for selector evidence, never inferred.
+
+    Only an exact ``int`` in the valid HTTP range is retained; booleans,
+    strings, floats and out-of-range values are dropped so they never
+    become a usable selector fact.
+    """
+    value = event.get('api_error_status')
+    if type(value) is int and 100 <= value <= 599:
+        return value
+    return None
+
+
 def terminal_result(event):
     if event.get('terminal_reason') != 'completed' or event.get('is_error') or event.get('subtype') != 'success':
         if isinstance(event.get('terminal_reason'), str) and event.get('terminal_reason') not in ('aborted', 'cancelled', 'interrupted', 'aborted_tools', 'max_turns', 'max_budget_usd'):
+            status = validated_api_error_status(event)
             raise ModelFailure('claude', kind=event['terminal_reason'], code=event.get('subtype'),
-                               message=event.get('errors') or event.get('subtype', ''))
+                               message=event.get('errors') or event.get('subtype', ''),
+                               details={'api_error_status': status} if status is not None else None)
         raise ProtocolError('Claude query failed: '+str(event.get('terminal_reason'))+' '+str(event.get('errors') or event.get('subtype'))[:4000])
 
 

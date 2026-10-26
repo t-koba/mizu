@@ -946,6 +946,56 @@ class SyntheticEngineTests(Fixture):
                 terminal_result({'terminal_reason': reason})
             self.assertNotIsInstance(caught.exception, ModelFailure)
 
+    def test_claude_api_error_status_is_preserved_as_selector_evidence(self):
+        for status in (429, 503, 401):
+            with self.subTest(status=status), self.assertRaises(ModelFailure) as caught:
+                terminal_result({'terminal_reason': 'api_error', 'subtype': 'success',
+                                 'is_error': True, 'errors': 'synthetic boom',
+                                 'api_error_status': status})
+            evidence = caught.exception.evidence
+            self.assertEqual(evidence['kind'], 'api_error')
+            self.assertEqual(evidence['code'], 'success')
+            self.assertEqual(evidence['details']['api_error_status'], status)
+            self.assertIsNone(evidence['retry_at'])
+        with self.assertRaises(ModelFailure) as caught:
+            terminal_result({'terminal_reason': 'api_error', 'subtype': 'success',
+                             'is_error': True, 'errors': 'synthetic boom'})
+        self.assertNotIn('api_error_status', caught.exception.evidence.get('details', {}))
+        for invalid in (True, False, '429', 429.0, None, 99, 600, 0, -1, 1000, [], {}):
+            with self.subTest(invalid=invalid), self.assertRaises(ModelFailure) as caught:
+                terminal_result({'terminal_reason': 'api_error', 'subtype': 'success',
+                                 'is_error': True, 'errors': 'synthetic boom',
+                                 'api_error_status': invalid})
+            self.assertNotIn('api_error_status', caught.exception.evidence.get('details', {}))
+
+    def test_claude_api_error_status_driver_reaches_selector_without_policy_change(self):
+        from mizu.selection import evaluate
+        with self.assertRaises(ModelFailure) as caught:
+            self.execute('claude', 'api-error')
+        evidence = caught.exception.evidence
+        self.assertEqual(evidence['kind'], 'api_error')
+        self.assertEqual(evidence['code'], 'success')
+        self.assertEqual(evidence['details']['api_error_status'], 429)
+        self.assertIsNone(evidence['retry_at'])
+        facts = {'error': evidence}
+        self.assertTrue(evaluate({'path': 'error.details.api_error_status', 'op': 'eq', 'value': 429}, facts) is True)
+        self.assertTrue(evaluate({'path': 'error.details.api_error_status', 'op': 'eq', 'value': 503}, facts) is False)
+        self.assertTrue(evaluate({'path': 'error.code', 'op': 'eq', 'value': 'success'}, facts) is True)
+        with self.assertRaises(ModelFailure) as absent:
+            terminal_result({'terminal_reason': 'api_error', 'subtype': 'success',
+                             'is_error': True, 'errors': 'synthetic boom'})
+        self.assertIsNot(evaluate({'path': 'error.details.api_error_status', 'op': 'eq', 'value': 429},
+                                  {'error': absent.exception.evidence}), True)
+        with self.assertRaises(ModelFailure) as malformed:
+            terminal_result({'terminal_reason': 'api_error', 'subtype': 'success',
+                             'is_error': True, 'errors': 'synthetic boom',
+                             'api_error_status': True})
+        self.assertIsNot(evaluate({'path': 'error.details.api_error_status', 'op': 'eq', 'value': 1},
+                                  {'error': malformed.exception.evidence}), True)
+        with self.assertRaises(ModelFailure) as query:
+            self.execute('claude', 'query-error')
+        self.assertNotIn('api_error_status', query.exception.evidence.get('details', {}))
+
     def test_post_finish_calls_are_refused(self):
         for engine in ('codex','claude'):
             self.execute(engine,'post-finish')
