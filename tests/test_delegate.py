@@ -75,6 +75,39 @@ class _PollDriver:
 
 
 class DelegateTests(Fixture):
+    def test_delegated_child_cannot_leave_role_owned_check_jobs(self):
+        from mizu import check_jobs
+
+        config = _configured(self)
+        roles = dict(config.roles)
+        original = ("files", "read", "exec", "check_job", "finish")
+        roles["helper"] = dataclasses.replace(roles["helper"], capabilities=original)
+        config = dataclasses.replace(config, roles=roles)
+        configured_capabilities = config.roles["helper"].capabilities
+        seen = {}
+
+        def callback(ctx, prompt, profile):
+            if ctx.role.name == "worker":
+                ctx.handle("delegate", {"role": "helper", "task": "Check delegated grants"})
+                ctx.handle("finish", {"outcome": "continue", "summary": "Root sealed",
+                                      "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+                return
+            seen["capabilities"] = ctx.role.capabilities
+            seen["tools"] = ctx.driver_capabilities
+            with self.assertRaises(Denied):
+                ctx.handle("check_job", {"action": "start", "script": "true"})
+            ctx.handle("finish", {"outcome": "continue", "summary": "Child sealed",
+                                  "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+
+        result = Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(config.roles["helper"].capabilities, configured_capabilities)
+        self.assertIn("exec", seen["capabilities"])
+        self.assertNotIn("check_job", seen["capabilities"])
+        self.assertEqual(set(configured_capabilities) - set(seen["capabilities"]), {"check_job"})
+        self.assertEqual(set(configured_capabilities) - set(seen["tools"]), {"check_job"})
+        self.assertFalse(check_jobs.pending(self.project, "helper"))
+
     def test_children_inherit_parent_charter_after_operator_goal_changes(self):
         from mizu.config import system_context_text
         from mizu.fs import digest

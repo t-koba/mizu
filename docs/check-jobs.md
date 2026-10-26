@@ -20,6 +20,17 @@ refused instead of detached, and `verify` behavior is unchanged (queued and
 frozen when `check_job` is granted). Mode alone does not change queue
 identity or sharing.
 
+## Delegated invocation ownership
+
+A delegated child cannot use the `check_job` capability, even when its
+configured role has that grant for ordinary top-level runs. The configured
+grant remains unchanged; only the ephemeral child role view removes it. As a
+result, child `exec`, `experiment` and `verify` routes run synchronously when
+the corresponding grants are present, and no role-owned asynchronous job or
+standalone check-job wake can outlive the caller-owned delegation. The caller
+keeps whatever capabilities it already had, including its own waiting path when
+it holds `check_job`.
+
 ## Opt-in disk-backed experiment scratch
 
 Queued custom experiments accept `scratch_paths`, an array of unique names from

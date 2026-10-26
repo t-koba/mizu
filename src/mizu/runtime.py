@@ -3468,8 +3468,13 @@ class Engine:
         # caller, a consistent read view otherwise. The child unit needs a
         # terminal seal, ensured here by the mechanism (idempotent when the
         # configured role already carries finish for its own top-level runs).
-        role = dataclasses.replace(role, workspace=parent.role.workspace,
-                                   capabilities=tuple(dict.fromkeys([*role.capabilities, "finish"])))
+        role = dataclasses.replace(
+            role, workspace=parent.role.workspace,
+            # Async check jobs belong to a top-level role invocation. A
+            # delegated child is owned by its caller and cannot leave a
+            # role-owned job (or standalone wake) behind after it returns.
+            capabilities=tuple(c for c in dict.fromkeys([*role.capabilities, "finish"])
+                               if c != "check_job"))
         parent.close_exec()
         capture = parent.project.snapshots.capture_files(parent.workspace)
         snap = parent.project.snapshots.create(capture, goal=parent.goal, state=parent.snapshot["state"],
