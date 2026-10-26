@@ -83,6 +83,37 @@ Experiment `3a2e941a2322b6589655ab68b194cc07b4ee2c365d760fd89beb4bc04fcfc742` us
 
 These maxima are not meaningful p95 estimates with `n=5`. The mixed timings do not demonstrate a speedup: order effects/noise remain, and integrated shared-store validation is omitted. These are local full-prompt construction measurements, not model latency or a causal scan-dominance result. A production slice must measure matched workloads with source validation, current eligibility and aggregate prompt limits in place.
 
+### Production-safe projection/read baseline
+
+Experiment `83aee77506a2ccd56eb73538673e15ba7873236239cfee7f6f88b37c99acd13c`,
+command evidence `104c57b71b924d9b8cc4ba7bbf91586c`, used code digest
+`089ee4252ec14dc7e3146ed3032e39ab4efe116c2209593de0135ac47beec6db`. It made
+205 short rejected insights in a disposable `Fixture`, then compared the legacy
+reader with a prototype using `project_decision_records()` plus the production
+`SharedRecords.get/received/freeze` paths. Five samples alternated order. No
+legacy or shared receipts existed; both event lists matched after removing the
+role-specific token, and both full prompts used the same `prompt_for()`. The
+shared timing includes full source reconciliation, exact idempotent record
+validation, safe record reads, receipt checks and manifest creation; there is no
+active shared reader yet.
+
+| Rows | Legacy scan median / sample max | Projection + shared read/freeze median / sample max | Legacy / shared event bytes | Legacy / shared full-prompt bytes |
+|---:|---:|---:|---:|---:|
+| 10 | 212.563 / 270.555 ms | 709.656 / 783.823 ms | 3,632 / 3,632 | 6,453 / 6,453 |
+| 100 | 223.728 / 289.990 ms | 657.122 / 787.655 ms | 36,302 / 36,302 | 41,284 / 41,284 |
+
+Prompt construction medians were 102.730 / 108.608 ms for 10 rows and 129.936 /
+124.301 ms for 100 rows (legacy / shared); with only five samples, sample maxima
+are not p95 estimates and the mixed timings show no prompt speedup. The one cold
+205-record projection took 466.016 ms. Retained `decision-history` bytes were
+43,050; shared immutable record bytes were 115,620; receipt bytes were zero in
+both stores, so receipt storage was not measured. This small fixture measures
+serialized shape, not large-body/evidence tails or an integrated run. In this
+prototype, the extra safe projection/read work is slower than the legacy scan;
+it does not justify adding an index. Use it as a baseline only, then measure the
+actual bounded shadow-page builder and receipt path before choosing a byte
+budget or index.
+
 ## Persistence-only decision-source adapter
 
 `Insights.project_decision_records(limit=512)` is an explicit host-only migration/
