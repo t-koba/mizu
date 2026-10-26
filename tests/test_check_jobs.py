@@ -49,6 +49,8 @@ class JobTests(Fixture):
         result = check_jobs.result(later, job['id'])
         self.assertTrue(result['accepted_for_current_source'])
         self.assertTrue(later.verification['passed'])
+        self.assertNotIn('cache_input', result['result'])
+        self.assertNotIn('cache_output', result['result'])
         self.assertTrue(check_jobs.pending(self.project, 'worker'))
         check_jobs.acknowledge(self.project, 'worker', later.check_results_read)
         self.assertFalse(check_jobs.pending(self.project, 'worker'))
@@ -1610,12 +1612,12 @@ class CacheInputTests(Fixture):
         # Dispatch revalidates under cache exclusion, without queue exclusion.
         with patch.object(check_jobs, 'cache_input', side_effect=fingerprint):
             self.run_job()
-        # Result's dependency/cache work also runs outside the queue lock.
+        # Import checks dependencies outside queue exclusion, not live caches.
         real_environment = check_jobs.execution_environment
         def environment(project, job):
             self.assertFalse(held(queue_lock))
             return real_environment(project, job)
-        with patch.object(check_jobs, 'cache_input', side_effect=fingerprint), patch.object(check_jobs, 'execution_environment', side_effect=environment):
+        with patch.object(check_jobs, 'cache_input', side_effect=AssertionError('Import must not hash outputs')), patch.object(check_jobs, 'execution_environment', side_effect=environment):
             self.assertTrue(check_jobs.result(ctx, first['id'])['accepted_for_current_source'])
 
     def test_mutating_build_cache_still_moves_back_and_is_next_input(self):
@@ -1628,17 +1630,86 @@ class CacheInputTests(Fixture):
                 artifact.write_text('built ' + str(len(observed)))
                 return super().execute(workspace, script, **kwargs)
         ctx = self.context()
+        initial_input = self.fingerprint()
         first = check_jobs.submit(ctx)
         self.assertTrue(self.run_job(Compiler)['passed'])
-        self.assertFalse(check_jobs.result(ctx, first['id'])['accepted_for_current_source'])
+        result = check_jobs.result(ctx, first['id'])
+        self.assertTrue(result['accepted_for_current_source'])
+        record = result['result']
+        self.assertEqual(record['cache_input'], initial_input)
+        self.assertEqual(record['cache_output'], self.fingerprint())
+        self.assertNotEqual(record['cache_input'], record['cache_output'])
+        self.assertEqual(check_jobs.read(self.project, first['id'])['cache_input'], initial_input)
+        self.assertEqual(ctx.verification, record)
+        self.assertEqual(read_json(ctx.run_dir / 'verification.json'), record)
         self.assertEqual((self.cache / 'object').read_text(), 'built 1')
+        reader = self.context('reviewer')
+        self.assertEqual(check_jobs.available(reader), [])
+        with self.assertRaises(Denied):
+            check_jobs.join(reader, first['id'])
         second = check_jobs.submit(ctx)
         self.assertNotEqual(first['id'], second['id'])
+        self.assertNotIn('shared_job', second)
+        self.assertEqual(check_jobs.read(self.project, second['id'])['cache_input'], record['cache_output'])
         self.assertTrue(self.run_job(Compiler)['passed'])
+        result = check_jobs.result(ctx, second['id'])
+        self.assertTrue(result['accepted_for_current_source'])
+        self.assertEqual(result['result']['cache_input'], record['cache_output'])
+        self.assertEqual(result['result']['cache_output'], self.fingerprint())
         self.assertEqual(observed, [None, 'built 1'])
         self.assertEqual((self.cache / 'object').read_text(), 'built 2')
         self.assertFalse((ctx.workspace / 'target').exists())
 
+    def test_import_requires_bound_job_input_and_matching_echo_when_present(self):
+        ctx = self.context()
+        job = check_jobs.submit(ctx)
+        self.assertTrue(self.run_job()['passed'])
+        directory = check_jobs.root(self.project) / job['id']
+        original_job = read_json(directory / 'job.json')
+        original_result = read_json(directory / 'result.json')
+        legacy_result = {k: v for k, v in original_result.items()
+                         if k not in ('cache_input', 'cache_output')}
+        self.seed('later cache input')
+        self.assertNotEqual(self.fingerprint(), original_job['cache_input'])
+        for record in (original_result, legacy_result):
+            write_json(directory / 'result.json', record)
+            # The legacy result is usable only with its bound execution input.
+            write_json(directory / 'job.json', original_job)
+            self.assertTrue(check_jobs.result(ctx, job['id'])['accepted_for_current_source'])
+            for value in (None, '', 'unbound', 123):
+                with self.subTest(echo='cache_input' in record, value=value):
+                    write_json(directory / 'job.json', {**original_job, 'cache_input': value})
+                    self.assertFalse(check_jobs.result(ctx, job['id'])['accepted_for_current_source'])
+            write_json(directory / 'job.json', {k: v for k, v in original_job.items() if k != 'cache_input'})
+            self.assertFalse(check_jobs.result(ctx, job['id'])['accepted_for_current_source'])
+        write_json(directory / 'job.json', original_job)
+        for value in (None, 'f' * 64):
+            write_json(directory / 'result.json', {**original_result, 'cache_input': value})
+            self.assertFalse(check_jobs.result(ctx, job['id'])['accepted_for_current_source'])
+
+    def test_unbindable_output_does_not_change_pass_or_input_identity(self):
+        self.config = dataclasses.replace(self.config,
+            sandbox=dataclasses.replace(self.config.sandbox, check_input_bytes=4))
+        self.project.config = self.config
+        class Compiler(FakeSandbox):
+            def execute(inner, workspace, script, **kwargs):
+                (workspace / 'target').mkdir()
+                (workspace / 'target/object').write_text('built')
+                return super().execute(workspace, script, **kwargs)
+        ctx = self.context()
+        initial_input = self.fingerprint()
+        job = check_jobs.submit(ctx)
+        self.assertTrue(self.run_job(Compiler)['passed'])
+        result = check_jobs.result(ctx, job['id'])
+        self.assertTrue(result['accepted_for_current_source'])
+        self.assertTrue(result['result']['passed'])
+        self.assertEqual(result['result']['cache_input'], initial_input)
+        self.assertIsNone(result['result']['cache_output'])
+        self.assertEqual(check_jobs.read(self.project, job['id'])['cache_input'], initial_input)
+        self.assertEqual((self.cache / 'object').read_text(), 'built')
+        self.assertEqual(check_jobs.available(self.context('reviewer')), [])
+        with self.assertRaises(Denied):
+            check_jobs.submit(ctx)
 
     def test_running_result_does_not_wait_for_its_cache_owner(self):
         ctx = self.context()

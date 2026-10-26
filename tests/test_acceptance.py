@@ -1033,7 +1033,7 @@ class AcceptanceTests(Fixture):
         with self.assertRaises(TypeError):
             acceptance.scope(self.project, _cache_locked=True)
 
-    def test_cache_input_is_bound_to_retained_scope_and_current_import(self):
+    def test_cache_input_binds_retained_lookup_but_not_live_cache_on_import(self):
         cache = self.configure_cache()
         ctx, job, proof = self.produce()
         receipt = acceptance.get(self.project.root, proof['receipt_id'])
@@ -1044,8 +1044,9 @@ class AcceptanceTests(Fixture):
         (cache / 'object').write_text('different input')
         self.assertIsNone(acceptance.effective(self.project, ctx.snapshot))
         later = self.context()
-        self.assertFalse(check_jobs.result(later, job['id'])['accepted_for_current_source'])
-        self.assertIsNone(later.verification)
+        imported = check_jobs.result(later, job['id'])
+        self.assertTrue(imported['accepted_for_current_source'])
+        self.assertEqual(later.verification['cache_input'], original['cache_input'])
         # The old receipt remains auditable but cannot attest the new inputs.
         self.assertEqual(acceptance.get(self.project.root, proof['receipt_id']), receipt)
         self.assertEqual(acceptance.audit(self.project.root), 1)
@@ -1137,7 +1138,7 @@ class AcceptanceTests(Fixture):
         new_proof = acceptance.effective(self.project, ctx.snapshot)
         self.assertNotEqual(new_proof['receipt_id'], proof['receipt_id'])
 
-    def test_mutated_cache_retains_pre_execution_proof_not_post_execution_pass(self):
+    def test_mutated_cache_proof_is_importable_but_not_reusable_for_output(self):
         cache = self.configure_cache()
         ctx = self.context()
         job = check_jobs.submit(ctx)
@@ -1154,7 +1155,13 @@ class AcceptanceTests(Fixture):
         self.assertNotEqual(acceptance.scope(self.project)['cache_input'], before)
         self.assertIsNone(acceptance.effective(self.project, ctx.snapshot))
         self.assertEqual((cache / 'object').read_text(), 'compiled')
-        self.assertFalse(check_jobs.result(ctx, job['id'])['accepted_for_current_source'])
+        imported = check_jobs.result(ctx, job['id'])
+        self.assertTrue(imported['accepted_for_current_source'])
+        self.assertEqual(imported['result']['cache_input'], before)
+        self.assertEqual(imported['result']['cache_output'], acceptance.scope(self.project)['cache_input'])
+        self.assertEqual(original['cache_input'], before)
+        self.assertEqual(check_jobs.available(self.context('reviewer')), [])
+        self.assertNotIn('shared_job', check_jobs.submit(self.context()))
 
     def test_legacy_unbound_scope_does_not_match_configured_cache(self):
         self.configure_cache()
@@ -1172,7 +1179,7 @@ class AcceptanceTests(Fixture):
         self.assertIsNone(acceptance.effective(self.project, ctx.snapshot))
         self.assertIsNotNone(acceptance.get(self.project.root, legacy_id))
 
-    def test_unbound_cache_disables_scope_and_current_acceptance(self):
+    def test_unbound_live_cache_disables_lookup_but_not_bound_result_import(self):
         cache = self.configure_cache()
         ctx, job, proof = self.produce()
         cache.mkdir(parents=True)
@@ -1180,13 +1187,13 @@ class AcceptanceTests(Fixture):
         self.configure(check_input_bytes=1)
         self.assertIsNone(acceptance.scope(self.project))
         self.assertIsNone(acceptance.effective(self.project, ctx.snapshot))
-        self.assertFalse(check_jobs.result(ctx, job['id'])['accepted_for_current_source'])
+        self.assertTrue(check_jobs.result(ctx, job['id'])['accepted_for_current_source'])
         self.assertIsNotNone(acceptance.get(self.project.root, proof['receipt_id']))
         self.configure(check_input_bytes=8589934592)
         (cache / 'object').unlink()
         self.symlink(self.root / 'outside', cache / 'object')
         self.assertIsNone(acceptance.scope(self.project))
-        self.assertFalse(check_jobs.result(ctx, job['id'])['accepted_for_current_source'])
+        self.assertTrue(check_jobs.result(ctx, job['id'])['accepted_for_current_source'])
 
     def test_cache_scope_must_match_producer_and_be_a_digest(self):
         self.configure_cache()

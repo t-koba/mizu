@@ -347,14 +347,20 @@ submit again. Custom checks without configured verification caches retain their
 independent behavior.
 
 Checks may legitimately mutate caches and still produce a passing result. Their
-proof binds the **pre-execution** cache input, not the staged-back output. Result
-import and retained-acceptance lookup compare the current fingerprint with that
-input while holding `check-cache.lock` through import or final index/receipt
-selection: cache mutation therefore requires a new check before current acceptance
-can be imported. Old receipts lacking `cache_input` remain auditable, but cannot
-match when verification caches are configured. No-cache scopes retain their
-existing form. Experiments, including cache-backed custom scratch, never mint
-configured verification acceptance.
+proof binds the **pre-execution** `cache_input`, not the staged-back output.
+Result import checks that immutable job input (and a matching result echo when
+present), along with current source, commands, execution environment and grants;
+it does not compare the live cache with that input. Older results without the
+echo can still be imported when their job binds a trustworthy input. After
+artifacts are staged back, `cache_output` records their fingerprint separately;
+an unbindable output is reported as null without changing the pass result.
+Later discovery, joining, submission and retained-acceptance lookup still compare
+the current cache fingerprint with the original input under `check-cache.lock`,
+never with `cache_output`: changed inputs require a new execution, not reuse of
+the old proof. Old jobs or receipts lacking `cache_input` remain auditable, but
+cannot match when verification caches are configured. No-cache scopes retain
+their existing form. Experiments, including cache-backed custom scratch, never
+mint configured verification acceptance.
 
 Development and CI can use `python scripts/check.py --fail-fast` to report a
 Python contract failure immediately instead of spending minutes running the

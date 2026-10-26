@@ -693,32 +693,37 @@ def result(context, job_id):
     output = summary(job)
     if job['status'] not in ('completed', 'interrupted', 'refused', 'cancelled', 'cleanup_failed'):
         return output
-    with cache_guard(project) if job['kind'] == 'verify' and job['status'] == 'completed' else contextlib.nullcontext():
-        record = read_json(root(project) / job.get('shared_job', job_id) / 'result.json', {})
-        output['result'] = record
-        if job['kind'] == 'verify' and job['status'] in ('completed', 'refused', 'interrupted', 'cleanup_failed'):
-            output['accepted_for_current_source'] = False
-        if job['kind'] == 'verify' and job['status'] == 'completed' and record.get('passed'):
-            context.close_exec()
-            capture = project.snapshots.capture_files(context.workspace)
-            matches = (not capture['skipped'] and capture['code_digest'] == job['code_digest']
-                       and execution_key(context.config) == job['execution']
-                       and list(project.verify) == job['commands']
-                       and cache_matches(project, job, cache_input(project))
-                       and (not job.get('inputs_bound_required') or job.get('environment') is not None)
-                       and (job.get('environment') is None or execution_environment(project, job) == job['environment'])
-                       and 'verify' in context.role.capabilities)
-            with lock(project.root / 'locks/check-jobs.lock'):
-                # A subscriber may have detached while inputs were inspected.
-                matches = matches and read(project, job_id)['status'] == 'completed'
-                output['accepted_for_current_source'] = matches
-                if matches:
-                    context.verification = record
-                    write_json(context.run_dir / 'verification.json', record)
-        consumed = getattr(context, 'check_results_read', set())
-        consumed.add(job_id)
-        context.check_results_read = consumed
-        return output
+    record = read_json(root(project) / job.get('shared_job', job_id) / 'result.json', {})
+    output['result'] = record
+    if job['kind'] == 'verify' and job['status'] in ('completed', 'refused', 'interrupted', 'cleanup_failed'):
+        output['accepted_for_current_source'] = False
+    if job['kind'] == 'verify' and job['status'] == 'completed' and record.get('passed'):
+        context.close_exec()
+        capture = project.snapshots.capture_files(context.workspace)
+        # Import the execution's proof, not its mutable compiler outputs.
+        # Older results may omit the echo, but the job must still bind an input.
+        bound_input = job.get('cache_input')
+        cache_bound = (not project.config.sandbox.check_cache_paths
+                       or isinstance(bound_input, str) and DIGEST.fullmatch(bound_input) is not None
+                       and record.get('cache_input', bound_input) == bound_input)
+        matches = (not capture['skipped'] and capture['code_digest'] == job['code_digest']
+                   and execution_key(context.config) == job['execution']
+                   and list(project.verify) == job['commands']
+                   and cache_bound
+                   and (not job.get('inputs_bound_required') or job.get('environment') is not None)
+                   and (job.get('environment') is None or execution_environment(project, job) == job['environment'])
+                   and 'verify' in context.role.capabilities)
+        with lock(project.root / 'locks/check-jobs.lock'):
+            # A subscriber may have detached while inputs were inspected.
+            matches = matches and read(project, job_id)['status'] == 'completed'
+            output['accepted_for_current_source'] = matches
+            if matches:
+                context.verification = record
+                write_json(context.run_dir / 'verification.json', record)
+    consumed = getattr(context, 'check_results_read', set())
+    consumed.add(job_id)
+    context.check_results_read = consumed
+    return output
 
 
 
@@ -1077,6 +1082,8 @@ def _execute(project, job, stop, sandbox_factory, slot):
                       'stdout': text_preview(r.get('stdout', ''), 512)[0],
                       'stderr': text_preview(r.get('stderr', ''), 512)[0],
                       'evidence': 'check-jobs/' + job['id'] + '/commands/' + r['id'] + '.json'} for r in results]}
+        if job['kind'] == 'verify' and project.config.sandbox.check_cache_paths:
+            record['cache_input'] = job['cache_input']
         write_json(directory / 'result.json', record)
         job.update(status='cancelled' if (directory / 'cancel.json').exists() else 'completed', passed=passed and not (directory / 'cancel.json').exists(), finished_at=now())
     except Exception as exc:
@@ -1101,6 +1108,11 @@ def _execute(project, job, stop, sandbox_factory, slot):
                 artifact = workspace / name
                 if project.snapshots.excluded(name) and artifact.is_dir() and not artifact.is_symlink():
                     artifact.replace(cache / name)
+            if project.config.sandbox.check_cache_paths:
+                # Informational only: unbindable outputs do not invalidate the
+                # proof of this execution or replace its immutable input.
+                record['cache_output'] = cache_input(project)
+                write_json(directory / 'result.json', record)
         if not job.get('scratch_paths'):
             shutil.rmtree(directory / 'input', ignore_errors=True)
     clean_scratch = (bool(job.get('scratch_paths')) and job['status'] == 'completed'
