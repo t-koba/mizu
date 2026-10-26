@@ -1,16 +1,19 @@
 """Official Python Agent SDK driver; one admission measures one query."""
 import contextlib
 import math
-import time
+import os
 import shutil
+import stat
+import tempfile
+import time
 from pathlib import Path
 
 from .bridge import Bridge
 from .drivers import admit_invocation
 from .engine_channel import Channel
 from .config import system_context_text
-from .engine_config import effective, connected_servers, mizu_server, session_record, save_session
-from .errors import ProtocolError, ModelFailure
+from .engine_config import effective, connected_servers, mizu_server, resource_digest, session_record, save_session
+from .errors import ConfigError, ProtocolError, ModelFailure
 from .fs import mkdir, write_json
 from .process import environment
 from .protocol import tool_definitions
@@ -53,6 +56,119 @@ def terminal_result(event):
         raise ProtocolError('Claude query failed: '+str(event.get('terminal_reason'))+' '+str(event.get('errors') or event.get('subtype'))[:4000])
 
 
+def _skill_target_name(source: Path) -> str:
+    """Runtime-owned skill directory name for one configured source."""
+    name = source.stem
+    if not name or name in ('.', '..') or '/' in name or '\\' in name or '\x00' in name:
+        raise ConfigError('Invalid local skill name')
+    return name
+
+
+def _verify_staged_skill(source: Path, target: Path, expected: str) -> None:
+    """Accept only a verified identical stage; never repair staged content.
+
+    A pre-existing staged path is reused only when it holds exactly the
+    current reviewed source: a real directory whose tree matches (a
+    single-file source is staged as exactly SKILL.md). Symlinks, extra
+    entries and changed bytes are refused instead of overwritten, so an
+    untrusted path never becomes trusted by repair.
+    """
+    if target.is_symlink():
+        raise ConfigError('Untrusted staged skill content')
+    if source.is_symlink():
+        raise ConfigError('Resource symlinks are not permitted')
+    if resource_digest(source) != expected:
+        raise ConfigError('Engine resource digest mismatch')
+    if source.is_dir():
+        if not target.is_dir():
+            raise ConfigError('Staged skill content mismatch')
+        try:
+            staged = resource_digest(target)
+        except ConfigError as exc:
+            raise ConfigError('Untrusted staged skill content') from exc
+        if staged != expected:
+            raise ConfigError('Staged skill content mismatch')
+        return
+    if not source.is_file():
+        raise ConfigError('Resource must be local content')
+    if not target.is_dir():
+        raise ConfigError('Staged skill content mismatch')
+    try:
+        entries = sorted(target.iterdir(), key=lambda item: item.name)
+    except OSError as exc:
+        raise ConfigError('Untrusted staged skill content') from exc
+    for entry in entries:
+        if entry.is_symlink():
+            raise ConfigError('Untrusted staged skill content')
+    if len(entries) != 1 or entries[0].name != 'SKILL.md' or not entries[0].is_file():
+        raise ConfigError('Staged skill content mismatch')
+    if entries[0].read_bytes() != source.read_bytes():
+        raise ConfigError('Staged skill content mismatch')
+
+
+def _skill_stage_directory(path: Path) -> None:
+    """Create or reuse a runtime-owned directory, never a symlink or file."""
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        mkdir(path)
+        return
+    if not stat.S_ISDIR(mode):
+        raise ConfigError('Untrusted skill staging directory')
+
+
+def _stage_skill_source(source: Path, target: Path, expected: str) -> None:
+    """Publish one verified skill stage atomically, or reuse an identical one.
+
+    New content is assembled in a temporary sibling and renamed only after it
+    verifies identical, so an interrupted copy never leaves a trusted partial
+    target behind; a later dispatch retries from the same reviewed source.
+    """
+    if os.path.lexists(target):
+        _verify_staged_skill(source, target, expected)
+        return
+    staging = Path(tempfile.mkdtemp(prefix='.staging-', dir=target.parent))
+    try:
+        if source.is_symlink():
+            raise ConfigError('Resource symlinks are not permitted')
+        if source.is_dir():
+            shutil.copytree(source, staging, symlinks=True, dirs_exist_ok=True)
+        elif source.is_file():
+            if resource_digest(source) != expected:
+                raise ConfigError('Engine resource digest mismatch')
+            shutil.copy2(source, staging / 'SKILL.md')
+        else:
+            raise ConfigError('Resource must be local content')
+        # The assembled copy verifies before it becomes the trusted target,
+        # so a source that changed mid-copy (a new symlink, for example) is
+        # refused while the published path is still untouched.
+        _verify_staged_skill(source, staging, expected)
+        if os.path.lexists(target):
+            # A sequential dispatch published first; reuse it when identical.
+            _verify_staged_skill(source, target, expected)
+        else:
+            os.rename(staging, target)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def _stage_claude_skills(root: Path, skills) -> None:
+    """Stage reviewed skill sources under the runtime-owned skills directory.
+
+    Repeated dispatches in one persistent session reuse the verified
+    identical stage instead of failing; duplicate configured names, changed
+    content and untrusted pre-existing paths are refused before any launch.
+    """
+    names = [_skill_target_name(Path(item['path'])) for item in skills]
+    if len(set(names)) != len(names):
+        raise ConfigError('Duplicate local skill name')
+    if names:
+        for directory in (root, root / '.claude', root / '.claude/skills'):
+            _skill_stage_directory(directory)
+    for item, name in zip(skills, names):
+        _stage_skill_source(Path(item['path']), root/'.claude/skills'/name, item['sha256'])
+
+
 class ClaudeDriver:
     requires_sandbox = True
 
@@ -68,7 +184,7 @@ class ClaudeDriver:
         context.model_evidence = {'profile': profile, **self.config.model(profile), 'engine': 'claude',
                                   'requests': 0, 'request_unit': 'query', 'usage': [], 'usage_known': False}
         cwd = (path.parent if settings['session'] == 'persistent' and not context.ephemeral else context.run_dir)/'controller'
-        mkdir(cwd)
+        _skill_stage_directory(cwd)
         with Bridge(context.handle, tool_definitions(context.driver_capabilities), timeout=self.config.limits.model_request_seconds,
                     on_close=context.cancel_operations) as bridge:
             servers = connected_servers(context, settings)
@@ -78,21 +194,9 @@ class ClaudeDriver:
             for resource in settings['resources']:
                 if resource['kind'] == 'plugin':
                     plugins.append({'type': 'local', 'path': resource['path']})
-                elif resource['kind'] == 'skill':
-                    source = Path(resource['path'])
-                    target = cwd/'.claude/skills'/source.stem
-                    if target.exists():
-                        from .errors import ConfigError
-                        raise ConfigError('Duplicate local skill name')
-                    mkdir(target.parent)
-                    if source.is_dir():
-                        shutil.copytree(source, target)
-                    else:
-                        mkdir(target)
-                        shutil.copy2(source, target/'SKILL.md')
-                else:
-                    from .errors import ConfigError
+                elif resource['kind'] != 'skill':
                     raise ConfigError('Unsupported Claude resource kind')
+            _stage_claude_skills(cwd, [item for item in settings['resources'] if item['kind'] == 'skill'])
             if plugins:
                 options['plugins'] = plugins
 
