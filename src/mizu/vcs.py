@@ -435,8 +435,10 @@ def require_go_approval(project, branch: str, code_digest: str,
     the merge will act on.
     Trust: local insight inbox plus ``decisions/`` records; the approval
     insight must carry source ``operator`` (``mizu insight submit``) and the
-    ``accept`` decision must carry run ``operator`` (``mizu insight decide``).
-    The opaque ``origin`` label is ignored here: it never grants approval.
+    ``accept`` decision must carry run ``operator`` (``mizu insight decide``)
+    and its recorded revision must equal the current inbox revision; revising
+    the GO content requires a fresh decision. The opaque ``origin`` label is
+    ignored here: it never grants approval.
     Model-submitted insights (source is the role name) and model decisions
     (run is the run directory name) never satisfy this gate. Use a dedicated
     publisher role without ``decide`` (refused together with lifecycle
@@ -449,8 +451,9 @@ def require_go_approval(project, branch: str, code_digest: str,
     approval bound to this publication. Failure: ``Denied`` when no matching
     title exists, when the digest line is missing/stale, when the source or
     decision run is not the operator channel, or when the matching
-    record is undecided or not ``accept``, or -- for merges -- when the
-    approval carries no endpoint binding or binds a different destination
+    record is undecided or not ``accept``, when the accept revision differs
+    from the current inbox revision, or -- for merges -- when the approval
+    carries no endpoint binding or binds a different destination
     or proposal content. Stale digests are refused even when an older
     approval exists; a digest-only approval never authorizes a merge.
     """
@@ -476,6 +479,7 @@ def require_go_approval(project, branch: str, code_digest: str,
     inbox = project.root / "inbox"
     saw_title = False
     saw_stale = False
+    saw_stale_revision = False
     saw_undecided = False
     saw_refused = False
     saw_forged = False
@@ -524,6 +528,11 @@ def require_go_approval(project, branch: str, code_digest: str,
             saw_undecided = True
             continue
         if decision.get("action") == "accept" and decision.get("run") == OPERATOR_RUN:
+            item_rev, decision_rev = item.get("rev"), decision.get("rev")
+            if (type(item_rev) is not int or item_rev < 1
+                    or type(decision_rev) is not int or decision_rev != item_rev):
+                saw_stale_revision = True
+                continue
             return {"insight": insight_id, "branch": branch,
                     "code_digest": code_digest}
         if decision.get("action") == "accept":
@@ -532,6 +541,8 @@ def require_go_approval(project, branch: str, code_digest: str,
         saw_refused = True
     if saw_forged:
         raise Denied("Publication approval must come from the operator channel")
+    if saw_stale_revision:
+        raise Denied("Recorded human approval is stale for this insight revision")
     if saw_refused or saw_undecided:
         raise Denied("Publication approval is not accepted for this code digest")
     if saw_stale:

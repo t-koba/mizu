@@ -54,7 +54,8 @@ timeout and no shell; the host fetches upstream refs and injects them read-only.
 
 ## ADR-009 — VCS publish behind recorded human approval, read/publish split
 `vcs_read` cannot publish; `vcs_publish` needs an accepted `GO <branch>` insight carrying
-the exact `code_digest`. Stale digests are refused. CI status uses the dedicated bounded cache and
+the exact `code_digest`, with the accept decision bound to that same insight revision.
+Stale digests and revisions are refused. CI status uses the dedicated bounded cache and
 SHA/check/run-aware wake path; receipt-pinned CI waits deliver success or failure.
 CI results do not create duplicate insight decisions.
 
@@ -110,8 +111,9 @@ toward the brake; see `runtime.py`/`errors.py`.
 
 ## ADR-018 — Operator-channel publication approval
 `GO <branch>` approvals count only from the operator channel with an
-operator-run accept decision; model submits and decides are refused as
-forged. Configs combining publish with insight submit/decide fail to load.
+operator-run accept decision on the exact current insight revision; revising
+the GO content requires a fresh decision. Model submits and decides are
+refused as forged. Configs combining publish with insight submit/decide fail to load.
 
 ## ADR-019 — Digest-bound publication adapter
 As refined by ADR-049, `vcs_publish` sends the approved whole-capture

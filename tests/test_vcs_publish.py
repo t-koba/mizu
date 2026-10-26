@@ -106,6 +106,25 @@ class VcsPublishTests(PublishFixture):
         with self.assertRaisesRegex(Denied, "stale"):
             ctx.handle("vcs_publish", {"op": "push", "branch": "main"})
 
+    def test_revised_go_requires_a_decision_for_the_current_revision(self):
+        original_digest, revised_digest = "a" * 64, "b" * 64
+        record = approve(self, "main", original_digest)
+        revised = self.project.insights.revise(
+            record["id"], source="operator", title=record["title"],
+            body=f"Ship it.\ndigest: {revised_digest}\n",
+            base_snapshot=record["base_snapshot"], run="operator",
+            expected_rev=record["rev"])
+        self.assertEqual(revised["rev"], 2)
+        self.assertIsNone(self.project.insights.read(record["id"]).get("decision"))
+        with self.assertRaisesRegex(Denied, "stale.*revision"):
+            vcs.require_go_approval(self.project, "main", revised_digest)
+
+        self.project.insights.decide(record["id"], "accept", "reviewed new digest", "",
+                                     "operator", expected_rev=revised["rev"])
+        approval = vcs.require_go_approval(self.project, "main", revised_digest)
+        self.assertEqual(approval["insight"], record["id"])
+        self.assertEqual(approval["code_digest"], revised_digest)
+
     def test_accepted_digest_publishes(self):
         config, role = with_caps(self, "worker", ["vcs_publish"])
         config = dataclasses.replace(config, vcs=adapter_settings(PUSH_OK))
