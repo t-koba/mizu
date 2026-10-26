@@ -87,9 +87,10 @@ class DecisionReceiptTests(Fixture):
         self.assertEqual(self.rows("searcher", sources="any"), [other])
 
     def test_legacy_cursor_cannot_hide_equal_time_batches_or_partial_holes(self):
+        # These fixtures target receipt behavior; auto-ID dedup is covered separately in test_insight_archive.
         with patch("mizu.insights.now", return_value="2026-01-01T00:00:00+00:00"):
             for i in range(205):
-                _reject(self.project, "reviewer", title=f"Finding {i}")
+                _reject(self.project, "reviewer", title=f"Finding {i}", insight_id=f"{i:032x}")
         ids = sorted(p.stem for p in (self.project.root / "decision-history").glob("*.json"))
         write_json(self.project.root / "decision-cursors/reviewer.json",
                    {"role": "reviewer", "acknowledged_at": "2099-01-01T00:00:00+00:00",

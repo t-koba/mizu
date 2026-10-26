@@ -25,9 +25,10 @@ class SharedDecisionPageTests(unittest.TestCase):
         self.insights = Insights(self.root)
         self.store = SharedRecords(self.root, {"insight.decision": INSIGHT_DECISION_POLICY})
 
-    def decide(self, index=0, *, action="reject", source="reviewer", body=None):
+    def decide(self, index=0, *, action="reject", source="reviewer", body=None, insight_id=None):
         item = self.insights.submit(source=source, title=f"Finding {index}",
-                                    body=body or f"Exact body {index}", base_snapshot=None)
+                                    body=body or f"Exact body {index}", base_snapshot=None,
+                                    **({"insight_id": insight_id} if insight_id is not None else {}))
         self.insights.decide(item["id"], action, "Exact reason", "Exact revisit", "test",
                              expected_rev=1, **({"work_item_intent": "none"}
                                                if action in ("accept", "modify") else {}))
@@ -68,9 +69,11 @@ class SharedDecisionPageTests(unittest.TestCase):
     def test_205_events_utc_then_stable_id_order_and_receipt_replay(self):
         stamps = ("2026-01-01T01:00:00+01:00", "2025-12-31T19:00:00-05:00",
                   "2026-01-01T00:00:01+00:00", "2026-01-01T00:00:00+00:00")
+        # These fixtures target page behavior; auto-ID dedup is covered separately in test_insight_archive.
         for i in range(205):
             with patch("mizu.insights.now", return_value=stamps[i % len(stamps)]):
-                self.decide(i, action=ACTIONS[i % 4], source="reviewer" if i % 2 else "searcher")
+                self.decide(i, insight_id=f"{i:032x}", action=ACTIONS[i % 4],
+                            source="reviewer" if i % 2 else "searcher")
         projected = self.insights.project_decision_records()
         expected = sorted(projected, key=lambda key: (
             dt.datetime.fromisoformat(self.store.get(key)[0]["created_at"]).astimezone(dt.timezone.utc), key))

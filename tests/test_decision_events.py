@@ -15,9 +15,10 @@ def _trigger_config(config, role="reviewer", events=("reject",)):
     return dataclasses.replace(config, roles=roles)
 
 
-def _reject(project, source, title="Finding"):
+def _reject(project, source, title="Finding", insight_id=None):
     item = project.insights.submit(source=source, title=title, body="evidence",
-                                   base_snapshot=project.snapshots.get()["id"])
+                                   base_snapshot=project.snapshots.get()["id"],
+                                   **({"insight_id": insight_id} if insight_id is not None else {}))
     project.insights.decide(item["id"], "reject", "not material", "", "test", expected_rev=1)
     return item
 

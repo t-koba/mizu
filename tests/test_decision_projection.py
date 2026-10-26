@@ -23,10 +23,11 @@ class DecisionProjectionTests(unittest.TestCase):
         self.insights = Insights(self.root)
         self.store = SharedRecords(self.root, {"insight.decision": INSIGHT_DECISION_POLICY})
 
-    def decide(self, index=0, *, action="reject", source="reviewer", evidence=False):
+    def decide(self, index=0, *, action="reject", source="reviewer", evidence=False, insight_id=None):
         item = self.insights.submit(source=source, title=f"Finding {index}",
                                     body=f"Exact body {index}", base_snapshot=None,
-                                    origin="opaque origin, not writer authority")
+                                    origin="opaque origin, not writer authority",
+                                    **({"insight_id": insight_id} if insight_id is not None else {}))
         if evidence:
             self.insights.attach_evidence(item["id"], source=source, text="Exact evidence",
                                           run="test", expected_rev=1)
@@ -63,9 +64,10 @@ class DecisionProjectionTests(unittest.TestCase):
         self.assertFalse((self.root / "decision-receipts").exists())
 
     def test_all_current_actions_sources_and_205_rows_ignore_legacy_receipts(self):
+        # These fixtures target projection behavior; auto-ID dedup is covered separately in test_insight_archive.
         with patch("mizu.insights.now", return_value="2026-01-01T01:00:00+01:00"):
             for i in range(205):
-                self.decide(i, action=("accept", "modify", "reject", "defer")[i % 4],
+                self.decide(i, insight_id=f"{i:032x}", action=("accept", "modify", "reject", "defer")[i % 4],
                             source="reviewer" if i % 2 else "searcher")
         expected_ids = {f"insight.decision/{path.stem}" for path in
                         (self.root / "decision-history").glob("*.json")}
