@@ -330,9 +330,11 @@ class DecisionCutoverTests(Fixture):
         for prompt in (prompt_for(ctx), prompt_delta_for(ctx, [])):
             doc = json.loads(prompt)
             contribution = {key: doc[key] for key in ('decision_events', 'decision_page')}
-            self.assertLessEqual(len(json.dumps(contribution, ensure_ascii=False).encode('utf-8')), 1000)
-            self.assertNotIn('ref', doc['decision_events'][0])
-            self.assertEqual(doc['decision_events'][0]['body'], body)
+            # Full and delta prompts use json.dumps defaults, including ASCII
+            # escaping; a full row would exceed this byte allowance.
+            self.assertLessEqual(len(json.dumps(contribution).encode('utf-8')), 1000)
+            self.assertIn('ref', doc['decision_events'][0])
+            self.assertNotIn('body', doc['decision_events'][0])
 
     def test_reference_full_and_delta_prompts_reader_and_byte_budget(self):
         for i in range(3): self.decide(i, body='日本語 😀 "quote" \\ slash\n' * 800)
@@ -346,7 +348,7 @@ class DecisionCutoverTests(Fixture):
         for prompt in (prompt_for(ctx), prompt_delta_for(ctx, [])):
             doc = json.loads(prompt)
             contribution = {key: doc[key] for key in ('decision_events', 'decision_page')}
-            self.assertLessEqual(len(json.dumps(contribution, ensure_ascii=False).encode()), 750)
+            self.assertLessEqual(len(json.dumps(contribution).encode()), 750)
             self.assertEqual(doc['decision_events'][0], row)
             self.assertIn('decision_read', doc['decision_task'])
             self.assertNotIn('manifest', doc)

@@ -1673,7 +1673,7 @@ replacement insight without implying rejected substance.
                 # including reference, token, overflow metadata and framing.
                 fields = {"decision_events": page["events"],
                           "decision_page": {k: v for k, v in page.items() if k != "events"}}
-                return len(json.dumps(fields, ensure_ascii=False).encode("utf-8"))
+                return len(json.dumps(fields, ensure_ascii=True).encode("utf-8"))
             return len(canonical(page))
 
         wanted = set(actions)
