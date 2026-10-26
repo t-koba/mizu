@@ -1398,12 +1398,54 @@ class CacheInputTests(Fixture):
             with self.assertRaises(Denied):
                 check_jobs.join(reader, first['id'])
 
-    def test_changed_queued_input_is_refused_before_cache_moves(self):
-        self.seed()
-        job = check_jobs.submit(self.context())
+    def test_changed_queued_input_binds_at_execution_start(self):
+        observed = []
+        class Observing(FakeSandbox):
+            def execute(inner, workspace, script, **kwargs):
+                artifact = workspace / 'target/object'
+                observed.append(artifact.read_text() if artifact.exists() else None)
+                return super().execute(workspace, script, **kwargs)
+        self.seed('one')
+        ctx = self.context()
+        job = check_jobs.submit(ctx)
+        enqueue_input = check_jobs.read(self.project, job['id'])['cache_input']
+        self.assertEqual(enqueue_input, self.fingerprint())
         (self.cache / 'object').write_text('two')
+        execution_input = self.fingerprint()
+        self.assertNotEqual(execution_input, enqueue_input)
+        self.assertEqual(self.run_job(Observing)['status'], 'completed')
+        # The runner staged the changed cache, not the enqueue-time tree.
+        self.assertEqual(observed, ['two'])
+        record = check_jobs.read(self.project, job['id'])
+        self.assertEqual(record['cache_input'], execution_input)
+        self.assertEqual(record['status'], 'completed')
+        result = check_jobs.result(ctx, job['id'])
+        self.assertTrue(result['accepted_for_current_source'])
+        self.assertEqual(result['result']['cache_input'], execution_input)
+        self.assertEqual(record['acceptance_scope']['cache_input'], execution_input)
+        self.assertEqual(record['shared_key'], check_jobs.read(self.project, job['id'])['shared_key'])
+        # Matching current cache reuses the execution proof; a changed cache does not.
+        reader = self.context('reviewer')
+        self.assertEqual(check_jobs.available(reader)[0]['id'], job['id'])
+        self.assertEqual(check_jobs.join(reader, job['id'])['shared_job'], job['id'])
+        self.assertEqual(check_jobs.submit(self.context())['shared_job'], job['id'])
+        (self.cache / 'object').write_text('three')
+        self.assertEqual(check_jobs.available(reader), [])
+        with self.assertRaises(Denied):
+            check_jobs.join(reader, job['id'])
+        fresh = check_jobs.submit(self.context())
+        self.assertNotIn('shared_job', fresh)
+
+    def test_execution_time_unbindable_cache_fails_closed(self):
+        self.seed('one')
+        job = check_jobs.submit(self.context())
+        enqueue_input = check_jobs.read(self.project, job['id'])['cache_input']
+        self.assertIsNotNone(enqueue_input)
+        self.config = dataclasses.replace(self.config,
+            sandbox=dataclasses.replace(self.config.sandbox, check_input_bytes=2))
+        self.project.config = self.config
+        self.assertIsNone(self.fingerprint())
         self.assertEqual(self.run_job()['status'], 'refused')
-        self.assertEqual((self.cache / 'object').read_text(), 'two')
         self.assertFalse(FakeSandbox.calls)
         self.assertNotIn('acceptance_scope', check_jobs.read(self.project, job['id']))
 
@@ -1740,16 +1782,31 @@ class CacheInputTests(Fixture):
         with lock(self.project.root / 'locks/check-cache.lock'):
             self.assertEqual(check_jobs.result(ctx, job['id'])['status'], 'running')
 
-    def test_changed_cache_is_refused_even_with_sharing_disabled(self):
+    def test_changed_cache_binds_at_execution_even_with_sharing_disabled(self):
         self.config = dataclasses.replace(self.config,
             sandbox=dataclasses.replace(self.config.sandbox, check_reuse=False))
         self.project.config = self.config
         ctx = self.context()
         job = check_jobs.submit(ctx)
         self.assertIsNone(check_jobs.read(self.project, job['id'])['environment'])
+        enqueue_input = check_jobs.read(self.project, job['id'])['cache_input']
         self.seed()
+        execution_input = self.fingerprint()
+        self.assertNotEqual(execution_input, enqueue_input)
+        self.assertEqual(self.run_job()['status'], 'completed')
+        self.assertTrue(FakeSandbox.calls)
+        record = check_jobs.read(self.project, job['id'])
+        self.assertEqual(record['cache_input'], execution_input)
+        self.assertEqual(check_jobs.result(ctx, job['id'])['result']['cache_input'], execution_input)
+        # Unrelated execution inputs still refuse even with sharing disabled.
+        later_ctx = self.context()
+        later = check_jobs.submit(later_ctx)
+        self.config = dataclasses.replace(self.config,
+            limits=dataclasses.replace(self.config.limits, command_seconds=self.config.limits.command_seconds + 1))
+        self.project.config = self.config
         self.assertEqual(self.run_job()['status'], 'refused')
-        self.assertFalse(FakeSandbox.calls)
+        self.assertFalse(check_jobs.result(later_ctx, later['id'])['accepted_for_current_source'])
+        self.assertNotIn('acceptance_scope', check_jobs.read(self.project, later['id']))
 
     def test_concurrent_edit_of_an_already_hashed_subtree_is_unbound(self):
         self.seed()

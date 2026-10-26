@@ -1030,8 +1030,30 @@ def _execute(project, job, stop, sandbox_factory, slot):
         shutil.rmtree(directory / 'input', ignore_errors=True)
         os.utime(root(project), None)
         return summary(job)
-    cache_changed = (job['kind'] == 'verify' and not cache_matches(project, job, cache_input(project)))
-    if cache_changed or (job['kind'] == 'verify' and job.get('inputs_bound_required') and job.get('environment') is None) or (job.get('environment') is not None and execution_environment(project, job) != job['environment']) or job['execution'] != execution_key(project.config) or (job['kind'] == 'verify' and list(project.verify) != job['commands']):
+    # Verification cache inputs bind at execution start under the caller's
+    # check-cache.lock (held by _run_one across _execute), never at enqueue.
+    # The request identity (job id, derived at submit) is preserved; the
+    # execution reuse identity (cache_input/shared_key) is rebound here to
+    # the actual fingerprint. A legitimate change since enqueue therefore
+    # runs instead of refusing. Fail closed when the execution input cannot
+    # be bounded or when the record predates cache binding.
+    if job['kind'] == 'verify' and project.config.sandbox.check_cache_paths:
+        if 'cache_input' not in job:
+            job.update(status='refused', error='Execution configuration, dependency or cache inputs changed', finished_at=now())
+            save_execution(project, job)
+            shutil.rmtree(directory / 'input', ignore_errors=True)
+            os.utime(root(project), None)
+            return summary(job)
+        current_cache = cache_input(project)
+        if current_cache is None:
+            job.update(status='refused', error='Cannot bind configured check cache inputs; verification refused', finished_at=now())
+            save_execution(project, job)
+            shutil.rmtree(directory / 'input', ignore_errors=True)
+            os.utime(root(project), None)
+            return summary(job)
+    else:
+        current_cache = None
+    if (job['kind'] == 'verify' and job.get('inputs_bound_required') and job.get('environment') is None) or (job.get('environment') is not None and execution_environment(project, job) != job['environment']) or job['execution'] != execution_key(project.config) or (job['kind'] == 'verify' and list(project.verify) != job['commands']):
         job.update(status='refused', error=('Dependency inputs could not be bound for reusable acceptance'
                    if job.get('inputs_bound_required') and job.get('environment') is None
                    else 'Execution configuration, dependency or cache inputs changed'), finished_at=now())
@@ -1039,6 +1061,18 @@ def _execute(project, job, stop, sandbox_factory, slot):
         shutil.rmtree(directory / 'input', ignore_errors=True)
         os.utime(root(project), None)
         return summary(job)
+    if current_cache is not None:
+        # Rebind the actual execution input before staging any cache tree.
+        # The job id stays the submit-time request identity; shared_key is
+        # the execution reuse identity and must match the recorded input so
+        # later reuse requires the same current cache.
+        job['cache_input'] = current_cache
+        if job.get('environment') is not None and not job.get('scratch_paths'):
+            job['shared_key'] = digest(canonical({'source': job['code_digest'], 'execution': job['execution'],
+                                                  'commands': job['commands'], 'kind': 'verify',
+                                                  'environment': job['environment'], 'cache_input': current_cache}))
+        else:
+            job['shared_key'] = None
     if (directory / 'cancel.json').exists():
         job.update(status='cancelled', finished_at=now())
         save_execution(project, job)

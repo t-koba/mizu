@@ -340,16 +340,22 @@ access.
 Cache fingerprinting and the reuse/enqueue decision hold `check-cache.lock` in
 that order before queue exclusion; cache users can wait for the current cache
 owner, but hashing never holds `check-jobs.lock`. When configured cache paths are
-unbound, verification is refused before a job is queued. Dispatch revalidates the
-queued fingerprint under the same cache lock before moving any cache tree into
-frozen source; if a previously bound tree changes or becomes unbound, the queued
-execution is refused, even with sharing disabled. Unbound requests never return
-an earlier same-unit result. No retry is automatic; after correcting inputs,
-submit again. Custom checks without configured verification caches retain their
-independent behavior.
+unbound, verification is refused before a job is queued. The enqueue-time
+fingerprint is the request identity only: dispatch captures the actual
+configured cache fingerprint under the same cache lock immediately before
+moving any cache tree into frozen source, and binds that execution-start value
+into the job (`cache_input`), the result echo, the acceptance scope and the
+result reuse key (`shared_key`). A queued verification therefore runs despite a
+legitimate shared-cache change since enqueue, even with sharing disabled; only
+an unbindable execution-time input, a record predating cache binding, or a
+changed source, command, execution or dependency input refuses execution.
+Unbound requests never return an earlier same-unit result. No retry is
+automatic; after correcting inputs, submit again. Custom checks without
+configured verification caches retain their independent behavior.
 
 Checks may legitimately mutate caches and still produce a passing result. Their
-proof binds the **pre-execution** `cache_input`, not the staged-back output.
+proof binds the execution-start **pre-execution** `cache_input`, not the
+staged-back output nor the enqueue-time value.
 Result import checks that immutable job input (and a matching result echo when
 present), along with current source, commands, execution environment and grants;
 it does not compare the live cache with that input. Older results without the
@@ -357,7 +363,7 @@ echo can still be imported when their job binds a trustworthy input. After
 artifacts are staged back, `cache_output` records their fingerprint separately;
 an unbindable output is reported as null without changing the pass result.
 Later discovery, joining, submission and retained-acceptance lookup still compare
-the current cache fingerprint with the original input under `check-cache.lock`,
+the current cache fingerprint with the recorded execution input under `check-cache.lock`,
 never with `cache_output`: changed inputs require a new execution, not reuse of
 the old proof. Old jobs or receipts lacking `cache_input` remain auditable, but
 cannot match when verification caches are configured. No-cache scopes retain
