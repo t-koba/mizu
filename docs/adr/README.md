@@ -489,11 +489,11 @@ change cannot inherit a passing result. The unit ends with `outcome=wait`
 and `wait_for_check`, and the job's completion resumes it.
 
 The boundary is explicit. Writable execution stays synchronous, because it
-writes the live tree its caller owns. A job's result is evidence for that
-job's own inputs only: it is not a general cross-role discovery of
-matching results, not a coalescing of equivalent in-flight checks, and a
-preserved build artifact is not validation evidence. The capability is
-opt-in per role, so a role without it keeps the synchronous behaviour.
+writes the live tree its caller owns. A check job's asynchronous execution
+and per-role `check_job` capability are separate from the project-local
+sharing decision recorded in ADR-052. A preserved build artifact is not
+validation evidence. The capability is opt-in per role, so a role without it
+keeps the synchronous behaviour.
 
 ## ADR-042 — Adapter startup is bounded by host-relative evidence
 
@@ -838,3 +838,20 @@ records, project/pair/reference overflows, age boundaries and zero, lock
 contention, default dry-run immutability, pair identity, and both quarantine
 recovery states. This lifecycle applies only to new manifest-bound smoke bundles; it does not alter
 per-project run, snapshot, object, scheduling or receipt policy.
+
+## ADR-052 — Project-local check reuse is explicit and input-bound
+
+Project-local sharing is off by default and enabled only by
+`sandbox.check_reuse`. With it enabled, equivalent jobs share or coalesce only
+when their frozen source, commands and execution kind, sandbox/execution
+configuration, observed dependency environment, and configured verification
+cache inputs match. Only completed passing results with those inputs bound are
+reusable; failures and partial work are not reusable. Unbound dependencies
+prevent sharing, and verification requested with reuse enabled cannot fall back
+to accepting unbound evidence.
+
+Cross-role access uses role-owned subscriptions to the shared execution or
+result. It does not grant `verify` or work-item completion authority; each role
+keeps its own `check_job` capability and subscription lifecycle. This reuse
+policy is separate from ADR-041's asynchronous-job mechanism. See
+`docs/check-jobs.md` for the input-binding, subscription and evidence rules.
