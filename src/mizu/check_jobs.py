@@ -15,7 +15,6 @@ import re
 import dataclasses
 import shutil
 import time
-import uuid
 from pathlib import Path
 from .admission import check_slot_exclusion
 from .errors import Busy, Denied
@@ -226,7 +225,10 @@ def cache_input(project):
     entries too, and stream file bytes within the existing dependency bounds.
     Permissions and mtimes participate as command-visible inputs; inode/ctime
     only detect concurrent edits. Moving an otherwise unchanged tree into/out
-    of a workspace must not change its identity.
+    of a workspace must not change its identity. Hardlinks are bound only when
+    every name of their inode is found inside these trees. Bind their topology
+    by a deterministic relative name, not by a host inode number. Each name
+    still counts against both traversal and byte bounds.
     """
     from . import platform
     from .fs import _same_file
@@ -235,7 +237,7 @@ def cache_input(project):
         return None  # Preserve scopes/identities for no-cache configurations.
     base = Path('check-cache') / execution_key(project.config)
     configured = {base / name for name in names}
-    observed, entries = {}, {}
+    observed, entries, hardlinks = {}, {}, {}
     total = 0
 
     def stamp(info):
@@ -304,7 +306,7 @@ def cache_input(project):
                 children.sort()
                 value['children'] = children
                 pending.extend(relative / name for name in reversed(children))
-            elif stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and relative not in configured:
+            elif stat.S_ISREG(info.st_mode) and info.st_nlink >= 1 and relative not in configured:
                 total += info.st_size
                 if total > project.config.sandbox.check_input_bytes:
                     return None
@@ -312,7 +314,7 @@ def cache_input(project):
                     stream = os.fdopen(os.dup(node), 'rb') if isinstance(node, int) else node.open('rb')
                     with stream:
                         before = os.fstat(stream.fileno())
-                        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or not _same_file(info, before):
+                        if not stat.S_ISREG(before.st_mode) or not _same_file(info, before):
                             return None
                         hasher, remaining = hashlib.sha256(), info.st_size
                         while remaining:
@@ -324,9 +326,23 @@ def cache_input(project):
                         if stream.read(1) or stamp(os.fstat(stream.fileno())) != stamp(before):
                             return None
                         value['digest'] = hasher.hexdigest()
+                if info.st_nlink > 1:
+                    if not info.st_ino:
+                        return None  # No trustworthy identity for link accounting.
+                    identity = (info.st_dev, info.st_ino)
+                    prior, members = hardlinks.setdefault(identity, (stamp(info), []))
+                    if prior != stamp(info):
+                        return None
+                    members.append(key)
             else:
                 return None
             entries[key] = value
+        for prior, members in hardlinks.values():
+            if len(members) != prior[3]:  # st_nlink includes names outside our trees.
+                return None
+            first = min(members)
+            for key in members:
+                entries[key]['hardlink'] = first
         for path, before in observed.items():
             try:
                 after = stamp(path.lstat())
@@ -501,6 +517,8 @@ def submit(context, script=None, *, commands=None, kind="experiment", fresh=Fals
     env = environment(project, bounds=env_bounds)
     with cache_guard(project) if not custom else contextlib.nullcontext():
         current = cache_input(project) if not custom else None
+        if not custom and project.config.sandbox.check_cache_paths and current is None:
+            raise Denied('Cannot bind configured check cache inputs; verification not queued')
         cache_binding = ({'cache_input': current}
                          if not custom and project.config.sandbox.check_cache_paths else {})
         # A fresh request asks for a measurement of its own: it never joins an
@@ -517,8 +535,6 @@ def submit(context, script=None, *, commands=None, kind="experiment", fresh=Fals
                     'kind': 'verify' if not custom else kind, 'environment': env, 'fresh': fresh}
         if not custom and project.config.sandbox.check_cache_paths:
             identity['cache_input'] = current
-            if current is None:
-                identity['unbound_cache_request'] = uuid.uuid4().hex
         if scratch_paths:
             identity['scratch_paths'] = list(scratch_paths)
         job_id = digest(canonical(identity))

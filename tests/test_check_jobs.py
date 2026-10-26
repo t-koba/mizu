@@ -1,4 +1,5 @@
 import dataclasses
+import os
 import threading
 import time
 from pathlib import Path
@@ -1406,7 +1407,7 @@ class CacheInputTests(Fixture):
         self.assertNotIn('shared_job', independent)
         check_jobs.cancel(later, independent['id'])
 
-    def test_over_bound_inputs_are_unbound_not_empty_or_idempotent(self):
+    def test_over_bound_inputs_are_refused_before_queueing(self):
         self.seed()
         for limits in ({'check_input_files': 1}, {'check_input_bytes': 2}):
             with self.subTest(limits=limits):
@@ -1415,17 +1416,145 @@ class CacheInputTests(Fixture):
                 self.project.config = config
                 self.assertIsNone(self.fingerprint())
                 ctx = self.context()
-                one = check_jobs.submit(ctx)
-                two = check_jobs.submit(ctx)
-                self.assertNotEqual(one['id'], two['id'])
-                raw = check_jobs.read(self.project, one['id'])
-                self.assertIsNone(raw['shared_key'])
-                self.assertIsNone(raw['cache_input'])
-                self.assertEqual(self.run_job()['status'], 'refused')
-                self.assertEqual(self.run_job()['status'], 'refused')
+                before = list(check_jobs.root(self.project).glob('*/job.json'))
+                with patch.object(check_jobs, '_make_room') as room, patch.object(self.project.snapshots, 'materialize') as materialize:
+                    for fresh in (False, True):
+                        with self.assertRaisesRegex(Denied, 'Cannot bind.*verification not queued'):
+                            check_jobs.submit(ctx, fresh=fresh)
+                    room.assert_not_called()
+                    materialize.assert_not_called()
+                self.assertEqual(list(check_jobs.root(self.project).glob('*/job.json')), before)
+                # Custom jobs do not use the verification cache.
                 custom = check_jobs.submit(ctx, 'echo ' + next(iter(limits)))
                 self.assertEqual(self.run_job()['status'], 'completed')
                 self.assertNotIn('acceptance_scope', check_jobs.read(self.project, custom['id']))
+
+    def link(self, source, destination):
+        try:
+            os.link(source, destination)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest('Hardlinks unavailable: ' + str(exc))
+
+    def test_internal_hardlinks_bind_topology_and_metadata_not_inode_numbers(self):
+        self.seed()
+        artifact = self.cache / 'object'
+        directory = self.cache / 'incremental'
+        directory.mkdir()
+        alias = directory / 'object'
+        self.link(artifact, alias)
+        bound = self.fingerprint()
+        self.assertIsNotNone(bound)
+        self.assertEqual(self.fingerprint(), bound)
+        with patch('mizu.platform.HAS_OPENAT', False):
+            self.assertEqual(self.fingerprint(), bound)
+        # Workspace moves change ctime, but not command-visible input identity.
+        moved = self.cache.with_name('moved')
+        self.cache.rename(moved)
+        moved.rename(self.cache)
+        self.assertEqual(self.fingerprint(), bound)
+        info = artifact.stat()
+        os.utime(artifact, ns=(info.st_atime_ns, info.st_mtime_ns + 2000000000))
+        self.assertNotEqual(self.fingerprint(), bound)
+        os.utime(artifact, ns=(info.st_atime_ns, info.st_mtime_ns))
+        self.assertEqual(self.fingerprint(), bound)
+        if os.name == 'posix':
+            artifact.chmod(0o700)
+            self.assertNotEqual(self.fingerprint(), bound)
+            artifact.chmod(info.st_mode & 0o7777)
+            self.assertEqual(self.fingerprint(), bound)
+        # A copy with identical bytes/mode/mtime is not the same topology.
+        parent_info = directory.stat()
+        cache_info = self.cache.stat()
+        alias.unlink()
+        alias.write_bytes(artifact.read_bytes())
+        alias.chmod(info.st_mode & 0o7777)
+        os.utime(alias, ns=(info.st_atime_ns, info.st_mtime_ns))
+        os.utime(directory, ns=(parent_info.st_atime_ns, parent_info.st_mtime_ns))
+        copied = self.fingerprint()
+        self.assertIsNotNone(copied)
+        self.assertNotEqual(copied, bound)
+        # Recreating an equivalent group on a new inode preserves the receipt.
+        artifact.unlink()
+        self.link(alias, artifact)
+        os.utime(self.cache, ns=(cache_info.st_atime_ns, cache_info.st_mtime_ns))
+        self.assertEqual(self.fingerprint(), bound)
+
+    def test_hardlinks_across_configured_trees_are_wholly_contained(self):
+        self.config = dataclasses.replace(self.config,
+            sandbox=dataclasses.replace(self.config.sandbox, check_cache_paths=('target', 'objects')))
+        self.project.config = self.config
+        self.cache = self.project.root / 'check-cache' / check_jobs.execution_key(self.config) / 'target'
+        self.seed()
+        objects = self.cache.with_name('objects')
+        objects.mkdir()
+        self.link(self.cache / 'object', objects / 'alias')
+        self.assertIsNotNone(self.fingerprint())
+
+    def test_additional_external_hardlink_is_unbound_and_not_queued(self):
+        self.seed()
+        self.link(self.cache / 'object', self.cache / 'alias')
+        self.assertIsNotNone(self.fingerprint())
+        # Even a name in an unconfigured tree beneath the same cache base escapes.
+        outside = self.cache.with_name('unconfigured')
+        outside.mkdir()
+        self.link(self.cache / 'object', outside / 'alias')
+        self.assertIsNone(self.fingerprint())
+        for reuse in (True, False):
+            self.config = dataclasses.replace(self.config,
+                sandbox=dataclasses.replace(self.config.sandbox, check_reuse=reuse))
+            self.project.config = self.config
+            with self.assertRaisesRegex(Denied, 'Cannot bind.*verification not queued'):
+                check_jobs.submit(self.context())
+        self.assertEqual(list(check_jobs.root(self.project).glob('*/job.json')), [])
+        self.assertFalse(FakeSandbox.calls)
+
+    def test_hardlink_names_count_against_file_and_byte_bounds(self):
+        self.seed()
+        self.link(self.cache / 'object', self.cache / 'alias')
+        for limits, expected in (({'check_input_files': 2}, False),
+                                 ({'check_input_bytes': 5}, False),
+                                 ({'check_input_files': 3, 'check_input_bytes': 6}, True)):
+            with self.subTest(limits=limits):
+                self.project.config = dataclasses.replace(self.config,
+                    sandbox=dataclasses.replace(self.config.sandbox, **limits))
+                self.assertEqual(self.fingerprint() is not None, expected)
+
+    def test_hardlinked_input_keeps_source_and_execution_binding(self):
+        self.seed()
+        self.link(self.cache / 'object', self.cache / 'alias')
+        bound = self.fingerprint()
+        ctx = self.context()
+        job = check_jobs.submit(ctx)
+        raw = check_jobs.read(self.project, job['id'])
+        self.assertEqual(raw['cache_input'], bound)
+        self.assertEqual(raw['execution'], check_jobs.execution_key(self.config))
+        self.assertEqual(raw['code_digest'], self.project.snapshots.capture_files(ctx.workspace)['code_digest'])
+        self.assertEqual(self.run_job()['status'], 'completed')
+        self.assertEqual(self.fingerprint(), bound)
+        self.assertTrue(check_jobs.result(ctx, job['id'])['accepted_for_current_source'])
+        (ctx.workspace / 'app.py').write_bytes(b'VALUE = 3\n')
+        self.assertFalse(check_jobs.result(ctx, job['id'])['accepted_for_current_source'])
+        (ctx.workspace / 'app.py').write_bytes(b'VALUE = 2\n')
+        self.config = dataclasses.replace(self.config,
+            limits=dataclasses.replace(self.config.limits, command_seconds=self.config.limits.command_seconds + 1))
+        self.project.config = self.config
+        self.assertFalse(check_jobs.result(self.context(), job['id'])['accepted_for_current_source'])
+
+    def test_external_link_added_during_traversal_is_unbound(self):
+        self.seed()
+        self.link(self.cache / 'object', self.cache / 'alias')
+        (self.cache / 'z').mkdir()
+        real_scandir = check_jobs.os.scandir
+        calls = []
+        def changed(node):
+            calls.append(node)
+            if len(calls) == 2:
+                # Both names have been hashed before visiting z.
+                os.link(self.cache / 'object', self.root / 'outside')
+            return real_scandir(node)
+        with patch.object(check_jobs.os, 'scandir', side_effect=changed):
+            self.assertIsNone(self.fingerprint())
+        self.assertEqual(len(calls), 2)
 
     def test_unsafe_and_unreadable_inputs_never_hash_as_absent(self):
         import os

@@ -326,19 +326,25 @@ under `check-cache/<execution>`. Inode/ctime observations detect concurrent edit
 but are not part of the content key, so staging an unchanged tree out and back
 does not invalidate it. Traversal independently uses the same `check_input_files`
 and `check_input_bytes` bounds; directories and absent configured names count as
-entries. Symlinks (including internal ones), reparse points, hardlinked files,
-special files, unreadable/unstable trees and exceeded bounds are **unbound**, not
-empty. POSIX traversal pins path components without following links; the portable
-fallback checks components and identities before/after access.
+entries, and each hardlink name counts against both limits. Symlinks (including
+internal ones), reparse points, special files, unreadable/unstable trees and
+exceeded bounds are **unbound**, not empty. A regular file with multiple hardlinks
+is bound only when every link is found within the configured cache trees; its
+relative link-group topology is fingerprinted. Any unaccounted link outside
+those trees is unbound. POSIX traversal pins path components without following
+links; the portable fallback checks components and identities before/after
+access.
 
 Cache fingerprinting and the reuse/enqueue decision hold `check-cache.lock` in
 that order before queue exclusion; cache users can wait for the current cache
-owner, but hashing never holds `check-jobs.lock`. Dispatch revalidates the queued
-fingerprint under the same cache lock before moving any cache tree into frozen
-source. A changed or unbound verification cache refuses the queued execution,
-even with sharing disabled. Unbound requests never return an earlier same-unit
-result. No retry is automatic; after correcting inputs, submit again. Custom
-checks without configured verification caches retain their independent behavior.
+owner, but hashing never holds `check-jobs.lock`. When configured cache paths are
+unbound, verification is refused before a job is queued. Dispatch revalidates the
+queued fingerprint under the same cache lock before moving any cache tree into
+frozen source; if a previously bound tree changes or becomes unbound, the queued
+execution is refused, even with sharing disabled. Unbound requests never return
+an earlier same-unit result. No retry is automatic; after correcting inputs,
+submit again. Custom checks without configured verification caches retain their
+independent behavior.
 
 Checks may legitimately mutate caches and still produce a passing result. Their
 proof binds the **pre-execution** cache input, not the staged-back output. Result
