@@ -175,7 +175,9 @@ The hold is named, never silent. The waiting unit's record carries
 `waiting_for_check` with the job and the second the hold ends, and
 `mizu status` lists every role the queue holds under `check_waits` with the
 same job, its status and its bound. A wait record that carries no bound
-holds nothing, so unreadable state never stops a role.
+holds nothing, so unreadable state never stops a role. The bound must be a
+finite positive epoch value; malformed or overflowing numeric values hold
+nothing and cannot wake a role.
 
 `mizu check-jobs PROJECT` drains up to `limits.check_pending` terminal jobs per invocation without a model, releasing admission between jobs. It returns immediately on idle, compute contention, cancellation, pause or cleanup failure; it never sleeps between queued jobs. Each result remains in its own durable record. The CLI response adds `processed`, the number of terminal jobs handled. On
 Linux, service generation creates a dedicated checks service, path notification

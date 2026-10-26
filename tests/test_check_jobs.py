@@ -1,5 +1,6 @@
 import dataclasses
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -423,6 +424,26 @@ class JobTests(Fixture):
         write_json(check_jobs.root(self.project) / 'worker.wait.json',
                    {'id': job['id'], 'inputs': check_jobs.wait_signature(self.project)})
         self.assertFalse(check_jobs.waiting(self.project, 'worker'))
+    def test_check_wait_rejects_nonfinite_or_unrepresentable_bounds(self):
+        _, job = self.submit()
+        for deadline in (float('inf'), float('-inf'), float('nan'), 10 ** 400):
+            with self.subTest(deadline=repr(deadline)):
+                with self.assertRaises(Denied):
+                    check_jobs.set_wait(self.project, 'worker', job['id'], wait_until=deadline)
+    def test_overflow_check_wait_bound_neither_holds_nor_wakes(self):
+        _, job = self.submit()
+        check_jobs.set_wait(self.project, 'worker', job['id'], wait_until=time.time() + 60)
+        path = check_jobs.root(self.project) / 'worker.wait.json'
+        raw, count = re.subn(r'("wait_until"\s*:\s*)[^,}]+', r'\g<1>1e999',
+                             path.read_text(), count=1)
+        self.assertEqual(count, 1)
+        path.write_text(raw)
+        self.assertIsNone(check_jobs.deferral(self.project, 'worker'))
+        self.assertFalse(check_jobs.waiting(self.project, 'worker'))
+        self.assertNotIn('worker', self.project.status()['check_waits'])
+        # A terminal result cannot turn the overflowing deadline into a wake.
+        self.run_job()
+        self.assertFalse(check_jobs.wake_ready(self.project, 'worker'))
     def test_failed_check_does_not_supply_acceptance(self):
         ctx, job = self.submit()
         class Failed(FakeSandbox):

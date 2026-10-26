@@ -15,6 +15,7 @@ import re
 import dataclasses
 import shutil
 import time
+import math
 from pathlib import Path
 from .admission import check_slot_exclusion
 from .errors import Busy, Denied
@@ -35,6 +36,19 @@ def execution_key(config):
 
 def root(project):
     return project.root / 'check-jobs'
+
+
+def _positive_finite_deadline(value):
+    """Normalize a recorded epoch bound, refusing overflow and non-finite values."""
+    if type(value) not in (int, float):
+        return None
+    try:
+        deadline = float(value)
+    except (OverflowError, ValueError):
+        return None
+    if not math.isfinite(deadline) or deadline <= 0:
+        return None
+    return deadline
 
 
 def job_role(job_id):
@@ -1202,16 +1216,18 @@ def set_wait(project, role, job_id, wait_until=None, *, continuation=None):
     a single number. Trust: local recorded state. Failure: a job that
     belongs to another role is refused; a bound that is not a positive
     number is refused. The bound defaults to the project's configured
-    default wait, so a recorded deferral is never unbounded.
+    default wait, so a recorded deferral is never unbounded. Only finite
+    positive epoch bounds are accepted.
     """
     job = read(project, job_id)
     if job['role'] != role:
         raise Denied('Check wait belongs to another role')
     if wait_until is None:
         wait_until = time.time() + project.config.limits.default_wait_seconds
-    if type(wait_until) not in (int, float) or wait_until <= 0:
+    deadline = _positive_finite_deadline(wait_until)
+    if deadline is None:
         raise Denied('Invalid check wait bound')
-    record = {'id': job_id, 'inputs': wait_signature(project), 'wait_until': float(wait_until)}
+    record = {'id': job_id, 'inputs': wait_signature(project), 'wait_until': deadline}
     if continuation is not None:
         record['continuation'] = {k: continuation[k] for k in ('run', 'snapshot', 'code_digest', 'summary', 'state') if k in continuation}
     write_json(root(project) / (role + '.wait.json'), record)
@@ -1236,8 +1252,8 @@ def deferral(project, role):
         record = read_json(root(project) / (role + '.wait.json'), {})
         if not isinstance(record, dict) or record.get('inputs') != wait_signature(project):
             return None
-        deadline = record.get('wait_until')
-        if type(deadline) not in (int, float) or deadline <= 0 or time.time() >= deadline:
+        deadline = _positive_finite_deadline(record.get('wait_until'))
+        if deadline is None or time.time() >= deadline:
             # The bound that ended the unit's wait ended this deferral too.
             return None
         job_id = record.get('id')
@@ -1318,8 +1334,8 @@ def wake_ready(project, role, *, discovery=None):
         record = read_json(root(project) / (role + '.wait.json'), {})
         if not isinstance(record, dict) or record.get('inputs') != wait_signature(project):
             return False
-        deadline = record.get('wait_until')
-        if type(deadline) not in (int, float) or deadline <= 0 or time.time() >= deadline:
+        deadline = _positive_finite_deadline(record.get('wait_until'))
+        if deadline is None or time.time() >= deadline:
             return False
         job_id = record.get('id')
         if not isinstance(job_id, str):
