@@ -946,23 +946,27 @@ only for this role's findings. `mizu explain` reports the effective routes.
 ### Decision-event receipts
 
 `finish` optionally accepts `ack_events`, an array of at most 512 strings,
-each at most 64 characters (default omitted, equivalent to `[]`). For this
-slice only `decision_events` rows carry a host-issued opaque `ack_token` in
-both full and delta prompts. Select exactly the handled rows' tokens, e.g.
+each at most 64 characters (default omitted, equivalent to `[]`). Delivered
+`decision_events` and terminal `work_item_events` rows carry a host-issued opaque
+`ack_token` in both full and delta prompts. Select exactly the handled rows'
+tokens, e.g.
 `{"outcome":"wait","summary":"Handled one decision","ack_events":["<ack_token>"]}`
 (writers also supply `state`). Role policy, not this field, defines handling.
 
-Tokens bind the consuming role, immutable decision history identity/record and
-exact delivered payload. They are not capabilities obtained by reading history
-or copying untrusted text: finish accepts only tokens delivered to this role in
+Tokens bind the consuming role, immutable event identity and exact delivered
+payload (including the decision history record for decisions). One unique
+selection may mix both sources. They are not capabilities obtained by reading
+history or copying untrusted text: finish accepts only tokens delivered to this role in
 this unit. Duplicate, malformed, unknown, foreign and undelivered/stale tokens
 refuse the seal before writing its intent; they never partially acknowledge.
-Topic revision/withdrawal during handling does not invalidate that frozen
-delivery. No outcome, prose summary, or `wait_for_check` implies acknowledgement;
+A decision topic revision/withdrawal during handling does not invalidate its
+frozen decision delivery; a terminal item correction that changes the current
+terminal revision/payload invalidates the older work-item token. No outcome,
+prose summary, or `wait_for_check` implies acknowledgement;
 explicit selections also work when the successful unit waits for a check.
-Work-item, structured-wait, CI and check-job acknowledgement are **unchanged**
-and do not yet use `ack_events`; full-source explicit receipts remain separate
-work.
+Structured-wait, CI/status, obligation and check-job sources do not use
+`ack_events`; their existing behavior is unchanged. Terminal work-item receipts
+use the same explicit selection contract, with their existing storage below.
 
 Only after the durable successful result and, for writers, successful snapshot
 publication does the host write selected exact receipts under
@@ -1025,12 +1029,12 @@ else the project default) bounds terminal rows, 1–100 per dispatch, while the
 role-effective `decision_events_limit` bounds only decisions. Either role
 override is 1–100 with `None` meaning inherit; the fixed 100-event mechanism
 cap still applies to both. Choose each batch to fit the role's
-`requests_per_run`: decision rows require explicit per-row receipts (above);
-terminal batches retain completion acknowledgement after a completed run,
-otherwise they replay. Each terminal row is
-at most 8192 canonical bytes, the page at most 1 MiB; title retains the seed's
+`requests_per_run`: both sources require explicit per-row selections in
+`finish.ack_events` (above); unselected rows replay oldest-first. Each terminal
+row, including its delivery token, is at most 8192 canonical bytes, the page at most 1 MiB; title retains the seed's
 200-character bound and reason is a 1024-byte preview with a truncation flag.
-Rows include stable `event: "work_item:<item-id>:<terminal-rev>"`, `source`,
+Delivered rows include a role/payload-bound `ack_token`, stable
+`event: "work_item:<item-id>:<terminal-rev>"`, `source`,
 `type`, item/origin references, transition, terminal time, actor and routing.
 `done` additionally includes `snapshot_id`, a bounded `verification`
 reference (SHA-256 of the canonical copied verification, passing flag and code
@@ -1050,10 +1054,17 @@ replay (ADR-050). No new configuration knob or grant is added.
 These events admit `--event` and unchanged-code runs, appear in a separate
 `work_item_events` field in both full and delta prompts, and are frozen in
 `runs/<run>/work-item-events.json` before selection/execution. `started.json`
-and `prompt_projection.json` record their count. Completion acknowledges only
-that selected batch, after `result.json` is durably `completed`. Failures,
-selector waits, busy/budget exits, bounded and unsealed runs do not acknowledge
-terminal events. An event arriving during execution is not in that batch.
+and `prompt_projection.json` record their count. Only tokens explicitly selected
+in `finish.ack_events` acknowledge terminal rows, after the durable successful
+result and, for writers, successful snapshot publication. Omitted/empty means
+none. Selection is validated against current terminal identity/payload before
+finish intent; tokens are stripped before the existing receipt writer validates
+and stores the original row. Store/CLI pending views do not carry tokens.
+Failures, selector waits, busy exits and unsealed runs do not acknowledge.
+Outcome (including bounded wrap-up), summary, CI wait or check wait alone never
+implies acknowledgement; a successful explicit selection works independently
+of outcome/check wait. Events arriving during execution are not delivered in
+that unit, so cannot be selected.
 
 Acknowledgements are source-scoped exact receipts at
 `work-item-receipts/<role>/<item-id>.<terminal-rev>.json`, separate from
@@ -1061,12 +1072,15 @@ Acknowledgements are source-scoped exact receipts at
 decision or clock rollback cannot hide an unseen terminal event. A matching
 retained terminal event with no receipt for the role is backfilled even if it
 predates subscription; receipts remain effective across unsubscribe/re-subscribe.
+Existing terminal receipts remain valid without rewriting; those made before
+explicit selection do not retroactively prove model handling.
 Receipts are excluded before applying the delivery limit. Each receipt is written atomically;
 a failed/partial batch replays only identities without committed receipts.
 Atomic-write leftovers are not receipts. Receipts have no automatic expiry,
 are included in backup/restore, and are not deleted by read-only views. An
 acknowledgement failure does not turn completed processing into an event loss;
-the next run may replay it. Decision acknowledgement/defer rotation is unchanged.
+the next run may replay it. Decision receipts and other event-source
+acknowledgement behavior are unchanged.
 
 Daemon admission checks pending terminal identities each idle tick. Non-daemon
 Linux/macOS service definitions also watch the work-items parent. After a

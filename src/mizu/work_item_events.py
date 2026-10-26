@@ -146,6 +146,51 @@ def pending(store, role, actions, *, sources="own", limit=10):
     return result
 
 
+def _token(role, payload):
+    identifier(role)
+    return digest(canonical({"role": role, "payload": payload}))
+
+
+def delivery(role, page):
+    """Add role/payload-bound host tokens to a frozen pending page.
+
+    Store/CLI pending views and durable receipt payloads remain unchanged.
+    Tokens add no authority: finish also requires delivery in the current unit.
+    Apply the existing byte bounds to the token-bearing projection too.
+    """
+    rows = [{**row, "ack_token": _token(role, row)} for row in page["events"]]
+    if any(len(canonical(row)) > MAX_CLOSED_ROW_BYTES for row in rows):
+        raise LimitExceeded("Work-item event exceeds row byte bound")
+    result = {**page, "events": rows}
+    if len(canonical(result)) > MAX_CLOSED_PAGE_BYTES:
+        raise LimitExceeded("Work-item events exceed page byte bound")
+    return result
+
+
+def _validate_payload(store, event):
+    if not isinstance(event, dict):
+        raise Denied("Invalid work-item acknowledgement event")
+    item_id = event.get("id")
+    # Reuse full seed/chain validation, never trust a delivered mutable id.
+    item = store._get(item_id, history_revisions=store._history_revisions(item_id, recover=False))
+    if item["status"] not in ("done", "dropped") or event != _payload(store, item):
+        raise Denied("Work-item acknowledgement differs from terminal event")
+    return item
+
+
+def acknowledgement_payload(store, role, event):
+    """Validate a delivered token and current terminal binding; return raw row.
+
+    Called before finish intent and again after durable success. The caller
+    enforces current-unit membership. Tokens never enter durable receipts.
+    """
+    payload = {k: v for k, v in event.items() if k != "ack_token"}
+    if event.get("ack_token") != _token(role, payload):
+        raise Denied("Work-item acknowledgement binding changed")
+    _validate_payload(store, payload)
+    return payload
+
+
 def acknowledge(store, role, events):
     """Host-only, after durable completed result; idempotent exact receipts.
 
@@ -160,13 +205,7 @@ def acknowledge(store, role, events):
     changed = False
     try:
         for event in events:
-            if not isinstance(event, dict):
-                raise Denied("Invalid work-item acknowledgement event")
-            item_id = event.get("id")
-            # Reuse full seed/chain validation, never trust a delivered mutable id.
-            item = store._get(item_id, history_revisions=store._history_revisions(item_id, recover=False))
-            if item["status"] not in ("done", "dropped") or event != _payload(store, item):
-                raise Denied("Work-item acknowledgement differs from terminal event")
+            item = _validate_payload(store, event)
             if _received(store, role, item):
                 continue
             path = _receipt_path(store, role, item)

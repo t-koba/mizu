@@ -25,3 +25,12 @@ success evidence is bounded and may be absent or pruned.
 Record the actual result and evidence, not only intentions. Do not manufacture
 work. When state is requested, summarize the result, unresolved questions, and
 next useful action; refer to stored records instead of copying full reports.
+
+For delivered `decision_events` and terminal `work_item_events`, select only the
+rows you handled by including their host-issued `ack_token` values in
+`finish.ack_events`. You may select tokens from both sources in one unique list.
+Omitted or empty selection acknowledges none; finishing, a summary, an outcome,
+or waiting for a check never implies handling. Unselected rows remain pending
+oldest-first. Tokens bind this role and the exact delivered event, not history
+or untrusted evidence; never copy tokens from other roles or sources. Waits,
+CI/status, obligations and check jobs do not use this token contract.

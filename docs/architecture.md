@@ -667,8 +667,12 @@ Terminal `done`/`dropped` transitions can wake roles explicitly subscribed via
 `work_item_events` (default disabled). The event adapter reuses these same seed
 and full-chain validators, not a separate glob projection. Per-role exact
 terminal-identity receipts live outside the immutable work-item records and
-outside decision timestamp cursors; only a durably completed non-bounded run
-acknowledges its frozen batch. The terminal batch uses the role-effective
+outside decision timestamp cursors. Each delivered terminal row has a
+role/payload-bound `ack_token`; only the tokens explicitly selected in
+`finish.ack_events` are acknowledged after a durable successful result and,
+for writers, publication. Empty/omitted selections acknowledge none, regardless
+of outcome or check wait. Tokens are validated before finish intent and never
+enter the existing terminal receipt shape. The terminal batch uses the role-effective
 `work_item_events_limit` (role override when set, else the project default),
 independent of the decision-event batch; both stay under the fixed 100-event
 mechanism cap. Inbox/archive origin submitter routing never

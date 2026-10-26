@@ -1711,17 +1711,23 @@ class Context:
         if not args["summary"].strip():
             raise Denied("A nonempty work summary is required")
         tokens = args.get("ack_events", [])
-        delivered = {event["ack_token"]: event for event in self.decision_events}
+        decisions = {event["ack_token"]: event for event in self.decision_events}
+        terminal = {event["ack_token"]: event for event in self.work_item_events}
+        delivered = decisions.keys() | terminal.keys()
         if (not isinstance(tokens, list) or len(tokens) > 512
                 or any(not isinstance(token, str) or len(token) > 64 for token in tokens)
                 or len(set(tokens)) != len(tokens)
                 or any(token not in delivered for token in tokens)):
-            raise Denied("ack_events must select unique decision tokens delivered to this role in this unit")
+            raise Denied("ack_events must select unique decision or terminal work-item tokens delivered to this role in this unit")
         # Recheck the immutable decision binding, not mutable topic state: the
         # role may have revised/withdrawn a topic as part of handling it.
         for token in tokens:
-            if self.project.insights._decision_token(self.role.name, delivered[token]) != token:
-                raise Denied("Decision acknowledgement binding changed")
+            if token in decisions:
+                if self.project.insights._decision_token(self.role.name, decisions[token]) != token:
+                    raise Denied("Decision acknowledgement binding changed")
+            else:
+                work_item_events.acknowledgement_payload(
+                    self.project.work_items, self.role.name, terminal[token])
         if args.get('wait_for_check'):
             if 'check_job' not in self.role.capabilities or args['outcome'] != 'wait':
                 raise Denied('Check wait requires check_job and outcome=wait')
@@ -2360,6 +2366,7 @@ class Engine:
         terminal_page = work_item_events.pending(
             project.work_items, role_name, role.work_item_events, sources=role.work_item_sources,
             limit=role_work_item_events_limit(project.config, role))
+        terminal_page = work_item_events.delivery(role_name, terminal_page)
         terminal_events = terminal_page["events"]
         wait_events = (project.insights.due_waits(role_name, snapshot)
                        + ci_waits.pending(project.work_items, role_name))
@@ -3170,15 +3177,20 @@ class Engine:
                                 ready_work=None,
                                 ready_work_signature=getattr(context, "ready_work_signature", None)))
                     write_json(project.root / "observed" / f"{role_name}.json", observed)
-                if finished.get("ack_events"):
+                selected_tokens = set(finished.get("ack_events", []))
+                selected_decisions = [e for e in context.decision_events if e["ack_token"] in selected_tokens]
+                if selected_decisions:
                     with contextlib.suppress(OSError, ValueError, TypeError, AttributeError, Denied):
                         project.insights.acknowledge_decisions(
-                            role_name, [e for e in context.decision_events
-                                        if e["ack_token"] in finished["ack_events"]],
+                            role_name, selected_decisions,
                             sources=getattr(role, "decision_sources", "own") or "own")
-                if context.work_item_events and not finished.get("wait_for_check") and finished.get("outcome") != "bounded" and not context.bound_hit:
+                selected_terminal = [e for e in context.work_item_events if e["ack_token"] in selected_tokens]
+                if selected_terminal:
                     with contextlib.suppress(OSError, ValueError, TypeError, AttributeError, Denied):
-                        work_item_events.acknowledge(project.work_items, role_name, context.work_item_events)
+                        work_item_events.acknowledge(
+                            project.work_items, role_name,
+                            [work_item_events.acknowledgement_payload(project.work_items, role_name, e)
+                             for e in selected_terminal])
                 if context.wait_events and not finished.get("wait_for_check"):
                     with contextlib.suppress(OSError, ValueError, TypeError, AttributeError, Denied):
                         project.insights.consume_waits(role_name, context.wait_events)

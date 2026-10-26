@@ -7,7 +7,7 @@ import threading
 from contextlib import nullcontext
 from unittest.mock import patch
 
-from support import Fixture, bind_delivery, ScriptDriver, finish_with_decision_acks
+from support import Fixture, bind_delivery, ScriptDriver
 from mizu import fs, insight_archive, work_item_events as events
 from mizu.cli import execute, parser
 from mizu.config import load
@@ -16,6 +16,15 @@ from mizu.fs import canonical, digest, lock, read_json, write_json
 from mizu.runtime import Engine, _role_events_due, prompt_for, prompt_delta_for
 from mizu.services import event_watches, render
 from mizu.work_items import _timestamp_order
+
+
+def finish_with_event_acks(context, prompt, profile=None):
+    """Fake role explicitly handles only the rows in its delivered prompt."""
+    delivered = json.loads(prompt)
+    rows = delivered["decision_events"] + delivered.get("work_item_events", [])
+    context.handle("finish", {"outcome": "wait", "summary": "Handled delivered events",
+                              "state": "Next step is explicit.",
+                              "ack_events": [row["ack_token"] for row in rows]})
 
 
 class WorkItemEventTests(Fixture):
@@ -57,6 +66,202 @@ class WorkItemEventTests(Fixture):
         roles = dict(self.config.roles)
         roles["reviewer"] = dataclasses.replace(roles["reviewer"], work_item_events=("done", "dropped"), **changes)
         return dataclasses.replace(self.config, roles=roles)
+
+    def delivered(self, role="reviewer", **kwargs):
+        return events.delivery(role, self.page(role, **kwargs))["events"]
+
+    def finish(self, ctx, **kwargs):
+        return ctx.handle("finish", {"outcome": "wait", "summary": "Handled selected events",
+                                     "state": "Continue remaining work", **kwargs})
+
+    def test_explicit_partial_empty_omitted_and_restart_receipts(self):
+        from mizu.project import Project
+        for _ in range(3):
+            self.terminal()
+        original = self.page()["events"]
+        delivered = self.delivered()
+        config = self.subscribed_config()
+        for selection in (None, []):
+            def no_ack(ctx, prompt, profile=None):
+                self.finish(ctx, **({} if selection is None else {"ack_events": selection}))
+            Engine(config, driver=ScriptDriver(no_ack)).run(self.project, "reviewer")
+            self.assertEqual(self.page()["events"], original)
+            self.assertEqual(self.delivered(), delivered)
+        def partial(ctx, prompt, profile=None):
+            self.finish(ctx, ack_events=[json.loads(prompt)["work_item_events"][1]["ack_token"]])
+            self.assertEqual(self.page(ctx.role.name, sources="any")["events"], original)  # intent is not a receipt
+        real_ack = events.acknowledge
+        with patch.object(events, "acknowledge", wraps=real_ack) as ack:
+            Engine(config, driver=ScriptDriver(partial)).run(self.project, "reviewer")
+        self.assertEqual(ack.call_args.args[2], [original[1]])  # no token in stored row
+        restarted = Project(config, "sample")
+        self.assertEqual(events.pending(restarted.work_items, "reviewer", ("dropped",))["events"],
+                         [original[0], original[2]])
+        row = original[1]
+        path = self.project.root / "work-item-receipts/reviewer" / f"{row['id']}.{row['rev']}.json"
+        retained = path.read_bytes()
+        self.assertEqual(set(read_json(path)), {"role", "source", "event", "acknowledged_at"})
+        raw = events.acknowledgement_payload(restarted.work_items, "reviewer", delivered[1])
+        events.acknowledge(restarted.work_items, "reviewer", [raw])
+        self.assertEqual(path.read_bytes(), retained)
+        self.assertEqual(len(self.page("searcher", sources="any")["events"]), 3)
+        Engine(config, driver=ScriptDriver(finish_with_event_acks)).run(restarted, "reviewer")
+        self.assertEqual(self.page()["events"], [])
+        roles = dict(config.roles)
+        roles["searcher"] = dataclasses.replace(roles["searcher"], work_item_events=("dropped",),
+                                                work_item_sources="any")
+        config = dataclasses.replace(config, roles=roles)
+        Engine(config, driver=ScriptDriver(partial)).run(restarted, "searcher")
+        self.assertEqual(self.page("searcher", sources="any")["events"], [original[0], original[2]])
+        self.assertEqual(self.page()["events"], [])
+
+    def test_terminal_token_validation_precedes_finish_intent(self):
+        self.terminal()
+        row = self.delivered()[0]
+        other_role = self.delivered("searcher", sources="any")[0]
+        self.assertNotEqual(row["ack_token"], other_role["ack_token"])
+        self.terminal()
+        undelivered = self.delivered()[1]
+        ctx = self.context("reviewer")
+        ctx.work_item_events = [row]
+        for tokens in ([row["ack_token"], row["ack_token"]], [other_role["ack_token"]],
+                       [undelivered["ack_token"]], ["0" * 64], [""], ["x" * 65],
+                       [None], "not-an-array", ["x"] * 513):
+            with self.subTest(tokens=str(tokens)[:80]), self.assertRaises(Denied):
+                self.finish(ctx, ack_events=tokens)
+            self.assertIsNone(ctx.finished)
+            self.assertFalse((ctx.run_dir / "finish-intent.json").exists())
+        # Even copying a row into delivery cannot break its role/payload binding.
+        for altered in (other_role, {**row, "reason": "forged"}, {**row, "rev": row["rev"] + 1}):
+            ctx.work_item_events = [altered]
+            with self.assertRaises(Denied):
+                self.finish(ctx, ack_events=[altered["ack_token"]])
+            self.assertIsNone(ctx.finished)
+            self.assertFalse((ctx.run_dir / "finish-intent.json").exists())
+        ctx.work_item_events = []
+        with self.assertRaises(Denied):
+            self.finish(ctx, ack_events=[row["ack_token"]])
+        ctx.work_item_events = [row]
+        self.finish(ctx, ack_events=[row["ack_token"]])
+        self.assertEqual(self.page()["pending"], 2)
+
+    def test_terminal_stale_payload_refused_before_intent(self):
+        proposal, _ = self.terminal()
+        ctx = self.context("reviewer")
+        ctx.work_item_events = self.delivered()
+        token = ctx.work_item_events[0]["ack_token"]
+        # Current routing/payload changed: retained identity alone is not enough.
+        (self.project.root / "inbox" / f"{proposal['id']}.json").unlink()
+        self.assertNotEqual(self.delivered(sources="any")[0]["ack_token"], token)
+        with self.assertRaises(Denied):
+            self.finish(ctx, ack_events=[token])
+        self.assertIsNone(ctx.finished)
+        self.assertFalse((ctx.run_dir / "finish-intent.json").exists())
+        self.assertEqual(self.page(sources="any")["pending"], 1)
+
+    def test_corrected_terminal_revision_invalidates_old_delivered_token(self):
+        from mizu import acceptance
+        _, seed = self.seed()
+        captured = self.project.snapshots.capture_files(self.project.workspace)
+        snapshot = self.project.snapshots.create(
+            captured, goal="Goal", state="State", run="run", outcome="continue",
+            summary="Delivery", verification={"passed": True, "code_digest": captured["code_digest"]})
+        self.project.snapshots.publish(snapshot)
+        bind_delivery(self.project, seed["id"], snapshot["id"])
+        dropped = self.store.transition(seed["id"], expected_rev=3, status="dropped",
+                                        actor="worker", reason="Mistaken disposition")
+        ctx = self.context("reviewer")
+        ctx.work_item_events = self.delivered()
+        bound = {"commands": ["check"], "execution": "1" * 64, "environment": "2" * 64,
+                 "image": "sha256:" + "3" * 64}
+        acceptance._retain(self.project.root, {
+            "schema": 1, "code_digest": snapshot["code_digest"], "scope": bound,
+            "producer": {"kind": "verify", "id": "4" * 32, "run": "4" * 32}, "passed": True,
+            "commands": [{"id": "5" * 32, "exit_code": 0, "reason": "exited"}]})
+        with patch("mizu.acceptance._current_scope", return_value=bound):
+            self.store.transition(seed["id"], expected_rev=dropped["rev"], status="done",
+                                  actor="worker", snapshot_id=snapshot["id"])
+        current = self.delivered()[0]
+        self.assertNotEqual(current["event"], ctx.work_item_events[0]["event"])
+        self.assertNotEqual(current["ack_token"], ctx.work_item_events[0]["ack_token"])
+        with self.assertRaises(Denied):
+            self.finish(ctx, ack_events=[ctx.work_item_events[0]["ack_token"]])
+        self.assertIsNone(ctx.finished)
+        self.assertFalse((ctx.run_dir / "finish-intent.json").exists())
+        self.assertEqual(self.page()["pending"], 1)
+
+    def test_token_bearing_delivery_retains_row_and_page_bounds(self):
+        self.terminal()
+        page = self.page()
+        with patch.object(events, "MAX_CLOSED_ROW_BYTES", len(canonical(page["events"][0]))):
+            with self.assertRaises(LimitExceeded):
+                events.delivery("reviewer", page)
+        with patch.object(events, "MAX_CLOSED_PAGE_BYTES", len(canonical(page))):
+            with self.assertRaises(LimitExceeded):
+                events.delivery("reviewer", page)
+        self.assertNotIn("ack_token", page["events"][0])  # raw store view unchanged
+        self.assertEqual(len(events.delivery("reviewer", page)["events"][0]["ack_token"]), 64)
+
+    def test_finish_selects_unique_mixture_without_other_sources(self):
+        self.terminal()
+        self.terminal()
+        roles = dict(self.subscribed_config().roles)
+        roles["reviewer"] = dataclasses.replace(roles["reviewer"], decision_events=("accept",))
+        config = dataclasses.replace(self.config, roles=roles)
+        def mixed(ctx, prompt, profile=None):
+            data = json.loads(prompt)
+            selected = [data["decision_events"][0]["ack_token"],
+                        data["work_item_events"][1]["ack_token"]]
+            # Out-of-scope sources cannot supply acknowledgement tokens.
+            ctx.wait_events = [{"ack_token": "a" * 64}]
+            ctx.obligations = [{"ack_token": "b" * 64}]
+            for token in ("a" * 64, "b" * 64):
+                with self.assertRaises(Denied):
+                    self.finish(ctx, ack_events=[*selected, token])
+                self.assertIsNone(ctx.finished)
+                self.assertFalse((ctx.run_dir / "finish-intent.json").exists())
+            ctx.wait_events = []
+            ctx.obligations = []
+            self.finish(ctx, ack_events=selected)
+        Engine(config, driver=ScriptDriver(mixed)).run(self.project, "reviewer")
+        self.assertEqual(self.page()["pending"], 1)
+        self.assertEqual(len(self.project.insights.decision_events("reviewer", ("accept",))), 1)
+
+    def test_terminal_selection_is_independent_of_outcome_and_check_wait(self):
+        roles = dict(self.subscribed_config().roles)
+        roles["reviewer"] = dataclasses.replace(roles["reviewer"], capabilities=(
+            *roles["reviewer"].capabilities, "check_job"))
+        config = dataclasses.replace(self.config, roles=roles)
+        for outcome in ("continue", "blocked", "done", "bounded", "wait"):
+            for explicit in (False, True):
+                with self.subTest(outcome=outcome, explicit=explicit):
+                    if not explicit:
+                        self.terminal()
+                    def work(ctx, prompt, profile=None):
+                        if outcome == "bounded":
+                            ctx.bound_hit = "requests"
+                        self.finish(ctx, outcome="wait" if outcome == "bounded" else outcome,
+                                    **({"ack_events": [r["ack_token"] for r in ctx.work_item_events]}
+                                       if explicit else {}),
+                                    **({"wait_for_check": "c" * 64} if outcome == "wait" else {}))
+                    with patch("mizu.runtime.check_jobs.read", return_value={"role": "reviewer"}), \
+                            patch("mizu.runtime.check_jobs.set_wait"):
+                        Engine(config, driver=ScriptDriver(work)).run(self.project, "reviewer")
+                    self.assertEqual(self.page()["pending"], 0 if explicit else 1)
+
+    def test_failed_writer_publication_leaves_terminal_selection_pending(self):
+        self.terminal(source="worker")
+        roles = dict(self.config.roles)
+        roles["worker"] = dataclasses.replace(roles["worker"], work_item_events=("dropped",))
+        config = dataclasses.replace(self.config, roles=roles)
+        with patch.object(self.project.snapshots, "publish", side_effect=OSError("publication failed")), \
+                patch.object(events, "acknowledge") as ack:
+            with self.assertRaises(OSError):
+                Engine(config, driver=ScriptDriver(finish_with_event_acks)).run(self.project, "worker")
+        ack.assert_not_called()
+        self.assertEqual(self.page("worker")["pending"], 1)
+        Engine(config, driver=ScriptDriver(finish_with_event_acks)).run(self.project, "worker")
+        self.assertEqual(self.page("worker")["pending"], 0)
 
     def test_disabled_default_and_config_validation(self):
         self.assertTrue(all(not r.work_item_events for r in self.config.roles.values()))
@@ -119,7 +324,7 @@ class WorkItemEventTests(Fixture):
         config = load(self.file)
         self.project.config = config
         self.terminal(source="worker")
-        driver = ScriptDriver(finish_with_decision_acks)
+        driver = ScriptDriver(finish_with_event_acks)
         engine = Engine(config, driver=driver)
         for name in ("reviewer", "searcher"):
             role = config.roles[name]
@@ -137,7 +342,7 @@ class WorkItemEventTests(Fixture):
                 self.assertEqual(result["status"], "completed")
                 prompt = json.loads(driver.calls[-1][1])
                 self.assertEqual(prompt["decision_events"], decisions)
-                self.assertEqual(prompt.get("work_item_events", []), terminal["events"])
+                self.assertEqual(prompt.get("work_item_events", []), events.delivery(name, terminal)["events"])
                 if name == "reviewer":
                     self.assertEqual(decision_ack.call_args.kwargs["sources"], "any")
                 else:
@@ -409,12 +614,12 @@ class WorkItemEventTests(Fixture):
     def test_event_admission_prompts_run_evidence_and_successful_only_ack(self):
         self.project.set_control(wake_generation="")  # no pending operator wake
         config = self.subscribed_config()
-        driver = ScriptDriver()
+        driver = ScriptDriver(finish_with_event_acks)
         engine = Engine(config, driver=driver)
         self.assertEqual(engine.run(self.project, "reviewer", event_trigger=True)["skipped"], "no-event")
         engine.run(self.project, "reviewer")  # marks unchanged code
         self.terminal()
-        batch = self.page()["events"]
+        batch = events.delivery("reviewer", self.page())["events"]
         # Ack is reached only after completed result is on disk.
         real_ack = events.acknowledge
         def assert_durable(store, role, rows):
@@ -444,8 +649,11 @@ class WorkItemEventTests(Fixture):
 
     def test_ack_failure_replays_and_new_events_during_run_not_acknowledged(self):
         self.terminal()
-        original = self.page()["events"]
-        driver = ScriptDriver(lambda *_: self.terminal())
+        original = events.delivery("reviewer", self.page())["events"]
+        def arrive(ctx, prompt, profile=None):
+            self.terminal()
+            finish_with_event_acks(ctx, prompt, profile)
+        driver = ScriptDriver(arrive)
         engine = Engine(self.subscribed_config(), driver=driver)
         with patch.object(events, "acknowledge", side_effect=OSError("full disk")):
             result = engine.run(self.project, "reviewer", event_trigger=True)
@@ -476,7 +684,7 @@ class WorkItemEventTests(Fixture):
 
     def test_busy_and_selector_wait_do_not_ack(self):
         self.terminal()
-        engine = Engine(self.subscribed_config(), driver=ScriptDriver())
+        engine = Engine(self.subscribed_config(), driver=ScriptDriver(finish_with_event_acks))
         with lock(self.project.root / "locks/run-reviewer.lock"):
             with self.assertRaises(Busy):
                 engine.run(self.project, "reviewer", event_trigger=True)
@@ -488,13 +696,13 @@ class WorkItemEventTests(Fixture):
         with patch("mizu.classification.prepare", return_value=waiting), \
                 patch("mizu.selection.wait_fingerprint", return_value="stable"), \
                 patch("mizu.selection.read_wait", return_value={"fingerprint": "stable", "run": "prior-wait"}):
-            result = Engine(selector_config, driver=ScriptDriver()).run(self.project, "reviewer", event_trigger=True)
+            result = Engine(selector_config, driver=ScriptDriver(finish_with_event_acks)).run(self.project, "reviewer", event_trigger=True)
         self.assertEqual(result["status"], "waiting")
         self.assertEqual(self.page()["pending"], 1)
         exhausted = dataclasses.replace(self.subscribed_config(),
                                          limits=dataclasses.replace(self.config.limits, daily_requests=0))
         with self.assertRaises(InfraExceeded):
-            Engine(exhausted, driver=ScriptDriver()).run(self.project, "reviewer", event_trigger=True)
+            Engine(exhausted, driver=ScriptDriver(finish_with_event_acks)).run(self.project, "reviewer", event_trigger=True)
         self.assertEqual(self.page()["acknowledged"], 0)
 
     def test_daemon_gate_and_platform_watch_rendering(self):
@@ -650,7 +858,7 @@ class WorkItemEventTests(Fixture):
         with patch.object(runtime, "write_json", side_effect=fail_completion), \
                 patch.object(events, "acknowledge") as ack:
             with self.assertRaises(OSError):
-                Engine(self.subscribed_config(), driver=ScriptDriver()).run(
+                Engine(self.subscribed_config(), driver=ScriptDriver(finish_with_event_acks)).run(
                     self.project, "reviewer", event_trigger=True)
         ack.assert_not_called()
         self.assertEqual(self.page()["pending"], 1)
@@ -659,9 +867,9 @@ class WorkItemEventTests(Fixture):
         self.project.set_control(wake_generation="")  # no pending operator wake
         proposal, _ = self.terminal(source="searcher")
         (self.project.root / "inbox" / f"{proposal['id']}.json").unlink()
-        own = Engine(self.subscribed_config(), driver=ScriptDriver())
+        own = Engine(self.subscribed_config(), driver=ScriptDriver(finish_with_event_acks))
         self.assertEqual(own.run(self.project, "reviewer", event_trigger=True)["skipped"], "no-event")
-        engine = Engine(self.subscribed_config(work_item_sources="any"), driver=ScriptDriver())
+        engine = Engine(self.subscribed_config(work_item_sources="any"), driver=ScriptDriver(finish_with_event_acks))
         self.assertEqual(engine.run(self.project, "reviewer", event_trigger=True)["status"], "completed")
         self.assertEqual(self.page(sources="any")["acknowledged"], 1)
         self.assertEqual(engine.run(self.project, "reviewer", event_trigger=True)["skipped"], "no-event")
@@ -697,7 +905,7 @@ class WorkItemEventTests(Fixture):
         config = self.subscribed_config()
         config = dataclasses.replace(config, limits=dataclasses.replace(config.limits, work_item_events_limit=1))
         self.project.config = config
-        driver = ScriptDriver()
+        driver = ScriptDriver(finish_with_event_acks)
         engine = Engine(config, driver=driver)
         selected = []
         for remaining in (2, 1, 0):
