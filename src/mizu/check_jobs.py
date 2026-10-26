@@ -106,16 +106,19 @@ def save_execution(project, job):
         write_json(root(project) / job['id'] / 'job.json', job)
 
 
-def environment(project):
-    """Fingerprint observed local dependencies; never share network/tag inputs.
+def _configured_input_bounds(project):
+    return {'files': project.config.sandbox.check_input_files,
+            'bytes': project.config.sandbox.check_input_bytes}
 
-    File digests are cached only against complete local stat identities. The
-    identity itself also participates in the receipt, so even a dependency
-    changed and restored during execution invalidates it on POSIX filesystems.
-    Unsupported files or concurrent edits disable reuse rather than execution.
-    """
+
+def _mount_fingerprint(project, bounds):
+    """Fingerprint local dependencies within validated, explicit traversal bounds."""
+    if (not isinstance(bounds, dict) or set(bounds) != {'files', 'bytes'}
+            or any(type(value) is not int or not 1 <= value <= 1099511627776
+                   for value in bounds.values())):
+        return None
     config = project.config
-    if not config.sandbox.check_reuse or config.sandbox.network != 'none' or not re.fullmatch(r'(?:.*@)?sha256:[a-f0-9]{64}', config.sandbox.image):
+    if config.sandbox.network != 'none' or not re.fullmatch(r'(?:.*@)?sha256:[a-f0-9]{64}', config.sandbox.image):
         return None
     def stamp(st):
         return (st.st_dev, st.st_ino, st.st_mode, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
@@ -130,18 +133,25 @@ def environment(project):
                 pending = [base]
                 while pending:
                     path = pending.pop()
-                    if len(entries) >= config.sandbox.check_input_files:
+                    if len(entries) >= bounds['files']:
                         return None
                     st = path.lstat()
                     identity = list(stamp(st))
                     key = str(path)
                     if stat.S_ISDIR(st.st_mode):
-                        children = sorted(path.iterdir())
+                        children = []
+                        for child in path.iterdir():
+                            # A directory and its children must fit even before
+                            # traversing the children; never list an unbounded tree.
+                            if len(entries) + len(pending) + len(children) + 1 >= bounds['files']:
+                                return None
+                            children.append(child)
+                        children.sort()
                         pending.extend(reversed(children))
                         value = {'stat': identity, 'children': [c.name for c in children]}
                     elif stat.S_ISREG(st.st_mode):
                         total_bytes += st.st_size
-                        if total_bytes > config.sandbox.check_input_bytes:
+                        if total_bytes > bounds['bytes']:
                             return None
                         old = cached.get(key, {})
                         if os.name == 'posix' and old.get('stat') == identity and old.get('digest'):
@@ -177,6 +187,30 @@ def environment(project):
         if entries != cached:
             write_json(cache_path, entries)
         return digest(canonical(entries))
+
+
+def environment(project, *, bounds=None):
+    """Fingerprint observed local dependencies; never share network/tag inputs.
+
+    File digests are cached only against complete local stat identities. The
+    identity itself also participates in the receipt, so even a dependency
+    changed and restored during execution invalidates it on POSIX filesystems.
+    Unsupported files or concurrent edits disable reuse rather than execution.
+    """
+    if not project.config.sandbox.check_reuse:
+        return None
+    return _mount_fingerprint(project, _configured_input_bounds(project) if bounds is None else bounds)
+
+
+def execution_environment(project, job):
+    """Revalidate with the bounds that originally bound this job's environment.
+
+    Reuse policy may change after submission, but validation must stay bounded.
+    Legacy records without bounds use current configuration; malformed retained
+    bounds fail closed, never falling back to configuration or an unbounded scan.
+    Bounds are validation metadata, not execution identity or sharing inputs.
+    """
+    return _mount_fingerprint(project, job.get('environment_bounds', _configured_input_bounds(project)))
 
 
 def cache_guard(project):
@@ -463,7 +497,8 @@ def submit(context, script=None, *, commands=None, kind="experiment", fresh=Fals
     if capture['skipped']:
         raise Denied('Check job input is not representable')
     # Run-local identity remains the fallback when observed inputs cannot be shared.
-    env = environment(project)
+    env_bounds = _configured_input_bounds(project)
+    env = environment(project, bounds=env_bounds)
     with cache_guard(project) if not custom else contextlib.nullcontext():
         current = cache_input(project) if not custom else None
         cache_binding = ({'cache_input': current}
@@ -531,6 +566,8 @@ def submit(context, script=None, *, commands=None, kind="experiment", fresh=Fals
                        'commands': job_commands, 'status': 'queued', 'created_at': now(),
                        'acknowledged': False, 'environment': env, 'shared_key': shared_key,
                        'inputs_bound_required': context.config.sandbox.check_reuse}
+                if env is not None:
+                    job['environment_bounds'] = env_bounds
                 if cache_binding:
                     job.update(cache_binding)
                 if scratch_paths:
@@ -653,7 +690,7 @@ def result(context, job_id):
                        and list(project.verify) == job['commands']
                        and cache_matches(project, job, cache_input(project))
                        and (not job.get('inputs_bound_required') or job.get('environment') is not None)
-                       and (job.get('environment') is None or environment(project) == job['environment'])
+                       and (job.get('environment') is None or execution_environment(project, job) == job['environment'])
                        and 'verify' in context.role.capabilities)
             with lock(project.root / 'locks/check-jobs.lock'):
                 # A subscriber may have detached while inputs were inspected.
@@ -959,7 +996,7 @@ def _execute(project, job, stop, sandbox_factory, slot):
         os.utime(root(project), None)
         return summary(job)
     cache_changed = (job['kind'] == 'verify' and not cache_matches(project, job, cache_input(project)))
-    if cache_changed or (job['kind'] == 'verify' and job.get('inputs_bound_required') and job.get('environment') is None) or (job.get('environment') is not None and environment(project) != job['environment']) or job['execution'] != execution_key(project.config) or (job['kind'] == 'verify' and list(project.verify) != job['commands']):
+    if cache_changed or (job['kind'] == 'verify' and job.get('inputs_bound_required') and job.get('environment') is None) or (job.get('environment') is not None and execution_environment(project, job) != job['environment']) or job['execution'] != execution_key(project.config) or (job['kind'] == 'verify' and list(project.verify) != job['commands']):
         job.update(status='refused', error=('Dependency inputs could not be bound for reusable acceptance'
                    if job.get('inputs_bound_required') and job.get('environment') is None
                    else 'Execution configuration, dependency or cache inputs changed'), finished_at=now())
@@ -1010,7 +1047,7 @@ def _execute(project, job, stop, sandbox_factory, slot):
         after = project.snapshots.capture_files(workspace)
         unchanged = after['code_digest'] == before['code_digest']
         representable = not after['skipped']
-        dependencies_unchanged = ((job.get('environment') is None or environment(project) == job['environment'])
+        dependencies_unchanged = ((job.get('environment') is None or execution_environment(project, job) == job['environment'])
                                   and execution_key(project.config) == job['execution']
                                   and (job['kind'] != 'verify' or list(project.verify) == job['commands']))
         passed = (unchanged and representable and dependencies_unchanged

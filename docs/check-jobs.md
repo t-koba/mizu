@@ -306,9 +306,18 @@ bypass earlier results but still validate their dependency inputs.
 
 Dependency traversal is bounded by `sandbox.check_input_files` (250000 entries)
 and `sandbox.check_input_bytes` (8 GiB of regular file contents), configurable
-positive integers up to 1 TiB. Exceeding a bound disables sharing. Warm matching
-uses cached content hashes but still checks filesystem identities. Neither build
-artifacts nor command text alone can establish passed validation.
+positive integers up to 1 TiB. Exceeding a bound disables sharing. A job with a
+bound dependency environment retains the exact traversal bounds in its
+`environment_bounds` record (`files` and `bytes`, each an integer in the same
+range). Execution and acceptance revalidation use these original bounds even
+if reuse is later disabled or the configured traversal limits change. Missing
+bounds on older records fall back to the current configured limits; malformed
+or out-of-range retained bounds refuse validation without scanning. These
+bounds are validation metadata, not part of job identity or the shared key;
+sharing candidates still use current sharing settings. Verification-cache
+traversal continues to use its current configured limits independently.
+Warm matching uses cached content hashes but still checks filesystem identities.
+Neither build artifacts nor command text alone can establish passed validation.
 
 Configured verification caches have a separate `cache_input` fingerprint, not
 part of the external-dependency `environment`. It binds every configured name,

@@ -958,6 +958,171 @@ class SharingTests(PurposeTests):
         self.assertTrue(check_jobs.result(ctx,job['id'])['accepted_for_current_source'])
         self.assertFalse(check_jobs.available(ctx))  # Old dependency inputs were not bound.
 
+    def test_disabling_sharing_keeps_bound_queued_execution_valid(self):
+        dep, ctx, raw = self.bound_dependency()
+        self.project.config = dataclasses.replace(self.config, sandbox=dataclasses.replace(
+            self.config.sandbox, check_reuse=False))
+        self.assertIsNone(check_jobs.environment(self.project))
+        self.assertEqual(check_jobs.execution_environment(self.project, raw), raw['environment'])
+        self.assertEqual(self.run_job()['status'], 'completed')
+        self.assertTrue(check_jobs.result(ctx, raw['id'])['accepted_for_current_source'])
+        self.assertEqual(check_jobs.available(ctx), [])
+        self.assertEqual(check_jobs.available(self.context('reviewer')), [])
+
+    def bound_dependency(self):
+        dep = self.root / 'dependency'
+        dep.mkdir()
+        (dep / 'version').write_text('one')
+        self.config = dataclasses.replace(self.config, sandbox=dataclasses.replace(
+            self.config.sandbox, mounts=({'source': str(dep), 'target': '/dep'},),
+            check_input_files=2, check_input_bytes=3))
+        self.project.config = self.config
+        ctx, job = self.submit()
+        raw = check_jobs.read(self.project, job['id'])
+        self.assertIsNotNone(raw['environment'])
+        self.assertEqual(raw['environment_bounds'], {'files': 2, 'bytes': 3})
+        return dep, ctx, raw
+
+    def test_lowered_limits_use_original_bounds_for_all_revalidation(self):
+        dep, ctx, job = self.bound_dependency()
+        self.project.config = dataclasses.replace(self.config, sandbox=dataclasses.replace(
+            self.config.sandbox, check_input_files=1, check_input_bytes=1))
+        self.assertIsNone(check_jobs.environment(self.project))
+        with patch.object(check_jobs, '_mount_fingerprint', wraps=check_jobs._mount_fingerprint) as scan:
+            self.assertEqual(self.run_job()['status'], 'completed')
+            self.assertTrue(check_jobs.result(ctx, job['id'])['accepted_for_current_source'])
+        self.assertEqual([call.args[1] for call in scan.call_args_list],
+                         [job['environment_bounds']] * 3)  # Before, after, acceptance.
+        self.assertEqual(check_jobs.available(self.context('reviewer')), [])
+
+    def test_bounds_are_metadata_not_job_or_shared_identity(self):
+        dep, ctx, job = self.bound_dependency()
+        self.project.config = dataclasses.replace(self.config, sandbox=dataclasses.replace(
+            self.config.sandbox, check_input_files=10, check_input_bytes=100))
+        ctx.config = self.project.config
+        self.assertEqual(check_jobs.execution_key(self.project.config), job['execution'])
+        self.assertEqual(check_jobs.submit(ctx)['id'], job['id'])
+        shared = check_jobs.submit(self.context())
+        self.assertEqual(shared['shared_job'], job['id'])
+        raw = check_jobs.read(self.project, shared['id'])
+        self.assertEqual(raw['shared_key'], job['shared_key'])
+        self.assertEqual(raw['environment_bounds'], job['environment_bounds'])
+
+    def test_changed_dependency_still_refuses_after_sharing_disabled(self):
+        dep, ctx, job = self.bound_dependency()
+        self.project.config = dataclasses.replace(self.config, sandbox=dataclasses.replace(
+            self.config.sandbox, check_reuse=False, check_input_files=1, check_input_bytes=1))
+        (dep / 'version').write_text('two')
+        self.assertEqual(self.run_job()['status'], 'refused')
+        self.assertFalse(FakeSandbox.calls)
+        self.assertFalse(check_jobs.result(ctx, job['id'])['accepted_for_current_source'])
+
+    def test_original_byte_limit_stops_before_hashing_grown_dependency(self):
+        dep, ctx, job = self.bound_dependency()
+        self.project.config = dataclasses.replace(self.config, sandbox=dataclasses.replace(
+            self.config.sandbox, check_reuse=False, check_input_files=1, check_input_bytes=1))
+        (dep / 'version').write_text('larger than original bound')
+        with patch.object(check_jobs.hashlib, 'file_digest', side_effect=AssertionError('Over-bound hash')):
+            self.assertEqual(self.run_job()['status'], 'refused')
+        self.assertFalse(FakeSandbox.calls)
+
+    def test_original_file_limit_stops_directory_enumeration(self):
+        dep, ctx, job = self.bound_dependency()
+        self.project.config = dataclasses.replace(self.config, sandbox=dataclasses.replace(
+            self.config.sandbox, check_reuse=False, check_input_files=1, check_input_bytes=1))
+        original = Path.iterdir
+        visited = []
+        def children(path):
+            if path != dep:
+                yield from original(path)
+                return
+            for name in ('version', 'extra'):
+                visited.append(name)
+                yield path / name
+            self.fail('Enumeration exceeded the original file bound')
+        with patch.object(Path, 'iterdir', children):
+            self.assertEqual(self.run_job()['status'], 'refused')
+        self.assertEqual(visited, ['version', 'extra'])
+        self.assertFalse(FakeSandbox.calls)
+
+    def test_original_file_limit_is_global_across_directory_enumeration(self):
+        dep = self.root / 'dependency'
+        dep.mkdir()
+        directories = [dep / name for name in ('a', 'b', 'c')]
+        for directory in directories:
+            directory.mkdir()
+        self.config = dataclasses.replace(self.config, sandbox=dataclasses.replace(
+            self.config.sandbox, mounts=({'source': str(dep), 'target': '/dep'},),
+            check_input_files=4, check_input_bytes=1024))
+        self.project.config = self.config
+        ctx, job = self.submit()
+        raw = check_jobs.read(self.project, job['id'])
+        self.assertEqual(raw['environment_bounds']['files'], 4)
+        self.project.config = dataclasses.replace(self.config, sandbox=dataclasses.replace(
+            self.config.sandbox, check_reuse=False))
+        for directory in directories:
+            for index in range(4):
+                (directory / f'file{index}').write_text('x')
+        original = Path.iterdir
+        visited = []
+
+        def children(path):
+            for child in original(path):
+                if path == dep or dep in path.parents:
+                    visited.append(child)
+                yield child
+
+        with patch.object(Path, 'iterdir', children):
+            self.assertEqual(self.run_job()['status'], 'refused')
+        # Four bound paths exist at submission; revalidation stops as soon as
+        # it observes a fifth, instead of enumerating each subtree up to four.
+        self.assertLessEqual(len(visited), 5)
+        self.assertFalse(FakeSandbox.calls)
+
+    def test_malformed_retained_bounds_refuse_execution_and_acceptance(self):
+        dep, ctx, job = self.bound_dependency()
+        self.run_job()
+        path = check_jobs.root(self.project) / job['id'] / 'job.json'
+        completed = read_json(path)
+        invalid = [None, [], {}, {'files': 2}, {'files': 2, 'bytes': 3, 'extra': 1}]
+        for key in ('files', 'bytes'):
+            invalid.extend({**job['environment_bounds'], key: value}
+                           for value in (True, False, '2', 2.0, 0, -1, 1099511627777))
+        for bounds in invalid:
+            with self.subTest(bounds=bounds):
+                write_json(path, {**completed, 'environment_bounds': bounds})
+                with patch.object(Path, 'lstat', side_effect=AssertionError('Invalid bounds must not scan')):
+                    self.assertIsNone(check_jobs.execution_environment(self.project, read_json(path)))
+                self.assertFalse(check_jobs.result(ctx, job['id'])['accepted_for_current_source'])
+        write_json(path, {**job, 'environment_bounds': None})
+        FakeSandbox.calls.clear()
+        self.assertEqual(self.run_job()['status'], 'refused')
+        self.assertFalse(FakeSandbox.calls)
+
+    def test_legacy_bound_jobs_use_current_limits_even_when_reuse_is_off(self):
+        dep, ctx, job = self.bound_dependency()
+        job.pop('environment_bounds')
+        self.project.config = dataclasses.replace(self.config, sandbox=dataclasses.replace(
+            self.config.sandbox, check_reuse=False))
+        self.assertEqual(check_jobs.execution_environment(self.project, job), job['environment'])
+        self.project.config = dataclasses.replace(self.project.config, sandbox=dataclasses.replace(
+            self.project.config.sandbox, check_input_bytes=1))
+        self.assertIsNone(check_jobs.execution_environment(self.project, job))
+
+    def test_bound_jobs_still_reject_execution_configuration_changes(self):
+        ctx, job = self.submit()
+        raw = check_jobs.read(self.project, job['id'])
+        path = check_jobs.root(self.project) / job['id'] / 'job.json'
+        for changes in ({'network': 'bridge'}, {'image': 'sha256:' + 'f' * 64},
+                        {'env': {'EXAMPLE': 'changed'}}):
+            with self.subTest(changes=changes):
+                write_json(path, raw)
+                self.project.config = dataclasses.replace(self.config, sandbox=dataclasses.replace(
+                    self.config.sandbox, check_reuse=False, **changes))
+                self.assertEqual(self.run_job()['status'], 'refused')
+                self.assertFalse(check_jobs.result(ctx, job['id'])['accepted_for_current_source'])
+        self.assertFalse(FakeSandbox.calls)
+
     def test_unavailable_dependency_identity_cannot_fall_back_to_acceptance(self):
         with patch('mizu.check_jobs.environment',return_value=None):
             ctx,job=self.submit()
@@ -1317,11 +1482,11 @@ class CacheInputTests(Fixture):
         with patch.object(check_jobs, 'cache_input', side_effect=fingerprint):
             self.run_job()
         # Result's dependency/cache work also runs outside the queue lock.
-        real_environment = check_jobs.environment
-        def environment(project):
+        real_environment = check_jobs.execution_environment
+        def environment(project, job):
             self.assertFalse(held(queue_lock))
-            return real_environment(project)
-        with patch.object(check_jobs, 'cache_input', side_effect=fingerprint), patch.object(check_jobs, 'environment', side_effect=environment):
+            return real_environment(project, job)
+        with patch.object(check_jobs, 'cache_input', side_effect=fingerprint), patch.object(check_jobs, 'execution_environment', side_effect=environment):
             self.assertTrue(check_jobs.result(ctx, first['id'])['accepted_for_current_source'])
 
     def test_mutating_build_cache_still_moves_back_and_is_next_input(self):
