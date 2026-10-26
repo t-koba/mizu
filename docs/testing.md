@@ -18,9 +18,17 @@
 
 ## Offline test execution (Linux / macOS / Windows)
 
+`make test` and `make check` both run the complete offline acceptance gate in
+`scripts/check.py`. This is the required full offline validation; neither target
+is a shortened test subset. `make test-quick` runs only the historical Python unittest discovery and bridge
+Node test (`python3 -m unittest discover -s tests -q` and `node --test
+tests/bridge.test.mjs`). It is a quick subset for development feedback, not
+acceptance, and passing it does not establish that the offline gate passed.
+
 ```sh
-python3 -m unittest discover -s tests -q
-node --test tests/bridge.test.mjs
+make test
+make check
+make test-quick
 python3 scripts/check.py --report private-validation/offline.json
 ```
 

@@ -1,12 +1,14 @@
 PYTHON ?= python3
-.PHONY: test check test-install package release install
+.PHONY: test test-quick check test-install package release install
 
-test:
-	$(PYTHON) -m unittest discover -s tests -q
-	node --test tests/bridge.test.mjs
+test: check
 
 check:
 	$(PYTHON) scripts/check.py
+
+test-quick:
+	$(PYTHON) -m unittest discover -s tests -q
+	node --test tests/bridge.test.mjs
 
 test-install:
 	./scripts/test-install.sh
