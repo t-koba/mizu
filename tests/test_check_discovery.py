@@ -361,7 +361,7 @@ class DiscoveryTests(Fixture):
         self.assertFalse(archive.exists())
         self.assertEqual(path.read_bytes(), canonical({}))
 
-    def test_dispatch_admission_and_daemon_wake_need_real_owned_completion(self):
+    def test_dispatch_admission_and_daemon_wake_require_explicit_wait(self):
         ctx, bad = self.queue(script='bad')
         _, healthy = self.queue(script='healthy')
         self.leaf(bad).write_bytes(b'bad json')
@@ -369,13 +369,19 @@ class DiscoveryTests(Fixture):
         snapshot = {**ctx.snapshot, 'outcome': 'done', 'wake_generation': 'test-wake',
                     'ready_work': {'ids': [], 'digest': digest(canonical([]))}}
         engine = Engine(self.config)
-        # Event admission uses the same pending discovery, not the diagnostics' truthiness.
+        # A completed owned result stays visible but cannot admit without its
+        # exact explicit wait. Malformed diagnostics do not supply a wake.
         with patch('mizu.runtime._operator_woke', return_value=False), \
              patch('mizu.runtime._ready_work_changed', return_value=False):
             self.assertFalse(should_run(self.project, snapshot, role_name='worker'))
             self.assertIn('skip', engine._dispatch_state(self.project, 'worker',
                                                          self.config.roles['worker'], event_trigger=True))
             self.edit(healthy, status='completed', passed=True)
+            self.assertEqual([job['id'] for job in check_jobs.pending(self.project, 'worker')], [healthy['id']])
+            self.assertFalse(should_run(self.project, snapshot, role_name='worker'))
+            self.assertIn('skip', engine._dispatch_state(self.project, 'worker',
+                                                         self.config.roles['worker'], event_trigger=True))
+            check_jobs.set_wait(self.project, 'worker', healthy['id'])
             self.assertTrue(should_run(self.project, snapshot, role_name='worker'))
             self.assertNotIn('skip', engine._dispatch_state(self.project, 'worker',
                                                             self.config.roles['worker'], event_trigger=True))
