@@ -1,6 +1,6 @@
 # Shared record delivery: inventory and migration design
 
-**Status:** design plus persistence foundation, host-only decision-source projection, and shadow-only bounded decision pages/retrieval. `src/mizu/shared_records.py` implements bounded schema-1 immutable records, explicit per-role receipts and backup membership, with focused tests. `Insights.project_decision_records()` can reconcile current decision events into shadow records; `Insights.shared_decision_page()` can inspect a bounded source-current shadow page and freeze its host manifest. No source kind is enabled for delivery or routed through it; current delivery paths remain authoritative until a separately verified, reconciled cutover.
+**Status:** design plus persistence foundation, host-only decision-source projection, shadow-only bounded decision pages/retrieval, and host-only exact legacy receipt reconciliation. `src/mizu/shared_records.py` implements bounded schema-1 immutable records, explicit per-role receipts and backup membership, with focused tests. `Insights.project_decision_records()` can reconcile current decision events into shadow records; `Insights.shared_decision_page()` can inspect a bounded source-current shadow page and freeze its host manifest. No source kind is enabled for delivery or routed through it; current delivery paths remain authoritative until a separately verified, reconciled cutover.
 
 ## Scope and invariants
 
@@ -225,7 +225,7 @@ selection/receipt authority. No prompt, finish, routing configuration, wake,
 admission or task lifecycle is changed. The page adapter writes only immutable
 shadow projections, never receipts. Generic receipt calls in tests exercise the
 already-existing `SharedRecords` mechanism; they do not enable shared runtime
-acknowledgements. The parent pilot's migration/cutover remains outstanding.
+acknowledgements. The host-only receipt reconciliation below supplies the migration preflight/apply slice; the parent pilot's runtime cutover remains outstanding.
 
 ```python
 page, manifest = insights.shared_decision_page(
@@ -328,3 +328,148 @@ command evidence `104c57b71b924d9b8cc4ba7bbf91586c`: 100 short rows produced a
 than legacy. This shadow adapter claims boundedness and parity, **not** speed or
 storage savings. Further storage/index complexity and a policy budget default
 still require the integrated pilot evidence.
+
+## Shadow-only exact legacy receipt reconciliation
+
+`mizu.decision_reconciliation` provides trusted host Python functions, **not
+model tools**, with no runtime caller or default route:
+
+```python
+plan = preflight_decision_receipts(insights, routes, enabled_roles=enabled_roles)
+report = apply_decision_receipts(insights, plan, routes, enabled_roles=enabled_roles)
+```
+
+Both calls require a fresh trusted configuration snapshot. `enabled_roles` is a
+unique list/tuple of valid role identifiers; `routes` is exactly a dictionary
+covering those roles, including roles with no decision subscription. Each value
+is exactly `{"actions": [...], "sources": "own" | "any"}`. Actions are a unique
+list/tuple subset of `accept`, `modify`, `reject`, `defer`; `[]` selects nothing.
+There is no inferred role, route, subscription, config path or default. `{}` is
+valid only with an explicitly empty enabled-role set. The caller is responsible
+for supplying the complete enabled set from trusted configuration, not model
+arguments. Routes are detached and normalized by sorting roles and actions;
+order-only differences do not invalidate the plan. Changed actions, sources or
+role membership do. This snapshot is not a lock on an external config file:
+apply must be called with the trusted configuration again, never routes copied
+out of the plan. A trusted host that edits receipt stores directly must also
+respect the boundary; these APIs cannot synchronize an out-of-band operator
+file edit or a caller that supplies an obsolete config snapshot.
+
+### Boundary and lock order
+
+Each call holds, together and in this order:
+
+1. Every enabled role's existing `admission.role_exclusion(project.root, role)`,
+   sorted by role, **nonblocking**. Any live run (even an empty-subscription role)
+   causes `Busy`, with no new projections or shared receipts.
+2. The existing insight `record_lock` (including its managed shared-retention
+   lock), excluding current source mutation.
+3. Each enabled role's receipt-writer lock, named
+   `locks/decision-receipts-<sha256(role)>.lock`, sorted by role. The exact
+   legacy acknowledgement algorithm holds only its own role's lock, so
+   independent role receipts do not serialize one another.
+
+All remain held through scan, comparison, projection writes, receipt writes and
+post-apply verification. Runtime already holds its own role exclusion through
+finish/ack. Direct legacy ack acquires only that role's receipt lock: it never
+acquires a source or role lock while holding it. Source mutations take
+`record_lock` and never acquire role exclusions or receipt locks in reverse
+order. Concurrent
+reconciliation attempts serialize or fail `Busy`; no caller waits for an active
+run while holding the source lock. Locks are released on exception/death and
+are never unlinked. Preflight can create lock infrastructure but creates **no
+immutable projections or receipts**. Legacy delivery and exact acknowledgement
+remain the only active runtime authority.
+
+### Exact schema and identity
+
+The returned JSON object has exactly the following schema (maps below use full
+shared record IDs `insight.decision/<event>`; lists are sorted by ID, not event
+time):
+
+```text
+{
+  schema: 1,
+  plan_digest: sha256(canonical({schema: 1, boundary: boundary})),
+  boundary: {
+    routes: {role: {actions: [action, ...], sources: "own" | "any"}},
+    route_digest: sha256(canonical(routes)),
+    sources: {record_id: {
+      record_digest, history_digest, insight_digest, decision_digest
+    }},
+    legacy_receipts: {role: {record_id: {ack_token, receipt_digest}}}
+  },
+  roles: {role: {
+    current_ids: [record_id, ...],
+    legacy_received_ids: [record_id, ...],
+    legacy_pending_ids: [record_id, ...],
+    shared_received_ids: [record_id, ...],
+    shared_pending_ids: [record_id, ...],
+    shared_receipt_digests: {record_id: digest},
+    post_map_pending_ids: [record_id, ...],
+    post_map_parity: true
+  }}
+}
+```
+
+Digests are SHA-256 hex strings using `fs.canonical` (including its newline) for
+structured values. `record_digest` pins the entire projected envelope; history
+and effective decision digests pin exact safely read file bytes. The insight
+digest pins exact live inbox bytes, or canonical retained archive content when
+there is no live inbox record. Thus non-payload source movement also invalidates
+the boundary. `sources` contains the complete strict source-current decision
+set, before routes, bounded at **512**. `legacy_receipts` contains every routed
+role/record pair, recomputed with `Insights._decision_token`; `receipt_digest`
+is the exact receipt-file byte digest, or **null for absence**. Only receipts
+validated by `_decision_received` count: exact role, event, full payload token
+and timezone-aware acknowledgement timestamp. Cursors are never consulted.
+Stale, withdrawn, superseded, old-payload-token and route-excluded receipt files
+are never translated or scanned for acknowledgement. Unrelated stale corrupt
+receipt files remain irrelevant. Relevant corrupt or unsafe files fail closed,
+without repair or deletion; receipt-presence and timestamp changes invalidate
+apply, even when the received set would be unchanged.
+
+`roles` is the deterministic observation/progress report. Existing shared
+receipts must be a valid exact subset of legacy-received identities. Anything
+else refuses preflight/apply, because it would hide a legacy-pending event.
+Every predicted post-map pending set equals its legacy pending set. The
+`plan_digest` deliberately excludes output progress: a new preflight after an
+interrupted apply has the **same identity** while its shared-received report
+can advance. The plan is host-retained evidence, not a model authorization
+credential. Apply validates report consistency and recomputes the entire input
+boundary from trusted routes and stores; it never uses a plan payload to create
+a record or choose recipients.
+
+### Apply, failure and restart
+
+Before any writes, apply checks the identical source/legacy-receipt/route
+boundary and all bounds. The full serialized plan/report, including its
+post-map form, must fit `fs.MAX_FRAME` (1 MiB); this is a refusal ceiling, **not a
+page budget default**. Count or byte overflow refuses without shared receipt
+writes. This API adds no index, scan cache, page default or storage optimization.
+The prior 205-event shadow scan evidence (3–5x slower reads) does not justify
+additional storage complexity here.
+
+Apply creates/validates projections only for currently routed,
+legacy-acknowledged records, then uses `SharedRecords.freeze` and explicit exact
+`acknowledge` selections for missing role/ID/full-envelope-digest receipts. It
+never rewrites/deletes legacy receipts, maps a completion cursor, or invents a
+receipt for a legacy-pending event. Existing projections are validated in
+preflight without writes; an orphan shared receipt with no immutable record
+refuses. Valid existing shared receipts are reused unchanged.
+
+I/O interruption can leave an idempotent projection/receipt prefix. Retain the
+original plan across restart and call apply again with current trusted routes.
+Any newly present exact shared receipts must be a subset of that plan's
+legacy-received identities. Original shared receipt byte digests must still be
+present and unchanged; corrupt, extra, missing-original or changed receipts
+refuse. This permits exact interrupted retries without putting output progress
+in input identity. Successful apply re-scans under the same locks, verifies each
+role's shared and legacy pending sets are equal, and returns the same schema
+with the completed shared progress report. A failed call is not proof of a
+completed batch, and failure never rolls back an immutable prefix.
+
+**No runtime cutover:** no shared prompting, runtime acknowledgement, routing,
+wake, admission, task lifecycle, WorkItems, waits or CI behavior is enabled or
+changed. Any later cutover needs its own verified reconciliation and authority
+switch; this migration does not make shared receipts active runtime authority.

@@ -1607,6 +1607,13 @@ replacement insight without implying rejected substance.
 
     def _project_decision_records_locked(self, *, limit: int) -> dict[str, str]:
         """Caller holds record_lock through source selection and all writes."""
+        pending = self._decision_projection_envelopes_locked(limit=limit)
+        store = SharedRecords(self.root, {"insight.decision": INSIGHT_DECISION_POLICY})
+        return {record_id: store.put(pending[record_id], writer="host.insights")
+                for record_id in sorted(pending)}
+
+    def _decision_projection_envelopes_locked(self, *, limit: int) -> dict:
+        """Select/validate without writes; caller holds record_lock."""
         history = self.root / "decision-history"
         if not insight_archive._directory(history):
             return {}
@@ -1635,9 +1642,7 @@ replacement insight without implying rejected substance.
             pending[record_id] = envelope
             if len(pending) > limit:
                 raise LimitExceeded("Decision projection exceeds record count bound")
-        store = SharedRecords(self.root, {"insight.decision": INSIGHT_DECISION_POLICY})
-        return {record_id: store.put(pending[record_id], writer="host.insights")
-                for record_id in sorted(pending)}
+        return pending
 
     def shared_decision_page(self, role_name: str, actions, *, max_bytes: int,
                              limit: int = 10, sources: str = "own") -> tuple[dict, tuple[Delivery, ...]]:
@@ -1789,39 +1794,45 @@ replacement insight without implying rejected substance.
         left for explicit operator-controlled recovery.
         """
         identifier(role_name)
-        if sources not in ("own", "any"):
-            raise Denied("Decision event sources must be own or any")
-        if not isinstance(events, list) or len(events) > 512:
-            raise Denied("Invalid decision receipt batch")
-        tokens = set()
-        for event in events:
-            if (not isinstance(event, dict) or not isinstance(event.get("ack_token"), str)
-                    or not DIGEST.fullmatch(event["ack_token"])
-                    or event["ack_token"] in tokens
-                    or (sources == "own" and event.get("source") != role_name)
-                    or self._decision_token(role_name, event) != event["ack_token"]):
-                raise Denied("Invalid decision acknowledgement")
-            tokens.add(event["ack_token"])
-        for event in events:
-            try:
-                received = self._decision_received(role_name, event)
-            except CorruptDecisionReceipt as exc:
-                raise Denied("Invalid decision acknowledgement") from exc
-            if received:
-                continue
-            path = self.root / "decision-receipts" / role_name / f"{event['ack_token']}.json"
-            mkdir(path.parent)
-            receipt = {"role": role_name, "event": event["event"],
-                       "ack_token": event["ack_token"], "acknowledged_at": now()}
-            try:
-                write_json(path, receipt, exclusive=True)
-            except (FileExistsError, Denied):
+        with self._decision_receipt_lock(role_name):
+            if sources not in ("own", "any"):
+                raise Denied("Decision event sources must be own or any")
+            if not isinstance(events, list) or len(events) > 512:
+                raise Denied("Invalid decision receipt batch")
+            tokens = set()
+            for event in events:
+                if (not isinstance(event, dict) or not isinstance(event.get("ack_token"), str)
+                        or not DIGEST.fullmatch(event["ack_token"])
+                        or event["ack_token"] in tokens
+                        or (sources == "own" and event.get("source") != role_name)
+                        or self._decision_token(role_name, event) != event["ack_token"]):
+                    raise Denied("Invalid decision acknowledgement")
+                tokens.add(event["ack_token"])
+            for event in events:
                 try:
-                    if self._decision_received(role_name, event):
-                        continue
+                    received = self._decision_received(role_name, event)
                 except CorruptDecisionReceipt as exc:
                     raise Denied("Invalid decision acknowledgement") from exc
-                raise
+                if received:
+                    continue
+                path = self.root / "decision-receipts" / role_name / f"{event['ack_token']}.json"
+                mkdir(path.parent)
+                receipt = {"role": role_name, "event": event["event"],
+                           "ack_token": event["ack_token"], "acknowledged_at": now()}
+                try:
+                    write_json(path, receipt, exclusive=True)
+                except (FileExistsError, Denied):
+                    try:
+                        if self._decision_received(role_name, event):
+                            continue
+                    except CorruptDecisionReceipt as exc:
+                        raise Denied("Invalid decision acknowledgement") from exc
+                    raise
+
+    def _decision_receipt_lock(self, role_name: str):
+        """Serialize one role's legacy receipt writes without cross-role blocking."""
+        identifier(role_name)
+        return lock(self.root / "locks" / f"decision-receipts-{digest(role_name.encode())}.lock")
 
     def decision_cursor(self, role_name: str) -> dict:
         """Read legacy cursor for diagnostics only; never used to suppress delivery."""
