@@ -3,7 +3,7 @@ import dataclasses
 from unittest.mock import patch
 from support import Fixture, ScriptDriver
 from mizu.fs import read_json
-from mizu.runtime import Engine
+from mizu.runtime import Engine, should_run
 
 
 class DispatchPreflightTests(Fixture):
@@ -60,13 +60,32 @@ class DispatchPreflightTests(Fixture):
             title='Work exists', actor='worker')
         engine = Engine(self.config, driver=ScriptDriver())
         self.assertEqual(engine.run(self.project, 'worker')['status'], 'completed')
-        # The result itself is still owned and delivered by the check store;
-        # its presence, not an unrelated project task, admits the callback.
-        with patch('mizu.runtime.check_jobs.pending', return_value=[{'id': 'owned-result'}]):
+        # A completed result remains discoverable, but only an exact explicit
+        # wait may make it a scheduler/admission wake.
+        with patch('mizu.runtime.check_jobs.pending', return_value=[{'id': 'owned-result'}]), \
+             patch('mizu.runtime.check_jobs.wake_ready', return_value=False):
             state = engine._dispatch_state(self.project, 'worker',
                 self.config.roles['worker'], event_trigger=True)
-        self.assertNotIn('skip', state)
-        self.assertEqual(state['_dispatch'].admission, 'wait')
+            self.assertIn('skip', state)
+            self.assertEqual(state['skip']['skipped'], 'no-event')
+            normal = engine._dispatch_state(self.project, 'worker',
+                self.config.roles['worker'], event_trigger=False)
+            if '_dispatch' in normal:
+                self.assertNotEqual(normal['_dispatch'].admission, 'wait')
+            self.assertFalse(should_run(self.project, self.project.snapshots.get(),
+                                        role_name='worker', config=self.config))
+        with patch('mizu.runtime.check_jobs.pending', return_value=[{'id': 'owned-result'}]), \
+             patch('mizu.runtime.check_jobs.wake_ready', return_value=True):
+            state = engine._dispatch_state(self.project, 'worker',
+                self.config.roles['worker'], event_trigger=True)
+            self.assertNotIn('skip', state)
+            self.assertEqual(state['_dispatch'].admission, 'wait')
+            normal = engine._dispatch_state(self.project, 'worker',
+                self.config.roles['worker'], event_trigger=False)
+            self.assertNotIn('skip', normal)
+            self.assertIn(normal['_dispatch'].admission, ('wait', 'schedule'))
+            self.assertTrue(should_run(self.project, self.project.snapshots.get(),
+                                       role_name='worker', config=self.config))
 
 
 class CodeChangeEventTests(Fixture):

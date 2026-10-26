@@ -2425,7 +2425,7 @@ class Engine:
                 ready_work_changed=ready_work_changed,
                 has_decision=bool(substantive_events or substantive_diagnostics),
                 has_work_item=bool(terminal_events),
-                has_wait=bool(wait_events or check_jobs.pending(project, role_name)),
+                has_wait=bool(wait_events or check_jobs.wake_ready(project, role_name)),
                 has_ci=bool(ci_failures),
             ))
             if event_gate.skipped == "no-event":
@@ -2458,7 +2458,7 @@ class Engine:
             ready_work_changed=ready_work_changed,
             has_decision=bool(substantive_events or substantive_diagnostics),
             has_work_item=bool(terminal_events),
-            has_wait=bool(wait_events or check_jobs.pending(project, role_name)),
+            has_wait=bool(wait_events or check_jobs.wake_ready(project, role_name)),
             has_ci=bool(ci_failures),
             operator_woke=bool(operator_woke and role.workspace != "write"),
             progress_self_admits=bool(progress_self_admits),
@@ -3941,7 +3941,7 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
                 name for name in project.roles
                 if project.config.roles[name].workspace == "write"]
             try:
-                value = any(check_jobs.pending(project, name) or ci_waits.pending(project.work_items, name, limit=1) for name in names)
+                value = any(check_jobs.wake_ready(project, name) or ci_waits.pending(project.work_items, name, limit=1) for name in names)
             except (Denied, LimitExceeded, OSError, ValueError):
                 value = False
         elif needed == "outcome":
