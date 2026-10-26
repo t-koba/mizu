@@ -195,9 +195,6 @@ class WaitDispatchTests(Fixture):
         self.assertEqual(self.project.insights.wait_for(item["id"])["kind"], "deadline")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class WaitRegistrationIdTests(Fixture):
     def test_new_waits_carry_unique_registration_id(self):
@@ -281,3 +278,6 @@ class WaitRegistrationIdTests(Fixture):
         self.assertTrue(first)
         self.assertTrue(second)
         self.assertNotEqual(first, second)
+
+if __name__ == "__main__":
+    unittest.main()

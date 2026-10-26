@@ -1114,7 +1114,14 @@ replacement insight without implying rejected substance.
                     with contextlib.suppress(OSError):
                         path.unlink()
                     continue
-                if current.get("source") != role_name or not self._wait_due(stored, snapshot):
+                if current.get("source") != role_name:
+                    continue
+                evidence = None
+                if stored.get("kind") == "dependency":
+                    evidence = self._satisfaction_evidence(stored)
+                    if evidence is None:
+                        continue
+                elif not self._wait_due(stored, snapshot):
                     continue
                 registered_at = stored.get("registered_at", "")
                 if not isinstance(registered_at, str):
@@ -1122,11 +1129,11 @@ replacement insight without implying rejected substance.
                 rid = _wait_registration_id(stored, path.stem)
                 if rid is None:
                     continue
-                yield ((registered_at, rid), stored, current)
+                yield ((registered_at, rid), stored, current, evidence)
 
         selected = heapq.nsmallest(limit, _eligible(), key=lambda item: item[0])
         due = []
-        for _, stored, current in selected:
+        for _, stored, current, evidence in selected:
             defer = stored.get("decision", {})
             if not isinstance(defer, dict):
                 defer = {}
@@ -1143,11 +1150,6 @@ replacement insight without implying rejected substance.
             if stored.get("kind") == "dependency":
                 payload["recipient"] = stored.get("recipient")
                 payload["requires"] = stored.get("requires")
-                evidence = self._satisfaction_evidence(stored)
-                if evidence is None:
-                    # A satisfaction claim without current result
-                    # evidence never dispatches; retry at next dispatch.
-                    continue
                 payload["result"] = evidence
             due.append(wait_events.delivery(role_name, wait_events.WAIT, payload))
         return due
@@ -1165,7 +1167,9 @@ replacement insight without implying rejected substance.
             record = read_json(raw, {})
             if not isinstance(record, dict):
                 return None
-            if record.get("rev") != _rev_of(result):
+            if (_rev_of(result) != requires.get("rev")
+                    or record.get("rev") != _rev_of(result)
+                    or record.get("action") != requires.get("action")):
                 return None
             decided_at = record.get("created_at")
             if not isinstance(decided_at, str) or not decided_at:
@@ -1266,25 +1270,7 @@ replacement insight without implying rejected substance.
                 current = snapshot.get("code_digest") if isinstance(snapshot, dict) else None
                 return isinstance(current, str) and bool(current) and current != stored.get("digest")
             if kind == "dependency":
-                requires = stored.get("requires")
-                if not isinstance(requires, dict):
-                    return False
-                try:
-                    result = self.read(requires.get("insight", ""))
-                except (Denied, OSError, ValueError, TypeError, AttributeError):
-                    return False
-                if _rev_of(result) != requires.get("rev"):
-                    # A moved result is stale against the assessed
-                    # requirement: never satisfy, wait for reassessment.
-                    return False
-                raw = self.root / "decisions" / f"{result['id']}.json"
-                if raw.is_symlink():
-                    return False
-                record = read_json(raw, {})
-                if not isinstance(record, dict):
-                    return False
-                return (record.get("rev") == _rev_of(result)
-                        and record.get("action") == requires.get("action"))
+                return self._satisfaction_evidence(stored) is not None
             if kind == "insight_decided":
                 target = self.root / "decisions" / f"{stored.get('target')}.json"
                 if target.is_symlink():

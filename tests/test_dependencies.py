@@ -2,7 +2,7 @@
 import unittest
 from support import Fixture, ScriptDriver, finish_with_decision_acks
 from mizu.errors import Denied, ConfigError
-from mizu.fs import read_json
+from mizu.fs import read_json, write_json
 from mizu.runtime import Engine
 
 
@@ -100,6 +100,27 @@ class DependencySatisfactionTests(Fixture):
         self.assertTrue(event["result"]["decided_at"])
         # Satisfied obligations leave the recipient's pending list.
         self.assertEqual(self.project.insights.pending_obligations("worker"), [])
+
+    def test_limit_selects_oldest_deliverable_dependency(self):
+        from unittest.mock import patch
+        first_result = _submit(self.project, "worker", "First result")
+        second_result = _submit(self.project, "worker", "Second result")
+        first = _defer(self.project, "reviewer", _wait(target=first_result["id"]), title="First request")
+        second = _defer(self.project, "reviewer", _wait(target=second_result["id"]), title="Second request")
+        self.project.insights.decide(first_result["id"], "accept", "done", "", "worker", expected_rev=1)
+        self.project.insights.decide(second_result["id"], "accept", "done", "", "worker", expected_rev=1)
+        paths = [self.project.root / "waits" / f"{item['id']}.json" for item in (first, second)]
+        for path, rid in zip(paths, ("0" * 31 + "1", "0" * 31 + "2")):
+            stored = read_json(path)
+            stored["registered_at"] = "2026-01-01T00:00:00+00:00"
+            stored["registration_id"] = rid
+            write_json(path, stored)
+        actual = self.project.insights._satisfaction_evidence
+        def evidence(stored):
+            return None if stored.get("owner") == first["id"] else actual(stored)
+        with patch.object(self.project.insights, "_satisfaction_evidence", side_effect=evidence):
+            due = self.project.insights.due_waits("reviewer", self.project.snapshots.get(), limit=1)
+        self.assertEqual([row["insight"] for row in due], [second["id"]])
 
     def test_wrong_action_does_not_satisfy(self):
         result, _ = self._setup()
@@ -201,9 +222,6 @@ class DependencyDispatchTests(Fixture):
         self.assertEqual(wait["requires"]["insight"], result["id"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class DependencyRegistrationIdTests(Fixture):
     def test_obligations_carry_unique_registration_id(self):
@@ -286,3 +304,6 @@ class DependencyRegistrationIdTests(Fixture):
         self.assertTrue(first)
         self.assertTrue(second)
         self.assertNotEqual(first, second)
+
+if __name__ == "__main__":
+    unittest.main()
