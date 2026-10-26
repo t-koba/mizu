@@ -3788,7 +3788,7 @@ def _role_events_due(project: Project, snapshot: dict, role_name=None) -> bool:
             if name in project.config.roles and project.config.roles[name].workspace == "write"]
         for name in names:
             try:
-                if "check_job" in project.config.roles[name].capabilities and check_jobs.pending(project, name):
+                if "check_job" in project.config.roles[name].capabilities and check_jobs.wake_ready(project, name):
                     return True
                 terminal_triggers = project.config.roles[name].work_item_events
                 if terminal_triggers and work_item_events.pending(

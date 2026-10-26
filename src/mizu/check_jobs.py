@@ -1231,6 +1231,51 @@ def waiting(project, role):
     return deferral(project, role) is not None
 
 
+#: Terminal statuses a completed explicit wait can wake on.
+TERMINAL_WAKE_STATUSES = frozenset(('completed', 'interrupted', 'refused', 'cancelled', 'cleanup_failed'))
+
+
+def wake_ready(project, role, *, discovery=None):
+    """True only when the role's explicit wait names a terminal owned result.
+
+    Schema: the role's ``<role>.wait.json`` record must name one job, carry
+    the current ``wait_signature`` and an unexpired ``wait_until`` bound.
+    Bounds: one record per role, one job per record. Trust: local recorded
+    state; the job record is the authority for status and acknowledgement.
+    Failure: a missing, malformed, stale, expired, other-role, running or
+    acknowledged record reads as no wake, never as admission. Listing and
+    result visibility are unchanged: a completed job without such a wait
+    stays inspectable but wakes nobody.
+    """
+    try:
+        if role not in project.config.roles or "check_job" not in project.config.roles[role].capabilities:
+            return False
+        record = read_json(root(project) / (role + '.wait.json'), {})
+        if not isinstance(record, dict) or record.get('inputs') != wait_signature(project):
+            return False
+        deadline = record.get('wait_until')
+        if type(deadline) not in (int, float) or deadline <= 0 or time.time() >= deadline:
+            return False
+        job_id = record.get('id')
+        if not isinstance(job_id, str):
+            return False
+        if discovery is not None:
+            job = discovery[0].get(job_id)
+            if job is None:
+                return False
+        else:
+            job = read(project, job_id)
+        if job.get('role') != role:
+            return False
+        if job.get('status') not in TERMINAL_WAKE_STATUSES:
+            return False
+        if job.get('acknowledged'):
+            return False
+    except (Denied, OSError, ValueError, KeyError, TypeError):
+        return False
+    return True
+
+
 def quarantine(project, job, slot, error):
     job.update(status='cleanup_failed', error=error[:512], finished_at=now())
     save_execution(project, job)

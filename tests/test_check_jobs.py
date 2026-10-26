@@ -240,12 +240,16 @@ class JobTests(Fixture):
         job = ctx._op_exec_experiment('experiment', {'script': 'test -f /workspace/app.py'})
         self.assertEqual(job['status'], 'queued')
         self.assertEqual(self.run_job()['status'], 'completed')
-    def test_event_only_role_admits_completed_check(self):
+    def test_event_only_role_admits_completed_check_with_explicit_wait(self):
         from mizu.services import render
         from pathlib import Path
         ctx, job = self.submit()
         self.run_job()
         from mizu.runtime import _role_events_due
+        # A completed job the role never waited on stays visible but wakes nobody.
+        self.assertTrue(check_jobs.pending(self.project, 'worker'))
+        self.assertFalse(_role_events_due(self.project, self.project.snapshots.get(), 'worker'))
+        check_jobs.set_wait(self.project, 'worker', job['id'])
         self.assertTrue(_role_events_due(self.project, self.project.snapshots.get(), 'worker'))
         units = render(self.config, self.project, Path('/usr/bin/mizu'), system='linux')
         self.assertIn('mizu-6-sample-checks.service', units)
@@ -1375,3 +1379,98 @@ class CacheInputTests(Fixture):
         with patch.object(check_jobs.os, 'scandir', side_effect=changed):
             self.assertIsNone(self.fingerprint())
         self.assertEqual(len(calls), 2)
+
+
+class ExplicitWaitWakeTests(Fixture):
+    """Only an explicit wait on the exact terminal job wakes its role."""
+
+    def setUp(self):
+        super().setUp()
+        FakeSandbox.calls = []
+        roles = {k: dataclasses.replace(v, capabilities=(*v.capabilities, "check_job"))
+                 for k, v in self.config.roles.items()}
+        self.config = dataclasses.replace(self.config, roles=roles)
+        self.project.config = self.config
+
+    def submit(self):
+        ctx = self.context()
+        return ctx, check_jobs.submit(ctx)
+
+    def run_job(self):
+        return check_jobs.run_one(self.project, threading.Event(), sandbox_factory=FakeSandbox)
+
+    def due(self, role='worker'):
+        from mizu.runtime import _role_events_due
+        return _role_events_due(self.project, self.project.snapshots.get(), role)
+
+    def wait_path(self, role='worker'):
+        return check_jobs.root(self.project) / (role + '.wait.json')
+
+    def test_completed_job_without_wait_stays_visible_but_wakes_nobody(self):
+        _, job = self.submit()
+        self.run_job()
+        self.assertEqual([entry['id'] for entry in check_jobs.pending(self.project, 'worker')], [job['id']])
+        self.assertFalse(check_jobs.wake_ready(self.project, 'worker'))
+        self.assertFalse(self.due())
+
+    def test_completed_exact_explicit_wait_wakes(self):
+        _, job = self.submit()
+        check_jobs.set_wait(self.project, 'worker', job['id'])
+        self.run_job()
+        self.assertTrue(check_jobs.wake_ready(self.project, 'worker'))
+        self.assertTrue(self.due())
+
+    def test_running_wait_is_a_hold_not_a_wake(self):
+        _, job = self.submit()
+        check_jobs.set_wait(self.project, 'worker', job['id'])
+        self.assertTrue(check_jobs.waiting(self.project, 'worker'))
+        self.assertFalse(check_jobs.wake_ready(self.project, 'worker'))
+        self.assertFalse(self.due())
+
+    def test_expired_wait_wakes_nobody(self):
+        _, job = self.submit()
+        check_jobs.set_wait(self.project, 'worker', job['id'], wait_until=time.time() - 1)
+        self.run_job()
+        self.assertTrue(check_jobs.pending(self.project, 'worker'))
+        self.assertFalse(check_jobs.wake_ready(self.project, 'worker'))
+        self.assertFalse(self.due())
+
+    def test_stale_wait_inputs_wake_nobody(self):
+        _, job = self.submit()
+        check_jobs.set_wait(self.project, 'worker', job['id'])
+        self.run_job()
+        record = read_json(self.wait_path(), {})
+        write_json(self.wait_path(), {**record, 'inputs': {'snapshot': 'stale'}})
+        self.assertTrue(check_jobs.pending(self.project, 'worker'))
+        self.assertFalse(check_jobs.wake_ready(self.project, 'worker'))
+        self.assertFalse(self.due())
+
+    def test_wait_on_another_job_ignores_unwaited_completion(self):
+        _, first = self.submit()
+        self.run_job()
+        _, second = self.submit()
+        check_jobs.set_wait(self.project, 'worker', second['id'])
+        self.assertEqual([entry['id'] for entry in check_jobs.pending(self.project, 'worker')], [first['id']])
+        self.assertFalse(check_jobs.wake_ready(self.project, 'worker'))
+        self.assertFalse(self.due())
+
+    def test_wait_naming_another_roles_job_wakes_nobody(self):
+        _, job = self.submit()
+        check_jobs.submit(self.context('reviewer'), 'printf independent', kind='exec')
+        self.run_job()
+        self.run_job()
+        record = {'id': job['id'], 'inputs': check_jobs.wait_signature(self.project),
+                  'wait_until': time.time() + 600}
+        write_json(self.wait_path('reviewer'), record)
+        self.assertFalse(check_jobs.wake_ready(self.project, 'reviewer'))
+        self.assertFalse(self.due('reviewer'))
+
+    def test_acknowledged_completion_wakes_nobody(self):
+        _, job = self.submit()
+        check_jobs.set_wait(self.project, 'worker', job['id'])
+        self.run_job()
+        self.assertTrue(self.due())
+        check_jobs.acknowledge(self.project, 'worker', {job['id']})
+        self.assertFalse(check_jobs.pending(self.project, 'worker'))
+        self.assertFalse(check_jobs.wake_ready(self.project, 'worker'))
+        self.assertFalse(self.due())

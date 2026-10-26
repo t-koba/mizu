@@ -165,8 +165,9 @@ never finishes, so a check that never runs delays a role instead of stopping
 it, and the recorded `wake_at` is the truth. Inside one bound the daemon
 does not spend repeated model turns waiting on the same job. New publication,
 inbox generation or explicit operator wake makes the prior waiting decision
-stale; the role may reconsider independent work. A completed job itself admits
-the role even when source code has not changed. Result delivery is acknowledged
+stale; the role may reconsider independent work. A completed job admits
+the role only when it is the exact job named by that role’s explicit wait,
+even when source code has not changed. Result delivery is acknowledged
 only after a consuming work unit has durably completed, not on a possibly lost
 tool response. Read-only service triggers watch the persisted queue.
 
