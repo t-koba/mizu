@@ -121,7 +121,10 @@ class WorkItemEventTests(Fixture):
         other_role = self.delivered("searcher", sources="any")[0]
         self.assertNotEqual(row["ack_token"], other_role["ack_token"])
         self.terminal()
-        undelivered = self.delivered()[1]
+        # Timestamp ties are ordered by event identity, not insertion order.
+        # Select the new event by identity rather than assuming it is row 1.
+        undelivered = next(event for event in self.delivered()
+                           if event["event"] != row["event"])
         ctx = self.context("reviewer")
         ctx.work_item_events = [row]
         for tokens in ([row["ack_token"], row["ack_token"]], [other_role["ack_token"]],
