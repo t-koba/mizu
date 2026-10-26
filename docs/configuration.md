@@ -943,6 +943,48 @@ the shared route; for example, `decision_sources = "any"` with
 `work_item_sources = "own"` delivers decisions from anyone but terminal events
 only for this role's findings. `mizu explain` reports the effective routes.
 
+### Shared decision delivery (explicit host cutover)
+
+Legacy decision delivery remains the default and the sole active authority until
+an operator's host invokes `decision_reconciliation.activate_decision_delivery(project)`.
+This is a trusted Python host API, **not a model tool, TOML switch, automatic
+migration, or deployment action**. See [shared records](shared-records.md#host-only-one-way-runtime-activation)
+for its quiescent boundary, evidence files and interrupted-retry contract.
+
+Every enabled role with `decision_events` must explicitly configure
+`decision_page_bytes`, an integer in **1–1048576**; there is **no default** and
+no inheritance from the count bound. The setting is inert in legacy mode.
+Activation and shared runtime reads refuse a missing budget. This budget covers
+the actual UTF-8 JSON decision prompt contribution (`decision_events` plus
+`decision_page`, including both keys, JSON formatting, tokens, references and
+all truncation metadata), not the entire prompt. Reserve space for the other
+prompt sections; 1 MiB is an absolute ceiling, not a recommended page size.
+The configured count limit remains independently effective. No kind other than
+`insight.decision` consumes this page budget in this pilot.
+
+Full and delta prompts keep existing `decision_events` action-shaped rows and
+add `decision_page: {pending_count, truncated, count_truncated, byte_truncated}`.
+Rows stay globally oldest-first. An oversized oldest row becomes a bounded
+`ref` with its full immutable record digest; it is never silently skipped.
+A budget too small even for metadata or the oldest reference raises an explicit
+budget failure, including during wake/selection, rather than an empty page.
+Subscriptions in shared mode grant a narrow `decision_read` tool automatically
+for that unit. It accepts only `ack_token` from the host-frozen role/unit
+manifest and optional character `offset`/`limit` (0-based, 1–8192 characters per
+page, default 8192); its response carries `record_id`, `record_digest`, `offset`,
+`total_chars`, `next_offset`, and `text`. Reading does not acknowledge anything.
+This tool grants neither arbitrary store reads nor activation/write authority.
+Source/routing movement cannot change the exact content of a frozen reference.
+
+Prompt, dispatch, wake, selection evidence and finish acknowledgement use the
+same durable marker; shared errors never fall back to legacy. Active routes,
+actions and `own`/`any` sources retain their configured meanings. Shared-mode
+selection evidence follows those routes, resolving references by full digest
+before applying existing classifier text/count bounds (zero decisions disables
+that input). Legacy selection evidence behavior is unchanged. Other event,
+work-item, task, check, wait and CI authorities are unchanged. There is no
+implicit downgrade, including when the budget/subscription configuration changes.
+
 ### Decision-event receipts
 
 `finish` optionally accepts `ack_events`, an array of at most 512 strings,

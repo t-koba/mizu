@@ -1,4 +1,4 @@
-"""Trusted host-only legacy receipt reconciliation; never runtime delivery.
+"""Trusted host-only legacy receipt reconciliation and one-way runtime activation.
 
 Both calls require the complete enabled-role set and explicit trusted routes.
 No model-supplied route/manifest grants authority. See docs/shared-records.md
@@ -8,10 +8,11 @@ from __future__ import annotations
 
 from contextlib import ExitStack, contextmanager
 from dataclasses import asdict
+import re
 
 from .admission import role_exclusion
 from .errors import Denied, LimitExceeded
-from .fs import MAX_FRAME, canonical, digest, identifier, lock, safe_read
+from .fs import MAX_FRAME, atomic_write, canonical, digest, identifier, loads_finite, lock, safe_read
 from .insights import (DECISION_RECEIPT_BYTES, INSIGHT_DECISION_POLICY,
                        MAX_DECISION_EVENT_BYTES)
 from .shared_records import RECEIPT_BYTES, RECORD_BYTES, SharedRecords
@@ -159,6 +160,7 @@ def preflight_decision_receipts(insights, routes, *, enabled_roles) -> dict:
     """
     routes = _routes(routes, enabled_roles)
     with _boundary(insights, routes):
+        _require_legacy(insights)
         boundary, roles, _, _ = _scan(insights, routes)
         _bound_post_report(boundary, roles)
         return _plan(boundary, roles)
@@ -172,51 +174,134 @@ def apply_decision_receipts(insights, plan, routes, *, enabled_roles) -> dict:
     shared state is deliberately excluded from the pinned boundary identity.
     """
     routes = _routes(routes, enabled_roles)
+    _validate_plan(plan)
+    with _boundary(insights, routes):
+        _require_legacy(insights)
+        return _apply_locked(insights, plan, routes)
+
+
+def _validate_plan(plan):
     if (type(plan) is not dict or set(plan) != {"schema", "boundary", "roles", "plan_digest"}
             or type(plan["schema"]) is not int or plan["schema"] != 1):
         raise Denied("Invalid decision reconciliation plan")
     _bounded(plan)
     if digest(canonical({"schema": 1, "boundary": plan["boundary"]})) != plan["plan_digest"]:
         raise Denied("Decision reconciliation plan digest mismatch")
-    with _boundary(insights, routes):
-        boundary, roles, envelopes, store = _scan(insights, routes)
-        # Bound all reports before any writes, including the post-map report.
-        _plan(boundary, roles)
-        if boundary != plan["boundary"]:
-            raise Denied("Decision reconciliation boundary changed")
-        # Original shared receipts must remain unchanged. Newly appearing
-        # receipts are allowed only within the legacy-acknowledged set (_scan).
-        if type(plan["roles"]) is not dict or set(plan["roles"]) != set(roles):
+
+
+def _apply_locked(insights, plan, routes):
+    boundary, roles, envelopes, store = _scan(insights, routes)
+    # Bound all reports before any writes, including the post-map report.
+    _plan(boundary, roles)
+    if boundary != plan["boundary"]:
+        raise Denied("Decision reconciliation boundary changed")
+    # Original shared receipts must remain unchanged. Newly appearing
+    # receipts are allowed only within the legacy-acknowledged set (_scan).
+    if type(plan["roles"]) is not dict or set(plan["roles"]) != set(roles):
+        raise Denied("Invalid decision reconciliation role report")
+    for role, report in roles.items():
+        original = plan["roles"][role]
+        if type(original) is not dict or type(original.get("shared_receipt_digests")) is not dict:
             raise Denied("Invalid decision reconciliation role report")
-        for role, report in roles.items():
-            original = plan["roles"][role]
-            if type(original) is not dict or type(original.get("shared_receipt_digests")) is not dict:
-                raise Denied("Invalid decision reconciliation role report")
-            original_shared = original["shared_receipt_digests"]
-            expected = dict(report, shared_received_ids=sorted(original_shared),
-                            shared_pending_ids=sorted(set(report["current_ids"]) - set(original_shared)),
-                            shared_receipt_digests=original_shared)
-            if (original != expected or not set(original_shared) <= set(report["legacy_received_ids"])
-                    or any(report["shared_receipt_digests"].get(rid) != computed
-                           for rid, computed in original_shared.items())):
-                raise Denied("Existing shared decision receipt or report changed")
+        original_shared = original["shared_receipt_digests"]
+        expected = dict(report, shared_received_ids=sorted(original_shared),
+                        shared_pending_ids=sorted(set(report["current_ids"]) - set(original_shared)),
+                        shared_receipt_digests=original_shared)
+        if (original != expected or not set(original_shared) <= set(report["legacy_received_ids"])
+                or any(report["shared_receipt_digests"].get(rid) != computed
+                       for rid, computed in original_shared.items())):
+            raise Denied("Existing shared decision receipt or report changed")
+    _bound_post_report(boundary, roles)
+    # Only routed, legacy-acknowledged identities require a projection/write.
+    for role, report in roles.items():
+        ids = report["legacy_received_ids"]
+        if not ids:
+            continue
+        for rid in ids:
+            store.put(envelopes[rid], writer="host.insights")
+        manifest = store.freeze(role, ids)
+        missing = set(ids) - set(report["shared_received_ids"])
+        store.acknowledge(role, [asdict(entry) for entry in manifest
+                                 if entry.record_id in missing], manifest=manifest)
+    final_boundary, verified, _, _ = _scan(insights, routes)
+    if final_boundary != boundary:
+        raise Denied("Decision reconciliation boundary changed during apply")
+    for role, report in verified.items():
+        if (report["shared_received_ids"] != report["legacy_received_ids"]
+                or report["shared_pending_ids"] != report["legacy_pending_ids"]):
+            raise Denied("Decision reconciliation pending-set mismatch after apply")
+    return _plan(boundary, verified)
+
+
+def _require_legacy(insights):
+    from .decision_delivery import authority
+    if authority(insights.root) is not None:
+        raise Denied("Decision delivery is shared; legacy reconciliation is closed")
+
+
+def activate_decision_delivery(project):
+    """Host-only, one-way cutover using a trusted project/config snapshot.
+
+    Quiesce every enabled role before source and receipt locks. Re-run exact
+    preflight, mapping and full pending parity inside that same boundary, then
+    publish a create-only marker last. A crash before publication leaves legacy
+    authoritative and an idempotent prefix. A retry after publication returns
+    the marker (never reimports legacy receipts). No model tool calls this API.
+    """
+    from .decision_delivery import AUTHORITY_FILE, PLAN_FILE, REPORT_FILE, authority, page_bytes
+    insights = project.insights
+    enabled = list(project.roles)
+    routes = _routes({name: {"actions": list(project.config.roles[name].decision_events),
+                            "sources": project.config.roles[name].decision_sources}
+                      for name in enabled}, enabled)
+    for name in enabled:
+        if routes[name]["actions"]:
+            page_bytes(project.config.roles[name])
+    with _boundary(insights, routes):
+        marker = authority(insights.root)
+        if marker is not None:
+            return marker
+        boundary, roles, _, store = _scan(insights, routes)
         _bound_post_report(boundary, roles)
-        # Only routed, legacy-acknowledged identities require a projection/write.
-        for role, report in roles.items():
-            ids = report["legacy_received_ids"]
-            if not ids:
-                continue
-            for rid in ids:
-                store.put(envelopes[rid], writer="host.insights")
-            manifest = store.freeze(role, ids)
-            missing = set(ids) - set(report["shared_received_ids"])
-            store.acknowledge(role, [asdict(entry) for entry in manifest
-                                     if entry.record_id in missing], manifest=manifest)
-        final_boundary, verified, _, _ = _scan(insights, routes)
-        if final_boundary != boundary:
-            raise Denied("Decision reconciliation boundary changed during apply")
-        for role, report in verified.items():
-            if (report["shared_received_ids"] != report["legacy_received_ids"]
-                    or report["shared_pending_ids"] != report["legacy_pending_ids"]):
-                raise Denied("Decision reconciliation pending-set mismatch after apply")
-        return _plan(boundary, verified)
+        # The shadow pilot has no authority to hide even a route-excluded or
+        # stale event. Refuse unexplained decision receipts anywhere, including
+        # disabled recipients, rather than importing uncertain state.
+        allowed = {store._receipt_name(role, rid)
+                   for role, report in roles.items() for rid in report["legacy_received_ids"]}
+        base = insights.root / "shared-record-receipts"
+        if store._parents("shared-record-receipts/probe"):
+            for directory in base.iterdir():
+                if not store._parents(directory.relative_to(insights.root).as_posix() + "/probe"):
+                    raise Denied("Unsafe shared receipt directory")
+                for path in directory.iterdir():
+                    name = path.relative_to(insights.root).as_posix()
+                    raw = store._read(name, RECEIPT_BYTES)
+                    if re.fullmatch(r"\.new-[a-z0-9_]{8}", path.name):
+                        # Atomic-write crash residue is not a committed receipt.
+                        # Still safe-read it: never ignore an unsafe entry.
+                        continue
+                    receipt = loads_finite(raw)
+                    if type(receipt) is not dict or not isinstance(receipt.get("record_id"), str):
+                        raise Denied("Uncertain shared receipt inventory")
+                    if receipt["record_id"].startswith("insight.decision/") and name not in allowed:
+                        raise Denied("Unexplained shared-only decision receipt")
+        try:
+            (insights.root / PLAN_FILE).lstat()
+        except FileNotFoundError:
+            plan = _plan(boundary, roles)
+            atomic_write(insights.root / PLAN_FILE, canonical(plan), exclusive=True)
+        else:
+            plan = loads_finite(safe_read(insights.root, PLAN_FILE, MAX_FRAME))
+            _validate_plan(plan)
+        report = _apply_locked(insights, plan, routes)
+        try:
+            (insights.root / REPORT_FILE).lstat()
+        except FileNotFoundError:
+            atomic_write(insights.root / REPORT_FILE, canonical(report), exclusive=True)
+        else:
+            if safe_read(insights.root, REPORT_FILE, MAX_FRAME) != canonical(report):
+                raise Denied("Decision activation report changed before marker")
+        marker = {"schema": 1, "kind": "insight.decision", "authority": "shared",
+                  "plan_digest": report["plan_digest"], "report_digest": digest(canonical(report))}
+        atomic_write(insights.root / AUTHORITY_FILE, canonical(marker), exclusive=True)
+        return authority(insights.root)

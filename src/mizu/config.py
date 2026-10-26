@@ -509,6 +509,8 @@ class Role:
     #: Per-role per-source event batch overrides. None inherits the matching
     #: project `[limits]` default; a set value must lie in 1-100.
     decision_events_limit: int | None = None
+    #: Required explicit serialized-page budget for shared decision subscribers.
+    decision_page_bytes: int | None = None
     work_item_events_limit: int | None = None
     #: Per-role no-progress timer-wake override. None inherits the project
     #: `[limits]` value; a set value must lie in 0-86400 like the project
@@ -1148,7 +1150,7 @@ def load(file: Path) -> Config:
             raise ConfigError(f"Role name '{name}' is reserved for the operator channel")
         keys(role, {"profile", "policy", "workspace", "capabilities", "engine_tools", "on_change",
                     "interval_seconds", "calendar", "daemon", "selector", "attributes",
-                    "decision_events", "work_item_events", "decision_sources", "work_item_sources", "ci_wake", "held_at_capacity", "persistent_exec", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds", "decision_events_limit", "work_item_events_limit", "no_progress_backoff_seconds", "cooldown_seconds", "progress_signals", "event_poll_seconds", "daemon_policy", "daemon_spacing_seconds"}, f"roles.{name}")
+                    "decision_events", "work_item_events", "decision_sources", "work_item_sources", "ci_wake", "held_at_capacity", "persistent_exec", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds", "decision_events_limit", "decision_page_bytes", "work_item_events_limit", "no_progress_backoff_seconds", "cooldown_seconds", "progress_signals", "event_poll_seconds", "daemon_policy", "daemon_spacing_seconds"}, f"roles.{name}")
         profile = string(role.get("profile", ""), f"roles.{name}.profile")
         selector = string(role.get("selector", ""), f"roles.{name}.selector")
         if ("profile" in role) == ("selector" in role):
@@ -1285,6 +1287,9 @@ def load(file: Path) -> Config:
         role_seconds = role.get("run_seconds")
         if role_seconds is not None:
             number(role_seconds, f"roles.{name}.run_seconds", 0, 1073741824)
+        role_decision_bytes = role.get("decision_page_bytes")
+        if role_decision_bytes is not None:
+            number(role_decision_bytes, f"roles.{name}.decision_page_bytes", 1, 1048576)
         role_decision_limit = role.get("decision_events_limit")
         if role_decision_limit is not None:
             number(role_decision_limit, f"roles.{name}.decision_events_limit", 1, 100)
@@ -1328,7 +1333,7 @@ def load(file: Path) -> Config:
                            requests_per_run=role_requests, tools_per_run=role_tools,
                            wrap_up_requests=role_wrap_requests, wrap_up_tools=role_wrap_tools,
                            run_seconds=role_seconds,
-                           decision_events_limit=role_decision_limit,
+                           decision_events_limit=role_decision_limit, decision_page_bytes=role_decision_bytes,
                            work_item_events_limit=role_work_item_limit,
                            no_progress_backoff_seconds=role_backoff,
                            cooldown_seconds=role_cooldown,

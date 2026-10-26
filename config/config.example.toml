@@ -271,6 +271,9 @@ daemon = true
 # wrap_up_tools = 5
 # Per-role event batch overrides (optional, 1-100 each; unset keeps the matching project default).
 # decision_events_limit = 10
+# Shared decision delivery requires an explicit page-byte budget per subscriber.
+# Unset by default; setting a budget does NOT activate shared delivery.
+# decision_page_bytes = 65536  # 1-1048576; include references/metadata, reserve other prompt space.
 # work_item_events_limit = 10
 # Per-role no-progress timer-wake override (optional, 0-86400; unset keeps the project value).
 # no_progress_backoff_seconds = 0

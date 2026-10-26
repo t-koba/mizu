@@ -1,6 +1,11 @@
 # Shared record delivery: inventory and migration design
 
-**Status:** design plus persistence foundation, host-only decision-source projection, shadow-only bounded decision pages/retrieval, and host-only exact legacy receipt reconciliation. `src/mizu/shared_records.py` implements bounded schema-1 immutable records, explicit per-role receipts and backup membership, with focused tests. `Insights.project_decision_records()` can reconcile current decision events into shadow records; `Insights.shared_decision_page()` can inspect a bounded source-current shadow page and freeze its host manifest. No source kind is enabled for delivery or routed through it; current delivery paths remain authoritative until a separately verified, reconciled cutover.
+**Status:** bounded immutable records, decision projection/pages/retrieval,
+exact legacy receipt reconciliation, and a host-only one-way runtime activation
+for `insight.decision`. Legacy remains the sole delivery/wake/ack authority by
+default. Only an explicit, parity-verified durable marker activates shared
+runtime consumers; no model tool or configuration default can activate it.
+Other source families retain their existing authorities.
 
 ## Scope and invariants
 
@@ -183,12 +188,11 @@ prefix: retry the same call after addressing the failure; exact replay does not
 rewrite records. A changed payload under an already projected event ID (including
 later evidence on a deferral) is a conflict, never an implicit record update.
 
-**Active delivery is unchanged:** `decision_events()` and
-`acknowledge_decisions()` remain the only active decision delivery/receipt path.
-This adapter creates no generic receipts and has no routing configuration, prompt,
-finish, wake or admission integration. Its output alone proves neither pending-set
-parity nor a cutover. Receipt translation, source/receipt/config quiescence and the
-single-authority activation marker below remain future work.
+The projection adapter alone creates no receipts or delivery authority. Its
+output proves neither pending-set parity nor a cutover. Legacy decision reads
+and receipts remain active until the separate host-only activation below has
+completed exact receipt translation and parity under source/receipt/config
+quiescence and published the single-authority marker.
 
 ## Staged migration
 
@@ -208,25 +212,26 @@ Operator answer `609e9479aaca426ca196f5dd81360e16` resolves the earlier question
 
 ## Source anchors
 
-Current behavior can be checked in these functions (the shared persistence core is present, but source adapters are not yet cut over):
+Current behavior can be checked in these functions (only insight decisions have
+an explicit host-activated shared route; all other families remain unchanged):
 
-- [`SharedRecords`](../src/mizu/shared_records.py): bounded canonical record envelopes, exact role/record/digest receipts and manifest-scoped paged reads; it does not own source eligibility, routing, wake, backfill or cutover. [`Insights.shared_decision_page`](../src/mizu/insights.py) is a host-only shadow adapter, not an active source route.
+- [`SharedRecords`](../src/mizu/shared_records.py): bounded canonical record envelopes, exact role/record/digest receipts and manifest-scoped paged reads; it does not own source eligibility, routing, wake, backfill or cutover. [`Insights.shared_decision_page`](../src/mizu/insights.py) builds shadow or active pages, selected by the host's durable authority route.
 - [`Insights.decision_events`, `acknowledge_decisions`, `due_waits`, `consume_waits`, `pending_obligations`](../src/mizu/insights.py): current decision/revision eligibility, exact receipts and consumable waits.
-- [`selection.work_inputs`](../src/mizu/selection.py) also reads routed legacy decisions as model-selection evidence; a decision cutover must switch this reader with runtime prompt/wake/ack paths so stale legacy receipts cannot create a second active view.
+- [`decision_delivery.pending`, `bind`, `read`, `acknowledge`](../src/mizu/decision_delivery.py) branch by the durable marker, carry host-only unit manifests and never fall back from shared failures. [`selection.work_inputs`](../src/mizu/selection.py) uses the same authority as runtime prompt/wake/ack, so legacy receipts cannot create a second active selection view.
 - [`work_item_events.pending`, `acknowledge`](../src/mizu/work_item_events.py): terminal projections and source-validated old receipts; [`ci_waits.pending`, `_pending`, `acknowledge`](../src/mizu/ci_waits.py): current holder/revision checks and blocked `updated_at` order.
 - [`check_jobs.pending`, `result`, `logs`, `acknowledge`, `_withdraw_locked`, `_make_room`](../src/mizu/check_jobs.py): prompt role, read versus acknowledgement authority, withdrawn demand and eviction.
 - [`runtime.prompt_for`, `ci_failures_projection`, `wake_ci_failures`, `_ci_due_for`](../src/mizu/runtime.py): prompt construction and explicit CI wake selection/due policy.
 
 
-## Shadow decision page and manifest-scoped retrieval
+## Decision page and manifest-scoped retrieval
 
-These are **trusted host Python APIs only**, not runtime tools or active delivery.
-`decision_events()` and `acknowledge_decisions()` remain the sole runtime
-selection/receipt authority. No prompt, finish, routing configuration, wake,
-admission or task lifecycle is changed. The page adapter writes only immutable
-shadow projections, never receipts. Generic receipt calls in tests exercise the
-already-existing `SharedRecords` mechanism; they do not enable shared runtime
-acknowledgements. The host-only receipt reconciliation below supplies the migration preflight/apply slice; the parent pilot's runtime cutover remains outstanding.
+These are trusted host Python APIs; calling them alone does not activate runtime
+delivery. They write immutable projections, never receipts. The explicit host
+activation below is the only runtime switch. Before activation, legacy remains
+the sole active delivery/wake/ack authority; afterwards the same page builder
+serves only shared receipts through `decision_delivery`, with a narrow
+manifest-scoped runtime retrieval tool and explicit finish acknowledgement.
+Other source lifecycles remain unchanged.
 
 ```python
 page, manifest = insights.shared_decision_page(
@@ -244,8 +249,10 @@ policy default. An empty `actions` collection returns the bounded empty page wit
 projecting or writing records. It bounds `len(fs.canonical(page))`, including UTF-8 encoding,
 JSON escapes, the final newline, event framing, tokens, references and metadata.
 The manifest tuple is separate host-only state, not serialized into the page.
-A future integrated prompt must reserve space for all other sections; this API
-alone does not promise a full prompt fits a protocol frame.
+Active runtime passes `prompt=True` to bound the actual UTF-8 serialized
+`decision_events`/`decision_page` prompt fields instead, including JSON formatting
+and both field names. The operator must reserve space for all other sections;
+this API alone does not promise a full prompt fits a protocol frame.
 
 The page is exactly:
 
@@ -269,7 +276,7 @@ bindings. Exact current decision and source revision/action must match; retained
 stale or withdrawn projections cannot become new page rows. Shared exact receipts
 are filtered before oldest-first selection, independently of legacy receipts.
 Timestamps are normalized to UTC and ties use the stable record ID. There is no
-index: this remains a bounded, fully validated shadow scan.
+index: this remains a bounded, fully validated scan.
 
 A full `row` preserves every legacy decision-event payload field, replacing only
 `ack_token` with the shared manifest token. If that row cannot fit in the
@@ -470,7 +477,83 @@ role's shared and legacy pending sets are equal, and returns the same schema
 with the completed shared progress report. A failed call is not proof of a
 completed batch, and failure never rolls back an immutable prefix.
 
-**No runtime cutover:** no shared prompting, runtime acknowledgement, routing,
-wake, admission, task lifecycle, WorkItems, waits or CI behavior is enabled or
-changed. Any later cutover needs its own verified reconciliation and authority
-switch; this migration does not make shared receipts active runtime authority.
+The two receipt-reconciliation calls alone never activate runtime delivery.
+They now refuse after activation; they cannot re-import legacy receipts into an
+active shared store. Task lifecycle, WorkItems, waits and CI remain unchanged.
+
+
+## Host-only one-way runtime activation
+
+Call `mizu.decision_reconciliation.activate_decision_delivery(project)` from a
+trusted host with a freshly loaded `Project`/configuration snapshot. This API
+is not installed deployment modification, a CLI/model tool or an automatic
+config-driven switch. It derives **all enabled roles** and existing
+`decision_events`/`decision_sources` routes directly from that trusted project,
+including empty subscriptions, and requires an explicit `decision_page_bytes`
+for every subscriber (see [configuration](configuration.md#shared-decision-delivery-explicit-host-cutover)).
+As with reconciliation, the host must serialize external config replacement;
+these locks cannot synchronize a host editing files behind the API.
+
+Activation holds the exact boundary above (all role exclusions, source record
+lock, all role receipt-writer locks) continuously through preflight, exact
+apply, complete per-role pending-set parity, and final marker publication.
+It does not compare only the first dispatch page. Every existing shared decision
+receipt must be explained by an exact routed legacy receipt; extra receipts for
+stale, route-excluded or disabled recipients also refuse activation. Inventory
+reads use the shared store's safe directory and bounded receipt readers.
+Recognized `.new-<8 lowercase/digit/underscore characters>` atomic-write residue
+is safely read but not interpreted as a committed receipt. Other kinds are not
+imported or made authoritative. Legacy source records and receipts are never
+rewritten, deleted or used as timestamp watermarks.
+
+Durable project-root evidence, included in backup/restore:
+
+- `decision-activation-plan.json`: create-only schema-1 exact reconciliation
+  plan, at most `MAX_FRAME`. Written before mapping. Retained original input
+  identity survives restart; retries use this plan, not a silently fresh one.
+- `decision-activation-report.json`: completed schema-1 reconciliation report,
+  at most `MAX_FRAME`, with actual whole-set parity. Written after successful
+  apply; a pre-marker exact retry validates/reuses the same bytes without
+  rewriting the report. Corrupt or mismatched prior report bytes refuse.
+- `decision-authority.json`: canonical create-only marker, at most 4096 bytes,
+  `{schema: 1, kind: "insight.decision", authority: "shared", plan_digest,
+  report_digest}`. `report_digest` pins the entire canonical completed report;
+  its `plan_digest` must match the marker. Published atomically and durably
+  **last**, while all the same exclusions/locks remain held.
+
+Before the marker exists, runtime remains legacy-only, even with an interrupted
+projection/receipt prefix. Exact retry validates the original source/receipt/
+route boundary and shared subset and completes missing writes. A source,
+legacy receipt, route or enabled-role change during that interruption refuses
+retry; an operator must explicitly investigate/reconcile it, not discard the
+plan to force a switch. Crash after marker publication is a completed switch:
+retry returns the validated marker without reimporting any legacy receipt.
+Corrupt/unsafe marker or report, mismatched report digest, unexplained shared
+receipt, or uncertain parity fails closed. No implicit reverse migration exists;
+never delete the marker or restore only legacy files to switch back. Reverse
+migration requires its own explicit reconciliation protocol. Out-of-band
+host-owned file edits are outside the synchronization contract.
+
+`decision_delivery.pending` is the single branch used by runtime dispatch,
+substantive-event wake (including the deferral-window probe) and selection.
+Shared pages reconcile source-current eligibility and trusted routing before
+reading only shared receipts; they do not consult legacy receipts. No shared
+failure can fall back. In active mode `shared_decision_page(prompt=True)` counts
+the actual full/delta prompt decision fields and JSON framing against the
+explicit byte budget; the host-only shadow call's default still measures
+`canonical(page)`. Count/byte overflow is explicit metadata, and an unfit oldest
+reference is an explicit error, not an empty successful page.
+
+The host retains the immutable `{role, record_id, record_digest, ack_token}`
+manifest only for this unit, recording it with the page in the run's
+`decision-delivery.json`. Prompts carry rows and overflow metadata, not a
+model-supplied authorization manifest. The narrow `decision_read` tool retrieves
+only identities in this host manifest. Finish validates explicit token selections
+against it **before** seal intent; after successful result/publication, only the
+selected shared receipts are written under the role receipt-writer lock.
+Omitted/partial selections leave all other deliveries pending. Cross-role or
+undelivered tokens are refused. Source revisions, withdrawal and route removal
+do not invalidate handling of an already frozen delivery; future reads/wakes
+still revalidate current eligibility. Shared errors remain loud, and replay after
+an interrupted receipt write is idempotent. Legacy acknowledgement writers
+refuse once the marker is present.

@@ -101,7 +101,11 @@ def _decision_task(context: Context) -> str | None:
     return (f"Delivered decision events: {len(events)}. "
             "Select each handled row's ack_token in finish.ack_events; omitted rows "
             "remain pending oldest-first, including deferrals. Finishing alone "
-            "does not acknowledge decisions. Handling is defined by role policy.")
+            "does not acknowledge decisions. Handling is defined by role policy." +
+            (" Oversized rows carry ref: use decision_read with that row's ack_token "
+             "and offset/limit to read its digest-pinned full envelope. decision_page "
+             "states pending count and truncation; omitted rows stay pending."
+             if getattr(context, "shared_decisions", False) else ""))
 
 
 def _open_backlog(context: Context, caps: set) -> dict:
@@ -263,6 +267,9 @@ def prompt_for(context: Context) -> str:
                        "open_insights": _open_backlog(context, caps),
                        "open_work_items": open_work_items,
                        "decision_events": list(getattr(context, "decision_events", []) or []),
+                       **({"decision_page": {key: value for key, value in context.decision_page.items()
+                                             if key != "events"}}
+                          if getattr(context, "decision_page", None) is not None else {}),
                        "decision_receipt_diagnostics": list(
                            getattr(context, "decision_receipt_diagnostics", []) or []),
                        **({"work_item_events": list(context.work_item_events)}
@@ -340,6 +347,9 @@ def prompt_delta_for(context: Context, pending: list) -> str:
                        "open_insights": open_backlog,
                        "open_work_items": open_work_items,
                        "decision_events": list(getattr(context, "decision_events", []) or []),
+                       **({"decision_page": {key: value for key, value in context.decision_page.items()
+                                             if key != "events"}}
+                          if getattr(context, "decision_page", None) is not None else {}),
                        "decision_receipt_diagnostics": list(
                            getattr(context, "decision_receipt_diagnostics", []) or []),
                        **({"work_item_events": list(context.work_item_events)}

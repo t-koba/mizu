@@ -1645,14 +1645,16 @@ replacement insight without implying rejected substance.
         return pending
 
     def shared_decision_page(self, role_name: str, actions, *, max_bytes: int,
-                             limit: int = 10, sources: str = "own") -> tuple[dict, tuple[Delivery, ...]]:
-        """Host-only shadow page and exact current-unit manifest; no receipts written.
+                             limit: int = 10, sources: str = "own",
+                             prompt: bool = False) -> tuple[dict, tuple[Delivery, ...]]:
+        """Host-only bounded page and exact current-unit manifest; no receipts written.
 
-        The explicit byte budget covers canonical(page), including all metadata,
-        tokens and references. Source projection is bounded to 512 current rows;
-        overflow refuses before writing. Retain the returned manifest only for
-        this role/unit, never accept it from model input. Legacy delivery remains
-        the runtime authority. See docs/shared-records.md for the page schema.
+        max_bytes covers canonical(page) by default, or actual prompt decision
+        fields/framing with prompt=True. Both include metadata/tokens/references.
+        Source projection is bounded to 512 current rows; overflow refuses before
+        writing. Retain the manifest only for this role/unit, never from model
+        input. The caller must honor the durable delivery authority marker;
+        this method alone never activates shared delivery. See docs/shared-records.md.
         """
         identifier(role_name)
         if type(limit) is not int or not 1 <= limit <= 100:
@@ -1664,11 +1666,21 @@ replacement insight without implying rejected substance.
         if not isinstance(actions, (list, tuple, set, frozenset)) or any(
                 not isinstance(action, str) or action not in _DECISION_ACTIONS for action in actions):
             raise Denied("Invalid shared decision actions")
+
+        def size(page):
+            if prompt:
+                # Match both full and delta prompt JSON formatting and keys,
+                # including reference, token, overflow metadata and framing.
+                fields = {"decision_events": page["events"],
+                          "decision_page": {k: v for k, v in page.items() if k != "events"}}
+                return len(json.dumps(fields, ensure_ascii=False).encode("utf-8"))
+            return len(canonical(page))
+
         wanted = set(actions)
         if not wanted:
             empty = {"events": [], "pending_count": 0, "truncated": False,
                      "count_truncated": False, "byte_truncated": False}
-            if len(canonical(empty)) > max_bytes:
+            if size(empty) > max_bytes:
                 raise LimitExceeded("Decision page metadata exceeds byte bound")
             return empty, ()
         with record_lock(self.root):
@@ -1695,20 +1707,20 @@ replacement insight without implying rejected substance.
 
             events = []
             record_ids = []
-            if len(canonical(page(events))) > max_bytes:
+            if size(page(events)) > max_bytes:
                 raise LimitExceeded("Decision page metadata exceeds byte bound")
             for _, record_id, computed, envelope in eligible[:limit]:
                 # Reserve the exact fixed-width token space before freezing only
                 # the rows actually selected. Canonical size is value-independent
                 # for lowercase hex tokens; replace after the final selection.
                 row = dict(envelope["payload"], ack_token="0" * 64)
-                if len(canonical(page(events + [row]))) > max_bytes:
+                if size(page(events + [row])) > max_bytes:
                     payload = envelope["payload"]
                     row = {key: payload[key] for key in ("event", "insight", "rev", "action")}
                     row.update(preview=payload["title"][:80], ack_token="0" * 64,
                                ref={"record_id": record_id, "record_digest": computed,
                                     "bytes": len(canonical(envelope))})
-                    if len(canonical(page(events + [row]))) > max_bytes:
+                    if size(page(events + [row])) > max_bytes:
                         if not events:
                             raise LimitExceeded("Decision page reference exceeds byte bound")
                         break
@@ -1720,7 +1732,7 @@ replacement insight without implying rejected substance.
                     raise Denied("Decision page record changed during freeze")
                 row["ack_token"] = entry.ack_token
             result = page(events)
-            if len(canonical(result)) > max_bytes:
+            if size(result) > max_bytes:
                 raise LimitExceeded("Decision page exceeds byte bound")
             return result, manifest
 
@@ -1795,6 +1807,9 @@ replacement insight without implying rejected substance.
         """
         identifier(role_name)
         with self._decision_receipt_lock(role_name):
+            from .decision_delivery import authority
+            if authority(self.root) is not None:
+                raise Denied("Legacy decision receipts are closed after shared activation")
             if sources not in ("own", "any"):
                 raise Denied("Decision event sources must be own or any")
             if not isinstance(events, list) or len(events) > 512:

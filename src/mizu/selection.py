@@ -772,7 +772,8 @@ def work_inputs(project, role, snapshot, bounds):
     proposals with their current revisions, plus the latest snapshot
     verification and unacknowledged decisions routed to this role. Counts and
     text lengths follow the operator's classifier ``inputs`` bounds; unreadable
-    proposal/decision stores read as absent. Retained-proof integrity errors
+    proposals and legacy decision stores read as absent. Shared decision errors
+    refuse selection, never fall back or silently erase evidence. Retained-proof integrity errors
     refuse selection, rather than silently hiding evidence. History beyond these
     windows is never replayed.
     """
@@ -788,11 +789,26 @@ def work_inputs(project, role, snapshot, bounds):
     proposals = [{'id': item.get('id'), 'rev': item.get('rev'), 'source': item.get('source'),
                   'title': _clip(item.get('title'), cap), 'at': _at(item.get('created_at'))}
                  for item in pending if isinstance(item, dict)][:bounds['max_proposals']]
-    try:
-        events = project.insights.decision_events(role.name, EVIDENCE_ACTIONS,
-                                                  limit=bounds['max_decisions'])
-    except Exception:
+    from . import decision_delivery
+    if decision_delivery.authority(project.insights.root) is not None:
         events = []
+        if bounds['max_decisions']:
+            state = decision_delivery.pending(
+                project, role, actions=tuple(a for a in role.decision_events if a in EVIDENCE_ACTIONS),
+                limit=bounds['max_decisions'])
+            # A page reference is delivery, not evidence loss. Resolve only its
+            # frozen full-envelope identity; classifier text bounds still apply.
+            from .shared_records import SharedRecords
+            from .insights import INSIGHT_DECISION_POLICY
+            store = SharedRecords(project.insights.root, {"insight.decision": INSIGHT_DECISION_POLICY})
+            events = [store.get(entry.record_id, expected_digest=entry.record_digest)[0]["payload"]
+                      for entry in state["manifest"]]
+    else:
+        try:
+            events = project.insights.decision_events(role.name, EVIDENCE_ACTIONS,
+                                                      limit=bounds['max_decisions'])
+        except Exception:
+            events = []
     decisions = [{'insight': event.get('insight'), 'rev': event.get('rev'),
                   'action': event.get('action'), 'reason': _clip(event.get('reason'), cap),
                   'at': _at(event.get('decided_at'))}

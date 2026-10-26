@@ -18,6 +18,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from . import decision_delivery
 from . import platform as _platform
 from . import run_activity as _run_activity
 from . import evidence_records, workspace_reads
@@ -37,7 +38,7 @@ from .ci_wake import (CI_WAKE_VERSION, DEFAULT_CI_REWAKE_SECONDS,
                       _normalize_ci_wake_branches, read_ci_wake, write_ci_wake)
 from .budget import Budget
 from .config import (DAEMON_POLICIES, Config, Role, load,
-                     role_cooldown_seconds, role_daemon_spacing_seconds, role_decision_events_limit,
+                     role_cooldown_seconds, role_daemon_spacing_seconds,
                      role_policy_bytes, role_progress_signals, role_requests_per_run,
                      role_run_seconds, role_tools_per_run,
                      role_work_item_events_limit, role_wrap_up_requests,
@@ -157,7 +158,7 @@ WRAP_UP_TOOLS = 5
 WRAP_UP_OPS = frozenset({"finish", "research", "submit_insight", "attach_evidence", "decide"})
 #: Reads of existing state are useful observation, not harness-observable progress.
 OBSERVATIONAL_OPS = frozenset({
-    "files", "read", "diff", "insights", "research_read", "vcs_read",
+    "files", "read", "diff", "insights", "decision_read", "research_read", "vcs_read",
     "command_evidence_read", "experiment_evidence_read", "work_items_read", "work_items_legacy_read",
 })
 REPLAYABLE_READ_ARGUMENTS = {"fetch": "receipt_id", "probe": "receipt_id", "search": "result_id"}
@@ -408,6 +409,9 @@ class Context:
         # recovery of this candidate keep the same ordinal; only a proven
         # terminal pi-durable unanswered settlement can advance it.
         self.attempt_ordinal = 0
+        self.shared_decisions = False
+        self.decision_manifest = ()
+        self.decision_page = None
         self.decision_events: list = []
         self.decision_receipt_diagnostics: list = []
         self.work_item_events: list = []
@@ -1145,6 +1149,9 @@ class Context:
     def _op_work_items_transition(self, args: dict) -> dict:
         return work_item_operations.transition(self, args)
 
+    def _op_decision_read(self, args: dict) -> dict:
+        return decision_delivery.read(self, args)
+
     def _op_insights(self, args: dict) -> dict:
         return insight_operations.insights(self, args)
 
@@ -1727,8 +1734,12 @@ class Context:
             raise Denied("ack_events must select unique event tokens delivered to this role in this unit")
         # Recheck the immutable decision binding, not mutable topic state: the
         # role may have revised/withdrawn a topic as part of handling it.
+        if self.shared_decisions:
+            decision_delivery.validate(self, [token for token in tokens if token in decisions])
         for token in tokens:
             if token in decisions:
+                if self.shared_decisions:
+                    continue  # Validated as one bounded manifest batch above.
                 if self.project.insights._decision_token(self.role.name, decisions[token]) != token:
                     raise Denied("Decision acknowledgement binding changed")
             elif token in terminal:
@@ -1806,7 +1817,7 @@ class Context:
         "command_evidence_read": _op_command_evidence_read,
         "experiment_evidence_read": _op_experiment_evidence_read,
         "exec": _op_exec, "experiment": _op_experiment, "verify": _op_verify, "check_job": _op_check_job,
-        "fetch": _op_fetch, "probe": _op_probe, "search": _op_search, "insights": _op_insights,
+        "fetch": _op_fetch, "probe": _op_probe, "search": _op_search, "insights": _op_insights, "decision_read": _op_decision_read,
         "work_items_read": _op_work_items_read,
         "work_items_legacy_read": _op_work_items_legacy_read,
         "work_items_reconcile": _op_work_items_reconcile,
@@ -2369,12 +2380,9 @@ class Engine:
         code_unchanged = role.on_change and _on_change_observed(cursor, snapshot)
         triggers = tuple(getattr(role, "decision_events", ()) or ())
         sources = getattr(role, "decision_sources", "own") or "own"
-        if triggers:
-            decision_events, receipt_diagnostics = project.insights.decision_events_with_diagnostics(
-                role_name, triggers, limit=role_decision_events_limit(project.config, role),
-                sources=sources)
-        else:
-            decision_events, receipt_diagnostics = [], []
+        decision_state = decision_delivery.pending(project, role)
+        decision_events = decision_state["events"]
+        receipt_diagnostics = decision_state["diagnostics"]
         terminal_page = work_item_events.pending(
             project.work_items, role_name, role.work_item_events, sources=role.work_item_sources,
             limit=role_work_item_events_limit(project.config, role))
@@ -2405,9 +2413,9 @@ class Engine:
             if not substantive_events and not substantive_diagnostics and "defer" in triggers:
                 # A prompt-size window of old deferrals must not suppress a
                 # pending substantive trigger outside that window.
-                substantive_events, substantive_diagnostics = (
-                    project.insights.decision_events_with_diagnostics(
-                        role_name, tuple(a for a in triggers if a != "defer"), limit=1, sources=sources))
+                substantive = decision_delivery.pending(
+                    project, role, actions=tuple(a for a in triggers if a != "defer"), limit=1)
+                substantive_events, substantive_diagnostics = substantive["events"], substantive["diagnostics"]
                 substantive_diagnostics = [d for d in substantive_diagnostics
                                             if isinstance(d, dict) and d.get("action") != "defer"]
         try:
@@ -2485,7 +2493,7 @@ class Engine:
         if _dispatch.skipped == "unchanged":
             return {"skip": {"skipped": "unchanged", "snapshot": snapshot["id"],
                     "code_digest": snapshot["code_digest"]}}
-        return {'snapshot': snapshot, 'sources': sources, 'terminal_events': terminal_events, 'terminal_page': terminal_page, 'wait_events': wait_events, 'obligations': obligations, 'ci_present': ci_present, 'ci_failures': ci_failures, 'prior_wait_expired': prior_wait_expired, 'decision_events': decision_events, 'decision_receipt_diagnostics': receipt_diagnostics, '_dispatch': _dispatch}
+        return {'decision_state': decision_state, 'snapshot': snapshot, 'sources': sources, 'terminal_events': terminal_events, 'terminal_page': terminal_page, 'wait_events': wait_events, 'obligations': obligations, 'ci_present': ci_present, 'ci_failures': ci_failures, 'prior_wait_expired': prior_wait_expired, 'decision_events': decision_events, 'decision_receipt_diagnostics': receipt_diagnostics, '_dispatch': _dispatch}
 
     def run(self, project: Project, role_name: str, *, attributes=None, retry_busy: bool = False,
                 enqueue_busy: bool = False, event_trigger: bool = False, probes_serviced: bool = False) -> dict:
@@ -2692,6 +2700,11 @@ class Engine:
                     write_json(run_dir / "started.json", started)
                 if continuation is not None:
                     write_json(active, {"run": run_id, "role": role_name, "started_at": now()})
+                if dispatch_state['decision_state']['shared']:
+                    write_json(run_dir / "decision-delivery.json", {
+                        "authority": "shared", "page": dispatch_state['decision_state']['page'],
+                        "manifest": [dataclasses.asdict(entry) for entry in
+                                     dispatch_state['decision_state']['manifest']]})
                 if decision_events:
                     write_json(run_dir / "decision-events.json",
                                {"run": run_id, "role": role_name, "admission": admission,
@@ -2786,8 +2799,7 @@ class Engine:
                     context.safe_point_yield_requested = True
                     context.turn_authority_role = recovery_authority
                     context.spend_role = recovery_authority
-                context.decision_events = decision_events
-                context.decision_receipt_diagnostics = list(receipt_diagnostics or [])
+                decision_delivery.bind(context, dispatch_state['decision_state'])
                 context.work_item_events = terminal_events
                 context.wait_events = wait_events
                 context.obligations = obligations
@@ -3192,10 +3204,14 @@ class Engine:
                 selected_tokens = set(finished.get("ack_events", []))
                 selected_decisions = [e for e in context.decision_events if e["ack_token"] in selected_tokens]
                 if selected_decisions:
-                    with contextlib.suppress(OSError, ValueError, TypeError, AttributeError, Denied):
-                        project.insights.acknowledge_decisions(
-                            role_name, selected_decisions,
-                            sources=getattr(role, "decision_sources", "own") or "own")
+                    if context.shared_decisions:
+                        decision_delivery.acknowledge(context, selected_tokens &
+                                                      {e["ack_token"] for e in selected_decisions})
+                    else:
+                        with contextlib.suppress(OSError, ValueError, TypeError, AttributeError, Denied):
+                            project.insights.acknowledge_decisions(
+                                role_name, selected_decisions,
+                                sources=getattr(role, "decision_sources", "own") or "own")
                 selected_terminal = [e for e in context.work_item_events if e["ack_token"] in selected_tokens]
                 if selected_terminal:
                     with contextlib.suppress(OSError, ValueError, TypeError, AttributeError, Denied):
@@ -3811,10 +3827,12 @@ def _role_events_due(project: Project, snapshot: dict, role_name=None) -> bool:
     the project. Decision registration and wait expiry leave no inbox or
     snapshot generation footprint of their own (the operator CLI can defer
     with a wait outside any run), so the writer gate must consult the event
-    and wait stores directly before suppressing dispatch. Never raises:
-    unreadable stores read as no events; admission itself still fails loudly
-    inside Engine.run.
+    and wait stores directly before suppressing dispatch. Historically,
+    unreadable legacy stores read as no events; admission itself still fails
+    loudly inside Engine.run. Shared decision authority/budget/store errors
+    propagate instead of quietly suppressing the wake or using legacy state.
     """
+    shared = decision_delivery.authority(project.insights.root) is not None
     try:
         names = [role_name] if role_name in project.roles else [
             name for name in project.roles
@@ -3828,12 +3846,17 @@ def _role_events_due(project: Project, snapshot: dict, role_name=None) -> bool:
                         project.work_items, name, terminal_triggers,
                         sources=project.config.roles[name].work_item_sources, limit=1)["events"]:
                     return True
+            except (Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError, AttributeError):
+                pass
+            try:
                 triggers = project.config.roles[name].decision_events
                 sources = getattr(project.config.roles[name], "decision_sources", "own") or "own"
                 if triggers:
-                    pending, troubled = project.insights.decision_events_with_diagnostics(
-                        name, triggers if sources == "any" else tuple(a for a in triggers if a != "defer"),
-                        limit=1, sources=sources)
+                    state = decision_delivery.pending(
+                        project, project.config.roles[name],
+                        actions=triggers if sources == "any" else tuple(a for a in triggers if a != "defer"),
+                        limit=1)
+                    pending, troubled = state["events"], state["diagnostics"]
                     if sources == "any":
                         if any(isinstance(e, dict) for e in pending) or any(
                                 isinstance(d, dict) for d in troubled):
@@ -3842,7 +3865,8 @@ def _role_events_due(project: Project, snapshot: dict, role_name=None) -> bool:
                           or any(isinstance(d, dict) and d.get("action") != "defer" for d in troubled)):
                         return True
             except (Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError, AttributeError):
-                pass
+                if shared or decision_delivery.authority(project.insights.root) is not None:
+                    raise
             try:
                 if (project.insights.due_waits(name, snapshot)
                         or ci_waits.pending(project.work_items, name, limit=1)):
@@ -3850,7 +3874,8 @@ def _role_events_due(project: Project, snapshot: dict, role_name=None) -> bool:
             except (Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError, AttributeError):
                 pass
     except (Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError, AttributeError):
-        pass
+        if shared or decision_delivery.authority(project.insights.root) is not None:
+            raise
     return False
 
 
