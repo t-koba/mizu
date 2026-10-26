@@ -4,7 +4,7 @@ import datetime as dt
 import time
 from unittest.mock import patch
 
-from support import Fixture, ScriptDriver
+from support import Fixture, ScriptDriver, delivered_ack_tokens
 from mizu.config import DEFAULT_PROGRESS_SIGNALS, load, role_no_progress_backoff_seconds, role_progress_signals
 from mizu.errors import ConfigError, Denied
 from mizu.explain import explain
@@ -121,7 +121,7 @@ class ProgressAdmissionTests(Fixture):
                 args = {"outcome": "continue", "summary": "Finished this unit",
                         "state": base["state"]}
                 if ack_decisions:
-                    args["ack_events"] = [event["ack_token"] for event in ctx.decision_events]
+                    args["ack_events"] = delivered_ack_tokens(prompt)
                 ctx.handle("finish", args)
         Engine(config, driver=ScriptDriver(run)).run(self.project, "worker")
         return self.project.snapshots.get()
@@ -320,7 +320,7 @@ class ProgressAdmissionTests(Fixture):
                 due = [{"sha": "red", "check": "offline", "run": "test"}] if kind == "ci" else []
                 with patch("mizu.runtime._ci_due_for", return_value=due):
                     result = self._recorded_run(base=parked, custom_config=config,
-                                                ack_decisions=(kind == "decision"))
+                                                ack_decisions=(kind in ("wait", "decision")))
                 self.assertTrue(result["progress"]["signals"]["input"])
                 self.assertEqual(result["progress"]["no_progress_count"], 0)
                 self.assertEqual(self.project.insights.due_waits("worker", result), [])

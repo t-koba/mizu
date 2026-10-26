@@ -38,6 +38,7 @@ and is stored with ``origin`` None; the Editor outbox accepts only
 from __future__ import annotations
 
 import json
+import re
 import base64
 import binascii
 import time
@@ -49,7 +50,7 @@ import os
 from pathlib import Path
 
 from .smoke_refs import record_lock, validate_refs, require_pairs
-from . import insight_archive
+from . import insight_archive, wait_events
 from .work_item_waits import WAIT_KINDS, normalize_wait
 from .errors import Denied, LimitExceeded
 from .work_item_seed import (make_seed, validate_scope, validate_seed, validate_tasks,
@@ -252,25 +253,24 @@ def _archive_summary(item: dict) -> dict:
     return record
 
 
-def _wait_registration_id(stored: dict, fallback_owner: str = "") -> str:
-    """Stable identity for one stored structured wait (never raises).
+def _wait_registration_id(stored: dict, fallback_owner: str = "") -> str | None:
+    """Strict new UUID identity; bounded legacy digest only for absent IDs.
 
-    New registrations carry a unique ``registration_id`` (uuid hex, no
-    colon). Legacy files without the field read through a stable
-    ``legacy:<owner>:<registered_at>`` fallback that cannot collide with
-    any new id (the colon never appears in a new id) and is never written
-    back. ``fallback_owner`` covers a stored record missing its owner.
+    Malformed explicit IDs are not legacy records. The legacy namespace hashes
+    the exact stored registration, so neither unbounded timestamps nor unsafe
+    path text become identities. Reading legacy state never rewrites it.
     """
-    rid = stored.get("registration_id") if isinstance(stored, dict) else None
-    if isinstance(rid, str) and rid and ":" not in rid and len(rid) <= 64:
-        return rid
-    owner = stored.get("owner") if isinstance(stored, dict) else None
-    if not isinstance(owner, str) or not owner:
-        owner = fallback_owner if isinstance(fallback_owner, str) else ""
-    registered_at = stored.get("registered_at") if isinstance(stored, dict) else ""
-    if not isinstance(registered_at, str):
-        registered_at = ""
-    return f"legacy:{owner}:{registered_at}"
+    if not isinstance(stored, dict):
+        return None
+    if "registration_id" in stored:
+        rid = stored["registration_id"]
+        return rid if isinstance(rid, str) and re.fullmatch(r"[0-9a-f]{32}", rid) else None
+    owner = stored.get("owner", fallback_owner)
+    try:
+        identifier(owner)
+    except Denied:
+        return None
+    return f"legacy:{owner}:{digest(canonical(stored))}"
 
 
 #: Evidence-entry bounds (fixed mechanism, not knobs): at most this many
@@ -1075,16 +1075,18 @@ replacement insight without implying rejected substance.
         """Collect registered waits due for one role (one-shot, dispatch-lazy).
 
         Schema: returns oldest-registered-first payloads with insight, rev,
-        title, body, kind, reason, revisit, registered_at and
-        registration_id (plus ``at`` for deadlines, ``target`` for
-        insight_decided), at most ``limit``.
-        Bounds: ``limit`` in [1, 100]. Trust: recorded decisions, inbox,
+        title, body, kind, reason, revisit, registered_at, registration_id and
+        a role/source/payload-bound ack_token (plus ``at`` for deadlines,
+        ``target`` for insight_decided), at most ``limit``.
+        Bounds: ``limit`` in [1, 100]; registration reads and token-bearing
+        rows at most 1 MiB. Trust: recorded decisions, inbox,
         and snapshots only; routing is ``insight.source == role_name``.
         Retry: read-only except best-effort pruning of waits unbound by
         revision, a new decision, or withdrawal. Evidence: delivery is
         logged under the run directory; consumed waits are removed on
-        acknowledge. Failure: Denied on bad role name or limit; unbound,
-        unmet, and moot (target withdrawn) waits never emit.
+        explicit acknowledgement after durable result/publication. Failure:
+        Denied on bad role name or limit; unbound, unmet, and moot (target
+        withdrawn) waits never emit; unsafe/oversized reads fail closed.
         """
         identifier(role_name)
         if type(limit) is not int or limit < 1 or limit > 100:
@@ -1098,7 +1100,8 @@ replacement insight without implying rejected substance.
                 if path.is_symlink():
                     continue
                 try:
-                    stored = read_json(path, {})
+                    stored = json.loads(safe_read(self.root, path.relative_to(self.root).as_posix(),
+                                                  wait_events.MAX_ROW_BYTES))
                 except (OSError, ValueError, TypeError, AttributeError):
                     continue
                 if not isinstance(stored, dict) or stored.get("kind") not in WAIT_KINDS:
@@ -1117,6 +1120,8 @@ replacement insight without implying rejected substance.
                 if not isinstance(registered_at, str):
                     registered_at = ""
                 rid = _wait_registration_id(stored, path.stem)
+                if rid is None:
+                    continue
                 yield ((registered_at, rid), stored, current)
 
         selected = heapq.nsmallest(limit, _eligible(), key=lambda item: item[0])
@@ -1144,7 +1149,7 @@ replacement insight without implying rejected substance.
                     # evidence never dispatches; retry at next dispatch.
                     continue
                 payload["result"] = evidence
-            due.append(payload)
+            due.append(wait_events.delivery(role_name, wait_events.WAIT, payload))
         return due
 
     def _satisfaction_evidence(self, stored: dict) -> dict | None:
@@ -1176,7 +1181,7 @@ replacement insight without implying rejected substance.
 
         Schema: oldest-registered-first payloads with insight, rev, title,
         body, recipient, requires, reason, revisit, registered_at and
-        registration_id (at most ``limit``). These make an explicit
+        registration_id and ack_token (at most ``limit``). These make an explicit
         recipient's obligation visible when the recipient runs for other
         reasons; they never admit a run on their own, so no new wake
         source or scheduler is implied: scheduling the fulfiller stays
@@ -1184,9 +1189,11 @@ replacement insight without implying rejected substance.
         Bounds: ``limit`` in [1, 100]. Trust: recorded decisions and inbox
         only. Retry: read-only except best-effort pruning of unbound
         waits, mirroring ``due_waits`` so restart recovery keeps the same
-        pending set. Evidence: none written; dispatch logs a delivered
-        copy under the run directory. Failure: Denied on bad role name
-        or limit; satisfied, unbound, and malformed waits never list.
+        pending set. Exact per-role receipts filter before the bounded heap;
+        dispatch logs a delivered copy under the run directory. Failure:
+        corrupt/unsafe receipts fail closed without repair; bad roles/limits
+        are Denied; satisfied, unbound, malformed and receipted waits never list.
+        Registration reads and token-bearing rows are bounded to 1 MiB.
         """
         identifier(role_name)
         if type(limit) is not int or limit < 1 or limit > 100:
@@ -1200,7 +1207,8 @@ replacement insight without implying rejected substance.
                 if path.is_symlink():
                     continue
                 try:
-                    stored = read_json(path, {})
+                    stored = json.loads(safe_read(self.root, path.relative_to(self.root).as_posix(),
+                                                  wait_events.MAX_ROW_BYTES))
                 except (OSError, ValueError, TypeError, AttributeError):
                     continue
                 if not isinstance(stored, dict) or stored.get("kind") != "dependency":
@@ -1225,21 +1233,27 @@ replacement insight without implying rejected substance.
                 if not isinstance(registered_at, str):
                     registered_at = ""
                 rid = _wait_registration_id(stored, path.stem)
-                yield ((registered_at, rid), stored, current)
+                if rid is None:
+                    continue
+                row = self._obligation_payload(stored, current)
+                row = wait_events.delivery(role_name, wait_events.OBLIGATION, row)
+                if not wait_events.received(self.root, role_name, row):
+                    yield ((registered_at, rid), row)
 
         selected = heapq.nsmallest(limit, _eligible(), key=lambda item: item[0])
-        rows = []
-        for _, stored, current in selected:
-            defer = stored.get("decision", {})
-            if not isinstance(defer, dict):
-                defer = {}
-            rows.append({"insight": current["id"], "rev": _rev_of(current),
-                         "title": current.get("title", ""), "body": current.get("body", ""),
-                         "recipient": role_name, "requires": stored.get("requires"),
-                         "reason": defer.get("reason", ""), "revisit": defer.get("revisit", ""),
-                         "registered_at": stored.get("registered_at", ""),
-                         "registration_id": _wait_registration_id(stored, current.get("id", ""))})
-        return rows
+        return [row for _, row in selected]
+
+    def _obligation_payload(self, stored, current):
+        """Frozen projection shared by delivery and exact registration receipts."""
+        defer = stored.get("decision", {})
+        if not isinstance(defer, dict):
+            defer = {}
+        return {"insight": current["id"], "rev": _rev_of(current),
+                "title": current.get("title", ""), "body": current.get("body", ""),
+                "recipient": stored.get("recipient"), "requires": stored.get("requires"),
+                "reason": defer.get("reason", ""), "revisit": defer.get("revisit", ""),
+                "registered_at": stored.get("registered_at", ""),
+                "registration_id": _wait_registration_id(stored, current.get("id", ""))}
 
     def _wait_due(self, stored: dict, snapshot: dict) -> bool:
         """True when a bound wait's observable condition is met (never raises)."""
@@ -1299,11 +1313,13 @@ replacement insight without implying rejected substance.
 
         Schema: ``events`` are payloads from ``due_waits``. Trust: called
         only after successful processing. Retry: idempotent; a wait
-        re-registered mid-run (newer ``registered_at``) is never removed.
+        re-registered mid-run (different ``registration_id``) is never removed.
         Evidence: returns the consumed count. Failure: Denied on bad role
         name; I/O failures remove nothing silently per wait.
         """
         identifier(role_name)
+        for event in (events or []):
+            wait_events.validate(role_name, wait_events.WAIT, event)
         consumed = 0
         for event in (events or []):
             if not isinstance(event, dict) or not isinstance(event.get("insight"), str):
@@ -1313,12 +1329,15 @@ replacement insight without implying rejected substance.
                 path = self.root / "waits" / f"{event['insight']}.json"
                 if path.is_symlink():
                     continue
-                stored = read_json(path, {})
+                path.lstat()  # Missing after a prior acknowledgement is an idempotent replay.
+                stored = json.loads(safe_read(self.root, path.relative_to(self.root).as_posix(),
+                                              wait_events.MAX_ROW_BYTES))
+                current = self.read(event["insight"])
             except (OSError, ValueError, TypeError, AttributeError):
                 continue
-            if (isinstance(stored, dict)
-                    and stored.get("registered_at") == event.get("registered_at")
-                    and stored.get("kind") == event.get("kind")):
+            if (isinstance(stored, dict) and current.get("source") == role_name
+                    and event.get("registration_id") is not None
+                    and _wait_registration_id(stored, event["insight"]) == event["registration_id"]):
                 with contextlib.suppress(OSError):
                     path.unlink()
                     consumed += 1

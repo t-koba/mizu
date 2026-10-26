@@ -404,6 +404,11 @@ def _preflight(metadata, root, names):
                             or record["decision"].get("action") != "defer"):
                         raise Denied("Malformed smoke wait owner")
                     timestamp(record["registered_at"])
+                    if "registration_id" in record:
+                        from .insights import _wait_registration_id
+                        if _wait_registration_id(record) is None:
+                            raise Denied("Malformed wait registration identity")
+                        fields.add("registration_id")
                     stored_wait({key: value for key, value in record.items() if key not in fields})
             if metadata.entries + metadata.count > MAX_ENTRIES:
                 raise LimitExceeded("Smoke reference store entry bound exceeded")

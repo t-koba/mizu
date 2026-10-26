@@ -395,3 +395,17 @@ security floor, fresh one-shot verification/check commands, timeout/no replay,
 reset and container removal. It does not expose the runtime/socket inside a role
 sandbox. Local acceptance alone is not runtime proof: require the integration's
 success on the exact published SHA before claiming real-OCI validation.
+
+
+### Structured wait and obligation receipts
+
+`test_wait_receipts`, `test_waits`, `test_dependencies`, `test_decision_receipts`,
+`test_work_item_events`, `test_event_batch_limits` and `test_ci_waits` exercise
+real local stores with fake model dispatch, not RPC/provider or live CI evidence.
+They cover explicit mixed/partial/empty/omitted selections, role/source/payload
+binding before finish intent, exact registration consumption and same-timestamp
+re-registration, restart/backup/restore and idempotent/interrupted writes, result/publication
+failure, full/delta prompts, malformed registration IDs, UTF-8 byte bounds and
+corrupt/unsafe receipt paths. CI waits remain non-token observations with their
+existing acknowledgement semantics. Fake role handlers share
+`support.delivered_ack_tokens`; finishing by itself is deliberately not handling.

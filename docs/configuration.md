@@ -947,15 +947,15 @@ only for this role's findings. `mizu explain` reports the effective routes.
 
 `finish` optionally accepts `ack_events`, an array of at most 512 strings,
 each at most 64 characters (default omitted, equivalent to `[]`). Delivered
-`decision_events` and terminal `work_item_events` rows carry a host-issued opaque
-`ack_token` in both full and delta prompts. Select exactly the handled rows'
+`decision_events`, terminal `work_item_events`, structured insight `wait_events`
+and dependency `obligations` rows carry a host-issued opaque `ack_token` in both full and delta prompts. Select exactly the handled rows'
 tokens, e.g.
 `{"outcome":"wait","summary":"Handled one decision","ack_events":["<ack_token>"]}`
 (writers also supply `state`). Role policy, not this field, defines handling.
 
 Tokens bind the consuming role, immutable event identity and exact delivered
 payload (including the decision history record for decisions). One unique
-selection may mix both sources. They are not capabilities obtained by reading
+selection may mix these four sources. They are not capabilities obtained by reading
 history or copying untrusted text: finish accepts only tokens delivered to this role in
 this unit. Duplicate, malformed, unknown, foreign and undelivered/stale tokens
 refuse the seal before writing its intent; they never partially acknowledge.
@@ -964,9 +964,38 @@ frozen decision delivery; a terminal item correction that changes the current
 terminal revision/payload invalidates the older work-item token. No outcome,
 prose summary, or `wait_for_check` implies acknowledgement;
 explicit selections also work when the successful unit waits for a check.
-Structured-wait, CI/status, obligation and check-job sources do not use
-`ack_events`; their existing behavior is unchanged. Terminal work-item receipts
-use the same explicit selection contract, with their existing storage below.
+CI wait rows also appear in `wait_events` but carry no `ack_token`; CI/status
+and check-job sources do not use `ack_events` and retain their existing behavior.
+Terminal work-item receipts use the same explicit selection contract, with their
+existing storage below.
+
+Structured insight waits and dependency obligations bind one persisted
+`registration_id` (new registrations use a UUID hex string). Legacy registrations
+without that field use a stable `legacy:<owner>:<digest>` identity computed from
+the exact stored registration, without rewriting it; malformed explicit IDs are
+not legacy. Tokens additionally bind the role, source (`insight_wait` versus
+`dependency_obligation`) and canonical delivered payload. After successful
+result/publication, selected due waits are removed only if the stored
+`registration_id` still matches. A same-instant re-registration during handling
+survives an older selection. An old delivered token may record handling in that
+unit but cannot acknowledge the replacement or be reused in a later unit.
+
+Selected obligations produce atomic create-only receipts under
+`obligation-receipts/<role>/<identity-digest>.json`, binding role, source, insight,
+registration ID and token plus `acknowledged_at`. Only those exact registrations
+are suppressed for that role; neither the dependency wait nor task state is
+changed. Receipt reads are capped at 4 KiB and reject corrupt content, invalid
+bindings/timestamps, unsafe directories, symlinks and hardlinks without repair.
+Retries preserve existing bytes; backup/restore retains these receipts.
+Partial write failure leaves unwritten and
+unselected rows pending, never advancing a watermark. Both sources select the
+globally earliest eligible unreceived registrations before applying their count
+limit (default 10, API 1–100). Registration reads and token-bearing payload rows
+are each capped at 1 MiB; UTF-8 bytes, including tokens, count toward the bound.
+Run `wait-events.json`, `obligation-events.json`, finish intent and result retain
+the delivery/selection evidence. No shared aggregate prompt byte budget or
+receipt-pruning policy is added. Receipting an obligation records observation
+handling, not assignment, satisfaction, admission or scheduling.
 
 Only after the durable successful result and, for writers, successful snapshot
 publication does the host write selected exact receipts under

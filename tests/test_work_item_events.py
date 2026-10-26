@@ -7,7 +7,7 @@ import threading
 from contextlib import nullcontext
 from unittest.mock import patch
 
-from support import Fixture, bind_delivery, ScriptDriver
+from support import Fixture, bind_delivery, ScriptDriver, finish_with_event_acks
 from mizu import fs, insight_archive, work_item_events as events
 from mizu.cli import execute, parser
 from mizu.config import load
@@ -17,14 +17,6 @@ from mizu.runtime import Engine, _role_events_due, prompt_for, prompt_delta_for
 from mizu.services import event_watches, render
 from mizu.work_items import _timestamp_order
 
-
-def finish_with_event_acks(context, prompt, profile=None):
-    """Fake role explicitly handles only the rows in its delivered prompt."""
-    delivered = json.loads(prompt)
-    rows = delivered["decision_events"] + delivered.get("work_item_events", [])
-    context.handle("finish", {"outcome": "wait", "summary": "Handled delivered events",
-                              "state": "Next step is explicit.",
-                              "ack_events": [row["ack_token"] for row in rows]})
 
 
 class WorkItemEventTests(Fixture):
@@ -205,30 +197,43 @@ class WorkItemEventTests(Fixture):
         self.assertNotIn("ack_token", page["events"][0])  # raw store view unchanged
         self.assertEqual(len(events.delivery("reviewer", page)["events"][0]["ack_token"]), 64)
 
-    def test_finish_selects_unique_mixture_without_other_sources(self):
+    def test_finish_shared_contract_excludes_ci_status_and_check_jobs(self):
+        from test_waits import _defer, _past
+        from test_dependencies import _submit, _wait
         self.terminal()
         self.terminal()
+        _defer(self.project, "reviewer", {"kind": "deadline", "at": _past()})
+        result = _submit(self.project, "worker", "Result")
+        _defer(self.project, "worker", _wait(recipient="reviewer", target=result["id"]))
         roles = dict(self.subscribed_config().roles)
         roles["reviewer"] = dataclasses.replace(roles["reviewer"], decision_events=("accept",))
         config = dataclasses.replace(self.config, roles=roles)
+        remaining_decisions = []
         def mixed(ctx, prompt, profile=None):
             data = json.loads(prompt)
-            selected = [data["decision_events"][0]["ack_token"],
-                        data["work_item_events"][1]["ack_token"]]
-            # Out-of-scope sources cannot supply acknowledgement tokens.
-            ctx.wait_events = [{"ack_token": "a" * 64}]
-            ctx.obligations = [{"ack_token": "b" * 64}]
-            for token in ("a" * 64, "b" * 64):
+            decision = next(r for r in data["decision_events"] if r["action"] == "accept")
+            selected = [decision["ack_token"], data["work_item_events"][1]["ack_token"],
+                        data["wait_events"][0]["ack_token"], data["obligations"][0]["ack_token"]]
+            remaining_decisions.extend(r["ack_token"] for r in data["decision_events"]
+                                       if r["ack_token"] not in selected)
+            # CI waits share wait_events, but never the structured wait tokens.
+            ctx.wait_events.append({"kind": "ci", "registration_id": "0" * 32, "ack_token": "a" * 64})
+            ctx.ci_failures = [{"ack_token": "b" * 64}]
+            ctx.check_jobs = [{"ack_token": "c" * 64}]
+            for token in ("a" * 64, "b" * 64, "c" * 64):
                 with self.assertRaises(Denied):
                     self.finish(ctx, ack_events=[*selected, token])
                 self.assertIsNone(ctx.finished)
                 self.assertFalse((ctx.run_dir / "finish-intent.json").exists())
-            ctx.wait_events = []
-            ctx.obligations = []
+            ctx.wait_events.pop()
+            ctx.ci_failures = []
             self.finish(ctx, ack_events=selected)
         Engine(config, driver=ScriptDriver(mixed)).run(self.project, "reviewer")
         self.assertEqual(self.page()["pending"], 1)
-        self.assertEqual(len(self.project.insights.decision_events("reviewer", ("accept",))), 1)
+        self.assertEqual([r["ack_token"] for r in self.project.insights.decision_events("reviewer", ("accept",))],
+                         remaining_decisions)
+        self.assertEqual(self.project.insights.due_waits("reviewer", self.project.snapshots.get()), [])
+        self.assertEqual(self.project.insights.pending_obligations("reviewer"), [])
 
     def test_terminal_selection_is_independent_of_outcome_and_check_wait(self):
         roles = dict(self.subscribed_config().roles)

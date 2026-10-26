@@ -551,9 +551,16 @@ writes, locks, recovers or deletes. The project is opened with
   role-effective `work_item_events_limit` bounds terminal delivery while the
   role-effective `decision_events_limit` bounds only decisions (each a role
   override when set, else the project `[limits]` default). Delivered decision
-  and terminal work-item rows carry `ack_token`; select only handled rows in
-  `finish.ack_events`. Finishing alone acknowledges neither source. Unselected rows replay oldest-first,
-  including deferrals; batch limits bound prompt size, not handling.
+  and terminal work-item rows, structured insight waits and dependency obligations
+  carry `ack_token`; select only handled rows in `finish.ack_events`. Finishing
+  alone acknowledges none of these sources. Unselected rows replay oldest-first,
+  including deferrals; batch limits bound prompt size, not handling. Structured
+  wait consumption matches exact registration IDs, preserving mid-run
+  re-registrations. Per-role exact obligation receipts suppress only handled
+  observations, never assign work or fulfill the requirement. Both apply only
+  after durable result/publication; failures leave unwritten/unselected rows
+  pending. Corrupt/unsafe obligation receipts fail closed without repair. CI
+  waits sharing `wait_events` have no token and retain their current behavior.
   The 10-ID samples here are display bounds on a read-only diagnostic, not
   dispatch batches. Open, closed and event-delivery pages are
   individually bounded to 1 MiB (whole document at most 3 MiB plus field names).

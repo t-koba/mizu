@@ -979,9 +979,23 @@ prose is never parsed as an executable condition. A deferral may instead
 register one structured wait (``deadline``, ``code_change``,
 ``insight_decided``, or ``dependency``) through the decision interface; the wait binds to the
 current revision and decision, survives restarts as a recorded file, and is
-checked lazily at dispatch, so a satisfied wait admits one focused
-reconsideration without polling or model calls. A ``dependency`` wait names an explicit
-``recipient`` role responsible for the external work and binds the assessed requirement as
+checked lazily at dispatch, so a satisfied wait admits focused
+reconsideration without polling or model calls until explicitly handled.
+Structured wait and obligation rows carry a persisted registration identity
+(with a stable digest fallback for legacy absent IDs) and a host-issued token
+bound to role, source and canonical payload. `finish.ack_events` selects handled
+rows, validated before intent alongside decision and terminal tokens. Only after
+a durable successful result/publication does the host remove a selected due
+wait whose registration still matches, or write a create-only per-role exact
+obligation receipt. Empty/omitted selections acknowledge none; partial writes
+leave unwritten rows pending, and replay is idempotent. A mid-run re-registration
+survives even at the same timestamp. Global oldest-first bounded scans filter
+obligation receipts before limiting. Registration reads and token-bearing rows
+are capped at 1 MiB, receipt reads at 4 KiB; corrupt/unsafe receipt paths fail
+closed without repair. CI wait rows sharing `wait_events` retain their separate
+acknowledgement behavior; CI/status and check jobs do not use these tokens.
+A ``dependency`` wait names an explicit ``recipient`` role as the visibility route
+(not assignment) and binds the assessed requirement as
 ``requires`` (result insight, exact revision, required substantive decision): the completion
 is satisfied only by a revision-current decision matching all three, so a moved result never
 satisfies a stale requirement and dispatch alone never counts as fulfillment. Unsatisfied

@@ -11,7 +11,7 @@ import json
 import re
 import unittest
 
-from support import Fixture, ScriptDriver
+from support import Fixture, ScriptDriver, finish_with_event_acks
 from mizu import work_item_events as events
 from mizu.config import (
     load,
@@ -21,15 +21,6 @@ from mizu.config import (
 from mizu.errors import ConfigError
 from mizu.fs import read_json
 from mizu.runtime import Engine
-
-
-def finish_with_event_acks(context, prompt, profile=None):
-    """Explicitly acknowledge only decision and terminal rows delivered."""
-    delivered = json.loads(prompt)
-    rows = delivered["decision_events"] + delivered.get("work_item_events", [])
-    context.handle("finish", {"outcome": "wait", "summary": "Handled delivered events",
-                              "state": "Continue remaining work.",
-                              "ack_events": [row["ack_token"] for row in rows]})
 
 
 class EventBatchLimitTests(Fixture):

@@ -137,9 +137,20 @@ class ScriptDriver:
         return {"requests": context.request_count, "profile": profile or context.role.profile}
 
 
-def finish_with_decision_acks(context, prompt, profile=None):
-    """Test role explicitly handles every decision in its delivered prompt."""
-    rows = json.loads(prompt)["decision_events"]
-    context.handle("finish", {"outcome": "wait", "summary": "Handled delivered decisions",
+def delivered_ack_tokens(prompt):
+    """Fake roles handle supported token rows, never CI waits or job/status data."""
+    data = json.loads(prompt)
+    return [row["ack_token"]
+            for source in ("decision_events", "work_item_events", "wait_events", "obligations")
+            for row in data.get(source, []) if "ack_token" in row]
+
+
+def finish_with_event_acks(context, prompt, profile=None):
+    """Test role explicitly handles the events in its delivered prompt."""
+    context.handle("finish", {"outcome": "wait", "summary": "Handled delivered events",
                               "state": "Next step is explicit.",
-                              "ack_events": [row["ack_token"] for row in rows]})
+                              "ack_events": delivered_ack_tokens(prompt)})
+
+
+# Existing decision-focused tests share the same explicit delivered-row contract.
+finish_with_decision_acks = finish_with_event_acks

@@ -409,7 +409,16 @@ included — admits one focused run (`Engine.run` filters `substantive_events`
 by source mode, and `_role_events_due` applies the same rule). Terminal
 routing is filtered independently by `work_item_sources`. Delivered
 obligations (`pending_obligations` in `Engine.run`) ride along when the role
-runs for other reasons and never admit a run on their own.
+runs for other reasons and never admit a run on their own. Structured due-wait
+and obligation rows carry exact registration identities and role/source/payload-bound
+`ack_token`s in full/delta prompts. Only handled tokens explicitly selected in
+`finish.ack_events` are consumed/receipted after durable successful result and
+writer publication. Unselected rows replay oldest-first; a re-registration
+survives selection of the prior identity. Obligation receipts suppress visibility
+only, never assign work or satisfy a dependency. CI waits sharing `wait_events`
+have no such token and keep their existing acknowledgement behavior. See
+[the receipt contract](configuration.md) for bounds and
+failure behavior.
 
 CI-wake default: `ci_wake` defaults to true for `write` roles and false
 otherwise (`src/mizu/config.py`). When VCS polling is enabled, red results on

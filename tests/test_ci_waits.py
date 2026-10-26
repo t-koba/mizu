@@ -320,6 +320,7 @@ class CiWaitTests(Fixture):
                 event = read_json(run / "wait-events.json")["events"][0]
                 prompt = json.loads(engine.driver.calls[-1][1])
                 self.assertEqual(prompt["wait_events"], [event])
+                self.assertNotIn("ack_token", event)  # CI retains its existing non-token acknowledgement.
                 self.assertEqual(event["work_item"], item["id"])
                 self.assertEqual(event["conclusion"], conclusion)
                 self.assertEqual(read_json(run / "started.json")["admission"], "wait")

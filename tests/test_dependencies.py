@@ -1,6 +1,6 @@
 """Revision-bound dependency requests: explicit recipient, exact-rev satisfaction."""
 import unittest
-from support import Fixture, ScriptDriver
+from support import Fixture, ScriptDriver, finish_with_decision_acks
 from mizu.errors import Denied, ConfigError
 from mizu.fs import read_json
 from mizu.runtime import Engine
@@ -153,7 +153,7 @@ class DependencySatisfactionTests(Fixture):
 
 class DependencyDispatchTests(Fixture):
     def _engine(self):
-        return Engine(self.config, driver=ScriptDriver())
+        return Engine(self.config, driver=ScriptDriver(finish_with_decision_acks))
 
     def test_obligation_rides_along_but_never_admits(self):
         import dataclasses

@@ -91,7 +91,7 @@ class WaitDispatchTests(Fixture):
         self.assertEqual(started["admission"], "wait")
 
     def _engine(self):
-        return Engine(self.config, driver=ScriptDriver())
+        return Engine(self.config, driver=ScriptDriver(finish_with_decision_acks))
 
     def test_deadline_due_admits_and_consumes_once(self):
         engine = self._engine()
