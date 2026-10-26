@@ -1,4 +1,8 @@
-"""Private delegation-state tests; no runtime, process or supervisor smoke claims."""
+"""Private delegation-state tests; no runtime, process or supervisor smoke claims.
+
+Covers the durable stable child run identity: generation, retry stability,
+reconstruction, owner-view hiding, tombstone retention and fail-closed
+rejection of malformed/duplicate/version-1 state."""
 import concurrent.futures
 import copy
 import os
@@ -292,10 +296,10 @@ class DelegationJobTests(unittest.TestCase):
         job_id = state['active']
         variants = [b'{', b'null', b'{"version":NaN}', b'[' * 65 + b']' * 65,
                     b' ' * (jobs.MAX_STATE_BYTES + 1),
-                    valid[:-2], valid + b' ', valid.replace(b'"version":1', b'"version":1,"version":1')]
+                    valid[:-2], valid + b' ', valid.replace(b'"version":2', b'"version":2,"version":2')]
         for field, value in [('status', 'lost'), ('request_digest', '0' * 64),
-                             ('token', None), ('execution', []), ('request', None),
-                             ('result', 'premature'), ('owner', 'editor')]:
+                             ('token', None), ('run_id', None), ('execution', []),
+                             ('request', None), ('result', 'premature'), ('owner', 'editor')]:
             bad = copy.deepcopy(state)
             bad['jobs'][job_id][field] = value
             variants.append(canonical(bad))
@@ -332,6 +336,107 @@ class DelegationJobTests(unittest.TestCase):
         self.path.write_bytes(canonical(bad))
         with self.assertRaises(Denied):
             self.store.status('worker', second)
+
+    def test_run_id_generated_once_and_stable_across_retry_and_reconstruction(self):
+        job_id = self.start()
+        first = self.store.reservation()
+        run_id = first['run_id']
+        self.assertIsInstance(run_id, str)
+        self.assertRegex(run_id, r'\A[0-9a-f]{32}\Z')
+        # Exact retry at every transition returns the same binding.
+        self.store.runner_started(*self.runner())
+        self.store.runner_finished(*self.runner(), 'failed')
+        for _ in range(2):
+            self.assertEqual(self.start(), job_id)
+            self.assertEqual(self.store.reservation()['run_id'], run_id)
+            self.store = jobs.DelegationJobs(self.root)
+            self.assertEqual(self.store.reservation()['run_id'], run_id)
+            self.assertEqual(self.store.reservation()['id'], job_id)
+        self.store.runner_quiescent(*self.runner(), 'evidence')
+        # Tombstone retains the identity for audit after reconstruction.
+        self.store = jobs.DelegationJobs(self.root)
+        state = loads_finite(self.path.read_bytes())
+        self.assertEqual(state['jobs'][job_id]['run_id'], run_id)
+        self.assertEqual(self.start(), job_id)
+        self.assertIsNone(self.store.reservation())
+        self.assertEqual(loads_finite(self.path.read_bytes())['jobs'][job_id]['run_id'], run_id)
+
+    def test_run_id_hidden_from_owner_views_and_distinct_per_job(self):
+        first = self.start()
+        first_run = self.store.reservation()['run_id']
+        for view in (self.store.status('worker', first),
+                     self.store.start('worker', 'first', self.request)):
+            self.assertNotIn('run_id', view)
+            self.assertNotIn('token', view)
+            self.assertNotIn('request', view)
+        self.complete('First evidence')
+        result_view = self.store.result('worker', first)
+        self.assertNotIn('run_id', result_view)
+        second = self.start('second')
+        second_run = self.store.reservation()['run_id']
+        self.assertRegex(second_run, r'\A[0-9a-f]{32}\Z')
+        self.assertNotEqual(first_run, second_run)
+        self.assertNotIn('run_id', self.store.status('worker', second))
+        self.complete('Second evidence')
+        self.assertNotIn('run_id', self.store.result('worker', second))
+        self.assertNotIn('run_id', self.store.cancel('worker', second))
+        state = loads_finite(self.path.read_bytes())
+        self.assertEqual(state['jobs'][first]['run_id'], first_run)
+        self.assertEqual(state['jobs'][second]['run_id'], second_run)
+        self.assertLess(len(canonical(state['jobs'][first])), 600)
+        self.assertLess(len(canonical(state['jobs'][second])), 600)
+
+    def test_malformed_duplicate_and_version1_run_state_rejected_without_reset(self):
+        job_id = self.start()
+        valid = self.path.read_bytes()
+        state = loads_finite(valid)
+        malformed = [None, 0, '', '0' * 31, '0' * 33, '0' * 64,
+                     'G' * 32, 'A' * 32, '0' * 32 + ' ', ' 0' * 16]
+        for bad_run in malformed:
+            with self.subTest(bad_run=bad_run):
+                bad = copy.deepcopy(state)
+                bad['jobs'][job_id]['run_id'] = bad_run
+                raw = canonical(bad)
+                self.path.write_bytes(raw)
+                for action in (lambda: jobs.DelegationJobs(self.root), lambda: self.start(),
+                               self.store.reservation):
+                    with self.assertRaises((Denied, LimitExceeded)):
+                        action()
+                self.assertEqual(self.path.read_bytes(), raw)
+        # Missing run identity is refused, never treated as empty.
+        bad = copy.deepcopy(state)
+        del bad['jobs'][job_id]['run_id']
+        raw = canonical(bad)
+        self.path.write_bytes(raw)
+        with self.assertRaises(Denied):
+            self.store.reservation()
+        self.assertEqual(self.path.read_bytes(), raw)
+        # Version 1 ledger without the run identity is refused, never migrated.
+        old = copy.deepcopy(state)
+        old['version'] = 1
+        for job in old['jobs'].values():
+            del job['run_id']
+        raw = canonical(old)
+        self.path.write_bytes(raw)
+        for action in (lambda: jobs.DelegationJobs(self.root), lambda: self.start(),
+                       self.store.reservation):
+            with self.assertRaises((Denied, LimitExceeded)):
+                action()
+        self.assertEqual(self.path.read_bytes(), raw)
+        # Duplicate run identities among retained jobs are refused.
+        self.path.write_bytes(valid)
+        self.complete('First done')
+        second = self.start('second')
+        dup = loads_finite(self.path.read_bytes())
+        dup['jobs'][second]['run_id'] = dup['jobs'][job_id]['run_id']
+        raw = canonical(dup)
+        self.path.write_bytes(raw)
+        with self.assertRaises(Denied):
+            self.store.status('worker', second)
+        self.assertEqual(self.path.read_bytes(), raw)
+        self.path.write_bytes(valid)
+        self.assertEqual(self.store.reservation()['run_id'],
+                         loads_finite(valid)['jobs'][job_id]['run_id'])
 
     def test_unsafe_state_paths_are_refused(self):
         original = self.path.read_bytes()

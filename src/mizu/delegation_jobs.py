@@ -10,9 +10,13 @@ ancestors must be protected from concurrent untrusted host mutation. Symlink,
 hardlink, special-file, invalid-schema and oversized state is refused, never
 repaired or treated as an empty queue. This module alone launches nothing.
 
-Schema v1: one canonical JSON ledger, {version, active, jobs}. Jobs are keyed by
+Schema v2: one canonical JSON ledger, {version, active, jobs}. Jobs are keyed by
 SHA256([owner, key]); each contains owner/key, immutable request digest, status,
-runner token, execution outcome, request, result and result digest. A request is
+runner token, stable child run identity, execution outcome, request, result and
+result digest. The run identity is a random lowercase 32-hex string generated
+once on first start, retained in terminal tombstones for crash reconciliation,
+and never exposed in owner views. Version 1 ledgers lack the run identity and
+are refused, never migrated or reset. A request is
 exactly {role, task, profile, source_snapshot}; profile may be null, and snapshot
 is an immutable SHA256 snapshot ID. The host must pin the rest of the invocation
 authority before using this primitive; these fields grant no execution rights.
@@ -43,6 +47,7 @@ results are reported as evicted; tombstones still prevent duplicate execution.
 from __future__ import annotations
 
 import contextlib
+import re
 import secrets
 import stat
 from pathlib import Path
@@ -57,12 +62,17 @@ MAX_REQUEST_BYTES = 128 * 1024
 MAX_RESULT_BYTES = 32768
 _STATES = {'queued', 'running', 'cancel-requested', 'terminal'}
 _OUTCOMES = {'succeeded', 'failed', 'cancelled'}
-_FIELDS = {'owner', 'key', 'request_digest', 'status', 'token', 'execution',
+_FIELDS = {'owner', 'key', 'request_digest', 'status', 'token', 'run_id', 'execution',
            'request', 'result', 'result_digest'}
+RUN_ID = re.compile(r"[0-9a-f]{32}\Z")
 
 
 def _sha(value):
     return isinstance(value, str) and DIGEST.fullmatch(value) is not None
+
+
+def _run_id(value):
+    return isinstance(value, str) and RUN_ID.fullmatch(value) is not None
 
 
 def _text(value, maximum):
@@ -110,11 +120,12 @@ class DelegationJobs:
     """One project's durable reservation. Construction/recovery never starts work.
 
     ``start/status/result/cancel`` require the authenticated owner role from the
-    host, not a model-supplied identity. Owner views omit runner tokens/requests.
-    ``reservation`` is internal recovery evidence, including the pinned request
-    and token; it is NOT permission to replay it. All returned values are fresh
-    decoded copies. OS/durability errors propagate: an error after replacement
-    has uncertain acknowledgement, so inspect/retry, never launch from the error.
+    host, not a model-supplied identity. Owner views omit runner tokens/requests
+    and the stable run identity. ``reservation`` is internal recovery evidence,
+    including the pinned request, token and run identity; it is NOT permission
+    to replay it. All returned values are fresh decoded copies. OS/durability
+    errors propagate: an error after replacement has uncertain acknowledgement,
+    so inspect/retry, never launch from the error.
     """
 
     def __init__(self, project_root: Path):
@@ -128,7 +139,7 @@ class DelegationJobs:
             # Directory existence is the initialization marker. If interrupted
             # here, absence of state is an error, not permission for a new start.
             sync_dir(self.root.parent)
-            write_json(self.root / 'state.json', {'version': 1, 'active': None, 'jobs': {}},
+            write_json(self.root / 'state.json', {'version': 2, 'active': None, 'jobs': {}},
                        exclusive=True)
         with self._locked():
             self._load()
@@ -161,17 +172,22 @@ class DelegationJobs:
     @staticmethod
     def _validate(state):
         if (type(state) is not dict or set(state) != {'version', 'active', 'jobs'}
-                or type(state['version']) is not int or state['version'] != 1
+                or type(state['version']) is not int or state['version'] != 2
                 or type(state['jobs']) is not dict or len(state['jobs']) > MAX_JOBS):
             raise Denied('Invalid delegation ledger')
         active = []
         retained = 0
+        seen_runs = set()
         for job_id, job in state['jobs'].items():
             if (type(job) is not dict or set(job) != _FIELDS
                     or job_id != _identity(job['owner'], job['key'])
                     or not _sha(job['request_digest'])
+                    or not _run_id(job['run_id'])
                     or not isinstance(job['status'], str) or job['status'] not in _STATES):
                 raise Denied('Invalid delegation job')
+            if job['run_id'] in seen_runs:
+                raise Denied('Duplicate delegation run identity')
+            seen_runs.add(job['run_id'])
             execution = job['execution']
             if execution is not None and (not isinstance(execution, str) or execution not in _OUTCOMES):
                 raise Denied('Invalid delegation execution outcome')
@@ -212,6 +228,7 @@ class DelegationJobs:
 
     @staticmethod
     def _view(job_id, job):
+        # Owner-facing view: run identity, token and request stay supervisor-only.
         return {'id': job_id, 'status': job['status'], 'execution': job['execution'],
                 'reserved': job['status'] != 'terminal',
                 'result_available': job['result'] is not None}
@@ -233,9 +250,12 @@ class DelegationJobs:
                 raise Denied('Project already has an active delegation reservation')
             if len(state['jobs']) >= MAX_JOBS:
                 raise Denied('Delegation idempotency history is full')
+            run_id = secrets.token_hex(16)
+            while any(existing.get('run_id') == run_id for existing in state['jobs'].values()):
+                run_id = secrets.token_hex(16)
             job = {'owner': owner, 'key': key, 'request_digest': fingerprint,
-                   'status': 'queued', 'token': secrets.token_hex(32), 'execution': None,
-                   'request': request, 'result': None, 'result_digest': None}
+                   'status': 'queued', 'token': secrets.token_hex(32), 'run_id': run_id,
+                   'execution': None, 'request': request, 'result': None, 'result_digest': None}
             state['jobs'][job_id] = job
             state['active'] = job_id
             self._save(state)
