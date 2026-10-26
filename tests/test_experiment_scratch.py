@@ -74,22 +74,28 @@ class ScratchTests(Fixture):
     def test_only_queued_custom_experiments_accept_selection(self):
         ctx = self.context()
         reader = self.context('reviewer')
-        for who, op, extra in [(ctx, 'experiment', {'mode': 'sync'}),
+        for who, op, extra in [(ctx, 'experiment', {}),
+                               (ctx, 'experiment', {'mode': 'sync'}),
                                (ctx, 'experiment', {'source_receipt': 'a' * 64}),
                                (ctx, 'experiment', {'mode': 'async', 'source_receipt': 'a' * 64}),
                                (ctx, 'exec', {}), (reader, 'exec', {'mode': 'async'})]:
             with self.subTest(op=op, extra=extra), self.assertRaises(Denied):
                 who._op_exec_experiment(op, {'script': 'compile', 'scratch_paths': ['target'], **extra})
-        # An empty selection is equivalent to omission and preserves sync routing.
-        with patch.object(ctx.sandbox, 'execute', return_value={
+        # An empty selection is equivalent to omission and preserves direct routing.
+        direct_result = {
                 'id': 'b' * 32, 'kind': 'experiment', 'exit_code': 0, 'reason': 'exited',
-                'seconds': 0.1, 'writable': False, 'script': 'compile', 'stdout': '', 'stderr': ''}) as spy:
+                'seconds': 0.1, 'writable': False, 'script': 'compile', 'stdout': '', 'stderr': ''}
+        with patch.object(ctx.sandbox, 'execute', return_value=dict(direct_result)) as spy:
             result = ctx._op_exec_experiment('experiment', {'script': 'compile', 'mode': 'sync', 'scratch_paths': []})
+            self.assertNotIn('status', result)
+            self.assertNotIn('scratch_paths', spy.call_args.kwargs)
+        with patch.object(ctx.sandbox, 'execute', return_value=dict(direct_result)) as spy:
+            result = ctx._op_exec_experiment('experiment', {'script': 'compile', 'scratch_paths': []})
             self.assertNotIn('status', result)
             self.assertNotIn('scratch_paths', spy.call_args.kwargs)
         ctx.role = dataclasses.replace(ctx.role, capabilities=tuple(c for c in ctx.role.capabilities if c != 'check_job'))
         with self.assertRaises(Denied):
-            ctx._op_exec_experiment('experiment', {'script': 'compile', 'scratch_paths': ['target']})
+            ctx._op_exec_experiment('experiment', {'script': 'compile', 'mode': 'async', 'scratch_paths': ['target']})
         for op in ('exec', 'verify'):
             with self.assertRaises(Denied):
                 validate({'script': 'compile', 'scratch_paths': ['target']} if op == 'exec'
@@ -100,7 +106,7 @@ class ScratchTests(Fixture):
         for args in [{'action': 'start'}, {'action': 'list'}, {'action': 'join', 'id': 'a' * 64}]:
             with self.assertRaises(Denied):
                 reader._op_check_job({**args, 'scratch_paths': ['target']})
-        first = self.context()._op_exec_experiment('experiment', {'script': 'compile', 'scratch_paths': ['target']})
+        first = self.context()._op_exec_experiment('experiment', {'script': 'compile', 'mode': 'async', 'scratch_paths': ['target']})
         self.assertEqual(first['scratch_paths'], ['target'])
         second = self.context()._op_check_job({'action': 'start', 'script': 'compile', 'scratch_paths': ['target']})
         self.assertNotEqual(first['id'], second['id'])

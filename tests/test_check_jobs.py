@@ -237,7 +237,7 @@ class JobTests(Fixture):
         ctx = self.context('reviewer')
         ctx.role = dataclasses.replace(ctx.role, capabilities=(*ctx.role.capabilities, 'experiment'))
         self.project.config.roles['reviewer'] = ctx.role
-        job = ctx._op_exec_experiment('experiment', {'script': 'test -f /workspace/app.py'})
+        job = ctx._op_exec_experiment('experiment', {'script': 'test -f /workspace/app.py', 'mode': 'async'})
         self.assertEqual(job['status'], 'queued')
         self.assertEqual(self.run_job()['status'], 'completed')
     def test_event_only_role_admits_completed_check_with_explicit_wait(self):
@@ -457,7 +457,7 @@ class JobTests(Fixture):
     def test_read_only_exec_returns_job_but_writer_exec_is_not_detached(self):
         reader = self.context('reviewer')
         reader.role = dataclasses.replace(reader.role, capabilities=(*reader.role.capabilities, 'exec'))
-        self.assertEqual(reader._op_exec_experiment('exec', {'script': 'echo hello'})['status'], 'queued')
+        self.assertEqual(reader._op_exec_experiment('exec', {'script': 'echo hello', 'mode': 'async'})['status'], 'queued')
         with self.assertRaises(Denied):
             check_jobs.submit(self.context(), 'echo hello', kind='exec')
     def test_matching_async_acceptance_can_complete_a_later_unit(self):

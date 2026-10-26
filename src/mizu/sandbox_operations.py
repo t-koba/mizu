@@ -7,8 +7,8 @@ from .fs import text_preview, write_json
 
 
 #: Caller-selected execution mode for ordinary exec/experiment calls.
-#: Omission keeps the historical routing; sync bypasses only the implicit
-#: queue; async selects the queued path under the existing grants.
+#: Omission and sync share the existing synchronous/direct path; only async
+#: selects the queued path under the existing grants.
 MODES = ("sync", "async")
 
 
@@ -17,7 +17,7 @@ def exec_experiment(context, op: str, args: dict) -> dict:
     if mode is not None and mode not in MODES:
         raise Denied("Unsupported execution mode")
     scratch_requested = bool(args.get("scratch_paths"))
-    if scratch_requested and (op != "experiment" or mode == "sync"
+    if scratch_requested and (op != "experiment" or mode != "async"
                               or "source_receipt" in args
                               or "check_job" not in context.role.capabilities):
         raise Denied("scratch_paths requires an async custom experiment without source_receipt")
@@ -30,11 +30,7 @@ def exec_experiment(context, op: str, args: dict) -> dict:
         if not (op == "experiment" or context.role.workspace == "read"):
             raise Denied("Cannot detach live workspace writes")
         return check_jobs.submit(context, args["script"], kind=op, **scratch)
-    queue_by_default = ("check_job" in context.role.capabilities
-                        and "source_receipt" not in args
-                        and (op == "experiment" or context.role.workspace == "read"))
-    if mode is None and queue_by_default:
-        return check_jobs.submit(context, args["script"], kind=op, **scratch)
+    # Omitted mode and sync share the direct path; only explicit async queues.
     if context.role.workspace == "none":
         raise Denied("This role has no workspace")
     source = {"source_receipt": args["source_receipt"]} if "source_receipt" in args else {}

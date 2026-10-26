@@ -53,14 +53,23 @@ class ExecModeRoutingTests(Fixture):
         ctx.role = dataclasses.replace(ctx.role, capabilities=(*ctx.role.capabilities, "exec"))
         return ctx
 
-    def test_default_routing_preserved(self):
+    def test_omitted_mode_runs_direct_even_with_check_job(self):
         reader = self.reviewer()
-        self.assertEqual(reader._op_exec_experiment("exec", {"script": "echo hi"})["status"], "queued")
-        with patch.object(reader.sandbox, "execute", side_effect=AssertionError("must queue")):
-            self.assertEqual(self.context()._op_exec_experiment(
-                "experiment", {"script": "echo hi"})["status"], "queued")
-        # Writable exec stays synchronous by default.
+        with patch.object(reader.sandbox, "execute", return_value=_sync_result()) as spy:
+            result = reader._op_exec_experiment("exec", {"script": "echo hi"})
+            self.assertNotIn("status", result)
+            self.assertEqual(result["exit_code"], 0)
+            self.assertTrue(spy.called)
+            _, kwargs = spy.call_args
+            self.assertFalse(kwargs.get("writable"))
         writer = self.context()
+        with patch.object(writer.sandbox, "execute", return_value=_sync_result()) as spy:
+            result = writer._op_exec_experiment(
+                "experiment", {"script": "echo hi"})
+            self.assertNotIn("status", result)
+            self.assertEqual(result["exit_code"], 0)
+            self.assertTrue(spy.called)
+        # Writable exec stays synchronous by default.
         with patch.object(writer.sandbox, "execute", return_value=_sync_result()) as spy:
             result = writer._op_exec_experiment("exec", {"script": "echo hi"})
             self.assertNotIn("status", result)
@@ -75,6 +84,17 @@ class ExecModeRoutingTests(Fixture):
             self.assertNotIn("status", result)
             self.assertTrue(spy.called)
 
+    def test_omitted_mode_does_not_record_a_job(self):
+        from mizu import check_jobs
+        reader = self.reviewer()
+        with patch.object(reader.sandbox, "execute", return_value=_sync_result()):
+            reader._op_exec_experiment("exec", {"script": "echo hi"})
+        writer = self.context()
+        with patch.object(writer.sandbox, "execute", return_value=_sync_result()):
+            writer._op_exec_experiment("experiment", {"script": "echo hi"})
+        self.assertEqual(check_jobs.pending(self.project, "reviewer"), [])
+        self.assertEqual(check_jobs.pending(self.project, "worker"), [])
+
     def test_without_check_job_ordinary_execution_stays_synchronous(self):
         ctx = self.context("reviewer")
         ctx.role = dataclasses.replace(
@@ -88,7 +108,7 @@ class ExecModeRoutingTests(Fixture):
             self.assertNotIn("status", result)
             self.assertTrue(spy.called)
 
-    def test_sync_bypasses_only_the_implicit_queue(self):
+    def test_sync_selects_the_direct_path(self):
         reader = self.reviewer()
         with patch.object(reader.sandbox, "execute", return_value=_sync_result()) as spy:
             result = reader._op_exec_experiment("exec", {"script": "echo hi", "mode": "sync"})
@@ -153,11 +173,19 @@ class ExecModeRoutingTests(Fixture):
         with self.assertRaises(Denied):
             ctx._op_exec_experiment("experiment", {"script": "echo hi", "mode": ""})
 
-    def test_async_shares_queue_identity_with_default(self):
+    def test_explicit_async_calls_share_queue_identity(self):
         writer = self.context()
-        first = writer._op_exec_experiment("experiment", {"script": "echo shared"})
+        first = writer._op_exec_experiment("experiment", {"script": "echo shared", "mode": "async"})
         second = writer._op_exec_experiment("experiment", {"script": "echo shared", "mode": "async"})
         self.assertEqual(first["id"], second["id"])
+
+    def test_omitted_mode_does_not_share_queue_identity_with_async(self):
+        writer = self.context()
+        with patch.object(writer.sandbox, "execute", return_value=_sync_result("echo shared")):
+            direct = writer._op_exec_experiment("experiment", {"script": "echo shared"})
+        queued = writer._op_exec_experiment("experiment", {"script": "echo shared", "mode": "async"})
+        self.assertNotIn("status", direct)
+        self.assertEqual(queued["status"], "queued")
 
     def test_verify_behavior_unchanged(self):
         ctx = self.context()

@@ -2,23 +2,22 @@
 
 Grant `check_job` to a role to opt in. `verify` then submits the configured
 acceptance commands against a frozen copy and returns a job ID without waiting
-for the commands. Ordinary `experiment` calls and read-only `exec` calls also submit jobs. Experiments with
-a fetched `source_receipt` retain their existing synchronous behavior. Arbitrary
-workspace-mutating `exec` remains synchronous; it is not safe to detach writes
-to a workspace that the caller can continue modifying.
+for the commands. Ordinary `experiment` and `exec` calls run directly on the
+existing synchronous path even with `check_job`; only an explicit `mode=async`
+submits those calls as jobs. `verify` and explicit `check_job` starts are
+unchanged. Arbitrary workspace-mutating `exec` remains synchronous; it is not
+safe to detach writes to a workspace that the caller can continue modifying.
 
 Ordinary `exec` and `experiment` calls accept an optional `mode` of `sync` or
-`async`. Omitting `mode` keeps the routing above exactly: with `check_job`,
-read-workspace `exec` and experiments without `source_receipt` queue, while
-writable `exec` and `source_receipt` experiments run synchronously; without
-`check_job`, ordinary execution stays synchronous. `mode=sync` bypasses only
-the implicit queue and runs on the existing sandbox path under the same role
-grants, without bypassing workspace denial or changing sandbox permissions.
-`mode=async` requires the `check_job` grant and uses only the already-safe
-queued paths, so writable-workspace `exec` and `source_receipt` experiments are
-refused instead of detached, and `verify` behavior is unchanged (queued and
-frozen when `check_job` is granted). Mode alone does not change queue
-identity or sharing.
+`async`. Omitting `mode` runs the existing direct synchronous path even with
+`check_job`, under the same role grants and workspace restrictions. `mode=sync`
+selects the same direct path as omission, without bypassing workspace denial
+or changing sandbox permissions. `mode=async` requires the `check_job` grant
+and uses only the already-safe queued paths, so writable-workspace `exec` and
+`source_receipt` experiments are refused instead of detached, and `verify`
+behavior is unchanged (queued and frozen when `check_job` is granted); explicit
+`check_job` starts (including named recorded batches) are unchanged. Mode alone
+does not change queue identity or sharing.
 
 ## Delegated invocation ownership
 
@@ -34,17 +33,19 @@ it holds `check_job`.
 ## Opt-in disk-backed experiment scratch
 
 Queued custom experiments accept `scratch_paths`, an array of unique names from
-`sandbox.check_cache_paths`. Both `experiment` (default queued routing or
-`mode=async`) and `check_job` (`action=start` with `script`, `commands` or
-`batch_name`) expose it under the existing grants. Names are configured
+`sandbox.check_cache_paths`. Both `experiment` (`mode=async`) and
+`check_job` (`action=start` with `script`, `commands` or `batch_name`) expose
+it under the existing grants. Names are configured
 top-level artifact directories, not host paths; duplicate, unconfigured and
 malformed names are refused. The tool schema
 bounds each name to 255 ASCII characters and the array to 32 entries. Omission or
 `[]` keeps ordinary tmpfs-only execution and the existing job identity. A
 nonempty selection is canonicalized into the run-local job identity and appears
 in job summaries and command evidence. For `experiment`, an empty selection is
-always equivalent to omission; nonempty selection on synchronous or
-source-receipt experiments is refused. For `check_job`, supply the field only
+always equivalent to omission; a nonempty selection requires `mode=async`, the
+`check_job` grant and no source receipt. Omitted or synchronous modes are
+refused so a direct call never silently ignores scratch. For `check_job`, supply
+the field only
 with `action=start`; an empty selection there is equivalent to omission, while a
 nonempty selection requires a custom experiment script, `commands` or a named
 `batch_name`. `exec` never accepts scratch paths. This grants no new execution
@@ -118,10 +119,9 @@ Operator-owned `project.toml` `[recorded_batches]` definitions are selectable
 through `check_job` (`action=start`) as `batch_name` (text, at most 63
 characters), an alternative to ad-hoc `script` or `commands`. Use
 `action=list` to inspect the available names; it does not expose command text.
-The three custom forms are mutually exclusive; omitting all three submits the configured
-acceptance commands, and existing ad-hoc `script`/`commands` and omitted-mode
-routing are unchanged. `batch_name` on any non-`start` action, an unknown
-name, a malformed name, or any combination of two custom forms is refused
+The three custom forms are mutually exclusive; omitting all three submits the
+configured acceptance commands. `batch_name` on any non-`start` action, an
+unknown name, a malformed name, or any combination of two custom forms is refused
 before any job submission.
 
 The name resolves at submission from the trusted loaded project settings to
