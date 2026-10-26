@@ -1,6 +1,6 @@
 # Shared record delivery: inventory and migration design
 
-**Status:** design slice only. This document records the source inventory, a bounded disposable pilot, and a proposed contract. No runtime behavior or configuration changed here; current delivery paths remain authoritative until a separately verified cutover.
+**Status:** design plus persistence-only foundation. `src/mizu/shared_records.py` implements bounded schema-1 immutable records, explicit per-role receipts and backup membership, with focused tests. No source kind is enabled or routed through it; current delivery paths remain authoritative until a separately verified, reconciled cutover.
 
 ## Scope and invariants
 
@@ -101,8 +101,9 @@ Operator answer `609e9479aaca426ca196f5dd81360e16` resolves the earlier question
 
 ## Source anchors
 
-Current behavior can be checked in these functions (the proposed shared contract is not implemented):
+Current behavior can be checked in these functions (the shared persistence core is present, but source adapters are not yet cut over):
 
+- [`SharedRecords`](../src/mizu/shared_records.py): bounded canonical record envelopes and exact role/record/digest receipts; it does not yet own source eligibility, routing, wake, backfill or cutover.
 - [`Insights.decision_events`, `acknowledge_decisions`, `due_waits`, `consume_waits`, `pending_obligations`](../src/mizu/insights.py): current decision/revision eligibility, exact receipts and consumable waits.
 - [`work_item_events.pending`, `acknowledge`](../src/mizu/work_item_events.py): terminal projections and source-validated old receipts; [`ci_waits.pending`, `_pending`, `acknowledge`](../src/mizu/ci_waits.py): current holder/revision checks and blocked `updated_at` order.
 - [`check_jobs.pending`, `result`, `logs`, `acknowledge`, `_withdraw_locked`, `_make_room`](../src/mizu/check_jobs.py): prompt role, read versus acknowledgement authority, withdrawn demand and eviction.

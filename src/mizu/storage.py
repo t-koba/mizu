@@ -36,7 +36,7 @@ MEMBERS = (
     "project.toml", "PROJECT.md", "control.json", "current.json", "safe-point.json", "snapshots", "objects",
     "inbox", "insight-ids", "insight-revisions", "insight-archive.sqlite3", "histories", ".ingest", "decisions",
     "decision-history", "decision-cursors", "decision-receipts", "work-items", "work-item-receipts",
-    "obligation-receipts", "waits", "runs", "sessions",
+    "obligation-receipts", "shared-records", "shared-record-receipts", "waits", "runs", "sessions",
     "evidence", "artifacts", "health", "observed", "maintenance", "spool", "selection",
 )
 
