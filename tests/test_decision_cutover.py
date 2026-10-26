@@ -321,6 +321,19 @@ class DecisionCutoverTests(Fixture):
         self.assertNotEqual(seen[0][1], seen[1][1])
         self.assertEqual(len(self.pending(limit=100)['events']), 2)
 
+    def test_prompt_budget_uses_exact_utf8_unicode_bytes(self):
+        body = 'é' * 120
+        self.decide(body=body)
+        self.role(decision_page_bytes=1000)
+        self.activate()
+        ctx = self.context_with_delivery()
+        for prompt in (prompt_for(ctx), prompt_delta_for(ctx, [])):
+            doc = json.loads(prompt)
+            contribution = {key: doc[key] for key in ('decision_events', 'decision_page')}
+            self.assertLessEqual(len(json.dumps(contribution, ensure_ascii=False).encode('utf-8')), 1000)
+            self.assertNotIn('ref', doc['decision_events'][0])
+            self.assertEqual(doc['decision_events'][0]['body'], body)
+
     def test_reference_full_and_delta_prompts_reader_and_byte_budget(self):
         for i in range(3): self.decide(i, body='日本語 😀 "quote" \\ slash\n' * 800)
         self.role(decision_page_bytes=750)

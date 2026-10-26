@@ -45,7 +45,10 @@ inputs. The trusted host adapter never executes model-provided host commands.
 | `protocol.py` | Tool schemas and strict parameter validation | Tool implementation semantics |
 | `sandbox.py`, `process.py` | Bounded execution, termination, cleanup | Experiment usefulness |
 | `snapshot.py` | Content objects, immutable manifests, published pointer | Semantic correctness |
-| `insights.py` | Submission identity, revisable proposals with separate audit, decision history, initial work-item seeds | Acceptance or rejection |
+| `insights.py` | Submission identity, revisable proposals, decision history/legacy receipts, source-current shared-decision projection and page construction, initial work-item seeds | Acceptance or rejection |
+| `shared_records.py` | Bounded canonical records, exact role/record/digest receipts and manifest-scoped paged reads | Source eligibility, route policy, lifecycle, or cutover |
+| `decision_delivery.py` | One durable-marker-selected `insight.decision` runtime route for prompt, wake, selection, retrieval and acknowledgement | Host activation or other event-family routing |
+| `decision_reconciliation.py` | Host-only exact legacy-receipt preflight/apply and one-way activation after per-role pending-set parity; publishes the authority marker last | Model-granted activation or task lifecycle |
 | `work_items.py` | Append-audited records, CAS lifecycle, bounded open pages and by-ID history | Work-item scheduling and policy |
 | `web.py` | Allowed retrieval, policy-bounded protocol observation, and external source receipts | Scientific truth |
 | `materialize.py` | Generic offline-input adapter (spec in, digest-bound content out) plus retained-receipt apply validation (spec/result output equality, digest, path safety) | Ecosystem resolution, cache policy |
@@ -63,9 +66,12 @@ otherwise a loopback TCP socket carrying the same per-run token — connecting
 each extension to its work unit. Files are the inter-process handoff.
 JSON is the machine format; Markdown is the human policy/report format.
 
-The [shared-record delivery design](shared-records.md) inventories current event
-authorities and proposes a bounded delivery/receipt migration; it is design-only,
-not a description of an implemented shared store.
+The [shared-record delivery](shared-records.md) mechanism is implemented as a
+bounded immutable store with manifest-scoped reads and receipts. A host-only,
+one-way marker can activate shared delivery for `insight.decision` after exact
+legacy-receipt migration and full per-role pending-set parity; legacy remains
+the default until that explicit activation. Other event families keep their
+existing authorities and are not switched by this pilot.
 
 ## Work-unit transaction
 

@@ -1,4 +1,4 @@
-# Shared record delivery: inventory and migration design
+# Shared record delivery: design, implementation and activation
 
 **Status:** bounded immutable records, decision projection/pages/retrieval,
 exact legacy receipt reconciliation, and a host-only one-way runtime activation
@@ -42,13 +42,13 @@ Source-current eligibility is distinct from retention and acknowledgement. A ret
 
 Keep each kind's existing event-time meaning, including the blocked revision's `updated_at` for a CI waiter, rather than replacing it with projection/arrival time. Filter source-ineligible and exactly acknowledged rows before bounded oldest-first selection. If the oldest eligible payload exceeds a page, deliver a bounded digest-pinned preview/reference with paged retrieval of the exact immutable content; the delivery manifest still binds the full record digest. Retrieval must validate that identity across pages. Do not silently skip the row or stall forever behind it. The byte budget must accommodate the bounded reference and metadata; otherwise report an explicit configuration/budget failure, not an empty successful page.
 
-The exact TOML shape and aggregate byte default belong to implementation after an integrated pilot that includes the production validators and full prompt. The fixed 1 MiB protocol bound is an absolute ceiling, not a target. Reserve budget for other prompt sections too, and one shared record budget across kinds, including all serialized metadata rather than payload bytes alone.
+For the active `insight.decision` pilot, `decision_page_bytes` is an explicit per-role budget required for every enabled subscriber at activation (1..1 MiB; no default). It bounds the actual UTF-8 JSON contribution from `decision_events` plus `decision_page`, including keys, formatting, tokens, references and truncation metadata; it does not bound the entire prompt. The full prompt also contains other sections and the manifest-only read-tool surface, so reserve space for those. No other kind consumes this setting in the pilot, and no cross-kind aggregate default is implemented. The 1 MiB limit is an absolute ceiling, not a target.
 
 ## Current source inventory
 
 | Family | Current authority and authenticated writer | Subject, route, and current delivery/closure | Current bounds and retention |
 |---|---|---|---|
-| Insight proposals and decision events | `Insights` owns the live inbox/revisions, decision pointer/history, and permanent decided-insight archive. Writers use the existing insight/decision capabilities; editor imports and operator-originated entries use their existing host paths. | Open proposals also appear in the capability-gated `pending_insights`/`open_insights` backlog; that is not a decision receipt. A decision event binds insight ID, current revision, action, source, title/body, reason/revisit and evidence. `decision_events` filters configured actions and `own`/`any` source routing. `finish.ack_events` explicitly selects delivered `ack_token`s; only selected exact events are receipted after the sealed result is durable. The source decision/revision, not the receipt, closes or supersedes the proposal. Legacy timestamp cursors are not acknowledgement evidence. | Per-role event count is configured, API limit 1–100, and each decision record read is capped at 1 MiB; the current decision page has no single aggregate byte ceiling. The live inbox follows `retention_days`, but archived bodies and decision/history evidence are permanent. |
+| Insight proposals and decision events | `Insights` owns the live inbox/revisions, decision pointer/history, and permanent decided-insight archive. Legacy receipts remain the runtime delivery authority by default; only the explicit host activation marker selects shared per-role receipts. Writers use the existing insight/decision capabilities; editor imports and operator-originated entries use their existing host paths. | Open proposals also appear in the capability-gated `pending_insights`/`open_insights` backlog; that is not a decision receipt. A decision event binds insight ID, current revision, action, source, title/body, reason/revisit and evidence. `decision_events` filters configured actions and `own`/`any` source routing. `finish.ack_events` explicitly selects delivered `ack_token`s; only selected exact events are receipted after the sealed result is durable. The source decision/revision, not the receipt, closes or supersedes the proposal. Legacy timestamp cursors are not acknowledgement evidence. | Per-role event count is configured (API limit 1–100), and each decision record read is capped at 1 MiB. Legacy delivery has no page-byte ceiling; after explicit shared activation, every decision subscriber must set `decision_page_bytes`, which bounds the serialized `decision_events`/`decision_page` contribution. The live inbox follows `retention_days`, but archived bodies and decision/history evidence are permanent. |
 | Review result and findings | Reviewer findings submitted through the product are ordinary `Insights`; there is no distinct durable aggregate review-result store in the inspected product path. External VCS proposal rows may carry up to 64 reviewer/verdict/SHA facts and are normalized into proposal insight revisions by the trusted adapter; those facts remain external-untrusted. | A finding is bound to its insight revision and any reviewed snapshot/SHA evidence. Reviewers route through configured insight subscriptions. An aggregate verdict, if delivered as a separate source, needs its own explicit `review.result` record bound to the exact whole-capture `code_digest`; findings are separate `review.finding` records bound to that same snapshot and stable finding IDs. Neither record changes the host publication approval requirement. | Findings inherit insight bounds and permanent archive behavior. VCS proposal pages are bounded to 256 proposals and 64 review rows each; no independent review-result acknowledgement store was found. |
 | Terminal work-item events | `WorkItems` owns seeds, history, CAS lifecycle and terminal state. `work_item_events` derives a read-only event from a validated terminal revision; it does not own task state. The transition actor and origin submitter remain distinct. | Event identity is `work_item:<id>:<rev>`; `done`/`dropped` payloads bind the exact terminal transition, origin-source route, and (for `done`) verification digest. Configured `work_item_events` actions and `own`/`any` source routes determine addressees; unknown origin stays visible as unknown. Exact per-role receipts are written only for delivered role/payload-bound `ack_token`s explicitly selected in `finish.ack_events`, after durable successful result/publication. Empty/omitted selection acknowledges none; unselected events replay oldest-first. The existing terminal receipt format is unchanged. Terminal status is source closure, not delivery acknowledgement. | Full ledger/history validation, oldest-first bounded heap; up to 100 rows, at most 8 KiB per row and 1 MiB per page. Role page size is configurable. No separate event-history pruning policy; task history and exact receipts remain with the ledger. |
 | Structured waits and obligations | Decision waits are bound to an insight ID/revision and the exact defer decision; WorkItem waits remain in the WorkItems history. Dependency satisfaction is checked against a specific insight revision/action. | Due insight waits route to the insight's source role; `pending_obligations` routes structured dependency visibility to `recipient` but does not admit a run by itself. Both projections carry role/source/canonical-payload-bound `ack_token`s and an exact `registration_id`. Only explicit `finish.ack_events` selections apply after durable successful result/publication: `consume_waits` removes only a still-matching registration, and atomic per-role `obligation-receipts` suppress only the acknowledged exact registration. Empty/omitted selections consume none; re-registrations survive. CI wait rows sharing `wait_events` remain outside this token protocol. Neither route establishes task assignment or external provenance. | Due waits and obligations each return globally earliest registrations, at most 10 by default (API bound 100), after eligibility/receipt filtering. Stored registration reads and token-bearing rows are capped at 1 MiB each; receipts at 4 KiB. Full insight text remains, without one shared prompt byte budget. Corrupt/unsafe receipts fail closed without repair. Legacy absent IDs use a bounded stable digest fallback; malformed explicit IDs never list. Stale/unbound waits are pruned; explicitly consumed waits are removed. WorkItem history remains authoritative. |
@@ -99,8 +99,9 @@ reader with a prototype using `project_decision_records()` plus the production
 legacy or shared receipts existed; both event lists matched after removing the
 role-specific token, and both full prompts used the same `prompt_for()`. The
 shared timing includes full source reconciliation, exact idempotent record
-validation, safe record reads, receipt checks and manifest creation; there is no
-active shared reader yet.
+validation, safe record reads, receipt checks and manifest creation. This is a
+historical shadow-only prototype measurement; it does not measure the later
+active page path or the full shared prompt with its read-tool surface.
 
 | Rows | Legacy scan median / sample max | Projection + shared read/freeze median / sample max | Legacy / shared event bytes | Legacy / shared full-prompt bytes |
 |---:|---:|---:|---:|---:|
@@ -188,21 +189,28 @@ prefix: retry the same call after addressing the failure; exact replay does not
 rewrite records. A changed payload under an already projected event ID (including
 later evidence on a deferral) is a conflict, never an implicit record update.
 
-The projection adapter alone creates no receipts or delivery authority. Its
-output proves neither pending-set parity nor a cutover. Legacy decision reads
-and receipts remain active until the separate host-only activation below has
-completed exact receipt translation and parity under source/receipt/config
-quiescence and published the single-authority marker.
+The low-level projection adapter alone creates no receipts or delivery authority;
+its output proves neither pending-set parity nor a cutover. The implemented host-only
+`activate_decision_delivery(project)` operation supplies that explicit switch.
+Legacy decision reads and receipts remain authoritative until exact receipt
+translation and full pending-set parity complete under source/receipt/config
+quiescence and the single-authority marker is published last.
 
-## Staged migration
+## Implemented pilot and remaining migration plan
 
-1. **Implement the generic contract with no source enabled by default.** Add immutable idempotent records, bounded kind validators, one host-side per-record receipt store, exact current-unit acknowledgement, and tests for event-time order (including late backfill/clock rollback), partial receipts, replay, conflicting IDs, role spoofing, unsafe paths, corrupt records, aggregate bytes/oversized references and failed sealing. A missing kind policy authorizes neither writer nor route nor wake.
-2. **Pilot `insight.decision` first.** Backfill stable source event identities without changing insight lifecycle, decisions or archives. Translate only validated exact per-role receipts; legacy completion cursors never proved handling. Shadow comparisons cover exact subjects/digests, order, current eligibility and per-role pending sets under the same configuration. Shadow records cannot prompt, acknowledge or wake.
-3. **Cut over at a stable boundary, one kind at a time.** Pause/quiesce producers and consumers under the existing source/receipt locks and freeze the trusted routing configuration. Use a durable shadow/active marker so restart unambiguously selects exactly one delivery/receipt authority. Finish backfill and receipt translation, then compare complete current eligible/pending sets at that same source+receipt+configuration boundary before atomically activating the shared reader/waker and disabling the old path. If reconciliation is incomplete, remain shadow/paused; never allow dual delivery or receipt writes. Source state remains the sole lifecycle authority throughout.
-4. **Reconcile source commits before projection.** Source writes commit first; restart/startup reconciliation must idempotently project any committed event missing from the shared store, including a crash between source commit and projection. Retain the old path/data until complete reconciliation and restart tests prove no eligible event is lost. A failed or uncertain projection is not an acknowledgement. Recheck current source eligibility rather than blindly replaying every retained historical row.
-5. **Migrate task delivery without task migration.** Project exact terminal and structured-wait identities, replacing auto-ack-on-finish with explicit selection. Revalidate terminal old receipts against authoritative source revision/payload before mapping them to a new digest; an old receipt alone does not validate that digest. Consumed insight waits have no exact old receipt to translate and cannot reconstruct historical handling: do not invent receipts or resurrect consumed waits. Migrate only waits still current under the source. Keep task CAS/history, holder authority, dependencies and digest-bound `done` unchanged.
-6. **Migrate check-job notifications, not verification authority.** Keep prompt routing to `job.role`, role-or-producer result/log authorization, owner-only acknowledgement and same-role shared-subscription semantics. Do not import every `acknowledged` flag as handling evidence: replaced demand may be withdrawn without a result read. Reconcile that state with job authority and current demand rather than manufacture a handling receipt. Notification acknowledgement never imports a verification pass: only explicit `action=result` with matching source/commands/environment can do so. Required deliveries and referenced result evidence must survive eviction; cancellation and job retention remain job-owned.
-7. **Add typed operator/review/publication kinds only when a trusted source exists.** Do not synthesize answers, verdicts or blockers from free text. Declare authenticated writer, exact subject, current routing/eligibility, wake and retention before enabling a kind. Remove legacy delivery/cursor machinery only after validated receipt mappings and complete current pending sets reconcile, including backup/restore and restart replay. Retain authoritative histories, publication receipts, run evidence and task verification; do not rewrite them as delivery state.
+The bounded immutable record/receipt mechanism, the `insight.decision` shadow
+projection and exact legacy-receipt migration, and the optional host-only
+runtime cutover are implemented. The first three stages below apply to
+`insight.decision` only; they do not activate any other event family. Remaining
+stages describe future source integrations and do not change current authority.
+
+1. **Bounded record/receipt mechanism (implemented).** Immutable idempotent records, bounded kind validators, one host-side per-record receipt store, exact current-unit acknowledgement, and failure/unsafe-path validation. A missing kind policy authorizes neither writer nor route nor wake.
+2. **`insight.decision` projection and exact receipt migration (implemented).** Stable source event identities are projected without changing insight lifecycle, decisions or archives. Only validated exact per-role receipts are translated; legacy completion cursors never proved handling. Complete subjects/digests, current eligibility and per-role pending sets are checked under the same configuration boundary. Shadow records alone cannot prompt, acknowledge or wake.
+3. **`insight.decision` runtime cutover (implemented, explicit opt-in).** A host-only operation quiesces all enabled roles under existing source/receipt locks, applies exact receipt migration, checks complete pending-set parity, and publishes the durable marker last. Before that marker, legacy remains the sole authority; afterwards all active decision consumers select shared delivery. Failures never enable dual delivery or receipt writes; source state remains the sole lifecycle authority.
+4. **Future source-specific commit/restart reconciliation.** For each additional kind, define how source commits are projected idempotently across interruption, validate current eligibility before replay, and prove no eligible event is lost. A failed or uncertain projection is not an acknowledgement.
+5. **Future work-item delivery, without task migration.** Project exact terminal and structured-wait identities only after a separate explicit cutover design. Revalidate terminal old receipts against authoritative source revision/payload before mapping them to a new digest; consumed insight waits have no exact old receipt to translate and cannot reconstruct historical handling. Keep task CAS/history, holder authority, dependencies and digest-bound `done` unchanged.
+6. **Future check-job notifications, not verification authority.** Keep prompt routing to `job.role`, role-or-producer result/log authorization, owner-only acknowledgement and same-role shared-subscription semantics. Do not import every `acknowledged` flag as handling evidence: replaced demand may be withdrawn without a result read. Notification acknowledgement never imports a verification pass; only explicit `action=result` with matching source/commands/environment can do so. Required deliveries and referenced result evidence must survive eviction; cancellation and job retention remain job-owned.
+7. **Future typed operator/review/publication kinds only when a trusted source exists.** Do not synthesize answers, verdicts or blockers from free text. Declare authenticated writer, exact subject, current routing/eligibility, wake and retention before enabling a kind. Keep authoritative histories, publication receipts, run evidence and task verification; do not rewrite them as delivery state.
 
 At each cutover, test that no duplicate delivery occurs, omitted records remain pending oldest-first, explicit partial acknowledgements affect only selected IDs, failed/uncertain units do not acknowledge, records cannot acknowledge across roles or revisions, and a record read/wake cannot mutate source state. After every code slice, verify and publish the exact snapshot; `WorkItems` completion remains bound to its matching published tree and passing digest-bound verification.
 
@@ -543,6 +551,25 @@ the actual full/delta prompt decision fields and JSON framing against the
 explicit byte budget; the host-only shadow call's default still measures
 `canonical(page)`. Count/byte overflow is explicit metadata, and an unfit oldest
 reference is an explicit error, not an empty successful page.
+
+A bounded full-prompt measurement used the real `prompt_for()` builder with a
+synthetic reviewer, short ASCII decisions, a 100-row count limit and a 131072-byte
+page budget (experiment `722f0b222ed2c9039ff96fd4fbcc2375e08420dc07330491a910cdfc5f6df92d`,
+command evidence `3c839faf85f645bdb2c36e6031f1490d`, code digest
+`6412e8c0eb4f68df34768d8a6aceac9fd0bc62154f6ab9aa99a5602e2bfcee45`):
+
+| Current decisions | Legacy/shared rows | Shared page contribution | Legacy full prompt | Shared full prompt |
+|---:|---:|---:|---:|---:|
+| 10 | 10 / 10 | 3,812 B | 6,263 B | 6,602 B |
+| 100 | 100 / 100 | 37,113 B | 39,564 B | 39,904 B |
+| 205 | 100 / 100 | 37,111 B | 39,564 B | 39,902 B |
+
+The 205-record case reports all 205 pending while the configured count cap keeps
+100 rows. The full-prompt figures include the prompt's other sections and the
+shared read-tool surface in this fixture, but the non-decision sources are
+minimal. These are observed construction sizes, not a worst-case prompt bound,
+token estimate, latency result or recommended budget; operators must reserve
+headroom for their actual prompt inputs.
 
 The host retains the immutable `{role, record_id, record_digest, ack_token}`
 manifest only for this unit, recording it with the page in the run's
