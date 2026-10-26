@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Callable, Mapping
 
 from .errors import Denied, LimitExceeded
-from .fs import (DIGEST, MAX_JSON_DEPTH, atomic_write, canonical,
+from .fs import (DIGEST, MAX_JSON_DEPTH, READ_PAGE_CHARS, atomic_write, canonical,
                  digest, identifier, loads_finite, now, safe_read, sync_dir)
 
 RECORD_BYTES = 1024 * 1024 + 4096
@@ -249,6 +249,44 @@ class SharedRecords:
             entries.append(Delivery(role, record_id, computed, _token(role, record_id, computed)))
         return tuple(entries)
 
+    def read_page(self, role: str, ack_token: str, *, manifest: tuple[Delivery, ...],
+                  offset: int = 0, limit: int = READ_PAGE_CHARS) -> dict:
+        """Read canonical envelope text only through a frozen host manifest.
+
+        Offsets/limits count Unicode characters, not UTF-8 bytes. Each call
+        revalidates the immutable record and its exact full-envelope digest.
+        Source/routing changes do not invalidate this unit's retained manifest.
+        """
+        identifier(role)
+        if (type(offset) is not int or offset < 0 or type(limit) is not int
+                or not 1 <= limit <= READ_PAGE_CHARS):
+            raise Denied("Invalid shared record page bounds")
+        allowed = self._manifest(role, manifest)
+        if not isinstance(ack_token, str) or ack_token not in allowed:
+            raise Denied("Record is not in the frozen shared record manifest")
+        entry = allowed[ack_token]
+        envelope, _ = self.get(entry.record_id, expected_digest=entry.record_digest)
+        text = canonical(envelope).decode("utf-8")
+        if offset > len(text):
+            raise Denied("Shared record offset exceeds text length")
+        end = min(offset + limit, len(text))
+        return {"record_id": entry.record_id, "record_digest": entry.record_digest,
+                "offset": offset, "total_chars": len(text),
+                "next_offset": end if end < len(text) else None,
+                "text": text[offset:end]}
+
+    def _manifest(self, role: str, manifest: tuple[Delivery, ...]) -> dict[str, Delivery]:
+        if not isinstance(manifest, tuple) or len(manifest) > MANIFEST_ROWS:
+            raise Denied("Invalid frozen shared record manifest")
+        allowed = {}
+        for entry in manifest:
+            if (not isinstance(entry, Delivery) or entry.role != role
+                    or _token(role, entry.record_id, entry.record_digest) != entry.ack_token
+                    or not isinstance(entry.ack_token, str) or entry.ack_token in allowed):
+                raise Denied("Invalid frozen shared record manifest")
+            allowed[entry.ack_token] = entry
+        return allowed
+
     def received(self, role: str, record_id: str, record_digest: str) -> bool:
         """Check exact receipt; unsafe/corrupt data raises, never counts as ack."""
         _token(role, record_id, record_digest)
@@ -282,13 +320,7 @@ class SharedRecords:
         if (not isinstance(manifest, tuple) or len(manifest) > MANIFEST_ROWS
                 or not isinstance(selections, list) or len(selections) > MANIFEST_ROWS):
             raise Denied("Invalid shared record acknowledgement batch")
-        allowed = {}
-        for entry in manifest:
-            if (not isinstance(entry, Delivery) or entry.role != role
-                    or _token(role, entry.record_id, entry.record_digest) != entry.ack_token
-                    or entry.ack_token in allowed):
-                raise Denied("Invalid frozen shared record manifest")
-            allowed[entry.ack_token] = entry
+        allowed = self._manifest(role, manifest)
         pending = []
         seen = set()
         for selected in selections:

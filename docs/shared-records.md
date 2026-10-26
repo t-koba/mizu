@@ -1,6 +1,6 @@
 # Shared record delivery: inventory and migration design
 
-**Status:** design plus persistence-only foundation and a host-only decision-source projection. `src/mizu/shared_records.py` implements bounded schema-1 immutable records, explicit per-role receipts and backup membership, with focused tests. `Insights.project_decision_records()` can reconcile current decision events into shadow records. No source kind is enabled for delivery or routed through it; current delivery paths remain authoritative until a separately verified, reconciled cutover.
+**Status:** design plus persistence foundation, host-only decision-source projection, and shadow-only bounded decision pages/retrieval. `src/mizu/shared_records.py` implements bounded schema-1 immutable records, explicit per-role receipts and backup membership, with focused tests. `Insights.project_decision_records()` can reconcile current decision events into shadow records; `Insights.shared_decision_page()` can inspect a bounded source-current shadow page and freeze its host manifest. No source kind is enabled for delivery or routed through it; current delivery paths remain authoritative until a separately verified, reconciled cutover.
 
 ## Scope and invariants
 
@@ -110,9 +110,42 @@ are not p95 estimates and the mixed timings show no prompt speedup. The one cold
 both stores, so receipt storage was not measured. This small fixture measures
 serialized shape, not large-body/evidence tails or an integrated run. In this
 prototype, the extra safe projection/read work is slower than the legacy scan;
-it does not justify adding an index. Use it as a baseline only, then measure the
-actual bounded shadow-page builder and receipt path before choosing a byte
-budget or index.
+it does not justify adding an index. The actual page/receipt prototype is
+measured below; neither experiment establishes an integrated prompt budget.
+
+### Bounded shadow-page and matched-receipt prototype
+
+Experiment `48eea5880d056641e98b5631b510fb593fdbf77c2742d861d9b9778b3eed4683`,
+command evidence `be2d71b49cf54c9db1e17c7b17332dd7`, used code digest
+`b9e99402ff93bfdc12c3a1e363f1b8dd9528d74ef5dec205dc3c5c89dd3fd2cb`. It used
+205 short current decisions, a 128 KiB explicit page bound, and five alternating
+samples. Legacy and shadow event payload/order matched after removing their
+role-bound token. The shared-reader timing covers source reconciliation,
+projection, exact shared-receipt checks, page sizing and selected-manifest
+freezing under the source lock. Prompt measurements reused the real
+`prompt_for(Context)` with each row list substituted; the shadow page remains
+unintegrated, so page metadata was not inserted into a runtime prompt.
+
+| Receipt state | Rows | Legacy / shadow page read median (sample max), ms | Legacy / shadow prompt build median, ms | Full-prompt bytes (legacy / shadow) | Shared page bytes |
+|---|---:|---:|---:|---:|---:|
+| Empty | 10 | 235.236 / 765.139 (264.145 / 1,255.192) | 160.150 / 187.496 | 6,542 / 6,542 | 3,815 |
+| Empty | 100 | 208.802 / 1,018.942 (687.498 / 1,325.305) | 131.930 / 146.073 | 42,160 / 42,160 | 37,272 |
+| Matched partial (oldest 100 acknowledged in each store) | 10 | 298.058 / 927.528 (332.510 / 1,476.439) | 146.158 / 147.233 | 6,539 / 6,539 | 3,812 |
+| Matched partial (oldest 100 acknowledged in each store) | 100 | 271.400 / 982.764 (606.945 / 1,657.235) | 122.360 / 121.360 | 42,159 / 42,159 | 37,271 |
+
+The partial-receipt sets matched by exact oldest event identity; legacy and shared
+pending pages remained payload/order-equal. Full prompt bytes stayed equal, while
+shared `canonical(page)` bytes include the bounded page envelope metadata. The
+cold 205-record projection took 454.196 ms. Stored bytes were 47,932 in
+`decision-history`, 117,414 in shared immutable records, 18,800 in 100 legacy
+receipts and 21,300 in 100 shared receipts. The five-sample maxima are not p95
+estimates. This actual shadow path is roughly 3–5 times slower than the legacy
+scan on this small fixture because it performs full reconciliation and safe
+record/receipt validation under lock; prompt timings are mixed, with no clear
+speedup. These measurements justify no index or speed claim. The tested 128 KiB
+page budget is about 3.1 times the largest measured full prompt (42,160 bytes),
+but is not a configured default or a worst-case bound: activation must budget
+other prompt sections and validate large-body/evidence tails separately.
 
 ## Persistence-only decision-source adapter
 
@@ -177,8 +210,121 @@ Operator answer `609e9479aaca426ca196f5dd81360e16` resolves the earlier question
 
 Current behavior can be checked in these functions (the shared persistence core is present, but source adapters are not yet cut over):
 
-- [`SharedRecords`](../src/mizu/shared_records.py): bounded canonical record envelopes and exact role/record/digest receipts; it does not yet own source eligibility, routing, wake, backfill or cutover.
+- [`SharedRecords`](../src/mizu/shared_records.py): bounded canonical record envelopes, exact role/record/digest receipts and manifest-scoped paged reads; it does not own source eligibility, routing, wake, backfill or cutover. [`Insights.shared_decision_page`](../src/mizu/insights.py) is a host-only shadow adapter, not an active source route.
 - [`Insights.decision_events`, `acknowledge_decisions`, `due_waits`, `consume_waits`, `pending_obligations`](../src/mizu/insights.py): current decision/revision eligibility, exact receipts and consumable waits.
 - [`work_item_events.pending`, `acknowledge`](../src/mizu/work_item_events.py): terminal projections and source-validated old receipts; [`ci_waits.pending`, `_pending`, `acknowledge`](../src/mizu/ci_waits.py): current holder/revision checks and blocked `updated_at` order.
 - [`check_jobs.pending`, `result`, `logs`, `acknowledge`, `_withdraw_locked`, `_make_room`](../src/mizu/check_jobs.py): prompt role, read versus acknowledgement authority, withdrawn demand and eviction.
 - [`runtime.prompt_for`, `ci_failures_projection`, `wake_ci_failures`, `_ci_due_for`](../src/mizu/runtime.py): prompt construction and explicit CI wake selection/due policy.
+
+
+## Shadow decision page and manifest-scoped retrieval
+
+These are **trusted host Python APIs only**, not runtime tools or active delivery.
+`decision_events()` and `acknowledge_decisions()` remain the sole runtime
+selection/receipt authority. No prompt, finish, routing configuration, wake,
+admission or task lifecycle is changed. The page adapter writes only immutable
+shadow projections, never receipts. Generic receipt calls in tests exercise the
+already-existing `SharedRecords` mechanism; they do not enable shared runtime
+acknowledgements. The parent pilot's migration/cutover remains outstanding.
+
+```python
+page, manifest = insights.shared_decision_page(
+    role_name, actions, max_bytes=explicit_budget, limit=100, sources="own")
+part = records.read_page(role_name, page["events"][0]["ack_token"],
+                         manifest=manifest, offset=0, limit=8192)
+```
+
+`actions` is an explicit collection (`list`, `tuple`, `set` or `frozenset`) of
+`accept`, `modify`, `reject`, `defer`; empty means no selected actions. `sources`
+is `own` or `any`; role and routing arguments come from trusted host policy,
+not payload text. `limit` is an integer in 1..100 (default 10).
+`max_bytes` is **required**, an integer in 1..`fs.MAX_FRAME` (1 MiB), with no
+policy default. An empty `actions` collection returns the bounded empty page without
+projecting or writing records. It bounds `len(fs.canonical(page))`, including UTF-8 encoding,
+JSON escapes, the final newline, event framing, tokens, references and metadata.
+The manifest tuple is separate host-only state, not serialized into the page.
+A future integrated prompt must reserve space for all other sections; this API
+alone does not promise a full prompt fits a protocol frame.
+
+The page is exactly:
+
+```text
+{events: [row, ...], pending_count: integer, truncated: boolean,
+ count_truncated: boolean, byte_truncated: boolean}
+```
+
+`pending_count` counts all source-current, routed, not-exactly-shared-received
+records before page selection. `truncated` means fewer rows are represented
+than pending; `count_truncated` means pending exceeds `limit`;
+`byte_truncated` means fewer than `min(pending_count, limit)` rows fit the byte
+budget. A reference represents one row; replacing an oversized full row with a
+reference does not itself count as an omitted row. There is no timestamp cursor.
+
+Selection, projection, shared receipt checks and page construction hold the
+existing insight record lock together. The projector's existing ceiling of 512
+current source records applies before routing/receipts; overflow refuses before
+any projection writes. The public projector still returns only ID-to-digest
+bindings. Exact current decision and source revision/action must match; retained
+stale or withdrawn projections cannot become new page rows. Shared exact receipts
+are filtered before oldest-first selection, independently of legacy receipts.
+Timestamps are normalized to UTC and ties use the stable record ID. There is no
+index: this remains a bounded, fully validated shadow scan.
+
+A full `row` preserves every legacy decision-event payload field, replacing only
+`ack_token` with the shared manifest token. If that row cannot fit in the
+remaining page, it is replaced, if possible, by:
+
+```text
+{event, insight, rev, action, preview, ack_token,
+ ref: {record_id, record_digest, bytes}}
+```
+
+`preview` is at most 80 title characters, never authority or the full content.
+`ref.bytes` is the exact canonical envelope's UTF-8 length including its final
+newline; the digest pins that full envelope, not the preview. Only represented
+rows are frozen into the returned `tuple[Delivery, ...]`, in page order. Each
+entry binds role, record ID, full-record digest and its token. Token bytes are
+reserved at their exact fixed width while sizing the page. No discarded row is
+added to the manifest. If the next row/reference cannot fit, a nonempty page
+ends with explicit truncation, without advancing past that row. If even metadata
+or the first row's reference cannot fit an empty page, `LimitExceeded` is raised,
+not an empty successful page. Retry with a larger explicit budget (within the
+ceiling); never silently skip the oldest row.
+
+`SharedRecords.read_page(role, ack_token, manifest=..., offset=0,
+limit=READ_PAGE_CHARS)` accepts no arbitrary record ID. The host must supply the
+current role's retained current-unit manifest, never one supplied by the model.
+Tokens are identity checks, not secrets or authorization outside that manifest.
+Every call validates manifest role/token/digest bindings and safely rereads and
+validates the entire canonical envelope against its exact digest. Source or
+routing movement after the freeze does not prevent retrieval of that immutable
+record during the same unit. The host discards the manifest at unit end.
+
+Retrieval returns exactly `{record_id, record_digest, offset, total_chars,
+next_offset, text}`. `text` is a slice of canonical envelope text, including the
+final newline on its last page. Offset/limit are integer Unicode character
+counts, not UTF-8 byte offsets; booleans, negative/past-end offsets and limits
+outside 1..`fs.READ_PAGE_CHARS` (8192) are refused. At exactly the total length an
+empty terminal page is allowed; `next_offset` is `null` at the end. This avoids
+splitting UTF-8 characters. Concatenate text pages and UTF-8 encode to reproduce
+the digest and `ref.bytes`. Each returned slice has at most 8192 characters,
+even when JSON-escaped serialization takes more bytes.
+
+Malformed arguments, cross-role/unmanifested selections, duplicate or invalid
+manifest entries, missing/stale-digest records, corrupt/noncanonical records or
+unsafe store paths fail closed on retrieval. Corrupt receipts fail shared page
+selection closed; retrieval does not consult receipts. No automatic repair occurs.
+Page generation may idempotently project current source records and can leave a
+committed prefix on failure; it never writes receipts. A failed page returns no
+usable page/manifest and exact replay is safe after the failure is addressed.
+`read_page` itself writes nothing; repeated pages without receipts replay the
+same selection while sources/policy remain unchanged. No cancellation or
+background job is introduced; I/O failures propagate to the host caller.
+
+The measured baseline remains experiment
+`83aee77506a2ccd56eb73538673e15ba7873236239cfee7f6f88b37c99acd13c`,
+command evidence `104c57b71b924d9b8cc4ba7bbf91586c`: 100 short rows produced a
+41,284-byte full prompt, and full projector plus safe shared reads were slower
+than legacy. This shadow adapter claims boundedness and parity, **not** speed or
+storage savings. Further storage/index complexity and a policy budget default
+still require the integrated pilot evidence.

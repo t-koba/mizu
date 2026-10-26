@@ -53,10 +53,10 @@ from .smoke_refs import record_lock, validate_refs, require_pairs
 from . import insight_archive, wait_events
 from .work_item_waits import WAIT_KINDS, normalize_wait
 from .errors import Denied, LimitExceeded
-from .shared_records import KindPolicy, RECORD_BYTES, SharedRecords
+from .shared_records import Delivery, KindPolicy, RECORD_BYTES, SharedRecords
 from .work_item_seed import (make_seed, validate_scope, validate_seed, validate_tasks,
                              task_id, task_seeds)
-from .fs import PREVIEW_BYTES, canonical, digest, identifier, lock, now, read_json, safe_read, write_json, mkdir, DIGEST
+from .fs import MAX_FRAME, PREVIEW_BYTES, canonical, digest, identifier, lock, now, read_json, safe_read, write_json, mkdir, DIGEST
 
 MAX_DECISION_EVENT_BYTES = 1024 * 1024
 #: Bound for one per-token decision receipt file (1 KiB). Receipts are small
@@ -1603,37 +1603,121 @@ replacement insight without implying rejected substance.
         if type(limit) is not int or not 1 <= limit <= 512:
             raise Denied("Decision projection limit must be an integer in [1, 512]")
         with record_lock(self.root):
-            history = self.root / "decision-history"
-            if not insight_archive._directory(history):
-                return {}
-            pending = {}
-            current_sources = set()
-            for path in history.glob("*.json"):
-                try:
-                    selected = self._current_decision_event(path, _DECISION_ACTIONS, strict=True)
-                except (ValueError, TypeError, KeyError, AttributeError, OverflowError) as exc:
-                    raise Denied("Malformed decision projection source") from exc
-                if selected is None:
-                    continue
-                _, payload = selected
-                source_key = (payload["insight"], payload["rev"])
-                if source_key in current_sources:
-                    raise Denied("Conflicting current decision projection source identity")
-                current_sources.add(source_key)
-                subject = {key: payload[key] for key in ("event", "insight", "rev")}
-                _validate_decision_projection(subject, payload)
-                record_id = f"insight.decision/{payload['event']}"
-                envelope = {"schema": 1, "id": record_id, "kind": "insight.decision",
-                            "created_at": payload["decided_at"], "writer": "host.insights",
-                            "subject": subject, "payload": payload}
-                if len(canonical(envelope)) > INSIGHT_DECISION_POLICY.maximum:
-                    raise LimitExceeded("Decision projection envelope exceeds byte bound")
-                pending[record_id] = envelope
-                if len(pending) > limit:
-                    raise LimitExceeded("Decision projection exceeds record count bound")
+            return self._project_decision_records_locked(limit=limit)
+
+    def _project_decision_records_locked(self, *, limit: int) -> dict[str, str]:
+        """Caller holds record_lock through source selection and all writes."""
+        history = self.root / "decision-history"
+        if not insight_archive._directory(history):
+            return {}
+        pending = {}
+        current_sources = set()
+        for path in history.glob("*.json"):
+            try:
+                selected = self._current_decision_event(path, _DECISION_ACTIONS, strict=True)
+            except (ValueError, TypeError, KeyError, AttributeError, OverflowError) as exc:
+                raise Denied("Malformed decision projection source") from exc
+            if selected is None:
+                continue
+            _, payload = selected
+            source_key = (payload["insight"], payload["rev"])
+            if source_key in current_sources:
+                raise Denied("Conflicting current decision projection source identity")
+            current_sources.add(source_key)
+            subject = {key: payload[key] for key in ("event", "insight", "rev")}
+            _validate_decision_projection(subject, payload)
+            record_id = f"insight.decision/{payload['event']}"
+            envelope = {"schema": 1, "id": record_id, "kind": "insight.decision",
+                        "created_at": payload["decided_at"], "writer": "host.insights",
+                        "subject": subject, "payload": payload}
+            if len(canonical(envelope)) > INSIGHT_DECISION_POLICY.maximum:
+                raise LimitExceeded("Decision projection envelope exceeds byte bound")
+            pending[record_id] = envelope
+            if len(pending) > limit:
+                raise LimitExceeded("Decision projection exceeds record count bound")
+        store = SharedRecords(self.root, {"insight.decision": INSIGHT_DECISION_POLICY})
+        return {record_id: store.put(pending[record_id], writer="host.insights")
+                for record_id in sorted(pending)}
+
+    def shared_decision_page(self, role_name: str, actions, *, max_bytes: int,
+                             limit: int = 10, sources: str = "own") -> tuple[dict, tuple[Delivery, ...]]:
+        """Host-only shadow page and exact current-unit manifest; no receipts written.
+
+        The explicit byte budget covers canonical(page), including all metadata,
+        tokens and references. Source projection is bounded to 512 current rows;
+        overflow refuses before writing. Retain the returned manifest only for
+        this role/unit, never accept it from model input. Legacy delivery remains
+        the runtime authority. See docs/shared-records.md for the page schema.
+        """
+        identifier(role_name)
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise Denied("Decision event limit must be an integer in [1, 100]")
+        if type(max_bytes) is not int or not 1 <= max_bytes <= MAX_FRAME:
+            raise Denied("Decision page max_bytes must be an integer in [1, MAX_FRAME]")
+        if sources not in ("own", "any"):
+            raise Denied("Decision event sources must be own or any")
+        if not isinstance(actions, (list, tuple, set, frozenset)) or any(
+                not isinstance(action, str) or action not in _DECISION_ACTIONS for action in actions):
+            raise Denied("Invalid shared decision actions")
+        wanted = set(actions)
+        if not wanted:
+            empty = {"events": [], "pending_count": 0, "truncated": False,
+                     "count_truncated": False, "byte_truncated": False}
+            if len(canonical(empty)) > max_bytes:
+                raise LimitExceeded("Decision page metadata exceeds byte bound")
+            return empty, ()
+        with record_lock(self.root):
+            projected = self._project_decision_records_locked(limit=512)
             store = SharedRecords(self.root, {"insight.decision": INSIGHT_DECISION_POLICY})
-            return {record_id: store.put(pending[record_id], writer="host.insights")
-                    for record_id in sorted(pending)}
+            eligible = []
+            for record_id, computed in projected.items():
+                envelope, _ = store.get(record_id, expected_digest=computed)
+                payload = envelope["payload"]
+                if (payload["action"] not in wanted
+                        or (sources == "own" and payload["source"] != role_name)):
+                    continue
+                if not store.received(role_name, record_id, computed):
+                    stamp = dt.datetime.fromisoformat(envelope["created_at"]).astimezone(dt.timezone.utc)
+                    eligible.append((stamp, record_id, computed, envelope))
+            eligible.sort(key=lambda row: (row[0], row[1]))
+            pending_count = len(eligible)
+
+            def page(events):
+                return {"events": events, "pending_count": pending_count,
+                        "truncated": len(events) < pending_count,
+                        "count_truncated": pending_count > limit,
+                        "byte_truncated": len(events) < min(pending_count, limit)}
+
+            events = []
+            record_ids = []
+            if len(canonical(page(events))) > max_bytes:
+                raise LimitExceeded("Decision page metadata exceeds byte bound")
+            for _, record_id, computed, envelope in eligible[:limit]:
+                # Reserve the exact fixed-width token space before freezing only
+                # the rows actually selected. Canonical size is value-independent
+                # for lowercase hex tokens; replace after the final selection.
+                row = dict(envelope["payload"], ack_token="0" * 64)
+                if len(canonical(page(events + [row]))) > max_bytes:
+                    payload = envelope["payload"]
+                    row = {key: payload[key] for key in ("event", "insight", "rev", "action")}
+                    row.update(preview=payload["title"][:80], ack_token="0" * 64,
+                               ref={"record_id": record_id, "record_digest": computed,
+                                    "bytes": len(canonical(envelope))})
+                    if len(canonical(page(events + [row]))) > max_bytes:
+                        if not events:
+                            raise LimitExceeded("Decision page reference exceeds byte bound")
+                        break
+                events.append(row)
+                record_ids.append(record_id)
+            manifest = store.freeze(role_name, record_ids)
+            for row, entry in zip(events, manifest):
+                if entry.record_digest != projected[entry.record_id]:
+                    raise Denied("Decision page record changed during freeze")
+                row["ack_token"] = entry.ack_token
+            result = page(events)
+            if len(canonical(result)) > max_bytes:
+                raise LimitExceeded("Decision page exceeds byte bound")
+            return result, manifest
 
     def _scan_decision_delivery(self, role_name: str, actions, *, limit: int,
                                 sources: str) -> tuple[list, list]:
