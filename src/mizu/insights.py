@@ -252,6 +252,27 @@ def _archive_summary(item: dict) -> dict:
     return record
 
 
+def _wait_registration_id(stored: dict, fallback_owner: str = "") -> str:
+    """Stable identity for one stored structured wait (never raises).
+
+    New registrations carry a unique ``registration_id`` (uuid hex, no
+    colon). Legacy files without the field read through a stable
+    ``legacy:<owner>:<registered_at>`` fallback that cannot collide with
+    any new id (the colon never appears in a new id) and is never written
+    back. ``fallback_owner`` covers a stored record missing its owner.
+    """
+    rid = stored.get("registration_id") if isinstance(stored, dict) else None
+    if isinstance(rid, str) and rid and ":" not in rid and len(rid) <= 64:
+        return rid
+    owner = stored.get("owner") if isinstance(stored, dict) else None
+    if not isinstance(owner, str) or not owner:
+        owner = fallback_owner if isinstance(fallback_owner, str) else ""
+    registered_at = stored.get("registered_at") if isinstance(stored, dict) else ""
+    if not isinstance(registered_at, str):
+        registered_at = ""
+    return f"legacy:{owner}:{registered_at}"
+
+
 #: Evidence-entry bounds (fixed mechanism, not knobs): at most this many
 #: append-only entries per insight, each at most this many chars of text.
 #: Entries carry small text plus receipt references; bulk belongs in the
@@ -1001,7 +1022,8 @@ replacement insight without implying rejected substance.
                 write_json(self.root / "decisions" / f"{insight_id}.json", record)
                 if registered is not None:
                     registered = {**registered, "owner": insight_id, "rev": rev,
-                                  "decision": record, "registered_at": now(), "run": run}
+                                  "decision": record, "registered_at": now(), "run": run,
+                                  "registration_id": uuid.uuid4().hex}
                     mkdir(self.root / "waits")
                     write_json(self.root / "waits" / f"{insight_id}.json", registered)
         return record
@@ -1053,8 +1075,9 @@ replacement insight without implying rejected substance.
         """Collect registered waits due for one role (one-shot, dispatch-lazy).
 
         Schema: returns oldest-registered-first payloads with insight, rev,
-        title, body, kind, reason, revisit, and registered_at (plus ``at``
-        for deadlines, ``target`` for insight_decided), at most ``limit``.
+        title, body, kind, reason, revisit, registered_at and
+        registration_id (plus ``at`` for deadlines, ``target`` for
+        insight_decided), at most ``limit``.
         Bounds: ``limit`` in [1, 100]. Trust: recorded decisions, inbox,
         and snapshots only; routing is ``insight.source == role_name``.
         Retry: read-only except best-effort pruning of waits unbound by
@@ -1069,31 +1092,36 @@ replacement insight without implying rejected substance.
         directory = self.root / "waits"
         if not directory.is_dir() or directory.is_symlink():
             return []
-        candidates = []
-        for path in sorted(directory.glob("*.json")):
-            if path.is_symlink():
-                continue
-            try:
-                stored = read_json(path, {})
-            except (OSError, ValueError, TypeError, AttributeError):
-                continue
-            if not isinstance(stored, dict) or stored.get("kind") not in WAIT_KINDS:
-                continue
-            try:
-                current = self.read(stored.get("owner", ""))
-            except (Denied, OSError, ValueError, TypeError, AttributeError):
-                continue
-            if not self._wait_bound(stored, current):
-                with contextlib.suppress(OSError):
-                    path.unlink()
-                continue
-            if current.get("source") != role_name or not self._wait_due(stored, snapshot):
-                continue
-            candidates.append((stored.get("registered_at", ""), stored, current))
-            if len(candidates) >= limit:
-                break
+
+        def _eligible():
+            for path in directory.glob("*.json"):
+                if path.is_symlink():
+                    continue
+                try:
+                    stored = read_json(path, {})
+                except (OSError, ValueError, TypeError, AttributeError):
+                    continue
+                if not isinstance(stored, dict) or stored.get("kind") not in WAIT_KINDS:
+                    continue
+                try:
+                    current = self.read(stored.get("owner", ""))
+                except (Denied, OSError, ValueError, TypeError, AttributeError):
+                    continue
+                if not self._wait_bound(stored, current):
+                    with contextlib.suppress(OSError):
+                        path.unlink()
+                    continue
+                if current.get("source") != role_name or not self._wait_due(stored, snapshot):
+                    continue
+                registered_at = stored.get("registered_at", "")
+                if not isinstance(registered_at, str):
+                    registered_at = ""
+                rid = _wait_registration_id(stored, path.stem)
+                yield ((registered_at, rid), stored, current)
+
+        selected = heapq.nsmallest(limit, _eligible(), key=lambda item: item[0])
         due = []
-        for _, stored, current in sorted(candidates, key=lambda item: item[0]):
+        for _, stored, current in selected:
             defer = stored.get("decision", {})
             if not isinstance(defer, dict):
                 defer = {}
@@ -1101,7 +1129,8 @@ replacement insight without implying rejected substance.
                        "title": current.get("title", ""), "body": current.get("body", ""),
                        "kind": stored.get("kind"), "reason": defer.get("reason", ""),
                        "revisit": defer.get("revisit", ""),
-                       "registered_at": stored.get("registered_at", "")}
+                       "registered_at": stored.get("registered_at", ""),
+                       "registration_id": _wait_registration_id(stored, current.get("id", ""))}
             if stored.get("kind") == "deadline":
                 payload["at"] = stored.get("at")
             if stored.get("kind") == "insight_decided":
@@ -1146,11 +1175,12 @@ replacement insight without implying rejected substance.
         """List bound-but-unsatisfied dependency waits addressed to one role.
 
         Schema: oldest-registered-first payloads with insight, rev, title,
-        body, recipient, requires, reason, revisit, and registered_at (at
-        most ``limit``). These make an explicit recipient's obligation
-        visible when the recipient runs for other reasons; they never
-        admit a run on their own, so no new wake source or scheduler is
-        implied: scheduling the fulfiller stays operator configuration.
+        body, recipient, requires, reason, revisit, registered_at and
+        registration_id (at most ``limit``). These make an explicit
+        recipient's obligation visible when the recipient runs for other
+        reasons; they never admit a run on their own, so no new wake
+        source or scheduler is implied: scheduling the fulfiller stays
+        operator configuration.
         Bounds: ``limit`` in [1, 100]. Trust: recorded decisions and inbox
         only. Retry: read-only except best-effort pruning of unbound
         waits, mirroring ``due_waits`` so restart recovery keeps the same
@@ -1164,44 +1194,52 @@ replacement insight without implying rejected substance.
         directory = self.root / "waits"
         if not directory.is_dir() or directory.is_symlink():
             return []
-        candidates = []
-        for path in sorted(directory.glob("*.json")):
-            if path.is_symlink():
-                continue
-            try:
-                stored = read_json(path, {})
-            except (OSError, ValueError, TypeError, AttributeError):
-                continue
-            if not isinstance(stored, dict) or stored.get("kind") != "dependency":
-                continue
-            if stored.get("recipient") != role_name:
-                continue
-            try:
-                current = self.read(stored.get("owner", ""))
-            except (Denied, OSError, ValueError, TypeError, AttributeError):
-                continue
-            if not self._wait_bound(stored, current):
-                with contextlib.suppress(OSError):
-                    path.unlink()
-                continue
-            if not isinstance(stored.get("requires"), dict):
-                continue
-            if self._wait_due(stored, None):
-                # Satisfied obligations belong to the requester's
-                # completion wake, not the recipient's pending list.
-                continue
+
+        def _eligible():
+            for path in directory.glob("*.json"):
+                if path.is_symlink():
+                    continue
+                try:
+                    stored = read_json(path, {})
+                except (OSError, ValueError, TypeError, AttributeError):
+                    continue
+                if not isinstance(stored, dict) or stored.get("kind") != "dependency":
+                    continue
+                if stored.get("recipient") != role_name:
+                    continue
+                try:
+                    current = self.read(stored.get("owner", ""))
+                except (Denied, OSError, ValueError, TypeError, AttributeError):
+                    continue
+                if not self._wait_bound(stored, current):
+                    with contextlib.suppress(OSError):
+                        path.unlink()
+                    continue
+                if not isinstance(stored.get("requires"), dict):
+                    continue
+                if self._wait_due(stored, None):
+                    # Satisfied obligations belong to the requester's
+                    # completion wake, not the recipient's pending list.
+                    continue
+                registered_at = stored.get("registered_at", "")
+                if not isinstance(registered_at, str):
+                    registered_at = ""
+                rid = _wait_registration_id(stored, path.stem)
+                yield ((registered_at, rid), stored, current)
+
+        selected = heapq.nsmallest(limit, _eligible(), key=lambda item: item[0])
+        rows = []
+        for _, stored, current in selected:
             defer = stored.get("decision", {})
             if not isinstance(defer, dict):
                 defer = {}
-            candidates.append((stored.get("registered_at", ""),
-                               {"insight": current["id"], "rev": _rev_of(current),
-                                "title": current.get("title", ""), "body": current.get("body", ""),
-                                "recipient": role_name, "requires": stored.get("requires"),
-                                "reason": defer.get("reason", ""), "revisit": defer.get("revisit", ""),
-                                "registered_at": stored.get("registered_at", "")}))
-            if len(candidates) >= limit:
-                break
-        return [payload for _, payload in sorted(candidates, key=lambda item: item[0])]
+            rows.append({"insight": current["id"], "rev": _rev_of(current),
+                         "title": current.get("title", ""), "body": current.get("body", ""),
+                         "recipient": role_name, "requires": stored.get("requires"),
+                         "reason": defer.get("reason", ""), "revisit": defer.get("revisit", ""),
+                         "registered_at": stored.get("registered_at", ""),
+                         "registration_id": _wait_registration_id(stored, current.get("id", ""))})
+        return rows
 
     def _wait_due(self, stored: dict, snapshot: dict) -> bool:
         """True when a bound wait's observable condition is met (never raises)."""

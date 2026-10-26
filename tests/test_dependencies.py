@@ -203,3 +203,86 @@ class DependencyDispatchTests(Fixture):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DependencyRegistrationIdTests(Fixture):
+    def test_obligations_carry_unique_registration_id(self):
+        from mizu.fs import read_json
+        result = _submit(self.project, "worker", "Result")
+        first = _defer(self.project, "reviewer", _wait(target=result["id"]), title="First")
+        second = _defer(self.project, "reviewer", _wait(target=result["id"]), title="Second")
+        stored_first = read_json(self.project.root / "waits" / f"{first['id']}.json")
+        stored_second = read_json(self.project.root / "waits" / f"{second['id']}.json")
+        for stored in (stored_first, stored_second):
+            rid = stored.get("registration_id")
+            self.assertIsInstance(rid, str)
+            self.assertTrue(rid)
+            self.assertNotIn(":", rid)
+        self.assertNotEqual(stored_first["registration_id"], stored_second["registration_id"])
+        obligations = {row["insight"]: row for row in
+                       self.project.insights.pending_obligations("worker")}
+        self.assertEqual(obligations[first["id"]]["registration_id"],
+                         stored_first["registration_id"])
+        self.assertEqual(obligations[second["id"]]["registration_id"],
+                         stored_second["registration_id"])
+
+    def test_legacy_obligation_reads_via_stable_fallback(self):
+        from mizu.fs import read_json, write_json
+        result = _submit(self.project, "worker", "Result")
+        item = _defer(self.project, "reviewer", _wait(target=result["id"]))
+        path = self.project.root / "waits" / f"{item['id']}.json"
+        stored = read_json(path)
+        stored.pop("registration_id", None)
+        write_json(path, stored)
+        first = self.project.insights.pending_obligations("worker")
+        self.assertEqual(len(first), 1)
+        fallback = first[0]["registration_id"]
+        self.assertTrue(fallback.startswith("legacy:"))
+        self.assertIn(item["id"], fallback)
+        self.assertNotIn("registration_id", read_json(path))
+        second = self.project.insights.pending_obligations("worker")
+        self.assertEqual(second[0]["registration_id"], fallback)
+        other = _defer(self.project, "reviewer", _wait(target=result["id"]), title="Other")
+        other_stored = read_json(self.project.root / "waits" / f"{other['id']}.json")
+        self.assertNotIn(":", other_stored["registration_id"])
+        self.assertNotEqual(other_stored["registration_id"], fallback)
+
+    def test_obligation_limit_returns_globally_earliest_not_path_order(self):
+        from mizu.fs import read_json, write_json
+        result = _submit(self.project, "worker", "Result")
+        [_defer(self.project, "reviewer", _wait(target=result["id"]), title=f"Need{i}")
+         for i in range(3)]
+        paths = sorted((self.project.root / "waits").glob("*.json"))
+        self.assertEqual(len(paths), 3)
+        stamps = "2026-01-01T00:00:00+00:00"
+        rids = ["00000000000000000000000000000003",
+                "00000000000000000000000000000002",
+                "00000000000000000000000000000001"]
+        for path, rid in zip(paths, rids):
+            stored = read_json(path)
+            stored["registered_at"] = stamps
+            stored["registration_id"] = rid
+            write_json(path, stored)
+        by_path = {path.stem: rid for path, rid in zip(paths, rids)}
+        smallest = min(by_path, key=lambda k: by_path[k])
+        first = self.project.insights.pending_obligations("worker", limit=1)
+        self.assertEqual([row["insight"] for row in first], [smallest])
+        self.assertEqual(first[0]["registration_id"], by_path[smallest])
+        two = self.project.insights.pending_obligations("worker", limit=2)
+        self.assertEqual([row["insight"] for row in two],
+                         sorted(by_path, key=lambda k: by_path[k])[:2])
+
+    def test_dependency_reregistration_gets_new_identity(self):
+        from mizu.fs import read_json
+        result = _submit(self.project, "worker", "Result")
+        item = _defer(self.project, "reviewer", _wait(target=result["id"]))
+        first = read_json(self.project.root / "waits" / f"{item['id']}.json")["registration_id"]
+        self.project.insights.revise(item["id"], source="reviewer", title="Need",
+                                     body="changed terms", expected_rev=1,
+                                     base_snapshot=self.project.snapshots.get()["id"])
+        self.project.insights.decide(item["id"], "defer", "parked again", "wait again", "test",
+                                     wait=_wait(target=result["id"]), expected_rev=2)
+        second = read_json(self.project.root / "waits" / f"{item['id']}.json")["registration_id"]
+        self.assertTrue(first)
+        self.assertTrue(second)
+        self.assertNotEqual(first, second)

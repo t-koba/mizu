@@ -197,3 +197,87 @@ class WaitDispatchTests(Fixture):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WaitRegistrationIdTests(Fixture):
+    def test_new_waits_carry_unique_registration_id(self):
+        from mizu.fs import read_json
+        first = _defer(self.project, "reviewer", {"kind": "deadline", "at": _past()}, title="First")
+        second = _defer(self.project, "reviewer", {"kind": "deadline", "at": _past()}, title="Second")
+        stored_first = read_json(self.project.root / "waits" / f"{first['id']}.json")
+        stored_second = read_json(self.project.root / "waits" / f"{second['id']}.json")
+        for stored in (stored_first, stored_second):
+            rid = stored.get("registration_id")
+            self.assertIsInstance(rid, str)
+            self.assertTrue(rid)
+            self.assertNotIn(":", rid)
+        self.assertNotEqual(stored_first["registration_id"], stored_second["registration_id"])
+        due = {row["insight"]: row for row in
+               self.project.insights.due_waits("reviewer", self.project.snapshots.get())}
+        self.assertEqual(due[first["id"]]["registration_id"], stored_first["registration_id"])
+        self.assertEqual(due[second["id"]]["registration_id"], stored_second["registration_id"])
+
+    def test_legacy_wait_without_id_reads_via_stable_fallback(self):
+        from mizu.fs import read_json, write_json
+        item = _defer(self.project, "reviewer", {"kind": "deadline", "at": _past()})
+        path = self.project.root / "waits" / f"{item['id']}.json"
+        stored = read_json(path)
+        stored.pop("registration_id", None)
+        write_json(path, stored)
+        first = self.project.insights.due_waits("reviewer", self.project.snapshots.get())
+        self.assertEqual(len(first), 1)
+        fallback = first[0]["registration_id"]
+        self.assertIsInstance(fallback, str)
+        self.assertTrue(fallback.startswith("legacy:"))
+        self.assertIn(item["id"], fallback)
+        # Read-only fallback: the legacy file is not rewritten on list.
+        self.assertNotIn("registration_id", read_json(path))
+        second = self.project.insights.due_waits("reviewer", self.project.snapshots.get())
+        self.assertEqual(second[0]["registration_id"], fallback)
+        # A new registration can never collide with the legacy fallback.
+        other = _defer(self.project, "reviewer", {"kind": "deadline", "at": _past()}, title="Other")
+        other_stored = read_json(self.project.root / "waits" / f"{other['id']}.json")
+        self.assertNotEqual(other_stored["registration_id"], fallback)
+        self.assertNotIn(":", other_stored["registration_id"])
+
+    def test_limit_returns_globally_earliest_not_path_order(self):
+        from mizu.fs import read_json, write_json
+        items = [_defer(self.project, "reviewer", {"kind": "deadline", "at": _past()},
+                        title=f"Item{i}") for i in range(3)]
+        paths = sorted((self.project.root / "waits").glob("*.json"))
+        self.assertEqual(len(paths), 3)
+        # Same instant for all: only the identity breaks the tie. Give the
+        # smallest path the largest identity so path order disagrees.
+        stamps = "2026-01-01T00:00:00+00:00"
+        rids = ["00000000000000000000000000000003",
+                "00000000000000000000000000000002",
+                "00000000000000000000000000000001"]
+        for path, rid in zip(paths, rids):
+            stored = read_json(path)
+            stored["registered_at"] = stamps
+            stored["registration_id"] = rid
+            write_json(path, stored)
+        by_path = {path.stem: rid for path, rid in zip(paths, rids)}
+        smallest = min(by_path, key=lambda k: by_path[k])
+        snap = self.project.snapshots.get()
+        first = self.project.insights.due_waits("reviewer", snap, limit=1)
+        self.assertEqual([row["insight"] for row in first], [smallest])
+        self.assertEqual(first[0]["registration_id"], by_path[smallest])
+        two = self.project.insights.due_waits("reviewer", snap, limit=2)
+        self.assertEqual([row["insight"] for row in two],
+                         sorted(by_path, key=lambda k: by_path[k])[:2])
+        self.assertEqual([row["registration_id"] for row in two],
+                         sorted(by_path.values())[:2])
+
+    def test_reregistration_gets_new_identity(self):
+        from mizu.fs import read_json
+        item = _defer(self.project, "reviewer", {"kind": "deadline", "at": _past()})
+        first = read_json(self.project.root / "waits" / f"{item['id']}.json")["registration_id"]
+        self.project.insights.revise(item["id"], source="reviewer", title="F", body="v2",
+                                     base_snapshot=None)
+        self.project.insights.decide(item["id"], "defer", "parked again", "wait again", "test",
+                                     wait={"kind": "deadline", "at": _past()}, expected_rev=2)
+        second = read_json(self.project.root / "waits" / f"{item['id']}.json")["registration_id"]
+        self.assertTrue(first)
+        self.assertTrue(second)
+        self.assertNotEqual(first, second)
