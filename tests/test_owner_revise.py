@@ -2,6 +2,7 @@
 import dataclasses
 import json
 import unittest
+from unittest.mock import patch
 
 from support import Fixture
 from mizu.errors import Denied, ConfigError
@@ -15,6 +16,20 @@ def with_caps(config, name, extra):
 
 
 class OwnerReviseTransportTests(Fixture):
+    def test_context_handlers_forward_to_insight_tools(self):
+        ctx = self.context("searcher")
+        args = {"title": "Claim", "body": "v1"}
+        for handler, operation_name in (
+                ("_op_insights", "insights"), ("_op_decide", "decide"),
+                ("_op_submit_insight", "submit_insight"),
+                ("_op_revise_insight", "revise_insight"),
+                ("_op_withdraw_insight", "withdraw_insight"),
+                ("_op_attach_evidence", "attach_evidence")):
+            expected = {"forwarded": handler}
+            with patch(f"mizu.insight_tools.{operation_name}", return_value=expected) as operation:
+                self.assertIs(getattr(ctx, handler)(args), expected)
+            operation.assert_called_once_with(ctx, args)
+
     def test_owner_revise_own_insight_reopens_topic(self):
         ctx = self.context("searcher")
         item = ctx.handle("submit_insight", {"title": "Claim", "body": "v1"})

@@ -73,9 +73,9 @@ from . import web_operations
 from . import sandbox_operations
 from . import role_state_ops
 from .role_state_ops import _reject_constant  # preserve the established runtime seam
-from . import insight_operations
+from . import insight_tools
 from . import work_item_operations
-from .insight_operations import INSIGHT_RETRIEVAL_LIMIT  # preserve the established runtime seam
+from .insight_tools import INSIGHT_RETRIEVAL_LIMIT  # preserve the established runtime seam
 from .web_worker import bounded
 from .vcs_poll_policy import (MAX_CI_BRANCHES, POLL_CALL_TIMEOUT_CAP,
                               POLL_FETCH_TIMEOUT_CAP, _vcs_poll_number,
@@ -1153,22 +1153,22 @@ class Context:
         return decision_delivery.read(self, args)
 
     def _op_insights(self, args: dict) -> dict:
-        return insight_operations.insights(self, args)
+        return insight_tools.insights(self, args)
 
     def _op_decide(self, args: dict) -> dict:
-        return insight_operations.decide(self, args)
+        return insight_tools.decide(self, args)
 
     def _op_submit_insight(self, args: dict) -> dict:
-        return insight_operations.submit_insight(self, args)
+        return insight_tools.submit_insight(self, args)
 
     def _op_revise_insight(self, args: dict) -> dict:
-        return insight_operations.revise_insight(self, args)
+        return insight_tools.revise_insight(self, args)
 
     def _op_withdraw_insight(self, args: dict) -> dict:
-        return insight_operations.withdraw_insight(self, args)
+        return insight_tools.withdraw_insight(self, args)
 
     def _op_attach_evidence(self, args: dict) -> dict:
-        return insight_operations.attach_evidence(self, args)
+        return insight_tools.attach_evidence(self, args)
 
     def _op_sync(self, args: dict) -> dict:
         # Host-side refresh only: fetch upstream refs via the trusted adapter

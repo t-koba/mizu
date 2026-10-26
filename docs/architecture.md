@@ -46,6 +46,7 @@ inputs. The trusted host adapter never executes model-provided host commands.
 | `sandbox.py`, `process.py` | Bounded execution, termination, cleanup | Experiment usefulness |
 | `snapshot.py` | Content objects, immutable manifests, published pointer | Semantic correctness |
 | `insights.py` | Submission identity, revisable proposals, decision history/legacy receipts, source-current shared-decision projection and page construction, initial work-item seeds | Acceptance or rejection |
+| `insight_tools.py` | Context-bound insight tool adaptation: paged reads, role/run/snapshot provenance, grant checks, and evidence-attachment audit records | Insight persistence/decision semantics or dispatch/schema policy |
 | `shared_records.py` | Bounded canonical records, exact role/record/digest receipts and manifest-scoped paged reads | Source eligibility, route policy, lifecycle, or cutover |
 | `decision_delivery.py` | One durable-marker-selected `insight.decision` runtime route for prompt, wake, selection, retrieval and acknowledgement | Host activation or other event-family routing |
 | `decision_reconciliation.py` | Host-only exact legacy-receipt preflight/apply and one-way activation after per-role pending-set parity; publishes the authority marker last | Model-granted activation or task lifecycle |
