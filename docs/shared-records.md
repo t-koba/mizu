@@ -1,6 +1,6 @@
 # Shared record delivery: inventory and migration design
 
-**Status:** design plus persistence-only foundation. `src/mizu/shared_records.py` implements bounded schema-1 immutable records, explicit per-role receipts and backup membership, with focused tests. No source kind is enabled or routed through it; current delivery paths remain authoritative until a separately verified, reconciled cutover.
+**Status:** design plus persistence-only foundation and a host-only decision-source projection. `src/mizu/shared_records.py` implements bounded schema-1 immutable records, explicit per-role receipts and backup membership, with focused tests. `Insights.project_decision_records()` can reconcile current decision events into shadow records. No source kind is enabled for delivery or routed through it; current delivery paths remain authoritative until a separately verified, reconciled cutover.
 
 ## Scope and invariants
 
@@ -82,6 +82,49 @@ Experiment `3a2e941a2322b6589655ab68b194cc07b4ee2c365d760fd89beb4bc04fcfc742` us
 | 100 | 92.128 / 118.436 ms | 39,092 | 126.757 / 143.673 ms | 38,856 |
 
 These maxima are not meaningful p95 estimates with `n=5`. The mixed timings do not demonstrate a speedup: order effects/noise remain, and integrated shared-store validation is omitted. These are local full-prompt construction measurements, not model latency or a causal scan-dominance result. A production slice must measure matched workloads with source validation, current eligibility and aggregate prompt limits in place.
+
+## Persistence-only decision-source adapter
+
+`Insights.project_decision_records(limit=512)` is an explicit host-only migration/
+shadow call, not a runtime hook or model tool. It returns a deterministic mapping
+of exact record IDs to recomputed canonical envelope SHA-256 digests, without
+payloads. The project-local store scopes `insight.decision/<event UUID>` IDs;
+there is no global namespace or caller-selected writer. The trusted closed
+`INSIGHT_DECISION_POLICY` authorizes only `host.insights`, keeps the legacy
+source-prompt payload cap at 1 MiB, and permits the canonical envelope up to
+the generic 1 MiB + 4 KiB framing cap. The adapter constructs
+`kind: insight.decision`,
+`created_at: <source decided_at>`, and exact `{event, insight, rev}` subjects.
+The closed payload is the current legacy prompt payload's `event`, `insight`,
+`rev`, `title`, `body`, `action`, `reason`, `revisit`, `decided_at`, `source` and
+`evidence`, **without** its role-specific `ack_token`. Evidence JSON is preserved,
+not interpreted as delivery authority. Payload `source` is the insight's original
+submitting channel, not the authenticated host writer or opaque `origin` label.
+
+Projection and legacy delivery share source-current selection: immutable history
+must match the current insight revision and exact effective decision. Revised,
+withdrawn and superseded events are not projected. The adapter holds the existing
+insight record lock across selection and immutable writes so revise/decide cannot
+interleave. It projects all current actions and sources independently of any
+legacy receipt, corrupt receipt diagnostic, cursor, role or subscription. Existing
+projected history remains immutable when its source later becomes ineligible;
+the returned mapping describes only the **current** set, not all retained records.
+
+This is a bounded full reconciliation, not a delivery page: `limit` is an integer
+in 1..512 (default 512); eligible-count overflow fails before writing rather than
+returning an incomplete reconciliation. It scans history with per-source reads
+bounded at 1 MiB. Malformed/unsafe source or store data and conflicting identities
+fail closed, with no repair/deletion. A failure during writes may leave a committed
+prefix: retry the same call after addressing the failure; exact replay does not
+rewrite records. A changed payload under an already projected event ID (including
+later evidence on a deferral) is a conflict, never an implicit record update.
+
+**Active delivery is unchanged:** `decision_events()` and
+`acknowledge_decisions()` remain the only active decision delivery/receipt path.
+This adapter creates no generic receipts and has no routing configuration, prompt,
+finish, wake or admission integration. Its output alone proves neither pending-set
+parity nor a cutover. Receipt translation, source/receipt/config quiescence and the
+single-authority activation marker below remain future work.
 
 ## Staged migration
 

@@ -4,7 +4,8 @@ Schema 1 has exactly schema/id/kind/created_at/writer/subject/payload. Names
 are at most 256 ASCII characters: lowercase alphanumeric/underscore/hyphen
 components separated by '.', '/' or ':' (at least two components). Event times
 are aware ISO timestamps, at most 64 characters; subject/payload are JSON
-objects. Canonical envelopes are at most 1 MiB, or a smaller kind bound.
+objects. Canonical envelopes are at most 1 MiB plus 4 KiB of framing, or a
+smaller kind bound.
 Roles use fs.identifier (1-63 characters). Receipt files are at most 2 KiB;
 manifest/selection batches are at most 512 entries. Receipt schema is exactly
 role/record_id/record_digest/acknowledged_at, with an aware acknowledgement time.
@@ -36,7 +37,7 @@ from .errors import Denied, LimitExceeded
 from .fs import (DIGEST, MAX_JSON_DEPTH, atomic_write, canonical,
                  digest, identifier, loads_finite, now, safe_read, sync_dir)
 
-RECORD_BYTES = 1024 * 1024
+RECORD_BYTES = 1024 * 1024 + 4096
 RECEIPT_BYTES = 2048
 MANIFEST_ROWS = 512
 _NAME = re.compile(r"[a-z0-9][a-z0-9_-]*(?:[./:][a-z0-9][a-z0-9_-]*)+\Z")

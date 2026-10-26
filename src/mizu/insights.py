@@ -53,6 +53,7 @@ from .smoke_refs import record_lock, validate_refs, require_pairs
 from . import insight_archive, wait_events
 from .work_item_waits import WAIT_KINDS, normalize_wait
 from .errors import Denied, LimitExceeded
+from .shared_records import KindPolicy, RECORD_BYTES, SharedRecords
 from .work_item_seed import (make_seed, validate_scope, validate_seed, validate_tasks,
                              task_id, task_seeds)
 from .fs import PREVIEW_BYTES, canonical, digest, identifier, lock, now, read_json, safe_read, write_json, mkdir, DIGEST
@@ -67,6 +68,47 @@ DECISION_RECEIPT_DIAGNOSTIC_LIMIT = 10
 #: Reason codes for per-token receipt content invalidity. Only these bounded
 #: codes ever leave the receipt check; receipt bytes are never surfaced.
 DECISION_RECEIPT_REASONS = frozenset({"malformed_json", "invalid_receipt", "invalid_timestamp"})
+
+
+_DECISION_PAYLOAD_FIELDS = frozenset({
+    "event", "insight", "rev", "title", "body", "action", "reason", "revisit",
+    "decided_at", "source", "evidence",
+})
+_DECISION_ACTIONS = frozenset({"accept", "modify", "defer", "reject"})
+
+
+def _validate_decision_projection(subject: dict, payload: dict) -> None:
+    """Closed persistence schema; source evidence remains exact JSON, not authority."""
+    if (set(subject) != {"event", "insight", "rev"}
+            or set(payload) != _DECISION_PAYLOAD_FIELDS
+            or subject != {key: payload[key] for key in subject}
+            or not isinstance(payload["event"], str)
+            or not re.fullmatch(r"[0-9a-f]{32}", payload["event"])
+            or type(payload["rev"]) is not int or payload["rev"] < 1
+            or type(subject["rev"]) is not int
+            or not isinstance(payload["action"], str)
+            or payload["action"] not in _DECISION_ACTIONS
+            or any(not isinstance(payload[key], str) for key in
+                   ("title", "body", "reason", "revisit", "decided_at"))
+            or not payload["reason"].strip()
+            or (payload["action"] == "defer" and not payload["revisit"].strip())
+            or type(payload["evidence"]) is not list
+            or any(type(entry) is not dict for entry in payload["evidence"])):
+        raise Denied("Invalid insight decision projection")
+    identifier(payload["insight"])
+    identifier(payload["source"])
+    try:
+        stamp = dt.datetime.fromisoformat(payload["decided_at"])
+        if len(payload["decided_at"]) > 64 or stamp.utcoffset() is None:
+            raise ValueError
+    except (ValueError, TypeError, OverflowError) as exc:
+        raise Denied("Invalid insight decision projection timestamp") from exc
+
+
+INSIGHT_DECISION_POLICY = KindPolicy(
+    writers=frozenset({"host.insights"}), validate=_validate_decision_projection,
+    maximum=RECORD_BYTES,
+)
 
 
 class CorruptDecisionReceipt(Exception):
@@ -1469,6 +1511,130 @@ replacement insight without implying rejected substance.
         events, _ = self._scan_decision_delivery(role_name, actions, limit=limit, sources=sources)
         return events
 
+    def _current_decision_event(self, path: Path, wanted, *, role_name=None,
+                                sources="any", strict=False):
+        """Source-current selection shared by legacy delivery and host projection.
+
+        Legacy delivery isolates malformed source rows; projection instead
+        propagates failures and additionally refuses malformed source bindings.
+        Neither selection consults receipts.
+        """
+        identifier(path.stem)
+        record = json.loads(safe_read(self.root, f"decision-history/{path.name}",
+                                      MAX_DECISION_EVENT_BYTES))
+        if strict:
+            if (type(record) is not dict or record.get("action") not in _DECISION_ACTIONS | {"withdraw"}
+                    or type(record.get("rev")) is not int or record["rev"] < 1
+                    or not isinstance(record.get("reason"), str) or not record["reason"].strip()
+                    or not isinstance(record.get("revisit"), str)):
+                raise Denied("Malformed decision projection source")
+            identifier(record.get("id"))
+            if "decision_key" in record:
+                key = _decision_key(record["id"], record["rev"])
+                if (record["decision_key"] != key
+                        or (record["action"] in {"accept", "modify", "reject"}
+                            and path.stem != key)):
+                    raise Denied("Conflicting decision projection source key")
+        if not isinstance(record, dict) or record.get("action") not in wanted:
+            return None
+        created = dt.datetime.fromisoformat(record["created_at"])
+        if created.tzinfo is None:
+            if strict:
+                raise Denied("Malformed decision projection source timestamp")
+            return None
+        if strict:
+            # Do not let the legacy normalizer coerce malformed live revisions
+            # or evidence into a seemingly valid immutable projection.
+            name = f"inbox/{record['id']}.json"
+            try:
+                (self.root / name).lstat()
+            except FileNotFoundError:
+                current = self.read(record["id"])
+            else:
+                current = json.loads(safe_read(self.root, name, MAX_DECISION_EVENT_BYTES))
+            if (type(current) is not dict or current.get("id") != record["id"]
+                    or type(current.get("rev", 1)) is not int or current.get("rev", 1) < 1
+                    or type(current.get("evidence", [])) is not list):
+                raise Denied("Malformed current insight projection source")
+        else:
+            current = self.read(record.get("id", ""))
+        if sources == "own" and current.get("source") != role_name:
+            return None
+        rev = _rev_of(current)
+        if type(record.get("rev")) is not int or record["rev"] != rev:
+            return None
+        raw = self.root / "decisions" / f"{current['id']}.json"
+        decision = json.loads(safe_read(
+            self.root, raw.relative_to(self.root).as_posix(), MAX_DECISION_EVENT_BYTES))
+        if strict and (type(decision) is not dict or decision.get("id") != current["id"]
+                       or type(decision.get("rev")) is not int or decision["rev"] < 1
+                       or decision.get("action") not in _DECISION_ACTIONS | {"withdraw"}):
+            raise Denied("Malformed current decision projection source")
+        effective = _effective_decision(rev, decision)
+        if effective != record:
+            if (strict and effective is not None and "decision_key" in record
+                    and effective.get("decision_key") == record["decision_key"]
+                    and record["action"] in {"accept", "modify", "reject"}
+                    and effective.get("action") in {"accept", "modify", "reject"}):
+                raise Denied("Conflicting current decision projection source")
+            return None
+        payload = {"event": path.stem, "insight": current["id"], "rev": rev,
+                   "title": current.get("title", ""), "body": current.get("body", ""),
+                   "action": record["action"], "reason": record.get("reason", ""),
+                   "revisit": record.get("revisit", ""),
+                   "decided_at": record["created_at"], "source": current.get("source", ""),
+                   "evidence": current.get("evidence", [])}
+        if len(canonical(payload)) > MAX_DECISION_EVENT_BYTES:
+            if strict:
+                raise LimitExceeded("Decision projection payload exceeds byte bound")
+            return None
+        return created, payload
+
+    def project_decision_records(self, *, limit: int = 512) -> dict[str, str]:
+        """Reconcile current decisions into project-local immutable shadow records.
+
+        Host-only, persistence-only: no routes, receipts, admission or delivery.
+        Return exact record ID -> canonical envelope digest, never payloads.
+        Scan history under the source record lock; at most ``limit`` eligible
+        records (1..512) are written. Count overflow fails before any writes.
+        Failure may commit a prefix; exact retry is safe.
+        Retained stale/withdrawn projections are never deleted or rewritten.
+        """
+        if type(limit) is not int or not 1 <= limit <= 512:
+            raise Denied("Decision projection limit must be an integer in [1, 512]")
+        with record_lock(self.root):
+            history = self.root / "decision-history"
+            if not insight_archive._directory(history):
+                return {}
+            pending = {}
+            current_sources = set()
+            for path in history.glob("*.json"):
+                try:
+                    selected = self._current_decision_event(path, _DECISION_ACTIONS, strict=True)
+                except (ValueError, TypeError, KeyError, AttributeError, OverflowError) as exc:
+                    raise Denied("Malformed decision projection source") from exc
+                if selected is None:
+                    continue
+                _, payload = selected
+                source_key = (payload["insight"], payload["rev"])
+                if source_key in current_sources:
+                    raise Denied("Conflicting current decision projection source identity")
+                current_sources.add(source_key)
+                subject = {key: payload[key] for key in ("event", "insight", "rev")}
+                _validate_decision_projection(subject, payload)
+                record_id = f"insight.decision/{payload['event']}"
+                envelope = {"schema": 1, "id": record_id, "kind": "insight.decision",
+                            "created_at": payload["decided_at"], "writer": "host.insights",
+                            "subject": subject, "payload": payload}
+                if len(canonical(envelope)) > INSIGHT_DECISION_POLICY.maximum:
+                    raise LimitExceeded("Decision projection envelope exceeds byte bound")
+                pending[record_id] = envelope
+                if len(pending) > limit:
+                    raise LimitExceeded("Decision projection exceeds record count bound")
+            store = SharedRecords(self.root, {"insight.decision": INSIGHT_DECISION_POLICY})
+            return {record_id: store.put(pending[record_id], writer="host.insights")
+                    for record_id in sorted(pending)}
+
     def _scan_decision_delivery(self, role_name: str, actions, *, limit: int,
                                 sources: str) -> tuple[list, list]:
         """One bounded scan returning (deliverable events, receipt diagnostics).
@@ -1491,33 +1657,11 @@ replacement insight without implying rejected substance.
         def eligible():
             for path in history.glob("*.json"):
                 try:
-                    identifier(path.stem)
-                    record = json.loads(safe_read(self.root, f"decision-history/{path.name}",
-                                                   MAX_DECISION_EVENT_BYTES))
-                    if not isinstance(record, dict) or record.get("action") not in wanted:
+                    selected = self._current_decision_event(
+                        path, wanted, role_name=role_name, sources=sources)
+                    if selected is None:
                         continue
-                    created = dt.datetime.fromisoformat(record["created_at"])
-                    if created.tzinfo is None:
-                        continue
-                    current = self.read(record.get("id", ""))
-                    if sources == "own" and current.get("source") != role_name:
-                        continue
-                    rev = _rev_of(current)
-                    if type(record.get("rev")) is not int or record["rev"] != rev:
-                        continue
-                    raw = self.root / "decisions" / f"{current['id']}.json"
-                    effective = _effective_decision(rev, json.loads(safe_read(
-                        self.root, raw.relative_to(self.root).as_posix(), MAX_DECISION_EVENT_BYTES)))
-                    if effective != record:
-                        continue
-                    payload = {"event": path.stem, "insight": current["id"], "rev": rev,
-                               "title": current.get("title", ""), "body": current.get("body", ""),
-                               "action": record["action"], "reason": record.get("reason", ""),
-                               "revisit": record.get("revisit", ""),
-                               "decided_at": record["created_at"], "source": current.get("source", ""),
-                               "evidence": current.get("evidence", [])}
-                    if len(canonical(payload)) > MAX_DECISION_EVENT_BYTES:
-                        continue
+                    created, payload = selected
                     payload["ack_token"] = self._decision_token(role_name, payload)
                 except (Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError, AttributeError):
                     continue

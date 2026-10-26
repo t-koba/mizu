@@ -271,6 +271,15 @@ class SharedRecordsTests(unittest.TestCase):
         with self.assertRaises(Denied):
             self.store.get(record["id"])
 
+    def test_one_mib_payload_fits_record_envelope_framing(self):
+        record = envelope()
+        record["payload"]["text"] = "x" * (1024 * 1024)
+        raw = canonical(record)
+        self.assertGreater(len(raw), 1024 * 1024)
+        self.assertLessEqual(len(raw), RECORD_BYTES)
+        computed = self.store.put(record, writer="host.test")
+        self.assertEqual(self.store.get(record["id"]), (record, computed))
+
     def test_exact_byte_boundary(self):
         record = envelope()
         record["payload"]["text"] = ""
