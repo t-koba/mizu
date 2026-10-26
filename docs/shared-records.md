@@ -212,6 +212,7 @@ Current behavior can be checked in these functions (the shared persistence core 
 
 - [`SharedRecords`](../src/mizu/shared_records.py): bounded canonical record envelopes, exact role/record/digest receipts and manifest-scoped paged reads; it does not own source eligibility, routing, wake, backfill or cutover. [`Insights.shared_decision_page`](../src/mizu/insights.py) is a host-only shadow adapter, not an active source route.
 - [`Insights.decision_events`, `acknowledge_decisions`, `due_waits`, `consume_waits`, `pending_obligations`](../src/mizu/insights.py): current decision/revision eligibility, exact receipts and consumable waits.
+- [`selection.work_inputs`](../src/mizu/selection.py) also reads routed legacy decisions as model-selection evidence; a decision cutover must switch this reader with runtime prompt/wake/ack paths so stale legacy receipts cannot create a second active view.
 - [`work_item_events.pending`, `acknowledge`](../src/mizu/work_item_events.py): terminal projections and source-validated old receipts; [`ci_waits.pending`, `_pending`, `acknowledge`](../src/mizu/ci_waits.py): current holder/revision checks and blocked `updated_at` order.
 - [`check_jobs.pending`, `result`, `logs`, `acknowledge`, `_withdraw_locked`, `_make_room`](../src/mizu/check_jobs.py): prompt role, read versus acknowledgement authority, withdrawn demand and eviction.
 - [`runtime.prompt_for`, `ci_failures_projection`, `wake_ci_failures`, `_ci_due_for`](../src/mizu/runtime.py): prompt construction and explicit CI wake selection/due policy.
