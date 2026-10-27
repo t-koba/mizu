@@ -75,6 +75,7 @@ from . import role_state_ops
 from .role_state_ops import _reject_constant  # preserve the established runtime seam
 from . import insight_tools
 from . import work_item_operations
+from . import work_order_ops
 from .insight_tools import INSIGHT_RETRIEVAL_LIMIT  # preserve the established runtime seam
 from .web_worker import bounded
 from .vcs_poll_policy import (MAX_CI_BRANCHES, POLL_CALL_TIMEOUT_CAP,
@@ -252,7 +253,8 @@ def is_deferred(exc: BaseException, context=None) -> bool:
 CONSULT_FORBIDDEN = frozenset({"exec", "experiment", "verify", "decide",
                                "submit_insight", "revise_insight", "withdraw_insight", "withdraw_decided", "attach_evidence", "consult", "report", "sync",
                                "vcs_publish", "vcs_retire", "vcs_dispose", "vcs_request",
-                               "research", "materialize", "work_items_create", "work_items_transition", "work_items_reconcile"})
+                               "research", "materialize", "work_items_create", "work_items_transition", "work_items_reconcile",
+                               "work_order"})
 
 
 #: Capabilities a delegation child must never hold. The child works in the
@@ -265,7 +267,8 @@ CONSULT_FORBIDDEN = frozenset({"exec", "experiment", "verify", "decide",
 DELEGATE_FORBIDDEN = frozenset({"decide", "submit_insight", "revise_insight",
                                 "withdraw_insight", "withdraw_decided", "attach_evidence", "delegate",
                                 "vcs_publish", "vcs_retire", "vcs_dispose", "vcs_request",
-                                "work_items_create", "work_items_transition", "work_items_reconcile"})
+                                "work_items_create", "work_items_transition", "work_items_reconcile",
+                                "work_order"})
 
 
 def check_delegate_role(role_name: str, role) -> None:
@@ -415,6 +418,8 @@ class Context:
         self.decision_events: list = []
         self.decision_receipt_diagnostics: list = []
         self.work_item_events: list = []
+        self._work_order_generation = False
+        self._work_order_inputs = None
         self.wait_events: list = []
         self.obligations: list = []
         self.closed = False
@@ -1149,6 +1154,9 @@ class Context:
     def _op_work_items_transition(self, args: dict) -> dict:
         return work_item_operations.transition(self, args)
 
+    def _op_work_order(self, args: dict) -> dict:
+        return work_order_ops.record(self, args)
+
     def _op_decision_read(self, args: dict) -> dict:
         return decision_delivery.read(self, args)
 
@@ -1830,6 +1838,7 @@ class Context:
         "work_items_reconcile": _op_work_items_reconcile,
         "work_items_create": _op_work_items_create,
         "work_items_transition": _op_work_items_transition,
+        "work_order": _op_work_order,
         "decide": _op_decide, "submit_insight": _op_submit_insight,
         "revise_insight": _op_revise_insight, "withdraw_insight": _op_withdraw_insight,
         "attach_evidence": _op_attach_evidence,

@@ -28,7 +28,7 @@ inputs. The trusted host adapter never executes model-provided host commands.
 | `config.py` | Strict typed TOML, grants, limits, profile resolution | Project priorities |
 | `drivers.py` | Engine routing by profile, shared logical admission | Model/provider selection |
 | `runtime.py` | Admission, locks, capability dispatch, publication | Which algorithm is best |
-| `unit_prompts.py` | Full unit prompt, resumed-session delta, and bounded display projections for ready work, decisions, research, and CI | Session selection/rotation/recovery, admission, scheduling, or lifecycle policy |
+| `unit_prompts.py` | Full unit prompt, resumed-session delta, and bounded display projections for ready work, decisions, research, CI, and the writer work order | Session selection/rotation/recovery, admission, scheduling, or lifecycle policy |
 | `workspace_reads.py` | Role-scoped workspace file listing, paged reads, and snapshot diff projections, including virtual upstream refs | Role grants, workspace write policy, or publication semantics |
 | `evidence_records.py` | Exact role-bound retained-evidence reads and durable per-invocation/mutation evidence records | Adapter retries, reconciliation, or evidence truth |
 | `run_health.py` | Role-health failure/streak bookkeeping and capture-cause persistence; runtime re-exports its helpers | Terminal outcome classification, recovery/rotation, or successful-run lifecycle decisions |
@@ -51,6 +51,7 @@ inputs. The trusted host adapter never executes model-provided host commands.
 | `decision_delivery.py` | One durable-marker-selected `insight.decision` runtime route for prompt, wake, selection, retrieval and acknowledgement | Host activation or other event-family routing |
 | `decision_reconciliation.py` | Host-only exact legacy-receipt preflight/apply and one-way activation after per-role pending-set parity; publishes the authority marker last | Model-granted activation or task lifecycle |
 | `work_items.py` | Append-audited records, CAS lifecycle, bounded open pages and by-ID history | Work-item scheduling and policy |
+| `work_order.py` | Writer's bounded ordered plan with append-audited CAS and review-gated display only | Item status/scope/evidence, scheduling, admission, or priority |
 | `web.py` | Allowed retrieval, policy-bounded protocol observation, and external source receipts | Scientific truth |
 | `materialize.py` | Generic offline-input adapter (spec in, digest-bound content out) plus retained-receipt apply validation (spec/result output equality, digest, path safety) | Ecosystem resolution, cache policy |
 | `editor.py` | Snapshot export and read/propose MCP | Code editing |
@@ -289,7 +290,7 @@ The history index retains published IDs up to the configured limit (default
 is always retained; older storage follows reference-aware retention below. Prompts carry a bounded, capability-gated projection: up to
 `limits.prompt_snapshots` recent anchored summaries with exact IDs and code
 digests, plus only the actionable context the role is granted to use.
-`pending_insights` is offered only to roles with `insights`/`decide`, newest
+`work_order` freshness (`absent`/`current`/`review_due`/`unavailable`) is offered only to roles with `work_order`, sharing the unit-frozen generation across full and delta; `pending_insights` is offered only to roles with `insights`/`decide`, newest
 kept up to `limits.pending_insights`;
 `acceptance_commands` only to roles with `verify`. Exact snapshot references
 (`id`, `code_digest`, `state`, `verification`) are always pinned, never

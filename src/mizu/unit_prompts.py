@@ -21,7 +21,6 @@ import time
 from typing import TYPE_CHECKING
 
 from . import acceptance, check_jobs
-from .ci_observation import ci_failures_projection
 from .fs import canonical, read_json
 from .protocol import tool_definitions
 from .report import previous as _previous_report
@@ -116,7 +115,19 @@ def _open_backlog(context: Context, caps: set) -> dict:
     already-offered entries still states the open backlog instead of reading
     as empty. Bounds: ids follow ``[limits] pending_insights`` (newest kept)
     with explicit ``truncated``. Trust: local recorded state only.
+    Reuses the unit-frozen capture when present so the prompt and the
+    work-order generation share one reading.
     """
+    try:
+        cached = getattr(context, "_work_order_inputs", None)
+        if isinstance(cached, dict) and cached.get("_captured") is True:
+            backlog = cached.get("open_backlog")
+            if isinstance(backlog, dict):
+                return {"ids": list(backlog.get("ids", [])),
+                        "total": backlog.get("total", 0),
+                        "truncated": bool(backlog.get("truncated", False))}
+    except Exception:
+        pass
     stated: dict = {"ids": [], "total": 0, "truncated": False}
     if "insights" not in caps and "decide" not in caps:
         return stated
@@ -159,13 +170,10 @@ def _ready_work_age(updated_at, current_time):
         return None
 
 
-def _ready_work_projection(context):
-    """Independent bounded ready page, never inferred from the general page."""
-    page = context.project.work_items.page_ready(
-        limit=context.config.limits.work_items_prompt, role_name=context.role.name)
-    # Capture the same locked scan that supplies the full/delta input, never
-    # the finish-time inventory: concurrent new work must remain unconsumed.
-    context.ready_work_signature = page["signature"]
+def _ready_work_projection(page, *, context=None):
+    """Display one captured ready page and retain its signature for the unit."""
+    if context is not None:
+        context.ready_work_signature = page["signature"]
     current_time = time.time()
     return {"items": [{**{key: row[key] for key in
                         ("id", "title", "status", "stale", "redecision", "updated_at")},
@@ -175,6 +183,40 @@ def _ready_work_projection(context):
                       for row in page["items"]],
             **{key: page[key] for key in ("total", "overflow_count", "truncated",
                                          "unseeded_decisions", "coverage_complete")}}
+
+
+def _work_order_projection(context) -> dict | None:
+    """Writer's explicit order freshness for this unit opening (never raises).
+
+    Uses the unit-frozen semantic generation so full and delta share one
+    review; arrivals after opening stay unreviewed until the next unit.
+    ``absent`` means no plan, ``current`` means the stored generation
+    equals the opening one, ``review_due`` means inputs moved, and
+    ``unavailable`` means corrupt/unsafe state or an uncomputable opening
+    (fail closed, never empty/current). Only roles holding ``work_order``
+    see the field; others omit it. A valid plan only changes this display,
+    never ready-work, admission or selection.
+    """
+    try:
+        if "work_order" not in set(getattr(context.role, "capabilities", ())):
+            return None
+    except Exception:
+        return {"status": "unavailable"}
+    try:
+        from . import work_order as _plan
+        projected = _plan.projection_for(context)
+    except Exception:
+        return {"status": "unavailable"}
+    if projected is None:
+        return None
+    try:
+        import json as _json
+        from .fs import canonical as _canonical
+        if len(_canonical(projected)) > 1024 * 1024:
+            return {"status": "unavailable"}
+    except Exception:
+        return {"status": "unavailable"}
+    return projected
 
 
 def _prompt_tool_surface(context: Context) -> dict:
@@ -249,17 +291,16 @@ def prompt_for(context: Context) -> str:
     # `recent_snapshots` follows `[limits] prompt_snapshots`. Exact snapshot
     # references are always pinned. Publication/commit and `should_run`
     # transitions below are the fixed single-writer contract, not policy.
-    pending = context.project.insights.list(limit=context.config.limits.pending_insights) \
-        if ("insights" in caps or "decide" in caps) else []
-    open_work_items = context.project.work_items.page_open(
-        limit=context.config.limits.work_items_prompt)
+    from . import work_order as _plan
+    opening = _plan._capture_opening(context)
+    pending = opening["pending_insights"]
+    open_work_items = opening["open_work_items"]
     acceptance = list(context.project.verify) if "verify" in caps else []
     ci_branch = context.config.vcs.get("ci_branch") or None
     if "vcs_read" not in caps:
         ci_branch = None
-    ci_failures = ci_failures_may_be_truncated = None
-    if "vcs_read" in caps:
-        ci_failures, ci_failures_may_be_truncated = ci_failures_projection(context.project)
+    ci_failures = opening["ci_failures"]
+    ci_failures_may_be_truncated = opening["ci_truncated"]
     return json.dumps({"unit": UNIT_BEGINS_STATEMENT,
                        "unit_tool_surface": _prompt_tool_surface(context),
                        "goal_digest": context.goal_digest,
@@ -269,19 +310,17 @@ def prompt_for(context: Context) -> str:
                                                 context.snapshot["id"], context.config.limits.prompt_snapshots)],
                        "workspace": "/workspace", "workspace_mode": context.role.workspace,
                        "pending_insights": pending,
-                       "open_insights": _open_backlog(context, caps),
+                       "open_insights": opening["open_backlog"],
                        "open_work_items": open_work_items,
-                       "decision_events": list(getattr(context, "decision_events", []) or []),
-                       **({"decision_page": {key: value for key, value in context.decision_page.items()
-                                             if key != "events"}}
-                          if getattr(context, "decision_page", None) is not None else {}),
-                       "decision_receipt_diagnostics": list(
-                           getattr(context, "decision_receipt_diagnostics", []) or []),
-                       **({"work_item_events": list(context.work_item_events)}
-                          if getattr(context, "work_item_events", None) else {}),
+                       "decision_events": opening["decision_events"],
+                       **({"decision_page": opening["decision_page"]}
+                          if opening["decision_page"] is not None else {}),
+                       "decision_receipt_diagnostics": opening["diagnostics"],
+                       **({"work_item_events": opening["work_item_events"]}
+                          if opening["work_item_events"] else {}),
                        "decision_task": _decision_task(context),
-                       "wait_events": list(getattr(context, "wait_events", []) or []),
-                       "obligations": list(getattr(context, "obligations", []) or []),
+                       "wait_events": opening["wait_events"],
+                       "obligations": opening["obligations"],
                        **check_jobs.prompt_projection(context),
                        "acceptance_commands": acceptance,
                        "research_state": _prompt_research_state(context),
@@ -291,7 +330,8 @@ def prompt_for(context: Context) -> str:
                        "ci_failures_may_be_truncated": ci_failures_may_be_truncated,
                        "previous_report": (_previous_report(context.project)
                                           if "report" in caps else None),
-                       "ready_work": _ready_work_projection(context),
+                       "ready_work": opening["ready_work"],
+                       "work_order": _work_order_projection(context),
                        "run": _prompt_run_identity(context),
                        **_prompt_clock(context)},
                       ensure_ascii=False)
@@ -333,33 +373,31 @@ def prompt_delta_for(context: Context, pending: list) -> str:
     synthesizing an empty inventory.
     """
     caps = set(context.role.capabilities)
+    from . import work_order as _plan
+    opening = _plan._capture_opening(context, pending_override=pending)
     acceptance = list(context.project.verify) if "verify" in caps else []
-    ci_failures = ci_failures_may_be_truncated = None
-    if "vcs_read" in caps:
-        ci_failures, ci_failures_may_be_truncated = ci_failures_projection(context.project)
-    open_backlog = _open_backlog(context, caps)
-    open_work_items = context.project.work_items.page_open(
-        limit=context.config.limits.work_items_prompt)
+    ci_failures = opening["ci_failures"]
+    ci_failures_may_be_truncated = opening["ci_truncated"]
+    open_backlog = opening["open_backlog"]
+    open_work_items = opening["open_work_items"]
     return json.dumps({"unit": UNIT_BEGINS_STATEMENT,
                        "unit_tool_surface": _prompt_tool_surface(context),
                        "goal_digest": context.goal_digest,
                        "published_snapshot": _published_snapshot(context),
                        "snapshot_delta": {"id": context.snapshot["id"],
                                           "code_digest": context.snapshot["code_digest"]},
-                       "pending_insights": pending,
+                       "pending_insights": opening["pending_insights"],
                        "open_insights": open_backlog,
                        "open_work_items": open_work_items,
-                       "decision_events": list(getattr(context, "decision_events", []) or []),
-                       **({"decision_page": {key: value for key, value in context.decision_page.items()
-                                             if key != "events"}}
-                          if getattr(context, "decision_page", None) is not None else {}),
-                       "decision_receipt_diagnostics": list(
-                           getattr(context, "decision_receipt_diagnostics", []) or []),
-                       **({"work_item_events": list(context.work_item_events)}
-                          if getattr(context, "work_item_events", None) else {}),
+                       "decision_events": opening["decision_events"],
+                       **({"decision_page": opening["decision_page"]}
+                          if opening["decision_page"] is not None else {}),
+                       "decision_receipt_diagnostics": opening["diagnostics"],
+                       **({"work_item_events": opening["work_item_events"]}
+                          if opening["work_item_events"] else {}),
                        "decision_task": _decision_task(context),
-                       "wait_events": list(getattr(context, "wait_events", []) or []),
-                       "obligations": list(getattr(context, "obligations", []) or []),
+                       "wait_events": opening["wait_events"],
+                       "obligations": opening["obligations"],
                        "research_state": _prompt_research_state(context),
                        "capture_limit": _prompt_capture_limit(context),
                        "workspace": "/workspace", "workspace_mode": context.role.workspace,
@@ -371,7 +409,8 @@ def prompt_delta_for(context: Context, pending: list) -> str:
                        "ci_failures_may_be_truncated": ci_failures_may_be_truncated,
                        "previous_report": (_previous_report(context.project)
                                           if "report" in caps else None),
-                       "ready_work": _ready_work_projection(context),
+                       "ready_work": opening["ready_work"],
+                       "work_order": _work_order_projection(context),
                        "run": _prompt_run_identity(context),
                        **_prompt_clock(context)},
                       ensure_ascii=False)

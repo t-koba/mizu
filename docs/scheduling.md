@@ -49,7 +49,7 @@ then supplies readiness, subject to the producer veto. Prepared intents never
 supply readiness; see [the registry](#internal-writer-continuation-registry).
 Otherwise it checks changed goal digest and operator wake-generation, then an
 independent ready-set change read.
-Ready work for a named role requires the `work_items_transition` capability.
+Ready work for a named role requires the `work_items_transition` capability. The writer work order (`work_order`) never admits a run: `review_due` is display only.
 It means an unheld `open` item the role can claim, or a `doing` item held by
 that role, with no structured wait. Satisfied blocked waits below are ready
 for their holder, or claimable by any transition-capable role when unheld.

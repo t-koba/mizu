@@ -262,7 +262,7 @@ workspace = "write"
 # Optional per-role sequential shell for direct exec only; requires the existing "exec" grant. Default false.
 # persistent_exec = true
 # Grant "check_job" to run acceptance checks asynchronously, so a long check does not block the unit (docs/check-jobs.md).
-capabilities = ["files", "read", "diff", "exec", "experiment", "verify", "fetch", "search", "insights", "decide", "consult", "work_items_read", "work_items_create", "work_items_transition", "work_items_legacy_read", "work_items_reconcile", "finish"]
+capabilities = ["files", "read", "diff", "exec", "experiment", "verify", "fetch", "search", "insights", "decide", "consult", "work_items_read", "work_items_create", "work_items_transition", "work_items_legacy_read", "work_items_reconcile", "work_order", "finish"]
 daemon = true
 # Per-role per-run spend override (optional, same range as [limits]; unset keeps the project value).
 # requests_per_run = 24

@@ -1549,6 +1549,17 @@ class WorkItems:
         with lock(self.root / "locks" / "insights.lock"):
             return self._page_open_impl(cursor=cursor, limit=limit, readonly=False)
 
+    def page_open_for_order(self, *, limit=25) -> tuple[dict, str]:
+        """Return the normal open page and an order-only full-inventory fingerprint.
+
+        The same locked scan folds bounded accepted scopes and origin decisions
+        into constant-size, order-independent evidence. No page or ready-set
+        signature is changed, and no bodies or history are retained.
+        """
+        with lock(self.root / "locks" / "insights.lock"):
+            return self._page_open_impl(cursor=None, limit=limit, readonly=False,
+                                        order_fingerprint=True)
+
     def page_ready(self, *, limit=25, role_name=None) -> dict:
         """Return actionable open/doing items and blocked items whose wait is due.
 
@@ -1685,7 +1696,7 @@ class WorkItems:
         return sort_key, row
 
     def _page_open_impl(self, *, cursor, limit, readonly: bool, ready_only: bool = False,
-                        role_name: str | None = None) -> dict:
+                        role_name: str | None = None, order_fingerprint: bool = False):
         """Collect the bounded open page with an explicit recovery mode.
 
         Callers hold insights.lock when ``readonly`` is False; the read-only
@@ -1703,6 +1714,7 @@ class WorkItems:
         eligible = 0
         unseeded_decisions = 0
         ready_sum = 0
+        order_sum = 0
         for event_id, event in events:
             kind, seed = self._seed_for_event(event_id, event, readonly=readonly)
             if kind == "skip":
@@ -1715,6 +1727,10 @@ class WorkItems:
             item = view["item"]
             if item["status"] not in ("open", "doing", "blocked"):
                 continue
+            if order_fingerprint:
+                leaf = canonical(["work-order-scope-v1", item["id"], item.get("scope"),
+                                  view["current_origin_rev"], view["stale"], view["redecision"]])
+                order_sum = (order_sum + int(digest(leaf), 16)) % (1 << 256)
             if ready_only:
                 if role_name is not None:
                     if item["status"] == "open":
@@ -1762,6 +1778,8 @@ class WorkItems:
                 ["ready-set-v1", total, f"{ready_sum:064x}"]))
         if len(canonical(result)) > MAX_OPEN_PAGE_BYTES:
             raise LimitExceeded("Work-item page exceeds byte bound")
+        if order_fingerprint:
+            return result, digest(canonical(["work-order-inventory-v1", total, f"{order_sum:064x}"]))
         return result
 
     def _page_closed_impl(self, *, limit, readonly: bool) -> dict:

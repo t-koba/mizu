@@ -319,6 +319,22 @@ class Project:
                 "producer_inputs": [{"source": name, "pending": counts.get(name)} for name in producers],
                 "held": held, "load_ok": limits_ok and counts_ok and open_ok}
 
+    def work_order_status(self) -> dict:
+        """Operator-readable freshness for the writer's explicit order.
+
+        Never writes or refreshes the work-order plan, or changes scheduling.
+        Fresh source projections retain their existing lock, recovery and
+        pruning behavior. ``absent`` means no plan, ``current`` means the
+        stored generation equals the present writer inputs, ``review_due``
+        means inputs moved, and ``unavailable`` means corrupt/unsafe state or
+        an uncomputable present (fail closed, never empty/current).
+        """
+        try:
+            from . import work_order as _plan
+            return _plan.status_for_project(self)
+        except Exception:
+            return {"status": "unavailable", "rev": None, "generation": None}
+
     def status(self) -> dict:
         from .admission import waiting as admission_waiting
         from .check_jobs import deferrals
@@ -374,6 +390,7 @@ class Project:
                 "health": {p.stem: read_json(p) for p in (self.root / "health").glob("*.json") if not p.is_symlink()},
                 "active": {p.stem: read_json(p) for p in (self.root / "active").glob("*.json") if not p.is_symlink()},
                 "pending_insights": self.insights.list(limit=self.config.limits.pending_insights),
+                "work_order": self.work_order_status(),
                 "budget": {"used_requests": budget["used"], "limit_requests": budget["limit"],
                            "shared_used_requests": budget["shared_used"],
                            "shared_limit_requests": budget["shared_limit"],

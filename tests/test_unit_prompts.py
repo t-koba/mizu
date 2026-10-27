@@ -66,6 +66,18 @@ class UnitPromptSeamTests(Fixture):
         self.assertEqual(second.pop("now"), second_clock["now"])
         self.assertEqual(first, second)
 
+    def test_ready_helper_uses_captured_page_without_another_scan(self):
+        import mizu.unit_prompts as unit_prompts
+        ctx = self.context("worker")
+        page = self.project.work_items.page_ready(
+            limit=ctx.config.limits.work_items_prompt, role_name=ctx.role.name)
+        with patch.object(self.project.work_items, "page_ready", side_effect=AssertionError("rescan")):
+            ready = unit_prompts._ready_work_projection(page, context=ctx)
+        self.assertEqual(ctx.ready_work_signature, page["signature"])
+        self.assertEqual(ready["total"], page["total"])
+        self.assertEqual(list(ready), ["items", "total", "overflow_count", "truncated",
+                                      "unseeded_decisions", "coverage_complete"])
+
     def test_moved_builders_still_set_the_ready_work_signature(self):
         import mizu.unit_prompts as unit_prompts
         ctx = self.context("worker")

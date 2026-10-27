@@ -19,7 +19,7 @@ CAPABILITIES = frozenset({"diff", "files", "read", "exec", "experiment", "verify
                           "report", "finish", "sync", "vcs_read", "vcs_publish",
                           "vcs_retire", "vcs_dispose", "vcs_request", "research_read", "research",
                           "materialize", "command_evidence_read", "experiment_evidence_read",
-                          "work_items_read", "work_items_create", "work_items_transition", "work_items_legacy_read", "work_items_reconcile"})
+                          "work_items_read", "work_items_create", "work_items_transition", "work_items_legacy_read", "work_items_reconcile", "work_order"})
 ENGINES = ("pi", "pi-durable", "codex", "claude")
 #: Role names that collide with insight sources owned by the host/operator
 #: channel (operator CLI, vcs CI helper, editor outbox). Model

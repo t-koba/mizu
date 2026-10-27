@@ -827,9 +827,14 @@ class PromptProjectionTests(Fixture):
         self.assertIsNotNone(page["next_cursor"])
         self.assertEqual(page["unseeded_decisions"], 1)
         self.assertFalse(page["coverage_complete"])
+        # Fail-closed is judged on a fresh unit: the frozen unit reuses
+        # its opening capture and does not reread the store.
+        fresh = self.context("consult")
+        fresh.config = small
+        fresh.role = ctx.role
         with patch.object(self.project.work_items, "page_open", side_effect=Denied("unsafe store")):
             with self.assertRaisesRegex(Denied, "unsafe store"):
-                prompt_for(ctx)
+                prompt_for(fresh)
 
     def test_prompts_open_with_the_fixed_new_unit_statement(self):
         import json
@@ -1596,7 +1601,7 @@ class PromptOrderTests(Fixture):
                           "decision_events", "decision_receipt_diagnostics", "decision_task", "wait_events", "obligations",
                           "check_jobs", "check_continuation", "shared_checks", "acceptance_commands", "research_state", "capture_limit",
                           "ci_branch", "ci_failures", "ci_failures_may_be_truncated",
-                          "previous_report", "ready_work", "run", "now", "timezone"])
+                          "previous_report", "ready_work", "work_order", "run", "now", "timezone"])
         self.assertEqual(
             list(json.loads(prompt_delta_for(ctx, [])).keys()),
             ["unit", "unit_tool_surface", "goal_digest", "published_snapshot", "snapshot_delta",
@@ -1604,4 +1609,4 @@ class PromptOrderTests(Fixture):
              "research_state", "capture_limit", "workspace", "workspace_mode",
              "check_jobs", "check_continuation", "shared_checks", "acceptance_commands", "ci_branch", "ci_failures",
              "ci_failures_may_be_truncated", "previous_report",
-             "ready_work", "run", "now", "timezone"])
+             "ready_work", "work_order", "run", "now", "timezone"])
