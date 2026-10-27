@@ -96,7 +96,7 @@ def read(project, job_id):
     job = raw_read(project, job_id)
     if job.get('shared_job') and not job.get('detached'):
         original = raw_read(project, job['shared_job'])
-        for key in ('status', 'passed', 'error', 'finished_at'):
+        for key in ('status', 'passed', 'error', 'finished_at', 'cache_input', 'shared_key'):
             if key in original:
                 job[key] = original[key]
     elif job.get('detached'):
@@ -390,7 +390,7 @@ def cache_matches(project, job, current):
 
 
 def reusable(job):
-    return (not job.get('scratch_paths') and not job.get('shared_job') and not job.get('detached')
+    return (not job.get('cache_binding_pending') and not job.get('scratch_paths') and not job.get('shared_job') and not job.get('detached')
             and (job.get('status') in ('queued', 'running')
                  or job.get('status') == 'completed' and job.get('passed')))
 
@@ -458,14 +458,15 @@ def _delivered_summary(project, job_id, owner):
     return summary(job)
 
 
-def _subscribe(context, original, *, purpose=None):
+def _subscribe(context, original, *, purpose=None, request=None, request_id=None,
+               request_fresh=None, request_bounds=None, request_reuse=None):
     receiver = getattr(context, 'spend_role', None) if getattr(context, 'delegated_child', False) else None
     owner = receiver.name if receiver is not None else context.role.name
     if receiver is not None and 'check_job' not in receiver.capabilities:
         raise Denied('Delegated checks require check_job on the receiving parent')
-    if original['run'] == context.run_dir.name and original['role'] == owner:
+    if request_id is None and original['run'] == context.run_dir.name and original['role'] == owner:
         return _delivered_summary(context.project, original['id'], owner)
-    job_id = digest(canonical({'shared_job': original['id'], 'run': context.run_dir.name, 'role': owner}))
+    job_id = request_id or digest(canonical({'shared_job': original['id'], 'run': context.run_dir.name, 'role': owner}))
     path = root(context.project) / job_id / 'job.json'
     if path.exists():
         return _delivered_summary(context.project, job_id, owner)
@@ -478,6 +479,14 @@ def _subscribe(context, original, *, purpose=None):
     job = {**original, 'id': job_id, 'shared_job': original['id'], 'role': owner,
            'producer_role': context.role.name, 'run': context.run_dir.name,
            'created_at': now(), 'acknowledged': already_delivered}
+    job.pop('cache_request', None)
+    if request is not None:
+        job['cache_request'] = request
+        # The subscription states the subscriber's own durable request
+        # identity, never the original's execution-bound fields.
+        job['fresh'] = request_fresh
+        job['environment_bounds'] = dict(request_bounds) if isinstance(request_bounds, dict) else request_bounds
+        job['inputs_bound_required'] = request_reuse
     for key in ('acceptance_scope', 'acceptance_receipt_id', 'acceptance_retention_refusal'):
         job.pop(key, None)  # Only the original execution produces proof.
     # The subscription states the subscriber's own demand. The shared job
@@ -564,12 +573,95 @@ def submit(context, script=None, *, commands=None, kind="experiment", fresh=Fals
     # Run-local identity remains the fallback when observed inputs cannot be shared.
     env_bounds = _configured_input_bounds(project)
     env = environment(project, bounds=env_bounds)
-    with cache_guard(project, blocking=False) if not custom else contextlib.nullcontext():
-        current = cache_input(project) if not custom else None
-        if not custom and project.config.sandbox.check_cache_paths and current is None:
+    request_identity = {'version': 1, 'owner': owner, 'producer': context.role.name,
+                        'run': context.run_dir.name, 'source': capture['code_digest'],
+                        'execution': execution_key(context.config), 'commands': job_commands,
+                        'kind': 'verify', 'environment': env, 'fresh': fresh,
+                        'input_bounds': env_bounds, 'reuse': project.config.sandbox.check_reuse,
+                        'cache_paths': list(project.config.sandbox.check_cache_paths)}
+    cache_request = digest(canonical(request_identity))
+
+    def request_slot():
+        # Strictly validate every retained record: an unreadable or ambiguous
+        # store must not conceal an unresolved request.
+        from . import acceptance
+        matches = []
+        for path in acceptance.job_paths(project):
+            record = acceptance.read_job(project, path.parent.name)
+            if record.get('cache_request') != cache_request:
+                continue
+            # Every decomposed request field is compared so a changed
+            # fresh, bounds, owner, source or configuration cannot coalesce
+            # with an unrelated demand. The request identity survives
+            # binding and start; only the execution binding is rebound.
+            if (record.get('role') != owner or record.get('producer_role') != context.role.name
+                    or record.get('run') != context.run_dir.name
+                    or record.get('code_digest') != capture['code_digest']
+                    or record.get('execution') != request_identity['execution']
+                    or record.get('commands') != job_commands or record.get('environment') != env
+                    or record.get('fresh') != fresh
+                    or record.get('environment_bounds') != env_bounds
+                    or record.get('inputs_bound_required') != project.config.sandbox.check_reuse):
+                raise Denied('Invalid check request identity')
+            if record.get('detached') or acceptance._present(project.root, f"check-jobs/{record['id']}/cancel.json"):
+                continue
+            if ('cache_input' not in record and 'cache_binding_pending' not in record
+                    and not record.get('shared_job')):
+                raise Denied('Existing check lacks matching cache inputs')
+            if record.get('shared_job'):
+                original = acceptance.read_job(project, record['shared_job'])
+                if original.get('shared_job'):
+                    raise Denied('Invalid check subscription')
+                # A pending or unbound original is impossible as shared
+                # execution: refuse the corrupt subscription, never reuse it.
+                if original.get('cache_binding_pending'):
+                    raise Denied('Invalid check subscription')
+                if (original.get('kind') == 'verify' and project.config.sandbox.check_cache_paths
+                        and 'cache_input' not in original):
+                    raise Denied('Invalid check subscription')
+                if acceptance._present(project.root, f"check-jobs/{original['id']}/cancel.json"):
+                    continue
+                status = original.get('status')
+            else:
+                status = record.get('status')
+            if status not in ('queued', 'running', 'completed', 'refused', 'cancelled', 'interrupted', 'cleanup_failed'):
+                raise Denied('Invalid check request status')
+            if status in ('queued', 'running'):
+                matches.append(record['id'])
+        if len(matches) > 1:
+            raise Denied('Ambiguous check request identity')
+        if matches:
+            return matches[0], True
+        for index in range(1025):
+            key = digest(canonical({'cache_request': cache_request, 'sequence': index}))
+            if not acceptance._present(project.root, f'check-jobs/{key}'):
+                return key, False
+            if (not (root(project) / key).is_dir()
+                    or not acceptance._present(project.root, f'check-jobs/{key}/job.json')):
+                raise Denied('Incomplete check request record')
+        raise Busy('Retained check evidence is full; inspect and acknowledge results')
+
+    cache_configured = not custom and bool(project.config.sandbox.check_cache_paths)
+    with contextlib.ExitStack() as stack:
+        pending_binding = False
+        if not custom:
+            try:
+                stack.enter_context(cache_guard(project, blocking=False))
+            except CacheOwned:
+                pending_binding = True
+        # Pending retries have priority even after the owner releases the lock.
+        if cache_configured:
+            with lock(project.root / 'locks/check-jobs.lock'):
+                pending_id, exists = request_slot()
+                if exists:
+                    _state_purpose(project, pending_id, purpose)
+                    _retire_superseded(project, owner, purpose, keep={pending_id}, replaced_by=pending_id)
+                    return _delivered_summary(project, pending_id, owner)
+        current = cache_input(project) if not custom and not pending_binding else None
+        if cache_configured and not pending_binding and current is None:
             raise Denied('Cannot bind configured check cache inputs; verification not queued')
         cache_binding = ({'cache_input': current}
-                         if not custom and project.config.sandbox.check_cache_paths else {})
+                         if cache_configured and not pending_binding else {})
         # A fresh request asks for a measurement of its own: it never joins an
         # existing execution. Its own result still carries the shared key, so a
         # later request with the same inputs reuses that measurement instead of
@@ -578,17 +670,26 @@ def submit(context, script=None, *, commands=None, kind="experiment", fresh=Fals
         shared_key = digest(canonical({'source': capture['code_digest'], 'execution': execution_key(context.config),
                                        'commands': job_commands, 'kind': 'verify' if not custom else kind,
                                        'environment': env, **cache_binding})) if (env is not None and not scratch_paths
-                                       and (not cache_binding or current is not None)) else None
+                                       and not pending_binding and (not cache_binding or current is not None)) else None
         identity = {'run': context.run_dir.name, 'source': capture['code_digest'],
                     'execution': execution_key(context.config), 'commands': job_commands,
                     'kind': 'verify' if not custom else kind, 'environment': env, 'fresh': fresh}
-        if not custom and project.config.sandbox.check_cache_paths:
-            identity['cache_input'] = current
         if scratch_paths:
             identity['scratch_paths'] = list(scratch_paths)
         job_id = digest(canonical(identity))
         directory = root(project) / job_id
         with lock(project.root / 'locks/check-jobs.lock'):
+            if cache_configured:
+                pending_id, exists = request_slot()
+                if exists:
+                    _state_purpose(project, pending_id, purpose)
+                    _retire_superseded(project, owner, purpose, keep={pending_id}, replaced_by=pending_id)
+                    return _delivered_summary(project, pending_id, owner)
+                # Every configured-cache submission has its own durable
+                # request identity. Cache-specific execution and sharing
+                # identity is bound separately below, under cache ownership.
+                job_id = pending_id
+                directory = root(project) / job_id
             if (directory / 'job.json').exists():
                 if not cache_matches(project, read(project, job_id), current):
                     raise Denied('Existing check lacks matching cache inputs')
@@ -599,11 +700,20 @@ def submit(context, script=None, *, commands=None, kind="experiment", fresh=Fals
                 return _delivered_summary(project, job_id, owner)
             if shared_key is not None and not fresh:
                 for path in sorted(root(project).glob('*/job.json')):
-                    other = read_json(path, {})
+                    if cache_configured:
+                        from .acceptance import read_job
+                        other = read_job(project, path.parent.name)
+                    else:
+                        other = read_json(path, {})
                     if (other.get('shared_key') == shared_key and reusable(other)
                             and cache_matches(project, other, current)
                             and not (path.parent / 'cancel.json').exists()):
-                        job = _subscribe(context, other, purpose=purpose)
+                        job = _subscribe(context, other, purpose=purpose,
+                                         request=cache_request if cache_configured else None,
+                                         request_id=job_id if cache_configured else None,
+                                         request_fresh=fresh if cache_configured else None,
+                                         request_bounds=env_bounds if cache_configured else None,
+                                         request_reuse=project.config.sandbox.check_reuse if cache_configured else None)
                         # The shared job is the surviving work, so it is never
                         # the one this request replaces.
                         _retire_superseded(project, owner, purpose,
@@ -631,7 +741,17 @@ def submit(context, script=None, *, commands=None, kind="experiment", fresh=Fals
                        'commands': job_commands, 'status': 'queued', 'created_at': now(),
                        'acknowledged': False, 'environment': env, 'shared_key': shared_key,
                        'inputs_bound_required': context.config.sandbox.check_reuse}
-                if env is not None:
+                if cache_configured:
+                    job['cache_request'] = cache_request
+                    # Durable request mode and bounds survive binding and
+                    # start; they are validated and compared on every lookup,
+                    # even when the environment itself is unbound (None).
+                    job['fresh'] = fresh
+                    job['environment_bounds'] = dict(env_bounds)
+                if pending_binding:
+                    job.pop('shared_key', None)
+                    job['cache_binding_pending'] = 1
+                if env is not None and not cache_configured:
                     job['environment_bounds'] = env_bounds
                 if cache_binding:
                     job.update(cache_binding)
@@ -1072,8 +1192,14 @@ def _execute(project, job, stop, sandbox_factory, slot):
     # the actual fingerprint. A legitimate change since enqueue therefore
     # runs instead of refusing. Fail closed when the execution input cannot
     # be bounded or when the record predates cache binding.
+    if job.get('cache_binding_pending') and not (job['kind'] == 'verify' and project.config.sandbox.check_cache_paths):
+        job.update(status='refused', error='Execution configuration, dependency or cache inputs changed', finished_at=now())
+        save_execution(project, job)
+        shutil.rmtree(directory / 'input', ignore_errors=True)
+        os.utime(root(project), None)
+        return summary(job)
     if job['kind'] == 'verify' and project.config.sandbox.check_cache_paths:
-        if 'cache_input' not in job:
+        if 'cache_input' not in job and job.get('cache_binding_pending') != 1:
             job.update(status='refused', error='Execution configuration, dependency or cache inputs changed', finished_at=now())
             save_execution(project, job)
             shutil.rmtree(directory / 'input', ignore_errors=True)
@@ -1102,6 +1228,7 @@ def _execute(project, job, stop, sandbox_factory, slot):
         # the execution reuse identity and must match the recorded input so
         # later reuse requires the same current cache.
         job['cache_input'] = current_cache
+        job.pop('cache_binding_pending', None)
         if job.get('environment') is not None and not job.get('scratch_paths'):
             job['shared_key'] = digest(canonical({'source': job['code_digest'], 'execution': job['execution'],
                                                   'commands': job['commands'], 'kind': 'verify',

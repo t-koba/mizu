@@ -998,7 +998,16 @@ execution and return. Status then reports `effective_verification: null` and
 `effective_verification_diagnostic: {status: "uncomputable", reason:
 "cache_owned", owner_job: null}`. The null owner is unknown, not proof of a
 particular owner. Historical snapshot verification is separate. Retry status or
-cache-aware verification submission/join after the lock is released; these
-requests do not wait for the running check or enqueue an unbound verification.
+cache-aware joins after the lock is released; they do not wait for the running
+check.
 Malformed evidence, unsafe paths and I/O errors are not cache-busy results.
 See [check jobs](check-jobs.md) for the cache and proof contract.
+
+Verification requests made while the configured check cache is owned queue as
+explicit unbound demand, never as proof or a shared result. The runner binds the
+actual cache under its exclusive lock before staging; unsafe inputs and legacy
+missing bindings are refused. Identical unresolved requests in the same run
+coalesce, including after start. Terminal requests are addressed by their job ID;
+a subsequent submission is new demand, and distinct identical concurrent
+demand requires a token the interface does not offer, or waiting until terminal.
+Normal queue limits and cancellation still apply.

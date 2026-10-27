@@ -69,7 +69,7 @@ def read_job(project, job_id):
     strings = ('role', 'run', 'kind', 'status', 'created_at', 'finished_at', 'error',
                'purpose')
     identities = ('code_digest', 'execution', 'environment', 'cache_input', 'shared_key',
-                  'shared_job', 'replaced_by', 'acceptance_receipt_id')
+                  'shared_job', 'replaced_by', 'acceptance_receipt_id', 'cache_request')
     flags = ('acknowledged', 'detached', 'passed')
     if (not isinstance(job, dict) or job.get('id') != job_id
             or any(k in job and not isinstance(job[k], str) for k in strings)
@@ -79,6 +79,30 @@ def read_job(project, job_id):
             or len(job.get('commands', [])) > 32
             or any(not isinstance(c, str) for c in job.get('commands', []))):
         raise InvalidProducer(job_id, 'job_schema')
+    if 'fresh' in job and type(job['fresh']) is not bool:
+        raise InvalidProducer(job_id, 'job_schema')
+    if 'inputs_bound_required' in job and type(job['inputs_bound_required']) is not bool:
+        raise InvalidProducer(job_id, 'job_schema')
+    if ('cache_binding_pending' in job
+            and (type(job['cache_binding_pending']) is not int or job['cache_binding_pending'] != 1 or not _digest(job.get('cache_request')) or job.get('kind') != 'verify'
+                 or not project.config.sandbox.check_cache_paths
+                 or 'cache_input' in job or 'shared_key' in job or job.get('shared_job')
+                 or job.get('acceptance_scope') is not None or job.get('acceptance_receipt_id') is not None
+                 or job.get('status') not in ('queued', 'refused', 'cancelled', 'interrupted'))):
+        raise InvalidProducer(job_id, 'job_schema')
+    if 'cache_request' in job:
+        if (not _digest(job['cache_request']) or job.get('kind') != 'verify'
+                or not project.config.sandbox.check_cache_paths):
+            raise InvalidProducer(job_id, 'job_schema')
+        if type(job.get('fresh')) is not bool:
+            raise InvalidProducer(job_id, 'job_schema')
+        _bounds = job.get('environment_bounds')
+        if (not isinstance(_bounds, dict) or set(_bounds) != {'files', 'bytes'}
+                or any(type(_value) is not int or not 1 <= _value <= 1099511627776
+                       for _value in _bounds.values())):
+            raise InvalidProducer(job_id, 'job_schema')
+        if type(job.get('inputs_bound_required')) is not bool:
+            raise InvalidProducer(job_id, 'job_schema')
     scratch = job.get('scratch_paths', [])
     if (not isinstance(scratch, list) or len(scratch) > 32
             or any(not isinstance(name, str) or len(name) > 255
@@ -193,7 +217,7 @@ def discover(project):
                 if original is None:
                     invalid[job_id] = 'job_subscription'
                     continue
-                for key in ('status', 'passed', 'error', 'finished_at'):
+                for key in ('status', 'passed', 'error', 'finished_at', 'cache_input', 'shared_key'):
                     if key in original:
                         job[key] = original[key]
             elif job.get('detached'):

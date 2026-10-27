@@ -1071,8 +1071,8 @@ class AcceptanceTests(Fixture):
                     self.assertIsNone(acceptance.effective(self.project, ctx.snapshot))
                     with self.assertRaises(check_jobs.CacheOwned):
                         acceptance.scope(self.project)
-                    with self.assertRaises(check_jobs.CacheOwned):
-                        check_jobs.submit(ctx, fresh=True)
+                    queued = check_jobs.submit(ctx)
+                    self.assertTrue(acceptance.read_job(self.project, queued['id'])['cache_binding_pending'])
                     with self.assertRaises(check_jobs.CacheOwned):
                         check_jobs.join(ctx, job['id'])
                     with self.assertRaises(Denied):

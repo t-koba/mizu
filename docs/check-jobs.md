@@ -228,9 +228,9 @@ in `published_snapshot`; the diagnostic is null when proof lookup is computable.
 `verification` remains unchanged and distinct. Selection and completion cannot
 use a stale retained receipt. After the lock is released, a retry recomputes the
 exact current cache input; unsafe paths, malformed evidence and I/O errors still
-fail closed rather than becoming a busy diagnosis. Cache-aware verification
-submission, validated listing and join return a `Busy` error promptly while
-owned; no unbound request is created. Custom checks without selected scratch
+fail closed rather than becoming a busy diagnosis. Cache-aware validated listing
+and join return a `Busy` error promptly while owned; verification submission
+queues unbound demand as described below. Custom checks without selected scratch
 and configurations without caches are unaffected. The exclusive lock remains
 held through checkout, execution and return; it is not an owner marker or lease.
 
@@ -358,21 +358,36 @@ those trees is unbound. POSIX traversal pins path components without following
 links; the portable fallback checks components and identities before/after
 access.
 
-Cache fingerprinting and the reuse/enqueue decision hold `check-cache.lock` in
-that order before queue exclusion; cache users can wait for the current cache
-owner, but hashing never holds `check-jobs.lock`. When configured cache paths are
-unbound, verification is refused before a job is queued. The enqueue-time
-fingerprint is the request identity only: dispatch captures the actual
-configured cache fingerprint under the same cache lock immediately before
-moving any cache tree into frozen source, and binds that execution-start value
-into the job (`cache_input`), the result echo, the acceptance scope and the
-result reuse key (`shared_key`). A queued verification therefore runs despite a
-legitimate shared-cache change since enqueue, even with sharing disabled; only
-an unbindable execution-time input, a record predating cache binding, or a
-changed source, command, execution or dependency input refuses execution.
-Unbound requests never return an earlier same-unit result. No retry is
-automatic; after correcting inputs, submit again. Custom checks without
-configured verification caches retain their independent behavior.
+Cache fingerprinting and the reuse/enqueue decision hold `check-cache.lock` before
+queue exclusion; hashing never holds `check-jobs.lock`. Configured-cache verify
+requests carry a stable, versioned demand identity covering owner and producer,
+run, source, commands, execution, environment, input bounds, cache paths, reuse
+policy and fresh mode. An identical same-run request coalesces only with its
+own unresolved queued or running demand, including after binding or start; its
+returned job ID and request identity survive binding. Distinct identical
+concurrent demands cannot be inferred without an explicit token (which this
+interface does not provide); wait until the first demand is terminal to create
+another. After terminal completion, cancellation or detachment, a submission
+is a new demand, not a retry of that job. Read the old status or result by its
+returned job ID. A new demand may reuse a valid completed result through the
+normal cache-specific sharing rules when the cache is readable; it never revives
+cancelled, detached or invalid proof.
+
+If the lock is owned, submission durably queues an explicitly versioned
+pending-binding request without reading the cache, inventing an input, or
+joining another job. Pending requests count against normal queue bounds, support
+cancellation, and cannot be shared, joined or supply proof. Errors other than
+cache ownership fail closed; an unsafe or ambiguous retained store is refused.
+When the cache is readable but unbound, verification is refused before queueing.
+The runner fingerprints the configured cache under the same exclusive lock
+immediately before moving any cache tree into frozen source and atomically
+persists the execution-start value in the running job (`cache_input`) and
+sharing key before staging. Only the validated version 1 pending marker permits
+missing enqueue-time binding; legacy missing-binding records and unsafe
+execution inputs are refused. A started execution is interrupted, not rebound,
+on runner recovery. Results and acceptance scopes bind the execution input.
+The execution-long lock, cache-free checks and custom experiments retain their
+independent behavior.
 
 Checks may legitimately mutate caches and still produce a passing result. Their
 proof binds the execution-start **pre-execution** `cache_input`, not the

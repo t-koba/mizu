@@ -1437,19 +1437,475 @@ class CacheInputTests(Fixture):
         with patch('mizu.platform.HAS_OPENAT', False):
             self.assertEqual(self.fingerprint(), changed)
 
-    def test_same_run_replay_only_matches_the_same_cache_input(self):
+    def test_owned_cache_queues_and_binds_before_staging(self):
+        from mizu import acceptance
+        self.seed('before')
+        ctx = self.context()
+        owner = check_jobs.submit(self.context())
+        entered, release = threading.Event(), threading.Event()
+        outcome = []
+        class Owner(FakeSandbox):
+            def execute(inner, workspace, script, **kwargs):
+                (workspace / 'target/object').write_text('execution-start')
+                entered.set()
+                if not release.wait(10):
+                    raise RuntimeError('test barrier timed out')
+                return super().execute(workspace, script, **kwargs)
+        thread = threading.Thread(target=lambda: outcome.append(self.run_job(Owner)))
+        thread.start()
+        try:
+            self.assertTrue(entered.wait(10))
+            with patch.object(check_jobs, 'cache_input', side_effect=AssertionError('unexpected fingerprint')):
+                started = time.monotonic()
+                pending = check_jobs.submit(ctx)
+                self.assertLess(time.monotonic() - started, 5)
+                self.assertEqual(check_jobs.submit(ctx)['id'], pending['id'])
+            self.assertNotEqual(pending['id'], owner['id'])
+            path = check_jobs.root(self.project) / pending['id'] / 'job.json'
+            raw = acceptance.read_job(self.project, pending['id'])
+            self.assertTrue(raw['cache_binding_pending'])
+            self.assertNotIn('cache_input', raw)
+            self.assertNotIn('shared_key', raw)
+            self.assertFalse(check_jobs.reusable(raw))
+            self.assertNotIn(pending['id'], [j['id'] for j in check_jobs.available(self.context('reviewer'), validate=False)])
+            self.assertEqual(acceptance._inspect_evidence(self.project, raw), (None, None))
+            self.assertEqual(len(list(check_jobs.root(self.project).glob('*/job.json'))), 2)
+            self.assertEqual(check_jobs.run_one(self.project, threading.Event(), sandbox_factory=FakeSandbox)['status'], 'busy')
+        finally:
+            release.set()
+            thread.join(10)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(outcome[0]['status'], 'completed')
+        expected = self.fingerprint()
+        self.assertNotIn(pending['id'], [j['id'] for j in check_jobs.available(self.context('reviewer'))])
+        with self.assertRaises(Denied):
+            check_jobs.join(self.context('reviewer'), pending['id'])
+        # Replay before execution remains the same request even with the lock free.
+        with patch.object(check_jobs, 'cache_input', side_effect=AssertionError('retry must not fingerprint')):
+            self.assertEqual(check_jobs.submit(ctx)['id'], pending['id'])
+        real_replace = Path.replace
+        def observe_move(source, target):
+            if source == self.cache:
+                stored = read_json(path)
+                self.assertEqual(stored['cache_input'], expected)
+                self.assertNotIn('cache_binding_pending', stored)
+                self.assertEqual(stored['status'], 'running')
+                with self.assertRaises(check_jobs.CacheOwned):
+                    with check_jobs.cache_guard(self.project, blocking=False):
+                        pass
+            return real_replace(source, target)
+        with patch.object(Path, 'replace', observe_move):
+            self.assertEqual(self.run_job()['status'], 'completed')
+        result = check_jobs.result(ctx, pending['id'])
+        self.assertEqual(result['result']['cache_input'], expected)
+        self.assertTrue(result['accepted_for_current_source'])
+        self.assertEqual((self.cache / 'object').read_text(), 'execution-start')
+        (self.cache / 'object').write_text('later')
+        later = check_jobs.submit(ctx)
+        self.assertNotEqual(later['id'], pending['id'])
+        self.assertNotIn('shared_job', later)
+
+    def test_replay_after_binding_and_start_keeps_request_identity(self):
+        from mizu import acceptance
+        self.seed('initial')
+        ctx = self.context()
+        with check_jobs.cache_guard(self.project):
+            job = check_jobs.submit(ctx)
+        path = check_jobs.root(self.project) / job['id'] / 'job.json'
+        request = acceptance.read_job(self.project, job['id'])['cache_request']
+        self.seed('actual-start')
+        expected = self.fingerprint()
+        entered, release = threading.Event(), threading.Event()
+        outcomes = []
+        class Held(FakeSandbox):
+            def execute(inner, workspace, script, **kwargs):
+                entered.set()
+                if not release.wait(10):
+                    raise RuntimeError('test barrier timed out')
+                return super().execute(workspace, script, **kwargs)
+        runner = threading.Thread(target=lambda: outcomes.append(self.run_job(Held)))
+        runner.start()
+        try:
+            self.assertTrue(entered.wait(10))
+            stored = acceptance.read_job(self.project, job['id'])
+            self.assertEqual(stored['status'], 'running')
+            self.assertEqual(stored['cache_input'], expected)
+            self.assertEqual(stored['cache_request'], request)
+            self.assertNotIn('cache_binding_pending', stored)
+            with patch.object(check_jobs, 'cache_input', side_effect=AssertionError('retry fingerprinted')):
+                self.assertEqual(check_jobs.submit(ctx)['id'], job['id'])
+        finally:
+            release.set()
+            runner.join(10)
+        self.assertFalse(runner.is_alive())
+        self.assertEqual(outcomes[0]['status'], 'completed')
+        self.assertEqual(read_json(path)['cache_request'], request)
+        new = check_jobs.submit(ctx)
+        self.assertNotEqual(new['id'], job['id'])
+        self.assertEqual(new.get('shared_job'), job['id'])
+        self.assertEqual(new['status'], 'completed')
+        self.assertTrue(check_jobs.result(ctx, new['id'])['accepted_for_current_source'])
+        self.assertEqual(check_jobs.result(ctx, job['id'])['status'], 'completed')
+
+    def test_request_identity_distinguishes_inputs_and_owner(self):
+        ctx = self.context()
+        with check_jobs.cache_guard(self.project):
+            first = check_jobs.submit(ctx)
+            self.assertEqual(first['id'], check_jobs.submit(ctx)['id'])
+            self.assertNotEqual(first['id'], check_jobs.submit(ctx, fresh=True)['id'])
+            with patch.object(check_jobs, 'environment', return_value='a' * 64):
+                self.assertNotEqual(first['id'], check_jobs.submit(ctx)['id'])
+            previous = self.project.config
+            try:
+                self.project.config = dataclasses.replace(previous, sandbox=dataclasses.replace(
+                    previous.sandbox, check_input_bytes=previous.sandbox.check_input_bytes - 1))
+                self.assertNotEqual(first['id'], check_jobs.submit(ctx)['id'])
+            finally:
+                self.project.config = previous
+            reviewer = self.context('reviewer')
+            reviewer.run_dir = ctx.run_dir
+            reviewer.role = dataclasses.replace(reviewer.role, capabilities=(*reviewer.role.capabilities, 'verify'))
+            self.assertNotEqual(first['id'], check_jobs.submit(reviewer)['id'])
+            (ctx.workspace / 'app.py').write_text('changed source\n')
+            self.assertNotEqual(first['id'], check_jobs.submit(ctx)['id'])
+
+    def test_reuse_disabled_terminal_resubmission_creates_new_demand(self):
+        self.config = dataclasses.replace(self.config,
+            sandbox=dataclasses.replace(self.config.sandbox, check_reuse=False))
+        self.project.config = self.config
+        ctx = self.context()
+        self.seed('stable')
+        first = check_jobs.submit(ctx)
+        self.assertNotIn('shared_job', first)
+        self.assertIsNone(check_jobs.read(self.project, first['id'])['environment'])
+        first_input = self.fingerprint()
+        self.assertEqual(check_jobs.read(self.project, first['id'])['cache_input'], first_input)
+        self.assertEqual(self.run_job()['status'], 'completed')
+
+        # A terminal request is not replayed; without reuse, a new demand runs.
+        second = check_jobs.submit(ctx)
+        self.assertNotEqual(second['id'], first['id'])
+        self.assertNotIn('shared_job', second)
+        self.assertEqual(check_jobs.read(self.project, second['id'])['cache_input'], first_input)
+        self.assertEqual(self.run_job()['status'], 'completed')
+
+        # Changed cache after terminal creates another demand; retries of that
+        # unresolved request coalesce to its stable request ID.
+        (self.cache / 'object').write_text('changed')
+        third = check_jobs.submit(ctx)
+        self.assertNotEqual(third['id'], second['id'])
+        self.assertNotIn('shared_job', third)
+        self.assertEqual(check_jobs.submit(ctx)['id'], third['id'])
+        stored = check_jobs.read(self.project, third['id'])
+        self.assertNotEqual(stored['cache_input'], first_input)
+        self.assertEqual(stored['fresh'], False)
+        self.assertEqual(stored['environment_bounds'],
+                         {'files': self.config.sandbox.check_input_files,
+                          'bytes': self.config.sandbox.check_input_bytes})
+        self.assertEqual(stored['inputs_bound_required'], False)
+
+    def test_bound_distinct_requests_do_not_coalesce(self):
+        self.seed('same-cache')
+        ctx = self.context()
+        first = check_jobs.submit(ctx)
+        self.assertNotEqual(check_jobs.submit(ctx, fresh=True)['id'], first['id'])
+        previous = self.project.config
+        try:
+            self.project.config = dataclasses.replace(previous, sandbox=dataclasses.replace(
+                previous.sandbox, check_input_bytes=previous.sandbox.check_input_bytes - 1))
+            self.assertNotEqual(check_jobs.submit(ctx)['id'], first['id'])
+        finally:
+            self.project.config = previous
+        reviewer = self.context('reviewer')
+        reviewer.run_dir = ctx.run_dir
+        reviewer.role = dataclasses.replace(reviewer.role, capabilities=(*reviewer.role.capabilities, 'verify'))
+        self.assertNotEqual(check_jobs.submit(reviewer)['id'], first['id'])
+        try:
+            self.project.config = dataclasses.replace(previous, sandbox=dataclasses.replace(
+                previous.sandbox, check_reuse=False))
+            self.assertNotEqual(check_jobs.submit(ctx)['id'], first['id'])
+        finally:
+            self.project.config = previous
+        self.assertEqual(check_jobs.submit(ctx)['id'], first['id'])
+
+    def test_lookup_refuses_corrupt_request_identity_fields(self):
+        from mizu import acceptance
+        ctx = self.context()
+        with check_jobs.cache_guard(self.project):
+            job = check_jobs.submit(ctx)
+            path = check_jobs.root(self.project) / job['id'] / 'job.json'
+            original = read_json(path)
+            # A valid but different mode still cannot coalesce with this demand.
+            write_json(path, {**original, 'fresh': True})
+            self.assertEqual(acceptance.read_job(self.project, job['id'])['fresh'], True)
+            with self.assertRaises(Denied):
+                check_jobs.submit(ctx)
+            write_json(path, original)
+            for changes in ({'fresh': None}, {'fresh': 1}, {'fresh': 'yes'},
+                            {'environment_bounds': None}, {'environment_bounds': {'files': 1}},
+                            {'environment_bounds': {'files': True, 'bytes': 1}},
+                            {'environment_bounds': {'files': 1, 'bytes': 1, 'extra': 1}},
+                            {'inputs_bound_required': None}, {'inputs_bound_required': 1}):
+                with self.subTest(changes=changes):
+                    write_json(path, {**original, **changes})
+                    with self.assertRaises(acceptance.InvalidProducer):
+                        acceptance.read_job(self.project, job['id'])
+                    with self.assertRaises(Denied):
+                        check_jobs.submit(ctx)
+            write_json(path, original)
+            self.assertEqual(check_jobs.submit(ctx)['id'], job['id'])
+
+    def test_pending_and_request_scoped_to_configured_cache(self):
+        from mizu import acceptance
+        ctx = self.context()
+        with check_jobs.cache_guard(self.project):
+            job = check_jobs.submit(ctx)
+            path = check_jobs.root(self.project) / job['id'] / 'job.json'
+            raw = read_json(path)
+            previous = self.project.config
+            try:
+                self.project.config = dataclasses.replace(previous, sandbox=dataclasses.replace(
+                    previous.sandbox, check_cache_paths=()))
+                with self.assertRaises(acceptance.InvalidProducer):
+                    acceptance.read_job(self.project, job['id'])
+                bound = {k: v for k, v in raw.items() if k != 'cache_binding_pending'}
+                bound.update(cache_input='a' * 64, status='queued')
+                bound.pop('shared_key', None)
+                write_json(path, bound)
+                with self.assertRaises(acceptance.InvalidProducer):
+                    acceptance.read_job(self.project, job['id'])
+            finally:
+                self.project.config = previous
+            write_json(path, raw)
+            self.assertTrue(acceptance.read_job(self.project, job['id'])['cache_binding_pending'])
+
+    def test_shared_subscription_with_pending_or_unbound_original_is_refused(self):
+        from mizu import acceptance
+        self.seed('shared-original')
+        first_ctx = self.context()
+        first = check_jobs.submit(first_ctx)
+        second_ctx = self.context()
+        second = check_jobs.submit(second_ctx)
+        self.assertEqual(second['shared_job'], first['id'])
+        orig_path = check_jobs.root(self.project) / first['id'] / 'job.json'
+        orig_raw = read_json(orig_path)
+        # Corrupt the original to a pending marker: the subscription is impossible.
+        pending = {**orig_raw}
+        pending.pop('cache_input', None)
+        pending.pop('shared_key', None)
+        pending['cache_binding_pending'] = 1
+        pending['status'] = 'queued'
+        write_json(orig_path, pending)
+        with self.assertRaises(Denied):
+            check_jobs.submit(second_ctx)
+        # Corrupt the original to an unbound legacy record: also refused, never reused.
+        unbound = {**orig_raw}
+        unbound.pop('cache_input', None)
+        write_json(orig_path, unbound)
+        with self.assertRaises(Denied):
+            check_jobs.submit(second_ctx)
+        # Restore and verify the subscription is usable again.
+        write_json(orig_path, orig_raw)
+        self.assertEqual(check_jobs.submit(second_ctx)['id'], second['id'])
+        self.assertFalse(check_jobs.reusable(acceptance.read_job(self.project, second['id'])) is True and 'cache_binding_pending' in acceptance.read_job(self.project, second['id']))
+
+    def test_subscription_stores_subscriber_request_identity(self):
+        from mizu import acceptance
+        self.seed('sub-fields')
+        first_ctx = self.context()
+        first = check_jobs.submit(first_ctx)
+        first_raw = acceptance.read_job(self.project, first['id'])
+        previous = self.project.config
+        try:
+            self.project.config = dataclasses.replace(previous, sandbox=dataclasses.replace(
+                previous.sandbox, check_input_bytes=previous.sandbox.check_input_bytes - 1))
+            second_ctx = self.context()
+            second = check_jobs.submit(second_ctx)
+            self.assertEqual(second.get('shared_job'), first['id'])
+            sub = acceptance.read_job(self.project, second['id'])
+            self.assertNotEqual(sub['cache_request'], first_raw['cache_request'])
+            self.assertEqual(sub['fresh'], False)
+            self.assertEqual(sub['environment_bounds'],
+                             {'files': previous.sandbox.check_input_files,
+                              'bytes': previous.sandbox.check_input_bytes - 1})
+            self.assertEqual(sub['inputs_bound_required'], previous.sandbox.check_reuse)
+            self.assertNotEqual(sub['environment_bounds'], first_raw['environment_bounds'])
+        finally:
+            self.project.config = previous
+        # Fresh mode is also subscriber-owned: a fresh execution is reused by a later non-fresh demand.
+        self.seed('fresh-sub')
+        fresh_ctx = self.context()
+        fresh_job = check_jobs.submit(fresh_ctx, fresh=True)
+        later_ctx = self.context()
+        shared = check_jobs.submit(later_ctx)
+        self.assertEqual(shared['shared_job'], fresh_job['id'])
+        sub = acceptance.read_job(self.project, shared['id'])
+        orig = acceptance.read_job(self.project, fresh_job['id'])
+        self.assertEqual(orig['fresh'], True)
+        self.assertEqual(sub['fresh'], False)
+        self.assertNotEqual(sub['cache_request'], orig['cache_request'])
+
+    def test_changed_cache_binds_but_request_identity_stable(self):
+        from mizu import acceptance
+        self.config = dataclasses.replace(self.config,
+            sandbox=dataclasses.replace(self.config.sandbox, check_reuse=False))
+        self.project.config = self.config
+        ctx = self.context()
+        self.seed('enqueue-identity')
+        job = check_jobs.submit(ctx)
+        before = acceptance.read_job(self.project, job['id'])
+        enqueue_input = before['cache_input']
+        request = before['cache_request']
+        fresh = before['fresh']
+        bounds = dict(before['environment_bounds'])
+        reuse = before['inputs_bound_required']
+        self.seed('execution-identity')
+        execution_input = self.fingerprint()
+        self.assertNotEqual(execution_input, enqueue_input)
+        self.assertEqual(self.run_job()['status'], 'completed')
+        after = acceptance.read_job(self.project, job['id'])
+        self.assertEqual(after['cache_request'], request)
+        self.assertEqual(after['fresh'], fresh)
+        self.assertEqual(after['environment_bounds'], bounds)
+        self.assertEqual(after['inputs_bound_required'], reuse)
+        self.assertEqual(after['cache_input'], execution_input)
+        self.assertNotIn('cache_binding_pending', after)
+
+    def test_cache_subscription_tracks_execution_start_binding(self):
+        self.seed('enqueue')
+        first_ctx = self.context()
+        first = check_jobs.submit(first_ctx)
+        second_ctx = self.context()
+        second = check_jobs.submit(second_ctx)
+        self.assertEqual(second['shared_job'], first['id'])
+        self.seed('start')
+        expected = self.fingerprint()
+        self.assertEqual(self.run_job()['status'], 'completed')
+        self.assertEqual(check_jobs.read(self.project, second['id'])['cache_input'], expected)
+        self.assertTrue(check_jobs.result(second_ctx, second['id'])['accepted_for_current_source'])
+
+    def test_cancelled_request_is_not_replayed(self):
+        ctx = self.context()
+        with check_jobs.cache_guard(self.project):
+            first = check_jobs.submit(ctx)
+            check_jobs.cancel(ctx, first['id'])
+            second = check_jobs.submit(ctx)
+            self.assertNotEqual(first['id'], second['id'])
+            self.assertEqual(check_jobs.submit(ctx)['id'], second['id'])
+        self.assertEqual(check_jobs.read(self.project, first['id'])['status'], 'cancelled')
+
+    def test_started_request_is_interrupted_not_rebound_on_recovery(self):
+        ctx = self.context()
+        with check_jobs.cache_guard(self.project):
+            job = check_jobs.submit(ctx)
+        path = check_jobs.root(self.project) / job['id'] / 'job.json'
+        raw = read_json(path)
+        raw.pop('cache_binding_pending')
+        raw.update(status='running', cache_input='a' * 64, shared_key='b' * 64)
+        write_json(path, raw)
+        with patch.object(check_jobs, 'cache_input', side_effect=AssertionError('rebound started execution')), \
+                patch.object(check_jobs, 'cleanup'):
+            self.assertEqual(self.run_job()['status'], 'interrupted')
+        stored = read_json(path)
+        self.assertEqual(stored['cache_input'], 'a' * 64)
+        self.assertEqual(stored['shared_key'], 'b' * 64)
+        self.assertFalse(FakeSandbox.calls)
+
+    def test_lookup_refuses_mismatched_request_record(self):
+        ctx = self.context()
+        with check_jobs.cache_guard(self.project):
+            job = check_jobs.submit(ctx)
+            path = check_jobs.root(self.project) / job['id'] / 'job.json'
+            raw = read_json(path)
+            raw['code_digest'] = 'a' * 64
+            write_json(path, raw)
+            with self.assertRaises(Denied):
+                check_jobs.submit(ctx)
+
+    def test_legacy_missing_binding_without_request_marker_is_refused(self):
+        ctx = self.context()
+        job = check_jobs.submit(ctx)
+        path = check_jobs.root(self.project) / job['id'] / 'job.json'
+        raw = read_json(path)
+        raw.pop('cache_input')
+        raw.pop('cache_request')
+        write_json(path, raw)
+        self.assertEqual(self.run_job()['status'], 'refused')
+        self.assertFalse(FakeSandbox.calls)
+        self.assertNotIn('acceptance_scope', read_json(path))
+
+    def test_lookup_refuses_malformed_unrelated_record(self):
+        ctx = self.context()
+        with check_jobs.cache_guard(self.project):
+            first = check_jobs.submit(ctx)
+            path = check_jobs.root(self.project) / first['id'] / 'job.json'
+            path.write_text('{invalid')
+            with self.assertRaises(Denied):
+                check_jobs.submit(ctx, fresh=True)
+
+    def test_pending_marker_validation_cancel_and_unbindable(self):
+        from mizu import acceptance
+        ctx = self.context()
+        with check_jobs.cache_guard(self.project):
+            job = check_jobs.submit(ctx)
+        path = check_jobs.root(self.project) / job['id'] / 'job.json'
+        raw = read_json(path)
+        for changes in ({'cache_binding_pending': False}, {'cache_binding_pending': True}, {'cache_binding_pending': 2},
+                        {'cache_input': None}, {'shared_key': None}, {'kind': 'experiment'},
+                        {'status': 'completed'}, {'cache_request': None},
+                        {'acceptance_scope': {}}):
+            with self.subTest(changes=changes):
+                write_json(path, {**raw, **changes})
+                with self.assertRaises(acceptance.InvalidProducer):
+                    acceptance.read_job(self.project, job['id'])
+        write_json(path, raw)
+        self.seed('unbounded')
+        with patch.object(check_jobs, 'cache_input', return_value=None):
+            self.assertEqual(self.run_job()['status'], 'refused')
+        self.assertFalse(FakeSandbox.calls)
+        self.assertNotIn('acceptance_scope', read_json(path))
+        with check_jobs.cache_guard(self.project):
+            other = check_jobs.submit(ctx)
+            self.assertNotEqual(other['id'], job['id'])
+            check_jobs.cancel(ctx, other['id'])
+        self.assertEqual(check_jobs.read(self.project, other['id'])['status'], 'cancelled')
+
+    def test_pending_requests_obey_queue_bound_and_replay(self):
+        self.config = dataclasses.replace(self.config,
+            limits=dataclasses.replace(self.config.limits, check_pending=1))
+        self.project.config = self.config
+        ctx = self.context()
+        with check_jobs.cache_guard(self.project):
+            job = check_jobs.submit(ctx)
+            self.assertEqual(check_jobs.submit(ctx)['id'], job['id'])
+            with self.assertRaises(Busy):
+                check_jobs.submit(ctx, fresh=True)
+            check_jobs.cancel(ctx, job['id'])
+            with self.assertRaises(Busy):
+                check_jobs.submit(ctx)
+            with self.assertRaises(Busy):
+                check_jobs.submit(ctx, fresh=True)
+        self.assertEqual(self.run_job()['status'], 'cancelled')
+        self.assertNotEqual(check_jobs.submit(ctx, fresh=True)['id'], job['id'])
+
+    def test_non_ownership_errors_do_not_queue(self):
+        ctx = self.context()
+        with patch.object(check_jobs, 'cache_input', side_effect=Denied('bad cache')):
+            with self.assertRaises(Denied):
+                check_jobs.submit(ctx)
+        self.assertEqual(list(check_jobs.root(self.project).glob('*/job.json')), [])
+
+    def test_same_run_replay_survives_cache_changes_until_terminal(self):
         ctx = self.context()
         absent = check_jobs.submit(ctx)
-        self.assertEqual(check_jobs.submit(ctx)['id'], absent['id'])
         self.seed()
-        present = check_jobs.submit(ctx)
-        self.assertNotEqual(present['id'], absent['id'])
-        self.assertNotIn('shared_job', present)
-        self.assertEqual(check_jobs.submit(ctx)['id'], present['id'])
+        self.assertEqual(check_jobs.submit(ctx)['id'], absent['id'])
+        self.assertEqual(self.run_job()['status'], 'completed')
         (self.cache / 'object').write_text('two')
         changed = check_jobs.submit(ctx)
-        self.assertNotEqual(changed['id'], present['id'])
+        self.assertNotEqual(changed['id'], absent['id'])
         self.assertNotIn('shared_job', changed)
+        self.assertEqual(check_jobs.submit(ctx)['id'], changed['id'])
 
     def test_shared_candidates_and_join_revalidate_cache_input(self):
         self.seed()
