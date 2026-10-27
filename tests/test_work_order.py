@@ -401,14 +401,24 @@ class WorkOrderTests(Fixture):
                 ctx.handle("work_order", args)
         self.assertEqual(plan._read_stored(self.project.root)["status"], "unavailable")
         hist = self.project.root / "work-order" / "history" / "1.json"
-        valid = hist.read_text()
+        valid = hist.read_bytes()
+        # A Windows text-mode restore changes canonical LF to CRLF. Reject
+        # those bytes too; recovery below must restore the exact audited bytes.
+        self.assertTrue(valid.endswith(b"\n") and not valid.endswith(b"\r\n"))
+        hist.write_bytes(valid.replace(b"\n", b"\r\n"))
+        self.assertEqual(plan._read_stored(self.project.root, allow_interrupted=True)["status"], "unavailable")
+        with self.assertRaisesRegex(Denied, "Work order is unavailable"):
+            ctx.handle("work_order", args)
         bad = json.loads(valid)
         bad["updated_at"] = "not-a-time"
         hist.write_text(json.dumps(bad))
         with self.assertRaises(Denied):
             ctx.handle("work_order", args)
         self.assertFalse((hist.parent.parent / "current.json").exists())
-        hist.write_text(valid)
+        hist.write_bytes(valid)
+        recovered = plan._read_stored(self.project.root, allow_interrupted=True)
+        self.assertEqual(recovered["status"], "absent")
+        self.assertEqual(recovered["interrupted"], json.loads(valid))
         self.assertEqual(ctx.handle("work_order", args)["rev"], 1)
         self.assertEqual(plan._read_stored(self.project.root)["status"], "current")
         # The same interrupted append recovery also works with an existing pointer.
@@ -423,7 +433,7 @@ class WorkOrderTests(Fixture):
         self.assertEqual(ctx.handle("work_order", args2)["rev"], 2)
         hist.unlink()
         self.assertEqual(plan._read_stored(self.project.root)["status"], "unavailable")
-        hist.write_text(valid)
+        hist.write_bytes(valid)
         hist = hist.parent / "2.json"
         bad = json.loads(hist.read_text())
         bad["rationale"] = "different"
