@@ -11,6 +11,7 @@ from .engine_config import effective, adapter_digest, local_settings_digest
 from .errors import Cancelled, ConfigError, Denied, ProtocolError, ModelFailure
 from .fs import canonical, digest, mkdir, now, read_json, write_json
 from .selection import (DEFAULT_CLASSIFIER_INPUTS, _clip, bounded, validate_labels, work_inputs)
+from .usage import attempt_usage, normalize
 
 
 class ClassificationOutputError(ValueError):
@@ -35,24 +36,16 @@ def _model_summary(model):
         value = model.get(key)
         if type(value) is int and 0 <= value <= 2**53:
             summary[key] = value
-    if model.get('usage_known') is True:
-        summary['usage_known'] = True
-        usage = model.get('usage')
-        try:
-            if not isinstance(usage, list) or not usage:
-                raise ValueError('no fragments')
-            totals = {'input': 0, 'output': 0}
-            for fragment in usage:
-                detail = fragment['usage']
-                for kind in totals:
-                    count = detail[kind]
-                    if type(count) not in (int, float) or not 0 <= count <= 2**53:
-                        raise ValueError('bad count')
-                    totals[kind] += count
-            summary['input_tokens'] = totals['input']
-            summary['output_tokens'] = totals['output']
-        except (KeyError, TypeError, ValueError, AttributeError):
-            pass
+    usage = model.get('usage')
+    engine = summary.get('engine', 'unknown')
+    if (model.get('usage_known') is True and isinstance(usage, list) and usage
+            and all(isinstance(fragment, dict) and all(isinstance(key, str) for key in fragment)
+                    for fragment in usage)):
+        totals = attempt_usage(usage, engine)
+        counts = (totals['input_tokens'], totals['output_tokens'])
+        if (all(type(count) is int and 0 <= count <= 2**53 for count in counts)
+                and all(not normalize(fragment, engine)['unknown_shape'] for fragment in usage)):
+            summary.update(usage_known=True, input_tokens=counts[0], output_tokens=counts[1])
     try:
         bounded(summary, 4096)
     except Exception:
