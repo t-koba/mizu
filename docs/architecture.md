@@ -51,7 +51,7 @@ inputs. The trusted host adapter never executes model-provided host commands.
 | `decision_delivery.py` | One durable-marker-selected `insight.decision` runtime route for prompt, wake, selection, retrieval and acknowledgement | Host activation or other event-family routing |
 | `decision_reconciliation.py` | Host-only exact legacy-receipt preflight/apply and one-way activation after per-role pending-set parity; publishes the authority marker last | Model-granted activation or task lifecycle |
 | `work_items.py` | Append-audited records, CAS lifecycle, bounded open pages and by-ID history | Work-item scheduling and policy |
-| `work_order.py` | Writer's bounded ordered plan with append-audited CAS and review-gated display only | Item status/scope/evidence, scheduling, admission, or priority |
+| `work_order.py` | Writer's bounded ordered plan with CAS, retained audit suffix and ordered-prefix checkpoint, and review-gated display only | Item status/scope/evidence, scheduling, admission, or priority |
 | `web.py` | Allowed retrieval, policy-bounded protocol observation, and external source receipts | Scientific truth |
 | `materialize.py` | Generic offline-input adapter (spec in, digest-bound content out) plus retained-receipt apply validation (spec/result output equality, digest, path safety) | Ecosystem resolution, cache policy |
 | `editor.py` | Snapshot export and read/propose MCP | Code editing |
@@ -284,6 +284,8 @@ for a later rescan, not deleted retained dependencies. A bounded result joins
 and shared-smoke retention are independent and unchanged. See
 [configuration](configuration.md#automatic-snapshot-retention) for the exact
 root/age/result contract and outbox lock permissions.
+
+Work-order audit rollover retains the latest 256 revision bodies and a constant-field ordered-prefix checkpoint; older bodies are not inspectable. The checkpoint is not authentication, and the retained non-head bodies have no individual integrity binding. Readers fail closed on interrupted rollover; only a matching locked write retry completes recognized leftovers. See the writer work-order contract in `configuration.md` for the digest construction and bounds.
 
 The history index retains published IDs up to the configured limit (default
 128, tunable 8–1000000 via `limits.history_index`). The active generation/window

@@ -981,4 +981,119 @@ class WorkOrderTests(Fixture):
                 self.assertNotEqual(plan._frozen_generation(ctx2), frozen)
                 self.assertEqual(json.loads(build(ctx2))["work_order"]["status"], "review_due")
 
+    def test_protocol_accepts_absolute_revision_beyond_retention_window(self):
+        from mizu.protocol import DEFINITIONS, validate
+        validate({"items": ["wi_" + "0" * 32], "rationale": "reviewed",
+                  "expected_rev": 257, "expected_generation": "0" * 64},
+                 DEFINITIONS["work_order"][1])
 
+    def test_rollover_bounded_history_and_integrity(self):
+        from unittest.mock import patch
+        from mizu.fs import canonical, digest
+        item = self.project.work_items.create(idempotency_key="rollover", title="A", actor="worker")["record"]["work_item"]
+        ctx = self.context("worker")
+        gen = plan._frozen_generation(ctx)
+        root = self.project.root / "work-order"
+        hist = root / "history"
+        hist.mkdir(parents=True)
+        for rev in range(1, 256):
+            record = {"schema": 1, "rev": rev, "generation": gen, "items": [item["id"]],
+                      "rationale": "review", "actor": "worker", "updated_at": now()}
+            write_json(hist / f"{rev}.json", record)
+        write_json(root / "current.json", record)
+        args = {"items": [item["id"]], "rationale": "review", "expected_generation": gen}
+        bodies = {n: (hist / f"{n}.json").read_bytes() for n in range(1, 6)}
+        previous = plan._GENESIS
+        for rev in range(256, 262):
+            self.assertEqual(ctx.handle("work_order", dict(args, expected_rev=rev-1))["rev"], rev)
+            self.assertEqual(plan._read_stored(self.project.root)["rev"], rev)
+            self.assertEqual(len(list(hist.iterdir())), 256)
+            if rev > 256:
+                pruned = rev - 256
+                cp = json.loads((root / "checkpoint.json").read_bytes())
+                previous = plan._checkpoint_hash(pruned, previous, digest(bodies[pruned]))
+                self.assertEqual(cp["digest"], previous)
+                self.assertEqual(cp["body"], digest(bodies[pruned]))
+                self.assertFalse((hist / f"{pruned}.json").exists())
+            with self.assertRaises(Denied):
+                ctx.handle("work_order", dict(args, expected_rev=rev-1))
+        with patch.object(plan, "safe_read", wraps=plan.safe_read) as reads:
+            self.assertEqual(plan._read_stored(self.project.root)["status"], "current")
+        self.assertEqual(reads.call_count, 258)
+        total = sum(p.stat().st_size for p in hist.iterdir()) + (root / "current.json").stat().st_size + (root / "checkpoint.json").stat().st_size
+        self.assertLessEqual(total, 258 * plan.MAX_WORK_ORDER_BYTES)
+        self.assertEqual(len(canonical(cp)), (root / "checkpoint.json").stat().st_size)
+        checkpoint_path = root / "checkpoint.json"
+        checkpoint = checkpoint_path.read_bytes()
+        checkpoint_path.unlink()
+        self.assertEqual(plan._read_stored(self.project.root)["status"], "unavailable")
+        checkpoint_path.write_bytes(checkpoint)
+        for bad in (dict(cp, digest="0" * 64), dict(cp, body="x"),
+                    dict(cp, rev=cp["rev"] + 1), dict(cp, schema=True),
+                    dict(cp, unexpected=1)):
+            write_json(root / "checkpoint.json", bad)
+            self.assertEqual(plan._read_stored(self.project.root, allow_interrupted=True)["status"], "unavailable")
+        (root / "checkpoint.json").write_bytes(checkpoint)
+        head = hist / "261.json"
+        saved_head = head.read_bytes()
+        wrong_head = json.loads(saved_head)
+        wrong_head["rationale"] = "not current"
+        write_json(head, wrong_head)
+        self.assertEqual(plan._read_stored(self.project.root)["status"], "unavailable")
+        head.write_bytes(saved_head)
+        missing = hist / "6.json"
+        saved = missing.read_bytes()
+        missing.unlink()
+        self.assertEqual(plan._read_stored(self.project.root, allow_interrupted=True)["status"], "unavailable")
+        missing.write_bytes(saved)
+        (hist / "1.json").write_bytes(bodies[1])
+        self.assertEqual(plan._read_stored(self.project.root, allow_interrupted=True)["status"], "unavailable")
+
+    def test_rollover_interrupted_boundaries_retry_and_corruption(self):
+        from unittest.mock import patch
+        item = self.project.work_items.create(idempotency_key="roll-crash", title="A", actor="worker")["record"]["work_item"]
+        ctx = self.context("worker")
+        gen = plan._frozen_generation(ctx)
+        root = self.project.root / "work-order"
+        hist = root / "history"
+        hist.mkdir(parents=True)
+        for rev in range(1, 257):
+            record = {"schema": 1, "rev": rev, "generation": gen, "items": [item["id"]],
+                      "rationale": "review", "actor": "worker", "updated_at": now()}
+            write_json(hist / f"{rev}.json", record)
+        write_json(root / "current.json", record)
+        args = {"items": [item["id"]], "rationale": "next", "expected_generation": gen, "expected_rev": 256}
+        original_unlink = type(hist).unlink
+        def fail_prune(path, *a, **kw):
+            if path == hist / "1.json":
+                raise OSError("after checkpoint")
+            return original_unlink(path, *a, **kw)
+        with patch.object(type(hist), "unlink", fail_prune), self.assertRaises(Denied):
+            ctx.handle("work_order", args)
+        self.assertEqual(plan._read_stored(self.project.root)["status"], "unavailable")
+        old = (hist / "1.json").read_bytes()
+        altered = json.loads(old)
+        altered["rationale"] = "tampered"
+        write_json(hist / "1.json", altered)
+        with self.assertRaises(Denied):
+            ctx.handle("work_order", args)
+        (hist / "1.json").write_bytes(old)
+        with self.assertRaises(Denied):
+            ctx.handle("work_order", dict(args, expected_rev=255))
+        with patch.object(plan, "sync_dir", side_effect=OSError("after prune")), self.assertRaises(Denied):
+            ctx.handle("work_order", args)
+        self.assertFalse((hist / "1.json").exists())
+        self.assertEqual(plan._read_stored(self.project.root)["status"], "unavailable")
+        original_write = plan.write_json
+        def fail_current(path, value, **kwargs):
+            if path.name == "current.json":
+                raise OSError("after append")
+            return original_write(path, value, **kwargs)
+        with patch.object(plan, "write_json", side_effect=fail_current), self.assertRaises(Denied):
+            ctx.handle("work_order", args)
+        self.assertTrue((hist / "257.json").exists())
+        self.assertEqual(plan._read_stored(self.project.root)["status"], "unavailable")
+        with self.assertRaises(Denied):
+            ctx.handle("work_order", dict(args, rationale="different"))
+        self.assertEqual(ctx.handle("work_order", args)["rev"], 257)
+        self.assertEqual(plan._read_stored(self.project.root)["status"], "current")

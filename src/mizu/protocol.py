@@ -275,7 +275,7 @@ DEFINITIONS = {
                               "items": {"type": "string", "minLength": 35, "maxLength": 35,
                                         "pattern": "^wi_[0-9a-f]{32}$"}},
                     "rationale": text(1024),
-                    "expected_rev": {"type": "integer", "minimum": 0, "maximum": 256},
+                    "expected_rev": {"type": "integer", "minimum": 0},
                     "expected_generation": text(64)}, ("items", "rationale", "expected_rev", "expected_generation"))),
     "finish": ("End this work unit and release its model slot and workspace lock. Call after all other tools. For a timed external wait on a writable role, use outcome=wait and wait_seconds=N; the host persists the wake deadline instead of keeping a command running. Independent new work may wake the role earlier. With check_job, release_checks optionally lists obsolete subscriptions to cancel at a successful finish; other consumers are preserved. Use outcome=wait and wait_for_check=<id> when no independent work remains; release the unit and resume on completion or new input. 'done' on writable roles requires successful verification. "
                "ack_events optionally selects unique delivered decision, terminal work-item, structured insight-wait and obligation ack_token values handled by this role; omitted events stay pending. Tokens bind this role and the exact event payload; foreign, stale or undelivered tokens are refused before finish intent. CI wait rows share wait_events but do not use these tokens; CI/status and check-job behavior is unchanged. next_profile optionally names the recommended profile for the following unit; next_reason needs next_profile. "
