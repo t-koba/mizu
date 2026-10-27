@@ -422,7 +422,7 @@ failure behavior. A valid finish seal remains separate from adapter settlement
 and all final integrity/verification/publication checks still apply.
 
 
-All limits are positive integers except `daily_requests`, `shared_daily_requests`, `max_failures`, `busy_retry_seconds`, `admission_wait_seconds`, `missing_finish_followups`, `safe_point_yield_quantum`, `free_disk_mb`, `retention_days`, `run_retention_days`, `snapshot_retention_days`, `automatic_prune_interval_seconds`, `automatic_smoke_retention_interval_seconds`, `event_log_compress_days`, `event_log_retention_days`, `session_max_tokens`, `session_max_age_seconds`, and adapter `diagnostic_bytes`, which may be zero. `missing_finish_counts_as_failure` and `drain_yield` are booleans. `session_max_cost_usd` is a number (integer or float) which may be zero.
+All limits are positive integers except `open_work_items`, `producer_inputs_per_source`, `delegate_wrap_up_requests`, `delegate_wrap_up_tools`, `daily_requests`, `shared_daily_requests`, `max_failures`, `busy_retry_seconds`, `admission_wait_seconds`, `no_progress_continuations`, `no_progress_backoff_seconds`, `missing_finish_followups`, `safe_point_yield_quantum`, `free_disk_mb`, `retention_days`, `run_retention_days`, `snapshot_retention_days`, `automatic_prune_interval_seconds`, `automatic_smoke_retention_interval_seconds`, `event_log_compress_days`, `event_log_retention_days`, `session_max_tokens`, `session_max_age_seconds`, and adapter `diagnostic_bytes`, which may be zero. `missing_finish_counts_as_failure` and `drain_yield` are booleans. `session_max_cost_usd` is a number (integer or float) which may be zero.
 
 ### Operator-invoked run retention
 
