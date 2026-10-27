@@ -819,7 +819,7 @@ never denies the valid records beside it. The same validation path lets an
 exact-SHA CI wait pin a `publication_id` to either receipt shape.
 
 A product receipt may carry an optional lineage observation returned by the
-VCS adapter and bound by Mizu to the configured `[vcs.lineage_target]`
+VCS adapter and bound by Mizu to the project-specific `project.toml` `[vcs.lineage_target]`
 (schema 2); the publication identity does not include it. An external
 receipt may carry the same bound observation as schema 4, supplied at record time
 with `--lineage` and bound to the configured descriptor; schema-2/3 external

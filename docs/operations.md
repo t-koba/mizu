@@ -1016,7 +1016,7 @@ Normal queue limits and cancellation still apply.
 
 The optional VCS-adapter `lineage` object on a successful `push`/`pr` response
 is captured create-only with the publication receipt when valid. The adapter
-observes the configured `[vcs.lineage_target]` when present; the product
+observes the project's operator-owned `project.toml` `[vcs.lineage_target]` when present; the product
 compares the response repository, remote and ref to the expected values
 independently and binds the descriptor identity and version into the new fact
 (schema 2). Missing or invalid facts do not turn a successful push into an
@@ -1028,7 +1028,7 @@ An operator-run publisher may record the same bounded observation with
 `mizu publication record --lineage '<json>'`. The JSON value is capped at
 4096 UTF-8 bytes, parsed as finite JSON, validated with the same shape and
 published-SHA binding as the product path, and stored create-only. When
-`[vcs.lineage_target]` is configured the CLI binds the current descriptor
+the selected project's `project.toml` `[vcs.lineage_target]` is configured the CLI binds the current descriptor
 into the new fact and the observation must match it; without configuration
 the fact stays unbound legacy. With lineage the external receipt carries
 schema 4 with exactly the schema-3 fields plus `lineage`; without it the
@@ -1038,7 +1038,7 @@ is refused, and a receipt without lineage stays `unknown`.
 
 For `vcs_read` `status` addressed by `publication_id`, the adapter receives
 the established status request containing the receipt's branch and published
-SHA; when `[vcs.lineage_target]` is configured the request additionally
+SHA; when the selected project's `project.toml` `[vcs.lineage_target]` is configured the request additionally
 carries `lineage_target` (`repository`, `remote`, `target_ref`, `version`)
 naming the expected promotion target, and `push`/`pr` requests carry the same
 descriptor. There are no other lineage-specific request fields. In the same
@@ -1080,7 +1080,7 @@ The exact-publication status `result.lineage` contains current `status` and
 `reason`, historical `receipt_status` and `receipt_reason`, the validated
 receipt `receipt` and current `observation` (null when unavailable). These
 facts are also retained in the normal run-local VCS read evidence. The
-configured `[vcs.lineage_target]` descriptor selects the promotion target:
+project-specific `project.toml` `[vcs.lineage_target]` descriptor selects the promotion target:
 without it readiness is `unknown` / `unconfigured` and ordinary publish and
 CI still succeed. With it, current `ready` / `target_ancestor` requires a
 valid bound receipt (schema 2 carrying `expected_repository` /

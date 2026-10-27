@@ -71,6 +71,18 @@ class CheckRunnerDoctorTests(unittest.TestCase):
         self.assertEqual(
             doctor.check_runner_row(config, self.units, system="linux")["status"], "not_run")
 
+    def test_per_project_lineage_target_is_valid_project_metadata(self):
+        config = make_config(self.root, grants={"worker"})
+        text = ('roles = ["worker"]\n'
+                'verify = []\n'
+                '[vcs.lineage_target]\n'
+                'repository = "' + "1" * 64 + '"\n'
+                'remote = "origin"\n'
+                'target_ref = "refs/heads/main"\n'
+                'version = 1\n')
+        write_project(self.root, "demo", text)
+        self.assertEqual(doctor._check_job_projects(config), ["demo"])
+
     def test_missing_linux_units_fail_with_exact_names(self):
         config = make_config(self.root, grants={"worker"})
         write_project(self.root, "demo", ["worker"])

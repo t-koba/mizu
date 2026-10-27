@@ -437,7 +437,7 @@ def _cmd_publication_record(config, project, args):
     an identical request replays the stored record, a conflicting one
     (including a differing lineage) is refused. A bounded ``--lineage``
     JSON value is validated against the published SHA with the same shape
-    as the product path; when `[vcs].lineage_target` is configured the
+    as the product path; when project.toml `[vcs.lineage_target]` is configured the
     observation is bound to that descriptor and must match it, otherwise it
     stays unbound legacy; lineage never enters the publication ID and a
     receipt without lineage stays unknown. Trust: the operator asserts the
@@ -468,7 +468,7 @@ def _cmd_publication_record(config, project, args):
         source_commit=args.source_commit, run=args.run,
         projection={"schema": args.projection_schema, "algorithm": args.projection_algorithm,
                     "digest": args.projection_digest},
-        lineage=lineage_value, lineage_target=config.vcs.get("lineage_target"))
+        lineage=lineage_value, lineage_target=project.lineage_target)
 
 
 def _cmd_publication_list(config, project, args):

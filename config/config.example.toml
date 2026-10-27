@@ -230,18 +230,6 @@ poll_interval_seconds = 300  # Daemon poll cadence in seconds (15-86400).
 poll_max_branches = 4            # CI branches polled per daemon tick (1-64).
 poll_fetch_timeout_seconds = 30  # Daemon fetch adapter cap in seconds (1-300).
 poll_status_timeout_seconds = 15 # Daemon per-branch status adapter cap in seconds (1-300).
-# Optional expected promotion target for lineage readiness. When absent,
-# lineage readiness stays unknown without failing publish or CI. When present,
-# all four keys are required with no implicit origin/main; publish/status
-# requests carry this descriptor, adapter responses must match it, and new
-# lineage facts bind it. A changed descriptor makes prior observations stale
-# without rewriting them; legacy unbound receipts stay readable but never ready.
-# [vcs.lineage_target]
-# repository = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" # 64 lowercase hex repository identity digest (non-secret)
-# remote = "origin"               # safe ASCII remote name (1-256 chars)
-# target_ref = "refs/heads/main"  # valid full branch ref (branch name at most 256 chars)
-# version = 1                     # descriptor version in [1, 1073741824]; bump on intentional change
-
 [web]
 hosts = []                       # HTTPS host allowlist, rechecked on every redirect: exact hosts ("example.com");
 # a leading-dot entry (".python.org") also covers the base domain and its subdomains. A single "*" entry

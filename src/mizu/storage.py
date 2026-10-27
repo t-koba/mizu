@@ -22,13 +22,12 @@ import uuid
 from pathlib import Path
 
 from .admission import check_slot_exclusions, role_exclusions
-from .config import keys, strings
 from .errors import Busy, Denied, LimitExceeded
 from .fs import (DIGEST, PREVIEW_BYTES, atomic_write, canonical, digest,
                  identifier, lock, mkdir, now, read_json, safe_read,
                  sync_dir, write_json, relative_parts)
 from . import acceptance, insight_archive
-from .project import Project, check_verify, read_goal
+from .project import Project, check_project_settings, read_goal
 from .snapshot import open_store
 
 #: Project members covered by backup/restore (plus backup.json on restore).
@@ -1458,11 +1457,7 @@ def restore(config, name: str, archive_path: Path, *, max_bytes: int = 107374182
                 raise Denied("Checkpoint omitted unsupported filesystem objects")
             # Parse operator-owned fields before publishing a usable project.
             settings = tomllib.loads((stage / "project.toml").read_text(encoding="utf-8"))
-            keys(settings, {"roles", "verify", "attributes"}, "project")
-            from .selection import attributes
-            attributes(settings.get("attributes", {}))
-            roles = strings(settings.get("roles", []), "project.roles")
-            check_verify(settings.get("verify", []))
+            roles, _, _, _ = check_project_settings(settings)
             if not roles or any(r not in config.roles for r in roles):
                 raise Denied("Backup roles are not configured on this installation")
             read_goal(stage / "PROJECT.md", "Restored goal must be nonempty and at most 64 KiB")

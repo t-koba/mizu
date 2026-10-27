@@ -539,8 +539,7 @@ def _check_job_projects(config: Config) -> list[str]:
     except OSError as exc:
         raise ConfigError(f"Cannot list initialized projects: {exc}") from exc
     needing: list[str] = []
-    from .project import check_verify
-    from .selection import attributes
+    from .project import check_project_settings
 
     for candidate in entries:
         try:
@@ -565,12 +564,9 @@ def _check_job_projects(config: Config) -> list[str]:
             raise ConfigError(f"{entry.name}: cannot read bounded project settings: {exc}") from exc
         try:
             settings = tomllib.loads(raw.decode("utf-8"))
-            keys(settings, {"roles", "verify", "attributes"}, "project")
-            roles = strings(settings.get("roles", []), "project.roles")
+            roles, _, _, _ = check_project_settings(settings)
             if not roles:
                 raise ConfigError("Project roles must refer to configured roles")
-            check_verify(settings.get("verify", []))
-            attributes(settings.get("attributes", {}))
         except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError,
                 MizuError, TypeError) as exc:
             raise ConfigError(f"{entry.name}: malformed project settings: {exc}") from exc

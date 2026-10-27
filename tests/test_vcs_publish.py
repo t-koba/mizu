@@ -8,7 +8,7 @@ from unittest.mock import patch
 import unittest
 import uuid
 
-from support import Fixture
+from support import Fixture, set_project_target
 from mizu import vcs
 from mizu.errors import ConfigError, Denied
 from mizu.fs import canonical, digest, lock, mkdir, write_json
@@ -698,8 +698,8 @@ class PublicationLineageTests(PublishFixture):
     def publish(self, make_fact, target=None):
         config, role = with_caps(self, "worker", ["vcs_publish", "vcs_read"])
         expected = self.target() if target is None else target
-        config = dataclasses.replace(config, vcs={**adapter_settings(PUSH_OK),
-                                                  "lineage_target": expected})
+        config = dataclasses.replace(config, vcs=adapter_settings(PUSH_OK))
+        set_project_target(self, expected)
         approve(self, "topic", current_digest(self))
         publisher = make_context(self, config, role)
 
@@ -716,7 +716,7 @@ class PublicationLineageTests(PublishFixture):
 
     def read(self, config, role, publication_id, make_fact):
         reader = make_context(self, config, role)
-        expected = config.vcs.get("lineage_target")
+        expected = self.project.lineage_target
         def adapter(_argv, **kwargs):
             req = json.loads(kwargs["input_data"])
             self.assertEqual(req, {"op": "status", "branch": "topic", "sha": "b" * 40,
@@ -774,7 +774,7 @@ class PublicationLineageTests(PublishFixture):
                                 "published_oid", "merge_bases", "target_is_ancestor",
                                 "observed_at"):
                         self.assertEqual(bound[key], observation[key])
-                    expected_target = config.vcs.get("lineage_target")
+                    expected_target = self.project.lineage_target
                     self.assertEqual(bound["expected_repository"], expected_target["repository"])
                     self.assertEqual(bound["expected_remote"], expected_target["remote"])
                     self.assertEqual(bound["expected_target_ref"], expected_target["target_ref"])
@@ -840,8 +840,8 @@ class PublicationLineageTests(PublishFixture):
         config, role = with_caps(self, "worker", ["vcs_publish", "vcs_read"])
         expected = {"repository": "1" * 64, "remote": "origin",
                     "target_ref": "refs/heads/main", "version": 1}
-        config = dataclasses.replace(config, vcs={**adapter_settings(PUSH_OK),
-                                                  "lineage_target": expected})
+        config = dataclasses.replace(config, vcs=adapter_settings(PUSH_OK))
+        set_project_target(self, expected)
         approve(self, "topic", current_digest(self))
         publisher = make_context(self, config, role)
         reader = make_context(self, config, role)
@@ -895,8 +895,8 @@ class LineageTargetConfiguredTests(PublishFixture):
 
     def publish_with(self, make_fact, target):
         config, role = with_caps(self, "worker", ["vcs_publish", "vcs_read"])
-        config = dataclasses.replace(config, vcs={**adapter_settings(PUSH_OK),
-                                                  "lineage_target": target} if target is not None else adapter_settings(PUSH_OK))
+        config = dataclasses.replace(config, vcs=adapter_settings(PUSH_OK))
+        set_project_target(self, target)
         approve(self, "topic", current_digest(self))
         publisher = make_context(self, config, role)
 
@@ -916,7 +916,7 @@ class LineageTargetConfiguredTests(PublishFixture):
 
     def status_with(self, config, role, publication_id, make_fact, expect_request_target=True):
         reader = make_context(self, config, role)
-        expected = config.vcs.get("lineage_target")
+        expected = self.project.lineage_target
 
         def adapter(_argv, **kwargs):
             req = json.loads(kwargs["input_data"])
@@ -980,8 +980,8 @@ class LineageTargetConfiguredTests(PublishFixture):
         config, role, _, published = self.publish_with(lambda: self_bound, None)
         receipt = Publication.read_receipt(self.project.root, published["publication_id"])
         self.assertNotIn("lineage", receipt)
-        configured = dataclasses.replace(
-            config, vcs={**config.vcs, "lineage_target": target})
+        set_project_target(self, target)
+        configured = config
         current = self.status_with(configured, role, published["publication_id"], self.fact)
         self.assertEqual((current["status"], current["reason"]),
                          ("unknown", "receipt_missing_or_invalid"))
@@ -1014,7 +1014,8 @@ class LineageTargetConfiguredTests(PublishFixture):
         config, role, _, published = self.publish_with(self.fact, old)
         # Operator reconfigures to a release ref; prior main-bound receipt cannot ready.
         new = self.target(target_ref="refs/heads/release-1")
-        config2 = dataclasses.replace(config, vcs={**config.vcs, "lineage_target": new})
+        set_project_target(self, new)
+        config2 = config
         lineage = self.status_with(config2, role, published["publication_id"], self.fact)
         self.assertEqual((lineage["status"], lineage["reason"]), ("unknown", "descriptor_mismatch"))
         self.assertEqual((lineage["receipt_status"], lineage["receipt_reason"]), ("stale", "descriptor_mismatch"))
@@ -1023,7 +1024,8 @@ class LineageTargetConfiguredTests(PublishFixture):
         old = self.target(version=1)
         config, role, _, published = self.publish_with(self.fact, old)
         new = self.target(version=2)
-        config2 = dataclasses.replace(config, vcs={**config.vcs, "lineage_target": new})
+        set_project_target(self, new)
+        config2 = config
         lineage = self.status_with(config2, role, published["publication_id"], self.fact)
         self.assertEqual((lineage["status"], lineage["reason"]), ("unknown", "descriptor_mismatch"))
         self.assertEqual((lineage["receipt_status"], lineage["receipt_reason"]), ("stale", "descriptor_mismatch"))
@@ -1035,7 +1037,8 @@ class LineageTargetConfiguredTests(PublishFixture):
         self.assertEqual(receipt["lineage"]["schema"], 1)
         # Later configuration cannot retroactively ready it.
         expected = self.target()
-        config = dataclasses.replace(config0, vcs={**config0.vcs, "lineage_target": expected})
+        set_project_target(self, expected)
+        config = config0
         role = config0.roles if hasattr(config0, "roles") else None
         # Reuse a worker role with read grant.
         _, read_role = with_caps(self, "worker", ["vcs_read"])
@@ -1051,19 +1054,73 @@ class LineageTargetConfiguredTests(PublishFixture):
         lineage = self.status_with(config, role, published["publication_id"], self.fact)
         self.assertEqual((lineage["status"], lineage["reason"]), ("unknown", "receipt_missing_or_invalid"))
 
+    def test_two_projects_share_adapter_but_bind_independent_targets(self):
+        from mizu.project import initialize
+        from concurrent.futures import ThreadPoolExecutor
+
+        second = initialize(self.config, "other", self.root / "source", self.goal,
+                            ["worker"], ["python3 -m unittest"])
+        second.set_control(armed=True, paused=False, wake_generation="test-wake")
+        first = self.project
+        config, role = with_caps(self, "worker", ["vcs_publish", "vcs_read"])
+        config = dataclasses.replace(config, vcs=adapter_settings(PUSH_OK))
+        targets = [self.target(), self.target(repository="2" * 64,
+                                               remote="upstream", target_ref="refs/heads/release-1")]
+        contexts = []
+        for project, target in zip((first, second), targets):
+            self.project = project
+            set_project_target(self, target)
+            if project.name == "other":
+                init_publish_git(self)
+            approve(self, "topic", current_digest(self))
+            contexts.append(make_context(self, config, role))
+
+        seen = []
+        def adapter(_argv, **kwargs):
+            req = json.loads(kwargs["input_data"])
+            target = req["lineage_target"]
+            seen.append((req["op"], target))
+            fact = self.fact(repository=target["repository"], remote=target["remote"],
+                             target_ref=target["target_ref"])
+            if req["op"] == "status":
+                data = {"checks": [{"check": "ci", "state": "success", "sha": "b" * 40}],
+                        "lineage": fact}
+            else:
+                data = {**{k: req[k] for k in ("digest", "projection_schema", "projection_algorithm",
+                                                "projection_digest", "publication_id")},
+                        "published_sha": "b" * 40, "lineage": fact}
+            return Result(0, json.dumps(data), "", "exited", 0)
+
+        with patch.object(vcs, "run", side_effect=adapter):
+            publications = [ctx.handle("vcs_publish", {"op": op, "branch": "topic"})
+                            for ctx, op in zip(contexts, ("push", "pr"))]
+            # Both projects remain live on the same configuration while reads overlap.
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(lambda pair: pair[0].handle(
+                    "vcs_read", {"op": "status", "publication_id": pair[1]["publication_id"]}),
+                    zip(contexts, publications)))
+        for ctx, target, publication, result in zip(contexts, targets, publications, results):
+            receipt = Publication.read_receipt(ctx.project.root, publication["publication_id"])
+            self.assertEqual(receipt["lineage"]["expected_repository"], target["repository"])
+            self.assertEqual(receipt["lineage"]["expected_target_ref"], target["target_ref"])
+            self.assertEqual(result["result"]["lineage"]["status"], "ready")
+            self.assertEqual(result["result"]["lineage"]["observation"]["expected_remote"], target["remote"])
+        self.assertCountEqual(seen, [("push", targets[0]), ("pr", targets[1]),
+                                    ("status", targets[0]), ("status", targets[1])])
+
     def test_lineage_target_config_validation(self):
         from mizu.config import load
         from mizu.errors import ConfigError
-        base = self.file.read_text()
-        # Absent stays None.
-        config = load(self.file)
-        self.assertIsNone(config.vcs.get("lineage_target"))
+        from mizu.project import Project
+        path = self.project.root / "project.toml"
+        base = path.read_text()
+        self.assertIsNone(self.project.lineage_target)
         # Valid main and release targets load.
         for ref in ("refs/heads/main", "refs/heads/release-1"):
             text = base + f'\n[vcs.lineage_target]\nrepository = "{"1" * 64}"\nremote = "origin"\ntarget_ref = "{ref}"\nversion = 1\n'
-            self.file.write_text(text)
-            loaded = load(self.file)
-            self.assertEqual(loaded.vcs["lineage_target"]["target_ref"], ref)
+            path.write_text(text)
+            loaded = Project(self.config, self.project.name)
+            self.assertEqual(loaded.lineage_target["target_ref"], ref)
         # Missing keys, unknown keys, bad values and implicit defaults are refused.
         bad_fragments = [
             'repository = "1" * 64',  # invalid TOML type context, still fails load
@@ -1080,11 +1137,34 @@ class LineageTargetConfiguredTests(PublishFixture):
         ]
         for frag in bad_fragments:
             with self.subTest(frag=frag[:40]):
-                self.file.write_text(base + "\n" + frag + "\n")
+                path.write_text(base + "\n" + frag + "\n")
                 with self.assertRaises(ConfigError):
-                    load(self.file)
+                    Project(self.config, self.project.name)
         # No implicit origin/main: a table missing remote/ref is refused (covered above),
         # and an empty table is refused.
-        self.file.write_text(base + "\n[vcs.lineage_target]\n")
+        path.write_text(base + "\n[vcs.lineage_target]\n")
+        with self.assertRaises(ConfigError):
+            Project(self.config, self.project.name)
+        for fragment in ("\n[vcs]\nunknown = 1\n", "\nvcs = 1\n",
+                         "\n[vcs]\nlineage_target = 1\n"):
+            path.write_text(base + fragment)
+            for read_only in (False, True):
+                with self.subTest(fragment=fragment, read_only=read_only):
+                    with self.assertRaises(ConfigError):
+                        Project(self.config, self.project.name, read_only=read_only)
+        self.file.write_text(self.file.read_text() + "\n[vcs.lineage_target]\n")
         with self.assertRaises(ConfigError):
             load(self.file)
+
+    def test_project_target_survives_backup_restore(self):
+        from mizu.project import Project
+        from mizu.storage import backup, restore
+
+        target = self.target(target_ref="refs/heads/release-1")
+        set_project_target(self, target)
+        self.project.set_control(paused=True)
+        archive = self.root / "lineage-backup.tar.gz"
+        backup(self.project, archive)
+        restore(self.config, "lineage-restored", archive)
+        restored = Project(self.config, "lineage-restored")
+        self.assertEqual(restored.lineage_target, target)

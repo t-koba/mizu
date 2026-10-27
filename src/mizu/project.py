@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 
 from .budget import Budget
-from .config import Config, keys, strings
+from .config import Config, _lineage_target, keys, strings
 from .errors import ConfigError, Denied, LimitExceeded
 from .fs import ID, SCRIPT_MAX, atomic_write, identifier, lock, mkdir, now, read_json, safe_read, sync_dir, write_json
 from .insights import Insights
@@ -129,12 +129,8 @@ class Project:
         except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, Denied, LimitExceeded) as exc:
             complaint = "Cannot read bounded project settings" if read_only else f"Project is not initialized: {name}"
             raise ConfigError(complaint) from exc
-        keys(self.settings, {"roles", "verify", "attributes", "recorded_batches"}, "project")
-        from .selection import attributes
-        attributes(self.settings.get("attributes", {}))
-        self.roles = strings(self.settings.get("roles", []), "project.roles")
-        self.verify = check_verify(self.settings.get("verify", []))
-        self.recorded_batches = check_recorded_batches(self.settings.get("recorded_batches"))
+        (self.roles, self.verify, self.recorded_batches,
+         self.lineage_target) = check_project_settings(self.settings)
         if not self.roles or any(r not in config.roles for r in self.roles):
             raise ConfigError("Project roles must refer to configured roles")
         self.snapshots = open_store(self.root, config, create_dirs=not read_only)
@@ -152,6 +148,10 @@ class Project:
         from .role_state import RoleStateStore
         self.role_state = RoleStateStore(self.root / "role-state",
                                          max_bytes=config.limits.role_state_bytes)
+
+    def vcs_settings(self, config: Config | None = None) -> dict:
+        """Shared adapter policy with this project's trusted target, if configured."""
+        return {**(config or self.config).vcs, "lineage_target": self.lineage_target}
 
     @property
     def goal(self) -> str:
@@ -436,6 +436,22 @@ def check_recorded_batches(value) -> dict[str, tuple[str, ...]]:
             normalized.append(entry)
         batches[name] = tuple(normalized)
     return batches
+
+
+def check_project_settings(
+        settings) -> tuple[list[str], tuple[str, ...], dict[str, tuple[str, ...]], dict | None]:
+    """Validate the complete operator-owned project.toml schema in one place."""
+    keys(settings, {"roles", "verify", "attributes", "recorded_batches", "vcs"}, "project")
+    from .selection import attributes
+    attributes(settings.get("attributes", {}))
+    roles = strings(settings.get("roles", []), "project.roles")
+    verify = check_verify(settings.get("verify", []))
+    recorded_batches = check_recorded_batches(settings.get("recorded_batches"))
+    project_vcs = settings.get("vcs", {})
+    keys(project_vcs, {"lineage_target"}, "project.vcs")
+    lineage_target = (_lineage_target(project_vcs["lineage_target"], "project.vcs.lineage_target")
+                      if "lineage_target" in project_vcs else None)
+    return roles, verify, recorded_batches, lineage_target
 
 
 def read_goal(path: Path, complaint: str) -> str:

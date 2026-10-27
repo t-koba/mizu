@@ -1296,7 +1296,7 @@ class Context:
         try:
             # Keep the one adapter response for diagnostics, then restore the
             # ordinary exact-SHA checks view. No extra network observation.
-            data = _vcs.read_via(self.config.vcs, args["op"], params,
+            data = _vcs.read_via(self.project.vcs_settings(self.config), args["op"], params,
                              cancel=self.tools_cancelled,
                              **({"preserve_status_rows": True} if diagnose_waits else {}))
         except OSError as exc:
@@ -1310,7 +1310,7 @@ class Context:
                 data["ci_waits"] = diagnostics
         if publication is not None:
             current = data.pop("lineage_observation")
-            expected = self.config.vcs.get("lineage_target")
+            expected = self.project.lineage_target
             data["lineage"] = lineage.status(publication, current, data.pop("lineage_reason"), expected)
             data["lineage"]["receipt"] = lineage.validate(publication.get("lineage"),
                                                           publication["published_sha"])
@@ -1377,7 +1377,7 @@ class Context:
                 if receipt is None:
                     try:
                         data = _vcs.publish_via(
-                            self.config.vcs, args["op"],
+                            self.project.vcs_settings(self.config), args["op"],
                             {**publication.identity, "publication_id": publication.id},
                             cancel=self.tools_cancelled, before_invoke=before_invoke)
                     except (Denied, OSError) as exc:

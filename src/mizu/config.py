@@ -1402,7 +1402,7 @@ def load(file: Path) -> Config:
                "poll_interval_seconds", "poll_max_branches",
                "poll_fetch_timeout_seconds", "poll_status_timeout_seconds",
                "retire_grant", "owned_prefixes", "protected_refs",
-               "close_grant", "merge_grant", "request_grant", "lineage_target"}, "vcs")
+               "close_grant", "merge_grant", "request_grant"}, "vcs")
     vcs = {"command": [], "timeout_seconds": 20,
            "max_bytes": 524288, "diagnostic_bytes": ADAPTER_DIAGNOSTIC_BYTES_DEFAULT,
            "ci_branch": "", "ci_wake_extra_branches": [], "ci_rewake_seconds": 1800,
@@ -1411,8 +1411,7 @@ def load(file: Path) -> Config:
            "poll_fetch_timeout_seconds": 30,
            "poll_status_timeout_seconds": 15, "retire_grant": False,
            "owned_prefixes": [], "protected_refs": [],
-           "close_grant": False, "merge_grant": False, "request_grant": False,
-           "lineage_target": None, **vcs}
+           "close_grant": False, "merge_grant": False, "request_grant": False, **vcs}
     strings(vcs["command"], "vcs.command")
     if vcs["command"] and any(not s or "\n" in s for s in vcs["command"]):
         raise ConfigError("vcs.command must be a nonempty argv array without newlines")
@@ -1446,11 +1445,6 @@ def load(file: Path) -> Config:
     for ref in vcs["protected_refs"]:
         if len(ref) > 256 or not ref or any(c.isspace() for c in ref):
             raise ConfigError("vcs.protected_refs must hold branch names without whitespace (at most 256 chars)")
-    raw_target = vcs.get("lineage_target")
-    if raw_target is None:
-        vcs["lineage_target"] = None
-    else:
-        vcs["lineage_target"] = _lineage_target(raw_target, "vcs.lineage_target")
     number(vcs["ci_rewake_seconds"], "vcs.ci_rewake_seconds", 60, 86400)
     vcs["poll_enabled"] = boolean(vcs["poll_enabled"], "vcs.poll_enabled")
     vcs["poll_proposals_enabled"] = boolean(vcs["poll_proposals_enabled"], "vcs.poll_proposals_enabled")

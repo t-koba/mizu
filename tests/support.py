@@ -54,6 +54,18 @@ def bind_delivery(project, item_id, snapshot_id, *, expected_rev=1):
                             snapshot_id=snapshot_id)
 
 
+def set_project_target(fixture, target):
+    """Change trusted fixture metadata and reopen the project."""
+    from mizu.project import Project
+    path = fixture.project.root / "project.toml"
+    text = path.read_text().split("\n[vcs.lineage_target]\n")[0]
+    if target is not None:
+        text += "\n[vcs.lineage_target]\n" + "".join(
+            f"{key} = {json.dumps(value)}\n" for key, value in target.items())
+    path.write_text(text)
+    fixture.project = Project(fixture.config, fixture.project.name)
+
+
 class Fixture(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="mizu-test-")

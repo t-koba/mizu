@@ -8,7 +8,7 @@ import io
 import uuid
 from unittest.mock import patch
 
-from support import Fixture
+from support import Fixture, set_project_target
 from mizu.cli import execute, parser
 from mizu.errors import Denied
 from mizu.fs import mkdir
@@ -372,8 +372,8 @@ class ExternalLineageTests(Fixture):
         expected = self.target()
         config, role = with_caps(self, "worker", ["vcs_read"])
         config = dataclasses.replace(config, vcs={"command": [sys.executable, "-c", "pass"],
-                                                  "timeout_seconds": 5, "max_bytes": 524288,
-                                                  "lineage_target": expected})
+                                                  "timeout_seconds": 5, "max_bytes": 524288})
+        set_project_target(self, expected)
         ctx = make_context(self, config, role)
 
         def adapter(_argv, **kwargs):
@@ -406,8 +406,8 @@ class ExternalLineageTests(Fixture):
         self.assertEqual(record["lineage"]["expected_version"], expected["version"])
         config, role = with_caps(self, "worker", ["vcs_read"])
         config = dataclasses.replace(config, vcs={"command": [sys.executable, "-c", "pass"],
-                                                  "timeout_seconds": 5, "max_bytes": 524288,
-                                                  "lineage_target": expected})
+                                                  "timeout_seconds": 5, "max_bytes": 524288})
+        set_project_target(self, expected)
         ctx = make_context(self, config, role)
 
         def adapter(_argv, **kwargs):
@@ -451,8 +451,8 @@ class ExternalLineageTests(Fixture):
         path.write_text(json.dumps(corrupted), encoding="utf-8")
         config, role = with_caps(self, "worker", ["vcs_read"])
         config = dataclasses.replace(config, vcs={"command": [sys.executable, "-c", "pass"],
-                                                  "timeout_seconds": 5, "max_bytes": 524288,
-                                                  "lineage_target": expected})
+                                                  "timeout_seconds": 5, "max_bytes": 524288})
+        set_project_target(self, expected)
         ctx = make_context(self, config, role)
 
         def adapter(_argv, **kwargs):
@@ -651,8 +651,8 @@ class LineageTargetExternalTests(Fixture):
         self.assertEqual(record["lineage"]["expected_version"], 1)
         config, role = with_caps(self, "worker", ["vcs_read"])
         config = dataclasses.replace(config, vcs={"command": [sys.executable, "-c", "pass"],
-                                                  "timeout_seconds": 5, "max_bytes": 524288,
-                                                  "lineage_target": expected})
+                                                  "timeout_seconds": 5, "max_bytes": 524288})
+        set_project_target(self, expected)
         ctx = make_context(self, config, role)
         def adapter(_argv, **kwargs):
             req = json.loads(kwargs["input_data"])
@@ -675,8 +675,8 @@ class LineageTargetExternalTests(Fixture):
         self.assertEqual(record["lineage"]["target_ref"], "refs/heads/release-1")
         config, role = with_caps(self, "worker", ["vcs_read"])
         config = dataclasses.replace(config, vcs={"command": [sys.executable, "-c", "pass"],
-                                                  "timeout_seconds": 5, "max_bytes": 524288,
-                                                  "lineage_target": expected})
+                                                  "timeout_seconds": 5, "max_bytes": 524288})
+        set_project_target(self, expected)
         ctx = make_context(self, config, role)
         def adapter(_argv, **kwargs):
             fresh = self.fact(target_ref="refs/heads/release-1")
@@ -717,8 +717,8 @@ class LineageTargetExternalTests(Fixture):
                                              lineage_target=expected)
         config, role = with_caps(self, "worker", ["vcs_read"])
         config = dataclasses.replace(config, vcs={"command": [sys.executable, "-c", "pass"],
-                                                  "timeout_seconds": 5, "max_bytes": 524288,
-                                                  "lineage_target": expected})
+                                                  "timeout_seconds": 5, "max_bytes": 524288})
+        set_project_target(self, expected)
         ctx = make_context(self, config, role)
         for bad in (self.fact(repository="2" * 64), self.fact(target_ref="refs/heads/other")):
             with self.subTest(bad=bad["target_ref"] if "target_ref" in bad else bad["repository"][:8]):
@@ -740,8 +740,8 @@ class LineageTargetExternalTests(Fixture):
         new = self.target(version=2)
         config, role = with_caps(self, "worker", ["vcs_read"])
         config = dataclasses.replace(config, vcs={"command": [sys.executable, "-c", "pass"],
-                                                  "timeout_seconds": 5, "max_bytes": 524288,
-                                                  "lineage_target": new})
+                                                  "timeout_seconds": 5, "max_bytes": 524288})
+        set_project_target(self, new)
         ctx = make_context(self, config, role)
         def adapter(_argv, **kwargs):
             return Result(0, json.dumps({"checks": [], "lineage": self.fact()}), "", "exited", 0)
@@ -762,8 +762,8 @@ class LineageTargetExternalTests(Fixture):
         expected = self.target()
         config, role = with_caps(self, "worker", ["vcs_read"])
         config = dataclasses.replace(config, vcs={"command": [sys.executable, "-c", "pass"],
-                                                  "timeout_seconds": 5, "max_bytes": 524288,
-                                                  "lineage_target": expected})
+                                                  "timeout_seconds": 5, "max_bytes": 524288})
+        set_project_target(self, expected)
         ctx = make_context(self, config, role)
         def adapter(_argv, **kwargs):
             return Result(0, json.dumps({"checks": [], "lineage": self.fact()}), "", "exited", 0)
@@ -788,12 +788,36 @@ class LineageTargetExternalTests(Fixture):
             Publication.record_external(self.root, **self.base_args(lineage=self.fact(target_ref="refs/heads/other")),
                                         lineage_target=expected)
 
+    def test_cli_uses_each_projects_target_with_shared_config(self):
+        from mizu.project import initialize
+        second = initialize(self.config, "other", self.goal.parent / "source",
+                            self.goal, ["worker"], ["python3 -m unittest"])
+        projects = (self.project, second)
+        targets = (self.target(), self.target(repository="2" * 64, remote="upstream",
+                                               target_ref="refs/heads/release-1"))
+        for project, target in zip(projects, targets):
+            self.project = project
+            set_project_target(self, target)
+        for project, target in zip(projects, targets):
+            fact = self.fact(repository=target["repository"], remote=target["remote"],
+                             target_ref=target["target_ref"])
+            args = parser().parse_args([
+                "--config", str(self.file), "publication", "record", project.name,
+                "--branch", BRANCH, "--published-sha", SHA, "--code-digest", DIGEST,
+                "--approval", APPROVAL, "--projection-schema", "1",
+                "--projection-algorithm", public_source_identity({})["algorithm"],
+                "--projection-digest", public_source_identity({})["digest"],
+                "--lineage", json.dumps(fact)])
+            record = execute(args)
+            self.assertEqual(record["lineage"]["expected_repository"], target["repository"])
+            self.assertEqual(record["lineage"]["expected_target_ref"], target["target_ref"])
+            self.assertEqual(Publication.read_receipt(project.root, record["publication_id"]), record)
+
     def test_cli_binds_descriptor_when_configured(self):
         import json
         from mizu.cli import parser, execute
         expected = self.target()
-        base = self.file.read_text()
-        self.file.write_text(base + "\n[vcs.lineage_target]\nrepository = \"" + "1" * 64 + "\"\nremote = \"origin\"\ntarget_ref = \"refs/heads/main\"\nversion = 1\n")
+        set_project_target(self, expected)
         fact = self.fact()
         args = parser().parse_args([
             "--config", str(self.file), "publication", "record", "sample",
