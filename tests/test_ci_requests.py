@@ -318,6 +318,65 @@ class CiRequestTests(Fixture):
         self.assertEqual(item["runs"][0]["run_id"], "run-1")
         self.assertEqual(item["covered"], [{"id": covered["id"], "rev": covered["rev"]}])
 
+    def test_daily_validates_marker_outcome_identity_and_provider_runs(self):
+        store = CiRequests(self.project.root)
+        publication = self.receipt["publication_id"]
+        workflows = ["ci", "lint"]
+        identity = request_id(publication, SHA, workflows)
+        marker = {"request_id": identity, "publication_id": publication, "sha": SHA,
+                  "workflows": workflows, "dispatched_at": "2026-10-20T23:59:00+00:00"}
+        outcome = {"request_id": identity, "publication_id": publication, "sha": SHA,
+                   "workflows": list(reversed(workflows)), "requested_at": "2026-10-21T00:01:00+00:00",
+                   "runs": [runs(workflow=name)["runs"][0] for name in workflows]}
+        store.mark_dispatch(identity, marker)
+        store.record_outcome(identity, outcome)
+        # A second valid request survives every damaged neighbor.
+        other_id = request_id(publication, OTHER_SHA, ["ci"])
+        store.mark_dispatch(other_id, {**marker, "request_id": other_id, "sha": OTHER_SHA,
+                                       "workflows": ["ci"]})
+        store.record_outcome(other_id, {**outcome, "request_id": other_id, "sha": OTHER_SHA,
+                                       "workflows": ["ci"], "runs": runs(OTHER_SHA)["runs"]})
+        path = store.root / f"{identity}.request.json"
+
+        def rows():
+            listing = store.daily()
+            return {row["request_id"]: row for day in listing["days"] for row in day["items"]}
+
+        self.assertEqual(rows()[identity]["state"], "resolved")
+        self.assertEqual(rows()[identity]["workflows"], list(reversed(workflows)))
+        invalid_runs = [None, [], [1], ["run"], [{}],
+                        [{**outcome["runs"][0], "run_id": ""}],
+                        [{**outcome["runs"][0], "run_id": "x" * 129}],
+                        [{**outcome["runs"][0], "url": "x" * 4097}],
+                        [{**outcome["runs"][0], "head_sha": OTHER_SHA}],
+                        [outcome["runs"][0]],
+                        [outcome["runs"][0], outcome["runs"][0]],
+                        [{**outcome["runs"][0], "extra": True}, outcome["runs"][1]]]
+        cases = [{"runs": value} for value in invalid_runs] + [
+            {"request_id": "f" * 64}, {"publication_id": "f" * 64},
+            {"sha": OTHER_SHA}, {"workflows": ["ci", "other"]},
+            {"workflows": ["ci", 1]}]
+        for change in cases:
+            with self.subTest(change=change):
+                path.write_text(json.dumps({**outcome, **change}), encoding="utf-8")
+                found = rows()
+                self.assertEqual(set(found), {identity, other_id})
+                self.assertEqual(found[identity]["state"], "unresolved")
+                self.assertEqual(found[identity]["runs"], [])
+                self.assertEqual(found[other_id]["state"], "resolved")
+
+        # A correctly shaped marker whose identity does not recompute is not evidence.
+        path.write_text(json.dumps(outcome), encoding="utf-8")
+        marker_path = store.root / f"{identity}.dispatch.json"
+        for change in ({"publication_id": "f" * 64}, {"sha": OTHER_SHA},
+                       {"workflows": ["other"]}, {"request_id": "f" * 64},
+                       {"workflows": []}, {"sha": "g" * 40}):
+            with self.subTest(marker=change):
+                marker_path.write_text(json.dumps({**marker, **change}), encoding="utf-8")
+                found = rows()
+                self.assertEqual(set(found), {other_id})
+                self.assertEqual(found[other_id]["state"], "resolved")
+
     def test_the_daily_listing_names_a_dispatch_whose_outcome_names_another_request(self):
         ctx = self.context(runs(), poll_enabled=True)
         self.request_covered(ctx, [])

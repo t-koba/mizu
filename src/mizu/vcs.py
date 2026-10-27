@@ -1669,6 +1669,17 @@ def request_runs_via(settings: dict, sha: str, workflows, *, cancel=lambda: Fals
     """
     if not isinstance(settings, dict) or settings.get("request_grant") is not True:
         raise Denied("CI requests are not granted in VCS configuration")
+    validate_ci_request(sha, workflows)
+    data = invoke(settings, {"op": "request_runs", "sha": sha,
+                             "workflows": list(workflows)},
+                  cancel=cancel, before_invoke=before_invoke)
+    if not isinstance(data, dict):
+        raise Denied("VCS adapter must return a JSON object")
+    return validate_ci_runs(data.get("runs"), sha, workflows)
+
+
+def validate_ci_request(sha, workflows) -> None:
+    """Validate the exact commit and workflow set for a CI request."""
     if not isinstance(sha, str) or not _SHA.fullmatch(sha):
         raise Denied("Invalid published sha for a CI request")
     if (not isinstance(workflows, list) or not workflows
@@ -1677,12 +1688,10 @@ def request_runs_via(settings: dict, sha: str, workflows, *, cancel=lambda: Fals
                    or "\n" in name or "\x00" in name for name in workflows)
             or len(set(workflows)) != len(workflows)):
         raise Denied("Invalid CI workflow list")
-    data = invoke(settings, {"op": "request_runs", "sha": sha,
-                             "workflows": list(workflows)},
-                  cancel=cancel, before_invoke=before_invoke)
-    if not isinstance(data, dict):
-        raise Denied("VCS adapter must return a JSON object")
-    runs = data.get("runs")
+
+
+def validate_ci_runs(runs, sha, workflows) -> list[dict]:
+    """Validate and normalize the bounded provider run response."""
     if not isinstance(runs, list) or not runs or len(runs) > MAX_CI_WORKFLOWS:
         raise Denied("VCS adapter must return the requested runs")
     out = []

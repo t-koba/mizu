@@ -18,6 +18,7 @@ from pathlib import Path
 
 from .errors import Denied, LimitExceeded
 from .fs import canonical, digest, loads_finite, mkdir, safe_read, sync_dir, write_json
+from .vcs import validate_ci_request, validate_ci_runs
 
 #: Bounded record size (8 KiB), like the other evidence records.
 RECORD_BYTES = 8192
@@ -107,8 +108,9 @@ class CiRequests:
         Trust: locally recorded evidence; an unreadable, oversized or
         invalid outcome record is never returned unvalidated and it never
         denies the valid records beside it, and a dispatch whose marker
-        cannot be validated is not listed at all, because it has no instant
-        to be dated by. Failure: ``Denied`` on an invalid limit; a missing
+        cannot be validated is not listed at all, because it cannot establish
+        dispatch identity. Outcome identity and provider runs are checked
+        against the marker and the VCS request schema. Failure: ``Denied`` on an invalid limit; a missing
         directory lists nothing.
         """
         if type(limit) is not int or not 1 <= limit <= 100:
@@ -207,17 +209,16 @@ def _summary(record: dict, identity: str, marker: dict) -> dict | None:
         return None
     if moment.tzinfo is None:
         return None
-    if not isinstance(record["publication_id"], str) or len(record["publication_id"]) != 64:
-        return None
-    if not isinstance(record["sha"], str) or not 40 <= len(record["sha"]) <= 64:
-        return None
     workflows = record["workflows"]
-    if (not isinstance(workflows, list) or len(workflows) > 8
-            or any(not isinstance(name, str) or not name or len(name) > 128
-                   for name in workflows)):
+    if (record["publication_id"] != marker["publication_id"]
+            or record["sha"] != marker["sha"]):
         return None
-    runs = record["runs"]
-    if not isinstance(runs, list) or len(runs) > 8:
+    try:
+        validate_ci_request(record["sha"], workflows)
+        if sorted(workflows) != sorted(marker["workflows"]):
+            return None
+        runs = validate_ci_runs(record["runs"], marker["sha"], marker["workflows"])
+    except Denied:
         return None
     covered = record.get("covered", [])
     if not isinstance(covered, list) or len(covered) > 16:
@@ -257,14 +258,15 @@ def _unresolved_summary(record: dict, identity: str) -> dict | None:
         return None
     if moment.tzinfo is None:
         return None
-    if not isinstance(record["publication_id"], str) or len(record["publication_id"]) != 64:
-        return None
-    if not isinstance(record["sha"], str) or not 40 <= len(record["sha"]) <= 64:
+    if (not isinstance(record["publication_id"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", record["publication_id"])):
         return None
     workflows = record["workflows"]
-    if (not isinstance(workflows, list) or len(workflows) > 8
-            or any(not isinstance(name, str) or not name or len(name) > 128
-                   for name in workflows)):
+    try:
+        validate_ci_request(record["sha"], workflows)
+    except Denied:
+        return None
+    if request_id(record["publication_id"], record["sha"], workflows) != identity:
         return None
     covered = record.get("covered", [])
     if not isinstance(covered, list) or len(covered) > 16:
