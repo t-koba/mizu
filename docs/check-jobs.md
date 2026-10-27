@@ -291,7 +291,11 @@ same inputs reuses that measurement instead of repeating it. Retrying the same
 request within a unit remains idempotent.
 
 The prompt exposes `shared_checks` candidates without expensive dependency
-traversal; these are not yet accepted evidence. `check_job action=list` validates
+traversal; these are not yet accepted evidence. The prompt hashes the exact live
+workspace under the snapshot bounds without storing capture objects. If that
+inspection is refused, it offers no candidates and reports a diagnostic of at
+most 256 UTF-8 bytes in `check_discovery.shared_check_error`; prompt generation
+continues. `check_job action=list` validates
 and lists compatible candidates with command previews. `action=join,id=<id>`
 creates a role-owned subscription after validating current inputs. A reviewer
 can inspect a worker's verification without obtaining the `verify` execution

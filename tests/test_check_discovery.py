@@ -9,7 +9,7 @@ from unittest.mock import patch
 from support import Fixture
 from test_check_jobs import FakeSandbox
 from mizu import acceptance, check_jobs, storage
-from mizu.errors import Denied
+from mizu.errors import CaptureLimitExceeded, Denied
 from mizu.fs import canonical, digest, held, write_json
 from mizu.runtime import Engine, prompt_for, prompt_delta_for, should_run
 
@@ -178,6 +178,79 @@ class DiscoveryTests(Fixture):
         hidden = self.context('consult')
         hidden.role = dataclasses.replace(hidden.role, workspace='none')
         self.assertFalse(check_jobs.available(hidden, validate=False))
+
+    def test_shared_prompt_uses_live_uncommitted_source_without_object_writes(self):
+        ctx = self.context()
+        source = ctx.workspace / 'app.py'
+        source.write_bytes(b'uncommitted source\n')
+        job = check_jobs.submit(ctx, 'healthy', kind='experiment')
+        self.assertNotEqual(job['code_digest'], ctx.snapshot['code_digest'])
+        objects = self.project.snapshots.root / 'objects'
+        before = {p.name for p in objects.iterdir()}
+        with patch('mizu.snapshot.atomic_write', side_effect=AssertionError('snapshot write')):
+            for build in (lambda: prompt_for(ctx), lambda: prompt_delta_for(ctx, [])):
+                prompt = json.loads(build())
+                self.assertEqual([j['id'] for j in prompt['shared_checks']], [job['id']])
+                self.assertTrue(prompt['shared_checks'][0]['requires_input_check'])
+            source.write_bytes(b'new uncommitted source\n')
+            for build in (lambda: prompt_for(ctx), lambda: prompt_delta_for(ctx, [])):
+                self.assertEqual(json.loads(build())['shared_checks'], [])
+        self.assertEqual({p.name for p in objects.iterdir()}, before)
+
+    def test_shared_prompt_capture_limits_fail_closed_in_full_and_delta(self):
+        ctx, job = self.queue()
+        snapshots = self.project.snapshots
+        for attribute, limit, message in (
+                ('max_file', 1, 'Snapshot file exceeds'),
+                ('max_bytes', 1, 'Snapshot byte limit exceeded'),
+                ('max_files', 0, 'Snapshot file count exceeded')):
+            capture = snapshots.capture_files
+            def limited(*args, **kwargs):
+                with patch.object(snapshots, attribute, limit):
+                    return capture(*args, **kwargs)
+            with self.subTest(attribute=attribute), patch.object(snapshots, 'capture_files', side_effect=limited):
+                for build in (lambda: prompt_for(ctx), lambda: prompt_delta_for(ctx, [])):
+                    prompt = json.loads(build())
+                    self.assertEqual(prompt['shared_checks'], [])
+                    diagnostic = prompt['check_discovery']['shared_check_error']
+                    self.assertIn(message, diagnostic)
+                    self.assertLessEqual(len(diagnostic), 256)
+                    self.assertEqual(prompt['check_jobs'][0]['id'], job['id'])
+        self.assertEqual(check_jobs.prompt_projection(ctx)['shared_checks'][0]['id'], job['id'])
+
+    def test_shared_prompt_diagnostic_bounds_and_sanitizes_refusal(self):
+        ctx, _ = self.queue()
+        error = CaptureLimitExceeded('x' * 300 + '\udcff')
+        with patch.object(self.project.snapshots, 'capture_files', side_effect=error):
+            for build in (lambda: prompt_for(ctx), lambda: prompt_delta_for(ctx, [])):
+                prompt = json.loads(build())
+                self.assertEqual(prompt['shared_checks'], [])
+                self.assertEqual(prompt['check_discovery']['shared_check_error'], 'x' * 256)
+        with patch.object(self.project.snapshots, 'capture_files',
+                          side_effect=CaptureLimitExceeded('invalid \udcff')):
+            self.assertIn('invalid ?', json.loads(prompt_for(ctx))['check_discovery']['shared_check_error'])
+
+    def test_shared_prompt_isolates_capture_refusal_from_other_io_errors(self):
+        ctx, _ = self.queue()
+        with patch.object(ctx, 'close_exec', side_effect=OSError('close failed')):
+            with self.assertRaisesRegex(OSError, 'close failed'):
+                check_jobs.prompt_projection(ctx)
+        with patch.object(self.project.snapshots, 'capture_files',
+                          side_effect=OSError('capture refused')):
+            prompt = json.loads(prompt_for(ctx))
+        self.assertEqual(prompt['shared_checks'], [])
+        self.assertEqual(prompt['check_discovery']['shared_check_error'], 'capture refused')
+
+    def test_inspection_manifest_matches_capture_for_both_walkers(self):
+        ctx = self.context()
+        (ctx.workspace / 'app.py').write_bytes(b'unstored manifest bytes\n')
+        snapshots = self.project.snapshots
+        for portable in (False, True):
+            with self.subTest(portable=portable), patch('mizu.snapshot._platform.HAS_OPENAT', not portable):
+                with patch('mizu.snapshot.atomic_write', side_effect=AssertionError('object write')):
+                    inspected = snapshots.capture_files(ctx.workspace, persist=False)
+                captured = snapshots.capture_files(ctx.workspace)
+                self.assertEqual(inspected, captured)
 
     def test_no_grant_does_not_read_or_expose_cache(self):
         _, job = self.queue()

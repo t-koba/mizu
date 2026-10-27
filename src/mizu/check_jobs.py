@@ -18,9 +18,13 @@ import time
 import math
 from pathlib import Path
 from .admission import check_slot_exclusion
-from .errors import Busy, Denied
+from .errors import Busy, CaptureLimitExceeded, Denied
 from .fs import text_preview, canonical, digest, lock, mkdir, now, read_json, write_json, DIGEST, SCRIPT_MAX
 from .sandbox import Sandbox, cleanup, cleanup_refused, scratch_selection
+
+
+class _SharedCheckCaptureRefused(Exception):
+    """The optional prompt projection could not inspect the live workspace."""
 
 
 def execution_key(config):
@@ -409,7 +413,14 @@ def available(context, *, validate=True, discovery=None):
     if not candidates:
         return []
     context.close_exec()
-    capture = context.project.snapshots.capture_files(context.workspace)
+    try:
+        capture = (context.project.snapshots.capture_files(
+            context.workspace, persist=False) if not validate else
+            context.project.snapshots.capture_files(context.workspace))
+    except (CaptureLimitExceeded, Denied, OSError) as exc:
+        if validate:
+            raise
+        raise _SharedCheckCaptureRefused(str(exc)) from exc
     if capture['skipped']:
         return []
     candidates = [j for j in candidates if j.get('code_digest') == capture['code_digest']]
@@ -835,10 +846,16 @@ def prompt_projection(context):
               'check_discovery': {'coverage_complete': not discovery[1],
                                   'summaries_omitted': 0, 'continuation_omitted': False,
                                   **producer_diagnostics(discovery[1])}}
+    try:
+        shared = available(context, validate=False, discovery=discovery)
+    except _SharedCheckCaptureRefused as exc:
+        shared = []
+        result['check_discovery']['shared_check_error'] = (
+            str(exc).encode('utf-8', 'replace')[:256].decode('utf-8', 'ignore'))
     views = (
         ('check_jobs', list_jobs(context.project, context.role.name,
                                  include_acknowledged=False, discovery=discovery)),
-        ('shared_checks', available(context, validate=False, discovery=discovery)))
+        ('shared_checks', shared))
     result['check_discovery']['summaries_omitted'] = sum(len(values) for _, values in views)
     if len(json.dumps(result, ensure_ascii=False).encode('utf-8')) > 65536:
         result['check_continuation'] = None

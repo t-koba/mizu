@@ -340,17 +340,18 @@ class Snapshots:
         else:
             self._capture_portable(workspace, files, skipped, reserved, 0, bounds_only=True)
 
-    def capture_files(self, workspace: Path) -> dict:
+    def capture_files(self, workspace: Path, *, persist: bool = True) -> dict:
+        """Capture the manifest; persist=False only inspects, without storing objects."""
         files: dict[str, dict] = {}
         skipped: list[str] = []
         reserved: list[str] = []
         total = 0
         if _platform.HAS_OPENAT and _platform.HAS_DIR_FD:
-            return self._capture_openat(workspace, files, skipped, reserved, total)
-        return self._capture_portable(workspace, files, skipped, reserved, total)
+            return self._capture_openat(workspace, files, skipped, reserved, total, persist=persist)
+        return self._capture_portable(workspace, files, skipped, reserved, total, persist=persist)
 
     def _capture_openat(self, workspace: Path, files: dict, skipped: list, reserved: list,
-                        total: int, *, bounds_only: bool = False) -> dict:
+                        total: int, *, bounds_only: bool = False, persist: bool = True) -> dict:
         # fwalk does not traverse symlink directories; safe_read pins each component.
         for directory, dirs, names, directory_fd in os.fwalk(workspace, follow_symlinks=False):
             relative = Path(directory).relative_to(workspace)
@@ -382,12 +383,12 @@ class Snapshots:
                     skipped.append(path)
                     continue
                 total = self._capture_file(workspace, path, files, total, info.st_size,
-                                           bounds_only=bounds_only)
+                                           bounds_only=bounds_only, persist=persist)
         return {"files": files, "code_digest": digest(canonical(files)), "skipped": skipped,
                 "reserved": reserved, "bytes": total}
 
     def _capture_portable(self, workspace: Path, files: dict, skipped: list, reserved: list,
-                          total: int, *, bounds_only: bool = False) -> dict:
+                          total: int, *, bounds_only: bool = False, persist: bool = True) -> dict:
         # Fallback where openat/dir_fd is unavailable: walk without following
         # links, refuse any symlink, and read through the same safe_read path.
         for directory, dirs, names in os.walk(workspace, followlinks=False):
@@ -429,12 +430,12 @@ class Snapshots:
                     skipped.append(rel)
                     continue
                 total = self._capture_file(workspace, rel, files, total, info.st_size,
-                                           bounds_only=bounds_only)
+                                           bounds_only=bounds_only, persist=persist)
         return {"files": files, "code_digest": digest(canonical(files)), "skipped": skipped,
                 "reserved": reserved, "bytes": total}
 
     def _capture_file(self, workspace: Path, name: str, files: dict, total: int,
-                      size: int, *, bounds_only: bool = False) -> int:
+                      size: int, *, bounds_only: bool = False, persist: bool = True) -> int:
         # Every bound names what tripped it, so the writer that owns the
         # workspace can act on the cause instead of repeating the failure.
         if len(files) >= self.max_files:
@@ -460,7 +461,8 @@ class Snapshots:
             raise CaptureLimitExceeded(
                 f"Snapshot byte limit exceeded: {total} > {self.max_bytes} bytes at {name}")
         sha = digest(data)
-        atomic_write(self.root / "objects" / sha, data, exclusive=True)
+        if persist:
+            atomic_write(self.root / "objects" / sha, data, exclusive=True)
         files[name] = {"sha256": sha, "bytes": len(data), "executable": bool(info.st_mode & 0o111)}
         return total
 
