@@ -348,8 +348,10 @@ class Limits:
     snapshot_files: int = 20000
     history_index: int = 128
     prompt_snapshots: int = 6
-    #: Maximum canonical JSON bytes of one role-owned current research
-    #: state record (1 KiB-64 KiB; default 4 KiB).
+    #: Maximum canonical JSON bytes of a new replacement role-owned
+    #: current research state record (1 KiB-64 KiB; default 4 KiB).
+    #: Existing records remain readable up to the supported 65,536-byte
+    #: ceiling, even when this write bound is lowered.
     role_state_bytes: int = 4096
     #: Maximum bytes of a role's own research state injected into its
     #: prompt (1-64 KiB; default 4 KiB). Records over the bound inject

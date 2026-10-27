@@ -93,12 +93,13 @@ class RoleStateTests(Fixture):
 
     def test_externally_written_oversized_record_is_unavailable(self):
         from mizu.fs import canonical, write_json
+        from mizu.role_state import MAX_RECORD_BYTES
         store = self.project.role_state
-        state = {"pad": "x" * (store.max_bytes)}
+        state = {"pad": "x" * (MAX_RECORD_BYTES + 1024)}
         record = {"role": "searcher", "generation": 1,
                   "updated_at": "2026-01-01T00:00:00+00:00",
                   "updated_by_run": None, "state": state}
-        self.assertGreater(len(canonical(record)), store.max_bytes)
+        self.assertGreater(len(canonical(record)), MAX_RECORD_BYTES)
         path = self.project.root / "role-state" / "searcher.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         write_json(path, record)
@@ -199,7 +200,8 @@ class RoleStateTests(Fixture):
         with self.assertRaises(Denied):
             self.project.role_state.read("../bad")
 
-    def test_exact_byte_bound_reads_current(self):
+    def test_exact_byte_bound_limits_writes_not_reads(self):
+        from mizu.errors import Denied
         from mizu.fs import canonical, write_json
         from mizu.role_state import RoleStateStore
         root = self.project.root / "role-state"
@@ -216,10 +218,72 @@ class RoleStateTests(Fixture):
         self.assertEqual(seen["status"], "current")
         self.assertEqual(seen["generation"], 1)
         self.assertEqual(seen["record"]["state"], state)
+        # A lower replacement-write bound leaves the existing record
+        # readable: reads are bounded by the supported ceiling, not the
+        # configured write bound.
         tight = RoleStateStore(root, max_bytes=size - 1)
         seen = tight.read("searcher")
-        self.assertEqual(seen["status"], "unavailable")
-        self.assertIsNone(seen["generation"])
+        self.assertEqual(seen["status"], "current")
+        self.assertEqual(seen["generation"], 1)
+        self.assertEqual(seen["record"]["state"], state)
+        # The same-size replacement still exceeds the tighter write bound,
+        # while a smaller replacement at the read generation compacts it.
+        with self.assertRaisesRegex(Denied, "byte bound"):
+            tight.replace("searcher", state, expected_generation=1)
+        out = tight.replace("searcher", {}, expected_generation=1)
+        self.assertEqual(out["generation"], 2)
+        self.assertEqual(tight.read("searcher")["record"]["state"], {})
+
+    def test_lowered_write_bound_keeps_record_readable_and_compactable(self):
+        from mizu.fs import canonical
+        from mizu.role_state import MAX_RECORD_BYTES, RoleStateStore
+        root = self.project.root / "role-state"
+        root.mkdir(parents=True, exist_ok=True)
+        wide = RoleStateStore(root, max_bytes=8192)
+        big = {"pad": "x" * 5000}
+        wide.replace("searcher", big, expected_generation=0)
+        stored = wide.read("searcher")
+        self.assertEqual(stored["status"], "current")
+        self.assertEqual(stored["generation"], 1)
+        self.assertGreater(len(canonical(stored["record"])), 4096)
+        self.assertLessEqual(len(canonical(stored["record"])), MAX_RECORD_BYTES)
+        # The 4,096-byte default store still reads the ~5 KiB record and
+        # compacts it with a smaller replacement at the read generation.
+        narrow = RoleStateStore(root, max_bytes=4096)
+        seen = narrow.read("searcher")
+        self.assertEqual(seen["status"], "current")
+        self.assertEqual(seen["generation"], 1)
+        self.assertEqual(seen["record"]["state"], big)
+        out = narrow.replace("searcher", {"ok": True},
+                             expected_generation=seen["generation"])
+        self.assertEqual(out["generation"], 2)
+        compacted = narrow.read("searcher")
+        self.assertEqual(compacted["status"], "current")
+        self.assertEqual(compacted["generation"], 2)
+        self.assertEqual(compacted["record"]["state"], {"ok": True})
+
+    def test_record_above_supported_ceiling_remains_unavailable(self):
+        from mizu.errors import Denied
+        from mizu.fs import canonical, write_json
+        from mizu.role_state import MAX_RECORD_BYTES, RoleStateStore
+        root = self.project.root / "role-state"
+        root.mkdir(parents=True, exist_ok=True)
+        state = {"pad": "x" * (MAX_RECORD_BYTES + 1024)}
+        record = {"role": "searcher", "generation": 1,
+                  "updated_at": "2026-01-01T00:00:00+00:00",
+                  "updated_by_run": None, "state": state}
+        self.assertGreater(len(canonical(record)), MAX_RECORD_BYTES)
+        path = root / "searcher.json"
+        write_json(path, record)
+        for bound in (4096, 8192, MAX_RECORD_BYTES):
+            store = RoleStateStore(root, max_bytes=bound)
+            seen = store.read("searcher")
+            self.assertEqual(seen["status"], "unavailable", bound)
+            self.assertIsNone(seen["generation"])
+            self.assertIsNone(seen["record"])
+            with self.assertRaisesRegex(Denied, "unavailable"):
+                store.replace("searcher", {"ok": True},
+                              expected_generation=1)
 
     def test_fifo_read_is_unavailable_without_hanging(self):
         import os

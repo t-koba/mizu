@@ -31,6 +31,11 @@ MAX_KEY_CHARS = 64
 #: Maximum length of the run token naming a replacement's author.
 MAX_RUN_CHARS = 128
 
+#: Maximum supported canonical JSON bytes of a stored role research
+#: state record. Reads validate existing records up to this ceiling,
+#: independent of the configured replacement-write bound.
+MAX_RECORD_BYTES = 65536
+
 
 def _check_state(state) -> dict:
     """Validate a replacement state object's shape; ``Denied`` never touches stored state."""
@@ -68,7 +73,12 @@ def _check_run(run):
 
 
 class RoleStateStore:
-    """Bounded per-role current-state records under one directory."""
+    """Bounded per-role current-state records under one directory.
+
+    ``max_bytes`` (``role_state_bytes``) limits new replacement records;
+    reads validate existing records up to ``MAX_RECORD_BYTES`` so a record
+    written under a higher previous bound stays readable and compactable.
+    """
 
     def __init__(self, root: Path, *, max_bytes: int):
         self.root = root
@@ -83,10 +93,12 @@ class RoleStateStore:
         Schema: ``{"status", "generation", "record"}`` where ``record``
         is the stored object (with ``state``) on ``current``, else
         ``None``. Absent files read ``absent`` with generation 0;
-        oversized, unstable, unreadable or malformed files read
-        ``unavailable`` with generation ``None``: callers must not CAS
-        against them, and a later ``replace`` refuses until an operator
-        clears the file.
+        files over the supported ``MAX_RECORD_BYTES`` ceiling, unstable,
+        unreadable or malformed files read ``unavailable`` with generation
+        ``None``: callers must not CAS against them, and a later ``replace``
+        refuses until an operator clears the file. Records above the
+        configured replacement-write bound but within the supported ceiling
+        still read ``current`` and may be compacted by a smaller replacement.
         Only the exact replacement envelope is current: role, positive exact-int
         generation, UTC ISO-seconds timestamp, validated author run and state.
         Failure: ``Denied`` only on a bad role name.
@@ -94,7 +106,7 @@ class RoleStateStore:
         missing = object()
         path = self._path(role)  # Bad role names remain caller errors.
         try:
-            record = read_json(path, missing, max_bytes=self.max_bytes)
+            record = read_json(path, missing, max_bytes=MAX_RECORD_BYTES)
         except (OSError, ValueError, RecursionError, Denied, LimitExceeded):
             return {"status": "unavailable", "generation": None, "record": None}
         if record is missing:
@@ -114,8 +126,8 @@ class RoleStateStore:
                 raise Denied("Invalid role research state timestamp")
             _check_state(record["state"])
             _check_run(record["updated_by_run"])
-            if len(canonical(record)) > self.max_bytes:
-                raise Denied("Role research state exceeds the configured byte bound")
+            if len(canonical(record)) > MAX_RECORD_BYTES:
+                raise Denied("Role research state exceeds the supported byte ceiling")
         except (Denied, ValueError):
             return {"status": "unavailable", "generation": None, "record": None}
         return {"status": "current", "generation": record["generation"],
@@ -134,9 +146,11 @@ class RoleStateStore:
         ``Denied`` (stale or busy) and re-reads instead of overwriting
         newer evidence. Corrupt stored files refuse every replacement
         until cleared. Writes are atomic, so an interrupted update
-        leaves the previous record intact; the byte bound covers the
-        full stored record (envelope plus authoring run token), not just
-        the state object. Evidence: returned ``{"role", "generation",
+        leaves the previous record intact; the configured write bound covers
+        each new full stored record (envelope plus authoring run token), not
+        just the state object, while existing records above that bound but
+        within the supported ceiling stay readable and compactable by a
+        smaller replacement. Evidence: returned ``{"role", "generation",
         "updated_at"}`` names the new generation. Failure: ``Denied``
         on bad roles, invalid states, bad runs, oversize records, stale
         expectations, contention, or unavailable stored files.

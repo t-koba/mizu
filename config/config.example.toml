@@ -68,7 +68,8 @@ safe_point_yield_quantum = 0   # Completed Claude queries/Codex turns between op
 missing_finish_followups = 1   # Extra bounded turns after a normal terminal return without mizu_finish (0-3).
 missing_finish_counts_as_failure = true # Exhaustion increments the failure brake by default.
 missing_finish_recovery_after = 2 # Consecutive missing-finish failures before a persistent session is rotated (1-100; default 2, below max_failures).
-role_state_bytes = 4096        # Maximum canonical JSON bytes of one role's current research state record (1024-65536; default 4096).
+role_state_bytes = 4096        # Maximum canonical JSON bytes for a new replacement record (1024-65536; default 4096).
+# Existing records remain readable up to the supported 65536-byte ceiling.
 role_state_prompt_bytes = 4096 # Maximum bytes of a role's own research state injected into its prompt (1-65536; default 4096).
 output_bytes = 262144
 file_bytes = 8388608
