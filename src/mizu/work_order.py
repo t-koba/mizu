@@ -243,12 +243,12 @@ def generation_from_captured(*, goal_digest, open_work_items, ready_work,
             or not isinstance(open_backlog.get("total"), int)
             or not isinstance(open_backlog.get("truncated"), bool)):
         raise Denied("Invalid open-insight backlog")
-    if ci_failures is None or ci_truncated is None:
-        if ci_failures is not None or ci_truncated is not None:
+    if ci_failures is None:
+        if ci_truncated is not None:
             raise Denied("Invalid CI projection")
-    else:
-        if not isinstance(ci_failures, list) or not isinstance(ci_truncated, bool):
-            raise Denied("Invalid CI projection")
+    elif (not isinstance(ci_failures, list)
+          or (ci_truncated is not None and not isinstance(ci_truncated, bool))):
+        raise Denied("Invalid CI projection")
     if decision_page is not None and (not isinstance(decision_page, dict) or "events" in decision_page):
         raise Denied("Invalid decision page summary")
     for name, value in (("decision_events", decision_events),
@@ -328,9 +328,10 @@ def _capture_opening(context) -> dict:
         if "vcs_read" in caps:
             from .ci_observation import ci_failures_projection as _proj
             rows, truncated = _proj(project)
-            if not isinstance(rows, list):
+            if (not isinstance(rows, list)
+                    or (truncated is not None and not isinstance(truncated, bool))):
                 raise Denied("Invalid CI failure projection")
-            ci_failures, ci_truncated = rows, bool(truncated)
+            ci_failures, ci_truncated = rows, truncated
         else:
             ci_failures, ci_truncated = None, None
         decision_events = list(getattr(context, "decision_events", []) or [])
@@ -450,7 +451,10 @@ def _fresh_generation_for_role(project, role) -> str:
     if "vcs_read" in caps:
         from .ci_observation import ci_failures_projection as _proj
         rows, truncated = _proj(project)
-        ci_failures, ci_truncated = rows, bool(truncated)
+        if (not isinstance(rows, list)
+                or (truncated is not None and not isinstance(truncated, bool))):
+            raise Denied("Invalid CI failure projection")
+        ci_failures, ci_truncated = rows, truncated
     else:
         ci_failures, ci_truncated = None, None
     from . import decision_delivery as _delivery

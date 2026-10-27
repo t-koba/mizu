@@ -701,6 +701,27 @@ class WorkOrderTests(Fixture):
         moved_both.role = both
         self.assertNotEqual(plan._frozen_generation(moved_both), empty_marker)
 
+    def test_unreadable_ci_marker_is_hashed_as_unknown_in_status(self):
+        from unittest.mock import patch
+        from mizu.unit_prompts import prompt_for
+        worker = self.config.roles["worker"]
+        role = dataclasses.replace(worker, capabilities=tuple((*worker.capabilities, "vcs_read")))
+        config_roles = dict(self.project.config.roles)
+        config_roles["worker"] = role
+        self.project.config = dataclasses.replace(self.project.config, roles=config_roles)
+        item = self.project.work_items.create(
+            idempotency_key="unknown-ci", title="A", actor="worker")["record"]["work_item"]
+        ctx = self.context("worker")
+        ctx.role = role
+        shown = json.loads(prompt_for(ctx))["work_order"]
+        ctx.handle("work_order", {"items": [item["id"]], "rationale": "reviewed",
+                                  "expected_rev": shown["rev"],
+                                  "expected_generation": shown["opening_generation"]})
+        with patch("mizu.ci_observation.read_json", side_effect=OSError("unreadable cache")):
+            status = self.project.work_order_status()
+        self.assertEqual(status["status"], "review_due")
+        self.assertIsNotNone(status["current_generation"])
+
     def test_exact_prompt_open_snapshot_and_mid_unit_arrivals(self):
         # The frozen generation binds the exact bounded prompt projections at
         # opening (open page, pending insights, CI marker for this role);
