@@ -48,8 +48,11 @@ class DecisionTriggerTests(Fixture):
         self.assertEqual(len(events), 1)
         ctx = self.context("reviewer")
         self.assertEqual(json.loads(prompt_for(ctx))["decision_events"], [])
-        ctx.decision_events = events
-        delivered = json.loads(prompt_for(ctx))["decision_events"]
+        # Event arrays are frozen when the opening prompt is captured. A
+        # dispatch that includes events starts with a fresh context.
+        ctx_with_events = self.context("reviewer")
+        ctx_with_events.decision_events = events
+        delivered = json.loads(prompt_for(ctx_with_events))["decision_events"]
         self.assertEqual(len(delivered), 1)
         self.assertEqual((delivered[0]["action"], delivered[0]["reason"], delivered[0]["body"]),
                          ("reject", "not material", "evidence"))
