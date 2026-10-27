@@ -738,7 +738,10 @@ unable to validate the capture must not claim it did. Every new intent or
 external receipt requires the projection. Schema-1/2 records stay readable as
 read-only legacy history and are never rewritten; the projection digest is
 never stored or compared as a `code_digest`, and derivation never inspects
-ignored private state.
+ignored private state. A later lineage extension keeps this identity unchanged:
+product receipts may carry a schema-1 observation, and external receipts with
+one use schema 4; see the publication-lineage operations contract. Lineage is
+not inferred from equal code digests and does not gate an external promotion.
 
 
 ## ADR-050 — Delivery is an immutable item revision, acceptance a late projection

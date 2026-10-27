@@ -387,6 +387,7 @@ class PublicationReceiptTests(PublishFixture):
             "projection_schema": receipt_store.identity["projection_schema"],
             "projection_algorithm": receipt_store.identity["projection_algorithm"],
             "projection_digest": receipt_store.identity["projection_digest"]})
+        self.assertEqual(observed["result"]["lineage"]["status"], "unknown")
         checks = observed["result"]["checks"]
         self.assertEqual([(row["check"], row["sha"]) for row in checks],
                          [("required", "b" * 40)])
@@ -676,3 +677,145 @@ class PublicationReceiptTests(PublishFixture):
             with self.assertRaises(LimitExceeded):
                 ctx.handle("vcs_publish", args)
         adapter.assert_not_called()
+
+class PublicationLineageTests(PublishFixture):
+    """A single bounded adapter observation, never inferred from content."""
+
+    def fact(self, **changes):
+        import datetime as dt
+        return {**{"schema": 1, "repository": "1" * 64, "remote": "origin",
+                   "target_ref": "refs/heads/main", "target_oid": "a" * 40,
+                   "published_oid": "b" * 40, "merge_bases": ["a" * 40],
+                   "target_is_ancestor": True,
+                   "observed_at": dt.datetime.now(dt.timezone.utc).isoformat()}, **changes}
+
+    def publish(self, make_fact):
+        config, role = with_caps(self, "worker", ["vcs_publish", "vcs_read"])
+        config = dataclasses.replace(config, vcs=adapter_settings(PUSH_OK))
+        approve(self, "topic", current_digest(self))
+        publisher = make_context(self, config, role)
+
+        def adapter(_argv, **kwargs):
+            req = json.loads(kwargs["input_data"])
+            return Result(0, json.dumps({**{k: req[k] for k in (
+                "digest", "projection_schema", "projection_algorithm", "projection_digest",
+                "publication_id")}, "published_sha": "b" * 40,
+                "lineage": make_fact()}), "", "exited", 0)
+        with patch.object(vcs, "run", side_effect=adapter):
+            published = publisher.handle("vcs_publish", {"op": "push", "branch": "topic"})
+        return config, role, publisher, published
+
+    def read(self, config, role, publication_id, make_fact):
+        reader = make_context(self, config, role)
+        def adapter(_argv, **kwargs):
+            req = json.loads(kwargs["input_data"])
+            self.assertEqual(req, {"op": "status", "branch": "topic", "sha": "b" * 40})
+            return Result(0, json.dumps({"checks": [{"check": "ci", "state": "success",
+                                                      "sha": "b" * 40}],
+                                         "lineage": make_fact()}), "", "exited", 0)
+        with patch.object(vcs, "run", side_effect=adapter):
+            result = reader.handle("vcs_read", {"op": "status", "publication_id": publication_id})
+        self.assertEqual(result["result"]["checks"][0]["check"], "ci")
+        self.assertEqual(json.loads((reader.run_dir / result["evidence"]).read_text()), result)
+        return result["result"]["lineage"]
+
+    def test_publication_and_fresh_status(self):
+        config, role, publisher, published = self.publish(self.fact)
+        receipt = Publication.read_receipt(self.project.root, published["publication_id"])
+        self.assertEqual(receipt["lineage"]["target_oid"], "a" * 40)
+        # Idempotent replay never replaces the first observation.
+        with patch.object(vcs, "run", side_effect=AssertionError("unexpected dispatch")):
+            replay = publisher.handle("vcs_publish", {"op": "push", "branch": "topic"})
+        self.assertEqual(replay["lineage"], receipt["lineage"])
+        cases = [
+            (self.fact, "ready", "target_ancestor"),
+            (lambda: self.fact(target_oid="c" * 40, merge_bases=["c" * 40]), "stale", "target_moved"),
+            (lambda: self.fact(repository="2" * 64), "unknown", "repository_mismatch"),
+            (lambda: None, "unknown", "observation_missing"),
+            (lambda: self.fact(merge_bases=["a" * 40, "c" * 40]), "unknown", "observation_invalid"),
+            (lambda: self.fact(published_oid="c" * 40), "unknown", "observation_invalid"),
+            (lambda: self.fact(remote="upstream"), "unknown", "observation_invalid"),
+            (lambda: self.fact(target_ref="refs/heads/other"), "unknown", "observation_invalid"),
+            (lambda: self.fact(observed_at="2025-01-01T00:00:00"), "unknown", "observation_invalid"),
+            (lambda: self.fact(observed_at="2020-01-01T00:00:00+00:00"), "unknown", "observation_invalid"),
+            (lambda: self.fact(merge_bases=["c" * 40], target_is_ancestor=False), "unknown", "not_ancestor"),
+        ]
+        for fact, expected, reason in cases:
+            with self.subTest(reason=reason):
+                outcome = self.read(config, role, published["publication_id"], fact)
+                self.assertEqual((outcome["status"], outcome["reason"]), (expected, reason))
+                self.assertEqual(outcome["receipt"], receipt["lineage"])
+
+    def test_missing_publication_observation_is_unknown(self):
+        config, role, _, published = self.publish(lambda: None)
+        receipt = Publication.read_receipt(self.project.root, published["publication_id"])
+        self.assertNotIn("lineage", receipt)
+        result = self.read(config, role, published["publication_id"], self.fact)
+        self.assertEqual((result["status"], result["reason"]),
+                         ("unknown", "receipt_missing_or_invalid"))
+
+    def test_non_ancestor_receipt_never_becomes_ready(self):
+        config, role, _, published = self.publish(
+            lambda: self.fact(merge_bases=["c" * 40], target_is_ancestor=False))
+        result = self.read(config, role, published["publication_id"], self.fact)
+        self.assertEqual((result["status"], result["reason"]), ("unknown", "not_ancestor"))
+
+    def test_malformed_publication_does_not_fail_push(self):
+        config, role, _, published = self.publish(lambda: self.fact(merge_bases=[]))
+        self.assertNotIn("lineage", Publication.read_receipt(self.project.root, published["publication_id"]))
+        self.assertEqual(self.read(config, role, published["publication_id"], self.fact)["status"], "unknown")
+
+    def test_malformed_retained_lineage_does_not_break_ci(self):
+        config, role, _, published = self.publish(self.fact)
+        publication_id = published["publication_id"]
+        store = Publication(self.project.root, self.source_commit, current_digest(self), "topic", "push",
+                            projection=public_source_identity(
+                                self.project.snapshots.capture_files(self.project.workspace)["files"]))
+        self.assertEqual(store.id, publication_id)
+        receipt = json.loads(store.path("receipt").read_text())
+        receipt["lineage"]["merge_bases"] = ["a" * 40, "c" * 40]
+        store.path("receipt").write_text(json.dumps(receipt))
+        outcome = self.read(config, role, publication_id, self.fact)
+        self.assertEqual((outcome["status"], outcome["reason"]),
+                         ("unknown", "receipt_missing_or_invalid"))
+
+    def test_offline_git_ancestry_and_target_movement(self):
+        import datetime as dt
+        workspace = self.project.workspace
+        def git(*args):
+            return subprocess.run(["git", "-C", str(workspace), *args], env=git_env(),
+                                  check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  text=True).stdout.strip()
+        target = self.source_commit
+        git("-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+            "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "Publish")
+        published_sha = git("rev-parse", "HEAD")
+        config, role = with_caps(self, "worker", ["vcs_publish", "vcs_read"])
+        config = dataclasses.replace(config, vcs=adapter_settings(PUSH_OK))
+        approve(self, "topic", current_digest(self))
+        publisher = make_context(self, config, role)
+        reader = make_context(self, config, role)
+
+        def adapter(_argv, **kwargs):
+            req = json.loads(kwargs["input_data"])
+            bases = git("merge-base", "--all", target, published_sha).splitlines()
+            fact = {"schema": 1, "repository": "1" * 64, "remote": "origin", "target_ref": "refs/heads/main",
+                    "target_oid": target, "published_oid": published_sha, "merge_bases": bases,
+                    "target_is_ancestor": bases == [target],
+                    "observed_at": dt.datetime.now(dt.timezone.utc).isoformat()}
+            if req["op"] == "status":
+                response = {"checks": [], "lineage": fact}
+            else:
+                response = {**{k: req[k] for k in ("digest", "projection_schema",
+                            "projection_algorithm", "projection_digest", "publication_id")},
+                            "published_sha": published_sha, "lineage": fact}
+            return Result(0, json.dumps(response), "", "exited", 0)
+
+        with patch.object(vcs, "run", side_effect=adapter):
+            publication = publisher.handle("vcs_publish", {"op": "push", "branch": "topic"})
+            args = {"op": "status", "publication_id": publication["publication_id"]}
+            self.assertEqual(reader.handle("vcs_read", args)["result"]["lineage"]["status"], "ready")
+            git("-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "Move target")
+            target = git("rev-parse", "HEAD")
+            self.assertEqual(reader.handle("vcs_read", args)["result"]["lineage"]["status"], "stale")

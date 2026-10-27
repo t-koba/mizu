@@ -1011,3 +1011,69 @@ coalesce, including after start. Terminal requests are addressed by their job ID
 a subsequent submission is new demand, and distinct identical concurrent
 demand requires a token the interface does not offer, or waiting until terminal.
 Normal queue limits and cancellation still apply.
+
+### Publication lineage observations
+
+The optional VCS-adapter `lineage` object on a successful `push`/`pr` response
+is captured create-only with the publication receipt when valid. Missing or
+invalid facts do not turn a successful push into an error. Existing receipts
+without lineage are never rewritten. Neither `publication_id` nor `code_digest`
+incorporates lineage.
+
+An operator-run publisher may record the same bounded observation with
+`mizu publication record --lineage '<json>'`. The JSON value is capped at
+4096 UTF-8 bytes, parsed as finite JSON, validated with the same shape and
+published-SHA binding as the product path, and stored create-only. With
+lineage the external receipt carries schema 4 with exactly the schema-3
+fields plus `lineage`; without it the receipt stays schema 3 with no
+lineage. The publication ID never incorporates lineage, so the same
+publication keeps one ID. A conflicting lineage on retry is refused, and a
+receipt without lineage stays `unknown`.
+
+For `vcs_read` `status` addressed by `publication_id`, the adapter receives
+the established status request containing the receipt's branch and published
+SHA; no lineage-specific request fields are added. In the same response as
+ordinary CI checks it may return one fresh `lineage` object (otherwise omit it
+or return null):
+
+* `repository`: 64 lowercase hex digits, a stable **non-secret** repository
+  identity digest shared between push and status observations. It identifies
+  the repository behind `origin`; do not return URLs containing credentials.
+* `remote`: exactly `origin`; `target_ref`: exactly `refs/heads/main`.
+* `target_oid` and `published_oid`: full lowercase 40- or 64-hex Git object
+  IDs of the freshly observed destination and the receipt's published commit,
+  in the same object format.
+* `merge_bases`: an array containing exactly one full OID, the complete result
+  of the unique merge-base calculation, in that same object format; an absent,
+  empty, or multiple result is not evidence. `target_is_ancestor` is a boolean
+  and must agree with whether that sole merge base equals `target_oid`.
+* `observed_at`: an aware ISO-8601 timestamp (at most 40 characters), taken
+  during that adapter invocation after observing the remote target and
+  ancestry. An outside-invocation timestamp is not fresh proof.
+
+The operator-owned adapter is responsible for observing the actual remote ref,
+resolving the exact published object, obtaining **all** merge bases and
+checking ancestry against the same observation; Mizu validates the bounded
+shape and bindings, not the adapter's Git claims. If the remote, history, or
+unique result cannot be observed, the adapter must omit the object, not guess.
+The regular adapter size and timeout limits and cancellation behavior apply;
+there is no extra call or automatic retry. An unavailable lineage field does
+not suppress otherwise valid CI status. If the whole status call fails, it
+still fails normally rather than inventing CI or lineage facts.
+
+The exact-publication status `result.lineage` contains `status`, `reason`, the
+validated receipt `receipt` and current `observation` (null when unavailable).
+These facts are also retained in the normal run-local VCS read evidence.
+`ready` / `target_ancestor` requires both valid observations, the same
+repository and target OID, and positive ancestry in both. `stale` /
+`target_moved` means the target OID changed under the same binding. `unknown`
+uses `receipt_missing_or_invalid`, `observation_missing`,
+`observation_invalid`, `repository_mismatch`, or `not_ancestor`. Wrong refs,
+wrong published OIDs, ambiguous merge bases and invalid or nonfresh times are
+invalid, never ready. The same projection applies to external receipts:
+schema-4 receipts with valid lineage may report `ready`/`stale`, while
+schema-2/3 receipts without lineage stay `unknown`; a schema-4 receipt with
+an invalid nested observation also projects to `unknown`. These are
+external-untrusted observations at a point in time, not a promotion gate:
+they do not prevent subsequent remote movement, invoke promotion, or enforce
+any condition on an external consumer.

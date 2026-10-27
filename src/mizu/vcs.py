@@ -31,7 +31,8 @@ import stat
 from pathlib import Path
 
 from .errors import Denied
-from .fs import atomic_write, canonical, digest, safe_read
+from . import lineage
+from .fs import DIGEST, atomic_write, canonical, digest, safe_read
 from .process import (
     ADAPTER_DIAGNOSTIC_BYTES_DEFAULT, adapter_failure_diagnostic, run,
 )
@@ -840,15 +841,30 @@ def read_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
         if not isinstance(sha, str) or not _SHA.fullmatch(sha):
             raise Denied("Invalid VCS sha filter")
         request["sha"] = sha
+    if op == "status" and "publication_id" in params:
+        # This is a host-only signal to validate an optional lineage response;
+        # keep the established adapter request shape (branch + exact SHA).
+        publication_id = params["publication_id"]
+        if (not isinstance(publication_id, str) or not DIGEST.fullmatch(publication_id)
+                or sha is None):
+            raise Denied("Invalid publication status binding")
+    started = dt.datetime.now(dt.timezone.utc)
     data = invoke(settings, request, cancel=cancel)
+    ended = dt.datetime.now(dt.timezone.utc)
     if op == "status":
         checks = parse_status_checks(data)
         if sha is not None and not preserve_status_rows:
             # An adapter may return a branch rollup with checks for other
             # commits; never let those rows satisfy an exact-SHA query.
             checks = [row for row in checks if row["sha"] == sha]
-        return {"op": op, "branch": branch, "checks": checks,
-                "trust": "external-untrusted"}
+        result = {"op": op, "branch": branch, "checks": checks,
+                  "trust": "external-untrusted"}
+        if "publication_id" in params:
+            raw = data.get("lineage")
+            result["lineage_observation"] = lineage.observe(raw, sha, started, ended)
+            result["lineage_reason"] = ('observation_missing' if raw is None
+                                        else 'observation_invalid')
+        return result
     if op == "proposals":
         complete = data.get("complete", None)
         if complete is not None and not isinstance(complete, bool):
@@ -1307,6 +1323,7 @@ def publish_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
     source_commit = params.get("source_commit")
     if not isinstance(source_commit, str) or not _SHA.fullmatch(source_commit):
         raise Denied("Invalid source commit for publication")
+    started = dt.datetime.now(dt.timezone.utc)
     data = invoke(settings, {"op": op, "branch": branch, "digest": code_digest,
                              "projection_schema": projection_schema,
                              "projection_algorithm": projection_algorithm,
@@ -1328,7 +1345,9 @@ def publish_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
     published_sha = data.get("published_sha")
     if not isinstance(published_sha, str) or not _SHA.fullmatch(published_sha):
         raise Denied("VCS adapter must return an exact published_sha")
-    return {**data, "trust": "external-untrusted"}
+    observed = lineage.observe(data.get("lineage"), published_sha, started,
+                               dt.datetime.now(dt.timezone.utc))
+    return {**data, "lineage": observed, "trust": "external-untrusted"}
 
 
 #: Branch lifecycle classes for the retire path. Only ``owned`` temporary

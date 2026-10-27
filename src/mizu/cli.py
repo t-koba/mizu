@@ -121,6 +121,7 @@ def parser() -> argparse.ArgumentParser:
     record.add_argument("--approval", required=True, help="Operator approval reference")
     record.add_argument("--source-commit", default=None, help="Source commit of the published tree (40 or 64 hex)")
     record.add_argument("--run", default=None, help="Optional publisher run reference")
+    record.add_argument("--lineage", default=None, help="Optional lineage observation as JSON (bounded, validated against published SHA)")
     listing = publication.add_parser("list", help="List recorded publication receipts; read-only")
     listing.add_argument("project", help="Managed project name")
     listing.add_argument("--code-digest", default=None, help="Filter by exact code digest (64 hex)")
@@ -431,19 +432,41 @@ def _cmd_publication_record(config, project, args):
     """Record one operator-run publication as a durable receipt.
 
     Schema: the schema-3 receipt, with required whole-capture and versioned
-    public-source projection identities. The write is create-only: an
-    identical request replays the stored record, a conflicting one is
-    refused. Trust: the operator asserts the published SHA and approval
-    reference; the product never infers them from a branch head. Failure:
-    ``Denied`` for invalid input or a conflicting receipt.
+    public-source projection identities, or schema 4 with exactly those
+    fields plus a validated lineage observation. The write is create-only:
+    an identical request replays the stored record, a conflicting one
+    (including a differing lineage) is refused. A bounded ``--lineage``
+    JSON value is validated against the published SHA with the same shape
+    as the product path; lineage never enters the publication ID and a
+    receipt without lineage stays unknown. Trust: the operator asserts the
+    published SHA and approval reference; the product never infers them or
+    ancestry from a branch head. Failure: ``Denied`` for invalid input or
+    a conflicting receipt.
     """
-    from .publication import Publication
+    from .fs import loads_finite
+    from .publication import LINEAGE_JSON_BYTES, Publication
+    lineage_value = None
+    if args.lineage is not None:
+        raw = args.lineage
+        if not isinstance(raw, str):
+            raise Denied("Invalid lineage observation for external publication")
+        try:
+            encoded = raw.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise Denied("Invalid lineage observation for external publication") from exc
+        if len(encoded) > LINEAGE_JSON_BYTES:
+            raise Denied("Invalid lineage observation for external publication")
+        try:
+            lineage_value = loads_finite(encoded)
+        except (ValueError, UnicodeError, RecursionError) as exc:
+            raise Denied("Invalid lineage observation for external publication") from exc
     return Publication.record_external(
         project.root, branch=args.branch, published_sha=args.published_sha,
         code_digest=args.code_digest, approval=args.approval,
         source_commit=args.source_commit, run=args.run,
         projection={"schema": args.projection_schema, "algorithm": args.projection_algorithm,
-                    "digest": args.projection_digest})
+                    "digest": args.projection_digest},
+        lineage=lineage_value)
 
 
 def _cmd_publication_list(config, project, args):

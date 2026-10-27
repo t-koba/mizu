@@ -18,7 +18,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import decision_delivery
+from . import decision_delivery, lineage
 from . import platform as _platform
 from . import run_activity as _run_activity
 from . import evidence_records, workspace_reads
@@ -1275,6 +1275,7 @@ class Context:
             publication = Publication.read_receipt(self.project.root, args["publication_id"])
             params["branch"] = publication["branch"]
             params["sha"] = publication["published_sha"]
+            params["publication_id"] = publication["publication_id"]
         else:
             if "branch" in args:
                 params["branch"] = args["branch"]
@@ -1308,6 +1309,11 @@ class Context:
             if diagnostics is not None:
                 data["ci_waits"] = diagnostics
         if publication is not None:
+            current = data.pop("lineage_observation")
+            data["lineage"] = lineage.status(publication, current, data.pop("lineage_reason"))
+            data["lineage"]["receipt"] = lineage.validate(publication.get("lineage"),
+                                                          publication["published_sha"])
+            data["lineage"]["observation"] = current
             observed = {
                 "publication_id": publication["publication_id"],
                 "source_commit": publication["source_commit"],
@@ -1375,7 +1381,7 @@ class Context:
                             cancel=self.tools_cancelled, before_invoke=before_invoke)
                     except (Denied, OSError) as exc:
                         raise Denied(f"VCS publication {publication.id}: {exc}") from exc
-                    receipt = publication.complete(intent, data["published_sha"])
+                    receipt = publication.complete(intent, data["published_sha"], data.get("lineage"))
                 else:
                     # Retain a run-local observation even on a durable replay.
                     before_local()

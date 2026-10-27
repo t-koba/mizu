@@ -303,3 +303,276 @@ class ExternalPublicationTests(Fixture):
             with self.subTest(key=key), self.assertRaises(Denied):
                 execute(parser().parse_args(argv))
         self.assertFalse((self.root / "evidence/publications").exists())
+
+
+class ExternalLineageTests(Fixture):
+    """Optional bounded lineage on external receipts; same shape as product path."""
+
+    def setUp(self):
+        super().setUp()
+        self.root = self.project.root
+
+    def fact(self, published_sha=SHA, **changes):
+        import datetime as dt
+        base = {"schema": 1, "repository": "1" * 64, "remote": "origin",
+                "target_ref": "refs/heads/main", "target_oid": "a" * 40,
+                "published_oid": published_sha, "merge_bases": ["a" * 40],
+                "target_is_ancestor": True,
+                "observed_at": dt.datetime.now(dt.timezone.utc).isoformat()}
+        base.update(changes)
+        return base
+
+    def base_args(self, **overrides):
+        args = {"branch": BRANCH, "published_sha": SHA, "code_digest": DIGEST,
+                "approval": APPROVAL, "projection": public_source_identity({})}
+        args.update(overrides)
+        return args
+
+    def test_valid_lineage_record_keeps_identity_and_reads_back(self):
+        from mizu.fs import canonical, digest
+        lineage = self.fact()
+        record = Publication.record_external(self.root, **self.base_args(lineage=lineage))
+        self.assertEqual(record["schema"], 4)
+        self.assertEqual(record["lineage"], lineage)
+        self.assertEqual(set(record), {"schema", "publication_id", "op", "branch",
+                                       "published_sha", "code_digest", "approval",
+                                       "source_commit", "run", "recorded_at",
+                                       "projection_schema", "projection_algorithm",
+                                       "projection_digest", "lineage"})
+        # The publication ID never incorporates lineage: it binds only the
+        # projection identity, exactly like the schema-3 shape.
+        identity = {"op": "external", "branch": BRANCH, "code_digest": DIGEST,
+                    "published_sha": SHA,
+                    "projection_schema": record["projection_schema"],
+                    "projection_algorithm": record["projection_algorithm"],
+                    "projection_digest": record["projection_digest"]}
+        self.assertEqual(record["publication_id"], digest(canonical(identity)))
+        self.assertEqual(Publication.read_receipt(self.root, record["publication_id"]), record)
+        # An identical retry replays the stored record, including lineage.
+        replay = Publication.record_external(self.root, **self.base_args(lineage=dict(lineage)))
+        self.assertEqual(replay, record)
+
+    def test_no_lineage_record_stays_schema3_and_unknown(self):
+        record = Publication.record_external(self.root, **self.base_args())
+        self.assertEqual(record["schema"], 3)
+        self.assertNotIn("lineage", record)
+        self.assertEqual(Publication.read_receipt(self.root, record["publication_id"]), record)
+        # Status without a recorded observation is never readiness.
+        import dataclasses, json, sys
+        from unittest.mock import patch
+        from mizu import vcs
+        from mizu.process import Result
+        config, role = with_caps(self, "worker", ["vcs_read"])
+        config = dataclasses.replace(config, vcs={"command": [sys.executable, "-c", "pass"],
+                                                  "timeout_seconds": 5, "max_bytes": 524288})
+        ctx = make_context(self, config, role)
+
+        def adapter(_argv, **kwargs):
+            req = json.loads(kwargs["input_data"])
+            self.assertEqual(req, {"op": "status", "branch": BRANCH, "sha": SHA})
+            return Result(0, json.dumps({"checks": [], "lineage": self.fact()}), "", "exited", 0)
+
+        with patch.object(vcs, "run", side_effect=adapter):
+            out = ctx.handle("vcs_read", {"op": "status", "publication_id": record["publication_id"]})
+        self.assertEqual((out["result"]["lineage"]["status"], out["result"]["lineage"]["reason"]),
+                         ("unknown", "receipt_missing_or_invalid"))
+
+    def test_external_lineage_status_ready_and_stale(self):
+        import dataclasses, json, sys
+        from unittest.mock import patch
+        from mizu import vcs
+        from mizu.process import Result
+        record = Publication.record_external(self.root, **self.base_args(lineage=self.fact()))
+        config, role = with_caps(self, "worker", ["vcs_read"])
+        config = dataclasses.replace(config, vcs={"command": [sys.executable, "-c", "pass"],
+                                                  "timeout_seconds": 5, "max_bytes": 524288})
+        ctx = make_context(self, config, role)
+
+        def adapter(_argv, **kwargs):
+            return Result(0, json.dumps({"checks": [], "lineage": self.fact()}), "", "exited", 0)
+
+        with patch.object(vcs, "run", side_effect=adapter):
+            out = ctx.handle("vcs_read", {"op": "status", "publication_id": record["publication_id"]})
+        self.assertEqual((out["result"]["lineage"]["status"], out["result"]["lineage"]["reason"]),
+                         ("ready", "target_ancestor"))
+        self.assertEqual(out["result"]["lineage"]["receipt"], record["lineage"])
+
+        def moved(_argv, **kwargs):
+            return Result(0, json.dumps({"checks": [],
+                                         "lineage": self.fact(target_oid="c" * 40,
+                                                               merge_bases=["c" * 40])}),
+                          "", "exited", 0)
+
+        with patch.object(vcs, "run", side_effect=moved):
+            stale = ctx.handle("vcs_read", {"op": "status", "publication_id": record["publication_id"]})
+        self.assertEqual((stale["result"]["lineage"]["status"], stale["result"]["lineage"]["reason"]),
+                         ("stale", "target_moved"))
+
+    def test_malformed_external_lineage_keeps_ci_status(self):
+        import dataclasses, json, sys
+        from unittest.mock import patch
+        from mizu import vcs
+        from mizu.process import Result
+        record = Publication.record_external(self.root, **self.base_args(lineage=self.fact()))
+        path = (self.root / "evidence" / "publications"
+                / (record["publication_id"] + ".external.json"))
+        corrupted = json.loads(path.read_text(encoding="utf-8"))
+        corrupted["lineage"]["merge_bases"] = ["a" * 40, "c" * 40]
+        path.write_text(json.dumps(corrupted), encoding="utf-8")
+        config, role = with_caps(self, "worker", ["vcs_read"])
+        config = dataclasses.replace(config, vcs={"command": [sys.executable, "-c", "pass"],
+                                                  "timeout_seconds": 5, "max_bytes": 524288})
+        ctx = make_context(self, config, role)
+
+        def adapter(_argv, **kwargs):
+            request = json.loads(kwargs["input_data"])
+            self.assertEqual(request, {"op": "status", "branch": BRANCH, "sha": SHA})
+            return Result(0, json.dumps({"checks": [{"check": "ci", "state": "success",
+                                                      "sha": SHA}],
+                                         "lineage": self.fact()}), "", "exited", 0)
+
+        with patch.object(vcs, "run", side_effect=adapter):
+            result = ctx.handle("vcs_read", {"op": "status",
+                                               "publication_id": record["publication_id"]})["result"]
+        self.assertEqual(result["checks"][0]["check"], "ci")
+        self.assertEqual((result["lineage"]["status"], result["lineage"]["reason"]),
+                         ("unknown", "receipt_missing_or_invalid"))
+
+    def test_invalid_mismatched_or_malformed_lineage_is_refused(self):
+        cases = [
+            {"schema": 2},
+            {"published_oid": OTHER_SHA},
+            {"remote": "upstream"},
+            {"target_ref": "refs/heads/other"},
+            {"repository": "not-hex"},
+            {"repository": "1" * 63},
+            {"target_oid": "not-an-oid"},
+            {"published_oid": "a" * 39},
+            {"merge_bases": []},
+            {"merge_bases": ["a" * 40, "c" * 40]},
+            {"merge_bases": "a" * 40},
+            {"merge_bases": ["c" * 40], "target_is_ancestor": True},
+            {"merge_bases": ["a" * 40], "target_is_ancestor": False},
+            {"target_is_ancestor": "yes"},
+            {"observed_at": "2025-01-01T00:00:00"},
+            {"observed_at": "not-a-time"},
+            {"observed_at": "x" * 41},
+            {"extra": "field"},
+        ]
+        for idx, changes in enumerate(cases):
+            with self.subTest(changes=changes):
+                fact = self.fact()
+                if "extra" in changes:
+                    fact["extra"] = changes["extra"]
+                else:
+                    fact.update(changes)
+                with self.assertRaises(Denied):
+                    Publication.record_external(self.root, **self.base_args(
+                        branch="invalid-%d" % idx,
+                        published_sha=SHA, lineage=fact))
+        for idx, bad in enumerate(("not-a-dict", ["list"], "string", 123, [])):
+            with self.subTest(bad=bad), self.assertRaises(Denied):
+                Publication.record_external(self.root, **self.base_args(
+                    branch="badtype-%d" % idx, published_sha=OTHER_SHA, code_digest=OTHER_DIGEST,
+                    lineage=bad))
+        # A missing lineage object field is malformed, not an absent fact.
+        incomplete = self.fact()
+        del incomplete["repository"]
+        with self.assertRaises(Denied):
+            Publication.record_external(self.root, **self.base_args(
+                branch="incomplete", published_sha=OTHER_SHA, code_digest=OTHER_DIGEST,
+                lineage=incomplete))
+        self.assertEqual(Publication.list_receipts(self.root)["publications"], [])
+
+    def test_conflicting_lineage_retry_is_refused(self):
+        first = Publication.record_external(self.root, **self.base_args(lineage=self.fact()))
+        # A differing observation for the same publication is a conflict.
+        with self.assertRaisesRegex(Denied, first["publication_id"]):
+            Publication.record_external(self.root, **self.base_args(
+                lineage=self.fact(target_oid="c" * 40, merge_bases=["c" * 40])))
+        # Adding lineage where none was recorded changes the retry, so it conflicts.
+        plain = Publication.record_external(self.root, **self.base_args(
+            branch="other", published_sha=OTHER_SHA, code_digest=OTHER_DIGEST))
+        self.assertEqual(plain["schema"], 3)
+        with self.assertRaisesRegex(Denied, plain["publication_id"]):
+            Publication.record_external(self.root, **self.base_args(
+                branch="other", published_sha=OTHER_SHA, code_digest=OTHER_DIGEST,
+                lineage=self.fact(published_sha=OTHER_SHA)))
+        # Dropping lineage is also a conflict, never a silent downgrade.
+        with self.assertRaisesRegex(Denied, first["publication_id"]):
+            Publication.record_external(self.root, **self.base_args())
+        self.assertEqual(Publication.read_receipt(self.root, first["publication_id"]), first)
+        self.assertEqual(Publication.read_receipt(self.root, plain["publication_id"]), plain)
+
+    def test_legacy_schema2_record_stays_readable_and_immutable(self):
+        from mizu.fs import canonical, digest, write_json
+        code_digest = DIGEST
+        identity = {"op": "external", "branch": "legacy-ext", "published_sha": "b" * 40,
+                    "code_digest": code_digest}
+        publication_id = digest(canonical(identity))
+        legacy = {**identity, "schema": 2, "publication_id": publication_id,
+                  "approval": APPROVAL, "source_commit": None, "run": None,
+                  "recorded_at": "2026-01-01T00:00:00+00:00"}
+        path = self.root / "evidence" / "publications" / (publication_id + ".external.json")
+        write_json(path, legacy)
+        before = path.read_bytes()
+        self.assertEqual(Publication.read_receipt(self.root, publication_id), legacy)
+        # A schema-4 record missing projection identity is malformed and refused.
+        tampered_id = digest(canonical({**identity, "branch": "legacy-tampered"}))
+        tampered = {**legacy, "schema": 4, "publication_id": tampered_id,
+                    "branch": "legacy-tampered", "lineage": {"bad": "shape"}}
+        tampered_path = self.root / "evidence" / "publications" / (tampered_id + ".external.json")
+        write_json(tampered_path, tampered)
+        with self.assertRaises(Denied):
+            Publication.read_receipt(self.root, tampered_id)
+        listing = Publication.list_receipts(self.root)
+        self.assertIn(publication_id, [r["publication_id"] for r in listing["publications"]])
+        self.assertNotIn(tampered_id, [r["publication_id"] for r in listing["publications"]])
+        # The legacy file itself is untouched by any new-write path.
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(Publication.read_receipt(self.root, publication_id), legacy)
+
+    def test_cli_lineage_round_trip_and_refusals(self):
+        import json
+        fact = self.fact()
+        args = parser().parse_args([
+            "--config", str(self.file), "publication", "record", "sample",
+            "--branch", BRANCH, "--published-sha", SHA, "--code-digest", DIGEST,
+            "--approval", APPROVAL,
+            "--projection-schema", "1", "--projection-algorithm", public_source_identity({})["algorithm"],
+            "--projection-digest", public_source_identity({})["digest"],
+            "--lineage", json.dumps(fact)])
+        record = execute(args)
+        self.assertEqual(record["schema"], 4)
+        self.assertEqual(record["lineage"], fact)
+        self.assertEqual(Publication.read_receipt(self.root, record["publication_id"])["lineage"], fact)
+        # Identical CLI retry replays.
+        replay = execute(parser().parse_args([
+            "--config", str(self.file), "publication", "record", "sample",
+            "--branch", BRANCH, "--published-sha", SHA, "--code-digest", DIGEST,
+            "--approval", APPROVAL,
+            "--projection-schema", "1", "--projection-algorithm", public_source_identity({})["algorithm"],
+            "--projection-digest", public_source_identity({})["digest"],
+            "--lineage", json.dumps(fact)]))
+        self.assertEqual(replay, record)
+        base = ["--config", str(self.file), "publication", "record", "sample",
+                "--branch", "cli-bad", "--published-sha", OTHER_SHA, "--code-digest", OTHER_DIGEST,
+                "--approval", APPROVAL,
+                "--projection-schema", "1", "--projection-algorithm", public_source_identity({})["algorithm"],
+                "--projection-digest", public_source_identity({})["digest"]]
+        bad_fact = self.fact(published_sha=OTHER_SHA, remote="upstream")
+        with self.assertRaises(Denied):
+            execute(parser().parse_args(base + ["--lineage", json.dumps(bad_fact)]))
+        mismatched = self.fact(published_sha=SHA)
+        with self.assertRaises(Denied):
+            execute(parser().parse_args(base + ["--lineage", json.dumps(mismatched)]))
+        with self.assertRaises(Denied):
+            execute(parser().parse_args(base + ["--lineage", "{not json"]))
+        with self.assertRaises(Denied):
+            execute(parser().parse_args(base + ["--lineage", "NaN"]))
+        oversized = json.dumps({**fact, "repository": "1" * 64, "extra_pad": "x" * 5000})
+        # The CLI cap refuses the value before any write, whatever its shape.
+        with self.assertRaises(Denied):
+            execute(parser().parse_args(base + ["--lineage", oversized]))
+        self.assertEqual(len([r for r in Publication.list_receipts(self.root)["publications"]
+                              if r["branch"] == "cli-bad"]), 0)

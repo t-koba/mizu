@@ -818,6 +818,15 @@ oversized or invalid record is skipped, never returned unvalidated, and it
 never denies the valid records beside it. The same validation path lets an
 exact-SHA CI wait pin a `publication_id` to either receipt shape.
 
+A product receipt may carry an optional schema-1 lineage observation returned
+by the VCS adapter; the publication identity does not include it. An external
+receipt may carry the same observation as schema 4, supplied at record time
+with `--lineage`; schema-2/3 external receipts remain readable without proof.
+Exact-publication `vcs_read status` retains both the immutable receipt fact and
+a fresh optional adapter observation in run evidence, projecting only
+`ready`, `stale` or `unknown`. This is external-untrusted evidence, not a
+promotion gate; malformed or unavailable lineage never upgrades readiness.
+
 Source-identity boundary (ADR-049): `code_digest` always names the whole
 immutable capture, never a filtered tree. New schema-3 records of both shapes
 additionally bind the versioned public-source projection

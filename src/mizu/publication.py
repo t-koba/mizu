@@ -14,14 +14,15 @@ identical request, and carries the same caller-visible fields, so an exact-SHA
 CI wait can be pinned to either shape.
 
 Source-identity boundary: ``code_digest`` always names the whole immutable
-capture, never a filtered tree; historical digests keep that meaning. New
-schema-3 records (both shapes) additionally bind the versioned public-source
-projection (``projection_schema``/``projection_algorithm``/
-``projection_digest`` from ``mizu.distribution``) that the host adapter must
-verify against the Git publication tree. A filtered projection digest is never
-stored or compared as a ``code_digest``, and no exact whole-snapshot match is
-claimed for a filtered tree. Schema-1/2 records stay readable and are never
-rewritten; new writes require schema 3.
+capture, never a filtered tree; historical digests keep that meaning. New schema-3 records bind the versioned public-source projection
+(``projection_schema``/``projection_algorithm``/``projection_digest`` from
+``mizu.distribution``) that the host adapter must verify against the Git
+publication tree. A schema-4 external receipt may additionally carry a
+versioned lineage observation; the product receipt carries the same nested
+observation without changing its publication identity. A filtered projection
+digest is never stored or compared as a ``code_digest``, and no exact
+whole-snapshot match is claimed for a filtered tree. Legacy records stay
+readable and are never rewritten; new external writes require schema 3 or 4.
 """
 from __future__ import annotations
 
@@ -31,7 +32,7 @@ import re
 import stat
 from pathlib import Path
 
-from . import process
+from . import lineage, process
 from .errors import Denied, LimitExceeded
 from .fs import (DIGEST, canonical, digest, identifier, loads_finite,
                  lock as kernel_lock, now, safe_read, sync_dir, write_json)
@@ -54,6 +55,14 @@ PROJECTION_SCHEMA = 3
 PROJECTION_KEYS = ("projection_schema", "projection_algorithm", "projection_digest")
 #: Exact fields of a projection-bound external receipt record.
 EXTERNAL_PROJECTION_FIELDS = EXTERNAL_FIELDS | set(PROJECTION_KEYS)
+#: Schema version of an external receipt that also carries a lineage observation.
+#: The publication ID still binds only the projection identity; lineage never
+#: enters the identity so the same publication keeps one ID.
+EXTERNAL_LINEAGE_SCHEMA = 4
+#: Exact fields of an external receipt with a lineage observation.
+EXTERNAL_LINEAGE_FIELDS = EXTERNAL_PROJECTION_FIELDS | {"lineage"}
+#: Maximum UTF-8 bytes of a caller-supplied lineage JSON value.
+LINEAGE_JSON_BYTES = 4096
 
 
 def _check_projection(schema, algorithm, projection_digest: str) -> None:
@@ -125,9 +134,13 @@ def _timestamp(value) -> bool:
 def _external_record(record, publication_id: str) -> dict:
     """Validate one external receipt record against its stable publication ID.
 
-    Schema: exactly the recorded fields, schema 2 (legacy) or 3, operation
-    ``external``, and a publication ID equal to the file name and to the
-    digest of its identity.
+    Schema: exactly the recorded fields, schema 2 (legacy), 3, or 4 with a
+    lineage observation, operation ``external``, and a publication ID equal
+    to the file name and to the digest of its identity. Schema 4 carries
+    exactly the schema-3 fields plus ``lineage``; schema 2/3 never carry
+    lineage. The outer receipt identity is validated here; lineage validity
+    is projected separately so a malformed optional observation becomes
+    unknown without suppressing otherwise valid CI status.
     Bounds: 8 KiB record (read bound), 40/64-hex commit SHAs, a 64-hex code
     digest, and references of at most 256 characters. Trust: the operator
     asserts the recorded content; it is never inferred from a branch head.
@@ -141,6 +154,12 @@ def _external_record(record, publication_id: str) -> dict:
         projection = None
     elif record.get("schema") == PROJECTION_SCHEMA:
         if set(record) != EXTERNAL_PROJECTION_FIELDS:
+            raise Denied(f"Invalid external publication receipt: {publication_id}")
+        projection = _projection_of(record)
+        assert projection is not None
+        _check_projection(projection["schema"], projection["algorithm"], projection["digest"])
+    elif record.get("schema") == EXTERNAL_LINEAGE_SCHEMA:
+        if set(record) != EXTERNAL_LINEAGE_FIELDS:
             raise Denied(f"Invalid external publication receipt: {publication_id}")
         projection = _projection_of(record)
         assert projection is not None
@@ -355,7 +374,7 @@ class Publication:
             raise Denied(f"Invalid publication dispatch marker: {publication_id}")
         published_sha = receipt.get("published_sha")
         if (not isinstance(published_sha, str) or not SHA.fullmatch(published_sha)
-                or receipt != {**intent, "published_sha": published_sha}):
+                or {k: v for k, v in receipt.items() if k != "lineage"} != {**intent, "published_sha": published_sha}):
             raise Denied(f"Invalid publication receipt: {publication_id}")
         return receipt
 
@@ -382,7 +401,7 @@ class Publication:
         if receipt is not None:
             sha = receipt.get("published_sha")
             if (dispatched is None or not isinstance(sha, str) or not SHA.fullmatch(sha)
-                    or receipt != {**intent, "published_sha": sha}):
+                    or {k: v for k, v in receipt.items() if k != "lineage"} != {**intent, "published_sha": sha}):
                 raise Denied(f"Invalid publication receipt: {self.id}")
             # A previous caller may have failed at directory fsync after the
             # receipt rename. Re-establish durability before acknowledging it.
@@ -402,7 +421,8 @@ class Publication:
     @classmethod
     def record_external(cls, project_root: Path, *, branch: str, published_sha: str,
                         code_digest: str, approval: str, source_commit: str | None = None,
-                        run: str | None = None, projection: dict | None = None) -> dict:
+                        run: str | None = None, projection: dict | None = None,
+                        lineage=None) -> dict:
         """Record one operator-run publication as a durable receipt.
 
         The publisher pushes outside the product, then records what it
@@ -415,14 +435,20 @@ class Publication:
         projection, so a filtered tree is never recorded as an exact
         whole-snapshot match. Missing projections are refused before any
         write; schema-2 receipts remain read-only legacy history.
+        An optional ``lineage`` observation uses the same bounded shape as
+        the product path and must bind the published SHA; when present the
+        receipt carries schema 4 with exactly the schema-3 fields plus
+        ``lineage``, otherwise schema 3 with no lineage. Lineage never
+        enters the publication ID. A receipt without lineage stays unknown.
         Identity: the publication ID is the digest of the operation, branch,
         code digest, published SHA and projection, so the same
         publication keeps one ID. Bounds: 8 KiB record, 256 characters per
-        reference. Trust: the operator asserts this content; the product never
-        infers a published SHA from a branch head. Retry: none; the write is
-        create-only and an identical request replays the stored record, a
-        conflicting one is refused. Failure: ``Denied`` for invalid input or
-        a conflicting receipt.
+        reference, lineage JSON at most 4096 UTF-8 bytes. Trust: the operator
+        asserts this content; the product never infers a published SHA or
+        ancestry from a branch head. Retry: none; the write is create-only
+        and an identical request replays the stored record, a conflicting
+        one (including a differing lineage) is refused. Failure: ``Denied``
+        for invalid input or a conflicting receipt.
         """
         from .vcs import check_branch
         check_branch(branch)
@@ -445,18 +471,31 @@ class Publication:
                  "projection_algorithm": projection["algorithm"],
                  "projection_digest": projection["digest"]}
         identity = {**identity, **extra}
+        from . import lineage as lineage_module
+        validated = None
+        if lineage is not None:
+            validated = lineage_module.validate(lineage, published_sha)
+            if validated is None:
+                raise Denied("Invalid lineage observation for external publication")
         compared = ("branch", "published_sha", "code_digest", "approval",
-                    "source_commit", "run", *PROJECTION_KEYS)
+                    "source_commit", "run", *PROJECTION_KEYS, "lineage")
         publication_id = digest(canonical(identity))
         store = cls.__new__(cls)
         store.id = publication_id
         store.root = Path(project_root) / "evidence" / "publications"
         store.identity = identity
-        record = {"schema": PROJECTION_SCHEMA, "publication_id": publication_id,
-                  "op": EXTERNAL_OP, "branch": branch, "published_sha": published_sha,
-                  "code_digest": code_digest, "approval": approval,
-                  "source_commit": source_commit, "run": run, "recorded_at": now(),
-                  **extra}
+        if validated is not None:
+            record = {"schema": EXTERNAL_LINEAGE_SCHEMA, "publication_id": publication_id,
+                      "op": EXTERNAL_OP, "branch": branch, "published_sha": published_sha,
+                      "code_digest": code_digest, "approval": approval,
+                      "source_commit": source_commit, "run": run, "recorded_at": now(),
+                      **extra, "lineage": validated}
+        else:
+            record = {"schema": PROJECTION_SCHEMA, "publication_id": publication_id,
+                      "op": EXTERNAL_OP, "branch": branch, "published_sha": published_sha,
+                      "code_digest": code_digest, "approval": approval,
+                      "source_commit": source_commit, "run": run, "recorded_at": now(),
+                      **extra}
         with kernel_lock(store.lock):
             try:
                 existing = store._read("external")
@@ -549,9 +588,11 @@ class Publication:
         return {"publications": page, "total": len(records),
                 "truncated": len(records) > len(page), "scan_stopped": scan_stopped}
 
-    def complete(self, intent: dict, published_sha: str) -> dict:
+    def complete(self, intent: dict, published_sha: str, observation=None) -> dict:
         if not isinstance(published_sha, str) or not SHA.fullmatch(published_sha):
             raise Denied(f"Invalid published SHA: {self.id}")
         receipt = {**intent, "published_sha": published_sha}
+        if lineage.validate(observation, published_sha) is not None:
+            receipt["lineage"] = observation
         self._write("receipt", receipt)
         return receipt
