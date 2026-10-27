@@ -781,6 +781,84 @@ class SharingTests(PurposeTests):
         self.assertFalse(check_jobs.pending(self.project, 'reviewer'))
         self.assertTrue(check_jobs.result(reader, joined['id'])['result']['passed'])
 
+    def test_queued_join_then_completion_then_repeated_join_acks_same_subscription(self):
+        _, original = self.submit()
+        reader = self.context('reviewer')
+        first = check_jobs.join(reader, original['id'])
+        self.assertEqual(first['status'], 'queued')
+        self.assertIn('wait', first)
+        self.assertFalse(check_jobs.read(self.project, first['id'])['acknowledged'])
+        self.run_job()
+        self.assertEqual(check_jobs.read(self.project, original['id'])['status'], 'completed')
+        repeated = check_jobs.join(reader, original['id'])
+        self.assertEqual(repeated['id'], first['id'])
+        self.assertEqual(repeated['status'], 'completed')
+        self.assertTrue(repeated['passed'])
+        self.assertNotIn('wait', repeated)
+        self.assertTrue(check_jobs.read(self.project, repeated['id'])['acknowledged'])
+        # The original execution and evidence are preserved for the owner.
+        self.assertEqual(check_jobs.read(self.project, repeated['id'])['shared_job'], original['id'])
+        self.assertFalse(check_jobs.read(self.project, original['id'])['acknowledged'])
+        self.assertFalse(check_jobs.pending(self.project, 'reviewer'))
+        self.assertTrue(check_jobs.result(reader, repeated['id'])['result']['passed'])
+
+    def test_same_run_original_and_same_request_replay_are_acknowledged(self):
+        ctx, original = self.submit()
+        self.run_job()
+        # Same-run original: joining the role's own completed job in the same
+        # run returns it synchronously, so it must not remain an unread wake.
+        same_run = check_jobs.join(ctx, original['id'])
+        self.assertEqual(same_run['id'], original['id'])
+        self.assertEqual(same_run['status'], 'completed')
+        self.assertTrue(check_jobs.read(self.project, original['id'])['acknowledged'])
+        self.assertFalse(check_jobs.pending(self.project, 'worker'))
+        # Same-request replay: resubmitting the identical request in the same
+        # run returns the same completed record, acknowledged the same way.
+        # Use a distinct fresh measurement so the later submit does not share
+        # the earlier completed execution.
+        ctx2 = self.context()
+        first = check_jobs.submit(ctx2, 'echo replay', kind='experiment', fresh=True)
+        self.assertFalse(check_jobs.read(self.project, first['id'])['acknowledged'])
+        self.run_job()
+        self.assertTrue(check_jobs.pending(self.project, 'worker'))
+        replayed = check_jobs.submit(ctx2, 'echo replay', kind='experiment', fresh=True)
+        self.assertEqual(replayed['id'], first['id'])
+        self.assertEqual(replayed['status'], 'completed')
+        self.assertTrue(check_jobs.read(self.project, replayed['id'])['acknowledged'])
+        self.assertFalse(check_jobs.pending(self.project, 'worker'))
+
+    def test_queued_and_unsuccessful_results_are_not_auto_acknowledged(self):
+        ctx, queued = self.submit()
+        replayed_queued = check_jobs.submit(ctx)
+        self.assertEqual(replayed_queued['id'], queued['id'])
+        self.assertEqual(replayed_queued['status'], 'queued')
+        self.assertFalse(check_jobs.read(self.project, queued['id'])['acknowledged'])
+        reader = self.context('reviewer')
+        subscription = check_jobs.join(reader, queued['id'])
+        self.assertEqual(subscription['status'], 'queued')
+        self.assertFalse(check_jobs.read(self.project, subscription['id'])['acknowledged'])
+        repeated_queued = check_jobs.join(reader, queued['id'])
+        self.assertEqual(repeated_queued['id'], subscription['id'])
+        self.assertFalse(check_jobs.read(self.project, subscription['id'])['acknowledged'])
+        # A completed but unsuccessful result stays unread until an explicit
+        # acknowledgement, even when returned synchronously via replay.
+        # Drain the earlier queued execution first so the failure below runs
+        # against the intended record.
+        self.run_job()
+        check_jobs.acknowledge(self.project, 'worker', {queued['id']})
+        failing = self.context()
+        failed = check_jobs.submit(failing, 'echo fail-marker', kind='experiment')
+        class Failed(FakeSandbox):
+            def execute(self, workspace, script, **kwargs):
+                return {'id': 'b' * 32, 'exit_code': 1, 'reason': 'exited', 'script': script}
+        check_jobs.run_one(self.project, threading.Event(), sandbox_factory=Failed)
+        self.assertEqual(check_jobs.read(self.project, failed['id'])['status'], 'completed')
+        self.assertFalse(check_jobs.read(self.project, failed['id'])['passed'])
+        replayed_failed = check_jobs.submit(failing, 'echo fail-marker', kind='experiment')
+        self.assertEqual(replayed_failed['id'], failed['id'])
+        self.assertFalse(check_jobs.read(self.project, failed['id'])['acknowledged'])
+        self.assertTrue(check_jobs.pending(self.project, 'worker'))
+
     def test_replaced_job_keeps_running_for_another_consumer(self):
         ctx = self.context()
         first = check_jobs.submit(ctx, 'echo first', kind='experiment', purpose='acceptance')

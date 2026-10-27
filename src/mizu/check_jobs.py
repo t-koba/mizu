@@ -423,17 +423,37 @@ def join(context, job_id):
             return _subscribe(context, original)
 
 
+def _delivered_summary(project, job_id, owner):
+    """Return the summary, durably acknowledging a synchronously delivered success.
+
+    A completed, passed result returned synchronously in this response must
+    not remain an unread wake. Only the returned request's own record is
+    marked; queued/running and unsuccessful results stay unread until the
+    normal result-read path, and ownership, execution and evidence are kept.
+    The caller holds check-jobs.lock, so the mark is written directly.
+    """
+    job = read(project, job_id)
+    if (job.get('role') == owner and job.get('status') == 'completed'
+            and job.get('passed') is True and not job.get('acknowledged')):
+        raw = raw_read(project, job_id)
+        if raw.get('role') == owner:
+            raw['acknowledged'] = True
+            write_json(root(project) / job_id / 'job.json', raw)
+            job = read(project, job_id)
+    return summary(job)
+
+
 def _subscribe(context, original, *, purpose=None):
     receiver = getattr(context, 'spend_role', None) if getattr(context, 'delegated_child', False) else None
     owner = receiver.name if receiver is not None else context.role.name
     if receiver is not None and 'check_job' not in receiver.capabilities:
         raise Denied('Delegated checks require check_job on the receiving parent')
     if original['run'] == context.run_dir.name and original['role'] == owner:
-        return summary(read(context.project, original['id']))
+        return _delivered_summary(context.project, original['id'], owner)
     job_id = digest(canonical({'shared_job': original['id'], 'run': context.run_dir.name, 'role': owner}))
     path = root(context.project) / job_id / 'job.json'
     if path.exists():
-        return summary(read(context.project, job_id))
+        return _delivered_summary(context.project, job_id, owner)
     _make_room(context.project, protect={original['id']})
     # A terminal reusable result is returned synchronously in this response;
     # recording a second unread completion would manufacture a later wake.
@@ -561,7 +581,7 @@ def submit(context, script=None, *, commands=None, kind="experiment", fresh=Fals
                 # purpose and retire the role's other demand for that purpose.
                 _state_purpose(project, job_id, purpose)
                 _retire_superseded(project, owner, purpose, keep={job_id}, replaced_by=job_id)
-                return summary(read(project, job_id))
+                return _delivered_summary(project, job_id, owner)
             if shared_key is not None and not fresh:
                 for path in sorted(root(project).glob('*/job.json')):
                     other = read_json(path, {})
