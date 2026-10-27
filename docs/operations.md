@@ -1061,19 +1061,25 @@ there is no extra call or automatic retry. An unavailable lineage field does
 not suppress otherwise valid CI status. If the whole status call fails, it
 still fails normally rather than inventing CI or lineage facts.
 
-The exact-publication status `result.lineage` contains `status`, `reason`, the
-validated receipt `receipt` and current `observation` (null when unavailable).
-These facts are also retained in the normal run-local VCS read evidence.
-`ready` / `target_ancestor` requires both valid observations, the same
-repository and target OID, and positive ancestry in both. `stale` /
-`target_moved` means the target OID changed under the same binding. `unknown`
-uses `receipt_missing_or_invalid`, `observation_missing`,
-`observation_invalid`, `repository_mismatch`, or `not_ancestor`. Wrong refs,
-wrong published OIDs, ambiguous merge bases and invalid or nonfresh times are
-invalid, never ready. The same projection applies to external receipts:
-schema-4 receipts with valid lineage may report `ready`/`stale`, while
-schema-2/3 receipts without lineage stay `unknown`; a schema-4 receipt with
-an invalid nested observation also projects to `unknown`. These are
+The exact-publication status `result.lineage` contains current `status` and
+`reason`, historical `receipt_status` and `receipt_reason`, the validated
+receipt `receipt` and current `observation` (null when unavailable). These
+facts are also retained in the normal run-local VCS read evidence. Current
+`ready` / `target_ancestor` requires a valid receipt and a fresh valid current
+observation bound to the same repository, accepted remote and target ref, and
+published OID, with current positive ancestry. The target OID may have moved;
+then `receipt_status` / `receipt_reason` is `stale` / `target_moved`, whether
+or not the new target is an ancestor. Otherwise historical standing matches
+current standing. For the same target OID, contradictory saved and current
+ancestry is `unknown` / `ancestry_conflict`, never ready.
+
+`unknown` also uses `receipt_missing_or_invalid`, `observation_missing`,
+`observation_invalid`, `repository_mismatch`, or `not_ancestor`. Without a
+valid, matching current observation the historical standing is unknown too:
+movement has not been established. Wrong refs, wrong published OIDs, ambiguous
+merge bases and invalid or nonfresh times are invalid, never ready. The same
+projection applies to external receipts: schema-2/3 receipts without lineage
+and schema-4 receipts with invalid nested observations stay `unknown`. These are
 external-untrusted observations at a point in time, not a promotion gate:
 they do not prevent subsequent remote movement, invoke promotion, or enforce
 any condition on an external consumer.

@@ -406,7 +406,11 @@ class ExternalLineageTests(Fixture):
         with patch.object(vcs, "run", side_effect=moved):
             stale = ctx.handle("vcs_read", {"op": "status", "publication_id": record["publication_id"]})
         self.assertEqual((stale["result"]["lineage"]["status"], stale["result"]["lineage"]["reason"]),
-                         ("stale", "target_moved"))
+                         ("ready", "target_ancestor"))
+        self.assertEqual((stale["result"]["lineage"]["receipt_status"],
+                          stale["result"]["lineage"]["receipt_reason"]), ("stale", "target_moved"))
+        self.assertEqual(stale["result"]["lineage"]["receipt"], record["lineage"])
+        self.assertEqual(stale["result"]["lineage"]["observation"]["target_oid"], "c" * 40)
 
     def test_malformed_external_lineage_keeps_ci_status(self):
         import dataclasses, json, sys

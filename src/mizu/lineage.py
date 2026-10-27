@@ -59,15 +59,27 @@ def observe(value, published_oid, started, ended):
 
 def status(receipt, current, reason):
     """Project exact-receipt evidence, with a closed set of bounded reasons."""
+    def project(state, why, receipt_state=None, receipt_why=None):
+        return {'status': state, 'reason': why,
+                'receipt_status': receipt_state or state,
+                'receipt_reason': receipt_why or why}
+
     saved = validate(receipt.get('lineage'), receipt['published_sha'])
     if saved is None:
-        return {'status': 'unknown', 'reason': 'receipt_missing_or_invalid'}
+        return project('unknown', 'receipt_missing_or_invalid')
     if current is None:
-        return {'status': 'unknown', 'reason': reason}
+        return project('unknown', reason)
+    current = validate(current, receipt['published_sha'])
+    if current is None:
+        return project('unknown', 'observation_invalid')
     if saved['repository'] != current['repository']:
-        return {'status': 'unknown', 'reason': 'repository_mismatch'}
+        return project('unknown', 'repository_mismatch')
     if saved['target_oid'] != current['target_oid']:
-        return {'status': 'stale', 'reason': 'target_moved'}
-    if not saved['target_is_ancestor'] or not current['target_is_ancestor']:
-        return {'status': 'unknown', 'reason': 'not_ancestor'}
-    return {'status': 'ready', 'reason': 'target_ancestor'}
+        state, why = (('ready', 'target_ancestor') if current['target_is_ancestor']
+                      else ('unknown', 'not_ancestor'))
+        return project(state, why, 'stale', 'target_moved')
+    if saved['target_is_ancestor'] != current['target_is_ancestor']:
+        return project('unknown', 'ancestry_conflict')
+    if not current['target_is_ancestor']:
+        return project('unknown', 'not_ancestor')
+    return project('ready', 'target_ancestor')

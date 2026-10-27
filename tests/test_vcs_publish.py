@@ -729,7 +729,8 @@ class PublicationLineageTests(PublishFixture):
         self.assertEqual(replay["lineage"], receipt["lineage"])
         cases = [
             (self.fact, "ready", "target_ancestor"),
-            (lambda: self.fact(target_oid="c" * 40, merge_bases=["c" * 40]), "stale", "target_moved"),
+            (lambda: self.fact(target_oid="c" * 40, merge_bases=["c" * 40]), "ready", "target_ancestor"),
+            (lambda: self.fact(target_oid="c" * 40, merge_bases=["a" * 40], target_is_ancestor=False), "unknown", "not_ancestor"),
             (lambda: self.fact(repository="2" * 64), "unknown", "repository_mismatch"),
             (lambda: None, "unknown", "observation_missing"),
             (lambda: self.fact(merge_bases=["a" * 40, "c" * 40]), "unknown", "observation_invalid"),
@@ -738,27 +739,51 @@ class PublicationLineageTests(PublishFixture):
             (lambda: self.fact(target_ref="refs/heads/other"), "unknown", "observation_invalid"),
             (lambda: self.fact(observed_at="2025-01-01T00:00:00"), "unknown", "observation_invalid"),
             (lambda: self.fact(observed_at="2020-01-01T00:00:00+00:00"), "unknown", "observation_invalid"),
-            (lambda: self.fact(merge_bases=["c" * 40], target_is_ancestor=False), "unknown", "not_ancestor"),
+            (lambda: self.fact(merge_bases=["c" * 40], target_is_ancestor=False), "unknown", "ancestry_conflict"),
         ]
         for fact, expected, reason in cases:
             with self.subTest(reason=reason):
-                outcome = self.read(config, role, published["publication_id"], fact)
+                observed = []
+                def capture():
+                    observation = fact()
+                    observed.append(observation)
+                    return observation
+                outcome = self.read(config, role, published["publication_id"], capture)
+                observation = observed[0]
                 self.assertEqual((outcome["status"], outcome["reason"]), (expected, reason))
                 self.assertEqual(outcome["receipt"], receipt["lineage"])
+                moved = observation is not None and observation["target_oid"] != "a" * 40
+                historical = ("stale", "target_moved") if moved else (expected, reason)
+                self.assertEqual((outcome["receipt_status"], outcome["receipt_reason"]), historical)
+                if reason not in ("observation_missing", "observation_invalid"):
+                    self.assertEqual(outcome["observation"], observation)
+                else:
+                    self.assertIsNone(outcome["observation"])
 
     def test_missing_publication_observation_is_unknown(self):
         config, role, _, published = self.publish(lambda: None)
         receipt = Publication.read_receipt(self.project.root, published["publication_id"])
         self.assertNotIn("lineage", receipt)
         result = self.read(config, role, published["publication_id"], self.fact)
-        self.assertEqual((result["status"], result["reason"]),
-                         ("unknown", "receipt_missing_or_invalid"))
+        self.assertEqual((result["status"], result["reason"], result["receipt_status"],
+                          result["receipt_reason"]),
+                         ("unknown", "receipt_missing_or_invalid", "unknown", "receipt_missing_or_invalid"))
+        self.assertIsNone(result["receipt"])
+        self.assertIsNotNone(result["observation"])
 
     def test_non_ancestor_receipt_never_becomes_ready(self):
         config, role, _, published = self.publish(
             lambda: self.fact(merge_bases=["c" * 40], target_is_ancestor=False))
         result = self.read(config, role, published["publication_id"], self.fact)
-        self.assertEqual((result["status"], result["reason"]), ("unknown", "not_ancestor"))
+        self.assertEqual((result["status"], result["reason"]), ("unknown", "ancestry_conflict"))
+        unchanged = self.read(config, role, published["publication_id"],
+                              lambda: self.fact(merge_bases=["c" * 40], target_is_ancestor=False))
+        self.assertEqual((unchanged["status"], unchanged["reason"], unchanged["receipt_status"]),
+                         ("unknown", "not_ancestor", "unknown"))
+        moved = self.read(config, role, published["publication_id"],
+                          lambda: self.fact(target_oid="c" * 40, merge_bases=["c" * 40]))
+        self.assertEqual((moved["status"], moved["reason"]), ("ready", "target_ancestor"))
+        self.assertEqual((moved["receipt_status"], moved["receipt_reason"]), ("stale", "target_moved"))
 
     def test_malformed_publication_does_not_fail_push(self):
         config, role, _, published = self.publish(lambda: self.fact(merge_bases=[]))
@@ -815,7 +840,12 @@ class PublicationLineageTests(PublishFixture):
             publication = publisher.handle("vcs_publish", {"op": "push", "branch": "topic"})
             args = {"op": "status", "publication_id": publication["publication_id"]}
             self.assertEqual(reader.handle("vcs_read", args)["result"]["lineage"]["status"], "ready")
+            target = published_sha
+            moved = reader.handle("vcs_read", args)["result"]["lineage"]
+            self.assertEqual((moved["status"], moved["receipt_status"]), ("ready", "stale"))
             git("-c", "user.name=Test", "-c", "user.email=test@example.invalid",
                 "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "Move target")
             target = git("rev-parse", "HEAD")
-            self.assertEqual(reader.handle("vcs_read", args)["result"]["lineage"]["status"], "stale")
+            moved = reader.handle("vcs_read", args)["result"]["lineage"]
+            self.assertEqual((moved["status"], moved["reason"], moved["receipt_status"]),
+                             ("unknown", "not_ancestor", "stale"))
