@@ -917,10 +917,10 @@ def provision_pinned_dependencies(adapter: Path, *, timeout: int = NPM_PROVISION
         # operator's own, and a version that differs from the pin is a
         # contract violation the gate must not paper over.
         return state, details
-    if (adapter / 'node_modules').exists():
-        # The clean install replaces the whole dependency tree, so it never
-        # runs over a tree the operator provisioned, even one that holds none
-        # of the pinned packages.
+    node_modules = adapter / 'node_modules'
+    if os.path.lexists(node_modules):
+        # lexists also catches a dangling symlink, which npm ci would remove.
+        # The clean install never runs over an existing operator-owned entry.
         return (state, details + '; a dependency tree is present, so the clean install '
                                  'would replace it; provision the adapter\'s own tree '
                                  '(npm ci in the adapter directory)')

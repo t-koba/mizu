@@ -1947,6 +1947,23 @@ class PinnedDependencyProvisionTests(unittest.TestCase):
             self.assertEqual(state, 'ready')
             self.assertEqual(self.calls, [])
 
+    def test_a_dangling_node_modules_symlink_is_refused(self):
+        with tempfile.TemporaryDirectory() as td:
+            adapter = self.adapter(Path(td))
+            node_modules = adapter / 'node_modules'
+            try:
+                node_modules.symlink_to(adapter / 'missing-target', target_is_directory=True)
+            except (NotImplementedError, OSError):
+                self.skipTest('symlink creation unavailable')
+            self.assertFalse(node_modules.exists())
+            self.assertTrue(os.path.lexists(node_modules))
+            with mock.patch.object(CHECK.subprocess, 'run', self.fake_npm()):
+                state, details = CHECK.provision_pinned_dependencies(adapter)
+            self.assertEqual(state, 'absent')
+            self.assertIn('dependency tree is present', details)
+            self.assertEqual(self.calls, [])
+            self.assertTrue(node_modules.is_symlink())
+
     def test_an_adapter_that_holds_none_of_the_pinned_packages_is_refused(self):
         with tempfile.TemporaryDirectory() as td:
             adapter = self.adapter(Path(td))
