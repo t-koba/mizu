@@ -75,6 +75,7 @@ from . import role_state_ops
 from .role_state_ops import _reject_constant  # preserve the established runtime seam
 from . import insight_tools
 from . import work_item_operations
+from .work_item_read_view import readonly_view
 from . import work_order_ops
 from .insight_tools import INSIGHT_RETRIEVAL_LIMIT  # preserve the established runtime seam
 from .web_worker import bounded
@@ -193,7 +194,7 @@ def _has_ready_work(project, role=None) -> bool:
         return False
 
 
-def _ready_work_changed(project, record, role=None) -> bool:
+def _ready_work_changed(project, record, role=None, *, work_items=None) -> bool:
     """Compare full role-eligible membership to the input actually delivered.
 
     Current store/read or malformed progress errors close. Valid legacy records
@@ -207,7 +208,8 @@ def _ready_work_changed(project, record, role=None) -> bool:
         previous = record.get("progress")
         if previous is not None:
             validate_progress(previous)
-        page = project.work_items.page_ready(
+        store = project.work_items if work_items is None else work_items
+        page = store.page_ready(
             limit=1, **({"role_name": role.name} if role is not None else {}))
         signature = page["signature"]
         if not isinstance(signature, str) or not DIGEST.fullmatch(signature):
@@ -2407,13 +2409,15 @@ class Engine:
         decision_state = decision_delivery.pending(project, role)
         decision_events = decision_state["events"]
         receipt_diagnostics = decision_state["diagnostics"]
+        # Reuse validated records only within this dispatch, never across rechecks.
+        work_items = readonly_view(project.work_items)
         terminal_page = work_item_events.pending(
-            project.work_items, role_name, role.work_item_events, sources=role.work_item_sources,
+            work_items, role_name, role.work_item_events, sources=role.work_item_sources,
             limit=role_work_item_events_limit(project.config, role))
         terminal_page = work_item_events.delivery(role_name, terminal_page)
         terminal_events = terminal_page["events"]
         wait_events = (project.insights.due_waits(role_name, snapshot)
-                       + ci_waits.pending(project.work_items, role_name))
+                       + ci_waits.pending(work_items, role_name))
         # Dependency obligations addressed to this role ride along when
         # it runs for other reasons; they never admit a run on their
         # own, so no new wake source is implied.
@@ -2459,7 +2463,7 @@ class Engine:
         unscheduled = not bool(role.daemon or role.interval_seconds or role.calendar)
         has_code_event = bool(role.on_change and unscheduled and not code_unchanged)
         ready_work_changed = ((not event_trigger or autonomous) and _ready_work_changed(
-            project, snapshot if role.workspace == "write" else cursor, role))
+            project, snapshot if role.workspace == "write" else cursor, role, work_items=work_items))
         # Only publishers consume snapshot-wide generations. Observers consume
         # operator wakes independently, even when no new code is published.
         wake_base = snapshot if role.workspace == "write" else cursor

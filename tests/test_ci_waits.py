@@ -307,6 +307,28 @@ class CiWaitTests(Fixture):
         self.assertFalse(_role_events_due(self.project, self.project.snapshots.get(), "worker"))
         self.assertEqual(self.store.get(item["id"]), item)
 
+    def test_dispatch_view_preserves_ci_delivery_and_rechecks_waiter(self):
+        item = self.block()
+        self.poll()
+        role = dataclasses.replace(self.config.roles["worker"], on_change=False,
+                                   work_item_events=("done", "dropped"))
+        engine = Engine(self.config, driver=ScriptDriver())
+
+        def dispatch():
+            return engine._dispatch_state(self.project, "worker", role, event_trigger=True)
+
+        with patch("mizu.runtime.readonly_view", side_effect=lambda store: store):
+            expected = dispatch()
+        self.assertEqual(dispatch(), expected)
+        self.assertEqual(expected["_dispatch"].admission, "wait")
+        self.assertEqual([event["work_item"] for event in expected["wait_events"]], [item["id"]])
+        self.store.transition(item["id"], expected_rev=item["rev"], status="doing", actor="worker")
+        current = dispatch()
+        self.assertEqual(current["wait_events"], [])
+        self.assertEqual(current["_dispatch"].admission, "ready_work")
+        with patch("mizu.runtime.readonly_view", side_effect=lambda store: store):
+            self.assertEqual(dispatch(), current)
+
     def test_runtime_delivers_evidence_in_prompt_and_run_then_stops_waking(self):
         engine = Engine(self.config, driver=ScriptDriver())
         for conclusion in ("success", "failure"):
