@@ -285,7 +285,7 @@ and shared-smoke retention are independent and unchanged. See
 [configuration](configuration.md#automatic-snapshot-retention) for the exact
 root/age/result contract and outbox lock permissions.
 
-Work-order audit rollover retains the latest 256 revision bodies and a constant-field ordered-prefix checkpoint; older bodies are not inspectable. The checkpoint is not authentication, and the retained non-head bodies have no individual integrity binding. Readers fail closed on interrupted rollover; only a matching locked write retry completes recognized leftovers. See the writer work-order contract in `configuration.md` for the digest construction and bounds.
+Work-order audit rollover retains the latest 256 revision bodies and a constant-field ordered-prefix checkpoint; older bodies are not inspectable. The checkpoint is not authentication, and the retained non-head bodies have no individual integrity binding. Readers leave recognized interruptions unavailable but expose bounded committed-revision and generation recovery metadata, plus any exact unpointed candidate; they never repair. A locked exact candidate retry, a fresh opening-generation replacement of that candidate, or a fresh explicit plan for checkpoint/prune-only leftovers completes the validated interruption; unrecognized corruption fails closed. See the writer work-order contract in `configuration.md` for the digest construction and bounds.
 
 The history index retains published IDs up to the configured limit (default
 128, tunable 8–1000000 via `limits.history_index`). The active generation/window

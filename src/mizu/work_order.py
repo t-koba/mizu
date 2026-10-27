@@ -156,7 +156,7 @@ def _read_checkpoint(project_root):
 
 
 def _read_stored(project_root: Path, *, allow_interrupted=False) -> dict:
-    """Validate the bounded suffix and checkpoint; only locked retries see leftovers."""
+    """Validate the bounded suffix and optionally recognized leftovers."""
     unavailable = {"status": "unavailable", "rev": None, "record": None}
     absent = {"status": "absent", "rev": 0, "record": None}
     try:
@@ -523,13 +523,27 @@ def _fresh_generation_for_role(project, role) -> str:
         obligations=obligations)
 
 
+def _recovery_projection(stored, generation_field, generation):
+    """Expose only validated interrupted state, without changing the store."""
+    if "interrupted" not in stored and "rollover" not in stored:
+        return None
+    result = {"status": "unavailable", "rev": stored["rev"], "generation": None,
+              generation_field: generation}
+    if "interrupted" in stored:
+        record = stored["interrupted"]
+        result["recovery_candidate"] = {key: record[key] for key in
+                                        ("rev", "generation", "items", "rationale", "actor")}
+    return result
+
+
 def projection_for(context) -> dict | None:
     """Prompt projection for the owning role; None when the grant is absent.
 
     Returns ``{"status", "rev", "generation", "items", "rationale", "actor",
     "updated_at", "opening_generation"}`` on ``current``/``review_due``
     (bounded), and ``opening_generation`` on ``absent``. Corrupt state reads
-    ``unavailable``, never empty/current. Never raises for prompt use.
+    ``unavailable``, never empty/current; validated interruptions expose recovery
+    metadata without repair. Never raises for prompt use.
     """
     try:
         caps = set(getattr(context.role, "capabilities", ()))
@@ -542,11 +556,14 @@ def projection_for(context) -> dict | None:
     except Exception:
         opening = None
     try:
-        stored = _read_stored(context.project.root)
+        stored = _read_stored(context.project.root, allow_interrupted=True)
     except Exception:
         return {"status": "unavailable", "rev": None, "generation": None}
     if opening is None:
         return {"status": "unavailable", "rev": None, "generation": None}
+    recovery = _recovery_projection(stored, "opening_generation", opening)
+    if recovery is not None:
+        return recovery
     if stored["status"] == "absent":
         return {"status": "absent", "rev": 0, "generation": None,
                 "opening_generation": opening}
@@ -567,21 +584,23 @@ def projection_for(context) -> dict | None:
 def status_for_project(project, *, role_name: str | None = None) -> dict:
     """Operator-readable freshness; never writes or refreshes the plan."""
     try:
-        stored = _read_stored(project.root)
+        stored = _read_stored(project.root, allow_interrupted=True)
     except Exception:
         return {"status": "unavailable", "rev": None, "generation": None}
-    if stored["status"] == "absent":
+    recovering = "interrupted" in stored or "rollover" in stored
+    if stored["status"] == "absent" and not recovering:
         return {"status": "absent", "rev": 0, "generation": None}
-    if stored["status"] != "current":
+    if stored["status"] == "unavailable":
         return {"status": "unavailable", "rev": None, "generation": None}
     record = stored["record"]
+    owner = record or stored.get("interrupted") or {}
     candidate = None
     try:
         roles = getattr(project, "roles", [])
         config_roles = getattr(getattr(project, "config", None), "roles", {})
-        if isinstance(record.get("actor"), str) and record["actor"] in roles \
-                and "work_order" in tuple(getattr(config_roles.get(record["actor"]), "capabilities", ())):
-            candidate = record["actor"]
+        if isinstance(owner.get("actor"), str) and owner["actor"] in roles \
+                and "work_order" in tuple(getattr(config_roles.get(owner["actor"]), "capabilities", ())):
+            candidate = owner["actor"]
         else:
             for name in roles:
                 role = config_roles.get(name)
@@ -597,6 +616,8 @@ def status_for_project(project, *, role_name: str | None = None) -> dict:
         current = _fresh_generation_for_role(project, role)
     except Exception:
         return {"status": "unavailable", "rev": None, "generation": None}
+    if recovering:
+        return _recovery_projection(stored, "current_generation", current)
     if record["generation"] == current:
         return {"status": "current", "rev": record["rev"], "generation": record["generation"],
                 "items": list(record["items"]), "rationale": record["rationale"],
@@ -646,10 +667,14 @@ def write_plan(project, *, actor: str, items, rationale: str,
     """Append-audited CAS for the writer's explicit order.
 
     ``actor`` is runtime-supplied, never caller-supplied. ``expected_rev``
-    is the stored rev read (0 when absent); ``expected_generation`` must
-    equal the unit-opening generation. Stale or invalid refs are refused
+    is the stored rev read (0 when absent); ``expected_generation`` equals
+    the unit-opening generation except for an exact interrupted candidate retry.
+    Stale or invalid refs are refused
     without writing. Under ``insights.lock``, ordinary commits append the
-    history body and replace ``current.json`` as the commit point. At the
+    history body and replace ``current.json`` as the commit point. An exact
+    retry completes only the validated unpointed candidate; a fresh plan at
+    the opening generation and committed rev may instead overwrite that
+    candidate at the same next revision and then replace current. At the
     retention boundary, a checkpoint authorizes pruning and syncing exactly
     one oldest body before the next append and current-pointer replacement.
     """
@@ -658,9 +683,9 @@ def write_plan(project, *, actor: str, items, rationale: str,
     rationale = _validate_rationale(rationale)
     _validate_rev(expected_rev)
     _validate_generation(expected_generation)
-    if opening_generation is None or _validate_generation(opening_generation) != expected_generation:
+    if opening_generation is None:
         raise Denied("Stale work-order review; re-read before recording")
-    # The opening generation is the review; the stored plan must name it.
+    _validate_generation(opening_generation)
     from .fs import lock as _lock
     with _lock(project.root / "locks" / "insights.lock"):
         stored = _read_stored(project.root, allow_interrupted=True)
@@ -671,6 +696,14 @@ def write_plan(project, *, actor: str, items, rationale: str,
             current_rev = 0
         if expected_rev != current_rev:
             raise Denied("Stale work order; re-read before recording")
+        existing = stored.get("interrupted")
+        exact = existing is not None and all(existing[key] == value for key, value in (
+            ("rev", current_rev + 1), ("generation", expected_generation),
+            ("items", items), ("rationale", rationale), ("actor", actor)))
+        if existing is not None and not exact and expected_generation != opening_generation:
+            raise Denied("Work order changed; re-read before recording")
+        if expected_generation != opening_generation and not exact:
+            raise Denied("Stale work-order review; re-read before recording")
         # Actionability is judged against the live ledger under the same lock.
         try:
             published = project.snapshots.get()
@@ -725,14 +758,24 @@ def write_plan(project, *, actor: str, items, rationale: str,
         except OSError as exc:
             raise Denied("Work order is unavailable") from exc
         history_path = _history_path(project.root, new_rev)
-        existing = stored.get("interrupted")
         if existing is not None:
-            if (existing["items"] != record["items"] or existing["rationale"] != record["rationale"]
-                    or existing["generation"] != record["generation"] or existing["actor"] != record["actor"]
-                    or existing["rev"] != new_rev):
-                raise Denied("Work order changed; re-read before recording")
+            if exact:
+                try:
+                    write_json(_current_path(project.root), existing)
+                except OSError as exc:
+                    raise Denied("Work order is unavailable") from exc
+                return {"rev": new_rev, "generation": record["generation"]}
+            # Fresh-current-generation replacement: expected_generation equals
+            # the opening generation and expected_rev equals the committed rev
+            # (both enforced above). The new plan was validated for
+            # actionability under the same lock; overwrite the unpointed
+            # candidate at the same next revision, then replace current.
             try:
-                write_json(_current_path(project.root), existing)
+                write_json(history_path, record)
+            except OSError as exc:
+                raise Denied("Work order is unavailable") from exc
+            try:
+                write_json(_current_path(project.root), record)
             except OSError as exc:
                 raise Denied("Work order is unavailable") from exc
             return {"rev": new_rev, "generation": record["generation"]}
