@@ -1957,6 +1957,14 @@ def session_prompt(context: Context, role, run_dir: Path) -> tuple:
         record = rotate_session(path, run_dir, missing_reason)
         return prompt_for(context), "full", key, record, session_dir
     try:
+        from . import work_order as _plan
+        opening = _plan._capture_opening(context)
+    except Exception:
+        return prompt_for(context), "full", key, None, session_dir
+    try:
+        # Freeze the displayed inventory before consulting the resume cursor.
+        # An arrival after this capture stays out of both the delta and the
+        # work-order generation, and will be offered from the next opening.
         current_generation = context.project.insights.generation()
         last = read_prompt_state(session_dir)
         if (last is not None
@@ -1964,13 +1972,12 @@ def session_prompt(context: Context, role, run_dir: Path) -> tuple:
                 and last.get("snapshot") == context.snapshot["id"]):
             pending: list = []
         else:
-            pending = None
+            pending = opening["pending_insights"]
     except Exception:
-        pending = []
+        # If the resume cursor cannot prove that the inventory is unchanged,
+        # re-offer the bounded captured rows rather than silently omit them.
+        pending = opening["pending_insights"]
     try:
-        if pending is None:
-            from . import work_order as _plan
-            pending = _plan._capture_opening(context)["pending_insights"]
         return prompt_delta_for(context, pending), "delta", key, None, session_dir
     except Exception:
         return prompt_for(context), "full", key, None, session_dir

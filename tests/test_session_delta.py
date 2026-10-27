@@ -56,7 +56,7 @@ class SessionDeltaTests(Fixture):
                           side_effect=Denied("work-item page failed closed")) as page_open:
             with self.assertRaisesRegex(Denied, "work-item page failed closed"):
                 session_prompt(ctx, ctx.role, ctx.run_dir)
-            # Both the delta attempt and generic full fallback fail closed.
+            # The initial opening capture and generic full fallback fail closed.
             self.assertEqual(page_open.call_count, 2)
 
     def test_resumed_session_receives_bounded_delta(self):
@@ -437,6 +437,61 @@ class SessionBacklogTests(Fixture):
         self.assertEqual([row["id"] for row in delta["pending_insights"]], [item["id"]])
         self.assertEqual(delta["pending_insights"], full["pending_insights"])
         self.assertEqual(delta["work_order"]["opening_generation"], full["work_order"]["opening_generation"])
+
+    def test_insight_arriving_after_delta_capture_stays_pending_for_next_unit(self):
+        from mizu.engine_config import write_prompt_state
+        from mizu.runtime import session_prompt
+        work = self.project.work_items.create(
+            idempotency_key="delta-capture-race", title="Work", actor="worker")["record"]["work_item"]
+        ctx = self.context("worker")
+        path = save_worker_session(self, {"tokens": 0})
+        store = self.project.insights
+        original_generation = store.generation
+        baseline = original_generation()
+        write_prompt_state(path.parent, snapshot=ctx.snapshot["id"],
+                           inbox_generation=baseline)
+        inserted = []
+
+        def inject_after_generation_read():
+            value = original_generation()
+            if not inserted:
+                inserted.append(_submit(self, "worker", "Arrived after capture"))
+            return value
+
+        with patch.object(store, "generation", side_effect=inject_after_generation_read):
+            prompt, mode, _, _, _ = session_prompt(ctx, ctx.role, ctx.run_dir)
+        delta = json.loads(prompt)
+        insight_id = inserted[0]["id"]
+        opening_generation = delta["work_order"]["opening_generation"]
+        self.assertEqual(mode, "delta")
+        self.assertEqual(delta["pending_insights"], [])
+        self.assertNotIn(insight_id, delta["open_insights"]["ids"])
+        ctx.handle("work_order", {
+            "items": [work["id"]], "rationale": "reviewed frozen opening",
+            "expected_rev": delta["work_order"]["rev"],
+            "expected_generation": opening_generation,
+        })
+        self.assertEqual(self.project.work_order_status()["status"], "review_due")
+
+        next_ctx = self.context("worker")
+        next_prompt, next_mode, _, _, _ = session_prompt(
+            next_ctx, next_ctx.role, next_ctx.run_dir)
+        next_delta = json.loads(next_prompt)
+        self.assertEqual(next_mode, "delta")
+        self.assertIn(insight_id, {row["id"] for row in next_delta["pending_insights"]})
+        self.assertEqual(next_delta["work_order"]["status"], "review_due")
+
+    def test_resume_generation_read_failure_reoffers_captured_inventory(self):
+        from mizu.runtime import session_prompt
+        item = _submit(self, "worker", "Offer when cursor unavailable")
+        ctx = self.context("worker")
+        save_worker_session(self, {"tokens": 0})
+        with patch.object(self.project.insights, "generation",
+                          side_effect=OSError("inbox cursor unavailable")):
+            prompt, mode, _, _, _ = session_prompt(ctx, ctx.role, ctx.run_dir)
+        decoded = json.loads(prompt)
+        self.assertEqual(mode, "delta")
+        self.assertIn(item["id"], {row["id"] for row in decoded["pending_insights"]})
 
     def test_open_backlog_truncation_is_explicit(self):
         import dataclasses
