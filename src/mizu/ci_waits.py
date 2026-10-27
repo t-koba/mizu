@@ -23,6 +23,10 @@ from .work_items import _directory, _timestamp
 MAX_CHECK_SET_BYTES = 2048
 
 
+class _CorruptAck(Denied):
+    """Safely read acknowledgement bytes failed content validation."""
+
+
 def normalize(root, value, *, stored=False):
     fields = {"kind", "publication_id", "checks"}
     if stored:
@@ -81,12 +85,13 @@ def _read(store, item, suffix="result"):
         path.lstat()
     except FileNotFoundError:
         return None
+    raw = safe_read(store.root, path.relative_to(store.root).as_posix(), PREVIEW_BYTES)
     try:
-        record = loads_finite(safe_read(store.root, path.relative_to(store.root).as_posix(), PREVIEW_BYTES))
+        record = loads_finite(raw)
     except (ValueError, UnicodeError) as exc:
-        raise Denied("Invalid CI wait evidence") from exc
+        raise (_CorruptAck if suffix == "ack" else Denied)("Invalid CI wait evidence") from exc
     if not isinstance(record, dict):
-        raise Denied("Invalid CI wait evidence")
+        raise (_CorruptAck if suffix == "ack" else Denied)("Invalid CI wait evidence")
     return record
 
 
@@ -147,8 +152,9 @@ def diagnose(wait, data):
 def status_diagnostics(store, role, publication, data):
     """Read-only, holder-only bounded projection using this status response.
 
-    Stream local waits with bounded retention; no evidence reads/writes, adapter
-    calls, acknowledgements or transitions. Omitted items/rows are explicit.
+    Stream local waits with bounded retention; safely read local evidence and acks,
+    but never write, acknowledge, transition or call the adapter. Omitted items/rows
+    are explicit; unsafe or unreadable evidence refuses the projection.
     """
     waits = (item for item in _items(store)
              if item["holder"] == role
@@ -160,7 +166,8 @@ def status_diagnostics(store, role, publication, data):
         return None
     rows = parse_status_checks(data)
     return {"items": [{"work_item": item["id"], "rev": item["rev"],
-                       "checks": diagnose(item["wait"], data)}
+                       "checks": diagnose(item["wait"], data),
+                       **({"acknowledgement": "corrupt"} if _ack_corrupt(store, item) else {})}
                       for item in selected[:MAX_DIAGNOSTIC_ITEMS]],
             "items_truncated": len(selected) > MAX_DIAGNOSTIC_ITEMS,
             "observed_checks": [{key: row[key] for key in ("check", "sha", "state", "run")
@@ -168,7 +175,7 @@ def status_diagnostics(store, role, publication, data):
             "observed_checks_truncated": len(rows) > MAX_DIAGNOSTIC_ROWS}
 
 
-def _evidence(store, item):
+def _evidence(store, item, *, sync=True):
     record = _read(store, item)
     if record is None:
         return None
@@ -187,7 +194,8 @@ def _evidence(store, item):
             or record["conclusion"] != _conclusion(rows)):
         raise Denied("Invalid terminal CI evidence")
     # Recover a previous post-rename directory-sync failure before delivery.
-    sync_dir(_path(store, item).parent)
+    if sync:
+        sync_dir(_path(store, item).parent)
     return {**record, "evidence_digest": digest(canonical(record))}
 
 
@@ -199,8 +207,25 @@ def _acknowledged(store, item, event):
             or ack["role"] != item["holder"]
             or ack["evidence_digest"] != event["evidence_digest"]
             or not _timestamp(ack["acknowledged_at"])):
-        raise Denied("Invalid CI wait acknowledgement")
+        raise _CorruptAck("Invalid CI wait acknowledgement")
     return True
+
+
+def _ack_corrupt(store, item):
+    # Validate evidence first: a broken shared store, unsafe path or bad result
+    # must never be reported as acknowledgement corruption.
+    event = _evidence(store, item, sync=False)
+    try:
+        if event is None:
+            if _read(store, item, "ack") is not None:
+                raise Denied("CI wait acknowledgement has no evidence")
+        else:
+            _acknowledged(store, item, event)
+    except _CorruptAck:
+        if event is None:
+            raise Denied("CI wait acknowledgement has no evidence")
+        return True
+    return False
 
 
 def _conclusion(rows):

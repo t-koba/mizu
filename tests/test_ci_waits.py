@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 from support import Fixture, ScriptDriver
 from mizu import ci_waits, vcs
-from mizu.errors import Denied
+from mizu.errors import Denied, LimitExceeded
 from mizu.fs import PREVIEW_BYTES, canonical, read_json, write_json
 from mizu.project import Project
 from mizu.protocol import DEFINITIONS, validate
@@ -521,6 +521,78 @@ class CiWaitTests(Fixture):
                 self.assertEqual(path.read_bytes(), payload)
                 self.assertTrue(ci_waits._path(self.store, good, "ack").exists())
                 self.assertEqual(ci_waits.pending(self.store, "worker"), [])
+
+    def test_status_reports_only_safely_read_corrupt_ack_and_keeps_delivery(self):
+        bad, good = [self.block(key) for key in ("bad-status", "good-status")]
+        self.poll()
+        events = {e["work_item"]: e for e in ci_waits.pending(self.store, "worker")}
+        path = ci_waits._path(self.store, bad, "ack")
+        evidence = ci_waits._path(self.store, bad).read_bytes()
+        valid = {"role": "worker", "evidence_digest": events[bad["id"]]["evidence_digest"],
+                 "acknowledged_at": "2025-01-01T00:00:00+00:00"}
+        reader = self.reader()
+        args = {"op": "status", "publication_id": self.publication.id}
+
+        def status():
+            with patch.object(vcs, "invoke", return_value={"checks": self.rows()}):
+                return reader.handle("vcs_read", args)["result"]["ci_waits"]["items"]
+
+        self.assertTrue(all("acknowledgement" not in row for row in status()))
+        cases = [b'not json', b'[]', canonical({**valid, "extra": 1}),
+                 canonical({**valid, "role": "editor"}),
+                 canonical({**valid, "evidence_digest": "0" * 64}),
+                 canonical({**valid, "acknowledged_at": "invalid"})]
+        for payload in cases:
+            with self.subTest(payload=payload):
+                path.write_bytes(payload)
+                result = {row["work_item"]: row for row in status()}
+                self.assertEqual(result[bad["id"]]["acknowledgement"], "corrupt")
+                self.assertNotIn("acknowledgement", result[good["id"]])
+                self.assertEqual(ci_waits.pending(self.store, "worker"), [events[good["id"]]])
+                self.assertEqual(path.read_bytes(), payload)
+                self.assertEqual(ci_waits._path(self.store, bad).read_bytes(), evidence)
+        path.write_bytes(canonical(valid))
+        self.assertTrue(all("acknowledgement" not in row for row in status()))
+        self.assertEqual(ci_waits.pending(self.store, "worker"), [events[good["id"]]])
+        ci_waits.acknowledge(self.store, "worker", [events[good["id"]]])
+        self.assertEqual(ci_waits.pending(self.store, "worker"), [])
+
+    def test_status_refuses_unsafe_or_unreadable_ack_and_broken_store(self):
+        item = self.block()
+        self.poll()
+        path = ci_waits._path(self.store, item, "ack")
+        data = {"checks": self.rows()}
+        def status():
+            return ci_waits.status_diagnostics(self.store, "worker", self.receipt, data)
+        path.write_bytes(b'x' * (PREVIEW_BYTES + 1))
+        with self.assertRaises(LimitExceeded):
+            status()
+        path.unlink()
+        try:
+            path.symlink_to(ci_waits._path(self.store, item))
+        except (OSError, NotImplementedError):
+            pass  # symlinks may be unavailable on Windows
+        else:
+            with self.assertRaises((Denied, OSError)):
+                status()
+            path.unlink()
+        path.write_bytes(b'not json')
+        safe_read = ci_waits.safe_read
+        for error in (OSError("unreadable"), ValueError("read failed")):
+            def unreadable(root, name, maximum):
+                if name.endswith(".ack.json"):
+                    raise error
+                return safe_read(root, name, maximum)
+            with patch.object(ci_waits, "safe_read", side_effect=unreadable):
+                with self.assertRaises(type(error)):
+                    status()
+        with patch.object(ci_waits, "_items", side_effect=Denied("ledger corrupt")):
+            with self.assertRaisesRegex(Denied, "ledger corrupt"):
+                status()
+        ci_waits._path(self.store, item).write_bytes(b'not json')
+        with self.assertRaisesRegex(Denied, "evidence"):
+            status()
+        self.assertEqual(path.read_bytes(), b'not json')
 
     def test_evidence_io_errors_are_local_and_poll_errors_are_bounded(self):
         bad = [self.block("unreadable-" + str(i)) for i in range(4)]

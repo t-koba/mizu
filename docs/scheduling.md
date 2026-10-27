@@ -394,6 +394,17 @@ receipt bindings still fail the whole scan; they are not per-waiter evidence
 errors. An acknowledgement error does not abort the remaining batch;
 unacknowledged valid events remain eligible for replay.
 
+For the holder's exact-publication `vcs_read status` diagnostic, a selected
+item reports `acknowledgement: "corrupt"` only when safely read acknowledgement
+content is malformed or invalid against valid retained result evidence. Valid
+or absent acknowledgements omit the field; omission is not an acknowledgement
+inference. Reads are bounded and return no raw bytes; no record is changed.
+Unsafe paths, oversized/unreadable records, invalid result evidence and shared
+ledger errors refuse the projection rather than being labeled corruption. The
+existing ten-item bound and truncation flag apply, and neither this view nor
+its failures change polling or delivery. See [operations](operations.md) for
+the required grants and invocation.
+
 Control and configured ordinary spacing remain in force (explicit
 `daemon_spacing_seconds` when set, else the policy default: `signals` uses the
 role-effective cooldown, `periodic` uses `idle_seconds`; ordinary spacing only,

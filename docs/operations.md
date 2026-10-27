@@ -609,9 +609,17 @@ branch mismatch reports `branch_mismatch`; the default adapter wrapper echoes
 the requested branch, so its equality is not proof of an observed branch.
 `observed_checks` lists up to 32 validated check/SHA/state/run identities
 from the same response, including other SHAs; both lists have truncation flags.
+A selected item with safely read malformed or invalid acknowledgement content
+reports `"acknowledgement":"corrupt"`; valid and absent acknowledgements omit
+that field. This does not say that an event was acknowledged. The projection
+reads and validates local result and acknowledgement records without returning
+their bytes or changing them. Unsafe paths, oversized or unreadable records,
+invalid result evidence and ledger failures refuse the status projection instead
+of being classified as acknowledgement corruption. The item bound and
+truncation flag apply to this diagnostic too.
 Names are exact: a raw job name never aliases a workflow-qualified name.
 Absence describes only this response, not failure: the exact name may appear
-on a later poll. Normal `checks` stay filtered to the receipt SHA. Diagnostics
+on a later poll. Normal `checks` stay filtered to the receipt SHA. Provider observations
 are external-untrusted invocation evidence only: they neither persist poll state
 nor wake, acknowledge or transition work, and status reads make no extra adapter
 call. Callers without either grant and ordinary branch/SHA status reads get no
