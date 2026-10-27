@@ -109,7 +109,8 @@ mizu cleanup demo
 - `snapshots/`, `objects/`: 不変なスナップショットマニフェストとコンテンツオブジェクト ★
 - `inbox/`, `insight-archive.sqlite3`, `decisions/`, `decision-history/`: 提案（Insight）の現行作業集合、決定済み本文・証拠の永続アーカイブ、採否判断、判断履歴 ★
 - `runs/`, `sessions/`: タスク実行記録とセッションログ ★
-- `evidence/`: 不変な公開ID・dispatch marker と receipt-pinned CI wait の結果・ack ★
+- `evidence/`: 不変な公開ID・dispatch marker、receipt-pinned CI wait の結果・ack、および `acceptance/` の正規化済み acceptance receipt（stdout/stderr と command log 本文は含まない） ★
+- `check-jobs/`: 非同期チェックの上限付き live cache とコマンド証跡（backup対象外：job、raw log、wait 記録は eviction や restore 後に失われることがあります）
 - `health/`: ヘルスチェック記録 ★（`capture_limit` は現在も適用されている
   snapshot 上限超過の原因（パスとサイズ）です。capture が成功すると解除され
   ます。実行の `error.json` にも同じ原因が記録され、次の実行の context に

@@ -151,9 +151,14 @@ and retrieve a completion with `action=result,id=<full digest>`. Results carry
 bounded output previews and paths to complete recorded command evidence. Use
 `action=logs,id=<job>,evidence_id=<command>,offset=0,limit=8192` for full
 recorded output; continue with `content_id` and `next_offset`. Pages are capped
-at 8192 characters and changed records are refused. Logs remain untrusted data. A
-passing acceptance result is imported only when current source, acceptance
-commands and configured execution environment match. A queued, interrupted,
+at 8192 characters and changed records are refused. Logs remain untrusted data. These paths refer to command evidence in the bounded
+`check-jobs/` live cache, not to durable acceptance proof: the cache is excluded
+from `mizu backup`, and its job, wait and raw-log records may be evicted or absent
+after restore. A separately retained normalized receipt under
+`evidence/acceptance/` survives backup/restore, but contains command IDs and exit
+results only, not stdout, stderr or command-log bodies. A passing acceptance
+result is imported only when current source, acceptance commands and configured
+execution environment match. A queued, interrupted,
 refused, failed or source-mismatched result cannot authorize completion.
 
 When only that job remains, finish with `outcome=wait, wait_for_check=<id>`.
@@ -179,7 +184,7 @@ holds nothing, so unreadable state never stops a role. The bound must be a
 finite positive epoch value; malformed or overflowing numeric values hold
 nothing and cannot wake a role.
 
-`mizu check-jobs PROJECT` drains up to `limits.check_pending` terminal jobs per invocation without a model, releasing admission between jobs. It returns immediately on idle, compute contention, cancellation, pause or cleanup failure; it never sleeps between queued jobs. Each result remains in its own durable record. The CLI response adds `processed`, the number of terminal jobs handled. On
+`mizu check-jobs PROJECT` drains up to `limits.check_pending` terminal jobs per invocation without a model, releasing admission between jobs. It returns immediately on idle, compute contention, cancellation, pause or cleanup failure; it never sleeps between queued jobs. Each result remains in its own bounded check-job cache record. The CLI response adds `processed`, the number of terminal jobs handled. On
 Linux, service generation creates a dedicated checks service, path notification
 and a 30-second recovery timer when a project enables the capability. Install
 and enable those units before enabling model use of the capability. Other
