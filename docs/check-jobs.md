@@ -218,6 +218,22 @@ waiting for ownership consumes no compute slot. The live writer's
 build tree is never accessed. Environment changes select a separate cache, and
 interrupted jobs discard their private artifacts. Cache storage requires ordinary
 operator disk maintenance and remains subject to the free-space admission reserve.
+While that exclusion is held, cache-sensitive proof lookup does not wait: the
+status `effective_verification` is null and its separate
+`effective_verification_diagnostic` is `{status: "uncomputable", reason:
+"cache_owned", owner_job: null}`. Null owner means unknown, not an assertion
+about which job owns the lock; this diagnostic is not proof or authority. Full
+and delta prompts expose the same null effective proof and separate diagnostic
+in `published_snapshot`; the diagnostic is null when proof lookup is computable. Historical snapshot
+`verification` remains unchanged and distinct. Selection and completion cannot
+use a stale retained receipt. After the lock is released, a retry recomputes the
+exact current cache input; unsafe paths, malformed evidence and I/O errors still
+fail closed rather than becoming a busy diagnosis. Cache-aware verification
+submission, validated listing and join return a `Busy` error promptly while
+owned; no unbound request is created. Custom checks without selected scratch
+and configurations without caches are unaffected. The exclusive lock remains
+held through checkout, execution and return; it is not an owner marker or lease.
+
 Artifacts never substitute for execution or passing evidence. Cross-role result
 reuse requires the explicit sharing configuration and input checks described
 below; shell text or a mutable mount path alone is insufficient.

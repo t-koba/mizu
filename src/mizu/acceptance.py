@@ -240,7 +240,7 @@ def _read(root, relative, maximum=MAX_BYTES):
 
 def scope(project):
     from .check_jobs import cache_guard
-    with cache_guard(project):
+    with cache_guard(project, blocking=False):
         return _current_scope(project)
 
 
@@ -376,24 +376,29 @@ def _retain(root, value):
     return receipt_id
 
 
-def effective(project, snapshot):
-    """Separate projection; never mutates a snapshot or imports current proof."""
+def effective_projection(project, snapshot):
+    """Return proof and a separate diagnostic; neither mutates the snapshot."""
     if snapshot.get("skipped"):
-        return None
-    from .check_jobs import cache_guard
-    # Keep the observed cache input stable through the final receipt selection.
-    # This takes neither queue nor acceptance exclusion; the private helper is
-    # used because the cache lock is already held and is not reentrant.
-    with cache_guard(project):
-        bound = _current_scope(project)
-        if bound is None:
-            return None
-        name = _index(project.root, snapshot['code_digest'], bound)
-        if not _present(project.root, name):
-            return None
-        receipt_id = _selected(project.root, name, snapshot['code_digest'], bound)
-        return {'passed': True, 'code_digest': snapshot['code_digest'],
-                'source': 'retained_acceptance', 'receipt_id': receipt_id}
+        return None, None
+    from .check_jobs import CacheOwned, cache_guard
+    # Keep the observed cache input stable through final receipt selection.
+    try:
+        with cache_guard(project, blocking=False):
+            bound = _current_scope(project)
+            if bound is None:
+                return None, None
+            name = _index(project.root, snapshot['code_digest'], bound)
+            if not _present(project.root, name):
+                return None, None
+            receipt_id = _selected(project.root, name, snapshot['code_digest'], bound)
+            return ({'passed': True, 'code_digest': snapshot['code_digest'],
+                     'source': 'retained_acceptance', 'receipt_id': receipt_id}, None)
+    except CacheOwned:
+        return None, {'status': 'uncomputable', 'reason': 'cache_owned', 'owner_job': None}
+
+
+def effective(project, snapshot):
+    return effective_projection(project, snapshot)[0]
 
 
 def audit(root, *, blocking=True):

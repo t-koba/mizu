@@ -80,12 +80,16 @@ class AcceptanceTests(Fixture):
         b = self.project.snapshots.capture_files(ctx.workspace)
         self.assertIsNone(acceptance.effective(self.project, b))
         # Both prompt modes distinguish immutable publication proof from late proof.
-        for text in (prompt_for(ctx), prompt_delta_for(ctx, [])):
-            header = json.loads(text)['published_snapshot']
+        for prompt in (lambda: prompt_for(ctx), lambda: prompt_delta_for(ctx, [])):
+            with patch.object(acceptance, 'effective_projection', wraps=acceptance.effective_projection) as projection:
+                header = json.loads(prompt())['published_snapshot']
+            projection.assert_called_once_with(self.project, ctx.snapshot)
             self.assertEqual(set(header), {'id', 'code_digest', 'created_at', 'state', 'summary',
-                                           'verification', 'effective_verification'})
+                                           'verification', 'effective_verification',
+                                           'effective_verification_diagnostic'})
             self.assertIsNone(header['verification'])
             self.assertEqual(header['effective_verification'], proof)
+            self.assertIsNone(header['effective_verification_diagnostic'])
 
     def test_sync_producer_retains_full_commands_not_preview(self):
         self.configure(detached=False)
@@ -1018,6 +1022,97 @@ class AcceptanceTests(Fixture):
         self.project.config = self.config
         self.project.snapshots.excludes = self.config.exclude
         return self.project.root / 'check-cache' / check_jobs.execution_key(self.config) / 'target'
+
+    def test_running_cache_check_keeps_projections_responsive_and_unusable(self):
+        from mizu.selection import work_inputs
+        self.configure_cache()
+        ctx, _, proof = self.produce()
+        item = self.project.work_items.create(actor='worker', idempotency_key='cache-busy',
+            title='Retained proof while cache is owned', scope='Test')['record']['work_item']
+        binding = bind_delivery(self.project, item['id'], ctx.snapshot['id'])
+        job = check_jobs.submit(ctx, fresh=True)
+        entered, release, done = threading.Event(), threading.Event(), threading.Event()
+        errors = []
+
+        class HeldSandbox(FakeSandbox):
+            def execute(self, workspace, script, **kwargs):
+                entered.set()
+                if not release.wait(15):
+                    raise RuntimeError('test cache barrier timed out')
+                return super().execute(workspace, script, **kwargs)
+
+        def run():
+            try:
+                self.run_job(HeldSandbox)
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                done.set()
+
+        runner = threading.Thread(target=run)
+        runner.start()
+        try:
+            self.assertTrue(entered.wait(10))
+            results, finished = [], threading.Event()
+            def reads():
+                try:
+                    status = self.project.status()
+                    self.assertIsNone(status['effective_verification'])
+                    self.assertEqual(status['effective_verification_diagnostic'],
+                        {'status': 'uncomputable', 'reason': 'cache_owned', 'owner_job': None})
+                    for text in (prompt_for(ctx), prompt_delta_for(ctx, [])):
+                        header = json.loads(text)['published_snapshot']
+                        self.assertIsNone(header['effective_verification'])
+                        self.assertEqual(header['effective_verification_diagnostic'],
+                            {'status': 'uncomputable', 'reason': 'cache_owned', 'owner_job': None})
+                    value = work_inputs(self.project, ctx.role, ctx.snapshot,
+                        {'max_proposals': 1, 'max_decisions': 1, 'max_text_bytes': 512})
+                    self.assertIsNone(value['evidence']['snapshot']['retained_verification'])
+                    self.assertIsNone(acceptance.effective(self.project, ctx.snapshot))
+                    with self.assertRaises(check_jobs.CacheOwned):
+                        acceptance.scope(self.project)
+                    with self.assertRaises(check_jobs.CacheOwned):
+                        check_jobs.submit(ctx, fresh=True)
+                    with self.assertRaises(check_jobs.CacheOwned):
+                        check_jobs.join(ctx, job['id'])
+                    with self.assertRaises(Denied):
+                        self.project.work_items.transition(item['id'], expected_rev=binding['rev'],
+                            status='done', actor='worker', snapshot_id=ctx.snapshot['id'])
+                    custom = check_jobs.submit(ctx, script='true')
+                    self.assertEqual(self.run_job()['id'], custom['id'])
+                except Exception as exc:
+                    results.append(exc)
+                finally:
+                    finished.set()
+            reader = threading.Thread(target=reads)
+            reader.start()
+            self.assertTrue(finished.wait(8), 'cache-sensitive read blocked behind check')
+            reader.join(1)
+            if results:
+                raise results[0]
+            self.assertFalse(done.is_set())
+        finally:
+            release.set()
+            runner.join(20)
+        self.assertFalse(runner.is_alive())
+        self.assertFalse(errors)
+        self.assertEqual(acceptance.effective(self.project, ctx.snapshot), proof)
+
+    def test_cache_busy_does_not_mask_unsafe_paths_or_corrupt_receipts(self):
+        self.configure_cache()
+        ctx, _, _ = self.produce()
+        index = next((self.project.root / 'evidence/acceptance/index').glob('*/*.json'))
+        index.write_bytes(b'not json')
+        with self.assertRaises(Denied):
+            self.project.status()
+        with self.assertRaises(Denied):
+            acceptance.effective(self.project, ctx.snapshot)
+        with patch('mizu.check_jobs.cache_input', side_effect=Denied('unsafe cache')):
+            with self.assertRaisesRegex(Denied, 'unsafe cache'):
+                acceptance.effective(self.project, ctx.snapshot)
+        with patch('mizu.check_jobs.cache_input', side_effect=OSError('cache I/O')):
+            with self.assertRaisesRegex(OSError, 'cache I/O'):
+                self.project.status()
 
     def test_scope_has_no_caller_controlled_cache_lock_bypass(self):
         self.configure_cache()

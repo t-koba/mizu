@@ -324,6 +324,8 @@ class Project:
         from .check_jobs import deferrals
         from .selection import project_status
         snapshot = self.snapshots.get()
+        from .acceptance import effective_projection
+        effective, effective_diagnostic = effective_projection(self, snapshot)
         budget = Budget(self.config.data / "budget", self.config.limits.daily_requests,
                         self.config.limits.retention_days,
                         self.config.limits.shared_daily_requests, self.config.timezone).usage(self.name)
@@ -348,7 +350,8 @@ class Project:
                 "code_digest": snapshot["code_digest"], "created_at": snapshot["created_at"],
                 "outcome": snapshot["outcome"], "summary": snapshot["summary"],
                 "verification": snapshot["verification"],
-                "effective_verification": self.effective_verification(snapshot), "state": snapshot["state"],
+                "effective_verification": effective,
+                "effective_verification_diagnostic": effective_diagnostic, "state": snapshot["state"],
                 "progress": {"status": "current" if progress is not None else "legacy",
                              "record": progress_projection(progress),
                              "disposition": progress_disposition_value,

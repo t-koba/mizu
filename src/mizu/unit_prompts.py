@@ -3,8 +3,8 @@
 This module owns one model-facing contract: the full unit prompt
 (:func:`prompt_for`) and the resumed-session delta (:func:`prompt_delta_for`)
 plus their tightly coupled bounded projection helpers and exact
-unit-opening literal. Everything stays byte- and key-order identical to the
-former ``runtime`` definitions.
+unit-opening literal. Snapshot proof and its diagnostic are projected together
+for both prompt variants.
 
 Session selection, rotation/recovery/fallback policy (:func:`runtime.session_prompt`
 and below), work-ready scheduling (``runtime._has_ready_work``,
@@ -20,7 +20,7 @@ import json
 import time
 from typing import TYPE_CHECKING
 
-from . import check_jobs
+from . import acceptance, check_jobs
 from .ci_observation import ci_failures_projection
 from .fs import canonical, read_json
 from .protocol import tool_definitions
@@ -230,6 +230,13 @@ def _prompt_capture_limit(context: Context) -> str | None:
     return cause if isinstance(cause, str) and cause else None
 
 
+def _published_snapshot(context: Context) -> dict:
+    proof, diagnostic = acceptance.effective_projection(context.project, context.snapshot)
+    return {**{k: context.snapshot[k] for k in (
+        "id", "code_digest", "created_at", "state", "summary", "verification")},
+        "effective_verification": proof, "effective_verification_diagnostic": diagnostic}
+
+
 def prompt_for(context: Context) -> str:
     # The charter body belongs to stable engine system context on every
     # dispatch (including resume); full and delta unit prompts carry its pin.
@@ -256,9 +263,7 @@ def prompt_for(context: Context) -> str:
     return json.dumps({"unit": UNIT_BEGINS_STATEMENT,
                        "unit_tool_surface": _prompt_tool_surface(context),
                        "goal_digest": context.goal_digest,
-                       "published_snapshot": {**{k: context.snapshot[k] for k in (
-                           "id", "code_digest", "created_at", "state", "summary", "verification")},
-                           "effective_verification": context.project.effective_verification(context.snapshot)},
+                       "published_snapshot": _published_snapshot(context),
                        "recent_snapshots": [{k: s[k] for k in ("id", "created_at", "outcome", "summary", "code_digest")}
                                             for s in context.project.snapshots.history(
                                                 context.snapshot["id"], context.config.limits.prompt_snapshots)],
@@ -338,9 +343,7 @@ def prompt_delta_for(context: Context, pending: list) -> str:
     return json.dumps({"unit": UNIT_BEGINS_STATEMENT,
                        "unit_tool_surface": _prompt_tool_surface(context),
                        "goal_digest": context.goal_digest,
-                       "published_snapshot": {**{k: context.snapshot[k] for k in (
-                           "id", "code_digest", "created_at", "state", "summary", "verification")},
-                           "effective_verification": context.project.effective_verification(context.snapshot)},
+                       "published_snapshot": _published_snapshot(context),
                        "snapshot_delta": {"id": context.snapshot["id"],
                                           "code_digest": context.snapshot["code_digest"]},
                        "pending_insights": pending,

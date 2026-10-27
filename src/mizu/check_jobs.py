@@ -226,10 +226,25 @@ def execution_environment(project, job):
     return _mount_fingerprint(project, job.get('environment_bounds', _configured_input_bounds(project)))
 
 
-def cache_guard(project):
+class CacheOwned(Busy):
+    """The cache lock is held; no owner identity is implied."""
+
+
+@contextlib.contextmanager
+def cache_guard(project, *, blocking=True):
     """Cache precedes queue exclusion everywhere; never hash under queue lock."""
-    return (lock(project.root / 'locks/check-cache.lock')
-            if project.config.sandbox.check_cache_paths else contextlib.nullcontext())
+    if not project.config.sandbox.check_cache_paths:
+        yield
+        return
+    guard = lock(project.root / 'locks/check-cache.lock', blocking=blocking)
+    try:
+        guard.__enter__()
+    except Busy as exc:
+        raise CacheOwned('Configured check cache busy; retry after its owner releases it') from exc
+    try:
+        yield
+    finally:
+        guard.__exit__(None, None, None)
 
 
 def cache_input(project):
@@ -402,7 +417,7 @@ def available(context, *, validate=True, discovery=None):
         return []
     if validate:
         env = environment(context.project)
-        with cache_guard(context.project):
+        with cache_guard(context.project, blocking=False):
             current = cache_input(context.project)
             candidates = [j for j in candidates if env is not None and j['environment'] == env
                           and cache_matches(context.project, j, current)]
@@ -413,7 +428,7 @@ def join(context, job_id):
     if job_id not in {j['id'] for j in available(context)}:
         raise Denied('No matching reusable check')
     project = context.project
-    with cache_guard(project):
+    with cache_guard(project, blocking=False):
         current = cache_input(project)
         with lock(project.root / 'locks/check-jobs.lock'):
             original = raw_read(project, job_id)
@@ -549,7 +564,7 @@ def submit(context, script=None, *, commands=None, kind="experiment", fresh=Fals
     # Run-local identity remains the fallback when observed inputs cannot be shared.
     env_bounds = _configured_input_bounds(project)
     env = environment(project, bounds=env_bounds)
-    with cache_guard(project) if not custom else contextlib.nullcontext():
+    with cache_guard(project, blocking=False) if not custom else contextlib.nullcontext():
         current = cache_input(project) if not custom else None
         if not custom and project.config.sandbox.check_cache_paths and current is None:
             raise Denied('Cannot bind configured check cache inputs; verification not queued')

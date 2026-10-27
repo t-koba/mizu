@@ -990,3 +990,15 @@ The local marker has a fixed version-1 schema (`version`, `role`, `profile`,
 and no model-write API. Its owner serializes mutations under workspace exclusion
 then publication lock; creation/replacement and removal use durable filesystem
 primitives. No new configuration or external provider call is introduced.
+
+### Shared check cache and status
+
+A running check may hold the configured shared check-cache lock across checkout,
+execution and return. Status then reports `effective_verification: null` and
+`effective_verification_diagnostic: {status: "uncomputable", reason:
+"cache_owned", owner_job: null}`. The null owner is unknown, not proof of a
+particular owner. Historical snapshot verification is separate. Retry status or
+cache-aware verification submission/join after the lock is released; these
+requests do not wait for the running check or enqueue an unbound verification.
+Malformed evidence, unsafe paths and I/O errors are not cache-busy results.
+See [check jobs](check-jobs.md) for the cache and proof contract.
