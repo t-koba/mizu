@@ -160,10 +160,10 @@ keeps the raw mtime so the drop clock does not restart, and only top-level
 `runs/*/` `*-events.jsonl` and `diagnostics.txt` (plus `.gz`) are candidates.
 See `docs/configuration.md` "Limits" and `mizu prune` help.
 
-## ADR-025 — Policy audit moves dashboard projection bounds to config
-The audit moves only what carries no safety cost: daemon poll bounds and the dashboard slice
-become `[vcs]`/`[limits]` keys with current values as defaults. Spend caps, the fault taxonomy,
-framing/memory bounds, sandbox floors, and liveness bounds stay fixed in code.
+## ADR-025 — Policy audit moves daemon poll bounds to config
+The audit moved only the daemon poll bounds into `[vcs]`; the proposed dashboard
+projection and configurable slice were not shipped. Spend caps, the fault taxonomy,
+framing/memory bounds, sandbox floors, and other fixed liveness bounds stay in code.
 
 | Constant (code) | Value | Disposition | Why |
 |---|---|---|---|
@@ -175,7 +175,6 @@ framing/memory bounds, sandbox floors, and liveness bounds stay fixed in code.
 | `MAX_WEB_WORKER_INPUT_BYTES` (`web_worker.py`) | 3 MiB | Stays fixed | Covers 2x canonical expansion of the 1 MiB TOML budget plus escaped valid probe input; parent and child reject overflow before parsing |
 | Sandbox termination, `MAX_VERIFY_COMMANDS`, include depth/files/bytes, web redirect/media, restore `--max-bytes` | 1 s+5 s / 32 / 8+32+1 MiB / 3 / 1 GiB | Stays fixed | Termination, fan-out, recursion, and archive-bomb safety floors |
 | `MAX_RUNS_SCANNED`, `MAX_RECENT_ENTRIES`, record size caps (`usage.py`) | 5000 / 200 / 1 MiB | Stays fixed | Unbounded run scans stall usage; records stay complete on disk |
-| `MAX_DECISIONS`, `REASON_TRUNCATE` (`dashboard.py`) | 10 / 500 | Moves to policy | Pure projection: raw decisions stay on disk, only the small-screen slice changes (`[limits] dashboard_decisions`, `dashboard_reason_chars`) |
 
 ## ADR-026 — In-process lock guard with a fixed 30 s liveness bound
 `fs.lock` serializes lock files within the process with a per-path guard keyed by canonical
