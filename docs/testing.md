@@ -102,20 +102,27 @@ The gate installs the pinned dependencies itself when they are absent: it runs
 `npm_config_offline=true`, so the install never reaches the network. A frozen
 source copy -- the input of a check job -- carries no `node_modules`, so
 without this the SDK gates fail closed on absent dependencies and the
-acceptance command has to be waived. The install happens only for a gate that
-will actually run (a waived gate needs no dependencies) and only over an
-adapter that has no dependency tree at all: `npm ci` is the clean install and
-replaces the whole tree, so it never runs over a tree the operator
-provisioned. An adapter that holds some of the pinned packages is left exactly
-as it is and fails closed, naming the packages that are missing; an adapter
-that holds none of them is absent, and the install does not run over the tree
-it has either. An installed version that differs from the pin is a contract
-violation, never reinstalled over. A missing npm, a missing lockfile, a failed install or an elapsed 300 s
-bound leaves the gate's verdict unchanged and the previous installation
-untouched, and names npm's own output. Because `npm ci` creates `node_modules`
-under the adapter source directory, that directory must be writable whenever
-pinned dependencies are absent. A permission failure names this precondition;
-the gate does not change permissions or redirect the installation elsewhere.
+acceptance command has to be waived. The dependency-status classifier and
+install eligibility are separate checks: `pi_sdk_deps_status()` reports only
+whether pinned packages are present at their pinned versions. Its `absent`
+status means none of the pinned packages was found; it does not mean the
+`node_modules` path is missing. Automatic `npm ci` additionally requires that
+the path itself not exist, because `npm ci` replaces the whole tree. Thus an
+existing empty, partial, or unrelated-only tree is left untouched and fails
+closed rather than dispatching npm; the regression
+`test_an_adapter_that_holds_none_of_the_pinned_packages_is_refused` verifies
+that an unrelated-only tree survives and npm is not dispatched. The install
+happens only for a gate that will actually run (a waived gate needs no
+dependencies) and only when the adapter has no dependency tree at all. A tree
+holding some pinned packages fails closed and names the packages that are
+missing; an installed version that differs from the pin is a contract
+violation, never reinstalled over. A missing npm, a missing lockfile, a failed
+install or an elapsed 300 s bound leaves the gate's verdict unchanged and the
+previous installation untouched, and names npm's own output. Because `npm ci`
+creates `node_modules` under the adapter source directory, that directory must
+be writable whenever pinned dependencies are absent and the path is missing.
+A permission failure names this precondition; the gate does not change
+permissions or redirect the installation elsewhere.
 
 The install resolves from npm's own cache, as selected by `npm_config_cache`
 (npm's default is `~/.npm`). That cache is the mechanism's input and must hold

@@ -814,17 +814,19 @@ def pi_sdk_deps_status(adapter: Path) -> tuple:
     SDK contract suites import operator-verified Pi dependencies, provisioned
     outside the offline test runner and never vendored into git.
     Returns ("ready", "") when every pinned dependency resolves at its pinned
-    version, ("absent", reason) when the adapter holds no installed
-    dependencies at all, ("partial", reason) when it holds some of the pinned
-    dependencies but not all, and ("mismatch", reason) when the manifest is
-    unreadable or an installed version differs from the pin.
+    version, ("absent", reason) when none of the pinned packages is present
+    (even if an empty or unrelated-only ``node_modules`` directory exists),
+    ("partial", reason) when some but not all pinned packages are present, and
+    ("mismatch", reason) when the manifest is unreadable or an installed
+    version differs from the pin.
 
-    Only ("absent") is installable. The clean install replaces the whole
-    dependency tree, so it never runs over a tree that holds anything the
-    operator provisioned: a partial tree fails closed and names the packages
-    that are missing, and a version mismatch fails like any contract
-    violation. Absent inputs are environment provisioning and fail closed
-    unless explicitly waived via --allow-not-run.
+    This presence/version classifier is not authorization to run ``npm ci``.
+    The provisioner separately requires the ``node_modules`` path itself to be
+    absent: the clean install replaces that entire path, including contents
+    unrelated to the pins. Existing trees are left untouched; partial trees
+    fail closed and name missing packages, while version mismatches fail like
+    any contract violation. Absent inputs fail closed unless explicitly waived
+    via --allow-not-run.
     """
     try:
         manifest = json.loads((adapter / "package.json").read_text(encoding="utf-8"))
@@ -887,11 +889,13 @@ def provision_pinned_dependencies(adapter: Path, *, timeout: int = NPM_PROVISION
     network, the committed lockfile pins every version, and dependency
     lifecycle scripts stay denied.
 
-    The clean install replaces the whole dependency tree, so it runs only
-    over an adapter that holds no installed dependencies at all. A tree that
-    holds some of the pinned packages is left exactly as it is and fails
-    closed, so a failed install never destroys what the operator provisioned.
-    When dependencies are absent, the adapter source directory must be
+    The classifier's ``absent`` verdict means no pinned packages were found;
+    it does not mean the ``node_modules`` path is missing. Automatic
+    provisioning also requires that path itself to be absent, because ``npm
+    ci`` replaces the entire dependency tree. Existing empty, unrelated-only,
+    or partial trees are left exactly as they are and fail closed; no install
+    runs over operator-owned contents. When dependencies are absent and the
+    path is missing, the adapter source directory must be
     writable because npm creates `node_modules` there; EACCES/EPERM failures
     name that precondition.
 
