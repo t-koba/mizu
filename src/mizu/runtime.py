@@ -1956,7 +1956,6 @@ def session_prompt(context: Context, role, run_dir: Path) -> tuple:
     if missing_recovery_due:
         record = rotate_session(path, run_dir, missing_reason)
         return prompt_for(context), "full", key, record, session_dir
-    caps = set(context.role.capabilities)
     try:
         current_generation = context.project.insights.generation()
         last = read_prompt_state(session_dir)
@@ -1965,11 +1964,13 @@ def session_prompt(context: Context, role, run_dir: Path) -> tuple:
                 and last.get("snapshot") == context.snapshot["id"]):
             pending: list = []
         else:
-            pending = context.project.insights.list(limit=context.config.limits.pending_insights) \
-                if ("insights" in caps or "decide" in caps) else []
+            pending = None
     except Exception:
         pending = []
     try:
+        if pending is None:
+            from . import work_order as _plan
+            pending = _plan._capture_opening(context)["pending_insights"]
         return prompt_delta_for(context, pending), "delta", key, None, session_dir
     except Exception:
         return prompt_for(context), "full", key, None, session_dir

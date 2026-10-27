@@ -21,6 +21,7 @@ import time
 from typing import TYPE_CHECKING
 
 from . import acceptance, check_jobs
+from .errors import Denied
 from .fs import canonical, read_json
 from .protocol import tool_definitions
 from .report import previous as _previous_report
@@ -373,8 +374,10 @@ def prompt_delta_for(context: Context, pending: list) -> str:
     synthesizing an empty inventory.
     """
     caps = set(context.role.capabilities)
+    if not isinstance(pending, list):
+        raise Denied("Invalid pending insights")
     from . import work_order as _plan
-    opening = _plan._capture_opening(context, pending_override=pending)
+    opening = _plan._capture_opening(context)
     acceptance = list(context.project.verify) if "verify" in caps else []
     ci_failures = opening["ci_failures"]
     ci_failures_may_be_truncated = opening["ci_truncated"]
@@ -386,7 +389,7 @@ def prompt_delta_for(context: Context, pending: list) -> str:
                        "published_snapshot": _published_snapshot(context),
                        "snapshot_delta": {"id": context.snapshot["id"],
                                           "code_digest": context.snapshot["code_digest"]},
-                       "pending_insights": opening["pending_insights"],
+                       "pending_insights": pending,
                        "open_insights": open_backlog,
                        "open_work_items": open_work_items,
                        "decision_events": opening["decision_events"],

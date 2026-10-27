@@ -52,7 +52,7 @@ class SessionDeltaTests(Fixture):
         from mizu.runtime import session_prompt
         ctx = self.context("worker")
         save_worker_session(self, {"tokens": 0})
-        with patch.object(self.project.work_items, "page_open",
+        with patch.object(self.project.work_items, "page_open_for_order",
                           side_effect=Denied("work-item page failed closed")) as page_open:
             with self.assertRaisesRegex(Denied, "work-item page failed closed"):
                 session_prompt(ctx, ctx.role, ctx.run_dir)
@@ -422,6 +422,21 @@ class SessionBacklogTests(Fixture):
         self.assertEqual(set(stated["ids"]), ids)
         self.assertEqual(stated["total"], 2)
         self.assertFalse(stated["truncated"])
+
+    def test_changed_delta_offers_the_same_once_captured_inventory(self):
+        from mizu.runtime import session_prompt, prompt_for
+        item = _submit(self, "worker", "Finding")
+        ctx = self.context("worker")
+        save_worker_session(self, {"tokens": 0})
+        with patch.object(self.project.insights, "projection", wraps=self.project.insights.projection) as captured:
+            prompt, mode, _, _, _ = session_prompt(ctx, ctx.role, ctx.run_dir)
+            full = json.loads(prompt_for(ctx))
+            self.assertEqual(captured.call_count, 1)
+        delta = json.loads(prompt)
+        self.assertEqual(mode, "delta")
+        self.assertEqual([row["id"] for row in delta["pending_insights"]], [item["id"]])
+        self.assertEqual(delta["pending_insights"], full["pending_insights"])
+        self.assertEqual(delta["work_order"]["opening_generation"], full["work_order"]["opening_generation"])
 
     def test_open_backlog_truncation_is_explicit(self):
         import dataclasses

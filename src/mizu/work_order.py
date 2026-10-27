@@ -3,17 +3,19 @@
 The plan records only the writer's ordered unique actionable work-item IDs
 plus a bounded short rationale and the exact semantic input generation
 reviewed. WorkItems stays authoritative for status, scope and evidence; no
-field here duplicates them. The generation binds the exact unit-opening
-projections shown in the prompt: the goal digest, the exact bounded
-open-work page, the bounded ready-work display (without volatile ages)
-plus the full actionable inventory signature and a full open-inventory
-accepted-scope/redecision fingerprint, the exact bounded
-pending-insight list plus open-insight backlog (when granted), the exact
-bounded CI-failure projection (when granted), and the dispatch-frozen
-configured actionable inputs (decision events and their visible page summary, corrupt-receipt
-diagnostics, work-item terminal events, structured insight waits including
-due waits, and obligations) exactly as displayed. It is captured once per
-unit so arrivals after opening are not retroactively treated as reviewed.
+field here duplicates them. The generation binds semantic inputs captured
+for the unit opening: goal digest, exact bounded open-work page, bounded
+ready-work display (without volatile ages) plus the full actionable inventory
+signature and a full open-inventory accepted-scope/redecision fingerprint,
+the full bounded pending-insight inventory plus open-insight backlog (when
+granted), the bounded CI-failure projection (when granted), and the
+dispatch-frozen configured actionable inputs (decision events and their
+visible page summary, corrupt-receipt diagnostics, work-item terminal events,
+structured insight waits including due waits, and obligations). Full prompts
+display the pending inventory; resumed-session deltas may omit already-offered
+bodies while reusing the same frozen inventory for generation and backlog.
+It is captured once per unit so arrivals after opening are not retroactively
+treated as reviewed.
 A change in the configured actionable-input set -- including an event
 disappearing after acknowledgement -- is a semantic input-set change and
 may legitimately make the next unit's order review_due; there is no
@@ -264,19 +266,17 @@ def generation_from_captured(*, goal_digest, open_work_items, ready_work,
                              work_item_events, wait_events, obligations]))
 
 
-_CAPTURE_SENTINEL = object()
-
-
 def _decision_page_summary(page):
     return {key: value for key, value in page.items() if key != "events"} if page is not None else None
 
 
-def _capture_opening(context, pending_override=_CAPTURE_SENTINEL) -> dict:
+def _capture_opening(context) -> dict:
     """Capture the unit-opening projections once; reuse for prompt and review.
 
     Reads each projection a single time and reuses the same objects for
-    both the prompt JSON and the frozen generation, so an arrival between
-    the two cannot enter the generation. Later calls on the same context
+    both the full prompt and the frozen generation, so an arrival between
+    the two cannot enter the generation. A delta displays its offered subset,
+    but hashes this same full semantic pending inventory. Later calls on the same context
     return the first capture; a prior failure is not retried mid-unit.
     Display-critical store failures propagate (fail-closed prompt);
     generation-hash failures are cached as None for unavailable.
@@ -312,35 +312,19 @@ def _capture_opening(context, pending_override=_CAPTURE_SENTINEL) -> dict:
         from .unit_prompts import _ready_work_projection
         ready_work = _ready_work_projection(raw_ready, context=context)
         limit_pending = config.limits.pending_insights
-        if pending_override is not _CAPTURE_SENTINEL:
-            if not isinstance(pending_override, list):
-                raise Denied("Invalid pending insights")
-            pending_insights = list(pending_override)
-            if "insights" in caps or "decide" in caps:
-                proj = project.insights.projection(limit=limit_pending)
-                if (not isinstance(proj, dict)
-                        or not isinstance(proj.get("items"), list)
-                        or not isinstance(proj.get("total"), int)):
-                    raise Denied("Invalid pending-insight projection")
-                open_backlog = {"ids": [item["id"] for item in proj["items"]],
-                                "total": proj["total"],
-                                "truncated": bool(proj.get("truncated"))}
-            else:
-                open_backlog = {"ids": [], "total": 0, "truncated": False}
+        if "insights" in caps or "decide" in caps:
+            proj = project.insights.projection(limit=limit_pending)
+            if (not isinstance(proj, dict)
+                    or not isinstance(proj.get("items"), list)
+                    or not isinstance(proj.get("total"), int)):
+                raise Denied("Invalid pending-insight projection")
+            pending_insights = list(proj["items"])
+            open_backlog = {"ids": [item["id"] for item in pending_insights],
+                            "total": proj["total"],
+                            "truncated": bool(proj.get("truncated"))}
         else:
-            if "insights" in caps or "decide" in caps:
-                proj = project.insights.projection(limit=limit_pending)
-                if (not isinstance(proj, dict)
-                        or not isinstance(proj.get("items"), list)
-                        or not isinstance(proj.get("total"), int)):
-                    raise Denied("Invalid pending-insight projection")
-                pending_insights = list(proj["items"])
-                open_backlog = {"ids": [item["id"] for item in proj["items"]],
-                                "total": proj["total"],
-                                "truncated": bool(proj.get("truncated"))}
-            else:
-                pending_insights = []
-                open_backlog = {"ids": [], "total": 0, "truncated": False}
+            pending_insights = []
+            open_backlog = {"ids": [], "total": 0, "truncated": False}
         if "vcs_read" in caps:
             from .ci_observation import ci_failures_projection as _proj
             rows, truncated = _proj(project)

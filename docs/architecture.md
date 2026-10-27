@@ -290,7 +290,7 @@ The history index retains published IDs up to the configured limit (default
 is always retained; older storage follows reference-aware retention below. Prompts carry a bounded, capability-gated projection: up to
 `limits.prompt_snapshots` recent anchored summaries with exact IDs and code
 digests, plus only the actionable context the role is granted to use.
-`work_order` freshness (`absent`/`current`/`review_due`/`unavailable`) is offered only to roles with `work_order`, sharing the unit-frozen generation across full and delta; `pending_insights` is offered only to roles with `insights`/`decide`, newest
+`work_order` freshness (`absent`/`current`/`review_due`/`unavailable`) is offered only to roles with `work_order`, sharing the unit-frozen full pending-inventory generation across full and delta even when a delta omits already-offered bodies; `pending_insights` is offered only to roles with `insights`/`decide`, newest
 kept up to `limits.pending_insights`;
 `acceptance_commands` only to roles with `verify`. Exact snapshot references
 (`id`, `code_digest`, `state`, `verification`) are always pinned, never
