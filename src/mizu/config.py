@@ -121,6 +121,23 @@ def _vcs_prefix(value, name):
         raise ConfigError(f"{name} must not hold empty components except one trailing slash")
 
 
+def _lineage_target(value, name):
+    """Validate the optional expected promotion-target descriptor."""
+    from .lineage import check_target
+    if not isinstance(value, dict):
+        raise ConfigError(f"{name} must be a table")
+    allowed = {"repository", "remote", "target_ref", "version"}
+    unknown = set(value) - allowed
+    if unknown:
+        raise ConfigError(f"Unknown keys in {name}: {', '.join(sorted(unknown))}")
+    missing = allowed - set(value)
+    if missing:
+        raise ConfigError(f"Missing keys in {name}: {', '.join(sorted(missing))}")
+    if check_target(value) is None:
+        raise ConfigError(f"{name} must hold a 64-hex repository, a safe remote name, a valid full refs/heads/<branch> ref and a version in [1, 1073741824]; no implicit origin/main")
+    return {"repository": value["repository"], "remote": value["remote"], "target_ref": value["target_ref"], "version": value["version"]}
+
+
 def boolean(value: Any, name: str) -> bool:
     if type(value) is not bool:
         raise ConfigError(f"{name} must be boolean")
@@ -1385,7 +1402,7 @@ def load(file: Path) -> Config:
                "poll_interval_seconds", "poll_max_branches",
                "poll_fetch_timeout_seconds", "poll_status_timeout_seconds",
                "retire_grant", "owned_prefixes", "protected_refs",
-               "close_grant", "merge_grant", "request_grant"}, "vcs")
+               "close_grant", "merge_grant", "request_grant", "lineage_target"}, "vcs")
     vcs = {"command": [], "timeout_seconds": 20,
            "max_bytes": 524288, "diagnostic_bytes": ADAPTER_DIAGNOSTIC_BYTES_DEFAULT,
            "ci_branch": "", "ci_wake_extra_branches": [], "ci_rewake_seconds": 1800,
@@ -1394,7 +1411,8 @@ def load(file: Path) -> Config:
            "poll_fetch_timeout_seconds": 30,
            "poll_status_timeout_seconds": 15, "retire_grant": False,
            "owned_prefixes": [], "protected_refs": [],
-           "close_grant": False, "merge_grant": False, "request_grant": False, **vcs}
+           "close_grant": False, "merge_grant": False, "request_grant": False,
+           "lineage_target": None, **vcs}
     strings(vcs["command"], "vcs.command")
     if vcs["command"] and any(not s or "\n" in s for s in vcs["command"]):
         raise ConfigError("vcs.command must be a nonempty argv array without newlines")
@@ -1428,6 +1446,11 @@ def load(file: Path) -> Config:
     for ref in vcs["protected_refs"]:
         if len(ref) > 256 or not ref or any(c.isspace() for c in ref):
             raise ConfigError("vcs.protected_refs must hold branch names without whitespace (at most 256 chars)")
+    raw_target = vcs.get("lineage_target")
+    if raw_target is None:
+        vcs["lineage_target"] = None
+    else:
+        vcs["lineage_target"] = _lineage_target(raw_target, "vcs.lineage_target")
     number(vcs["ci_rewake_seconds"], "vcs.ci_rewake_seconds", 60, 86400)
     vcs["poll_enabled"] = boolean(vcs["poll_enabled"], "vcs.poll_enabled")
     vcs["poll_proposals_enabled"] = boolean(vcs["poll_proposals_enabled"], "vcs.poll_proposals_enabled")

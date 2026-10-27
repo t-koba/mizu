@@ -1015,31 +1015,46 @@ Normal queue limits and cancellation still apply.
 ### Publication lineage observations
 
 The optional VCS-adapter `lineage` object on a successful `push`/`pr` response
-is captured create-only with the publication receipt when valid. Missing or
-invalid facts do not turn a successful push into an error. Existing receipts
-without lineage are never rewritten. Neither `publication_id` nor `code_digest`
-incorporates lineage.
+is captured create-only with the publication receipt when valid. The adapter
+observes the configured `[vcs.lineage_target]` when present; the product
+compares the response repository, remote and ref to the expected values
+independently and binds the descriptor identity and version into the new fact
+(schema 2). Missing or invalid facts do not turn a successful push into an
+error. Existing receipts without lineage are never rewritten, and legacy
+unbound receipts are never upgraded retroactively. Neither `publication_id`
+nor `code_digest` incorporates lineage.
 
 An operator-run publisher may record the same bounded observation with
 `mizu publication record --lineage '<json>'`. The JSON value is capped at
 4096 UTF-8 bytes, parsed as finite JSON, validated with the same shape and
-published-SHA binding as the product path, and stored create-only. With
-lineage the external receipt carries schema 4 with exactly the schema-3
-fields plus `lineage`; without it the receipt stays schema 3 with no
-lineage. The publication ID never incorporates lineage, so the same
-publication keeps one ID. A conflicting lineage on retry is refused, and a
-receipt without lineage stays `unknown`.
+published-SHA binding as the product path, and stored create-only. When
+`[vcs.lineage_target]` is configured the CLI binds the current descriptor
+into the new fact and the observation must match it; without configuration
+the fact stays unbound legacy. With lineage the external receipt carries
+schema 4 with exactly the schema-3 fields plus `lineage`; without it the
+receipt stays schema 3 with no lineage. The publication ID never incorporates
+lineage, so the same publication keeps one ID. A conflicting lineage on retry
+is refused, and a receipt without lineage stays `unknown`.
 
 For `vcs_read` `status` addressed by `publication_id`, the adapter receives
 the established status request containing the receipt's branch and published
-SHA; no lineage-specific request fields are added. In the same response as
-ordinary CI checks it may return one fresh `lineage` object (otherwise omit it
-or return null):
+SHA; when `[vcs.lineage_target]` is configured the request additionally
+carries `lineage_target` (`repository`, `remote`, `target_ref`, `version`)
+naming the expected promotion target, and `push`/`pr` requests carry the same
+descriptor. There are no other lineage-specific request fields. In the same
+response as ordinary CI checks it may return one fresh `lineage` object
+(otherwise omit it or return null):
 
+* `schema`: integer `1`, the raw adapter observation schema. Mizu adds the
+  configured target binding when it stores a new fact (schema 2).
 * `repository`: 64 lowercase hex digits, a stable **non-secret** repository
   identity digest shared between push and status observations. It identifies
-  the repository behind `origin`; do not return URLs containing credentials.
-* `remote`: exactly `origin`; `target_ref`: exactly `refs/heads/main`.
+  the repository behind the expected remote; do not return URLs containing credentials.
+* `remote`: the observed remote name, which must equal the configured
+  `lineage_target.remote` when a target is configured (no implicit `origin`);
+  `target_ref`: the observed full ref, which must equal the configured
+  `lineage_target.target_ref` (for example `refs/heads/main` or
+  `refs/heads/release-1`; no implicit `main`).
 * `target_oid` and `published_oid`: full lowercase 40- or 64-hex Git object
   IDs of the freshly observed destination and the receipt's published commit,
   in the same object format.
@@ -1064,22 +1079,41 @@ still fails normally rather than inventing CI or lineage facts.
 The exact-publication status `result.lineage` contains current `status` and
 `reason`, historical `receipt_status` and `receipt_reason`, the validated
 receipt `receipt` and current `observation` (null when unavailable). These
-facts are also retained in the normal run-local VCS read evidence. Current
-`ready` / `target_ancestor` requires a valid receipt and a fresh valid current
-observation bound to the same repository, accepted remote and target ref, and
-published OID, with current positive ancestry. The target OID may have moved;
-then `receipt_status` / `receipt_reason` is `stale` / `target_moved`, whether
-or not the new target is an ancestor. Otherwise historical standing matches
-current standing. For the same target OID, contradictory saved and current
-ancestry is `unknown` / `ancestry_conflict`, never ready.
+facts are also retained in the normal run-local VCS read evidence. The
+configured `[vcs.lineage_target]` descriptor selects the promotion target:
+without it readiness is `unknown` / `unconfigured` and ordinary publish and
+CI still succeed. With it, current `ready` / `target_ancestor` requires a
+valid bound receipt (schema 2 carrying `expected_repository` /
+`expected_remote` / `expected_target_ref` / `expected_version` equal to the
+configured descriptor) and a fresh valid bound current observation with the
+same binding, the same repository, remote and target ref, and published OID,
+with current positive ancestry. The observation time must fall within the
+adapter invocation. The target OID may have moved; then `receipt_status` /
+`receipt_reason` is `stale` / `target_moved`, whether or not the new target
+is an ancestor. Otherwise historical standing matches current standing. For
+the same target OID, contradictory saved and current ancestry is `unknown` /
+`ancestry_conflict`, never ready. A changed descriptor makes prior bound
+facts unusable without rewriting them: `unknown` / `descriptor_mismatch`
+(receipt `stale` / `descriptor_mismatch`); first publish a new receipt under
+the new descriptor. Legacy unbound receipts (schema 1, `origin` /
+`refs/heads/main` without a descriptor binding) stay readable history but
+report `unknown` / `unbound` and never become ready retroactively.
 
 `unknown` also uses `receipt_missing_or_invalid`, `observation_missing`,
-`observation_invalid`, `repository_mismatch`, or `not_ancestor`. Without a
+`observation_invalid`, `repository_mismatch`, `target_mismatch`,
+`unconfigured`, `unbound`, `descriptor_mismatch`, or `not_ancestor`. Without a
 valid, matching current observation the historical standing is unknown too:
-movement has not been established. Wrong refs, wrong published OIDs, ambiguous
-merge bases and invalid or nonfresh times are invalid, never ready. The same
-projection applies to external receipts: schema-2/3 receipts without lineage
-and schema-4 receipts with invalid nested observations stay `unknown`. These are
-external-untrusted observations at a point in time, not a promotion gate:
-they do not prevent subsequent remote movement, invoke promotion, or enforce
-any condition on an external consumer.
+movement has not been established. Wrong repositories, remotes or refs
+against the configured target, wrong published OIDs, ambiguous merge bases
+and invalid or nonfresh times are invalid, never ready. The same projection
+applies to external receipts: schema-2/3 receipts without lineage and
+schema-4 receipts with invalid nested observations stay `unknown`; only
+schema-4 receipts whose bound lineage matches the configured descriptor can
+become ready. New product and external facts bind the configured descriptor
+identity and version when it is present. Without configuration, a retained
+schema-1 fact remains unbound and can never become ready retroactively merely
+by later configuring values that match its response. The publication ID never
+incorporates lineage. These are external-untrusted observations at a point in
+time, not a promotion gate: they do not prevent subsequent remote movement,
+invoke promotion, gate any external consumer such as `dash-server.py`, or
+enforce any condition on an external consumer.

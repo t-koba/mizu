@@ -328,6 +328,12 @@ class ExternalLineageTests(Fixture):
         args.update(overrides)
         return args
 
+    def target(self, **changes):
+        base = {"repository": "1" * 64, "remote": "origin",
+                "target_ref": "refs/heads/main", "version": 1}
+        base.update(changes)
+        return base
+
     def test_valid_lineage_record_keeps_identity_and_reads_back(self):
         from mizu.fs import canonical, digest
         lineage = self.fact()
@@ -358,18 +364,27 @@ class ExternalLineageTests(Fixture):
         self.assertNotIn("lineage", record)
         self.assertEqual(Publication.read_receipt(self.root, record["publication_id"]), record)
         # Status without a recorded observation is never readiness.
+        # With a configured target the missing receipt stays receipt_missing_or_invalid.
         import dataclasses, json, sys
         from unittest.mock import patch
         from mizu import vcs
         from mizu.process import Result
+        expected = self.target()
         config, role = with_caps(self, "worker", ["vcs_read"])
         config = dataclasses.replace(config, vcs={"command": [sys.executable, "-c", "pass"],
-                                                  "timeout_seconds": 5, "max_bytes": 524288})
+                                                  "timeout_seconds": 5, "max_bytes": 524288,
+                                                  "lineage_target": expected})
         ctx = make_context(self, config, role)
 
         def adapter(_argv, **kwargs):
             req = json.loads(kwargs["input_data"])
-            self.assertEqual(req, {"op": "status", "branch": BRANCH, "sha": SHA})
+            self.assertEqual(req, {"op": "status", "branch": BRANCH, "sha": SHA,
+                                   "lineage_target": expected})
+            bound = {**self.fact(), "schema": 2,
+                     "expected_repository": expected["repository"],
+                     "expected_remote": expected["remote"],
+                     "expected_target_ref": expected["target_ref"],
+                     "expected_version": expected["version"]}
             return Result(0, json.dumps({"checks": [], "lineage": self.fact()}), "", "exited", 0)
 
         with patch.object(vcs, "run", side_effect=adapter):
@@ -382,13 +397,22 @@ class ExternalLineageTests(Fixture):
         from unittest.mock import patch
         from mizu import vcs
         from mizu.process import Result
-        record = Publication.record_external(self.root, **self.base_args(lineage=self.fact()))
+        expected = self.target()
+        record = Publication.record_external(self.root, **self.base_args(lineage=self.fact()),
+                                             lineage_target=expected)
+        # Bound receipts carry the descriptor identity and version.
+        self.assertEqual(record["lineage"]["expected_repository"], expected["repository"])
+        self.assertEqual(record["lineage"]["expected_target_ref"], expected["target_ref"])
+        self.assertEqual(record["lineage"]["expected_version"], expected["version"])
         config, role = with_caps(self, "worker", ["vcs_read"])
         config = dataclasses.replace(config, vcs={"command": [sys.executable, "-c", "pass"],
-                                                  "timeout_seconds": 5, "max_bytes": 524288})
+                                                  "timeout_seconds": 5, "max_bytes": 524288,
+                                                  "lineage_target": expected})
         ctx = make_context(self, config, role)
 
         def adapter(_argv, **kwargs):
+            req = json.loads(kwargs["input_data"])
+            self.assertEqual(req["lineage_target"], expected)
             return Result(0, json.dumps({"checks": [], "lineage": self.fact()}), "", "exited", 0)
 
         with patch.object(vcs, "run", side_effect=adapter):
@@ -417,7 +441,9 @@ class ExternalLineageTests(Fixture):
         from unittest.mock import patch
         from mizu import vcs
         from mizu.process import Result
-        record = Publication.record_external(self.root, **self.base_args(lineage=self.fact()))
+        expected = self.target()
+        record = Publication.record_external(self.root, **self.base_args(lineage=self.fact()),
+                                             lineage_target=expected)
         path = (self.root / "evidence" / "publications"
                 / (record["publication_id"] + ".external.json"))
         corrupted = json.loads(path.read_text(encoding="utf-8"))
@@ -425,12 +451,14 @@ class ExternalLineageTests(Fixture):
         path.write_text(json.dumps(corrupted), encoding="utf-8")
         config, role = with_caps(self, "worker", ["vcs_read"])
         config = dataclasses.replace(config, vcs={"command": [sys.executable, "-c", "pass"],
-                                                  "timeout_seconds": 5, "max_bytes": 524288})
+                                                  "timeout_seconds": 5, "max_bytes": 524288,
+                                                  "lineage_target": expected})
         ctx = make_context(self, config, role)
 
         def adapter(_argv, **kwargs):
             request = json.loads(kwargs["input_data"])
-            self.assertEqual(request, {"op": "status", "branch": BRANCH, "sha": SHA})
+            self.assertEqual(request, {"op": "status", "branch": BRANCH, "sha": SHA,
+                                       "lineage_target": expected})
             return Result(0, json.dumps({"checks": [{"check": "ci", "state": "success",
                                                       "sha": SHA}],
                                          "lineage": self.fact()}), "", "exited", 0)
@@ -580,3 +608,215 @@ class ExternalLineageTests(Fixture):
             execute(parser().parse_args(base + ["--lineage", oversized]))
         self.assertEqual(len([r for r in Publication.list_receipts(self.root)["publications"]
                               if r["branch"] == "cli-bad"]), 0)
+class LineageTargetExternalTests(Fixture):
+    """Configured target for external receipts: binding, staleness and CLI."""
+
+    def setUp(self):
+        super().setUp()
+        self.root = self.project.root
+
+    def fact(self, published_sha=None, **changes):
+        import datetime as dt
+        sha = published_sha if published_sha is not None else SHA
+        base = {"schema": 1, "repository": "1" * 64, "remote": "origin",
+                "target_ref": "refs/heads/main", "target_oid": "a" * 40,
+                "published_oid": sha, "merge_bases": ["a" * 40],
+                "target_is_ancestor": True,
+                "observed_at": dt.datetime.now(dt.timezone.utc).isoformat()}
+        base.update(changes)
+        return base
+
+    def target(self, **changes):
+        base = {"repository": "1" * 64, "remote": "origin",
+                "target_ref": "refs/heads/main", "version": 1}
+        base.update(changes)
+        return base
+
+    def base_args(self, **overrides):
+        args = {"branch": BRANCH, "published_sha": SHA, "code_digest": DIGEST,
+                "approval": APPROVAL, "projection": public_source_identity({})}
+        args.update(overrides)
+        return args
+
+    def test_configured_main_binds_and_readies(self):
+        import dataclasses, json, sys
+        from unittest.mock import patch
+        from mizu import vcs
+        from mizu.process import Result
+        expected = self.target()
+        record = Publication.record_external(self.root, **self.base_args(lineage=self.fact()),
+                                             lineage_target=expected)
+        self.assertEqual(record["schema"], 4)
+        self.assertEqual(record["lineage"]["schema"], 2)
+        self.assertEqual(record["lineage"]["expected_version"], 1)
+        config, role = with_caps(self, "worker", ["vcs_read"])
+        config = dataclasses.replace(config, vcs={"command": [sys.executable, "-c", "pass"],
+                                                  "timeout_seconds": 5, "max_bytes": 524288,
+                                                  "lineage_target": expected})
+        ctx = make_context(self, config, role)
+        def adapter(_argv, **kwargs):
+            req = json.loads(kwargs["input_data"])
+            self.assertEqual(req["lineage_target"], expected)
+            return Result(0, json.dumps({"checks": [], "lineage": self.fact()}), "", "exited", 0)
+        with patch.object(vcs, "run", side_effect=adapter):
+            out = ctx.handle("vcs_read", {"op": "status", "publication_id": record["publication_id"]})
+        self.assertEqual((out["result"]["lineage"]["status"], out["result"]["lineage"]["reason"]),
+                         ("ready", "target_ancestor"))
+
+    def test_configured_release_ref_readies(self):
+        import dataclasses, json, sys
+        from unittest.mock import patch
+        from mizu import vcs
+        from mizu.process import Result
+        expected = self.target(target_ref="refs/heads/release-1")
+        fact = self.fact(target_ref="refs/heads/release-1")
+        record = Publication.record_external(self.root, **self.base_args(lineage=fact),
+                                             lineage_target=expected)
+        self.assertEqual(record["lineage"]["target_ref"], "refs/heads/release-1")
+        config, role = with_caps(self, "worker", ["vcs_read"])
+        config = dataclasses.replace(config, vcs={"command": [sys.executable, "-c", "pass"],
+                                                  "timeout_seconds": 5, "max_bytes": 524288,
+                                                  "lineage_target": expected})
+        ctx = make_context(self, config, role)
+        def adapter(_argv, **kwargs):
+            fresh = self.fact(target_ref="refs/heads/release-1")
+            return Result(0, json.dumps({"checks": [], "lineage": fresh}), "", "exited", 0)
+        with patch.object(vcs, "run", side_effect=adapter):
+            out = ctx.handle("vcs_read", {"op": "status", "publication_id": record["publication_id"]})
+        self.assertEqual(out["result"]["lineage"]["status"], "ready")
+
+    def test_missing_descriptor_leaves_unconfigured(self):
+        import dataclasses, json, sys
+        from unittest.mock import patch
+        from mizu import vcs
+        from mizu.process import Result
+        record = Publication.record_external(self.root, **self.base_args(lineage=self.fact()))
+        self.assertEqual(record["lineage"]["schema"], 1)
+        config, role = with_caps(self, "worker", ["vcs_read"])
+        config = dataclasses.replace(config, vcs={"command": [sys.executable, "-c", "pass"],
+                                                  "timeout_seconds": 5, "max_bytes": 524288})
+        ctx = make_context(self, config, role)
+        def adapter(_argv, **kwargs):
+            req = json.loads(kwargs["input_data"])
+            self.assertNotIn("lineage_target", req)
+            return Result(0, json.dumps({"checks": [{"check": "ci", "state": "success", "sha": SHA}],
+                                         "lineage": self.fact()}), "", "exited", 0)
+        with patch.object(vcs, "run", side_effect=adapter):
+            out = ctx.handle("vcs_read", {"op": "status", "publication_id": record["publication_id"]})
+        self.assertEqual((out["result"]["lineage"]["status"], out["result"]["lineage"]["reason"]),
+                         ("unknown", "unconfigured"))
+        self.assertEqual(out["result"]["checks"][0]["check"], "ci")
+
+    def test_wrong_repository_and_ref_are_invalid(self):
+        import dataclasses, json, sys
+        from unittest.mock import patch
+        from mizu import vcs
+        from mizu.process import Result
+        expected = self.target()
+        record = Publication.record_external(self.root, **self.base_args(lineage=self.fact()),
+                                             lineage_target=expected)
+        config, role = with_caps(self, "worker", ["vcs_read"])
+        config = dataclasses.replace(config, vcs={"command": [sys.executable, "-c", "pass"],
+                                                  "timeout_seconds": 5, "max_bytes": 524288,
+                                                  "lineage_target": expected})
+        ctx = make_context(self, config, role)
+        for bad in (self.fact(repository="2" * 64), self.fact(target_ref="refs/heads/other")):
+            with self.subTest(bad=bad["target_ref"] if "target_ref" in bad else bad["repository"][:8]):
+                def adapter(_argv, _bad=bad, **kwargs):
+                    return Result(0, json.dumps({"checks": [], "lineage": _bad}), "", "exited", 0)
+                with patch.object(vcs, "run", side_effect=adapter):
+                    out = ctx.handle("vcs_read", {"op": "status", "publication_id": record["publication_id"]})
+                self.assertEqual(out["result"]["lineage"]["status"], "unknown")
+                self.assertEqual(out["result"]["lineage"]["reason"], "observation_invalid")
+
+    def test_descriptor_change_makes_prior_stale(self):
+        import dataclasses, json, sys
+        from unittest.mock import patch
+        from mizu import vcs
+        from mizu.process import Result
+        old = self.target()
+        record = Publication.record_external(self.root, **self.base_args(lineage=self.fact()),
+                                             lineage_target=old)
+        new = self.target(version=2)
+        config, role = with_caps(self, "worker", ["vcs_read"])
+        config = dataclasses.replace(config, vcs={"command": [sys.executable, "-c", "pass"],
+                                                  "timeout_seconds": 5, "max_bytes": 524288,
+                                                  "lineage_target": new})
+        ctx = make_context(self, config, role)
+        def adapter(_argv, **kwargs):
+            return Result(0, json.dumps({"checks": [], "lineage": self.fact()}), "", "exited", 0)
+        with patch.object(vcs, "run", side_effect=adapter):
+            out = ctx.handle("vcs_read", {"op": "status", "publication_id": record["publication_id"]})
+        self.assertEqual((out["result"]["lineage"]["status"], out["result"]["lineage"]["reason"]),
+                         ("unknown", "descriptor_mismatch"))
+        self.assertEqual((out["result"]["lineage"]["receipt_status"], out["result"]["lineage"]["receipt_reason"]),
+                         ("stale", "descriptor_mismatch"))
+
+    def test_unbound_legacy_never_readies(self):
+        import dataclasses, json, sys
+        from unittest.mock import patch
+        from mizu import vcs
+        from mizu.process import Result
+        record = Publication.record_external(self.root, **self.base_args(lineage=self.fact()))
+        self.assertEqual(record["lineage"]["schema"], 1)
+        expected = self.target()
+        config, role = with_caps(self, "worker", ["vcs_read"])
+        config = dataclasses.replace(config, vcs={"command": [sys.executable, "-c", "pass"],
+                                                  "timeout_seconds": 5, "max_bytes": 524288,
+                                                  "lineage_target": expected})
+        ctx = make_context(self, config, role)
+        def adapter(_argv, **kwargs):
+            return Result(0, json.dumps({"checks": [], "lineage": self.fact()}), "", "exited", 0)
+        with patch.object(vcs, "run", side_effect=adapter):
+            out = ctx.handle("vcs_read", {"op": "status", "publication_id": record["publication_id"]})
+        self.assertEqual((out["result"]["lineage"]["status"], out["result"]["lineage"]["reason"]),
+                         ("unknown", "unbound"))
+
+    def test_self_asserted_binding_without_config_is_refused(self):
+        from mizu import lineage as lineage_module
+        bound = lineage_module.bind(self.fact(), SHA, self.target())
+        self.assertIsNotNone(bound)
+        with self.assertRaises(Denied):
+            Publication.record_external(self.root, **self.base_args(lineage=bound))
+
+    def test_external_mismatched_lineage_is_refused(self):
+        expected = self.target()
+        with self.assertRaises(Denied):
+            Publication.record_external(self.root, **self.base_args(lineage=self.fact(repository="2" * 64)),
+                                        lineage_target=expected)
+        with self.assertRaises(Denied):
+            Publication.record_external(self.root, **self.base_args(lineage=self.fact(target_ref="refs/heads/other")),
+                                        lineage_target=expected)
+
+    def test_cli_binds_descriptor_when_configured(self):
+        import json
+        from mizu.cli import parser, execute
+        expected = self.target()
+        base = self.file.read_text()
+        self.file.write_text(base + "\n[vcs.lineage_target]\nrepository = \"" + "1" * 64 + "\"\nremote = \"origin\"\ntarget_ref = \"refs/heads/main\"\nversion = 1\n")
+        fact = self.fact()
+        args = parser().parse_args([
+            "--config", str(self.file), "publication", "record", "sample",
+            "--branch", BRANCH, "--published-sha", SHA, "--code-digest", DIGEST,
+            "--approval", APPROVAL,
+            "--projection-schema", "1", "--projection-algorithm", public_source_identity({})["algorithm"],
+            "--projection-digest", public_source_identity({})["digest"],
+            "--lineage", json.dumps(fact)])
+        record = execute(args)
+        self.assertEqual(record["schema"], 4)
+        self.assertEqual(record["lineage"]["schema"], 2)
+        self.assertEqual(record["lineage"]["expected_repository"], expected["repository"])
+        self.assertEqual(record["lineage"]["expected_version"], 1)
+        self.assertEqual(Publication.read_receipt(self.root, record["publication_id"])["lineage"], record["lineage"])
+        # A mismatched lineage against the configured descriptor is refused via CLI too.
+        bad = self.fact(target_ref="refs/heads/other")
+        with self.assertRaises(Denied):
+            execute(parser().parse_args([
+                "--config", str(self.file), "publication", "record", "sample",
+                "--branch", "other", "--published-sha", OTHER_SHA, "--code-digest", OTHER_DIGEST,
+                "--approval", APPROVAL,
+                "--projection-schema", "1", "--projection-algorithm", public_source_identity({})["algorithm"],
+                "--projection-digest", public_source_identity({})["digest"],
+                "--lineage", json.dumps(bad)]))
+        listed = execute(parser().parse_args(["--config", str(self.file), "publication", "list", "sample"]))
+        self.assertIn(record["publication_id"], [r["publication_id"] for r in listed["publications"]])

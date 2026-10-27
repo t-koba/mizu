@@ -689,14 +689,23 @@ class PublicationLineageTests(PublishFixture):
                    "target_is_ancestor": True,
                    "observed_at": dt.datetime.now(dt.timezone.utc).isoformat()}, **changes}
 
-    def publish(self, make_fact):
+    def target(self, **changes):
+        base = {"repository": "1" * 64, "remote": "origin",
+                "target_ref": "refs/heads/main", "version": 1}
+        base.update(changes)
+        return base
+
+    def publish(self, make_fact, target=None):
         config, role = with_caps(self, "worker", ["vcs_publish", "vcs_read"])
-        config = dataclasses.replace(config, vcs=adapter_settings(PUSH_OK))
+        expected = self.target() if target is None else target
+        config = dataclasses.replace(config, vcs={**adapter_settings(PUSH_OK),
+                                                  "lineage_target": expected})
         approve(self, "topic", current_digest(self))
         publisher = make_context(self, config, role)
 
         def adapter(_argv, **kwargs):
             req = json.loads(kwargs["input_data"])
+            self.assertEqual(req.get("lineage_target"), expected)
             return Result(0, json.dumps({**{k: req[k] for k in (
                 "digest", "projection_schema", "projection_algorithm", "projection_digest",
                 "publication_id")}, "published_sha": "b" * 40,
@@ -707,9 +716,11 @@ class PublicationLineageTests(PublishFixture):
 
     def read(self, config, role, publication_id, make_fact):
         reader = make_context(self, config, role)
+        expected = config.vcs.get("lineage_target")
         def adapter(_argv, **kwargs):
             req = json.loads(kwargs["input_data"])
-            self.assertEqual(req, {"op": "status", "branch": "topic", "sha": "b" * 40})
+            self.assertEqual(req, {"op": "status", "branch": "topic", "sha": "b" * 40,
+                                   "lineage_target": expected})
             return Result(0, json.dumps({"checks": [{"check": "ci", "state": "success",
                                                       "sha": "b" * 40}],
                                          "lineage": make_fact()}), "", "exited", 0)
@@ -731,7 +742,7 @@ class PublicationLineageTests(PublishFixture):
             (self.fact, "ready", "target_ancestor"),
             (lambda: self.fact(target_oid="c" * 40, merge_bases=["c" * 40]), "ready", "target_ancestor"),
             (lambda: self.fact(target_oid="c" * 40, merge_bases=["a" * 40], target_is_ancestor=False), "unknown", "not_ancestor"),
-            (lambda: self.fact(repository="2" * 64), "unknown", "repository_mismatch"),
+            (lambda: self.fact(repository="2" * 64), "unknown", "observation_invalid"),
             (lambda: None, "unknown", "observation_missing"),
             (lambda: self.fact(merge_bases=["a" * 40, "c" * 40]), "unknown", "observation_invalid"),
             (lambda: self.fact(published_oid="c" * 40), "unknown", "observation_invalid"),
@@ -756,7 +767,18 @@ class PublicationLineageTests(PublishFixture):
                 historical = ("stale", "target_moved") if moved else (expected, reason)
                 self.assertEqual((outcome["receipt_status"], outcome["receipt_reason"]), historical)
                 if reason not in ("observation_missing", "observation_invalid"):
-                    self.assertEqual(outcome["observation"], observation)
+                    bound = outcome["observation"]
+                    self.assertIsNotNone(bound)
+                    self.assertEqual(bound["schema"], 2)
+                    for key in ("repository", "remote", "target_ref", "target_oid",
+                                "published_oid", "merge_bases", "target_is_ancestor",
+                                "observed_at"):
+                        self.assertEqual(bound[key], observation[key])
+                    expected_target = config.vcs.get("lineage_target")
+                    self.assertEqual(bound["expected_repository"], expected_target["repository"])
+                    self.assertEqual(bound["expected_remote"], expected_target["remote"])
+                    self.assertEqual(bound["expected_target_ref"], expected_target["target_ref"])
+                    self.assertEqual(bound["expected_version"], expected_target["version"])
                 else:
                     self.assertIsNone(outcome["observation"])
 
@@ -816,13 +838,17 @@ class PublicationLineageTests(PublishFixture):
             "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "Publish")
         published_sha = git("rev-parse", "HEAD")
         config, role = with_caps(self, "worker", ["vcs_publish", "vcs_read"])
-        config = dataclasses.replace(config, vcs=adapter_settings(PUSH_OK))
+        expected = {"repository": "1" * 64, "remote": "origin",
+                    "target_ref": "refs/heads/main", "version": 1}
+        config = dataclasses.replace(config, vcs={**adapter_settings(PUSH_OK),
+                                                  "lineage_target": expected})
         approve(self, "topic", current_digest(self))
         publisher = make_context(self, config, role)
         reader = make_context(self, config, role)
 
         def adapter(_argv, **kwargs):
             req = json.loads(kwargs["input_data"])
+            assert req.get("lineage_target") == expected, req
             bases = git("merge-base", "--all", target, published_sha).splitlines()
             fact = {"schema": 1, "repository": "1" * 64, "remote": "origin", "target_ref": "refs/heads/main",
                     "target_oid": target, "published_oid": published_sha, "merge_bases": bases,
@@ -849,3 +875,216 @@ class PublicationLineageTests(PublishFixture):
             moved = reader.handle("vcs_read", args)["result"]["lineage"]
             self.assertEqual((moved["status"], moved["reason"], moved["receipt_status"]),
                              ("unknown", "not_ancestor", "stale"))
+
+class LineageTargetConfiguredTests(PublishFixture):
+    """Configured promotion target: binding, requests, staleness and fallbacks."""
+
+    def fact(self, **changes):
+        import datetime as dt
+        return {**{"schema": 1, "repository": "1" * 64, "remote": "origin",
+                   "target_ref": "refs/heads/main", "target_oid": "a" * 40,
+                   "published_oid": "b" * 40, "merge_bases": ["a" * 40],
+                   "target_is_ancestor": True,
+                   "observed_at": dt.datetime.now(dt.timezone.utc).isoformat()}, **changes}
+
+    def target(self, **changes):
+        base = {"repository": "1" * 64, "remote": "origin",
+                "target_ref": "refs/heads/main", "version": 1}
+        base.update(changes)
+        return base
+
+    def publish_with(self, make_fact, target):
+        config, role = with_caps(self, "worker", ["vcs_publish", "vcs_read"])
+        config = dataclasses.replace(config, vcs={**adapter_settings(PUSH_OK),
+                                                  "lineage_target": target} if target is not None else adapter_settings(PUSH_OK))
+        approve(self, "topic", current_digest(self))
+        publisher = make_context(self, config, role)
+
+        def adapter(_argv, **kwargs):
+            req = json.loads(kwargs["input_data"])
+            if target is None:
+                self.assertNotIn("lineage_target", req)
+            else:
+                self.assertEqual(req.get("lineage_target"), target)
+            return Result(0, json.dumps({**{k: req[k] for k in (
+                "digest", "projection_schema", "projection_algorithm", "projection_digest",
+                "publication_id")}, "published_sha": "b" * 40,
+                "lineage": make_fact()}), "", "exited", 0)
+        with patch.object(vcs, "run", side_effect=adapter):
+            published = publisher.handle("vcs_publish", {"op": "push", "branch": "topic"})
+        return config, role, publisher, published
+
+    def status_with(self, config, role, publication_id, make_fact, expect_request_target=True):
+        reader = make_context(self, config, role)
+        expected = config.vcs.get("lineage_target")
+
+        def adapter(_argv, **kwargs):
+            req = json.loads(kwargs["input_data"])
+            if expect_request_target and expected is not None:
+                self.assertEqual(req.get("lineage_target"), expected)
+            else:
+                # Missing descriptor carries no target in the request.
+                self.assertNotIn("lineage_target", req)
+            return Result(0, json.dumps({"checks": [{"check": "ci", "state": "success",
+                                                      "sha": "b" * 40}],
+                                         "lineage": make_fact()}), "", "exited", 0)
+        with patch.object(vcs, "run", side_effect=adapter):
+            result = reader.handle("vcs_read", {"op": "status", "publication_id": publication_id})
+        return result["result"]["lineage"]
+
+    def test_configured_main_binds_descriptor_and_readies(self):
+        expected = self.target()
+        config, role, _, published = self.publish_with(self.fact, expected)
+        receipt = Publication.read_receipt(self.project.root, published["publication_id"])
+        self.assertEqual(receipt["lineage"]["schema"], 2)
+        self.assertEqual(receipt["lineage"]["expected_repository"], expected["repository"])
+        self.assertEqual(receipt["lineage"]["expected_target_ref"], expected["target_ref"])
+        self.assertEqual(receipt["lineage"]["expected_version"], 1)
+        lineage = self.status_with(config, role, published["publication_id"], self.fact)
+        self.assertEqual((lineage["status"], lineage["reason"]), ("ready", "target_ancestor"))
+        self.assertEqual(lineage["observation"]["schema"], 2)
+
+    def test_configured_release_ref_readies(self):
+        expected = self.target(target_ref="refs/heads/release-1")
+        fact = lambda **c: self.fact(target_ref="refs/heads/release-1", **c)
+        config, role, _, published = self.publish_with(fact, expected)
+        receipt = Publication.read_receipt(self.project.root, published["publication_id"])
+        self.assertEqual(receipt["lineage"]["target_ref"], "refs/heads/release-1")
+        lineage = self.status_with(config, role, published["publication_id"], fact)
+        self.assertEqual((lineage["status"], lineage["reason"]), ("ready", "target_ancestor"))
+
+    def test_missing_descriptor_leaves_unknown_but_publish_and_ci_succeed(self):
+        config, role, _, published = self.publish_with(self.fact, None)
+        # Ordinary publish still succeeds without a descriptor.
+        self.assertTrue(published["published"])
+        receipt = Publication.read_receipt(self.project.root, published["publication_id"])
+        # Without a descriptor the new fact stays unbound legacy (or absent if mismatched).
+        # Here the adapter returned origin/main so it is stored unbound.
+        self.assertIn("lineage", receipt)
+        self.assertEqual(receipt["lineage"]["schema"], 1)
+        lineage = self.status_with(config, role, published["publication_id"], self.fact,
+                                   expect_request_target=False)
+        self.assertEqual((lineage["status"], lineage["reason"]), ("unknown", "unconfigured"))
+        # CI checks are still present alongside the unknown lineage.
+        reader = make_context(self, config, role)
+        with patch.object(vcs, "run", side_effect=lambda _a, **k: Result(0, json.dumps({"checks": [{"check": "ci", "state": "success", "sha": "b" * 40}]}), "", "exited", 0)):
+            out = reader.handle("vcs_read", {"op": "status", "publication_id": published["publication_id"]})
+        self.assertEqual(out["result"]["checks"][0]["check"], "ci")
+        self.assertEqual(out["result"]["lineage"]["status"], "unknown")
+
+    def test_unconfigured_adapter_cannot_self_bind_a_future_target(self):
+        from mizu import lineage as lineage_module
+        target = self.target()
+        self_bound = lineage_module.bind(self.fact(), "b" * 40, target)
+        self.assertIsNotNone(self_bound)
+        config, role, _, published = self.publish_with(lambda: self_bound, None)
+        receipt = Publication.read_receipt(self.project.root, published["publication_id"])
+        self.assertNotIn("lineage", receipt)
+        configured = dataclasses.replace(
+            config, vcs={**config.vcs, "lineage_target": target})
+        current = self.status_with(configured, role, published["publication_id"], self.fact)
+        self.assertEqual((current["status"], current["reason"]),
+                         ("unknown", "receipt_missing_or_invalid"))
+
+    def test_wrong_repository_is_invalid_not_ready(self):
+        expected = self.target()
+        config, role, _, published = self.publish_with(self.fact, expected)
+        lineage = self.status_with(config, role, published["publication_id"],
+                                   lambda: self.fact(repository="2" * 64))
+        self.assertEqual((lineage["status"], lineage["reason"]), ("unknown", "observation_invalid"))
+        self.assertIsNone(lineage["observation"])
+
+    def test_wrong_ref_is_invalid_not_ready(self):
+        expected = self.target()
+        config, role, _, published = self.publish_with(self.fact, expected)
+        lineage = self.status_with(config, role, published["publication_id"],
+                                   lambda: self.fact(target_ref="refs/heads/other"))
+        self.assertEqual((lineage["status"], lineage["reason"]), ("unknown", "observation_invalid"))
+
+    def test_target_movement_marks_stale_but_stays_ready(self):
+        expected = self.target()
+        config, role, _, published = self.publish_with(self.fact, expected)
+        lineage = self.status_with(config, role, published["publication_id"],
+                                   lambda: self.fact(target_oid="c" * 40, merge_bases=["c" * 40]))
+        self.assertEqual((lineage["status"], lineage["reason"]), ("ready", "target_ancestor"))
+        self.assertEqual((lineage["receipt_status"], lineage["receipt_reason"]), ("stale", "target_moved"))
+
+    def test_descriptor_ref_change_makes_prior_unusable(self):
+        old = self.target()
+        config, role, _, published = self.publish_with(self.fact, old)
+        # Operator reconfigures to a release ref; prior main-bound receipt cannot ready.
+        new = self.target(target_ref="refs/heads/release-1")
+        config2 = dataclasses.replace(config, vcs={**config.vcs, "lineage_target": new})
+        lineage = self.status_with(config2, role, published["publication_id"], self.fact)
+        self.assertEqual((lineage["status"], lineage["reason"]), ("unknown", "descriptor_mismatch"))
+        self.assertEqual((lineage["receipt_status"], lineage["receipt_reason"]), ("stale", "descriptor_mismatch"))
+
+    def test_descriptor_version_bump_makes_prior_stale(self):
+        old = self.target(version=1)
+        config, role, _, published = self.publish_with(self.fact, old)
+        new = self.target(version=2)
+        config2 = dataclasses.replace(config, vcs={**config.vcs, "lineage_target": new})
+        lineage = self.status_with(config2, role, published["publication_id"], self.fact)
+        self.assertEqual((lineage["status"], lineage["reason"]), ("unknown", "descriptor_mismatch"))
+        self.assertEqual((lineage["receipt_status"], lineage["receipt_reason"]), ("stale", "descriptor_mismatch"))
+
+    def test_unbound_legacy_never_establishes_readiness(self):
+        # Publish without a descriptor to mint a legacy unbound receipt.
+        config0, _, _, published = self.publish_with(self.fact, None)
+        receipt = Publication.read_receipt(self.project.root, published["publication_id"])
+        self.assertEqual(receipt["lineage"]["schema"], 1)
+        # Later configuration cannot retroactively ready it.
+        expected = self.target()
+        config = dataclasses.replace(config0, vcs={**config0.vcs, "lineage_target": expected})
+        role = config0.roles if hasattr(config0, "roles") else None
+        # Reuse a worker role with read grant.
+        _, read_role = with_caps(self, "worker", ["vcs_read"])
+        lineage = self.status_with(config, read_role, published["publication_id"], self.fact)
+        self.assertEqual((lineage["status"], lineage["reason"]), ("unknown", "unbound"))
+
+    def test_unrelated_publication_without_lineage_succeeds(self):
+        expected = self.target()
+        config, role, _, published = self.publish_with(lambda: None, expected)
+        self.assertTrue(published["published"])
+        receipt = Publication.read_receipt(self.project.root, published["publication_id"])
+        self.assertNotIn("lineage", receipt)
+        lineage = self.status_with(config, role, published["publication_id"], self.fact)
+        self.assertEqual((lineage["status"], lineage["reason"]), ("unknown", "receipt_missing_or_invalid"))
+
+    def test_lineage_target_config_validation(self):
+        from mizu.config import load
+        from mizu.errors import ConfigError
+        base = self.file.read_text()
+        # Absent stays None.
+        config = load(self.file)
+        self.assertIsNone(config.vcs.get("lineage_target"))
+        # Valid main and release targets load.
+        for ref in ("refs/heads/main", "refs/heads/release-1"):
+            text = base + f'\n[vcs.lineage_target]\nrepository = "{"1" * 64}"\nremote = "origin"\ntarget_ref = "{ref}"\nversion = 1\n'
+            self.file.write_text(text)
+            loaded = load(self.file)
+            self.assertEqual(loaded.vcs["lineage_target"]["target_ref"], ref)
+        # Missing keys, unknown keys, bad values and implicit defaults are refused.
+        bad_fragments = [
+            'repository = "1" * 64',  # invalid TOML type context, still fails load
+            '[vcs.lineage_target]\nrepository = "1"\nremote = "origin"\ntarget_ref = "refs/heads/main"\nversion = 1\n',
+            '[vcs.lineage_target]\nrepository = "' + "1" * 64 + '"\nremote = ""\ntarget_ref = "refs/heads/main"\nversion = 1\n',
+            '[vcs.lineage_target]\nrepository = "' + "1" * 64 + '"\nremote = "origin"\ntarget_ref = "main"\nversion = 1\n',
+            '[vcs.lineage_target]\nrepository = "' + "1" * 64 + '"\nremote = "--upload-pack"\ntarget_ref = "refs/heads/main"\nversion = 1\n',
+            '[vcs.lineage_target]\nrepository = "' + "1" * 64 + '"\nremote = "origin"\ntarget_ref = "refs/heads/a..b"\nversion = 1\n',
+            '[vcs.lineage_target]\nrepository = "' + "1" * 64 + '"\nremote = "origin"\ntarget_ref = "refs/heads/.hidden"\nversion = 1\n',
+            '[vcs.lineage_target]\nrepository = "' + "1" * 64 + '"\nremote = "origin"\ntarget_ref = "refs/heads/main"\nversion = true\n',
+            '[vcs.lineage_target]\nrepository = "' + "1" * 64 + '"\nremote = "origin"\ntarget_ref = "refs/heads/main"\nversion = 0\n',
+            '[vcs.lineage_target]\nrepository = "' + "1" * 64 + '"\nremote = "origin"\ntarget_ref = "refs/heads/main"\nversion = 1\nextra = 1\n',
+            '[vcs.lineage_target]\nrepository = "' + "1" * 64 + '"\nremote = "origin"\nversion = 1\n',
+        ]
+        for frag in bad_fragments:
+            with self.subTest(frag=frag[:40]):
+                self.file.write_text(base + "\n" + frag + "\n")
+                with self.assertRaises(ConfigError):
+                    load(self.file)
+        # No implicit origin/main: a table missing remote/ref is refused (covered above),
+        # and an empty table is refused.
+        self.file.write_text(base + "\n[vcs.lineage_target]\n")
+        with self.assertRaises(ConfigError):
+            load(self.file)

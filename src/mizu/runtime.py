@@ -1310,7 +1310,8 @@ class Context:
                 data["ci_waits"] = diagnostics
         if publication is not None:
             current = data.pop("lineage_observation")
-            data["lineage"] = lineage.status(publication, current, data.pop("lineage_reason"))
+            expected = self.config.vcs.get("lineage_target")
+            data["lineage"] = lineage.status(publication, current, data.pop("lineage_reason"), expected)
             data["lineage"]["receipt"] = lineage.validate(publication.get("lineage"),
                                                           publication["published_sha"])
             data["lineage"]["observation"] = current

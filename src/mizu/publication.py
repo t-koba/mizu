@@ -422,7 +422,7 @@ class Publication:
     def record_external(cls, project_root: Path, *, branch: str, published_sha: str,
                         code_digest: str, approval: str, source_commit: str | None = None,
                         run: str | None = None, projection: dict | None = None,
-                        lineage=None) -> dict:
+                        lineage=None, lineage_target=None) -> dict:
         """Record one operator-run publication as a durable receipt.
 
         The publisher pushes outside the product, then records what it
@@ -438,7 +438,10 @@ class Publication:
         An optional ``lineage`` observation uses the same bounded shape as
         the product path and must bind the published SHA; when present the
         receipt carries schema 4 with exactly the schema-3 fields plus
-        ``lineage``, otherwise schema 3 with no lineage. Lineage never
+        ``lineage``, otherwise schema 3 with no lineage. When
+        ``lineage_target`` (the configured promotion descriptor) is given,
+        the observation is bound to that descriptor and must match it;
+        without it the observation stays unbound legacy. Lineage never
         enters the publication ID. A receipt without lineage stays unknown.
         Identity: the publication ID is the digest of the operation, branch,
         code digest, published SHA and projection, so the same
@@ -474,7 +477,26 @@ class Publication:
         from . import lineage as lineage_module
         validated = None
         if lineage is not None:
-            validated = lineage_module.validate(lineage, published_sha)
+            if lineage_target is None:
+                validated = lineage_module.validate(lineage, published_sha)
+                if validated is not None and validated.get("schema") != lineage_module.SCHEMA:
+                    validated = None
+            else:
+                target = lineage_module.check_target(lineage_target)
+                if target is None:
+                    raise Denied("Invalid lineage target for external publication")
+                # Accept an already-bound fact matching the target, or bind an
+                # unbound adapter observation to the target.
+                existing = lineage_module.validate(lineage, published_sha)
+                if existing is not None and existing.get("schema") == lineage_module.BOUND_SCHEMA:
+                    if (existing.get("expected_repository") != target["repository"]
+                            or existing.get("expected_remote") != target["remote"]
+                            or existing.get("expected_target_ref") != target["target_ref"]
+                            or existing.get("expected_version") != target["version"]):
+                        raise Denied("Invalid lineage observation for external publication")
+                    validated = existing
+                else:
+                    validated = lineage_module.bind(lineage, published_sha, target)
             if validated is None:
                 raise Denied("Invalid lineage observation for external publication")
         compared = ("branch", "published_sha", "code_digest", "approval",

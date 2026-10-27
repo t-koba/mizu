@@ -841,13 +841,20 @@ def read_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
         if not isinstance(sha, str) or not _SHA.fullmatch(sha):
             raise Denied("Invalid VCS sha filter")
         request["sha"] = sha
+    expected = None
     if op == "status" and "publication_id" in params:
         # This is a host-only signal to validate an optional lineage response;
         # keep the established adapter request shape (branch + exact SHA).
+        # When a promotion target is configured, carry its versioned identity
+        # so the adapter observes the expected remote ref; the product still
+        # compares the response independently and binds the descriptor.
         publication_id = params["publication_id"]
         if (not isinstance(publication_id, str) or not DIGEST.fullmatch(publication_id)
                 or sha is None):
             raise Denied("Invalid publication status binding")
+        expected = lineage.check_target(settings.get("lineage_target"))
+        if expected is not None:
+            request["lineage_target"] = expected
     started = dt.datetime.now(dt.timezone.utc)
     data = invoke(settings, request, cancel=cancel)
     ended = dt.datetime.now(dt.timezone.utc)
@@ -861,7 +868,7 @@ def read_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
                   "trust": "external-untrusted"}
         if "publication_id" in params:
             raw = data.get("lineage")
-            result["lineage_observation"] = lineage.observe(raw, sha, started, ended)
+            result["lineage_observation"] = lineage.observe(raw, sha, started, ended, expected)
             result["lineage_reason"] = ('observation_missing' if raw is None
                                         else 'observation_invalid')
         return result
@@ -1323,13 +1330,17 @@ def publish_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
     source_commit = params.get("source_commit")
     if not isinstance(source_commit, str) or not _SHA.fullmatch(source_commit):
         raise Denied("Invalid source commit for publication")
+    expected = lineage.check_target(settings.get("lineage_target"))
+    lineage_request = {"op": op, "branch": branch, "digest": code_digest,
+                       "projection_schema": projection_schema,
+                       "projection_algorithm": projection_algorithm,
+                       "projection_digest": projection_digest,
+                       "publication_id": publication_id,
+                       "source_commit": source_commit}
+    if expected is not None:
+        lineage_request["lineage_target"] = expected
     started = dt.datetime.now(dt.timezone.utc)
-    data = invoke(settings, {"op": op, "branch": branch, "digest": code_digest,
-                             "projection_schema": projection_schema,
-                             "projection_algorithm": projection_algorithm,
-                             "projection_digest": projection_digest,
-                             "publication_id": publication_id,
-                             "source_commit": source_commit},
+    data = invoke(settings, lineage_request,
                      cancel=cancel, before_invoke=before_invoke)
     if not isinstance(data, dict):
         raise Denied("VCS adapter must return a JSON object")
@@ -1346,7 +1357,7 @@ def publish_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
     if not isinstance(published_sha, str) or not _SHA.fullmatch(published_sha):
         raise Denied("VCS adapter must return an exact published_sha")
     observed = lineage.observe(data.get("lineage"), published_sha, started,
-                               dt.datetime.now(dt.timezone.utc))
+                               dt.datetime.now(dt.timezone.utc), expected)
     return {**data, "lineage": observed, "trust": "external-untrusted"}
 
 
