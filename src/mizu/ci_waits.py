@@ -10,12 +10,15 @@ from __future__ import annotations
 
 import contextlib
 import heapq
+import json
 import os
+from dataclasses import asdict
 
 from .errors import Denied, LimitExceeded
-from .fs import (PREVIEW_BYTES, canonical, digest, identifier, loads_finite, lock,
+from .fs import (MAX_FRAME, PREVIEW_BYTES, canonical, digest, identifier, loads_finite, lock,
                  mkdir, safe_read, sync_dir, write_json)
 from .fs import now as observed_now
+from .shared_records import RECORD_BYTES, RECEIPT_BYTES, KindPolicy, SharedRecords, _token
 from .publication import Publication
 from .vcs import _reject_terminal_controls, parse_status_checks
 from .work_items import _directory, _timestamp
@@ -149,7 +152,7 @@ def diagnose(wait, data):
     return result
 
 
-def status_diagnostics(store, role, publication, data):
+def status_diagnostics(store, role, publication, data, *, shared=False):
     """Read-only, holder-only bounded projection using this status response.
 
     Stream local waits with bounded retention; safely read local evidence and acks,
@@ -167,7 +170,8 @@ def status_diagnostics(store, role, publication, data):
     rows = parse_status_checks(data)
     return {"items": [{"work_item": item["id"], "rev": item["rev"],
                        "checks": diagnose(item["wait"], data),
-                       **({"acknowledgement": "corrupt"} if _ack_corrupt(store, item) else {})}
+                       **({"acknowledgement": "corrupt"} if (_ack_corrupt(store, item)
+                           or (shared and _shared_ack_corrupt(store, item))) else {})}
                       for item in selected[:MAX_DIAGNOSTIC_ITEMS]],
             "items_truncated": len(selected) > MAX_DIAGNOSTIC_ITEMS,
             "observed_checks": [{key: row[key] for key in ("check", "sha", "state", "run")
@@ -232,10 +236,11 @@ def _conclusion(rows):
     return "success" if all(r["state"] == "success" for r in rows) else "failure"
 
 
-def pending(store, role, *, limit=10):
+def pending(store, role, *, limit=10, config=None):
     """Freeze a current holder-routed delivery page under the lifecycle lock."""
     with lock(store.root / "locks" / "insights.lock"):
-        return _pending(store, role, limit=limit)
+        return (_shared_page(store, role, limit=limit, persist=False)[0] if enabled(config)
+                else _pending(store, role, limit=limit))
 
 
 def _pending(store, role, *, limit):
@@ -280,6 +285,173 @@ def acknowledge(store, role, events):
             except (Denied, LimitExceeded, OSError, ValueError):
                 # Leave this event unacknowledged and continue the frozen batch.
                 continue
+
+
+# CI is still the source authority. SharedRecords owns only immutable envelopes,
+# manifests and explicit per-role receipts; legacy auto-acks are never imported.
+def enabled(config):
+    return config is not None and config.vcs.get("ci_wait_shared_records", False) is True
+
+
+def _validate_record(subject, payload):
+    if (set(subject) != {"work_item", "rev", "holder"}
+            or any(subject[key] != payload.get(key) for key in subject)
+            or payload.get("kind") != "ci" or payload.get("trust") != "external-untrusted"):
+        raise Denied("Invalid shared CI wait binding")
+
+
+def shared_store(store):
+    # Generic record bound only. The per-source 128 KiB evidence limit stays at
+    # poll/write (canonical source record); no smaller aggregate cap is added.
+    return SharedRecords(store.root, {"ci.wait": KindPolicy(
+        frozenset({"host.ci"}), _validate_record, maximum=RECORD_BYTES)})
+
+
+def _envelope(item, event):
+    return {"schema": 1, "id": f"ci-wait:{item['id']}:{item['rev']}",
+            "kind": "ci.wait", "created_at": item["updated_at"], "writer": "host.ci",
+            "subject": {key: item[key] for key in ("rev", "holder")} | {"work_item": item["id"]},
+            "payload": event}
+
+
+def _existing(shared, envelope):
+    # Read-only eligibility/wake checks must not create records. Exact replay
+    # also handles a previous create-only write whose directory sync failed.
+    if any(shared._read(name, RECORD_BYTES) is not None
+           for name in shared._record_names(envelope["id"])):
+        _, computed = shared.get(envelope["id"])
+        if computed != digest(canonical(envelope)):
+            raise Denied("Shared CI evidence differs from current source")
+        return computed
+    if shared._read(shared._receipt_name(envelope["subject"]["holder"], envelope["id"]),
+                    RECEIPT_BYTES) is not None:
+        raise Denied("Shared CI receipt has no record")
+    return None
+
+
+def _shared_ack_corrupt(store, item):
+    event = _evidence(store, item, sync=False)
+    if event is None:
+        return False
+    shared = shared_store(store)
+    envelope = _envelope(item, event)
+    computed = _existing(shared, envelope)
+    if computed is None:
+        return False
+    shared._read(shared._receipt_name(item["holder"], envelope["id"]), RECEIPT_BYTES)
+    try:
+        shared.received(item["holder"], envelope["id"], computed)
+    except Denied:
+        return True
+    return False
+
+
+def _page_bytes(events) -> int:
+    # Actual prompt serialization for the wait_events contribution, not
+    # canonical list framing. prompt_for uses json.dumps with the default
+    # ensure_ascii=True, so emoji and framing measure larger here than in
+    # canonical bytes; the generic 1 MiB frame is the only aggregate bound.
+    return len(json.dumps({"wait_events": events}, ensure_ascii=True).encode("utf-8"))
+
+
+def _shared_page(store, role, *, limit=10, persist):
+    identifier(role)
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise Denied("Invalid CI wait delivery limit")
+    shared = shared_store(store)
+    selected = []
+    for item in _items(store):  # full history replay and publication validation
+        if item["holder"] != role:
+            continue
+        try:
+            event = _evidence(store, item, sync=persist)
+            if event is None:
+                continue
+            envelope = _envelope(item, event)
+            shared._validate(envelope)
+            computed = _existing(shared, envelope)
+            if computed is not None and shared.received(role, envelope["id"], computed):
+                continue
+        except (Denied, LimitExceeded, OSError, ValueError):
+            continue  # one broken waiter cannot hide another holder's evidence
+        selected.append((item["updated_at"], item["id"], envelope))
+        selected.sort(key=lambda row: row[:2])
+        del selected[limit:]
+    # No smaller aggregate cap: per-source evidence stays bounded at 128 KiB at
+    # poll/write, each shared envelope at the generic record bound, and the
+    # page at the existing generic 1 MiB frame measured as serialized above.
+    if _page_bytes([]) > MAX_FRAME:
+        raise LimitExceeded("CI wait page metadata exceeds byte bound")
+    events, manifest = [], ()
+    for _, _, envelope in selected:
+        computed = digest(canonical(envelope))
+        event = {**envelope["payload"], "record_id": envelope["id"], "record_digest": computed,
+                 "ack_token": _token(role, envelope["id"], computed)}
+        # Keep a contiguous oldest-first prefix. A full page leaves this and
+        # later rows pending; after the delivered prefix is receipted, replay
+        # starts here. One valid row fits an empty frame under the source bound.
+        if _page_bytes(events + [event]) > MAX_FRAME:
+            if not events:
+                raise LimitExceeded("CI wait event exceeds the generic prompt frame bound")
+            break
+        if persist:
+            shared.put(envelope, writer="host.ci")
+            manifest += shared.freeze(role, [envelope["id"]])
+        events.append(event)
+    return events, manifest
+
+
+def delivery(store, role, config):
+    """Freeze only current holder deliveries; no model-supplied manifest."""
+    if not enabled(config):
+        return pending(store, role), ()
+    with lock(store.root / "locks" / "insights.lock"):
+        return _shared_page(store, role, persist=True)
+
+
+def _selected(context, tokens):
+    if not context.shared_ci_waits or not enabled(context.config):
+        raise Denied("Shared CI wait authority changed")
+    shared = shared_store(context.project.work_items)
+    allowed = shared._manifest(context.role.name, context.ci_wait_manifest)
+    if len(set(tokens)) != len(tokens) or any(token not in allowed for token in tokens):
+        raise Denied("CI token is not in this unit's manifest")
+    selected = [allowed[token] for token in tokens]
+    for entry in selected:
+        envelope, _ = shared.get(entry.record_id, expected_digest=entry.record_digest)
+        store = context.project.work_items
+        item_id = envelope["subject"]["work_item"]
+        item = store._get(item_id, history_revisions=store._history_revisions(item_id, recover=False))
+        if (item["status"] != "blocked" or item["holder"] != context.role.name
+                or item["rev"] != envelope["subject"]["rev"]
+                or (item.get("wait") or {}).get("kind") != "ci"):
+            raise Denied("CI waiter revision or holder changed")
+        event = _evidence(store, item)
+        if event is None or digest(canonical(_envelope(item, event))) != entry.record_digest:
+            raise Denied("CI evidence changed")
+        shared.received(context.role.name, entry.record_id, entry.record_digest)
+    return shared, selected
+
+
+def validate_selection(context, tokens):
+    with lock(context.project.root / "locks" / "insights.lock"):
+        _selected(context, tokens)
+
+
+def complete(context, finished):
+    """Called only after successful completion, retaining the legacy no-ack gates."""
+    if (not context.wait_events or finished.get("wait_for_check")
+            or finished.get("outcome") == "bounded" or context.bound_hit):
+        return
+    if not context.shared_ci_waits:
+        acknowledge(context.project.work_items, context.role.name, context.wait_events)
+        return
+    tokens = set(finished.get("ack_events", []))
+    selected = [entry.ack_token for entry in context.ci_wait_manifest if entry.ack_token in tokens]
+    with lock(context.project.root / "locks" / "insights.lock"):
+        shared, entries = _selected(context, selected)
+        shared.acknowledge(context.role.name, [asdict(entry) for entry in entries],
+                           manifest=context.ci_wait_manifest)
 
 
 def poll(config, project, state, *, now, interval, reader=None):

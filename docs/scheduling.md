@@ -391,7 +391,8 @@ nor otherwise transitions the item.
 Only the matching current blocked holder receives this evidence, in full and
 delta prompt `wait_events` and the run's `wait-events.json` (at most ten CI
 records per run, separately from insight waits). Reopened/replaced waits or a
-changed holder do not receive old evidence. A completed, non-bounded run
+changed holder do not receive old evidence. With the default
+`[vcs] ci_wait_shared_records = false`, a completed, non-bounded run
 acknowledges the exact evidence digest in a create-only per-item/revision ack;
 there is no moving timestamp watermark. Unchanged terminal evidence is neither
 repolled nor redelivered after acknowledgement, avoiding scheduler spin even
@@ -400,6 +401,44 @@ until acknowledged; a partial ack can only replay the remainder. Changing the
 wait requires the normal CAS lifecycle (leave `blocked`, then block again).
 There is no automatic retry of publication or CI rerun, no wait cancellation
 API beyond that lifecycle, and no auto-transition on either conclusion.
+
+The host may explicitly enable `ci_wait_shared_records` (default false; examples
+remain inactive). This changes only terminal waiter delivery/receipts, not
+polling, CI requests, status authority, routing or admission policy. Current
+WorkItems history and the completed Publication receipt are still replayed and
+validated. Terminal evidence is projected into the existing SharedRecords store
+as `ci.wait`, writer `host.ci`, identity `ci-wait:<item>:<blocked-rev>`, with the
+blocked revision's `updated_at` as event time. The payload is the exact validated
+external-untrusted result plus its evidence digest. The per-source 128 KiB
+evidence limit is preserved at poll/write and each shared envelope uses the
+existing generic record bound; no smaller aggregate cap is added. Pages stop at
+ten rows or the existing generic 1 MiB frame measured against the actual
+serialized `wait_events` prompt contribution (not canonical list framing),
+oldest blocked revision then item ID first, after source eligibility and explicit
+receipt filtering. A page stops before the next oldest row that would exceed
+the remaining frame; after the delivered prefix is explicitly receipted, replay
+starts at that row. Each individually valid source event fits an empty frame
+under the per-source bound. No timestamp cursor is introduced.
+
+The unit freezes a holder-only host manifest. Rows add `record_id`,
+`record_digest` and `ack_token`; full and resumed prompts state the enabled
+`ci_wait_delivery` contract. Only unique exact tokens explicitly selected in
+`finish.ack_events` may produce generic per-role SharedRecords receipts after
+successful completion. Omitted/empty/partial selections leave other events
+pending. Current revision, blocked status, holder, wait digest, exact publication
+and terminal evidence are rechecked both before finish intent and under the
+lifecycle lock before receipt writes. A stale selected source refuses the batch
+without any CI receipt. Bounded/bound-hit units and finishes registering another
+check wait write none. Finishing alone is never handling on this route.
+
+Legacy `evidence/ci-waits/*.ack.json` files are not imported or consulted for
+shared delivery; an otherwise-current result may replay after activation.
+Status diagnostics remain holder-only, bounded and read-only, including corrupt
+legacy or shared receipt visibility. Unsafe/unreadable paths fail closed;
+corrupt bytes are never repaired. Records and receipts use existing backup and
+restore coverage. Interrupted create-only writes may leave a prefix: exact
+replay reuses it and unreceipted events remain pending. There is no second CI
+receipt store, model activation tool, or automatic deployment.
 
 Malformed or unreadable per-waiter result/ack records fail closed for that
 waiter: they are neither delivered nor acknowledged or overwritten. They do

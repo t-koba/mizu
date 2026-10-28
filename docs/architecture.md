@@ -1018,8 +1018,12 @@ leave unwritten rows pending, and replay is idempotent. A mid-run re-registratio
 survives even at the same timestamp. Global oldest-first bounded scans filter
 obligation receipts before limiting. Registration reads and token-bearing rows
 are capped at 1 MiB, receipt reads at 4 KiB; corrupt/unsafe receipt paths fail
-closed without repair. CI wait rows sharing `wait_events` retain their separate
-acknowledgement behavior; CI/status and check jobs do not use these tokens.
+closed without repair. CI wait rows sharing `wait_events` retain legacy
+acknowledgement by default. The explicit host gate `vcs.ci_wait_shared_records`
+enables their SharedRecords per-record tokens, with current source validation
+at delivery and acknowledgement and no legacy auto-ack mapping; see
+[the CI wait contract](scheduling.md#exact-sha-work-item-ci-waits). CI status
+and check jobs do not use these tokens.
 A ``dependency`` wait names an explicit ``recipient`` role as the visibility route
 (not assignment) and binds the assessed requirement as
 ``requires`` (result insight, exact revision, required substantive decision): the completion

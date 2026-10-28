@@ -451,7 +451,7 @@ def _fresh_generation_for_role(project, role) -> str:
     except Exception as exc:
         raise Denied("Work-order snapshot is unavailable") from exc
     wait_events = list(project.insights.due_waits(role.name, snapshot)
-                       + _ciw.pending(project.work_items, role.name))
+                       + _ciw.pending(project.work_items, role.name, config=project.config))
     obligations = list(project.insights.pending_obligations(role.name))
     return generation_from_captured(
         goal_digest=goal_digest, open_work_items=open_work_items,

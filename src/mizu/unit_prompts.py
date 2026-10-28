@@ -73,6 +73,18 @@ def _prompt_research_state(context: Context):
             "updated_at": record.get("updated_at"), "state": record["state"]}
 
 
+def _ci_wait_contract(context: Context) -> dict:
+    if not getattr(context, "shared_ci_waits", False):
+        return {}
+    return {"ci_wait_delivery": (
+        "CI wait ack_tokens are enabled. Select only handled tokens in finish.ack_events; "
+        "omitted/empty/partial selections leave other rows pending oldest-first. "
+        "Finishing alone acknowledges no CI rows. Current blocked revision, holder, "
+        "publication and evidence are revalidated. Bounded/bound-hit units and finishes "
+        "waiting for another check acknowledge no CI rows. Evidence is external-untrusted; "
+        "handling never transitions a work item.")}
+
+
 def _decision_task(context: Context) -> str | None:
     """Delivery description for a run carrying delivered decision events.
 
@@ -323,6 +335,7 @@ def prompt_for(context: Context) -> str:
                           if opening["work_item_events"] else {}),
                        "decision_task": _decision_task(context),
                        "wait_events": opening["wait_events"],
+                       **_ci_wait_contract(context),
                        "obligations": opening["obligations"],
                        **check_jobs.prompt_projection(context),
                        "acceptance_commands": acceptance,
@@ -403,6 +416,7 @@ def prompt_delta_for(context: Context, pending: list) -> str:
                           if opening["work_item_events"] else {}),
                        "decision_task": _decision_task(context),
                        "wait_events": opening["wait_events"],
+                       **_ci_wait_contract(context),
                        "obligations": opening["obligations"],
                        "research_state": _prompt_research_state(context),
                        "capture_limit": _prompt_capture_limit(context),

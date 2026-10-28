@@ -17,7 +17,7 @@ from mizu.runtime import Context, Engine, _role_events_due, poll_project_vcs, re
 SHA = "b" * 40
 
 
-class CiWaitTests(Fixture):
+class CiWaitFixture(Fixture):
     def setUp(self):
         super().setUp()
         self.config = dataclasses.replace(self.config, vcs={**self.config.vcs,
@@ -57,6 +57,8 @@ class CiWaitTests(Fixture):
         return Context(self.config, self.project, role, run,
                        self.project.snapshots.get(), self.project.workspace)
 
+
+class CiWaitTests(CiWaitFixture):
     def test_diagnosis_is_exact_current_bounded_and_pure(self):
         name = "Offline checks / core (windows-latest, 3.13)"
         wait = self.block(wait={**self.wait, "checks": [name]})["wait"]
