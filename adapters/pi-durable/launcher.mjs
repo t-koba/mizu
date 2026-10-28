@@ -52,9 +52,9 @@ const MAX_SETTLEMENT_DETAIL_CHARS = 4000;
  * Failure: an unknown model refuses loudly with its provider and model;
  * a malformed catalog refuses loudly.
  */
-function hasOnlyExtensionResources(cfg) {
-  return Array.isArray(cfg.resources) && cfg.resources.length > 0
-    && cfg.resources.every(resource => resource?.kind === 'extension');
+function hasExtensionResources(cfg) {
+  return Array.isArray(cfg.resources)
+    && cfg.resources.some(resource => resource?.kind === 'extension');
 }
 
 export async function resolveConfiguredModel(cfg) {
@@ -64,7 +64,7 @@ export async function resolveConfiguredModel(cfg) {
     modelsStorePath: join(dirname(cfg.modelsPath), 'models-cache.json'), allowModelNetwork: false });
   const model = models.getModel(cfg.provider, cfg.model);
   if (!model) {
-    const extensionHint = hasOnlyExtensionResources(cfg)
+    const extensionHint = hasExtensionResources(cfg)
       ? '; extension-provided models are not supported by this engine'
       : '';
     throw new Error(`Configured exact model is unavailable on pi-durable: ${cfg.provider}/${cfg.model}${extensionHint}`);
@@ -398,8 +398,8 @@ async function runOnce(cfg) {
     throw new Error('Effective configuration carries an invalid cacheRetention');
   }
   if (cfg.engine_tools?.length) throw new Error('Native host tools bypass the OCI bridge');
-  const extensionOnlyResources = hasOnlyExtensionResources(cfg);
-  if (cfg.resources?.length && !extensionOnlyResources) {
+  const extensionResourcesConfigured = hasExtensionResources(cfg);
+  if (cfg.resources?.length && !extensionResourcesConfigured) {
     throw new Error('Resource kinds are unsupported on pi-durable');
   }
   if (cfg.mcp_servers && Object.keys(cfg.mcp_servers).length) throw new Error('MCP servers are unsupported on pi-durable');
@@ -410,8 +410,9 @@ async function runOnce(cfg) {
   // both engines, and an unknown model still refuses loudly.
   const { models, model } = await resolveConfiguredModel(cfg);
   // Extensions remain unsupported: resolving first only lets an unavailable
-  // extension-only pin report the reason instead of a generic resource error.
-  if (extensionOnlyResources) throw new Error('Resource kinds are unsupported on pi-durable');
+  // pin with any configured extension report the reason instead of a generic
+  // resource error. No resource is loaded by this path.
+  if (cfg.resources?.length) throw new Error('Resource kinds are unsupported on pi-durable');
   const bridge = JSON.parse(readFileSync(process.env.MIZU_BRIDGE_CONFIG, 'utf8'));
   // Credentials resolve like pi: the shared engine-directory login store
   // (authPath) plus environment API keys. Pi's own file-backed store

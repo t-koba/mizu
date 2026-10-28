@@ -454,7 +454,16 @@ test('pi-durable execution names unsupported extension-only pins before the reso
     assert.doesNotMatch(unsupportedPin.stderr, /Resource kinds are unsupported on pi-durable/);
     assert.doesNotMatch(unsupportedPin.stderr, /missing-bridge/);
 
-    const supportedPin = run({ ...config, model: 'model-x' });
+    const mixedResources = [...config.resources,
+      { kind: 'skill', path: join(directory, 'configured-skill') }];
+    const mixedUnsupportedPin = run({ ...config, resources: mixedResources });
+    assert.equal(mixedUnsupportedPin.status, 1,
+      mixedUnsupportedPin.stderr || mixedUnsupportedPin.error?.message);
+    assert.match(mixedUnsupportedPin.stderr, /extension-provided models are not supported by this engine/);
+    assert.doesNotMatch(mixedUnsupportedPin.stderr, /Resource kinds are unsupported on pi-durable/);
+    assert.doesNotMatch(mixedUnsupportedPin.stderr, /missing-bridge/);
+
+    const supportedPin = run({ ...config, model: 'model-x', resources: mixedResources });
     assert.equal(supportedPin.status, 1, supportedPin.stderr || supportedPin.error?.message);
     assert.match(supportedPin.stderr, /Resource kinds are unsupported on pi-durable/);
     assert.doesNotMatch(supportedPin.stderr, /missing-bridge/);
