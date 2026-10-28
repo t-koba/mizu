@@ -16,7 +16,18 @@ platforms with file triggers; they do not count as a second schedule mode.
 `on_change` skips unchanged code on ordinary scheduled/explicit runs.
 For an unscheduled role, it also selects published-code event wake: service
 rendering watches the persisted snapshot pointer and invokes `mizu run --event`;
-the role runs only while its observed code digest is stale.
+the role runs only while its observed code digest is stale. Pending eligible
+operator records are a separate role-addressed event source, not the project
+operator wake-generation cursor.
+
+Enabled operator answers/notices are additional role-addressed input. With the
+default `wake = true`, pending SharedRecords admit event/on-change dispatch with
+`operator_record`; they also admit armed daemon readiness before the `done`
+gate. Existing scheduling controls still win, and no Insight lifecycle is
+changed. Service-managed scheduled, event-subscribed and unscheduled on-change
+roles additionally watch the sharded `shared-records/operator` partition
+(triggers are not recursive); explicit-run-only roles stay explicit-run-only. See [shared-records.md](shared-records.md)
+for exact routing, frozen retrieval, acknowledgements and immutable closures.
 
 The shipped example (`config/config.example.toml`) exercises each pattern:
 
@@ -48,7 +59,9 @@ waits). For an enabled writer, an exact committed/reserved internal continuation
 then supplies readiness, subject to the producer veto. Prepared intents never
 supply readiness; see [the registry](#internal-writer-continuation-registry).
 Otherwise it checks changed goal digest and operator wake-generation, then an
-independent ready-set change read.
+independent ready-set change, receipt-pinned CI wait, and eligible operator-record
+read in evaluator order. Operator records are checked before the `done` gate;
+the existing project wake-generation cursor remains a separate signal.
 Ready work for a named role requires the `work_items_transition` capability. The writer work order (`work_order`) never admits a run: `review_due` is display only.
 It means an unheld `open` item the role can claim, or a `doing` item held by
 that role, with no structured wait. Satisfied blocked waits below are ready
@@ -85,8 +98,10 @@ control/goal/operator short-circuit behavior and other wake sources are unchange
 No mutable index, ordering policy or new configuration is added.
 Next, unacknowledged receipt-pinned CI wait evidence admits only its current
 blocked holder (daemon reason `ci_wait`), including after `done`. Without changed ready
-work, an internal continuation or that evidence, `done` still ignores inbox, routed events, general CI,
-`wake_at` and progress; a changed goal or operator wake continues to admit it.
+work, an internal continuation or that evidence, `done` still ignores inbox,
+ordinary routed events, general CI, `wake_at` and progress. Pending eligible
+operator records are checked before this gate; a changed goal or operator
+wake-generation also admits it.
 For other outcomes, it checks inbox generation; role-routed decision/terminal
 events and due structured waits (`_role_events_due`); due CI reds for opted-in
 roles (`_ci_due_for`); expired `wait` `wake_at`; and finally the no-progress
@@ -117,26 +132,26 @@ route, and batch policies.
 Scheduled timer dispatches are plain one-shot runs: `mizu run` without
 `--event` (`src/mizu/cli.py` passes `event_trigger` only for `--event`).
 Event-triggered dispatch (`mizu run --event`, invoked by the platform file
-triggers or the recovery/poll triggers below) admits on a substantive decision event, a
-terminal `work_item_events` row, a due structured wait, a due CI red for that
-role, a changed role-eligible ready set, an unconsumed role-cursored operator wake
-for a read-only role, or an unobserved code change for an
-`on_change` role, and otherwise exits with `skipped: no-event` before
+triggers or the recovery/poll triggers below) admits on a pending eligible
+operator record, a substantive decision event, a terminal `work_item_events`
+row, a due structured wait, a due CI red for that role, a changed role-eligible
+ready set, an unconsumed role-cursored operator wake for a read-only role, or
+an unobserved code change for an `on_change` role, and otherwise exits with `skipped: no-event` before
 allocating a run directory or any model use. The code-change event carries
 admission `change` when no more-specific event wins. For `on_change` roles
 whose code snapshot is already observed, `Engine.run` otherwise skips
-unchanged-code dispatch unless there is a substantive decision, terminal
-event, due wait, or due CI red.
+unchanged-code dispatch unless there is a pending eligible operator record, a
+substantive decision, a terminal event, a due wait, or a due CI red.
 The snapshot-publishing role additionally bypasses that skip for changed goal,
-inbox generation or prior-wait expiry. Operator wake, changed role-eligible ready work
-and role-specific progress self-admission bypass it independently of workspace
-mode. Read-only roles never inherit goal/inbox/run-wait generations or the
+inbox generation or prior-wait expiry. Operator wake-generation, pending eligible
+operator records, changed role-eligible ready work and role-specific progress
+self-admission bypass it independently of workspace mode. Read-only roles never inherit goal/inbox/run-wait generations or the
 publisher's progress. Event probes still exclude generic goal/inbox/run-wait
 changes and progress-only continuation; writer probes retain their existing
 subscribed-event gate. A changed code snapshot bypasses the skip for either
 workspace mode. The recorded
-`admission` label is `decision` / `work_item` / `wait` / `ci` / `operator` /
-`ready_work` / `change` / `schedule`, or `continuation` for an exact internal
+`admission` label is `operator_record` / `decision` / `work_item` / `wait` /
+`ci` / `operator` / `ready_work` / `change` / `schedule`, or `continuation` for an exact internal
 committed/reserved intent. Such an intent bypasses both dispatch skips, not
 control/producer/check holds or fresh admission checks. Without that intent,
 existing event labels take precedence over ready work;

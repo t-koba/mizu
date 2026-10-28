@@ -41,7 +41,7 @@ class DecisionProjectionTests(unittest.TestCase):
                                              sources="any", limit=100)
 
     def record_path(self, record_id):
-        return self.root / "shared-records" / f"{digest(record_id.encode())}.json"
+        return self.root / self.store._record_name(record_id)
 
     def test_exact_payload_deterministic_digest_and_replay_after_restart(self):
         self.decide(evidence=True)
@@ -101,7 +101,7 @@ class DecisionProjectionTests(unittest.TestCase):
         self.assertEqual(len(current), 1)
         self.assertTrue(set(current).isdisjoint(initial))
         self.assertEqual({key: self.record_path(key).read_bytes() for key in initial}, retained)
-        self.assertEqual(len(list((self.root / "shared-records").glob("*.json"))), 4)
+        self.assertEqual(len(list((self.root / "shared-records").rglob("*.json"))), 4)
         self.assertEqual(set(current), {f"insight.decision/{self.rows()[0]['event']}"})
         # A fresh projection must omit the same stale/withdrawn history too.
         with tempfile.TemporaryDirectory() as other:
@@ -242,7 +242,7 @@ class DecisionProjectionTests(unittest.TestCase):
 
         with patch.object(SharedRecords, "put", interrupted), self.assertRaises(OSError):
             self.insights.project_decision_records()
-        retained = {p: p.read_bytes() for p in (self.root / "shared-records").glob("*.json")}
+        retained = {p: p.read_bytes() for p in (self.root / "shared-records").rglob("*.json")}
         self.assertEqual(len(retained), 1)
         self.assertEqual(len(self.insights.project_decision_records()), 2)
         self.assertEqual({p: p.read_bytes() for p in retained}, retained)

@@ -29,6 +29,20 @@ work_item_intent_default = "create"
 operator = "none"
 vcs = "none"
 
+# Operator-only records; no model writer. Pending addressed records admit runs.
+# Disable a kind to stop writes/delivery, without deleting its immutable audit.
+# Answers bind an exact insight ID/revision and derive its authenticated source.
+[operator_records.answer]
+enabled = true
+wake = true
+route = "question_source"
+retention = "permanent"  # Only permanent immutable storage is supported; no TTL/deletion.
+[operator_records."operator.notice"]
+enabled = true
+wake = true
+route = "addressee"
+retention = "permanent"
+
 [limits]
 # Provisional project cap on open/doing/blocked work; 0 disables.
 # Existing over-limit items are preserved; only new seeds are refused.

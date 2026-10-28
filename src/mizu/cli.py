@@ -93,6 +93,17 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--live", action="store_true", required=True, help="Explicit consent to a paid, read-only Pi/provider probe")
     p.add_argument("--profile", help="Model profile for the probe")
     p.add_argument("--role", default=None, help="Read-only probe role (default: configured consult_role, else single configured role, else required)")
+    p = sub.add_parser("record", help="Operator-only immutable answers and notices; no Insight decisions")
+    p.add_argument("project")
+    p.add_argument("action", choices=("publish", "withdraw", "supersede"))
+    p.add_argument("--id", required=True, help="Stable event ID for exact replay")
+    p.add_argument("--kind", required=True, choices=("answer", "operator.notice"))
+    p.add_argument("--body", default="", help="Exact bounded content (not interpreted)")
+    p.add_argument("--role", help="Notice addressee; answers derive the authenticated asking role")
+    p.add_argument("--subject-id", help="Exact full insight/question ID")
+    p.add_argument("--subject-rev", type=int)
+    p.add_argument("--target-id", help="Exact notice record ID to withdraw/supersede")
+    p.add_argument("--target-digest", help="Exact notice envelope digest")
     p = sub.add_parser("insight", help="Submit, list, read, decide or ingest proposals")
     p.add_argument("action", choices=("submit", "list", "page", "read", "decide", "ingest", "revise", "history", "withdraw"), help="Proposal operation")
     p.add_argument("project", help="Managed project name")
@@ -665,6 +676,18 @@ def execute(args):
             return _cmd_publication_list(config, project, args)
         project = Project(config, args.project)
         return _cmd_publication_record(config, project, args)
+    if args.command == "record":
+        from .operator_records import write
+        if (args.subject_id is None) != (args.subject_rev is None):
+            raise ConfigError("Record subject requires both exact ID and revision")
+        if (args.target_id is None) != (args.target_digest is None):
+            raise ConfigError("Record target requires both ID and digest")
+        subject = ({"type": "insight", "id": args.subject_id, "rev": args.subject_rev}
+                   if args.subject_id is not None else None)
+        target = ({"id": args.target_id, "digest": args.target_digest}
+                  if args.target_id is not None else None)
+        return write(Project(config, args.project), event_id=args.id, kind=args.kind, body=args.body,
+                     addressee=args.role, subject=subject, action=args.action, target=target)
     project = Project(config, args.project)
     handler = _PROJECT_COMMANDS.get(args.command)
     if handler is None:

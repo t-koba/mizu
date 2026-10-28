@@ -183,7 +183,7 @@ class SharedDecisionPageTests(unittest.TestCase):
         ):
             with self.subTest(role=role, token=token), self.assertRaises(Denied):
                 self.store.read_page(role, token, manifest=frozen)
-        path = self.root / "shared-records" / f"{digest(entry.record_id.encode())}.json"
+        path = self.root / self.store._record_name(entry.record_id)
         original = path.read_bytes()
         changed = json.loads(original)
         changed["payload"]["title"] = "Changed after first read"
@@ -232,7 +232,7 @@ class SharedDecisionPageTests(unittest.TestCase):
             self.read(manifest)
         directory.unlink()
         moved.rename(directory)
-        path = next(directory.glob("*.json"))
+        path = next(directory.rglob("*.json"))
         retained = path.with_suffix(".retained")
         path.rename(retained)
         path.symlink_to(retained)
@@ -311,7 +311,7 @@ class SharedDecisionPageTests(unittest.TestCase):
 
         with patch.object(SharedRecords, "put", interrupted), self.assertRaises(OSError):
             self.page(limit=1)
-        paths = list((self.root / "shared-records").glob("*.json"))
+        paths = list((self.root / "shared-records").rglob("*.json"))
         self.assertEqual(len(paths), 1)
         original = paths[0].read_bytes()
         with patch.object(SharedRecords, "freeze", wraps=self.store.freeze) as freeze:

@@ -2,10 +2,135 @@
 
 **Status:** bounded immutable records, decision projection/pages/retrieval,
 exact legacy receipt reconciliation, and a host-only one-way runtime activation
-for `insight.decision`. Legacy remains the sole delivery/wake/ack authority by
-default. Only an explicit, parity-verified durable marker activates shared
-runtime consumers; no model tool or configuration default can activate it.
-Other source families retain their existing authorities.
+for `insight.decision`. Legacy remains the sole delivery/wake/ack authority for
+that kind until its explicit, parity-verified durable marker; no model tool or
+configuration default can activate that cutover. Operator-written `answer` and
+`operator.notice` records are a separate active SharedRecords slice, enabled
+only by their explicitly declared `operator_records` kind policy. Other source
+families retain their existing authorities.
+
+## Operator answers and notices (active without decision cutover)
+
+The host `mizu record` CLI uses the same trusted human/operator control plane as
+`mizu insight submit`: access to the private host configuration and managed data
+is the authentication boundary. The CLI is not an RPC/model tool. Its writer is
+always `operator.cli`; neither the operator command nor a model can supply a
+writer field. Model sandbox files, Editor text and origin labels grant no writer
+identity. No text is parsed to infer a kind. Insights remain proposals; these
+records are never Insight decisions and do not mutate or resolve a question.
+
+The configuration defaults (also in `config/config.example.toml`) are:
+
+```toml
+[operator_records.answer]
+enabled = true
+wake = true
+route = "question_source"
+retention = "permanent"
+[operator_records."operator.notice"]
+enabled = true
+wake = true
+route = "addressee"
+retention = "permanent"
+```
+
+Only these two kinds, their stated routes, boolean enablement/wake and permanent
+retention are supported in this slice. Unknown kinds/keys/routes/retention fail
+configuration validation. An omitted kind table is disabled; only explicitly
+declared kinds are enabled. Disabling a kind stops new writes and new deliveries,
+not audit retrieval, already-frozen acknowledgements or existing receipts.
+Permanent immutable retention is the only supported policy: no TTL, automatic
+deletion, expiry or redaction. Future finite retention requires separate design
+covering audit references, receipts, backup/restore, deletion eligibility and
+dry-run reporting (operator answer `answer-c4114659257f48b790b42de30e32eecf-r1`).
+Both content and closure records, plus exact receipts, remain in the existing
+backup/restore audit members.
+
+Pending enabled records with `wake = true` admit the addressed role through the
+existing event and on-change gates (`operator_record` admission). Armed daemon readiness consults
+SharedRecords directly, including after `done`; paused/draining controls still
+win. Existing service-managed event/scheduled/on-change roles watch the sharded
+`shared-records/operator` partition (systemd PathChanged and launchd WatchPaths
+triggers are not recursive, so the parent directory needs no watch; Windows retains
+schedule triggers or the existing bounded event-only recovery poll). Explicit-run-only roles remain explicit-run-only: use
+`mizu run PROJECT ROLE` for them. `wake = false` retains delivery on independently
+admitted units but stops record admission and wake hints. No new queue, scheduler service, assignment, review, publication or Insight authority is
+introduced. Acknowledged or closed records cease to admit; omitted acknowledgements
+remain eligible. Re-render operator-managed services to install the new watch;
+these changes do not modify installed services.
+
+For an answer, supply the full existing question/Insight ID **and exact revision**:
+
+```sh
+mizu record PROJECT publish --kind answer --id answer-event-1 \
+  --subject-id FULL_INSIGHT_ID --subject-rev 1 --body 'The explicit answer'
+```
+
+`--id` is a stable event identifier (1–63 lowercase letters/digits/underscore/
+hyphen), required for uncertain-response retries. Identity is
+`operator/PROJECT/EVENT_ID` in the existing SharedRecords store. Canonical files
+are sharded by the record ID's first component under
+`shared-records/<namespace>/` (long namespace components use a bounded digest
+directory; operator records live under `shared-records/operator/`); pre-partition flat `shared-records/*.json` files
+remain readable by exact `get` and by the unfiltered scan without gaining a
+second copy on replay, while `records(namespace="operator")` scans only the
+operator partition so dispatch never rereads unrelated source history. Each
+enumerated envelope is validated once from its scanned bytes. The kind `answer`
+is single-component; other envelope IDs and writers remain namespaced. An answer
+requires subject `{type="insight", id, rev}`; prefixes, missing revisions and
+unavailable revisions are refused. A retained prior revision can be answered.
+The asking role is the question's authenticated `source`, not its free-text body,
+origin label or current holder. That source must be a configured project role.
+Optional `--role` must equal that role; it cannot redirect the answer.
+
+A notice requires an explicit configured project role. Its optional exact Insight
+subject uses the same `--subject-id`/`--subject-rev` pair but does not change routing:
+
+```sh
+mizu record PROJECT publish --kind operator.notice --id notice-event-1 \
+  --role worker --body 'An operator notice'
+mizu record PROJECT supersede --kind operator.notice --id notice-event-2 \
+  --role worker --target-id operator/PROJECT/notice-event-1 \
+  --target-digest EXACT_ENVELOPE_DIGEST --body 'Replacement notice'
+mizu record PROJECT withdraw --kind operator.notice --id notice-withdraw-1 \
+  --role worker --target-id operator/PROJECT/notice-event-2 \
+  --target-digest EXACT_REPLACEMENT_DIGEST
+```
+
+CLI output contains the immutable envelope and recomputed `record_digest`.
+Notice supersession/withdrawal appends another `operator.notice` record with
+payload `{action, body, addressee, target}`. Publish has null target; supersede
+has replacement body and exact `{id, digest}` target; withdraw has empty body and
+subject. Only the same authenticated writer can close a notice for the same
+addressee. A notice can be closed once (an exact retry remains valid); answers,
+withdrawals, self-targets, missing targets, and digest mismatches cannot be closed.
+Withdrawal records are audit-only; supersession delivers the replacement content.
+Originals are never edited or deleted.
+No Insight decision is used for either kind.
+
+Bodies are nonblank, at most 32768 Unicode characters (withdrawal excepted), and
+the canonical envelope is at most 140000 UTF-8 bytes. All shape/key/type checks are
+closed. Writes/closure selection and manifest freezing share a host lock; a
+reused event ID must match every immutable field. Replay preserves the first
+host timestamp; a lost response is retried with the **same event ID and content**.
+No automatic retry, repair, timestamp cursor, second queue or mutable lifecycle
+pointer is introduced. Unsafe/corrupt records or receipts fail closed.
+
+Unit full/delta prompts carry `operator_records` with up to 20 bounded references
+across both kinds, `pending_count`, `truncated` and `wake_pending` (whether any eligible unacknowledged
+record has wake enabled, including rows beyond the delivery page). Rows carry exact record ID,
+digest, role and ack token, kind and subject; full body is not copied into the
+prompt. Acknowledged rows are filtered before oldest-UTC-time/ID selection.
+The host records the frozen page in the run's `operator-record-delivery.json`
+(delivery evidence, not another authority). `record_read` is granted only for a
+nonempty unit manifest and pages the exact envelope by ack token/character offset,
+limit 1–8192. Reading does not acknowledge. The addressed role explicitly selects
+handled tokens in `finish.ack_events`; omitted/partial selections acknowledge
+nothing/only selected rows. Foreign, duplicate, tampered or undelivered tokens
+are refused before finish intent. Already frozen deliveries remain readable and
+acknowledgeable after notice closure, question revision or policy disablement;
+this never reopens the notice or changes an Insight. Receipt retries preserve the
+first exact acknowledgement.
 
 ## Scope and invariants
 
@@ -36,7 +161,7 @@ A minimal proposed record is:
 
 The record digest is `sha256(canonical(record))`; it is recomputed, not self-asserted. A separate receipt is `{role, record_id, record_digest, acknowledged_at}`. The authenticated `writer` is the principal authorized to project the source event, not the insight's origin/submitter or the payload's claimed author. Source origin is separately validated for `own`/`any` routing; it never grants writer authority. The subject above is illustrative, not a universal three-field schema: each kind must bind its exact insight/decision revision, task transition, wait/revision/holder and wait digest, snapshot/whole-capture digest, or publication receipt/branch/SHA/check set as applicable. Project/source namespaces prevent cross-project or cross-source identity collisions.
 
-Kind policy declares a closed payload validator/size bound, authorized writer, structured route, role subscription/filter, whether a wake is permitted, the source-current eligibility predicate, and retention. These are declarations, not executable expressions. Recipients are not immutable record fields: current trusted policy resolves delivery and wake independently. New subscribers see retained events that are still source-eligible; removed recipients receive no new deliveries or wakes. Remove/re-add does not erase a role's exact prior receipts. Policy changes cannot rewrite an already-frozen delivery manifest or let one role acknowledge another's delivery. No model-facing generic record-write capability is added.
+Kind policy declares a closed payload validator/size bound, authorized writer, structured route, role subscription/filter, whether a wake is permitted, the source-current eligibility predicate, and retention. These are declarations, not executable expressions. Resolved recipient sets are not immutable record fields (typed addressee/source fields may be): current trusted policy resolves delivery and wake independently. New subscribers see retained events that are still source-eligible; removed recipients receive no new deliveries or wakes. Remove/re-add does not erase a role's exact prior receipts. Policy changes cannot rewrite an already-frozen delivery manifest or let one role acknowledge another's delivery. No model-facing generic record-write capability is added.
 
 Source-current eligibility is distinct from retention and acknowledgement. A retained obsolete insight decision or CI result whose wait revision/holder moved must not be newly delivered or woken, even without a receipt. Revalidate eligibility and current routing at delivery/wake; neither retention nor absence of a receipt proves eligibility. Conversely, an immutable event already delivered in the current unit may be explicitly acknowledged by its manifest identity after source movement; this records handling of that delivery only and never mutates or revives the source. Retention keeps evidence, not delivery authority.
 
@@ -54,7 +179,7 @@ For the active `insight.decision` pilot, `decision_page_bytes` is an explicit pe
 | Structured waits and obligations | Decision waits are bound to an insight ID/revision and the exact defer decision; WorkItem waits remain in the WorkItems history. Dependency satisfaction is checked against a specific insight revision/action. | Due insight waits route to the insight's source role; `pending_obligations` routes structured dependency visibility to `recipient` but does not admit a run by itself. Both projections carry role/source/canonical-payload-bound `ack_token`s and an exact `registration_id`. Only explicit `finish.ack_events` selections apply after durable successful result/publication: `consume_waits` removes only a still-matching registration, and atomic per-role `obligation-receipts` suppress only the acknowledged exact registration. Empty/omitted selections consume none; re-registrations survive. CI wait rows sharing `wait_events` remain outside this token protocol. Neither route establishes task assignment or external provenance. | Due waits and obligations each return globally earliest registrations, at most 10 by default (API bound 100), after eligibility/receipt filtering. Stored registration reads and token-bearing rows are capped at 1 MiB each; receipts at 4 KiB. Full insight text remains, without one shared prompt byte budget. Corrupt/unsafe receipts fail closed without repair. Legacy absent IDs use a bounded stable digest fallback; malformed explicit IDs never list. Stale/unbound waits are pruned; explicitly consumed waits are removed. WorkItem history remains authoritative. |
 | CI status and receipt-pinned CI waits | Adapter status is external-untrusted; ordinary status/failure projections are cached host observations. A WorkItem's structured CI wait and its publication receipt bind the expected branch, exact published SHA, declared check set, item/revision and holder. CI requests have a separate create-only dispatch/outcome record keyed by publication receipt, SHA and workflow set. | General CI failure rows are diagnostics, not task state. Current runtime/docs also allow a due aggregate CI-red projection to signal admission; that is intentional writer-wake policy (see resolved CI policy below). The cache is the observation producer, not a special authority. A terminal waiter result routes only to the matching current blocked holder, is digest-bound to its exact wait, and only wakes: it never transitions the item. The host currently acknowledges delivered CI waiter evidence after a successful unit, without an explicit per-event selection. CI request/read/approval grants remain separate. | CI failure cache is bounded (128 branches × 16 checks/branch, 32-row prompt projection). Wait evidence is create-only, at most 128 KiB; polling is opt-in and bounded by the configured per-tick cap. `ci_waits.pending` returns at most 10 by default (API bound 100); CI requests scan at most 10,000 directory entries/1,000 candidate requests and list at most 100. Existing source-specific evidence remains; no shared retention policy exists. |
 | Check-job results | `check_jobs` owns queued/running/terminal job records, command evidence, input digests and result files; the result is not a task transition. The job owner and optional producer are host-bound. | Prompt delivery selects `job.role` only. `action=result` and `logs` authorize either that role or `producer_role`; read authorization is not acknowledgement authority. Only the owner role can acknowledge, and this may mark same-role shared-result subscriptions together after a durable successful unit. Superseded demand can already be marked `acknowledged` by withdrawal without result handling; that flag alone is not proof of handling. A verification pass is imported only when source, commands and environment still match. The bounded check wait is a separate role deferral, not a result acknowledgement. | Up to 32 terminal results are projected per role; logs are paged at 8,192 characters. At 1,024 retained job records the current room-making path can evict acknowledged nonexecuting jobs subject to its shared-result protections. Migration must keep required deliveries and referenced result evidence available; a generic notification receipt alone must not authorize their eviction. Existing job/result authority remains. |
-| Operator answers and notices | Operator-originated content currently travels through the existing insight/control paths; no separate general operator-message store or answer schema was found. Control wake generation is host control state, not a message body. | A future typed `operator.answer` should bind the exact question ID/revision and route to its asking role; a notice needs a typed source ID and explicit route. Neither should be recognized from title/body prose or treated as a decision unless the existing decision API records one. Model roles cannot impersonate the operator principal. | Insight-backed messages inherit insight bounds/retention. Control wakes are independently versioned. There is no common notice page or receipt today. |
+| Operator answers and notices | Trusted host CLI writes `answer` and `operator.notice` directly to SharedRecords as `operator.cli`; no model writer. | Answers bind an exact Insight ID/revision and route to the authenticated source role. Notices route only to their explicit validated addressee. Both use manifest-scoped `record_read` and explicit `finish.ack_events`. Notice writer closure/supersession appends an immutable closure event; neither kind uses Insight decisions. Pending eligible records can be a configured wake source through existing scheduler gates; no new scheduler service. | 32768-character content, 140000-byte envelopes, 20 aggregate references plus pending/truncation metadata; permanent immutable record/closure/receipt audit. See operator CLI and configuration above. |
 | Publication blockers | Publication intent/receipt records are host VCS evidence, bound to approval, run, whole-capture `code_digest`, public-source projection and exact published SHA. A failed operation is also a run/tool result; the inspected product path has no distinct durable `publication.blocker` inbox. | A future blocker record must be emitted only from a validated host publication outcome, bind the exact publication attempt/receipt or source snapshot, and route under explicit policy. It cannot grant approval, reinterpret `code_digest`, or infer a task/dependency from an error message. Publication approval and adapter reconciliation remain unchanged. | Publication receipts are immutable project evidence; failures remain run evidence. No common blocker retention or acknowledgement policy exists. |
 
 Across the families, source history is authoritative and retention differs: insight archives are permanent, WorkItems retain validated revision chains, check jobs use an acknowledged-eviction cap, and other evidence stores keep their own bounds. The shared delivery store must not add a destructive global TTL. Unacknowledged records and unresolved source events are never silently expired; any later pruning is a documented per-kind policy and cannot remove source history or verified completion evidence.
@@ -201,8 +326,10 @@ quiescence and the single-authority marker is published last.
 The bounded immutable record/receipt mechanism, the `insight.decision` shadow
 projection and exact legacy-receipt migration, and the optional host-only
 runtime cutover are implemented. The first three stages below apply to
-`insight.decision` only; they do not activate any other event family. Remaining
-stages describe future source integrations and do not change current authority.
+`insight.decision`; they neither activate that kind without its explicit marker
+nor activate other source families. Operator answer/notice is a separate,
+configuration-gated active source slice (above). Remaining stages describe
+future source integrations except for that slice.
 
 1. **Bounded record/receipt mechanism (implemented).** Immutable idempotent records, bounded kind validators, one host-side per-record receipt store, exact current-unit acknowledgement, and failure/unsafe-path validation. A missing kind policy authorizes neither writer nor route nor wake.
 2. **`insight.decision` projection and exact receipt migration (implemented).** Stable source event identities are projected without changing insight lifecycle, decisions or archives. Only validated exact per-role receipts are translated; legacy completion cursors never proved handling. Complete subjects/digests, current eligibility and per-role pending sets are checked under the same configuration boundary. Shadow records alone cannot prompt, acknowledge or wake.
@@ -210,7 +337,7 @@ stages describe future source integrations and do not change current authority.
 4. **Future source-specific commit/restart reconciliation.** For each additional kind, define how source commits are projected idempotently across interruption, validate current eligibility before replay, and prove no eligible event is lost. A failed or uncertain projection is not an acknowledgement.
 5. **Future work-item delivery, without task migration.** Project exact terminal and structured-wait identities only after a separate explicit cutover design. Revalidate terminal old receipts against authoritative source revision/payload before mapping them to a new digest; consumed insight waits have no exact old receipt to translate and cannot reconstruct historical handling. Keep task CAS/history, holder authority, dependencies and digest-bound `done` unchanged.
 6. **Future check-job notifications, not verification authority.** Keep prompt routing to `job.role`, role-or-producer result/log authorization, owner-only acknowledgement and same-role shared-subscription semantics. Do not import every `acknowledged` flag as handling evidence: replaced demand may be withdrawn without a result read. Notification acknowledgement never imports a verification pass; only explicit `action=result` with matching source/commands/environment can do so. Required deliveries and referenced result evidence must survive eviction; cancellation and job retention remain job-owned.
-7. **Future typed operator/review/publication kinds only when a trusted source exists.** Do not synthesize answers, verdicts or blockers from free text. Declare authenticated writer, exact subject, current routing/eligibility, wake and retention before enabling a kind. Keep authoritative histories, publication receipts, run evidence and task verification; do not rewrite them as delivery state.
+7. **Operator answers/notices implemented; future review/publication kinds only when a trusted source exists.** The configured `answer` and `operator.notice` kinds use the authenticated host CLI; answers bind exact questions and notices may carry an optional exact subject. Both use structured source/addressee routing, explicit wake policy and permanent retention. Do not synthesize answers, verdicts or blockers from free text. Any future kind must declare its authenticated writer, exact subject, current routing/eligibility, wake and retention before enablement. Keep authoritative histories, publication receipts, run evidence and task verification; do not rewrite them as delivery state.
 
 At each cutover, test that no duplicate delivery occurs, omitted records remain pending oldest-first, explicit partial acknowledgements affect only selected IDs, failed/uncertain units do not acknowledge, records cannot acknowledge across roles or revisions, and a record read/wake cannot mutate source state. After every code slice, verify and publish the exact snapshot; `WorkItems` completion remains bound to its matching published tree and passing digest-bound verification.
 
@@ -220,10 +347,10 @@ Operator answer `609e9479aaca426ca196f5dd81360e16` resolves the earlier question
 
 ## Source anchors
 
-Current behavior can be checked in these functions (only insight decisions have
-an explicit host-activated shared route; all other families remain unchanged):
+Current behavior can be checked in these functions (`insight.decision` uses its explicit host marker; answers/notices use their separate configured slice; all remaining source families retain existing routes):
 
 - [`SharedRecords`](../src/mizu/shared_records.py): bounded canonical record envelopes, exact role/record/digest receipts and manifest-scoped paged reads; it does not own source eligibility, routing, wake, backfill or cutover. [`Insights.shared_decision_page`](../src/mizu/insights.py) builds shadow or active pages, selected by the host's durable authority route.
+- [`operator_records`](../src/mizu/operator_records.py): host-only answer/notice writes, exact-question routing, notice closure/supersession, pending projections, wake hints and manifest-scoped acknowledgements.
 - [`Insights.decision_events`, `acknowledge_decisions`, `due_waits`, `consume_waits`, `pending_obligations`](../src/mizu/insights.py): current decision/revision eligibility, exact receipts and consumable waits.
 - [`decision_delivery.pending`, `bind`, `read`, `acknowledge`](../src/mizu/decision_delivery.py) branch by the durable marker, carry host-only unit manifests and never fall back from shared failures. [`selection.work_inputs`](../src/mizu/selection.py) uses the same authority as runtime prompt/wake/ack, so legacy receipts cannot create a second active selection view.
 - [`work_item_events.pending`, `acknowledge`](../src/mizu/work_item_events.py): terminal projections and source-validated old receipts; [`ci_waits.pending`, `_pending`, `acknowledge`](../src/mizu/ci_waits.py): current holder/revision checks and blocked `updated_at` order.
@@ -239,7 +366,7 @@ activation below is the only runtime switch. Before activation, legacy remains
 the sole active delivery/wake/ack authority; afterwards the same page builder
 serves only shared receipts through `decision_delivery`, with a narrow
 manifest-scoped runtime retrieval tool and explicit finish acknowledgement.
-Other source lifecycles remain unchanged.
+Operator answer/notice use the separate configured projection described above; all other source lifecycles remain unchanged.
 
 ```python
 page, manifest = insights.shared_decision_page(
@@ -395,7 +522,7 @@ reconciliation attempts serialize or fail `Busy`; no caller waits for an active
 run while holding the source lock. Locks are released on exception/death and
 are never unlinked. Preflight can create lock infrastructure but creates **no
 immutable projections or receipts**. Legacy delivery and exact acknowledgement
-remain the only active runtime authority.
+remain the only active runtime authority for decisions.
 
 ### Exact schema and identity
 
@@ -529,7 +656,7 @@ Durable project-root evidence, included in backup/restore:
   its `plan_digest` must match the marker. Published atomically and durably
   **last**, while all the same exclusions/locks remain held.
 
-Before the marker exists, runtime remains legacy-only, even with an interrupted
+Before the marker exists, decision delivery remains legacy-only, even with an interrupted
 projection/receipt prefix. Exact retry validates the original source/receipt/
 route boundary and shared subset and completes missing writes. A source,
 legacy receipt, route or enabled-role change during that interruption refuses

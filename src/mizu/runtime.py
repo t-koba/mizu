@@ -18,7 +18,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import decision_delivery, lineage
+from . import decision_delivery, lineage, operator_records
 from . import platform as _platform
 from . import run_activity as _run_activity
 from . import evidence_records, workspace_reads
@@ -160,7 +160,7 @@ WRAP_UP_TOOLS = 5
 WRAP_UP_OPS = frozenset({"finish", "research", "submit_insight", "attach_evidence", "decide"})
 #: Reads of existing state are useful observation, not harness-observable progress.
 OBSERVATIONAL_OPS = frozenset({
-    "files", "read", "diff", "insights", "decision_read", "research_read", "vcs_read",
+    "files", "read", "diff", "insights", "decision_read", "record_read", "research_read", "vcs_read",
     "command_evidence_read", "experiment_evidence_read", "work_items_read", "work_items_legacy_read",
 })
 REPLAYABLE_READ_ARGUMENTS = {"fetch": "receipt_id", "probe": "receipt_id", "search": "result_id"}
@@ -414,6 +414,8 @@ class Context:
         # recovery of this candidate keep the same ordinal; only a proven
         # terminal pi-durable unanswered settlement can advance it.
         self.attempt_ordinal = 0
+        self.operator_record_manifest = ()
+        self.operator_record_page = {"events": [], "pending_count": 0, "truncated": False, "wake_pending": False}
         self.shared_decisions = False
         self.decision_manifest = ()
         self.decision_page = None
@@ -1159,6 +1161,9 @@ class Context:
     def _op_work_order(self, args: dict) -> dict:
         return work_order_ops.record(self, args)
 
+    def _op_record_read(self, args: dict) -> dict:
+        return operator_records.read(self, args)
+
     def _op_decision_read(self, args: dict) -> dict:
         return decision_delivery.read(self, args)
 
@@ -1743,7 +1748,8 @@ class Context:
                  and "registration_id" in event and "ack_token" in event}
         obligations = {event["ack_token"]: event for event in self.obligations
                        if "registration_id" in event and "ack_token" in event}
-        delivered = decisions.keys() | terminal.keys() | waits.keys() | obligations.keys()
+        records = {entry.ack_token for entry in self.operator_record_manifest}
+        delivered = records | decisions.keys() | terminal.keys() | waits.keys() | obligations.keys()
         if (not isinstance(tokens, list) or len(tokens) > 512
                 or any(not isinstance(token, str) or len(token) > 64 for token in tokens)
                 or len(set(tokens)) != len(tokens)
@@ -1753,7 +1759,10 @@ class Context:
         # role may have revised/withdrawn a topic as part of handling it.
         if self.shared_decisions:
             decision_delivery.validate(self, [token for token in tokens if token in decisions])
+        operator_records.validate(self, [token for token in tokens if token in records])
         for token in tokens:
+            if token in records:
+                continue
             if token in decisions:
                 if self.shared_decisions:
                     continue  # Validated as one bounded manifest batch above.
@@ -1834,7 +1843,7 @@ class Context:
         "command_evidence_read": _op_command_evidence_read,
         "experiment_evidence_read": _op_experiment_evidence_read,
         "exec": _op_exec, "experiment": _op_experiment, "verify": _op_verify, "check_job": _op_check_job,
-        "fetch": _op_fetch, "probe": _op_probe, "search": _op_search, "insights": _op_insights, "decision_read": _op_decision_read,
+        "fetch": _op_fetch, "probe": _op_probe, "search": _op_search, "insights": _op_insights, "decision_read": _op_decision_read, "record_read": _op_record_read,
         "work_items_read": _op_work_items_read,
         "work_items_legacy_read": _op_work_items_legacy_read,
         "work_items_reconcile": _op_work_items_reconcile,
@@ -2406,6 +2415,7 @@ class Engine:
         code_unchanged = role.on_change and _on_change_observed(cursor, snapshot)
         triggers = tuple(getattr(role, "decision_events", ()) or ())
         sources = getattr(role, "decision_sources", "own") or "own"
+        record_state = operator_records.pending(project, role)
         decision_state = decision_delivery.pending(project, role)
         decision_events = decision_state["events"]
         receipt_diagnostics = decision_state["diagnostics"]
@@ -2423,7 +2433,7 @@ class Engine:
         # own, so no new wake source is implied.
         obligations = project.insights.pending_obligations(role_name)
         # Event-triggered dispatch (platform file triggers) admits only on a
-        # subscribed substantive decision/terminal event or a due structured wait
+        # addressed operator record, subscribed decision/terminal event or due wait
         # for this role. Decision routing uses decision_sources: own-source
         # deferrals ride along but do not admit; decision_sources="any" admits
         # on matching actions including deferrals. Terminal routing is already
@@ -2478,6 +2488,7 @@ class Engine:
                 operator_woke=operator_woke and role.workspace != "write",
                 explicit_wake=operator_woke and role.workspace != "write",
                 ready_work_changed=ready_work_changed,
+                has_record=bool(record_state[0]["wake_pending"]),
                 has_decision=bool(substantive_events or substantive_diagnostics),
                 has_work_item=bool(terminal_events),
                 has_wait=bool(wait_events or check_jobs.wake_ready(project, role_name)),
@@ -2511,6 +2522,7 @@ class Engine:
             has_code_event=bool(has_code_event),
             explicit_wake=bool(explicit_wake),
             ready_work_changed=ready_work_changed,
+            has_record=bool(record_state[0]["wake_pending"]),
             has_decision=bool(substantive_events or substantive_diagnostics),
             has_work_item=bool(terminal_events),
             has_wait=bool(wait_events or check_jobs.wake_ready(project, role_name)),
@@ -2521,7 +2533,7 @@ class Engine:
         if _dispatch.skipped == "unchanged":
             return {"skip": {"skipped": "unchanged", "snapshot": snapshot["id"],
                     "code_digest": snapshot["code_digest"]}}
-        return {'decision_state': decision_state, 'snapshot': snapshot, 'sources': sources, 'terminal_events': terminal_events, 'terminal_page': terminal_page, 'wait_events': wait_events, 'obligations': obligations, 'ci_present': ci_present, 'ci_failures': ci_failures, 'prior_wait_expired': prior_wait_expired, 'decision_events': decision_events, 'decision_receipt_diagnostics': receipt_diagnostics, '_dispatch': _dispatch}
+        return {'record_state': record_state, 'decision_state': decision_state, 'snapshot': snapshot, 'sources': sources, 'terminal_events': terminal_events, 'terminal_page': terminal_page, 'wait_events': wait_events, 'obligations': obligations, 'ci_present': ci_present, 'ci_failures': ci_failures, 'prior_wait_expired': prior_wait_expired, 'decision_events': decision_events, 'decision_receipt_diagnostics': receipt_diagnostics, '_dispatch': _dispatch}
 
     def run(self, project: Project, role_name: str, *, attributes=None, retry_busy: bool = False,
                 enqueue_busy: bool = False, event_trigger: bool = False, probes_serviced: bool = False) -> dict:
@@ -2828,6 +2840,8 @@ class Engine:
                     context.turn_authority_role = recovery_authority
                     context.spend_role = recovery_authority
                 decision_delivery.bind(context, dispatch_state['decision_state'])
+                operator_records.bind(context, dispatch_state['record_state'])
+                write_json(run_dir / 'operator-record-delivery.json', context.operator_record_page)
                 context.work_item_events = terminal_events
                 context.wait_events = wait_events
                 context.obligations = obligations
@@ -2842,7 +2856,8 @@ class Engine:
                     (role.workspace == "write" and context.inbox_seen != snapshot.get("inbox_seen", ""))
                     or _operator_woke({"wake_generation": context.wake_generation}, role_cursor,
                                       observer=role.workspace != "write")
-                    or bool(decision_events or receipt_diagnostics or terminal_events or wait_events or ci_failures)
+                    or bool(context.operator_record_manifest or decision_events or receipt_diagnostics
+                            or terminal_events or wait_events or ci_failures)
                     or new_obligation or (role.workspace == "write" and prior_wait_expired))
                 prompt, prompt_mode, session_key, rotation, session_dir = session_prompt(context, role, run_dir)
                 dispatch_evidence.capture_projection(context, role.profile, prompt_mode,
@@ -3230,6 +3245,8 @@ class Engine:
                                 ready_work_signature=getattr(context, "ready_work_signature", None)))
                     write_json(project.root / "observed" / f"{role_name}.json", observed)
                 selected_tokens = set(finished.get("ack_events", []))
+                operator_records.acknowledge(context, selected_tokens &
+                    {entry.ack_token for entry in context.operator_record_manifest})
                 selected_decisions = [e for e in context.decision_events if e["ack_token"] in selected_tokens]
                 if selected_decisions:
                     if context.shared_decisions:
@@ -3989,7 +4006,8 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
 
     The evaluator names one next fact at a time. This preserves the old
     short-circuit contract: absent ready work or receipt-pinned CI wait evidence,
-    done does not read inbox/events/general CI/insight waits/progress. A higher-priority wake does not probe
+    done does not read inbox/decision events/general CI/insight waits/progress.
+    Addressed operator records are checked before done, directly from SharedRecords. A higher-priority wake does not probe
     lower-priority stores. Named roles only see role-eligible ready work;
     observers use their own completion cursor, never the writer's progress.
     """
@@ -4005,6 +4023,7 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
         armed=bool(control.get("armed")),
         paused=bool(control.get("paused")),
         draining=bool(control.get("draining")),
+        operator_records_due=None,
     )
     decision = _scheduling.evaluate(facts)
     if (decision.ready is None and role_name in project.roles and role is not None
@@ -4030,6 +4049,8 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
                 value = any(check_jobs.wake_ready(project, name) or ci_waits.pending(project.work_items, name, limit=1) for name in names)
             except (Denied, LimitExceeded, OSError, ValueError):
                 value = False
+        elif needed == "operator_records_due":
+            value = operator_records.due(project, role_name)
         elif needed == "outcome":
             value = role_record.get("outcome", "wait")
             if observer and value not in ("continue", "bounded", "done", "wait", "blocked"):

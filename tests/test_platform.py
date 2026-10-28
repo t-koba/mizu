@@ -513,7 +513,10 @@ class ServiceRendererTests(unittest.TestCase):
         import plistlib
         from mizu.services import render
         units = render(self.config, self.project, ROOT / "bin/mizu", system="macos")
-        self.assertEqual(sorted(units), ["mizu-3-svc-reporter.plist", "mizu-3-svc-worker.plist"])
+        self.assertEqual(sorted(units), ["mizu-3-svc-reporter-event.plist",
+                                         "mizu-3-svc-reporter.plist", "mizu-3-svc-worker.plist"])
+        events = plistlib.loads(units["mizu-3-svc-reporter-event.plist"].encode())
+        self.assertIn(str(self.project.root / "shared-records" / "operator"), events["WatchPaths"])
         worker = plistlib.loads(units["mizu-3-svc-worker.plist"].encode())
         self.assertEqual(worker["Label"], "mizu-3-svc-worker")
         self.assertTrue(worker["KeepAlive"])

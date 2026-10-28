@@ -44,7 +44,7 @@ class SharedRecordsTests(unittest.TestCase):
         return record, self.store.put(record, writer="host.test")
 
     def record_path(self, record_id):
-        return self.root / "shared-records" / (digest(record_id.encode()) + ".json")
+        return self.root / self.store._record_name(record_id)
 
     def receipt_path(self, role, record_id):
         return (self.root / "shared-record-receipts" / digest(role.encode()) /
@@ -317,6 +317,117 @@ class SharedRecordsTests(unittest.TestCase):
     def test_backup_restore_membership(self):
         self.assertIn("shared-records", MEMBERS)
         self.assertIn("shared-record-receipts", MEMBERS)
+
+    def test_sharded_canonical_and_namespace_isolation(self):
+        one, _ = self.put("one")
+        other = dict(envelope("other"), id="operator/sample/other")
+        computed = self.store.put(other, writer="host.test")
+        self.assertEqual(self.store._record_name("project/test/one"),
+                         f"shared-records/project/{digest(b'project/test/one')}.json")
+        self.assertEqual(self.store._record_name("operator/sample/other"),
+                         f"shared-records/operator/{digest(b'operator/sample/other')}.json")
+        self.assertTrue((self.root / self.store._record_name(other["id"])).is_file())
+        self.assertFalse((self.root / self.store._legacy_record_name(other["id"])).exists())
+        self.assertEqual({row[0]["id"] for row in self.store.records(namespace="project")},
+                         {"project/test/one"})
+        self.assertEqual({row[0]["id"] for row in self.store.records(namespace="operator")},
+                         {"operator/sample/other"})
+        self.assertEqual({row[0]["id"] for row in self.store.records()},
+                         {"project/test/one", "operator/sample/other"})
+        for bad in ("", "../escape", "Bad", "a/b", "a:b", "a.b", 1):
+            with self.subTest(namespace=bad), self.assertRaises(Denied):
+                list(self.store.records(namespace=bad))
+        long_namespace = "n" * 100
+        long_record = dict(envelope("long"), id=f"{long_namespace}/event")
+        long_record["subject"] = {"event": "long"}
+        self.store.put(long_record, writer="host.test")
+        partition = (self.root / self.store._record_name(long_record["id"])).parent.name
+        self.assertLessEqual(len(partition), 34)
+        self.assertEqual(list(self.store.records(namespace=long_namespace))[0][0], long_record)
+
+    def test_legacy_flat_read_replay_preserved_without_second_copy(self):
+        record = envelope("legacy")
+        record["id"] = "project/test/legacy"
+        record["subject"] = {"event": "legacy"}
+        raw = self.store._validate(record)
+        legacy = self.root / self.store._legacy_record_name(record["id"])
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_bytes(raw)
+        self.assertFalse((self.root / self.store._record_name(record["id"])).exists())
+        self.assertEqual(self.store.get(record["id"]), (record, digest(raw)))
+        self.assertEqual(self.store.put(dict(record), writer="host.test"), digest(raw))
+        self.assertFalse((self.root / self.store._record_name(record["id"])).exists())
+        self.assertEqual(legacy.read_bytes(), raw)
+        self.assertEqual({row[0]["id"] for row in self.store.records()}, {record["id"]})
+        # Namespace scans cover only the sharded partition; the flat legacy
+        # stays retrievable by exact get and by the unfiltered scan.
+        self.assertEqual(list(self.store.records(namespace="project")), [])
+        with self.assertRaises(Denied):
+            self.store.put(dict(record, payload={"text": "different"}), writer="host.test")
+        self.assertEqual(legacy.read_bytes(), raw)
+
+    def test_conflicting_duplicates_fail_closed_without_repair(self):
+        record = envelope("dup")
+        record["id"] = "project/test/dup"
+        record["subject"] = {"event": "dup"}
+        raw = self.store._validate(record)
+        canonical = self.root / self.store._record_name(record["id"])
+        legacy = self.root / self.store._legacy_record_name(record["id"])
+        canonical.parent.mkdir(parents=True, exist_ok=True)
+        canonical.write_bytes(raw)
+        legacy.write_bytes(raw)
+        self.assertEqual(self.store.get(record["id"])[1], digest(raw))
+        self.assertEqual(self.store.put(dict(record), writer="host.test"), digest(raw))
+        self.assertEqual({row[0]["id"] for row in self.store.records()}, {record["id"]})
+        other = dict(record, created_at="2026-01-03T03:04:05+09:00")
+        other_raw = self.store._validate(other)
+        self.assertNotEqual(raw, other_raw)
+        canonical.write_bytes(other_raw)
+        for check in (lambda: self.store.get(record["id"]),
+                      lambda: self.store.put(dict(record), writer="host.test"),
+                      lambda: list(self.store.records())):
+            with self.subTest(check=check), self.assertRaises(Denied):
+                check()
+        self.assertEqual(canonical.read_bytes(), other_raw)
+        self.assertEqual(legacy.read_bytes(), raw)
+
+    def test_unknown_kind_duplicate_cannot_hide_a_known_record(self):
+        record = envelope('shadow')
+        record['id'] = 'project/test/shadow'
+        record['subject'] = {'event': 'shadow'}
+        raw = self.store._validate(record)
+        legacy = self.root / self.store._legacy_record_name(record['id'])
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_bytes(raw)
+        unknown = dict(record, kind='other.kind')
+        canonical_path = self.root / self.store._record_name(record['id'])
+        canonical_path.parent.mkdir(parents=True, exist_ok=True)
+        canonical_path.write_bytes(canonical(unknown))
+        with self.assertRaises(Denied):
+            list(self.store.records())
+        with self.assertRaises(Denied):
+            self.store.get(record['id'])
+
+    def test_enumeration_validates_once_without_second_get(self):
+        self.put("one")
+        self.put("two")
+        with patch.object(SharedRecords, "get", side_effect=AssertionError("second read")):
+            self.assertEqual({row[0]["id"] for row in self.store.records()},
+                             {"project/test/one", "project/test/two"})
+            self.assertEqual({row[0]["id"] for row in self.store.records(namespace="project")},
+                             {"project/test/one", "project/test/two"})
+        # Misplaced files fail closed in both scans.
+        record = envelope("misplaced")
+        record["id"] = "operator/sample/misplaced"
+        record["subject"] = {"event": "misplaced"}
+        raw = self.store._validate(record)
+        wrong = self.root / f"shared-records/project/{digest(record['id'].encode())}.json"
+        wrong.parent.mkdir(parents=True, exist_ok=True)
+        wrong.write_bytes(raw)
+        with self.assertRaises(Denied):
+            list(self.store.records(namespace="project"))
+        with self.assertRaises(Denied):
+            list(self.store.records())
 
 
 class SharedRecordsBackupTests(Fixture):

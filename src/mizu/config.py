@@ -277,7 +277,7 @@ def _load_merged(top: Path) -> dict:
         # Unknown root keys still fail here per fragment so the error names
         # the fragment, then the final merged load re-checks the whole.
         allowed = {"data_dir", "engines", "timezone", "limits", "sandbox", "profiles",
-                   "roles", "consult_role", "delegate_role", "web", "vcs", "materialize", "exclude", "selectors", "include", "insight_decisions", "workspace_cache"}
+                   "roles", "consult_role", "delegate_role", "web", "vcs", "materialize", "exclude", "selectors", "include", "insight_decisions", "workspace_cache", "operator_records"}
         unknown = set(data) - allowed
         if unknown:
             raise ConfigError(f"Unknown keys in {resolved}: {', '.join(sorted(unknown))}")
@@ -871,6 +871,8 @@ class Config:
     #: Disabled unless the operator designates reproducible, excluded roots.
     workspace_cache: WorkspaceCache = dataclasses.field(default_factory=WorkspaceCache)
 
+    operator_records: dict = dataclasses.field(default_factory=dict)
+
     def __post_init__(self):
         object.__setattr__(self, "tzinfo", resolve_timezone(self.timezone))
 
@@ -910,8 +912,10 @@ def load(file: Path) -> Config:
     file = file.expanduser().resolve()
     data = _load_merged(file)
     keys(data, {"data_dir", "engines", "timezone", "limits", "sandbox", "profiles",
-                "roles", "consult_role", "delegate_role", "web", "vcs", "materialize", "exclude", "selectors", "include", "insight_decisions", "workspace_cache"}, "root")
+                "roles", "consult_role", "delegate_role", "web", "vcs", "materialize", "exclude", "selectors", "include", "insight_decisions", "workspace_cache", "operator_records"}, "root")
     data.pop("include", None)
+    from .operator_records import configuration as record_configuration
+    records = record_configuration(data.get("operator_records", {}))
     decisions = data.get("insight_decisions", {})
     keys(decisions, {"work_item_intent_default", "work_item_intent_by_source"}, "insight_decisions")
     decisions = {"work_item_intent_default": "create", "work_item_intent_by_source": {}, **decisions}
@@ -1467,4 +1471,4 @@ def load(file: Path) -> Config:
                   environments, limits, sandbox, profiles, roles, consult_role, delegate_role, timezone, web, vcs, mat,
                   strings(data.get("exclude", [".git", ".pi", ".env", ".env.*", ".venv",
                                                 "node_modules", "__pycache__", "*.pyc", "*.pyo", ".pytest_cache"]), "exclude"), selectors, insight_decisions=decisions,
-                  workspace_cache=workspace_cache_policy(data.get("workspace_cache", {})))
+                  workspace_cache=workspace_cache_policy(data.get("workspace_cache", {})), operator_records=records)

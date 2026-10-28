@@ -313,6 +313,7 @@ def prompt_for(context: Context) -> str:
                        "pending_insights": pending,
                        "open_insights": opening["open_backlog"],
                        "open_work_items": open_work_items,
+                       "operator_records": getattr(context, "operator_record_page", {"events": []}),
                        "decision_events": opening["decision_events"],
                        **({"decision_page": opening["decision_page"]}
                           if opening["decision_page"] is not None else {}),
@@ -392,6 +393,7 @@ def prompt_delta_for(context: Context, pending: list) -> str:
                        "pending_insights": pending,
                        "open_insights": open_backlog,
                        "open_work_items": open_work_items,
+                       "operator_records": getattr(context, "operator_record_page", {"events": []}),
                        "decision_events": opening["decision_events"],
                        **({"decision_page": opening["decision_page"]}
                           if opening["decision_page"] is not None else {}),

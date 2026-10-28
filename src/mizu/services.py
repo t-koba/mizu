@@ -142,9 +142,17 @@ def event_watches(config: Config, project: Project) -> dict[str, list[str]]:
     ``on_change`` without any schedule) still gets a trigger, while a role with
     neither a schedule nor event subscriptions nor unscheduled ``on_change``
     stays explicit-run only.
+    Enabled operator records additionally watch the sharded operator partition
+    ``shared-records/operator`` for these roles and scheduled observers;
+    addressed SharedRecords pending state admits runs. The parent
+    ``shared-records`` directory is not watched: systemd PathChanged and
+    launchd WatchPaths triggers are not recursive, so only the partition that
+    gains new operator files needs a trigger.
     Periodic discovery stays independent policy: timers and
     calendar entries keep their own schedules unchanged.
     """
+    from .operator_records import configuration as record_configuration
+    operator_enabled = any(row['enabled'] and row['wake'] for row in record_configuration(config.operator_records).values())
     watches: dict[str, list[str]] = {}
     for name in project.roles:
         role = config.roles[name]
@@ -156,7 +164,7 @@ def event_watches(config: Config, project: Project) -> dict[str, list[str]]:
             role.decision_events or role.work_item_events or "check_job" in role.capabilities)
         scheduled_write = bool(
             role.workspace == "write" and (role.interval_seconds or role.calendar))
-        if not (has_subscription or scheduled_write or unscheduled_on_change):
+        if not (has_subscription or scheduled_write or unscheduled_on_change or (scheduled and operator_enabled)):
             continue
         if has_subscription or scheduled_write:
             watches[name] = [str(project.root / "decision-history"), str(project.root / "waits")]
@@ -169,6 +177,8 @@ def event_watches(config: Config, project: Project) -> dict[str, list[str]]:
                 watches[name].append(str(project.root / "work-items"))
         else:
             watches[name] = []
+        if operator_enabled:
+            watches[name].append(str(project.root / "shared-records" / "operator"))
         if unscheduled_on_change:
             # Coarse published-code pointer: the persisted level state whose
             # change wakes ``mizu run --event``; admission still compares the

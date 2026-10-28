@@ -10,6 +10,17 @@ Environment substitution reads the controller process environment, not
 `ConfigError`); there are no implicit defaults so a missing export cannot
 silently change grants or paths. Prefer literal model aliases for systemd services.
 
+## Operator answers and notices
+
+The host-only `mizu record` CLI supports the configured `answer` and
+`operator.notice` kinds. A missing kind table is disabled; declaring a table
+without `enabled` defaults that kind to enabled. The routes are fixed to the
+exact question's authenticated source role and the notice's explicit addressee;
+retention is permanently `permanent`, and `wake` defaults to true for a declared
+kind. These are explicit product policy defaults, not model write grants. The
+complete schema, CLI lifecycle, wake behavior and acknowledgement rules are in
+[shared-record delivery](shared-records.md#operator-answers-and-notices-active-without-decision-cutover).
+
 ## Regenerable workspace caches
 
 Automatic reclamation is opt-in and separate from operator-invoked `prune`:

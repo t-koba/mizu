@@ -39,6 +39,7 @@ class DaemonFacts:
     # Full role-eligible ID set differs from the last delivered unit input.
     ready_work_changed: bool | None = None
     ci_wait_due: bool | None = None
+    operator_records_due: bool | None = False
     outcome: str | None = None
     inbox_changed: bool | None = None
     routed_events_due: bool | None = None
@@ -73,6 +74,7 @@ class DispatchFacts:
     # on_change roles keep timer-based discovery; their --event probes still
     # exit with no-event when no subscribed decision/work/wait/CI is due.
     has_code_event: bool = False
+    has_record: bool = False
     has_decision: bool = False
     has_work_item: bool = False
     ready_work_changed: bool = False
@@ -94,11 +96,13 @@ class DispatchDecision:
 
 
 def _has_event(facts: DispatchFacts) -> bool:
-    return bool(facts.has_decision or facts.has_work_item or facts.has_wait or facts.has_ci
+    return bool(facts.has_record or facts.has_decision or facts.has_work_item or facts.has_wait or facts.has_ci
                 or facts.ready_work_changed or (facts.event_trigger and facts.operator_woke))
 
 
 def _event_label(facts: DispatchFacts) -> str:
+    if facts.has_record:
+        return "operator_record"
     if facts.has_decision:
         return "decision"
     if facts.has_work_item:
@@ -134,6 +138,10 @@ def evaluate_daemon(facts: DaemonFacts) -> DaemonDecision:
         return DaemonDecision(ready=None, reason="collecting", needed="ci_wait_due")
     if facts.ci_wait_due:
         return DaemonDecision(ready=True, reason="ci_wait")
+    if facts.operator_records_due is None:
+        return DaemonDecision(ready=None, reason="collecting", needed="operator_records_due")
+    if facts.operator_records_due:
+        return DaemonDecision(ready=True, reason="operator_record")
     if facts.outcome is None:
         return DaemonDecision(ready=None, reason="collecting", needed="outcome")
     if facts.outcome == "done":
