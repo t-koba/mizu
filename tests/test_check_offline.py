@@ -356,6 +356,13 @@ class CheckTimeoutTests(unittest.TestCase):
                 process = real_spawn([sys.executable, '-u', str(parent), str(descendant),
                                       str(ready), 'timeout' if timed_out else 'exit'], **kwargs)
                 processes.append(process)
+                # Start the mocked timeout only after the descendant is ready,
+                # retaining the parent's existing 20 s startup allowance.
+                deadline = time.monotonic() + 20
+                while not ready.exists():
+                    self.assertIsNone(process.poll(), 'parent exited before descendant readiness')
+                    self.assertLess(time.monotonic(), deadline, 'descendant failed to start')
+                    time.sleep(.01)
                 return process
 
             def run_gate():
@@ -371,24 +378,23 @@ class CheckTimeoutTests(unittest.TestCase):
                     mock.patch.object(CHECK.sys, 'argv', ['check.py', '--report', str(report)]), \
                     mock.patch.object(CHECK.sys, 'stdout', output), \
                     mock.patch.object(CHECK, 'spawn', side_effect=launch), \
-                    mock.patch.object(CHECK, '_unittest_timeout_seconds', return_value=30), \
+                    mock.patch.object(CHECK, '_unittest_timeout_seconds', return_value=10), \
                     mock.patch.object(CHECK, 'PROCESS_CLEANUP_TIMEOUT_SECONDS', 1), \
                     mock.patch.object(CHECK.shutil, 'which', return_value=None), \
                     mock.patch.object(CHECK, 'bash_available', return_value=False):
                 started = time.monotonic()
                 gate.start()
                 try:
-                    # The mocked child cap must outlast the descendant's own
-                    # start-up (the parent waits 20 s for it) on a loaded host,
-                    # so the live progress and the bounded cleanup are the
-                    # assertions, not the host's speed.
+                    # Startup has its own 20 s readiness wait; the mocked 10 s
+                    # child cap then exercises the real timeout/cleanup path.
+                    # Keep generous margins for live progress and cleanup.
                     self.assertTrue(progress.wait(45), 'confirmed descendant progress must stream live')
                     if timed_out:
                         self.assertTrue(gate.is_alive(), 'progress must arrive before the timeout')
                     gate.join(timeout=90)
                     elapsed = time.monotonic() - started
                     self.assertFalse(gate.is_alive(), 'gate blocked on inherited stdout')
-                    self.assertLess(elapsed, 120, '30 s child cap plus cleanup/startup margin')
+                    self.assertLess(elapsed, 120, '10 s child cap plus cleanup/startup margin')
                     self.assertFalse(errors, errors)
                     self.assertEqual(results, [1])  # node is deliberately unavailable
                     self.assertEqual(len(processes), 1)
@@ -401,7 +407,7 @@ class CheckTimeoutTests(unittest.TestCase):
                     if timed_out:
                         # Windows Job Object termination can report process exit
                         # status 0; the gate records timeout in status/details.
-                        self.assertIn('timed out after 30 s', entry['details'])
+                        self.assertIn('timed out after 10 s', entry['details'])
                         self.assertIn('unittest failure details unavailable', entry['details'])
                     else:
                         self.assertEqual(entry['exit_code'], 0)
