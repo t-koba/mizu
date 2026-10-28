@@ -963,6 +963,77 @@ after cancellation by reading the current revision first: an append may already
 have committed. These operations publish nothing and schedule no work.
 
 
+### Retire revision-exhausted work without claiming completion
+
+The ordinary immutable chain is capped at **256 revisions including its seed**.
+The final ordinary CAS (255 to 256) still works. A nonterminal item at 256 may
+only leave the ledger through an explicit `work_items_transition` to `dropped`,
+with `expected_rev: 256` and a required nonblank reason (1–4000 characters).
+Omit `scope`, `snapshot_id`, `wait` and `smoke_refs`: retirement cannot change
+the accepted scope, delivery/verification evidence, wait or stored item-level
+reference list. As with an ordinary drop, terminal status releases those
+smoke references from live retention pins while preserving their history. This
+is **not completion**, cannot create revision 257, and permits no later
+reopening/correction. Already terminal
+ordinary chains cannot be retired again. Unfinished accepted scope still needs
+an explicit owner/replanning decision; retirement never infers delivery.
+
+The existing transition capability and runtime-bound actor authorize this
+operation; there is no caller-supplied actor or new grant. Under the same
+transition locks, the store fully validates the seed, every ordinary revision
+and retained delivery/verification evidence before exclusively atomically
+writing the single `work-items/<id>/retirement.json`. Its schema is exactly:
+`schema: 1`, `request`, `request_sha256`, `chain_sha256`, `created_at`.
+`request` contains exactly `id`, `expected_rev`, `status`, `actor`, `reason`;
+reason is trimmed before binding. Request identity is SHA-256 of canonical JSON;
+the chain hash is SHA-256 of the canonical seed followed by all ascending
+canonical revision records, each followed by a single LF. `created_at` is a
+timezone-aware timestamp from the first commit. The sidecar has the existing
+bounded safe-file read limit, while its derived state retains the ordinary
+event byte limit. This is append-only authenticated store evidence, not a
+signature granting authority to external JSON writers.
+
+Exact normalized same-request/same-actor retries after cancellation or an
+uncertain response return the original terminal state without rewriting it.
+Different reasons/actors, stale revisions, malformed/gapped/unsafe histories,
+wrong-chain or unsafe sidecars fail closed. No direct JSON repair is supported.
+Read-only scans and storage audits validate without recovery/writes; only locked
+reads recover recognized atomic-write temporaries, including aliases of the
+committed retirement target. The fixed sidecar consumes no ordinary revision.
+
+The current projection has `status: dropped`, no holder/wait/doing age, and the
+same ordinary `rev: 256`; scope, origin, description, delivery and historical
+verification remain intact. By-ID history exposes `retirement` separately,
+keeps ascending revisions 1–256 and `history_total: 256`, and never invents a
+257th event. Open/ready/held-slot counts exclude the retired item, closed and
+terminal-event views include it, and a successful first retirement sends the
+ordinary non-authoritative terminal wake hint. No prior terminal event can
+share its identity, because only nonterminal ordinary chains may be retired.
+
+**Post-review operator recovery template for qpx:** the exact fields and full
+chain of `wi_f53ccb4ea4229eea2911746e3709e24a` are unavailable in this project.
+After review and the operator's normal supported runtime rollout, re-read that
+item through `work_items_read` in the supported qpx runtime. Verify that the
+full chain is valid, the current ordinary revision is exactly 256 and the item
+is nonterminal; inspect scope, holder, waits and delivery before deciding to
+retire it. From the authorized runtime role, use the existing transition tool:
+
+```json
+{
+  "id": "wi_f53ccb4ea4229eea2911746e3709e24a",
+  "expected_rev": 256,
+  "status": "dropped",
+  "reason": "Retire revision-exhausted tracking and release its hold; this is not completion and asserts no implementation or verification success."
+}
+```
+
+Re-read to confirm separate retirement evidence and slot release. On an uncertain
+response, retry only the identical normalized request under the same runtime
+actor; on any conflict or invalid chain, stop. Do not edit ledger JSON, mutate
+the qpx ledger from this repository, or patch an installed runtime. The template
+authorizes no deployment and does not assert that this recovery has been run.
+
+
 ## Open-work capacity
 
 `[limits].open_work_items` caps new nonterminal WorkItems per project (provisional

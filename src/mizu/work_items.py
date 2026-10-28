@@ -23,7 +23,7 @@ import stat
 from pathlib import Path
 
 from .smoke_refs import record_lock, validate_refs, require_pairs
-from . import insight_archive
+from . import insight_archive, work_item_retirement
 from .work_item_waits import stored_wait, liveness
 from .errors import Denied, LimitExceeded, OpenWorkItemsFull
 from .fs import (DIGEST, PREVIEW_BYTES, canonical, digest, identifier, lock, now, safe_read,
@@ -987,7 +987,7 @@ class WorkItems:
     def _current_decision(self, insight_id: str, *, include_work_item: bool = False) -> dict | None:
         return self._current_decision_impl(insight_id, include_work_item=include_work_item, readonly=False)
 
-    def _history_revisions(self, item_id: str, *, recover: bool) -> set[int] | None:
+    def _history_revisions(self, item_id: str, *, recover: bool, require_clean=False) -> set[int] | None:
         """Validate per-item history names, optionally recovering leftovers.
 
         Single scan shared by locked and read-only readers. With
@@ -996,10 +996,13 @@ class WorkItems:
         directory synced; with ``recover=False`` they are only validated and
         ignored, never deleted or synced. A safe orphan (``st_nlink == 1``)
         is uncommitted, and a post-link alias (``st_nlink == 2``) is accepted
-        only when exactly one regular revision identifies the same inode.
+        only when exactly one regular committed target identifies the same inode.
+        The single fixed retirement sidecar is separate from the unchanged
+        ordinary-name/temporary budget; it never consumes a revision.
         Anything else, including unsafe temporaries and unexpected names,
         fails closed. Returns the validated revision set, or None when the
-        item directory is absent.
+        item directory is absent. The storage auditor requires a clean directory
+        and refuses even recognized leftovers until a locked read recovers them.
         """
         if not isinstance(item_id, str) or ITEM_ID.fullmatch(item_id) is None:
             raise Denied("Invalid work-item ID")
@@ -1010,7 +1013,7 @@ class WorkItems:
         revision_inodes = []
         revisions = set()
         with os.scandir(directory) as entries:
-            for count, entry in enumerate(entries):
+            for count, entry in enumerate(entry for entry in entries if entry.name != "retirement.json"):
                 if count >= MAX_REVISIONS + 1:
                     raise Denied("Work-item directory exceeds recovery bound")
                 if _TEMP_NAME.fullmatch(entry.name):
@@ -1038,6 +1041,18 @@ class WorkItems:
                 if (stat.S_ISREG(info.st_mode)
                         and not getattr(info, "st_file_attributes", 0) & 0x400):
                     revision_inodes.append((info.st_dev, info.st_ino, entry))
+        retirement_path = directory / "retirement.json"
+        try:
+            info = retirement_path.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            if (not stat.S_ISREG(info.st_mode)
+                    or getattr(info, "st_file_attributes", 0) & 0x400):
+                raise Denied("Unsafe work-item retirement")
+            revision_inodes.append((info.st_dev, info.st_ino, retirement_path))
+        if require_clean and temporary_entries:
+            raise Denied("Unrecovered work-item temporary")
         removed = False
         for entry in temporary_entries:
             try:
@@ -1236,45 +1251,34 @@ class WorkItems:
             raise Denied("Only completed work items carry snapshot evidence")
 
     def _iter_chain(self, item_id: str, *, seed_event: dict | None = None,
-                    history_revisions=_HISTORY_UNSET):
+                    history_revisions=_HISTORY_UNSET, retirement=None):
         """Replay and validate one append-only chain, yielding one record at a time.
 
         The seed and each revision are immutable full-state records. Callers may
         retain only the current record or a bounded page; replay itself never
-        materializes the complete history.
+        materializes the complete history. On exhaustion, validate the terminal
+        sidecar separately; never yield it as an invented revision. Optional
+        retirement collects that validated record and the full chain hash.
         """
         current = self._seed(item_id, seed_event, history_revisions=history_revisions)
+        chain_hash = hashlib.sha256()
+        chain_hash.update(canonical(current) + b"\n")
         yield current
-        # The storage auditor calls this read-only without recovery. Keep its
-        # bounded fail-closed scan; locked readers pass the recovery scan result.
-        if history_revisions is _HISTORY_UNSET:
-            directory = self.root / "work-items" / item_id
-            if not _directory(directory.parent) or not _directory(directory):
-                return
-            revisions = set()
-            with os.scandir(directory) as entries:
-                for entry in entries:
-                    if entry.name in ("legacy.json", "create.json"):
-                        continue
-                    if len(revisions) >= MAX_REVISIONS - 1:
-                        raise Denied("Work-item history exceeds revision bound")
-                    if _REVISION_NAME.fullmatch(entry.name) is None:
-                        raise Denied("Invalid work-item history entry")
-                    revision = int(entry.name[:-5])
-                    if revision > MAX_REVISIONS:
-                        raise Denied("Work-item history exceeds revision bound")
-                    revisions.add(revision)
-        elif history_revisions is None:
-            return
-        else:
-            revisions = history_revisions
+        # The auditor uses the same safe scan, without recovery or writes.
+        revisions = (self._history_revisions(item_id, recover=False, require_clean=True)
+                     if history_revisions is _HISTORY_UNSET else history_revisions) or set()
         if revisions != set(range(2, len(revisions) + 2)):
             raise Denied("Gapped work-item history")
         for revision in range(2, len(revisions) + 2):
             record = self._read(f"work-items/{item_id}/{revision}.json")
             self._validate_transition(current, record)
             current = record
+            chain_hash.update(canonical(current) + b"\n")
             yield current
+        chain_sha256 = chain_hash.hexdigest()
+        terminal = work_item_retirement.read(self, current, chain_sha256)
+        if retirement is not None:
+            retirement.update(chain_sha256=chain_sha256, record=terminal)
 
     def _get(self, item_id: str, *, seed_event: dict | None = None,
              history_revisions=_HISTORY_UNSET) -> dict:
@@ -1285,10 +1289,12 @@ class WorkItems:
                       history_revisions=_HISTORY_UNSET) -> tuple:
         since = None
         current = None
+        retirement = {}
         for current in self._iter_chain(item_id, seed_event=seed_event,
-                                        history_revisions=history_revisions):
+                                        history_revisions=history_revisions, retirement=retirement):
             since = (since or current["updated_at"]) if current["status"] == "doing" else None
-        return current, since
+        terminal = retirement["record"]
+        return work_item_retirement.project(current, terminal), None if terminal else since
 
     def get(self, item_id: str) -> dict:
         """Read one seed and at most 255 bounded full-state events under lock.
@@ -1367,10 +1373,11 @@ class WorkItems:
             stopped_for_bytes = False
             # Reserve the maximum independently bounded current projection and
             # ample fixed envelope space before admitting immutable history rows.
-            row_budget = MAX_HISTORY_PAGE_BYTES - MAX_PROJECTION_BYTES - 1024
+            row_budget = MAX_HISTORY_PAGE_BYTES - MAX_PROJECTION_BYTES - PREVIEW_BYTES - 1024
             current = None
             since = None
-            for record in self._iter_chain(item_id, history_revisions=history_revisions):
+            retirement = {}
+            for record in self._iter_chain(item_id, history_revisions=history_revisions, retirement=retirement):
                 current = record
                 since = (since or record["updated_at"]) if record["status"] == "doing" else None
                 revision = record["rev"]
@@ -1388,6 +1395,10 @@ class WorkItems:
 
             if after_rev > current["rev"]:
                 raise Denied("Work-item history cursor is ahead of current revision")
+            terminal = retirement["record"]
+            current = work_item_retirement.project(current, terminal)
+            if terminal:
+                since = None
             projection = {"item": current, **self._origin_projection(current), **self._hold_projection(since)}
             if len(canonical(projection)) > MAX_PROJECTION_BYTES:
                 raise LimitExceeded("Work-item projection exceeds byte bound")
@@ -1397,6 +1408,8 @@ class WorkItems:
             result = {**projection, "history": history, "history_total": history_total,
                       "cursor": after_rev, "next_cursor": last_returned if more else None,
                       "truncated": more}
+            if terminal:
+                result["retirement"] = terminal
             if len(canonical(result)) > MAX_HISTORY_PAGE_BYTES:
                 raise LimitExceeded("Work-item history response exceeds byte bound")
             return result
@@ -1989,6 +2002,11 @@ class WorkItems:
                        if binding_request else contextlib.nullcontext())
         with publication, record_lock(self.root):
             history_revisions = self._recover_temporary_writes(item_id)
+            if expected_rev == MAX_REVISIONS:
+                return work_item_retirement.retire(
+                    self, item_id, expected_rev=expected_rev, status=status, actor=actor, reason=reason,
+                    history_revisions=history_revisions, wait=wait, snapshot_id=snapshot_id,
+                    scope=scope, smoke_refs=smoke_refs)
             current = self._get(item_id, history_revisions=history_revisions)
             if current["rev"] != expected_rev:
                 raise Denied("Work item changed; re-read before transitioning")
@@ -2082,10 +2100,11 @@ class WorkItems:
                 raise LimitExceeded("Work-item event exceeds byte bound")
             write_json(self.root / "work-items" / item_id / f"{record['rev']}.json", record, exclusive=True)
             if status in ("done", "dropped"):
-                # Non-authoritative wake hint for non-recursive platform directory
-                # watches. No new record/index, and no scheduling policy here.
-                # Failure/crash cannot acknowledge or hide an event: admission
-                # always replays the committed chain, not this metadata.
-                with contextlib.suppress(OSError, NotImplementedError):
-                    os.utime(self.root / "work-items", None, follow_symlinks=False)
+                self._wake_terminal()
             return record
+
+    def _wake_terminal(self):
+        # Non-authoritative hint for non-recursive directory watches. Admission
+        # and event delivery always replay committed records, never metadata.
+        with contextlib.suppress(OSError, NotImplementedError):
+            os.utime(self.root / "work-items", None, follow_symlinks=False)

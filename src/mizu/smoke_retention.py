@@ -527,11 +527,15 @@ def collect_refs(metadata: Metadata, pairs: dict, *, roots=None) -> set:
                 continue
             seen.add(seed["id"])
             item = None
+            retirement = {}
             for item in store._iter_chain(seed["id"], seed_event=event,
-                                          history_revisions=store._history_revisions(seed["id"], recover=False)):
+                                          history_revisions=store._history_revisions(seed["id"], recover=False),
+                                          retirement=retirement):
                 pass
             if item is None:
                 raise Denied("Missing work-item chain")
+            from .work_item_retirement import project as _retire_project
+            item = _retire_project(item, retirement.get("record"))
             refs = validate_refs(item.get("smoke_refs", []))
             wait_refs = validate_refs((item.get("wait") or {}).get("smoke_refs", []))
             if item["status"] not in ("done", "dropped"):
