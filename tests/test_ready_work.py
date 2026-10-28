@@ -422,8 +422,8 @@ class ReadySetChangeTests(Fixture):
         with self.assertRaises(Denied):
             validate_progress({k: v for k, v in progress.items() if k != 'ready_work_signature'})
 
-    def test_unchanged_ready_work_respects_no_progress_backoff(self):
-        self.item('persistent-backoff')
+    def test_unchanged_ready_work_does_not_self_admit_writer(self):
+        self.item('persistent-ready-work')
         self.config = dataclasses.replace(self.config, limits=dataclasses.replace(
             self.config.limits, no_progress_backoff_seconds=60))
         self.project.config = self.config
@@ -431,16 +431,13 @@ class ReadySetChangeTests(Fixture):
             ctx.handle('finish', {'outcome': 'continue', 'summary': 'Observed only',
                                   'state': 'An ordinary free-text rewrite'})
         engine = self.engine(finish)
-        engine.run(self.project, 'worker')  # initial input is progress
-        engine.run(self.project, 'worker')  # unchanged input is not progress
+        engine.run(self.project, 'worker')
         snapshot = self.project.snapshots.get()
-        self.assertFalse(snapshot['progress']['has_progress'])
-        self.assertEqual(snapshot['progress']['no_progress_count'], 1)
+        self.assertTrue(snapshot['progress']['has_progress'])
+        self.assertEqual(snapshot['progress']['no_progress_count'], 0)
         stamp = dt.datetime.fromisoformat(snapshot['progress']['recorded_at']).timestamp()
-        self.assertFalse(should_run(self.project, snapshot, current_time=stamp + 59,
+        self.assertFalse(should_run(self.project, snapshot, current_time=stamp + 61,
                                     role_name='worker'))
-        self.assertTrue(should_run(self.project, snapshot, current_time=stamp + 61,
-                                   role_name='worker'))
         self.assertEqual(engine.run(self.project, 'worker')['skipped'], 'unchanged')
         self.assertEqual(engine.run(self.project, 'worker', event_trigger=True)['skipped'], 'no-event')
 
