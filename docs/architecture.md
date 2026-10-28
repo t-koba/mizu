@@ -285,7 +285,7 @@ and shared-smoke retention are independent and unchanged. See
 [configuration](configuration.md#automatic-snapshot-retention) for the exact
 root/age/result contract and outbox lock permissions.
 
-Work orders keep one bounded canonical `work-order/current.json` record, atomically replaced under `insights.lock` with exact revision/generation CAS. The authoring run receives a complete `work-order.json` receipt under existing run retention. Legacy history/checkpoint files are unused and left untouched; valid schema-1 current records remain readable. There is no recovery scan, cleanup or automatic retry. See the writer work-order contract in `configuration.md` for schema, bounds and failure behavior.
+Work orders keep one bounded canonical `work-order/current.json` record, atomically replaced under `insights.lock` with exact revision/generation CAS. Each committed revision receives a distinct immutable `work-order-<sha256>.json` receipt under the authoring run and existing run retention; the tool result names its exact receipt. Legacy history/checkpoint files are unused and left untouched; valid schema-1 current records remain readable. There is no recovery scan, cleanup or automatic retry. See the writer work-order contract in `configuration.md` for schema, bounds and failure behavior.
 
 The history index retains published IDs up to the configured limit (default
 128, tunable 8–1000000 via `limits.history_index`). The active generation/window

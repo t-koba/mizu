@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from . import work_order as _plan
 from .errors import Denied
-from .fs import write_json
+from .fs import canonical, digest, write_json
 
 
 def record(context, args: dict) -> dict:
@@ -20,6 +20,9 @@ def record(context, args: dict) -> dict:
         expected_rev=args["expected_rev"],
         expected_generation=args["expected_generation"],
         opening_generation=opening)
-    write_json(context.run_dir / "work-order.json", out)
+    # Every acknowledged revision gets an immutable, bounded receipt. The
+    # digest keeps the run-retained path fixed-length even as revisions grow.
+    evidence = f"work-order-{digest(canonical(out))}.json"
+    write_json(context.run_dir / evidence, out, exclusive=True)
     return {"rev": out["rev"], "generation": out["generation"],
-            "evidence": "work-order.json"}
+            "evidence": evidence}

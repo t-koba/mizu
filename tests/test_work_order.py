@@ -5,7 +5,7 @@ import json
 from support import Fixture
 from mizu import work_order as plan
 from mizu.errors import Denied
-from mizu.fs import now, write_json
+from mizu.fs import digest, now, write_json
 from mizu.snapshot import PROGRESS_SIGNALS
 
 
@@ -923,7 +923,7 @@ class WorkOrderTests(Fixture):
                 ctx.handle("work_order", args)
         self.assertEqual(plan._read_stored(self.project.root)["status"], "absent")
         self.assertFalse(path.exists())
-        self.assertFalse((ctx.run_dir / "work-order.json").exists())
+        self.assertFalse(list(ctx.run_dir.glob("work-order-*.json")))
         ctx.handle("work_order", args)
         old = path.read_bytes()
         args = dict(args, expected_rev=1, rationale="second")
@@ -1008,19 +1008,38 @@ class WorkOrderTests(Fixture):
         timestamp = "2026-01-01T00:00:00+00:00"
         with patch.object(plan, "now", return_value=timestamp):
             out = ctx.handle("work_order", args)
-        self.assertEqual(out, {"rev": 1, "generation": args["expected_generation"],
-                               "evidence": "work-order.json"})
+        self.assertEqual(out["rev"], 1)
+        self.assertEqual(out["generation"], args["expected_generation"])
         receipt_path = ctx.run_dir / out["evidence"]
         receipt = receipt_path.read_bytes()
+        self.assertEqual(out["evidence"], f"work-order-{digest(receipt)}.json")
         self.assertEqual(receipt, (self.project.root / "work-order" / "current.json").read_bytes())
-        self.assertEqual(json.loads(receipt), {"schema": 2, "rev": 1,
+        first_record = json.loads(receipt)
+        self.assertEqual(first_record, {"schema": 2, "rev": 1,
             "generation": args["expected_generation"], "items": [b["id"], a["id"]],
             "rationale": "B then A", "actor": "worker", "updated_at": timestamp,
             "run": ctx.run_dir.name})
-        ctx2 = self.context("worker")
-        ctx2.handle("work_order", self._order_args(ctx2, [a["id"]], rev=1))
+
+        # A second successful write in the same run gets a distinct receipt;
+        # the first result continues to name its unchanged revision.
+        second = ctx.handle("work_order", self._order_args(
+            ctx, [a["id"]], rev=1, rationale="A only"))
+        second_path = ctx.run_dir / second["evidence"]
+        second_receipt = second_path.read_bytes()
+        self.assertEqual(second["rev"], 2)
+        self.assertNotEqual(out["evidence"], second["evidence"])
         self.assertEqual(receipt_path.read_bytes(), receipt)
-        self.assertEqual(json.loads((ctx2.run_dir / "work-order.json").read_bytes())["run"], ctx2.run_dir.name)
+        self.assertEqual(second_receipt, (self.project.root / "work-order" / "current.json").read_bytes())
+        self.assertEqual(json.loads(second_receipt)["rationale"], "A only")
+        self.assertEqual(second["evidence"], f"work-order-{digest(second_receipt)}.json")
+
+        # Later runs retain their own receipt without mutating this run's.
+        ctx2 = self.context("worker")
+        third = ctx2.handle("work_order", self._order_args(ctx2, [b["id"]], rev=2))
+        third_receipt = (ctx2.run_dir / third["evidence"]).read_bytes()
+        self.assertEqual(json.loads(third_receipt)["run"], ctx2.run_dir.name)
+        self.assertEqual(receipt_path.read_bytes(), receipt)
+        self.assertEqual(second_path.read_bytes(), second_receipt)
         for run in (None, "", "../run", "f" * 31, "G" * 32, "f" * 33):
             with self.subTest(run=run), self.assertRaisesRegex(Denied, "Invalid work-order run"):
                 plan.write_plan(self.project, actor="worker", run=run,
@@ -1029,6 +1048,21 @@ class WorkOrderTests(Fixture):
         for field in ("run", "actor"):
             with self.subTest(field=field), self.assertRaises(Denied):
                 ctx2.handle("work_order", dict(args, **{field: "f" * 32}))
+
+    def test_receipt_failure_reports_error_after_current_commit(self):
+        from unittest.mock import patch
+        item = self.project.work_items.create(idempotency_key="receipt-failure", title="A", actor="worker")["record"]["work_item"]
+        ctx = self.context("worker")
+        args = self._order_args(ctx, [item["id"]], rationale="committed before receipt")
+        with patch("mizu.work_order_ops.write_json", side_effect=OSError("receipt write failed")):
+            with self.assertRaises(OSError):
+                ctx.handle("work_order", args)
+        stored = plan._read_stored(self.project.root)
+        self.assertEqual(stored["status"], "current")
+        self.assertEqual(stored["record"]["rev"], 1)
+        self.assertEqual(stored["record"]["run"], ctx.run_dir.name)
+        self.assertEqual(stored["record"]["rationale"], "committed before receipt")
+        self.assertFalse(list(ctx.run_dir.glob("work-order-*.json")))
 
     def test_malformed_current_fails_closed_without_repair(self):
         from mizu.fs import canonical
@@ -1064,9 +1098,9 @@ class WorkOrderTests(Fixture):
         item = self.project.work_items.create(idempotency_key="unsafe", title="A", actor="worker")["record"]["work_item"]
         ctx = self.context("worker")
         args = self._order_args(ctx, [item["id"]])
-        ctx.handle("work_order", args)
+        out = ctx.handle("work_order", args)
         path = self.project.root / "work-order" / "current.json"
-        target = ctx.run_dir / "work-order.json"
+        target = ctx.run_dir / out["evidence"]
         path.unlink()
         path.mkdir()
         self.assertEqual(plan._read_stored(self.project.root)["status"], "unavailable")
