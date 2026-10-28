@@ -11,12 +11,15 @@ from .work_items import MAX_OPEN_CURSOR_CHARS, MAX_OPEN_PAGE_ROWS, MAX_REVISIONS
 
 # Shared by full/delta unit openings and the finish-tool description.
 WRITER_CONTINUATION_CONTRACT = (
-    "For immediate writer continuation, finish with outcome=continue (or a "
+    "To propose an immediate writer continuation, finish with outcome=continue (or a "
     "host-sealed bounded outcome) and include exactly one standalone "
-    "`Next: <actionable step>` line in state, naming a new actionable step. "
-    "Use outcome=wait for external results or work that is not yet actionable; "
-    "Next is not a wake/wait mechanism. An admitted continuation opens with "
-    "that step as its task.")
+    "`Next: <actionable step>` line in state, naming a new proposed follow-up. "
+    "Next alone does not admit: the host requires a parent snapshot and a "
+    "validated progress record with at least one selected true `tool`, `code`, "
+    "`decision`, or `insight` signal. A state-only Next does not admit and may "
+    "leave the writer parked; do not rely on Next as a wake signal. Use "
+    "outcome=wait for external results or work not yet actionable. An admitted "
+    "continuation opens with that step as its task.")
 
 
 #: MCP protocol versions accepted by the capsule and bridge servers.

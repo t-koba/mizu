@@ -63,9 +63,14 @@ class UnitPromptSeamTests(Fixture):
             with self.subTest(surface=name):
                 for phrase in ("outcome=continue", "host-sealed bounded outcome",
                                "exactly one standalone `Next: <actionable step>` line in state",
-                               "new actionable step", "outcome=wait for external results",
-                               "work that is not yet actionable",
-                               "Next is not a wake/wait mechanism",
+                               "new proposed follow-up", "Next alone does not admit",
+                               "parent snapshot", "validated progress record",
+                               "at least one selected true",
+                               "`tool`, `code`, `decision`, or `insight` signal",
+                               "A state-only Next does not admit and may leave the writer parked",
+                               "do not rely on Next as a wake signal",
+                               "outcome=wait for external results",
+                               "work not yet actionable",
                                "An admitted continuation opens with that step as its task"):
                     self.assertIn(phrase, text)
         # bounded is a host-sealed outcome, not a new finish-tool argument.

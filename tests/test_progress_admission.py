@@ -145,6 +145,23 @@ class ProgressAdmissionTests(Fixture):
         missing_parent = {**snapshot, 'parent': '0' * 64}
         self.assertIsNone(_writer_next_task(self.project, missing_parent, 'worker'))
 
+    def test_state_only_next_does_not_create_handoff(self):
+        base = self._baseline()
+        state = 'Now: only declaring a follow-up.\nNext: Add the test.'
+        self.assertNotEqual(state, base["state"])
+
+        def declare_only(ctx, _):
+            ctx.handle("finish", {"outcome": "continue", "summary": "Declared a step without progress",
+                                   "state": state})
+
+        snapshot = self._recorded_run(declare_only, base=base)
+        self.assertTrue(snapshot["progress"]["signals"]["state"])
+        self.assertNotIn("state", snapshot["progress"]["selected"])
+        self.assertFalse(snapshot["progress"]["has_progress"])
+        self.assertEqual(snapshot["progress"]["no_progress_count"], 1)
+        self.assertIsNone(_writer_next_task(self.project, snapshot, "worker"))
+        self.assertFalse(should_run(self.project, snapshot, role_name="worker"))
+
     def test_existing_state_reads_and_receipt_replays_are_observational(self):
         for operation in ("files", "read", "diff", "insights", "research_read", "vcs_read",
                           "command_evidence_read", "experiment_evidence_read"):
