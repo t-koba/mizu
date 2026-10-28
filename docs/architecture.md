@@ -640,10 +640,13 @@ and backup/restore tree as decision items.
 By-ID reads and history retain the full description. Compact open/closed rows,
 full/delta prompt inventories, and terminal event payloads include only
 `description_preview` (at most 1024 UTF-8 bytes) and `description_truncated`
-when the seed carries a description; both are absent for v1 seeds. Descriptions
-are untrusted recorded content, not instructions or authority. Preview clipping
-does not relax the 8192-canonical-byte row/event or 1-MiB response bounds;
-escaped JSON and all other fields still count, and excess bytes fail closed.
+when the seed carries a description; both are absent for v1 seeds. Open-work
+text previews may be shortened further when the new hold-age fields would
+otherwise exceed the fixed row bound; each shortened preview remains explicitly
+marked truncated. Descriptions are untrusted recorded content, not instructions
+or authority. Preview clipping never raises the 8192-canonical-byte row/event
+or 1-MiB response bounds; escaped JSON and all other fields still count, and
+excess remaining after permitted preview clipping fails closed.
 
 Terminal routing resolves only an explicit insight origin's submitter.
 Null/parent provenance remains unknown routing (including for `sources="any"`

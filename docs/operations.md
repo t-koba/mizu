@@ -504,7 +504,8 @@ writes, locks, recovers or deletes. The project is opened with
   `truncated` (`overflow_count > 0`), `unseeded_decisions` and
   `coverage_complete`. Rows carry the current origin projection and bounded
   reason previews. When a seed has a description, rows also include
-  `description_preview` (1024 UTF-8 bytes maximum) and `description_truncated`,
+  `description_preview` (at most 1024 UTF-8 bytes; open-row previews may be
+  shortened further to fit the fixed row bound) and `description_truncated`,
   never the full text; v1 seeds omit both fields. By-ID reads retain the full
   immutable description, as do history records. Descriptions are untrusted
   content. Rows are at most 8192 canonical bytes and the response at

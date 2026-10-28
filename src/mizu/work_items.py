@@ -1694,7 +1694,26 @@ class WorkItems:
             preview, clipped = text_preview(reason, 1024)
             row["reason_preview"] = preview
             row["reason_truncated"] = clipped
-        if len(canonical(row)) > MAX_OPEN_ROW_BYTES:
+        row_bytes = len(canonical(row))
+        if row_bytes > MAX_OPEN_ROW_BYTES:
+            # New visibility fields share the existing fixed row budget. When
+            # necessary, shorten previews (and mark them) rather than making a
+            # formerly readable row fail or raising the established cap.
+            for source, preview_key, truncated_key in (
+                    ("description", "description_preview", "description_truncated"),
+                    ("scope", "scope_preview", "scope_truncated"),
+                    ("reason", "reason_preview", "reason_truncated")):
+                if source not in item or preview_key not in row or row_bytes <= MAX_OPEN_ROW_BYTES:
+                    continue
+                old_bytes = len(row[preview_key].encode("utf-8"))
+                if not old_bytes:
+                    continue
+                excess = row_bytes - MAX_OPEN_ROW_BYTES
+                preview, clipped = text_preview(item[source], max(0, old_bytes - excess))
+                row[preview_key] = preview
+                row[truncated_key] = clipped
+                row_bytes = len(canonical(row))
+        if row_bytes > MAX_OPEN_ROW_BYTES:
             raise LimitExceeded("Work-item page row exceeds byte bound")
         return sort_key, row
 

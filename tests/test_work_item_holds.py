@@ -7,11 +7,11 @@ from unittest.mock import patch
 from support import Fixture
 from mizu.config import load
 from mizu.errors import ConfigError, Denied
-from mizu.fs import read_json, write_json
+from mizu.fs import canonical, read_json, text_preview, write_json
 from mizu.insights import Insights
 from mizu.project import Project
 from mizu.runtime import prompt_delta_for, prompt_for
-from mizu.work_items import WorkItems
+from mizu.work_items import MAX_OPEN_ROW_BYTES, WorkItems
 
 
 # Host synchronization bounds, not product deadlines; no sustained load.
@@ -193,6 +193,34 @@ class WorkItemHoldTests(Fixture):
         self.assertIsNone(view["doing_since"])
         self.assertIsNone(view["doing_age_seconds"])
         self.assertFalse(view["doing_stale"])
+
+    def test_hold_fields_preserve_the_fixed_compact_row_cap(self):
+        item = {"id": "wi_" + "1" * 32, "title": "t", "origin": None,
+                "status": "doing", "rev": 2, "holder": "worker",
+                "created_at": "2030-01-01T00:00:00+00:00",
+                "updated_at": "2030-01-01T00:00:00+00:00",
+                "description": "\x01" * 560, "scope": "\x01" * 560, "reason": "r" * 1024}
+        view = {"current_origin_rev": None, "stale": False, "redecision": None,
+                "doing_since": item["updated_at"], "doing_age_seconds": 0, "doing_stale": False}
+        _, row = self.store._open_row(item, view)
+        self.assertLessEqual(len(canonical(row)), MAX_OPEN_ROW_BYTES)
+        self.assertTrue(row["description_truncated"] or row["scope_truncated"]
+                        or row["reason_truncated"])
+
+        # Before hold-age fields, the complete 1024-byte previews fit under
+        # the same existing 8192-byte cap; keep that row readable by trimming
+        # previews only when the new metadata actually needs the bytes.
+        old_row = dict(row)
+        for source, preview_key, truncated_key in (
+                ("description", "description_preview", "description_truncated"),
+                ("scope", "scope_preview", "scope_truncated"),
+                ("reason", "reason_preview", "reason_truncated")):
+            old_row[preview_key], old_row[truncated_key] = text_preview(item[source], 1024)
+        for key in ("doing_since", "doing_age_seconds", "doing_stale"):
+            old_row.pop(key)
+        old_bytes = len(canonical(old_row))
+        self.assertLessEqual(old_bytes, MAX_OPEN_ROW_BYTES)
+        self.assertLess(MAX_OPEN_ROW_BYTES - old_bytes, 100)
 
     def test_malformed_earlier_timestamp_fails_closed_in_reads_and_claims(self):
         first, second = self.item("bad-history"), self.item("new-claim")
