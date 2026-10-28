@@ -284,6 +284,31 @@ revalidated before delivery and selected acknowledgement, if ordering or
 payload identity changes, if legacy auto-acks would need to be inferred, or if
 the existing 128 KiB cap cannot be preserved.
 
+## Terminal work-item event shadow preflight (fixture only)
+
+Experiment `d05a868b0a6f4a9fac50e451cbcdc975` projected 24 deterministic
+terminal events (23 `dropped`, one `done`) into a disposable `work-item.terminal`
+SharedRecords envelope, then compared the bounded pending view with
+`work_item_events.pending`. The candidate repeated WorkItems seed/full-chain
+and current-terminal validation before exact shared-record and receipt checks;
+WorkItems remained authoritative. With tied event times and mixed reviewer /
+searcher origins, the initial and post-partial-ack views matched exactly; exact
+record replay was idempotent, conflicting identity and cross-role selection
+were refused, and the fixture had no unseeded decisions. This did not exercise
+terminal revision correction or maximum-size rows; the existing
+`test_corrected_terminal_revision_invalidates_old_delivered_token` regression
+remains relevant.
+
+The largest fixture row was 1,926 bytes and envelope 2,195 bytes, below the
+unchanged 8 KiB row cap; page JSON was 16,726 bytes before and 16,827 after
+receipts, below the 1 MiB page cap. Five page-read samples had median 35.745 ms
+for the legacy path and 54.859 ms for the authority scan plus shadow lookup.
+This small fixture is not a production performance estimate: it shows no
+speedup, and retaining source-current validation while adding immutable record
+and receipt checks adds work. It justifies neither a cutover nor an index; any
+future migration needs a separate design and evidence for source-current
+acknowledgement, correction/replay, backup/restore and full-size bounds.
+
 ## Bounded disposable pilot
 
 The high-volume representative was `insight.decision`, because the current decision-event reader already handles exact per-role receipts and has a 205-event oldest-first regression. The experiment created 205 rejected insights in an isolated test `Fixture`, repeated each read five times, built the normal prompt locally, and projected the same events into a scratch common envelope (`kind`, stable decision event ID, author, insight/revision subject, bounded payload) with scratch per-role receipts. It changed no source files and used no model/provider, network, CI runner or deployment. Evidence: experiment `0adfa0cbd6e46e847d04f211c87795caf7a1398b2a6d83758097ece8382de1ea`.
