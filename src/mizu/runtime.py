@@ -166,8 +166,13 @@ OBSERVATIONAL_OPS = frozenset({
 REPLAYABLE_READ_ARGUMENTS = {"fetch": "receipt_id", "probe": "receipt_id", "search": "result_id"}
 
 
-def _is_observational_operation(operation: str, arguments: dict) -> bool:
+def _is_observational_operation(operation: str, arguments: dict, result=None) -> bool:
     """Identify pure reads of existing data, which do not reset progress."""
+    if operation == "check_job":
+        if arguments.get("action") in ("list", "logs"):
+            return True
+        if arguments.get("action") == "result":
+            return not (isinstance(result, dict) and result.get("status") in check_jobs.TERMINAL_WAKE_STATUSES)
     if operation in OBSERVATIONAL_OPS:
         return True
     replay_argument = REPLAYABLE_READ_ARGUMENTS.get(operation)
@@ -996,7 +1001,7 @@ class Context:
                 idempotent_replay = (operation in ("work_items_create", "work_items_reconcile")
                                      and isinstance(result, dict)
                                      and result.get("created") is False)
-                if (operation != "finish" and not _is_observational_operation(operation, arguments)
+                if (operation != "finish" and not _is_observational_operation(operation, arguments, result)
                         and not idempotent_replay):
                     self.progress_tool = True
                 if operation == "decide":
@@ -2509,14 +2514,11 @@ class Engine:
         prior_wait_expired = (snapshot.get("outcome") == "wait"
                               and snapshot.get("wake_at") is not None
                               and _dispatch_now >= snapshot["wake_at"])
-        progress_base = snapshot if role.workspace == "write" else cursor
+        next_task = _writer_next_task(project, snapshot, role_name) if role.workspace == "write" else None
         if role.workspace == "write":
-            progress_self_admits = (snapshot.get("outcome") in ("continue", "bounded")
-                and snapshot.get("progress") is not None
-                and progress_disposition(snapshot["progress"], snapshot["outcome"],
-                                         self.config, role_name) != "parked_no_progress")
+            progress_self_admits = False
         else:
-            progress_self_admits = _progress_self_admits(progress_base, self.config, role_name)
+            progress_self_admits = _progress_self_admits(cursor, self.config, role_name)
         explicit_wake = operator_woke or (role.workspace == "write" and (
             goal_changed or inbox_changed or prior_wait_expired))
         _dispatch = _scheduling.evaluate(_scheduling.DispatchFacts(
@@ -2534,11 +2536,12 @@ class Engine:
             has_ci=bool(ci_failures),
             operator_woke=bool(operator_woke and role.workspace != "write"),
             progress_self_admits=bool(progress_self_admits),
+            has_next_task=bool(next_task),
         ))
         if _dispatch.skipped == "unchanged":
             return {"skip": {"skipped": "unchanged", "snapshot": snapshot["id"],
                     "code_digest": snapshot["code_digest"]}}
-        return {'ci_manifest': ci_manifest, 'shared_ci_waits': ci_waits.enabled(self.config), 'record_state': record_state, 'decision_state': decision_state, 'snapshot': snapshot, 'sources': sources, 'terminal_events': terminal_events, 'terminal_page': terminal_page, 'wait_events': wait_events, 'obligations': obligations, 'ci_present': ci_present, 'ci_failures': ci_failures, 'prior_wait_expired': prior_wait_expired, 'decision_events': decision_events, 'decision_receipt_diagnostics': receipt_diagnostics, '_dispatch': _dispatch}
+        return {'next_task': next_task, 'ci_manifest': ci_manifest, 'shared_ci_waits': ci_waits.enabled(self.config), 'record_state': record_state, 'decision_state': decision_state, 'snapshot': snapshot, 'sources': sources, 'terminal_events': terminal_events, 'terminal_page': terminal_page, 'wait_events': wait_events, 'obligations': obligations, 'ci_present': ci_present, 'ci_failures': ci_failures, 'prior_wait_expired': prior_wait_expired, 'decision_events': decision_events, 'decision_receipt_diagnostics': receipt_diagnostics, '_dispatch': _dispatch}
 
     def run(self, project: Project, role_name: str, *, attributes=None, retry_busy: bool = False,
                 enqueue_busy: bool = False, event_trigger: bool = False, probes_serviced: bool = False) -> dict:
@@ -2836,6 +2839,8 @@ class Engine:
                         project.snapshots.materialize(snapshot, workspace)
                 context = Context(self.config, project, role, run_dir, snapshot, workspace,
                                   stop=self.stop, consult=self.consult, delegate=self.delegate)
+                context.opening_task = (dispatch_state["next_task"]
+                                        if _dispatch.admission == "next_task" else None)
                 context._slot_lease = True
                 context._admission_observation_sink = record_admission
                 context.ephemeral = self.ephemeral
@@ -3831,6 +3836,47 @@ def _operator_woke(control, cursor, *, observer=False) -> bool:
     return generation != seen
 
 
+def _declared_next(state) -> str | None:
+    """A single-line declaration, not a semantic task classifier; invalid is absent."""
+    if not isinstance(state, str) or len(state) > 32000:
+        return None
+    steps = [line for line in state.splitlines() if line.startswith("Next:")]
+    if len(steps) != 1 or not steps[0].startswith("Next: "):
+        return None
+    step = steps[0][6:]
+    if (not step or len(step) > 4096 or step != step.strip() or not step.isprintable()
+            or step.casefold().rstrip(".") in ("none", "nothing", "n/a")):
+        return None
+    return step
+
+
+def _writer_next_task(project, snapshot, role_name) -> str | None:
+    """Resolve one durable writer handoff from the exact published parent pair.
+
+    Only continue/bounded work may declare readiness. State/input-only changes
+    and legacy/malformed evidence fail closed. Repeating the previous Next is
+    not a new declaration; publishing the successor consumes this handoff.
+    Reads at most one parent and never changes WorkItems or wait authority.
+    """
+    if snapshot.get("outcome") not in ("continue", "bounded"):
+        return None
+    step = _declared_next(snapshot.get("state"))
+    progress = snapshot.get("progress")
+    try:
+        validate_progress(progress)
+        if (not step or progress["role"] != role_name
+                or not any(progress["signals"][name] and name in progress["selected"] for name in
+                           ("tool", "code", "decision", "insight"))):
+            return None
+        parent_id = snapshot.get("parent")
+        if not parent_id:
+            return None
+        parent = project.snapshots.get(parent_id)
+        return step if step != _declared_next(parent.get("state")) else None
+    except (Denied, OSError, ValueError):
+        return None
+
+
 def _progress_self_admits(record, config, role_name, current_time=None) -> bool:
     """Only validated, role-specific continuation evidence can self-admit."""
     if record.get("outcome") not in ("continue", "bounded"):
@@ -4094,22 +4140,10 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
         elif needed == "progress_admits":
             if observer:
                 value = _progress_self_admits(role_record, effective, role_name, current_time)
-            elif "progress" not in snapshot or role_name is None:
+            elif role_name is None:
                 value = True
             else:
-                progress = snapshot["progress"]
-                try:
-                    validate_progress(progress)
-                except Denied:
-                    # Snapshots.get rejects malformed persisted records; fail
-                    # closed for direct projections rather than treating corrupt
-                    # evidence as a legacy snapshot.
-                    value = False
-                else:
-                    effective = config if config is not None else getattr(project, "config", None)
-                    disposition = progress_disposition(progress, snapshot["outcome"],
-                                                       effective, role_name, current_time)
-                    value = disposition != "parked_no_progress"
+                value = bool(_writer_next_task(project, snapshot, role_name))
         else:
             raise RuntimeError(f"scheduler evaluator requested unknown fact: {needed!r}")
         facts = dataclasses.replace(facts, **{needed: value})

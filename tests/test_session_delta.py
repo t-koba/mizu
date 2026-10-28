@@ -48,6 +48,47 @@ class SessionDeltaTests(Fixture):
         self.assertEqual(record["prompt_mode"], "full")
         self.assertTrue(record["session_key"])
 
+    def test_new_writer_next_admits_and_opens_as_first_task_without_rotating(self):
+        from mizu.runtime import should_run
+        step = 'Add the deterministic regression for the parser.'
+        state = 'Now: implemented the parser.\nNext: ' + step
+        for resumed in (False, True):
+            with self.subTest(resumed=resumed):
+                def work(ctx, *_):
+                    (ctx.workspace / 'app.py').write_text('VALUE = ' + str(resumed) + '\n')
+                    ctx.handle('finish', {'outcome': 'continue', 'summary': 'Parser implemented',
+                                          'state': state})
+                # Use distinct preceding declarations so both subtests model a new handoff.
+                def clear(ctx, *_):
+                    ctx.handle('finish', {'outcome': 'wait', 'summary': 'Start slice',
+                                          'state': 'Now: starting.\nNext: Implement the parser.'})
+                Engine(self.config, driver=ScriptDriver(clear)).run(self.project, 'worker')
+                first = Engine(self.config, driver=ScriptDriver(work)).run(self.project, 'worker')
+                snapshot = self.project.snapshots.get()
+                self.assertEqual(snapshot['state'], state)
+                for _ in range(2):
+                    self.assertTrue(should_run(self.project, snapshot, role_name='worker'))
+                if resumed:
+                    path = save_worker_session(self, {'tokens': 0})
+                def followup(ctx, prompt, _):
+                    decoded = json.loads(prompt)
+                    self.assertEqual(next(iter(decoded)), 'task')
+                    self.assertEqual(decoded['task'], step)
+                    self.assertEqual(decoded['published_snapshot']['id'], snapshot['id'])
+                    # Even real work cannot redeclare the identical Next to loop.
+                    (ctx.workspace / 'app.py').write_text('VALUE = completed\n')
+                    ctx.handle('finish', {'outcome': 'continue', 'summary': 'Regression added',
+                                          'state': state})
+                result = Engine(self.config, driver=ScriptDriver(followup)).run(self.project, 'worker')
+                self.assertEqual(read_json(self.project.root / 'runs' / result['run'] / 'started.json')['admission'],
+                                 'next_task')
+                self.assertEqual(projection(self, result['run'])['prompt_mode'], 'delta' if resumed else 'full')
+                self.assertEqual(projection(self, result['run'])['session_key'],
+                                 projection(self, first['run'])['session_key'])
+                if resumed:
+                    self.assertEqual(read_json(path)['id'], 'test-session')
+                self.assertFalse(should_run(self.project, self.project.snapshots.get(), role_name='worker'))
+
     def test_delta_does_not_swallow_work_item_store_errors(self):
         from mizu.runtime import session_prompt
         ctx = self.context("worker")

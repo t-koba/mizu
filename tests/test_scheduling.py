@@ -132,6 +132,15 @@ class DaemonEvaluatorTests(unittest.TestCase):
 
 
 class DispatchEvaluatorTests(unittest.TestCase):
+    def test_writer_next_bypasses_unchanged_but_is_not_an_event(self):
+        facts = _dispatch(on_change=True, code_unchanged=True, has_next_task=True)
+        self.assertEqual(evaluate_dispatch(facts).admission, "next_task")
+        event = dataclasses.replace(facts, event_trigger=True)
+        self.assertEqual(evaluate_dispatch(event).skipped, "no-event")
+        self.assertEqual(evaluate_dispatch(dataclasses.replace(event, has_wait=True)).admission, "wait")
+        code_event = dataclasses.replace(event, code_unchanged=False, has_code_event=True)
+        self.assertEqual(evaluate_dispatch(code_event).admission, "change")
+
     def test_inputs_are_immutable(self):
         facts = _dispatch()
         with self.assertRaises(dataclasses.FrozenInstanceError):

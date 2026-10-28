@@ -2489,6 +2489,42 @@ class TerminalResultWakeTests(Fixture):
         self.assertFalse(should_run(self.project, self.project.snapshots.get(), role_name='worker'))
         return engine, driver
 
+    def test_pending_check_reads_cannot_admit_a_followup_writer(self):
+        from mizu.runtime import Engine, should_run
+        self.park()
+        # Even configured empty-unit allowances/timers cannot turn polling into work.
+        self.config = dataclasses.replace(self.config, limits=dataclasses.replace(
+            self.config.limits, no_progress_continuations=100, no_progress_backoff_seconds=1))
+        self.project.config = self.config
+        for status in ('queued', 'running'):
+            with self.subTest(status=status):
+                job = self.submit('printf ' + status)
+                path = check_jobs.root(self.project) / job['id'] / 'job.json'
+                write_json(path, {**read_json(path), 'status': status})
+                def poll(ctx, *_):
+                    self.assertEqual(ctx.handle('check_job', {
+                        'action': 'result', 'id': job['id']})['status'], status)
+                    ctx.handle('check_job', {'action': 'list'})
+                    ctx.handle('check_job', {'action': 'logs', 'id': job['id']})
+                    ctx.handle('files', {})
+                    self.assertFalse(ctx.progress_tool)
+                    self.assertFalse(getattr(ctx, "check_results_read", set()))
+                    ctx.handle('finish', {'outcome': 'continue', 'summary': 'Still pending',
+                        'state': 'Now: observed only.\nNext: Inspect pending result for ' + status})
+                engine = Engine(self.config, driver=ScriptDriver(poll))
+                self.assertEqual(engine.run(self.project, 'worker')['status'], 'completed')
+                snapshot = self.project.snapshots.get()
+                self.assertFalse(snapshot['progress']['signals']['tool'])
+                self.assertFalse(should_run(self.project, snapshot, role_name='worker',
+                                            current_time=time.time() + 10000))
+                self.assertEqual(engine.run(self.project, 'worker', event_trigger=True)['skipped'], 'no-event')
+                role = dataclasses.replace(self.config.roles['worker'], on_change=True)
+                self.assertEqual(engine._dispatch_state(self.project, 'worker', role,
+                                                       event_trigger=False)['skip']['skipped'], 'unchanged')
+        # A genuinely new trigger still admits the parked role.
+        self.project.set_control(wake_generation='new-operator-input')
+        self.assertTrue(should_run(self.project, self.project.snapshots.get(), role_name='worker'))
+
     def test_no_progress_continue_wakes_once_without_acknowledging_unread_output(self):
         import json
         from mizu.runtime import should_run

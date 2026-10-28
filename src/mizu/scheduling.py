@@ -45,10 +45,8 @@ class DaemonFacts:
     routed_events_due: bool | None = None
     ci_due: bool | None = None
     wait_expired: bool | None = None
-    # Caller-resolved progress self-admission: legacy missing record or
-    # unscoped calls resolve True (existing permissive behavior), malformed
-    # persisted records resolve False (fail closed), otherwise the
-    # ``progress_disposition(...) != "parked_no_progress"`` verdict.
+    # Runtime resolves writer Next readiness or the observer progress policy.
+    # Unscoped diagnostic callers retain the legacy permissive behavior.
     progress_admits: bool | None = None
 
 
@@ -84,8 +82,10 @@ class DispatchFacts:
     # wake may also admit an event probe; snapshot-wide wakes do not.
     explicit_wake: bool = False
     operator_woke: bool = False
-    # Runtime resolves the role-specific persisted progress policy.
+    # Runtime resolves the observer-specific persisted progress policy.
     progress_self_admits: bool = False
+    # A writer declaration is not an event subscription.
+    has_next_task: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -183,12 +183,16 @@ def evaluate_dispatch(facts: DispatchFacts) -> DispatchDecision:
         and not _has_event(facts)
         and not facts.explicit_wake
         and not facts.progress_self_admits
+        and not facts.has_next_task
     ):
         return DispatchDecision(admitted=False, skipped="unchanged", admission=None)
     if facts.code_unchanged and _has_event(facts):
         return DispatchDecision(admitted=True, skipped=None, admission=_event_label(facts))
     if facts.event_trigger and _has_event(facts):
         return DispatchDecision(admitted=True, skipped=None, admission=_event_label(facts))
+    if (facts.has_next_task and not facts.explicit_wake and not _has_event(facts)
+            and not (facts.event_trigger and facts.has_code_event)):
+        return DispatchDecision(admitted=True, admission="next_task")
     if facts.on_change:
         return DispatchDecision(admitted=True, skipped=None, admission="change")
     return DispatchDecision(admitted=True, skipped=None, admission="schedule")

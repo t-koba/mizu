@@ -88,7 +88,7 @@ Work added or becoming ready during execution therefore remains new input.
 
 An unchanged set after `wait` parks until independent input, wait expiry or
 another genuine wake; unchanged ready work does not bypass the existing
-no-progress allowance/backoff for `continue`/`bounded`. Additions, removals
+requirement for new actionable input or a writer handoff for `continue`/`bounded`. Additions, removals
 (including the last item), replacements with equal totals, and blocked-wait
 satisfaction change membership and wake once after delivery. Claiming the same
 ID or rewriting its metadata does not. Legacy schema 1/2 or absent signatures
@@ -105,19 +105,43 @@ operator records are checked before this gate; a changed goal or operator
 wake-generation also admits it.
 For other outcomes, it checks inbox generation; role-routed decision/terminal
 events and due structured waits (`_role_events_due`); due CI reds for opted-in
-roles (`_ci_due_for`); expired `wait` `wake_at`; and finally the no-progress
-self-admission guard for `continue`/`bounded` units
-(`progress_disposition != parked_no_progress`).
+roles (`_ci_due_for`); expired `wait` `wake_at`; and finally the
+writer handoff for `continue`/`bounded` units. Mere progress or an unused
+no-progress allowance/backoff does not admit another writer unit.
 
-Progress self-admission uses the effective per-role `progress_signals` list
-(`roles.<name>.progress_signals` when set, else project `[limits].progress_signals`; example
-default: `tool`, `code`, `decision`, `insight`, `input`; `state` is
-optional), `no_progress_continuations`, and the effective per-role
-`no_progress_backoff_seconds` (`roles.<name>.no_progress_backoff_seconds`
-when set, else the project `[limits]` value).
-It bounds continuation of writer daemons and on-change dispatch; it is not a
-platform trigger. Read-only on-change roles use their own progress record,
-not the publisher's snapshot record (see below).
+### Writer Next handoff
+
+A writer declares its next actionable step in the existing durable finish
+`state`, as exactly one line `Next: <step>`. The state is limited to 32,000
+characters; the step must be 1–4,096 printable characters with no surrounding
+whitespace. Empty, duplicate, malformed and `none`/`nothing`/`n/a` declarations
+are absent. This is an explicit writer declaration, not natural-language
+classification: use `wait` with the exact check or a deadline when the next
+step is not actionable yet.
+
+Readiness requires `continue` or `bounded`, a validated role-matching progress
+record, and at least one selected work signal (`tool`, `code`, `decision`, or
+`insight`). State rewording and delivered input alone are not work. Pure reads
+(including check-job `list`, `logs`, and queued/running `result`) do not
+count as tool work. Terminal result retrieval still qualifies as work; exact
+check-result wake/acknowledgement and verification import are unchanged. The
+declaration must differ from the exact published parent's Next. Legacy/missing/corrupt evidence or an unavailable parent fails
+closed. This reads at most one parent, adds no store or task lifecycle, and
+never changes WorkItems eligibility or any wait/event routing.
+
+The published parent pair retains readiness across daemon restarts and repeated
+readiness probes. A successful successor publication consumes it; repeating the
+same Next, even after work, does not renew it. When this is the dispatch cause,
+admission is `next_task`, and both full and resumed/delta unit openings carry
+the exact step as the first `task` field. Persistent session identity, stable
+system context and cache remain unchanged. Independent events keep precedence;
+`--event` probes still require their existing subscribed event, not Next alone.
+
+Progress records and their allowance/backoff disposition remain bounded evidence
+and the read-only on-change policy below; that disposition alone is not writer
+readiness. No-progress parking, counters, recovery rotation on an already
+admitted run, and missing-finish nudges remain defect backstops, not normal
+observation-only scheduling sources.
 
 Daemon readiness follows the explicit per-role `daemon_policy` in
 `src/mizu/runtime.py`, never `workspace`: `signals` (the default for `write`
@@ -145,14 +169,15 @@ unchanged-code dispatch unless there is a pending eligible operator record, a
 substantive decision, a terminal event, a due wait, or a due CI red.
 The snapshot-publishing role additionally bypasses that skip for changed goal,
 inbox generation or prior-wait expiry. Operator wake-generation, pending eligible
-operator records, changed role-eligible ready work and role-specific progress
-self-admission bypass it independently of workspace mode. Read-only roles never inherit goal/inbox/run-wait generations or the
+operator records and changed role-eligible ready work bypass it independently
+of workspace mode. A writer Next handoff or a read-only role-specific progress
+continuation can also bypass the unchanged-code gate. Read-only roles never inherit goal/inbox/run-wait generations or the
 publisher's progress. Event probes still exclude generic goal/inbox/run-wait
-changes and progress-only continuation; writer probes retain their existing
+changes, Next handoffs and progress-only continuation; writer probes retain their existing
 subscribed-event gate. A changed code snapshot bypasses the skip for either
 workspace mode. The recorded
 `admission` label is `operator_record` / `decision` / `work_item` / `wait` /
-`ci` / `operator` / `ready_work` / `change` / `schedule`, or `continuation` for an exact internal
+`ci` / `operator` / `ready_work` / `next_task` / `change` / `schedule`, or `continuation` for an exact internal
 committed/reserved intent. Such an intent bypasses both dispatch skips, not
 control/producer/check holds or fresh admission checks. Without that intent,
 existing event labels take precedence over ready work;

@@ -9,8 +9,8 @@ from mizu.config import DEFAULT_PROGRESS_SIGNALS, load, role_no_progress_backoff
 from mizu.errors import ConfigError, Denied
 from mizu.explain import explain
 from mizu.fs import canonical, digest, now, read_json, write_json
-from mizu.runtime import (Engine, _is_observational_operation, _operator_woke,
-                          _progress_obligations_digest, _progress_record, should_run)
+from mizu.runtime import (Engine, _declared_next, _is_observational_operation, _operator_woke,
+                          _progress_obligations_digest, _progress_record, _writer_next_task, should_run)
 from mizu.snapshot import PROGRESS_SIGNALS, no_progress_recovery_due, progress_disposition, validate_progress
 
 
@@ -33,7 +33,7 @@ class ProgressConfigTests(Fixture):
                 ("no_progress_backoff_seconds", "86401"),
                 ("no_progress_backoff_seconds", "-1")):
             candidate = raw.replace(
-                'progress_signals = ["tool", "code", "decision", "insight", "input"] # Any selected true signal admits another continue/bounded unit. Empty disables progress qualification.',
+                'progress_signals = ["tool", "code", "decision", "insight", "input"] # Selected signals qualify progress evidence; writer admission also requires a new Next after work. Empty disables qualification.',
                 f"progress_signals = {invalid}" if setting == "progress_signals" else
                 'progress_signals = ["tool", "code", "decision", "insight", "input"]')
             if setting == "no_progress_continuations":
@@ -57,12 +57,12 @@ class ProgressConfigTests(Fixture):
                           limits.no_progress_recovery_after), (100, 86400, 100))
 
         empty = raw.replace(
-            'progress_signals = ["tool", "code", "decision", "insight", "input"] # Any selected true signal admits another continue/bounded unit. Empty disables progress qualification.',
+            'progress_signals = ["tool", "code", "decision", "insight", "input"] # Selected signals qualify progress evidence; writer admission also requires a new Next after work. Empty disables qualification.',
             "progress_signals = []")
         self.file.write_text(empty)
         self.assertEqual(load(self.file).limits.progress_signals, ())
         state_opt_in = raw.replace(
-            'progress_signals = ["tool", "code", "decision", "insight", "input"] # Any selected true signal admits another continue/bounded unit. Empty disables progress qualification.',
+            'progress_signals = ["tool", "code", "decision", "insight", "input"] # Selected signals qualify progress evidence; writer admission also requires a new Next after work. Empty disables qualification.',
             'progress_signals = ["state"]')
         self.file.write_text(state_opt_in)
         self.assertEqual(load(self.file).limits.progress_signals, ("state",))
@@ -126,10 +126,34 @@ class ProgressAdmissionTests(Fixture):
         Engine(config, driver=ScriptDriver(run)).run(self.project, "worker")
         return self.project.snapshots.get()
 
+    def test_next_declaration_is_bounded_unambiguous_and_requires_work(self):
+        self.assertEqual(_declared_next('Now: worked.\nNext: Add the test.'), 'Add the test.')
+        for state in (None, '', 'Next: none', 'Next: ', 'Next:  padded', 'Next: padded ',
+                      'Next: first\nNext: second', 'Next:\nNext: valid', 'Next: tab\there',
+                      'Next: ' + 'x' * 4097, 'x' * 32001):
+            with self.subTest(state=str(state)[:30]):
+                self.assertIsNone(_declared_next(state))
+        def work(ctx, _):
+            (ctx.workspace / 'app.py').write_text('VALUE = 42\n')
+            ctx.handle('finish', {'outcome': 'continue', 'summary': 'Worked',
+                                  'state': 'Now: worked.\nNext: Add the test.'})
+        snapshot = self._recorded_run(work)
+        self.assertEqual(_writer_next_task(self.project, snapshot, 'worker'), 'Add the test.')
+        self.assertIsNone(_writer_next_task(self.project, snapshot, 'reviewer'))
+        for outcome in ('wait', 'blocked', 'done'):
+            self.assertIsNone(_writer_next_task(self.project, {**snapshot, 'outcome': outcome}, 'worker'))
+        missing_parent = {**snapshot, 'parent': '0' * 64}
+        self.assertIsNone(_writer_next_task(self.project, missing_parent, 'worker'))
+
     def test_existing_state_reads_and_receipt_replays_are_observational(self):
         for operation in ("files", "read", "diff", "insights", "research_read", "vcs_read",
                           "command_evidence_read", "experiment_evidence_read"):
             self.assertTrue(_is_observational_operation(operation, {}), operation)
+        for action in ("list", "logs", "result"):
+            self.assertTrue(_is_observational_operation("check_job", {"action": action}))
+        for status in ("queued", "running"):
+            self.assertTrue(_is_observational_operation("check_job", {"action": "result"}, {"status": status}))
+        self.assertFalse(_is_observational_operation("check_job", {"action": "result"}, {"status": "completed"}))
         cases = (("fetch", "receipt_id", {"url": "https://example.test/"}),
                  ("probe", "receipt_id", {"url": "https://example.test/", "method": "GET"}),
                  ("search", "result_id", {"query": "new work"}))
@@ -367,11 +391,7 @@ class ProgressAdmissionTests(Fixture):
                 if kind != "goal":
                     self.assertTrue(snapshot["progress"]["signals"]["input"])
                     self.assertEqual(snapshot["progress"]["no_progress_count"], 0)
-                    # The fresh input permits one follow-up, but cannot loop.
-                    self.assertEqual(engine.run(self.project, "worker")["status"], "completed")
-                    snapshot = self.project.snapshots.get()
-                    self.assertFalse(snapshot["progress"]["signals"]["input"])
-                    self.assertEqual(snapshot["progress"]["no_progress_count"], 1)
+                    # Delivered input is consumed; without a new Next it cannot loop.
                 self.assertFalse(should_run(self.project, snapshot, role_name="worker"))
                 self.assertEqual(engine.run(self.project, "worker")["skipped"], "unchanged")
 
@@ -401,14 +421,14 @@ class ProgressAdmissionTests(Fixture):
         self.assertFalse(should_run(self.project, parked, role_name="worker"))
         self.assertTrue(should_run(self.project, parked, role_name="searcher"))
         legacy = {key: value for key, value in parked.items() if key != "progress"}
-        self.assertTrue(should_run(self.project, legacy, role_name="worker"))
+        self.assertFalse(should_run(self.project, legacy, role_name="worker"))
 
         allowance_config = dataclasses.replace(
             self.config, limits=dataclasses.replace(self.config.limits, no_progress_continuations=1))
-        self.assertTrue(should_run(self.project, parked, role_name="worker", config=allowance_config))
+        self.assertFalse(should_run(self.project, parked, role_name="worker", config=allowance_config))
         policy_config = dataclasses.replace(
             self.config, limits=dataclasses.replace(self.config.limits, progress_signals=("code",)))
-        self.assertTrue(should_run(self.project, parked, role_name="worker", config=policy_config))
+        self.assertFalse(should_run(self.project, parked, role_name="worker", config=policy_config))
 
         stamp = now()
         backoff_snapshot = self._parked_snapshot(count=1, stamp=stamp)
@@ -417,10 +437,10 @@ class ProgressAdmissionTests(Fixture):
         epoch = dt.datetime.fromisoformat(stamp).timestamp()
         self.assertFalse(should_run(self.project, backoff_snapshot, current_time=epoch + 59,
                                     role_name="worker", config=backoff_config))
-        self.assertTrue(should_run(self.project, backoff_snapshot, current_time=epoch + 61,
+        self.assertFalse(should_run(self.project, backoff_snapshot, current_time=epoch + 61,
                                    role_name="worker", config=backoff_config))
 
-    def test_configured_backoff_dispatches_on_change_role(self):
+    def test_configured_backoff_does_not_dispatch_empty_writer(self):
         old_stamp = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=120)).isoformat(timespec="microseconds")
         parked = self._parked_snapshot(count=1, stamp=old_stamp)
         limits = dataclasses.replace(self.config.limits, no_progress_backoff_seconds=60)
@@ -437,8 +457,8 @@ class ProgressAdmissionTests(Fixture):
             ctx.handle("finish", {"outcome": "continue", "summary": "Backoff elapsed",
                                    "state": ctx.snapshot["state"]})
         result = Engine(config, driver=ScriptDriver(finish)).run(self.project, "worker")
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(result["status"], "completed")
+        self.assertEqual(calls, [])
+        self.assertEqual(result["skipped"], "unchanged")
 
     def test_writer_progress_does_not_self_admit_read_only_on_change_role(self):
         engine = Engine(self.config, driver=ScriptDriver())
@@ -580,7 +600,7 @@ class ProgressAdmissionTests(Fixture):
         self.assertEqual(progress_disposition(searcher_record, "continue", config, "searcher", epoch + 3601),
                          "self_admit_backoff")
         parked = self._parked_snapshot(count=1, stamp=stamp)
-        self.assertTrue(should_run(self.project, parked, current_time=epoch + 61,
+        self.assertFalse(should_run(self.project, parked, current_time=epoch + 61,
                                    role_name="worker", config=config))
         # Disabling the role timer keeps it parked after the project timer elapses.
         roles["worker"] = dataclasses.replace(roles["worker"], no_progress_backoff_seconds=0)

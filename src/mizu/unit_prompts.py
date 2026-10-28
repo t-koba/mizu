@@ -315,7 +315,8 @@ def prompt_for(context: Context) -> str:
         ci_branch = None
     ci_failures = opening["ci_failures"]
     ci_failures_may_be_truncated = opening["ci_truncated"]
-    return json.dumps({"unit": UNIT_BEGINS_STATEMENT,
+    return json.dumps({**({"task": context.opening_task} if getattr(context, "opening_task", None) else {}),
+                       "unit": UNIT_BEGINS_STATEMENT,
                        "unit_tool_surface": _prompt_tool_surface(context),
                        "goal_digest": context.goal_digest,
                        "published_snapshot": _published_snapshot(context),
@@ -398,7 +399,8 @@ def prompt_delta_for(context: Context, pending: list) -> str:
     ci_failures_may_be_truncated = opening["ci_truncated"]
     open_backlog = opening["open_backlog"]
     open_work_items = opening["open_work_items"]
-    return json.dumps({"unit": UNIT_BEGINS_STATEMENT,
+    return json.dumps({**({"task": context.opening_task} if getattr(context, "opening_task", None) else {}),
+                       "unit": UNIT_BEGINS_STATEMENT,
                        "unit_tool_surface": _prompt_tool_surface(context),
                        "goal_digest": context.goal_digest,
                        "published_snapshot": _published_snapshot(context),
