@@ -1614,13 +1614,15 @@ replacement insight without implying rejected substance.
         if type(limit) is not int or not 1 <= limit <= 512:
             raise Denied("Decision projection limit must be an integer in [1, 512]")
         with record_lock(self.root):
-            return self._project_decision_records_locked(limit=limit)
+            return {record_id: computed for record_id, (_, computed) in
+                    self._project_decision_records_locked(limit=limit).items()}
 
-    def _project_decision_records_locked(self, *, limit: int) -> dict[str, str]:
-        """Caller holds record_lock through source selection and all writes."""
+    def _project_decision_records_locked(self, *, limit: int) -> dict[str, tuple[dict, str]]:
+        """Return put-validated envelopes/digests; caller holds record_lock."""
         pending = self._decision_projection_envelopes_locked(limit=limit)
         store = SharedRecords(self.root, {"insight.decision": INSIGHT_DECISION_POLICY})
-        return {record_id: store.put(pending[record_id], writer="host.insights")
+        return {record_id: (pending[record_id],
+                            store.put(pending[record_id], writer="host.insights"))
                 for record_id in sorted(pending)}
 
     def _decision_projection_envelopes_locked(self, *, limit: int) -> dict:
@@ -1698,12 +1700,14 @@ replacement insight without implying rejected substance.
             projected = self._project_decision_records_locked(limit=512)
             store = SharedRecords(self.root, {"insight.decision": INSIGHT_DECISION_POLICY})
             eligible = []
-            for record_id, computed in projected.items():
-                envelope, _ = store.get(record_id, expected_digest=computed)
+            for record_id, (envelope, computed) in projected.items():
                 payload = envelope["payload"]
                 if (payload["action"] not in wanted
                         or (sources == "own" and payload["source"] != role_name)):
+                    # Filtered rows still need a post-put integrity/path check.
+                    store.get(record_id, expected_digest=computed)
                     continue
+                # received() revalidates eligible rows against this exact digest.
                 if not store.received(role_name, record_id, computed):
                     stamp = dt.datetime.fromisoformat(envelope["created_at"]).astimezone(dt.timezone.utc)
                     eligible.append((stamp, record_id, computed, envelope))
@@ -1739,7 +1743,7 @@ replacement insight without implying rejected substance.
                 record_ids.append(record_id)
             manifest = store.freeze(role_name, record_ids)
             for row, entry in zip(events, manifest):
-                if entry.record_digest != projected[entry.record_id]:
+                if entry.record_digest != projected[entry.record_id][1]:
                     raise Denied("Decision page record changed during freeze")
                 row["ack_token"] = entry.ack_token
             result = page(events)

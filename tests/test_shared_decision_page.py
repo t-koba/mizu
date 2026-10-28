@@ -199,6 +199,39 @@ class SharedDecisionPageTests(unittest.TestCase):
         with self.assertRaises(Denied):
             self.read(manifest)
 
+    def test_post_put_corruption_denied_for_eligible_and_filtered_rows(self):
+        self.decide(action="reject", source="reviewer")
+        put = SharedRecords.put
+        # Exercise eligible, action-filtered and source-filtered rows.
+        for role, actions, sources in (("reviewer", ("reject",), "own"),
+                                      ("reviewer", ("accept",), "any"),
+                                      ("worker", ("reject",), "own")):
+            for malformed in (True, False):
+                with self.subTest(role=role, actions=actions, malformed=malformed):
+                    corrupted = []
+
+                    def corrupt(store, envelope, *, writer):
+                        computed = put(store, envelope, writer=writer)
+                        path = self.root / store._record_name(envelope["id"])
+                        original = path.read_bytes()
+                        changed = json.loads(original)
+                        changed["payload"]["title"] = "Changed after put"
+                        raw = b"not json" if malformed else canonical(changed)
+                        path.write_bytes(raw)
+                        corrupted.append((path, original, raw))
+                        return computed
+
+                    try:
+                        with patch.object(SharedRecords, "put", corrupt), self.assertRaises(Denied):
+                            self.page(role, actions, sources=sources)
+                        self.assertEqual(len(corrupted), 1)
+                        path, _, raw = corrupted[0]
+                        self.assertEqual(path.read_bytes(), raw)
+                        self.assertFalse((self.root / "shared-record-receipts").exists())
+                    finally:
+                        for path, original, _ in corrupted:
+                            path.write_bytes(original)
+
     def test_corrupt_shared_receipt_fails_closed_but_legacy_receipt_is_ignored(self):
         self.decide()
         legacy = self.insights.decision_events("reviewer", ACTIONS, sources="any")
