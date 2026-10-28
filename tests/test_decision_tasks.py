@@ -388,11 +388,16 @@ class DecisionTaskTests(Fixture):
                              work_item_intent="none")
         self.assertEqual({r["id"] for r in self.store.page_ready(role_name="reviewer")["items"]},
                          set(ids) - {ids[2]})
-        # Matching decisions for an obsolete revision no longer satisfy either wait.
+        # The exact dependency revision is now impossible and actionable for
+        # replanning; the current-revision insight wait remains pending.
         self.insights.revise(target["id"], source="reviewer", title="Required result",
                              body="reassess", base_snapshot=None, expected_rev=1)
-        self.assertEqual({r["id"] for r in self.store.page_ready(role_name="reviewer")["items"]},
-                         {ids[0], ids[1], ids[3]})
+        rows = self.store.page_ready(role_name="reviewer")["items"]
+        self.assertEqual({row["id"] for row in rows}, {ids[0], ids[1], ids[3], ids[5]})
+        liveness_rows = self.store.blocked_liveness_readonly()["items"]
+        by_id = {row["id"]: row for row in liveness_rows}
+        self.assertEqual(by_id[ids[4]]["state"], "pending")
+        self.assertEqual(by_id[ids[5]]["state"], "impossible")
         self.assertEqual(self.decide(work_items=tasks), event)
 
     def test_code_change_retry_preserves_baseline_and_repairs_pointer_without_reading_head(self):
