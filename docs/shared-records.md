@@ -231,6 +231,59 @@ For the active `insight.decision` pilot, `decision_page_bytes` is an explicit pe
 
 Across the families, source history is authoritative and retention differs: insight archives are permanent, WorkItems retain validated revision chains, check jobs use an acknowledged-eviction cap, and other evidence stores keep their own bounds. The shared delivery store must not add a destructive global TTL. Unacknowledged records and unresolved source events are never silently expired; any later pruning is a documented per-kind policy and cannot remove source history or verified completion evidence.
 
+## CI-wait explicit-receipt preflight (shadow only)
+
+The bounded isolated experiment `f249c22172974261904ef623ca3ad616` projected
+four terminal waiter results (three routed to `worker`, one to `reviewer`) from
+the existing `CiWaitTests` fixture into disposable `ci.wait.result`
+`SharedRecords` envelopes. Reading them through frozen role manifests exactly
+reconstructed the current `ci_waits.pending` event fields and evidence digests;
+manifest order followed the current `updated_at`/item-ID order, and envelope
+`created_at` preserved the blocked WorkItem revision's `updated_at`. Omitted
+and empty selections wrote no receipt; one exact selection receipted only that
+record; a wrong-role selection was refused. This is contract evidence for the
+existing transport only, not integrated runtime or performance evidence.
+
+The experiment also moved one waiter to a new revision/holder: current
+`ci_waits.pending` no longer routed its old event, and the fixture's
+source-current acknowledgement check rejected the old selection.
+`tests/test_ci_waits.py::CiWaitTests.test_stale_observation_and_old_delivery_cannot_reach_reopened_waiter`
+exercises the existing refusal. `SharedRecords` itself intentionally validates
+only the frozen role/record/digest manifest and allows an exact receipt after
+source movement; therefore a CI adapter must keep the current
+blocked-revision, holder, wait-digest and evidence checks before both new
+delivery and acknowledgement. `WorkItems` history/CAS, the exact
+`Publication` receipt, and `ci_waits.terminal`'s unique declared check set,
+exact SHA, and terminal-state validation remain authoritative; the shared
+record is notification evidence, never a task transition or publication
+approval. Preserve `external-untrusted` status evidence and the existing
+oldest-first filtering before page limits.
+
+A separate bound-oriented fixture `b558226bbbf342bd940dadba3bebb7b1` carried
+64 declared checks and maximum-length run IDs. Its source evidence was 23,589
+bytes and the compact shared envelope 25,716 bytes, both below the unchanged
+131,072-byte per-waiter evidence bound; no size cap was raised. This is not a
+proof for every accepted payload shape, so an implementation must retain the
+same cap and test its full boundary before activation.
+
+The legacy CI acknowledgement is not mappable to a SharedRecords receipt: the
+current file contains only role, source evidence digest and acknowledgement
+time, and is written after unit success without an explicit per-record token
+selection or run binding. `SharedRecords.received` therefore remains false for
+that old acknowledgement in the experiment. Do not import it as handling;
+under a future cutover an otherwise-current result without a new explicit
+SharedRecords receipt may be replayed. Stale source events remain ineligible.
+
+No production CI kind policy, source store, wake, or runtime activation changed
+here. A later cutover must use the existing `SharedRecords` store and explicit host-only
+kind/route activation, must not write a parallel CI acknowledgement file, and
+must prove durable replay, partial selection, wrong-role and stale-revision
+refusal, backup/restore, exact publication/check validation and bounded reads.
+Code presence alone never activates it. Stop if the source checks cannot be
+revalidated before delivery and selected acknowledgement, if ordering or
+payload identity changes, if legacy auto-acks would need to be inferred, or if
+the existing 128 KiB cap cannot be preserved.
+
 ## Bounded disposable pilot
 
 The high-volume representative was `insight.decision`, because the current decision-event reader already handles exact per-role receipts and has a 205-event oldest-first regression. The experiment created 205 rejected insights in an isolated test `Fixture`, repeated each read five times, built the normal prompt locally, and projected the same events into a scratch common envelope (`kind`, stable decision event ID, author, insight/revision subject, bounded payload) with scratch per-role receipts. It changed no source files and used no model/provider, network, CI runner or deployment. Evidence: experiment `0adfa0cbd6e46e847d04f211c87795caf7a1398b2a6d83758097ece8382de1ea`.
