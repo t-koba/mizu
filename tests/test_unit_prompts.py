@@ -51,6 +51,27 @@ class UnitPromptSeamTests(Fixture):
                 self.assertEqual(runtime.prompt_delta_for(ctx, []),
                                  unit_prompts.prompt_delta_for(ctx, []))
 
+    def test_full_delta_and_finish_tool_explain_writer_continuation(self):
+        from mizu.protocol import tool_definitions
+        from mizu.unit_prompts import prompt_for, prompt_delta_for
+        ctx = self.context("worker")
+        finish = tool_definitions(("finish",))[0]
+        surfaces = {"full": json.loads(prompt_for(ctx))["unit"],
+                    "delta": json.loads(prompt_delta_for(ctx, []))["unit"],
+                    "finish": finish["description"]}
+        for name, text in surfaces.items():
+            with self.subTest(surface=name):
+                for phrase in ("outcome=continue", "host-sealed bounded outcome",
+                               "exactly one standalone `Next: <actionable step>` line in state",
+                               "new actionable step", "outcome=wait for external results",
+                               "work that is not yet actionable",
+                               "Next is not a wake/wait mechanism",
+                               "An admitted continuation opens with that step as its task"):
+                    self.assertIn(phrase, text)
+        # bounded is a host-sealed outcome, not a new finish-tool argument.
+        self.assertEqual(finish["inputSchema"]["properties"]["outcome"]["enum"],
+                         ["continue", "wait", "blocked", "done"])
+
     def test_delta_clock_boundary_changes_only_the_clock_projection(self):
         import mizu.unit_prompts as unit_prompts
         ctx = self.context("worker")

@@ -9,6 +9,16 @@ from .fs import READ_PAGE_CHARS, SCRIPT_MAX
 from .work_item_seed import MAX_DECISION_TASKS
 from .work_items import MAX_OPEN_CURSOR_CHARS, MAX_OPEN_PAGE_ROWS, MAX_REVISIONS, STATUSES
 
+# Shared by full/delta unit openings and the finish-tool description.
+WRITER_CONTINUATION_CONTRACT = (
+    "For immediate writer continuation, finish with outcome=continue (or a "
+    "host-sealed bounded outcome) and include exactly one standalone "
+    "`Next: <actionable step>` line in state, naming a new actionable step. "
+    "Use outcome=wait for external results or work that is not yet actionable; "
+    "Next is not a wake/wait mechanism. An admitted continuation opens with "
+    "that step as its task.")
+
+
 #: MCP protocol versions accepted by the capsule and bridge servers.
 MCP_VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18")
 
@@ -280,7 +290,7 @@ DEFINITIONS = {
                     "rationale": text(1024),
                     "expected_rev": {"type": "integer", "minimum": 0},
                     "expected_generation": text(64)}, ("items", "rationale", "expected_rev", "expected_generation"))),
-    "finish": ("End this work unit and release its model slot and workspace lock. Call after all other tools. For a timed external wait on a writable role, use outcome=wait and wait_seconds=N; the host persists the wake deadline instead of keeping a command running. Independent new work may wake the role earlier. With check_job, release_checks optionally lists obsolete subscriptions to cancel at a successful finish; other consumers are preserved. Use outcome=wait and wait_for_check=<id> when no independent work remains; release the unit and resume on completion or new input. 'done' on writable roles requires successful verification. "
+    "finish": (WRITER_CONTINUATION_CONTRACT + " End this work unit and release its model slot and workspace lock. Call after all other tools. For a timed external wait on a writable role, use outcome=wait and wait_seconds=N; the host persists the wake deadline instead of keeping a command running. Independent new work may wake the role earlier. With check_job, release_checks optionally lists obsolete subscriptions to cancel at a successful finish; other consumers are preserved. Use outcome=wait and wait_for_check=<id> when no independent work remains; release the unit and resume on completion or new input. 'done' on writable roles requires successful verification. "
                "ack_events optionally selects unique delivered operator record, decision, terminal work-item, structured insight-wait and obligation ack_token values handled by this role; omitted events stay pending. Tokens bind this role and the exact event payload; foreign, stale or undelivered tokens are refused before finish intent. CI wait rows share wait_events: only when the host enables shared CI delivery do their ack_tokens use this protocol; otherwise legacy CI rows have no tokens. CI/status and check-job behavior is unchanged. next_profile optionally names the recommended profile for the following unit; next_reason needs next_profile. "
                "The recommendation binds to the finished task inputs and applies only while fresh, per operator selector rules; no extra model call is spent.",
                obj({"outcome": {"type": "string", "enum": ["continue", "wait", "blocked", "done"]},

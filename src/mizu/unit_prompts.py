@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING
 from . import acceptance, check_jobs
 from .errors import Denied
 from .fs import canonical, read_json
-from .protocol import tool_definitions
+from .protocol import WRITER_CONTINUATION_CONTRACT, tool_definitions
 from .report import previous as _previous_report
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only, never a runtime cycle.
@@ -162,7 +162,7 @@ def _open_backlog(context: Context, caps: set) -> dict:
 UNIT_BEGINS_STATEMENT = (
     "A new work unit begins. This is not an acknowledgement of a previous "
     "seal: do useful work within your role and capabilities, then finish "
-    "with mizu_finish and a short state.")
+    "with mizu_finish and a short state. " + WRITER_CONTINUATION_CONTRACT)
 
 
 # Saturating display bound, not an admission/aging policy.

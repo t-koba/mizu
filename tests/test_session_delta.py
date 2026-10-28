@@ -52,24 +52,29 @@ class SessionDeltaTests(Fixture):
         from mizu.runtime import should_run
         step = 'Add the deterministic regression for the parser.'
         state = 'Now: implemented the parser.\nNext: ' + step
-        for resumed in (False, True):
-            with self.subTest(resumed=resumed):
+        for resumed, outcome in ((False, "continue"), (True, "continue"),
+                                 (False, "bounded"), (True, "bounded")):
+            with self.subTest(resumed=resumed, outcome=outcome):
                 def work(ctx, *_):
                     (ctx.workspace / 'app.py').write_text('VALUE = ' + str(resumed) + '\n')
+                    if outcome == 'bounded':
+                        ctx.bound_hit = 'requests'  # Host seals a bounded finish.
                     ctx.handle('finish', {'outcome': 'continue', 'summary': 'Parser implemented',
                                           'state': state})
-                # Use distinct preceding declarations so both subtests model a new handoff.
+                # Use a distinct preceding declaration so each case models a new handoff.
                 def clear(ctx, *_):
                     ctx.handle('finish', {'outcome': 'wait', 'summary': 'Start slice',
                                           'state': 'Now: starting.\nNext: Implement the parser.'})
                 Engine(self.config, driver=ScriptDriver(clear)).run(self.project, 'worker')
                 first = Engine(self.config, driver=ScriptDriver(work)).run(self.project, 'worker')
+                self.assertEqual(first['finish']['outcome'], outcome)
                 snapshot = self.project.snapshots.get()
                 self.assertEqual(snapshot['state'], state)
                 for _ in range(2):
                     self.assertTrue(should_run(self.project, snapshot, role_name='worker'))
-                if resumed:
-                    path = save_worker_session(self, {'tokens': 0})
+                path = save_worker_session(self, {'tokens': 0})
+                if not resumed:
+                    path.unlink()
                 def followup(ctx, prompt, _):
                     decoded = json.loads(prompt)
                     self.assertEqual(next(iter(decoded)), 'task')
