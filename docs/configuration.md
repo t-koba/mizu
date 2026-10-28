@@ -940,13 +940,71 @@ refresh failure when the provider hook preserves/restores them. A failed refresh
 never implies that a cached row is current. Invalid/oversized listings fail
 closed rather than silently truncating them.
 
-`last_successful_observation` is null and `freshness`/`completeness` are `unknown`:
-the current SDK has no source-bound native success/completeness record. Its
-shared `models-cache.json` timestamps can also belong to an overlay and are not
-promoted to native provenance, even after a refresh returns without error.
+After an explicit successful native refresh with a valid projected listing,
+Mizu records its own observation. `last_successful_observation` is that command's
+completion time (UTC ISO 8601, second precision); `observation_age_seconds` is its
+nonnegative age in whole seconds when the current time follows that observation.
+`freshness: "observed"` means the current provider/runtime identity and **exact**
+projected listing (IDs, order and `resolvable` flags) match that observation and
+the current time does not precede it, not that the catalog is current or
+complete. Without a match the age field is null and `freshness` is `unknown`;
+when the clock has moved backward past the retained observation (`now` precedes
+`last_successful_observation`), the age is also null and `freshness` is `unknown`
+while the retained timestamp is still shown. There is no implicit staleness threshold.
+`completeness` remains `unknown`. SDK shared `models-cache.json` timestamps may
+belong to overlays and are never used as native freshness evidence.
 `refresh: completed` means the SDK operation returned without a reported error,
 not that the provider fetched a complete catalog. Cache persistence/restoration
-is owned by the native provider through the SDK store.
+is still owned by the native provider through the SDK store.
+
+`last_refresh_error` is null or `{code, at}` for the latest failed **explicit**
+refresh of this provider/runtime; it is separate from this invocation's `error`.
+Only the safe codes above, `aborted`, `invalid_native_listing`,
+`provider_setup_failed`, `engine_unavailable`, `catalog_process_failed` or
+`invalid_catalog_response` and a UTC timestamp are retained. Failure preserves
+prior success, but that success is shown only if the returned listing still
+matches; a process failure has no listing to match. A cache-only call never
+updates either record. The next successful explicit refresh replaces the
+observation and clears the retained error. Unsupported engines (including
+pi-durable's source mismatch) have no observation or retained error.
+
+The single Mizu-owned `model-catalog-observations.json` in the configured data
+directory is at most 64 KiB and 128 provider/runtime entries. Its version-1
+schema is `{version, observations, checksum}`; `observations` maps identity
+digests to `{success, refresh_error}`. `success` is null or `{listing_digest, at}`;
+`refresh_error` is null or `{code, at}`. The identity hashes the engine/provider,
+configured command and engine directory, reviewed resources/options, and Pi
+launcher/catalog/lockfile content; it does not include the pinned model or
+credentials. Only digests, safe codes and times are stored, never raw paths,
+provider/model IDs, credentials or diagnostics. Digests are SHA-256 over Mizu
+canonical JSON; `checksum` covers `{version, observations}`. These are local
+consistency bindings, **not cryptographic attestations**, signatures or protection
+against a local actor who can rewrite the file and recompute its checksum.
+
+Inspection validates the retained sidecar with bounded atomic safe reads
+(no symlinks/hardlinks/reparse points/specials, single-link regular files,
+oversized reads refused) **before** loading credentials or invoking the provider,
+without holding any lock across the potentially long provider child; unrelated
+inspections never block for the provider timeout. Missing metadata means unknown
+freshness; malformed, oversized, unsafe or checksum-mismatched metadata fails
+closed before provider code when found at preflight, without auto-repair; records
+are validated again under the lock before an update. Credential, identity and
+engine errors keep their own identity and are never reported as observation-store errors.
+Cache-only reads present from atomic safe reads without taking the store lock.
+An explicit refresh that retains a new observation or error takes the
+cross-process lock only around a short post-invocation read/modify/atomic-write
+section; the sidecar write uses the existing `safe_write` path writer, which pins the root, rejects unsafe
+paths, and syncs the complete atomic replacement. At the 128-entry bound a new
+explicit observation or error evicts the entry with the oldest latest-event timestamp (success or error;
+entries without time first, ties by digest) and, if needed
+for the 64 KiB bound, further oldest entries until the new record fits;
+updating an existing identity replaces in place without eviction. An operator
+may remove this regenerable store while inspection is stopped to reset
+observations (never remove an active lock file). Lock contention uses the
+existing bounded local-file lock behavior. A persistence failure fails the
+command without retrying a possibly completed refresh. Cancellation/process
+death releases the kernel lock; an interrupted command may leave only the prior
+complete observation, never an inferred success.
 
 Trust and bounds: this is an operator-only control path, not a model tool. It
 uses the configured engine command, login store, credentials environment and
