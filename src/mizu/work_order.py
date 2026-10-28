@@ -1,4 +1,4 @@
-"""Writer's explicit work order: bounded, append-audited CAS over actionable IDs.
+"""Writer's explicit work order: bounded atomic CAS over actionable IDs.
 
 The plan records only the writer's ordered unique actionable work-item IDs
 plus a bounded short rationale and the exact semantic input generation
@@ -28,12 +28,12 @@ ready-work, admission and selection are untouched.
 """
 from __future__ import annotations
 
-import os
+import re
 import stat
 from pathlib import Path
 
 from .errors import Denied, LimitExceeded
-from .fs import DIGEST, canonical, digest, identifier, now, safe_read, sync_dir, write_json
+from .fs import DIGEST, canonical, digest, identifier, now, safe_read, write_json
 from .work_item_seed import ITEM_ID
 
 #: Ordered plan IDs are bounded by the fixed maximum work-item page size.
@@ -42,12 +42,10 @@ MAX_WORK_ORDER_ITEMS = 100
 MAX_RATIONALE_CHARS = 1024
 #: Stored record byte ceiling (envelope plus rationale, no item bodies).
 MAX_WORK_ORDER_BYTES = 8192
-#: History revisions retained for audit (one per committed plan).
-MAX_WORK_ORDER_HISTORY = 256
 #: Read statuses exposed in prompts and operator status.
 STATUSES = frozenset({"absent", "current", "review_due", "unavailable"})
 
-_SCHEMA = 1
+_SCHEMA = 2
 
 
 def _directory(path: Path) -> bool:
@@ -67,10 +65,6 @@ def _root(project_root: Path) -> Path:
 
 def _current_path(project_root: Path) -> Path:
     return _root(project_root) / "current.json"
-
-
-def _history_path(project_root: Path, rev: int) -> Path:
-    return _root(project_root) / "history" / f"{rev}.json"
 
 
 def _validate_items(items) -> list:
@@ -109,6 +103,12 @@ def _validate_rev(value) -> int:
     return value
 
 
+def _validate_run(value) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{32}", value) is None:
+        raise Denied("Invalid work-order run ID")
+    return value
+
+
 def _read_record(project_root: Path, name: str) -> dict:
     import datetime
     import json
@@ -116,10 +116,14 @@ def _read_record(project_root: Path, name: str) -> dict:
     record = json.loads(raw.decode("utf-8"))
     if not isinstance(record, dict) or canonical(record) != raw:
         raise Denied("Noncanonical work-order record")
-    if (set(record) != {"schema", "rev", "generation", "items", "rationale", "actor", "updated_at"}
-            or type(record["schema"]) is not int or record["schema"] != _SCHEMA
+    fields = {"schema", "rev", "generation", "items", "rationale", "actor", "updated_at"}
+    schema = record.get("schema")
+    if (type(schema) is not int or schema not in (1, _SCHEMA)
+            or set(record) != (fields if schema == 1 else fields | {"run"})
             or type(record["rev"]) is not int or record["rev"] < 1):
         raise Denied("Invalid work-order record")
+    if schema == _SCHEMA:
+        _validate_run(record["run"])
     identifier(record["actor"])
     _validate_items(record["items"])
     _validate_rationale(record["rationale"])
@@ -131,102 +135,21 @@ def _read_record(project_root: Path, name: str) -> dict:
     return record
 
 
-_GENESIS = digest(canonical(["work-order-history-v1"]))
-
-
-def _checkpoint_hash(rev, previous, body):
-    return digest(canonical(["work-order-history-v1", rev, previous, body]))
-
-
-def _read_checkpoint(project_root):
-    import json
-    raw = safe_read(project_root, "work-order/checkpoint.json", MAX_WORK_ORDER_BYTES)
-    cp = json.loads(raw.decode("utf-8"))
-    if (not isinstance(cp, dict) or canonical(cp) != raw
-            or set(cp) != {"schema", "rev", "previous", "body", "digest"}
-            or type(cp["schema"]) is not int or cp["schema"] != _SCHEMA
-            or type(cp["rev"]) is not int or cp["rev"] < 1):
-        raise Denied("Invalid work-order checkpoint")
-    for field in ("previous", "body", "digest"):
-        _validate_generation(cp[field])
-    if (cp["rev"] == 1 and cp["previous"] != _GENESIS
-            or cp["digest"] != _checkpoint_hash(cp["rev"], cp["previous"], cp["body"])):
-        raise Denied("Invalid work-order checkpoint digest")
-    return cp
-
-
-def _read_stored(project_root: Path, *, allow_interrupted=False) -> dict:
-    """Validate the bounded suffix and optionally recognized leftovers."""
-    unavailable = {"status": "unavailable", "rev": None, "record": None}
+def _read_stored(project_root: Path) -> dict:
+    """Read only the canonical current record; legacy audit files are inert."""
     absent = {"status": "absent", "rev": 0, "record": None}
     try:
-        root = _root(project_root)
-        if not _directory(root):
+        if not _directory(_root(project_root)):
             return absent
-        root_names = set()
-        with os.scandir(root) as entries:
-            for entry in entries:
-                if entry.name not in {"current.json", "history", "checkpoint.json"}:
-                    return unavailable
-                root_names.add(entry.name)
-        current = (_read_record(project_root, "work-order/current.json")
-                   if "current.json" in root_names else None)
-        cp = _read_checkpoint(project_root) if "checkpoint.json" in root_names else None
-        hist = root / "history"
-        if not _directory(hist):
-            return absent if current is None and cp is None else unavailable
-        names = set()
-        with os.scandir(hist) as entries:
-            for entry in entries:
-                names.add(entry.name)
-                if len(names) > MAX_WORK_ORDER_HISTORY:
-                    return unavailable
-        rev = current["rev"] if current else 0
-        pruned = cp["rev"] if cp else 0
-        # A checkpoint one ahead of the committed window is the only possible
-        # interrupted rollover. The old first file may still be present, or
-        # the next append may exist, but never both.
-        pending = cp is not None and pruned == rev - MAX_WORK_ORDER_HISTORY + 1
-        if cp is not None and not (pruned == rev - MAX_WORK_ORDER_HISTORY or pending):
-            return unavailable
-        if cp is None and rev > MAX_WORK_ORDER_HISTORY:
-            return unavailable
-        if pending and not allow_interrupted:
-            return unavailable
-        expected = {f"{n}.json" for n in range(pruned + 1, rev + 1)}
-        old = f"{pruned}.json" if pending else None
-        extra = names - expected
-        next_name = f"{rev + 1}.json"
-        if not expected <= names or extra not in (set(), {old}, {next_name}):
-            return unavailable
-        if extra == {old} and not pending:
-            return unavailable
-        if extra == {next_name} and (not allow_interrupted or len(names) > MAX_WORK_ORDER_HISTORY):
-            return unavailable
-        if pending and old in names:
-            old_record = _read_record(project_root, f"work-order/history/{pruned}.json")
-            if old_record["rev"] != pruned or digest(canonical(old_record)) != cp["body"]:
-                return unavailable
-        records = [_read_record(project_root, f"work-order/history/{n}.json")
-                   for n in range(pruned + 1, rev + 1)]
-        if any(record["rev"] != n for n, record in enumerate(records, pruned + 1)):
-            return unavailable
-        if current is not None and (not records or records[-1] != current):
-            return unavailable
-        result = {"status": "current", "rev": rev, "record": current} if current else absent.copy()
-        if next_name in extra:
-            next_record = _read_record(project_root, f"work-order/history/{rev + 1}.json")
-            if next_record["rev"] != rev + 1:
-                return unavailable
-            result["interrupted"] = next_record
-        if pending:
-            result["rollover"] = pruned
-            result["prune_present"] = old in names
-        if cp:
-            result["checkpoint"] = cp
-        return result
-    except (OSError, ValueError, TypeError, KeyError, UnicodeError, Denied, LimitExceeded):
-        return unavailable
+        try:
+            _current_path(project_root).lstat()
+        except FileNotFoundError:
+            return absent
+        record = _read_record(project_root, "work-order/current.json")
+        return {"status": "current", "rev": record["rev"], "record": record}
+    except (OSError, ValueError, TypeError, KeyError, UnicodeError, RecursionError,
+            Denied, LimitExceeded):
+        return {"status": "unavailable", "rev": None, "record": None}
 
 
 def _stable_ready_for_hash(ready_work) -> dict:
@@ -523,27 +446,13 @@ def _fresh_generation_for_role(project, role) -> str:
         obligations=obligations)
 
 
-def _recovery_projection(stored, generation_field, generation):
-    """Expose only validated interrupted state, without changing the store."""
-    if "interrupted" not in stored and "rollover" not in stored:
-        return None
-    result = {"status": "unavailable", "rev": stored["rev"], "generation": None,
-              generation_field: generation}
-    if "interrupted" in stored:
-        record = stored["interrupted"]
-        result["recovery_candidate"] = {key: record[key] for key in
-                                        ("rev", "generation", "items", "rationale", "actor")}
-    return result
-
-
 def projection_for(context) -> dict | None:
     """Prompt projection for the owning role; None when the grant is absent.
 
     Returns ``{"status", "rev", "generation", "items", "rationale", "actor",
     "updated_at", "opening_generation"}`` on ``current``/``review_due``
     (bounded), and ``opening_generation`` on ``absent``. Corrupt state reads
-    ``unavailable``, never empty/current; validated interruptions expose recovery
-    metadata without repair. Never raises for prompt use.
+    ``unavailable``, never empty/current. Never raises for prompt use.
     """
     try:
         caps = set(getattr(context.role, "capabilities", ()))
@@ -556,14 +465,11 @@ def projection_for(context) -> dict | None:
     except Exception:
         opening = None
     try:
-        stored = _read_stored(context.project.root, allow_interrupted=True)
+        stored = _read_stored(context.project.root)
     except Exception:
         return {"status": "unavailable", "rev": None, "generation": None}
     if opening is None:
         return {"status": "unavailable", "rev": None, "generation": None}
-    recovery = _recovery_projection(stored, "opening_generation", opening)
-    if recovery is not None:
-        return recovery
     if stored["status"] == "absent":
         return {"status": "absent", "rev": 0, "generation": None,
                 "opening_generation": opening}
@@ -584,16 +490,15 @@ def projection_for(context) -> dict | None:
 def status_for_project(project, *, role_name: str | None = None) -> dict:
     """Operator-readable freshness; never writes or refreshes the plan."""
     try:
-        stored = _read_stored(project.root, allow_interrupted=True)
+        stored = _read_stored(project.root)
     except Exception:
         return {"status": "unavailable", "rev": None, "generation": None}
-    recovering = "interrupted" in stored or "rollover" in stored
-    if stored["status"] == "absent" and not recovering:
+    if stored["status"] == "absent":
         return {"status": "absent", "rev": 0, "generation": None}
     if stored["status"] == "unavailable":
         return {"status": "unavailable", "rev": None, "generation": None}
     record = stored["record"]
-    owner = record or stored.get("interrupted") or {}
+    owner = record
     candidate = None
     try:
         roles = getattr(project, "roles", [])
@@ -616,8 +521,6 @@ def status_for_project(project, *, role_name: str | None = None) -> dict:
         current = _fresh_generation_for_role(project, role)
     except Exception:
         return {"status": "unavailable", "rev": None, "generation": None}
-    if recovering:
-        return _recovery_projection(stored, "current_generation", current)
     if record["generation"] == current:
         return {"status": "current", "rev": record["rev"], "generation": record["generation"],
                 "items": list(record["items"]), "rationale": record["rationale"],
@@ -661,24 +564,18 @@ def _is_actionable_locked(project, role_name: str, item_id: str, published_snaps
     return True
 
 
-def write_plan(project, *, actor: str, items, rationale: str,
+def write_plan(project, *, actor: str, run: str, items, rationale: str,
                expected_rev: int, expected_generation: str,
                opening_generation: str | None) -> dict:
-    """Append-audited CAS for the writer's explicit order.
+    """Replace one complete current record under the revision/generation CAS.
 
-    ``actor`` is runtime-supplied, never caller-supplied. ``expected_rev``
-    is the stored rev read (0 when absent); ``expected_generation`` equals
-    the unit-opening generation except for an exact interrupted candidate retry.
-    Stale or invalid refs are refused
-    without writing. Under ``insights.lock``, ordinary commits append the
-    history body and replace ``current.json`` as the commit point. An exact
-    retry completes only the validated unpointed candidate; a fresh plan at
-    the opening generation and committed rev may instead overwrite that
-    candidate at the same next revision and then replace current. At the
-    retention boundary, a checkpoint authorizes pruning and syncing exactly
-    one oldest body before the next append and current-pointer replacement.
+    ``actor`` and ``run`` are runtime-supplied, never caller-supplied.
+    ``expected_rev`` is the stored rev (0 when absent); the expected generation
+    must equal the frozen unit-opening generation. No recovery or retry occurs.
+    Return the complete committed record for the authoring run's audit receipt.
     """
     identifier(actor)
+    _validate_run(run)
     items = _validate_items(items)
     rationale = _validate_rationale(rationale)
     _validate_rev(expected_rev)
@@ -688,21 +585,13 @@ def write_plan(project, *, actor: str, items, rationale: str,
     _validate_generation(opening_generation)
     from .fs import lock as _lock
     with _lock(project.root / "locks" / "insights.lock"):
-        stored = _read_stored(project.root, allow_interrupted=True)
+        stored = _read_stored(project.root)
         if stored["status"] == "unavailable":
-            raise Denied("Work order is unavailable; clear it before recording")
-        current_rev = stored["rev"] if stored["status"] == "current" else 0
-        if stored["status"] == "absent":
-            current_rev = 0
+            raise Denied("Work order is unavailable")
+        current_rev = stored["rev"]
         if expected_rev != current_rev:
             raise Denied("Stale work order; re-read before recording")
-        existing = stored.get("interrupted")
-        exact = existing is not None and all(existing[key] == value for key, value in (
-            ("rev", current_rev + 1), ("generation", expected_generation),
-            ("items", items), ("rationale", rationale), ("actor", actor)))
-        if existing is not None and not exact and expected_generation != opening_generation:
-            raise Denied("Work order changed; re-read before recording")
-        if expected_generation != opening_generation and not exact:
+        if expected_generation != opening_generation:
             raise Denied("Stale work-order review; re-read before recording")
         # Actionability is judged against the live ledger under the same lock.
         try:
@@ -720,73 +609,14 @@ def write_plan(project, *, actor: str, items, rationale: str,
         new_rev = current_rev + 1
         record = {"schema": _SCHEMA, "rev": new_rev, "generation": expected_generation,
                   "items": list(items), "rationale": rationale, "actor": actor,
-                  "updated_at": now()}
+                  "updated_at": now(), "run": run}
         if len(canonical(record)) > MAX_WORK_ORDER_BYTES:
             raise LimitExceeded("Work order exceeds byte bound")
         root = _root(project.root)
-        # Ensure safe directories without following links.
         try:
-            if root.exists() and not _directory(root):
-                raise Denied("Unsafe work-order directory")
-            root.mkdir(parents=True, exist_ok=True)
-            hist = root / "history"
-            if hist.exists() and not _directory(hist):
-                raise Denied("Unsafe work-order directory")
-            hist.mkdir(parents=True, exist_ok=True)
-        except Denied:
-            raise
-        except OSError as exc:
-            raise Denied("Work order is unavailable") from exc
-        # Publish the checkpoint before removing its one committed prefix body.
-        # On retry the exact checkpoint/old-body pair is validated above.
-        try:
-            if current_rev >= MAX_WORK_ORDER_HISTORY:
-                prune_rev = current_rev - MAX_WORK_ORDER_HISTORY + 1
-                if "rollover" not in stored:
-                    old = _read_record(project.root, f"work-order/history/{prune_rev}.json")
-                    previous = stored["checkpoint"]["digest"] if "checkpoint" in stored else _GENESIS
-                    body = digest(canonical(old))
-                    cp = {"schema": _SCHEMA, "rev": prune_rev, "previous": previous,
-                          "body": body, "digest": _checkpoint_hash(prune_rev, previous, body)}
-                    write_json(root / "checkpoint.json", cp)
-                    prune_present = True
-                else:
-                    prune_present = stored["prune_present"]
-                if prune_present:
-                    _history_path(project.root, prune_rev).unlink()
-                sync_dir(hist)
-        except OSError as exc:
-            raise Denied("Work order is unavailable") from exc
-        history_path = _history_path(project.root, new_rev)
-        if existing is not None:
-            if exact:
-                try:
-                    write_json(_current_path(project.root), existing)
-                except OSError as exc:
-                    raise Denied("Work order is unavailable") from exc
-                return {"rev": new_rev, "generation": record["generation"]}
-            # Fresh-current-generation replacement: expected_generation equals
-            # the opening generation and expected_rev equals the committed rev
-            # (both enforced above). The new plan was validated for
-            # actionability under the same lock; overwrite the unpointed
-            # candidate at the same next revision, then replace current.
-            try:
-                write_json(history_path, record)
-            except OSError as exc:
-                raise Denied("Work order is unavailable") from exc
-            try:
-                write_json(_current_path(project.root), record)
-            except OSError as exc:
-                raise Denied("Work order is unavailable") from exc
-            return {"rev": new_rev, "generation": record["generation"]}
-        try:
-            write_json(history_path, record, exclusive=True)
-        except FileExistsError as exc:
-            raise Denied("Work order changed; re-read before recording") from exc
-        except OSError as exc:
-            raise Denied("Work order is unavailable") from exc
-        try:
+            if not _directory(root):
+                root.mkdir(parents=True, exist_ok=True)
             write_json(_current_path(project.root), record)
         except OSError as exc:
             raise Denied("Work order is unavailable") from exc
-        return {"rev": new_rev, "generation": record["generation"]}
+        return record

@@ -51,7 +51,7 @@ inputs. The trusted host adapter never executes model-provided host commands.
 | `decision_delivery.py` | One durable-marker-selected `insight.decision` runtime route for prompt, wake, selection, retrieval and acknowledgement | Host activation or other event-family routing |
 | `decision_reconciliation.py` | Host-only exact legacy-receipt preflight/apply and one-way activation after per-role pending-set parity; publishes the authority marker last | Model-granted activation or task lifecycle |
 | `work_items.py` | Append-audited records, CAS lifecycle, bounded open pages and by-ID history | Work-item scheduling and policy |
-| `work_order.py` | Writer's bounded ordered plan with CAS, retained audit suffix and ordered-prefix checkpoint, and review-gated display only | Item status/scope/evidence, scheduling, admission, or priority |
+| `work_order.py` | Writer's bounded atomic current plan with CAS, run receipt, and review-gated display only | Item status/scope/evidence, scheduling, admission, or priority |
 | `web.py` | Allowed retrieval, policy-bounded protocol observation, and external source receipts | Scientific truth |
 | `materialize.py` | Generic offline-input adapter (spec in, digest-bound content out) plus retained-receipt apply validation (spec/result output equality, digest, path safety) | Ecosystem resolution, cache policy |
 | `editor.py` | Snapshot export and read/propose MCP | Code editing |
@@ -285,7 +285,7 @@ and shared-smoke retention are independent and unchanged. See
 [configuration](configuration.md#automatic-snapshot-retention) for the exact
 root/age/result contract and outbox lock permissions.
 
-Work-order audit rollover retains the latest 256 revision bodies and a constant-field ordered-prefix checkpoint; older bodies are not inspectable. The checkpoint is not authentication, and the retained non-head bodies have no individual integrity binding. Readers leave recognized interruptions unavailable but expose bounded committed-revision and generation recovery metadata, plus any exact unpointed candidate; they never repair. A locked exact candidate retry, a fresh opening-generation replacement of that candidate, or a fresh explicit plan for checkpoint/prune-only leftovers completes the validated interruption; unrecognized corruption fails closed. See the writer work-order contract in `configuration.md` for the digest construction and bounds.
+Work orders keep one bounded canonical `work-order/current.json` record, atomically replaced under `insights.lock` with exact revision/generation CAS. The authoring run receives a complete `work-order.json` receipt under existing run retention. Legacy history/checkpoint files are unused and left untouched; valid schema-1 current records remain readable. There is no recovery scan, cleanup or automatic retry. See the writer work-order contract in `configuration.md` for schema, bounds and failure behavior.
 
 The history index retains published IDs up to the configured limit (default
 128, tunable 8–1000000 via `limits.history_index`). The active generation/window

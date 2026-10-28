@@ -15,14 +15,11 @@ def record(context, args: dict) -> dict:
     # Protocol already bounds items/rationale/rev/generation shapes; the
     # store revalidates exact IDs, order-uniqueness and byte bounds.
     out = _plan.write_plan(
-        context.project, actor=context.role.name,
+        context.project, actor=context.role.name, run=context.run_dir.name,
         items=args["items"], rationale=args["rationale"],
         expected_rev=args["expected_rev"],
         expected_generation=args["expected_generation"],
         opening_generation=opening)
-    write_json(context.run_dir / "work-order.json",
-               {"rev": out["rev"], "generation": out["generation"],
-                "items": list(args["items"]), "rationale": args["rationale"],
-                "evidence": "work-order/history"})
+    write_json(context.run_dir / "work-order.json", out)
     return {"rev": out["rev"], "generation": out["generation"],
-            "evidence": "work-order/history"}
+            "evidence": "work-order.json"}
