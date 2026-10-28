@@ -410,6 +410,10 @@ test('the pinned model resolves from the engine directory models.json', async ()
     await assert.rejects(
       resolveConfiguredModel({ authPath, modelsPath, provider: 'test-only', model: 'absent' }),
       /unavailable on pi-durable: test-only\/absent/);
+    await assert.rejects(
+      resolveConfiguredModel({ authPath, modelsPath, provider: 'test-only', model: 'extension-only',
+        resources: [{ kind: 'extension', path: '/configured/extension.mjs' }] }),
+      /extension-provided models are not supported by this engine/);
     // A missing catalog leaves the bundled catalog in force: a built-in
     // provider still resolves, and no file is created for it.
     const empty = join(directory, 'empty');
@@ -417,6 +421,48 @@ test('the pinned model resolves from the engine directory models.json', async ()
       { authPath, modelsPath: join(empty, 'models.json'), provider: 'openai', model: 'gpt-4o-mini' });
     assert.equal(builtins.model.id, 'gpt-4o-mini');
     assert.equal(existsSync(join(empty, 'models.json')), false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('pi-durable execution names unsupported extension-only pins before the resource refusal', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'mizu-durable-extension-model-'));
+  try {
+    const modelsPath = join(directory, 'models.json');
+    const authPath = join(directory, 'auth.json');
+    const configPath = join(directory, 'effective.json');
+    const bridgePath = join(directory, 'missing-bridge.json');
+    writeFileSync(modelsPath, JSON.stringify({ providers: { 'test-only': {
+      name: 'Test Only', api: 'openai-completions', baseUrl: 'https://models.example.invalid/v1',
+      models: [{ id: 'model-x', name: 'Model X',
+        cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 } }] } } }));
+    const config = { provider: 'test-only', model: 'extension-only',
+      instructions: 'test', store: join(directory, 'store.sqlite'), requestId: 'test-request',
+      prompt: 'test', cwd: directory, tools: [{ name: 'finish' }], authPath, modelsPath,
+      resources: [{ kind: 'extension', path: join(directory, 'provider-extension.mjs') }] };
+    const run = value => {
+      writeFileSync(configPath, JSON.stringify(value));
+      return spawnSync(process.execPath, [launcherPath(), configPath], {
+        cwd: directory, env: launcherEnv(directory, bridgePath), encoding: 'utf8',
+        timeout: LAUNCHER_CHILD_CEILING_MS,
+      });
+    };
+    const unsupportedPin = run(config);
+    assert.equal(unsupportedPin.status, 1, unsupportedPin.stderr || unsupportedPin.error?.message);
+    assert.match(unsupportedPin.stderr, /extension-provided models are not supported by this engine/);
+    assert.doesNotMatch(unsupportedPin.stderr, /Resource kinds are unsupported on pi-durable/);
+    assert.doesNotMatch(unsupportedPin.stderr, /missing-bridge/);
+
+    const supportedPin = run({ ...config, model: 'model-x' });
+    assert.equal(supportedPin.status, 1, supportedPin.stderr || supportedPin.error?.message);
+    assert.match(supportedPin.stderr, /Resource kinds are unsupported on pi-durable/);
+    assert.doesNotMatch(supportedPin.stderr, /missing-bridge/);
+
+    const otherResource = run({ ...config, resources: [{ kind: 'skill', path: join(directory, 'skill') }] });
+    assert.equal(otherResource.status, 1, otherResource.stderr || otherResource.error?.message);
+    assert.match(otherResource.stderr, /Resource kinds are unsupported on pi-durable/);
+    assert.doesNotMatch(otherResource.stderr, /extension-provided models/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

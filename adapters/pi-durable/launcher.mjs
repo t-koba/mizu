@@ -52,13 +52,23 @@ const MAX_SETTLEMENT_DETAIL_CHARS = 4000;
  * Failure: an unknown model refuses loudly with its provider and model;
  * a malformed catalog refuses loudly.
  */
+function hasOnlyExtensionResources(cfg) {
+  return Array.isArray(cfg.resources) && cfg.resources.length > 0
+    && cfg.resources.every(resource => resource?.kind === 'extension');
+}
+
 export async function resolveConfiguredModel(cfg) {
   if (typeof cfg.authPath !== 'string' || !cfg.authPath) throw new Error('Effective configuration lacks authPath');
   if (typeof cfg.modelsPath !== 'string' || !cfg.modelsPath) throw new Error('Effective configuration lacks modelsPath');
   const models = await ModelRuntime.create({ authPath: cfg.authPath, modelsPath: cfg.modelsPath,
     modelsStorePath: join(dirname(cfg.modelsPath), 'models-cache.json'), allowModelNetwork: false });
   const model = models.getModel(cfg.provider, cfg.model);
-  if (!model) throw new Error(`Configured exact model is unavailable on pi-durable: ${cfg.provider}/${cfg.model}`);
+  if (!model) {
+    const extensionHint = hasOnlyExtensionResources(cfg)
+      ? '; extension-provided models are not supported by this engine'
+      : '';
+    throw new Error(`Configured exact model is unavailable on pi-durable: ${cfg.provider}/${cfg.model}${extensionHint}`);
+  }
   return { models, model };
 }
 
@@ -388,15 +398,21 @@ async function runOnce(cfg) {
     throw new Error('Effective configuration carries an invalid cacheRetention');
   }
   if (cfg.engine_tools?.length) throw new Error('Native host tools bypass the OCI bridge');
-  if (cfg.resources?.length) throw new Error('Resource kinds are unsupported on pi-durable');
+  const extensionOnlyResources = hasOnlyExtensionResources(cfg);
+  if (cfg.resources?.length && !extensionOnlyResources) {
+    throw new Error('Resource kinds are unsupported on pi-durable');
+  }
   if (cfg.mcp_servers && Object.keys(cfg.mcp_servers).length) throw new Error('MCP servers are unsupported on pi-durable');
-  const bridge = JSON.parse(readFileSync(process.env.MIZU_BRIDGE_CONFIG, 'utf8'));
 
   // Exact-model pin over the same source the pi engine uses: Pi's bundled
   // catalog plus the engine directory's models.json, resolved by Pi's own
   // model runtime. An operator-defined model therefore behaves the same on
   // both engines, and an unknown model still refuses loudly.
   const { models, model } = await resolveConfiguredModel(cfg);
+  // Extensions remain unsupported: resolving first only lets an unavailable
+  // extension-only pin report the reason instead of a generic resource error.
+  if (extensionOnlyResources) throw new Error('Resource kinds are unsupported on pi-durable');
+  const bridge = JSON.parse(readFileSync(process.env.MIZU_BRIDGE_CONFIG, 'utf8'));
   // Credentials resolve like pi: the shared engine-directory login store
   // (authPath) plus environment API keys. Pi's own file-backed store
   // persists OAuth refreshes under its cross-process lock, so a rotating
