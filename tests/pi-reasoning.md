@@ -80,5 +80,9 @@ records that it never receives a network-enabled refresh. Offline/auth failures
 retain cached native rows; overlay-only and missing hooks are unsupported, and
 unknown freshness is not inferred from the shared store's timestamp. Separate
 Python control-plane tests cover explicit `--refresh`, bounded single dispatch,
-selection preservation and pi-durable's explicit unsupported source mismatch.
+selection preservation and pi-durable's offline, no-launch/no-credentials catalog
+inspection: it matches Pi's unsupported native-listing result when no extension is configured, or
+`extension_provided_model_not_supported_by_engine` with a configured extension
+resource. The latter diagnoses an unsupported source, not proof that the pinned
+model requires it; ordinary bundled/explicit pinned resolution is unchanged.
 These fixtures prove adapter wiring, not a live provider or OS sandbox boundary.

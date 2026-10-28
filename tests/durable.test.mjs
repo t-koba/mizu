@@ -18,6 +18,8 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join as joinPath } from 'node:path';
 import { agentChanges, assertProviderAuth, boundStatusFor, meterModels, resolveConfiguredModel, settlementFields, submitWithCurrentAgent, usageDelta }
   from '../adapters/pi-durable/launcher.mjs';
+import { ModelRuntime as PiModelRuntime }
+  from '../adapters/pi/node_modules/@earendil-works/pi-coding-agent/dist/index.js';
 import { AssistantEntry, BACKGROUND_CONTEXT, Harness, Type, createModels, createRegistry,
   defineExtension, defineTool, fauxAssistantMessage, fauxProvider, fauxToolCall,
   openNodeSqliteStorage, openaiProvider } from '../adapters/pi-durable/test-support.mjs';
@@ -416,6 +418,46 @@ test('the pinned model resolves from the engine directory models.json', async ()
     assert.equal(builtins.model.id, 'gpt-4o-mini');
     assert.equal(existsSync(join(empty, 'models.json')), false);
   } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('Pi and pi-durable resolve the same bundled and explicit pinned models offline', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'mizu-model-parity-'));
+  const originalFetch = globalThis.fetch;
+  let fetches = 0;
+  globalThis.fetch = () => { fetches++; throw new Error('network forbidden'); };
+  try {
+    const modelsPath = join(directory, 'models.json');
+    const authPath = join(directory, 'auth.json');
+    writeFileSync(modelsPath, JSON.stringify({ providers: { 'test-only': {
+      name: 'Test Only', api: 'openai-completions', baseUrl: 'https://models.example.invalid/v1',
+      models: [{ id: 'model-x', name: 'Model X',
+        cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 } }] } } }));
+    const before = readFileSync(modelsPath);
+    // Pi ordinary resolution and pi-durable's launcher share ModelRuntime's
+    // bundled/explicit sources; no session service or extension loader exists.
+    const pi = await PiModelRuntime.create({ authPath, modelsPath,
+      modelsStorePath: join(directory, 'models-cache.json'), allowModelNetwork: false,
+      refreshOnCreate: false });
+    const selections = [
+      { provider: 'openai', model: 'gpt-4o-mini' },
+      { provider: 'test-only', model: 'model-x' },
+    ];
+    const fields = ['provider', 'id', 'api', 'baseUrl', 'contextWindow', 'maxTokens', 'cost'];
+    for (const selection of selections) {
+      const piModel = pi.getModel(selection.provider, selection.model);
+      const durable = await resolveConfiguredModel({ authPath, modelsPath, ...selection });
+      assert.ok(piModel, `Pi resolves ${selection.provider}/${selection.model}`);
+      assert.ok(durable.model, `pi-durable resolves ${selection.provider}/${selection.model}`);
+      const project = model => Object.fromEntries(fields.map(field => [field, model[field]]));
+      assert.deepEqual(project(durable.model), project(piModel),
+        `${selection.provider}/${selection.model} resolves identically`);
+    }
+    assert.equal(fetches, 0, 'ordinary model resolution does not refresh over the network');
+    assert.deepEqual(readFileSync(modelsPath), before, 'selection resolution does not rewrite models.json');
+  } finally {
+    globalThis.fetch = originalFetch;
     await rm(directory, { recursive: true, force: true });
   }
 });

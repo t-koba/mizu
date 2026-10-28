@@ -375,17 +375,61 @@ except Busy:
         self.assertEqual(self.file.read_bytes(), config_bytes)
         self.assertEqual(list(self.config.data.glob('catalog-*')), [], 'ephemeral input removed')
 
-    def test_durable_is_explicit_source_mismatch_without_launch_or_credentials(self):
+    def durable_catalog(self, error):
         self.config.profiles['primary']['engine'] = 'pi-durable'
+        profiles = copy.deepcopy(self.config.profiles)
         for refresh in (False, True):
-            with patch('mizu.model_catalog.run') as run, patch('mizu.model_catalog.credentials') as credentials:
+            with self.subTest(refresh=refresh), patch('mizu.model_catalog.run') as run, \
+                    patch('mizu.model_catalog.credentials') as credentials:
                 report = inspect(self.config, 'primary', refresh=refresh)
             run.assert_not_called()
             credentials.assert_not_called()
             self.assertEqual(report['status'], 'unsupported')
-            self.assertEqual(report['error'], 'durable_native_provider_source_mismatch')
+            self.assertEqual(report['source'], 'unsupported')
+            self.assertEqual(report['error'], error)
+            self.assertEqual(report['refresh'], 'unsupported' if refresh else 'not_requested')
             self.assertEqual(report['models'], [])
             self.assertEqual(report['selected_model'], 'test-model')
+            self.assertEqual(report['inference'], 'not_run')
+            self.assertIsNone(report['last_successful_observation'])
+        self.assertEqual(self.config.profiles, profiles)
+        self.assertFalse((self.config.data / OBSERVATIONS).exists())
+
+    def test_durable_without_extension_matches_unsupported_native_listing(self):
+        self.durable_catalog(None)
+
+    def test_durable_without_extension_matches_pi_native_listing_result(self):
+        unsupported = {'source': 'unsupported', 'status': 'unsupported', 'models': [],
+                       'refresh': 'not_requested', 'error': None,
+                       'last_successful_observation': None, 'freshness': 'unknown',
+                       'completeness': 'unknown'}
+        child = SimpleNamespace(reason='exited', exit_code=0, stdout=json.dumps(unsupported))
+        with patch('mizu.model_catalog.run', return_value=child) as run, \
+                patch('mizu.model_catalog.credentials', return_value={}) as credentials:
+            self.config.profiles['primary']['engine'] = 'pi'
+            pi = inspect(self.config, 'primary')
+            self.config.profiles['primary']['engine'] = 'pi-durable'
+            durable = inspect(self.config, 'primary')
+        run.assert_called_once()
+        credentials.assert_called_once()
+        for key in ('provider', 'selected_model', 'inference', 'source', 'status', 'models',
+                    'refresh', 'error', 'last_successful_observation', 'freshness',
+                    'completeness', 'observation_age_seconds', 'last_refresh_error'):
+            self.assertEqual(durable[key], pi[key], key)
+
+    def test_durable_extension_is_explicitly_unsupported_without_launch_or_credentials(self):
+        from mizu.engine_config import resource_digest
+        extension = self.root / 'native.mjs'
+        extension.write_text('throw new Error("must not load extension");')
+        self.config.profiles['primary']['resources'] = [
+            {'kind': 'extension', 'path': str(extension), 'sha256': resource_digest(extension)}]
+        self.durable_catalog('extension_provided_model_not_supported_by_engine')
+        extension.write_text('changed')
+        with patch('mizu.model_catalog.run') as run, patch('mizu.model_catalog.credentials') as credentials:
+            with self.assertRaisesRegex(ConfigError, '^Engine resource digest mismatch$'):
+                inspect(self.config, 'primary')
+        run.assert_not_called()
+        credentials.assert_not_called()
 
     def test_failure_is_bounded_safe_and_never_retried(self):
         for reason, code in [('timeout', None), ('output_limit', None), ('exited', 1)]:

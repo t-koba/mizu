@@ -269,10 +269,14 @@ def inspect(config, profile: str, *, refresh: bool = False) -> dict:
             'refresh': 'not_started' if refresh else 'not_requested', 'error': None,
             'last_successful_observation': None, 'freshness': 'unknown', 'completeness': 'unknown'}
     if engine != 'pi':
+        if engine == 'pi-durable':
+            error = ('extension_provided_model_not_supported_by_engine'
+                     if any(item['kind'] == 'extension' for item in settings['resources'])
+                     else None)
+        else:
+            error = 'engine_unsupported'
         return {**base, 'status': 'unsupported', 'source': 'unsupported', 'models': [],
-                'refresh': 'unsupported' if refresh else 'not_requested',
-                'error': ('durable_native_provider_source_mismatch' if engine == 'pi-durable'
-                          else 'engine_unsupported'),
+                'refresh': 'unsupported' if refresh else 'not_requested', 'error': error,
                 'last_successful_observation': None, 'freshness': 'unknown', 'completeness': 'unknown',
                 'observation_age_seconds': None, 'last_refresh_error': None}
     agent_dir = config.agent_dir(engine)

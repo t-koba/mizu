@@ -19,7 +19,8 @@
  * - harness.usage(): cumulative per provider/model + per tool spend.
  * - ModelRuntime resolves the pinned model from the bundled catalog plus the
  *   engine directory's models.json/cache. Unlike pi, native provider
- *   extensions are not loaded; model-catalog reports that source mismatch.
+ *   extensions are not loaded; model-catalog inspection is unsupported and
+ *   diagnoses configured extension resources explicitly.
  *
  * Authority preserved from the pi engine: exact provider/model pin resolved
  * from the shared bundled/explicit sources (plus the engine directory's
