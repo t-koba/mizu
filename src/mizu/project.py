@@ -337,7 +337,7 @@ class Project:
 
     def status(self) -> dict:
         from .admission import waiting as admission_waiting
-        from .check_jobs import deferrals
+        from .check_jobs import deferrals, outstanding
         from .selection import project_status
         snapshot = self.snapshots.get()
         from .acceptance import effective_projection
@@ -381,6 +381,7 @@ class Project:
                 "goal_digest": snapshot.get("goal_digest"), "wake_at": snapshot.get("wake_at"),
                 # A role the check queue holds now, with the bound that ends it.
                 "check_waits": deferrals(self),
+                "check_results": outstanding(self),
                 # The roles waiting for an execution slot now, so a waiter is
                 # distinguishable from a running role and from one that was
                 # never admitted.

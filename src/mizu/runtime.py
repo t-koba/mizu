@@ -2883,6 +2883,11 @@ class Engine:
                             "prompt_bytes": len(prompt.encode("utf-8")), "created_at": now(),
                             "prompt_mode": prompt_mode, "session_key": session_key,
                             "rotation": (rotation or {}).get("reason", "")})
+                # A scheduling delivery is not acknowledgement of unread output.
+                # Mark only terminal results actually present in this bounded prompt.
+                check_jobs.mark_wake_delivered(project, role_name,
+                    [j['id'] for j in decoded.get('check_jobs', [])
+                     if j.get('status') in check_jobs.TERMINAL_WAKE_STATUSES], run_id)
                 fallback_attempt = 0
                 fallback_wait_deadline = None
                 retry_budgets: dict = {}

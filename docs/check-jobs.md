@@ -170,19 +170,28 @@ never finishes, so a check that never runs delays a role instead of stopping
 it, and the recorded `wake_at` is the truth. Inside one bound the daemon
 does not spend repeated model turns waiting on the same job. New publication,
 inbox generation or explicit operator wake makes the prior waiting decision
-stale; the role may reconsider independent work. A completed job admits
-the role only when it is the exact job named by that role’s explicit wait,
-even when source code has not changed. Result delivery is acknowledged
+stale; the role may reconsider independent work. An owned terminal result also
+supplies one automatic dispatch attempt regardless of the prior finish outcome,
+even when source code has not changed (`roles.<name>.check_result_wake = true`,
+the default for `check_job` roles). The separate one-shot marker prevents unread
+output from spinning scheduling; it never acknowledges output or imports proof.
+With this policy disabled, only the exact job named by the role's valid explicit
+wait supplies a check wake. Explicit waits still work after an automatic attempt.
+See [result wake semantics](scheduling.md#asynchronous-check-result-wakes) for
+prompt bounds, idempotence and the crash window. Result delivery is acknowledged
 only after a consuming work unit has durably completed, not on a possibly lost
 tool response. Read-only service triggers watch the persisted queue.
 
 The hold is named, never silent. The waiting unit's record carries
 `waiting_for_check` with the job and the second the hold ends, and
 `mizu status` lists every role the queue holds under `check_waits` with the
-same job, its status and its bound. A wait record that carries no bound
+same job, its status and its bound. `check_results` separately lists unread owned
+terminal summaries, with `automatic_wake_pending`, even for a parked writer.
+A wait record that carries no bound
 holds nothing, so unreadable state never stops a role. The bound must be a
 finite positive epoch value; malformed or overflowing numeric values hold
-nothing and cannot wake a role.
+nothing and cannot supply an explicit-wait wake (an independent eligible result
+can still supply its automatic wake).
 
 `mizu check-jobs PROJECT` drains up to `limits.check_pending` terminal jobs per invocation without a model, releasing admission between jobs. It returns immediately on idle, compute contention, cancellation, pause or cleanup failure; it never sleeps between queued jobs. Each result remains in its own bounded check-job cache record. The CLI response adds `processed`, the number of terminal jobs handled. On
 Linux, service generation creates a dedicated checks service, path notification

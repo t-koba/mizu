@@ -1304,6 +1304,15 @@ firing, while unscheduled watched roles use the event poll task. Re-render/reins
 service definitions after enabling a subscription; rendering does not install
 or start services itself.
 
+`roles.<name>.check_result_wake` is a boolean (default `true`, effective only
+with the `check_job` capability). An owned terminal, unacknowledged async check
+can admit its role regardless of the prior finish outcome. Each result gets
+one automatic dispatch attempt, not repeated ticks until output is read.
+`false` disables automatic result admission, not result visibility, explicit
+`wait_for_check` continuations, or other wake sources. This policy neither
+grants check ownership nor imports acceptance. See [scheduling](scheduling.md#asynchronous-check-result-wakes)
+for the separate one-shot dispatch marker and crash semantics.
+
 A role has exactly one of `profile` or `selector`, plus `policy`, `workspace` (`write`, `read`, `none`),
 `capabilities`, `engine_tools` (maximum 128 explicit names), `on_change`,
 `decision_events` (at most 8 unique lowercase decision actions, never

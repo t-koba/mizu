@@ -5,7 +5,7 @@ import threading
 import time
 from pathlib import Path
 from unittest.mock import patch
-from support import Fixture
+from support import Fixture, ScriptDriver
 from mizu import check_jobs
 from mizu.admission import check_slot_exclusion
 from mizu.errors import Busy, Denied
@@ -244,14 +244,16 @@ class JobTests(Fixture):
         job = ctx._op_exec_experiment('experiment', {'script': 'test -f /workspace/app.py', 'mode': 'async'})
         self.assertEqual(job['status'], 'queued')
         self.assertEqual(self.run_job()['status'], 'completed')
-    def test_event_only_role_admits_completed_check_with_explicit_wait(self):
+    def test_event_only_role_admits_owned_completion_and_preserves_explicit_wait(self):
         from mizu.services import render
         from pathlib import Path
         ctx, job = self.submit()
         self.run_job()
         from mizu.runtime import _role_events_due
-        # A completed job the role never waited on stays visible but wakes nobody.
+        # The default automatic signal is one-shot, separate from exact waits.
         self.assertTrue(check_jobs.pending(self.project, 'worker'))
+        self.assertTrue(_role_events_due(self.project, self.project.snapshots.get(), 'worker'))
+        check_jobs.mark_wake_delivered(self.project, 'worker', [job['id']], ctx.run_dir.name)
         self.assertFalse(_role_events_due(self.project, self.project.snapshots.get(), 'worker'))
         check_jobs.set_wait(self.project, 'worker', job['id'])
         self.assertTrue(_role_events_due(self.project, self.project.snapshots.get(), 'worker'))
@@ -431,6 +433,9 @@ class JobTests(Fixture):
                 with self.assertRaises(Denied):
                     check_jobs.set_wait(self.project, 'worker', job['id'], wait_until=deadline)
     def test_overflow_check_wait_bound_neither_holds_nor_wakes(self):
+        # Isolate the explicit wait from the independent automatic result policy.
+        self.config.roles['worker'] = dataclasses.replace(self.config.roles['worker'],
+                                                         check_result_wake=False)
         _, job = self.submit()
         check_jobs.set_wait(self.project, 'worker', job['id'], wait_until=time.time() + 60)
         path = check_jobs.root(self.project) / 'worker.wait.json'
@@ -2359,12 +2364,13 @@ class CacheInputTests(Fixture):
 
 
 class ExplicitWaitWakeTests(Fixture):
-    """Only an explicit wait on the exact terminal job wakes its role."""
+    """Opting out of automatic wakes preserves exact explicit-wait behavior."""
 
     def setUp(self):
         super().setUp()
         FakeSandbox.calls = []
-        roles = {k: dataclasses.replace(v, capabilities=(*v.capabilities, "check_job"))
+        roles = {k: dataclasses.replace(v, capabilities=(*v.capabilities, "check_job"),
+                                        check_result_wake=False)
                  for k, v in self.config.roles.items()}
         self.config = dataclasses.replace(self.config, roles=roles)
         self.project.config = self.config
@@ -2451,3 +2457,220 @@ class ExplicitWaitWakeTests(Fixture):
         self.assertFalse(check_jobs.pending(self.project, 'worker'))
         self.assertFalse(check_jobs.wake_ready(self.project, 'worker'))
         self.assertFalse(self.due())
+
+
+class TerminalResultWakeTests(Fixture):
+    def setUp(self):
+        super().setUp()
+        self.config = dataclasses.replace(self.config, roles={
+            name: dataclasses.replace(role, capabilities=(*role.capabilities, 'check_job'))
+            for name, role in self.config.roles.items()})
+        self.project.config = self.config
+
+    def submit(self, script='printf first', role='worker'):
+        return check_jobs.submit(self.context(role), script, kind='experiment')
+
+    def run_job(self):
+        return check_jobs.run_one(self.project, threading.Event(), sandbox_factory=FakeSandbox)
+
+    def mark(self, *jobs, role='worker'):
+        check_jobs.mark_wake_delivered(self.project, role, [j['id'] for j in jobs], 'dispatch')
+
+    def park(self):
+        from mizu.runtime import Engine, should_run
+        def finish(ctx, *_):
+            ctx.handle('finish', {'outcome': 'continue', 'summary': 'No change',
+                                  'state': ctx.snapshot['state']})
+        driver = ScriptDriver(finish)
+        engine = Engine(self.config, driver=driver)
+        # Consume initial goal/operator inputs, then publish a no-progress finish.
+        engine.run(self.project, 'worker')
+        engine.run(self.project, 'worker')
+        self.assertFalse(should_run(self.project, self.project.snapshots.get(), role_name='worker'))
+        return engine, driver
+
+    def test_no_progress_continue_wakes_once_without_acknowledging_unread_output(self):
+        import json
+        from mizu.runtime import should_run
+        engine, driver = self.park()
+        job = self.submit()
+        self.assertFalse(check_jobs.wake_ready(self.project, 'worker'))
+        self.run_job()
+        # Readiness checks are pure and an unrelated role gets no wake.
+        for _ in range(2):
+            self.assertTrue(should_run(self.project, self.project.snapshots.get(), role_name='worker'))
+            self.assertFalse(check_jobs.wake_ready(self.project, 'reviewer'))
+        status = self.project.status()
+        self.assertEqual(status['progress']['disposition'], 'parked_no_progress')
+        self.assertTrue(status['check_results']['worker'][0]['automatic_wake_pending'])
+        self.assertEqual(engine.run(self.project, 'worker', event_trigger=True)['status'], 'completed')
+        self.assertEqual(json.loads(driver.calls[-1][1])['check_jobs'][0]['id'], job['id'])
+        self.assertFalse(check_jobs.read(self.project, job['id'])['acknowledged'])
+        self.assertTrue(check_jobs.pending(self.project, 'worker'))
+        self.assertFalse(self.project.status()['check_results']['worker'][0]['automatic_wake_pending'])
+        self.assertFalse(should_run(self.project, self.project.snapshots.get(), role_name='worker'))
+        self.assertEqual(engine.run(self.project, 'worker', event_trigger=True)['skipped'], 'no-event')
+        # A wake marker cannot import verification or prevent ordinary retrieval/ack.
+        ctx = self.context()
+        self.assertIsNone(ctx.verification)
+        check_jobs.result(ctx, job['id'])
+        check_jobs.acknowledge(self.project, 'worker', ctx.check_results_read)
+        self.assertNotIn('worker', self.project.status()['check_results'])
+        self.assertFalse(check_jobs.wake_ready(self.project, 'worker'))
+
+    def test_multiple_results_and_arrival_during_dispatch_have_independent_markers(self):
+        first = self.submit()
+        self.run_job()
+        second = self.submit('printf second')
+        projection = check_jobs.prompt_projection(self.context())
+        self.run_job()  # The second summary was queued in the captured prompt.
+        terminal = [j['id'] for j in projection['check_jobs']
+                    if j['status'] in check_jobs.TERMINAL_WAKE_STATUSES]
+        check_jobs.mark_wake_delivered(self.project, 'worker', terminal, 'first-dispatch')
+        self.assertTrue(check_jobs.wake_ready(self.project, 'worker'))
+        self.mark(second)
+        self.assertFalse(check_jobs.wake_ready(self.project, 'worker'))
+        self.mark(first, second)  # Idempotent; unread output is never acknowledged.
+        self.assertEqual(read_json(check_jobs.root(self.project) / first['id'] / 'wake.json')['run'],
+                         'first-dispatch')
+        self.assertEqual(len(check_jobs.pending(self.project, 'worker')), 2)
+        third = self.submit('printf third')
+        self.run_job()
+        check_jobs.acknowledge(self.project, 'worker', {third['id']})
+        self.assertFalse(check_jobs.wake_ready(self.project, 'worker'))
+
+    def test_undelivered_result_is_not_hidden_behind_a_full_page_of_seen_results(self):
+        # Synthetic discovery page: no commands or sustained load needed.
+        job = self.submit()
+        self.run_job()
+        original = check_jobs.read(self.project, job['id'])
+        records = {}
+        for i in range(33):
+            identifier = f'{i:064x}'
+            records[identifier] = {**original, 'id': identifier,
+                                   'created_at': f'2026-01-01T00:00:{i:02d}+00:00'}
+            if i:
+                write_json(check_jobs.root(self.project) / identifier / 'wake.json', {})
+        discovery = (records, [])
+        with patch('mizu.acceptance.discover', return_value=discovery):
+            projection = check_jobs.prompt_projection(self.context())
+        self.assertEqual(len(projection['check_jobs']), 32)
+        self.assertEqual(projection['check_jobs'][0]['id'], f'{0:064x}')
+        self.assertNotIn(f'{0:064x}', [j['id'] for j in check_jobs.list_jobs(
+            self.project, 'worker', discovery=discovery)])
+
+    def test_result_wakes_for_every_finish_outcome_but_not_without_capability(self):
+        from mizu.runtime import should_run
+        self.park()
+        job = self.submit()
+        self.run_job()
+        current = self.project.snapshots.get()
+        snapshots = [{**current, 'outcome': outcome, 'wake_at': time.time() + 600}
+                     for outcome in ('continue', 'bounded', 'wait', 'blocked', 'done')]
+        for snapshot in snapshots:
+            with self.subTest(outcome=snapshot['outcome']):
+                self.assertTrue(should_run(self.project, snapshot, role_name='worker'))
+        roles = {**self.config.roles, 'worker': dataclasses.replace(self.config.roles['worker'],
+                 capabilities=tuple(c for c in self.config.roles['worker'].capabilities if c != 'check_job'))}
+        self.project.config = dataclasses.replace(self.config, roles=roles)
+        self.assertFalse(check_jobs.wake_ready(self.project, 'worker'))
+        self.assertFalse(check_jobs.pending(self.project, 'worker'))
+        self.project.config = self.config
+        self.mark(job)
+        for snapshot in snapshots:
+            with self.subTest(delivered_outcome=snapshot['outcome']):
+                self.assertFalse(should_run(self.project, snapshot, role_name='worker'))
+
+    def test_wake_delivery_neither_imports_nor_blocks_explicit_verification_claim(self):
+        job = check_jobs.submit(self.context())
+        self.run_job()
+        self.mark(job)
+        ctx = self.context()
+        self.assertIsNone(ctx.verification)
+        self.assertFalse(check_jobs.read(self.project, job['id'])['acknowledged'])
+        self.assertTrue(check_jobs.result(ctx, job['id'])['accepted_for_current_source'])
+        self.assertTrue(ctx.verification['passed'])
+        check_jobs.acknowledge(self.project, 'worker', ctx.check_results_read)
+        self.assertFalse(check_jobs.pending(self.project, 'worker'))
+
+    def test_opt_out_and_explicit_wait_after_automatic_delivery(self):
+        job = self.submit()
+        self.run_job()
+        self.mark(job)
+        check_jobs.set_wait(self.project, 'worker', job['id'])
+        self.assertTrue(check_jobs.wake_ready(self.project, 'worker'))
+        roles = {**self.config.roles, 'worker': dataclasses.replace(self.config.roles['worker'],
+                                                                  check_result_wake=False)}
+        self.project.config = dataclasses.replace(self.config, roles=roles)
+        self.assertTrue(check_jobs.wake_ready(self.project, 'worker'))
+        check_jobs.clear_wait(self.project, 'worker')
+        self.submit('printf other')
+        self.run_job()
+        self.assertFalse(check_jobs.wake_ready(self.project, 'worker'))
+        self.assertEqual(len(check_jobs.pending(self.project, 'worker')), 2)
+
+    def test_live_explicit_wait_still_holds_admission_for_other_terminal_results(self):
+        from mizu.runtime import should_run, Engine
+        first = self.submit()
+        self.run_job()
+        second = self.submit('printf second')
+        check_jobs.set_wait(self.project, 'worker', second['id'])
+        self.assertTrue(check_jobs.waiting(self.project, 'worker'))
+        self.assertFalse(should_run(self.project, self.project.snapshots.get(), role_name='worker'))
+        with self.assertRaises(Busy):
+            Engine(self.config, driver=ScriptDriver()).run(self.project, 'worker', event_trigger=True)
+        self.assertFalse((check_jobs.root(self.project) / first['id'] / 'wake.json').exists())
+
+    def test_markers_are_owner_bound_and_malformed_marker_cannot_acknowledge(self):
+        job = self.submit()
+        self.run_job()
+        with self.assertRaises(Denied):
+            self.mark(job, role='reviewer')
+        path = check_jobs.root(self.project) / job['id'] / 'wake.json'
+        path.write_text('not JSON')
+        self.assertFalse(check_jobs.wake_ready(self.project, 'worker'))
+        ctx = self.context()
+        self.assertEqual(check_jobs.result(ctx, job['id'])['status'], 'completed')
+        self.assertFalse(check_jobs.read(self.project, job['id'])['acknowledged'])
+
+    def test_terminal_statuses_and_shared_subscribers_wake_only_their_owners(self):
+        # Shared execution retains independent owner-bound scheduling markers.
+        self.config = dataclasses.replace(self.config, sandbox=dataclasses.replace(
+            self.config.sandbox, check_reuse=True))
+        self.project.config = self.config
+        first = check_jobs.submit(self.context())
+        second = check_jobs.join(self.context('reviewer'), first['id'])
+        self.run_job()
+        self.assertTrue(check_jobs.wake_ready(self.project, 'worker'))
+        self.assertTrue(check_jobs.wake_ready(self.project, 'reviewer'))
+        self.mark(first)
+        self.assertTrue(check_jobs.wake_ready(self.project, 'reviewer'))
+        self.mark(second, role='reviewer')
+        self.assertFalse(check_jobs.wake_ready(self.project, 'reviewer'))
+        check_jobs.acknowledge(self.project, 'worker', {first['id']})
+        for status in check_jobs.TERMINAL_WAKE_STATUSES:
+            job = self.submit('printf ' + status)
+            check_jobs.cancel(self.context(), job['id'])
+            path = check_jobs.root(self.project) / job['id'] / 'job.json'
+            write_json(path, {**read_json(path), 'status': status})
+            with self.subTest(status=status):
+                self.assertTrue(check_jobs.wake_ready(self.project, 'worker'))
+                self.mark(job)
+                self.assertFalse(check_jobs.wake_ready(self.project, 'worker'))
+
+
+class CheckResultWakeConfigTests(Fixture):
+    def test_default_opt_out_and_boolean_validation(self):
+        from mizu.config import load
+        from mizu.errors import ConfigError
+        self.assertTrue(self.config.roles['worker'].check_result_wake)
+        raw = self.file.read_text()
+        for value in ('true', 'false', '1', '"true"'):
+            with self.subTest(value=value):
+                self.file.write_text(raw.replace('[roles.worker]',
+                    '[roles.worker]\ncheck_result_wake = ' + value))
+                if value in ('true', 'false'):
+                    self.assertEqual(load(self.file).roles['worker'].check_result_wake, value == 'true')
+                else:
+                    with self.assertRaises(ConfigError):
+                        load(self.file)

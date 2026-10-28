@@ -59,8 +59,8 @@ waits). For an enabled writer, an exact committed/reserved internal continuation
 then supplies readiness, subject to the producer veto. Prepared intents never
 supply readiness; see [the registry](#internal-writer-continuation-registry).
 Otherwise it checks changed goal digest and operator wake-generation, then an
-independent ready-set change, receipt-pinned CI wait, and eligible operator-record
-read in evaluator order. Operator records are checked before the `done` gate;
+independent ready-set change, owned check-result wake / receipt-pinned CI wait, and eligible operator-record
+read in evaluator order. Owned check results and operator records are checked before the `done` gate;
 the existing project wake-generation cursor remains a separate signal.
 Ready work for a named role requires the `work_items_transition` capability. The writer work order (`work_order`) never admits a run: `review_due` is display only.
 It means an unheld `open` item the role can claim, or a `doing` item held by
@@ -96,10 +96,11 @@ admit nonempty current sets for reassessment, but empty sets create no event.
 Malformed progress or unreadable current ledgers fail closed for this signal;
 control/goal/operator short-circuit behavior and other wake sources are unchanged.
 No mutable index, ordering policy or new configuration is added.
-Next, unacknowledged receipt-pinned CI wait evidence admits only its current
-blocked holder (daemon reason `ci_wait`), including after `done`. Without changed ready
-work, an internal continuation or that evidence, `done` still ignores inbox,
-ordinary routed events, general CI, `wake_at` and progress. Pending eligible
+Next, an eligible owned check-result wake or unacknowledged receipt-pinned CI
+wait evidence admits the role (daemon reason `ci_wait`), including after `done`.
+The CI wait routes only to its current blocked holder. Without changed ready
+work, an internal continuation or either check/CI signal, `done` still ignores
+inbox, ordinary routed events, general CI, `wake_at` and progress. Pending eligible
 operator records are checked before this gate; a changed goal or operator
 wake-generation also admits it.
 For other outcomes, it checks inbox generation; role-routed decision/terminal
@@ -575,6 +576,50 @@ explicit-run only. A `check_job` grant adds owned-result wakeups, not authority
 to start unrelated project ledger work on every shared check-directory change.
 Explicit invocations and actual owned-result continuations remain available;
 this distinction uses the existing scheduling configuration, not role names.
+
+## Asynchronous check-result wakes
+
+`roles.<name>.check_result_wake` defaults to `true` for roles with `check_job`
+(and has no effect without that capability). A terminal owned result
+(`completed`, `interrupted`, `refused`, `cancelled`, or `cleanup_failed`) that
+is unacknowledged and has not supplied an automatic dispatch attempt admits
+its owner, independent of the previous `continue`, `bounded`, `wait`, `blocked`
+or `done` outcome. Joined checks use their own role-bound subscription identity;
+another role's completion is not an event. Existing control, check deferral,
+producer, budget and execution admission gates still apply. No pending result
+means no change to no-progress parking. `false` opts out of this automatic
+signal; it does not disable explicit check waits or other wake sources.
+
+Readiness/status polling has no side effects. After locked admission and prompt
+construction, just before execution, Engine writes a `check-jobs/<id>/wake.json`
+sidecar under `check-jobs.lock` for each eligible terminal summary in that prompt.
+The record contains the job `id`, owning `role` and dispatch `run`; there is at
+most one per owned job. Existence suppresses only the automatic wake, including
+when malformed (fail closed for scheduling). It is not a second result store,
+output acknowledgement, or acceptance evidence. Repeated dispatch bookkeeping
+is idempotent. A crash after marking but before the model receives the prompt
+can lose this automatic attempt; unread results remain retrievable and an exact
+explicit wait can still wake. No model-receipt/exactly-once execution guarantee
+is made. Marking failures fail the dispatch instead of acknowledging unread
+output. The sidecar lives with the existing job directory; retention and result
+authority do not change.
+
+Automatic wake candidates take priority in the existing bounded prompt job
+page (32 summaries, within the aggregate 65,536-byte check projection). Only
+included terminal summaries are marked: omitted results or jobs completing
+after prompt capture keep their independent wake. An unread result remains in
+ordinary job listings after its automatic attempt but cannot cause a scheduling
+spin. Existing `result` retrieval and successful-finish acknowledgement alone
+consume output; a wake marker never imports verification. Exact explicit waits
+retain their signature/deadline/ownership checks and existing acknowledgement
+semantics, even with automatic waking disabled or already marked. A live wait
+on a queued/running job still holds the role until completion, expiry or changed
+inputs, including when another result becomes terminal.
+
+`mizu status` exposes `check_results`, keyed by enabled owning role, with up to
+32 unread terminal summaries per role and an `automatic_wake_pending` boolean
+on each. This includes a parked writer and already-dispatched unread results;
+acknowledged results disappear. It is scheduling/visibility data, not acceptance.
 
 ## Local shadow queue observations
 

@@ -506,6 +506,8 @@ class Role:
     #: false otherwise, so event-only/read roles never spend runs on CI they
     #: never subscribed to unless the operator opts them in.
     ci_wake: bool = False
+    #: One automatic dispatch per owned terminal result; inert without check_job.
+    check_result_wake: bool = True
     #: Direct exec shell state is confined to one role unit; never acceptance.
     persistent_exec: bool = False
     #: Explicit opt-in to holding this non-writer producer when project
@@ -1173,7 +1175,7 @@ def load(file: Path) -> Config:
             raise ConfigError(f"Role name '{name}' is reserved for the operator channel")
         keys(role, {"profile", "policy", "workspace", "capabilities", "engine_tools", "on_change",
                     "interval_seconds", "calendar", "daemon", "selector", "attributes",
-                    "decision_events", "work_item_events", "decision_sources", "work_item_sources", "ci_wake", "held_at_capacity", "persistent_exec", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds", "decision_events_limit", "decision_page_bytes", "work_item_events_limit", "no_progress_backoff_seconds", "cooldown_seconds", "progress_signals", "event_poll_seconds", "daemon_policy", "daemon_spacing_seconds"}, f"roles.{name}")
+                    "decision_events", "work_item_events", "decision_sources", "work_item_sources", "ci_wake", "check_result_wake", "held_at_capacity", "persistent_exec", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds", "decision_events_limit", "decision_page_bytes", "work_item_events_limit", "no_progress_backoff_seconds", "cooldown_seconds", "progress_signals", "event_poll_seconds", "daemon_policy", "daemon_spacing_seconds"}, f"roles.{name}")
         profile = string(role.get("profile", ""), f"roles.{name}.profile")
         selector = string(role.get("selector", ""), f"roles.{name}.selector")
         if ("profile" in role) == ("selector" in role):
@@ -1290,6 +1292,8 @@ def load(file: Path) -> Config:
                 if value == "any" and not subscription:
                     raise ConfigError(f"roles.{name}.{key} is any without its event subscription")
         ci_wake = boolean(role.get("ci_wake", workspace == "write"), f"roles.{name}.ci_wake")
+        check_result_wake = boolean(role.get("check_result_wake", True),
+                                    f"roles.{name}.check_result_wake")
         held_at_capacity = boolean(role.get("held_at_capacity", False),
                                    f"roles.{name}.held_at_capacity")
         persistent_exec = boolean(role.get("persistent_exec", False), f"roles.{name}.persistent_exec")
@@ -1352,6 +1356,7 @@ def load(file: Path) -> Config:
                            boolean(role.get("on_change", False), "on_change"), interval, calendar, daemon, selector, attrs,
                            decision_events=events, work_item_events=work_events, decision_sources=raw_sources,
                            work_item_sources=work_sources, ci_wake=ci_wake,
+                           check_result_wake=check_result_wake,
                            held_at_capacity=held_at_capacity, persistent_exec=persistent_exec,
                            requests_per_run=role_requests, tools_per_run=role_tools,
                            wrap_up_requests=role_wrap_requests, wrap_up_tools=role_wrap_tools,

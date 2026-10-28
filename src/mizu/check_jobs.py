@@ -822,7 +822,7 @@ def pending(project, role, *, discovery=None):
             and not j.get('acknowledged')][:32]
 
 
-def list_jobs(project, role, *, include_acknowledged=True, discovery=None):
+def list_jobs(project, role, *, include_acknowledged=True, discovery=None, wake_first=False):
     if role not in project.config.roles or 'check_job' not in project.config.roles[role].capabilities:
         return []
     if discovery is None:
@@ -830,7 +830,8 @@ def list_jobs(project, role, *, include_acknowledged=True, discovery=None):
         discovery = discover(project)
     jobs = [j for j in discovery[0].values() if j.get('role') == role
             and (include_acknowledged or not j.get('acknowledged'))]
-    return [summary(j) for j in sorted(jobs, key=lambda j: j.get('created_at', ''), reverse=True)[:32]]
+    return [summary(j) for j in sorted(jobs, key=lambda j: (
+        wake_first and _automatic_wake_pending(project, j), j.get('created_at', '')), reverse=True)[:32]]
 
 
 def prompt_projection(context):
@@ -854,7 +855,7 @@ def prompt_projection(context):
             str(exc).encode('utf-8', 'replace')[:256].decode('utf-8', 'ignore'))
     views = (
         ('check_jobs', list_jobs(context.project, context.role.name,
-                                 include_acknowledged=False, discovery=discovery)),
+                                 include_acknowledged=False, discovery=discovery, wake_first=True)),
         ('shared_checks', shared))
     result['check_discovery']['summaries_omitted'] = sum(len(values) for _, values in views)
     if len(json.dumps(result, ensure_ascii=False).encode('utf-8')) > 65536:
@@ -1525,25 +1526,71 @@ def waiting(project, role):
     return deferral(project, role) is not None
 
 
-#: Terminal statuses a completed explicit wait can wake on.
+#: Terminal statuses eligible for result delivery or an explicit wait wake.
 TERMINAL_WAKE_STATUSES = frozenset(('completed', 'interrupted', 'refused', 'cancelled', 'cleanup_failed'))
 
 
-def wake_ready(project, role, *, discovery=None):
-    """True only when the role's explicit wait names a terminal owned result.
+def _automatic_wake_pending(project, job):
+    role = project.config.roles.get(job.get('role'))
+    if (role is None or 'check_job' not in role.capabilities or not role.check_result_wake
+            or job.get('status') not in TERMINAL_WAKE_STATUSES or job.get('acknowledged')):
+        return False
+    # Existence is sufficient: malformed markers fail closed for scheduling,
+    # never for result retrieval. Do not follow a marker symlink.
+    try:
+        (root(project) / job['id'] / 'wake.json').lstat()
+    except FileNotFoundError:
+        return True
+    return False
 
-    Schema: the role's ``<role>.wait.json`` record must name one job, carry
-    the current ``wait_signature`` and an unexpired ``wait_until`` bound.
-    Bounds: one record per role, one job per record. Trust: local recorded
-    state; the job record is the authority for status and acknowledgement.
-    Failure: a missing, malformed, stale, expired, other-role, running or
-    acknowledged record reads as no wake, never as admission. Listing and
-    result visibility are unchanged: a completed job without such a wait
-    stays inspectable but wakes nobody.
+
+def mark_wake_delivered(project, role, ids, run):
+    """Consume only automatic wakes represented in this dispatch's prompt.
+
+    One sidecar per owned job, under the queue lock, makes retries idempotent.
+    This is an at-most-once dispatch-attempt marker, not a result acknowledgement
+    or proof of model receipt. A crash after the write may lose the automatic
+    wake; the unread result remains inspectable and explicit waits still work.
+    """
+    if not ids:
+        return
+    with lock(project.root / 'locks/check-jobs.lock'):
+        for job_id in ids:
+            job = read(project, job_id)
+            if job.get('role') != role:
+                raise Denied('Check wake belongs to another role')
+            if _automatic_wake_pending(project, job):
+                write_json(root(project) / job_id / 'wake.json',
+                           {'id': job_id, 'role': role, 'run': run})
+
+
+def outstanding(project):
+    """Bounded status view of unread owned terminal results, including parked roles."""
+    from .acceptance import discover
+    discovery = discover(project)
+    return {name: [{**job, 'automatic_wake_pending': _automatic_wake_pending(project, job)}
+                   for job in jobs]
+            for name in project.roles
+            if (jobs := pending(project, name, discovery=discovery))}
+
+
+def wake_ready(project, role, *, discovery=None):
+    """An unseen owned terminal result or the existing exact explicit wait.
+
+    Automatic wake policy defaults on for check_job roles. Reads are pure:
+    Engine marks only terminal summaries included in an admitted prompt just
+    before execution. Acknowledged results never wake; a wake marker suppresses
+    only automatic admission, never explicit waits or result authority.
     """
     try:
         if role not in project.config.roles or "check_job" not in project.config.roles[role].capabilities:
             return False
+        if discovery is None:
+            from .acceptance import discover
+            discovery = discover(project)
+        if any(_automatic_wake_pending(project, job) for job in discovery[0].values()
+               if job.get('role') == role):
+            return True
         record = read_json(root(project) / (role + '.wait.json'), {})
         if not isinstance(record, dict) or record.get('inputs') != wait_signature(project):
             return False
@@ -1553,12 +1600,9 @@ def wake_ready(project, role, *, discovery=None):
         job_id = record.get('id')
         if not isinstance(job_id, str):
             return False
-        if discovery is not None:
-            job = discovery[0].get(job_id)
-            if job is None:
-                return False
-        else:
-            job = read(project, job_id)
+        job = discovery[0].get(job_id)
+        if job is None:
+            return False
         if job.get('role') != role:
             return False
         if job.get('status') not in TERMINAL_WAKE_STATUSES:
