@@ -244,3 +244,16 @@ Only dropped-to-done correction is allowed, with a prior delivery binding and
 independently retained acceptance; the dropped revision remains immutable.
 Unit-finish verification and external VCS publication witnesses are unchanged.
 See ADR-050 and the WorkItems schema in architecture.md.
+
+### Optional independently authenticated CI receipts
+
+[Trusted CI acceptance](ci-acceptance.md) adds a disabled-by-default,
+operator-only schema-2 producer to the retained-acceptance path. Only an explicit
+reviewed project equivalence policy plus the configured trusted adapter can
+establish complete exact-SHA workflow/run/attempt coverage; status alone cannot.
+Effective verification and WorkItems completion consume the immutable receipt by
+exact ID, scope digest and snapshot identity, with the same prior delivery
+binding. Local failure evidence remains unchanged and is never relabeled; a separately
+validated CI receipt can establish its own pass. Old local receipts and closure
+history remain readable. This is not current-workspace
+acceptance, a promotion/deployment decision or automatic work-item completion.

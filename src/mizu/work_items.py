@@ -1145,7 +1145,7 @@ class WorkItems:
                 raise Denied("Completion requires a prior exact snapshot and scope delivery binding")
         return binding
 
-    def _retained_verification(self, verification, code_digest, scope_digest):
+    def _retained_verification(self, verification, code_digest, scope_digest, snapshot_id):
         from .acceptance import get
         if (not isinstance(verification, dict)
                 or set(verification) != {"source", "receipt_id", "passed", "code_digest"}
@@ -1155,7 +1155,8 @@ class WorkItems:
             raise Denied("Invalid retained completion verification")
         receipt = get(self.root, verification["receipt_id"])
         if (receipt["code_digest"] != code_digest
-                or digest(canonical(receipt["scope"])) != scope_digest):
+                or digest(canonical(receipt["scope"])) != scope_digest
+                or receipt["schema"] == 2 and receipt["scope"]["ci"]["snapshot_id"] != snapshot_id):
             raise Denied("Completion acceptance receipt code or scope mismatch")
 
     def _validate_transition(self, previous: dict, record: dict) -> None:
@@ -1231,7 +1232,7 @@ class WorkItems:
             retained = verification.get("source") == "retained_acceptance"
             if retained and "delivery_schema" in record:
                 self._retained_verification(verification, snapshot["code_digest"],
-                                            record["verification_scope"])
+                                            record["verification_scope"], sid)
             elif (snapshot.get("id") != sid or not isinstance(stored_verification, dict)
                     or stored_verification != verification
                     or stored_verification.get("passed") is not True

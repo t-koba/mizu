@@ -632,3 +632,8 @@ Forward dropped-to-done correction requires that prior delivery plus retained
 acceptance, not embedded proof alone. No unit-finish verification or external
 VCS publication witness rule changes. Tests in `test_acceptance.py` use bounded
 fake runners; they are not a rootless-runtime or deployment smoke test.
+
+The separate [operator-only trusted CI importer](ci-acceptance.md) can retain
+schema-2 acceptance under an explicitly reviewed equivalence policy (disabled by
+default). Local synchronous/detached producers continue to mint schema 1 only;
+CI does not change job execution, cancellation, subscription or failure records.

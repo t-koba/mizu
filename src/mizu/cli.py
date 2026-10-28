@@ -36,6 +36,12 @@ def parser() -> argparse.ArgumentParser:
     initialize.add_argument("--armed", action="store_true",
                             help="Start armed (operator has reviewed the source at init time)")
     initialize.add_argument("--verify", action="append", default=[], help="Operator-owned acceptance command; repeatable")
+    ci = sub.add_parser("ci-acceptance", help="Retain exact trusted CI proof under operator equivalence policy")
+    ci.add_argument("project")
+    ci.add_argument("--snapshot", required=True)
+    ci.add_argument("--publication-id", required=True)
+    ci.add_argument("--run", required=True)
+    ci.add_argument("--attempt", type=int, required=True)
     explain = sub.add_parser("explain", help="Show bounded recorded evidence for one project role; not a scheduler verdict")
     explain.add_argument("project", help="Managed project name")
     explain.add_argument("--role", default=None, help="Enabled project role (default: only project role, else required)")
@@ -689,6 +695,10 @@ def execute(args):
         return write(Project(config, args.project), event_id=args.id, kind=args.kind, body=args.body,
                      addressee=args.role, subject=subject, action=args.action, target=target)
     project = Project(config, args.project)
+    if args.command == "ci-acceptance":
+        from .ci_acceptance import retain
+        return retain(project, snapshot_id=args.snapshot, publication_id=args.publication_id,
+                      run=args.run, attempt=args.attempt)
     handler = _PROJECT_COMMANDS.get(args.command)
     if handler is None:
         raise ConfigError("Unhandled command")

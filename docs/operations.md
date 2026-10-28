@@ -1279,3 +1279,14 @@ incorporates lineage. These are external-untrusted observations at a point in
 time, not a promotion gate: they do not prevent subsequent remote movement,
 invoke promotion, gate any external consumer such as `dash-server.py`, or
 enforce any condition on an external consumer.
+
+## Retain independently authenticated CI validation
+
+After independent implementation **and equivalence-policy** review, an operator
+may use `mizu ci-acceptance PROJECT --snapshot SNAPSHOT_ID --publication-id ID
+--run RUN_ID --attempt N`. This does not run builds/CI, deploy, change waits, or
+close work items. It queries only the configured trusted VCS adapter; existing
+exact publication and scope evidence must match. The policy is disabled unless
+explicitly configured in private project settings. Do not enable it or apply it
+to a reported external case merely because a branch is green. See
+[the protocol, bounded receipts, retry and failure rules](ci-acceptance.md).

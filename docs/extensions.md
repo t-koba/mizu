@@ -129,3 +129,14 @@ startup, live read-only smoke and a real container write/verify run. Tests with
 A future different harness can implement `execute(context, prompt, profile=...)`
 and the same capability/evidence contract. The production configuration has no
 mock/unsafe driver selection. Test dependency injection remains in tests.
+
+## Trusted CI acceptance adapter operation
+
+The optional host-only VCS `acceptance` operation has a stricter provenance
+contract than `status`: independently authenticated exact tested source,
+workflow definition, immutable run/attempt/check IDs and complete declared
+command/coverage/environment facts. Implementations must fail rather than infer
+these from green display status or code-controlled artifacts. The operation is
+not available through `vcs_read`. See [the full request/response protocol and
+bounds](ci-acceptance.md). No provider adapter or equivalence policy is enabled
+by this extension alone.

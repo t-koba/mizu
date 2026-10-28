@@ -2,7 +2,7 @@
 
 Objects and first-writer indexes are immutable. An index selects one exact
 receipt, never a mutable latest verdict. No command output is retained here.
-Only the two acceptance producers supply finalized, input-bound results.
+Local producers and the operator-only trusted CI importer supply bound results.
 """
 from __future__ import annotations
 
@@ -291,6 +291,19 @@ def _current_scope(project):
 
 
 def _scope(value):
+    if isinstance(value, dict) and 'ci' in value:
+        from .ci_acceptance import policy
+        ci = value['ci']
+        if (not isinstance(ci, dict) or set(ci) != {'policy', 'adapter', 'snapshot_id'}
+                or not _digest(ci['adapter']) or not _digest(ci['snapshot_id'])):
+            raise Denied('Invalid CI scope binding')
+        policy(ci['policy'], value.get('commands', []))
+        local = {k: v for k, v in value.items() if k != 'ci'}
+        if ci['policy']['acceptance_scope'] != _scope(local):
+            raise Denied('CI policy acceptance scope mismatch')
+        if len(canonical(value)) > MAX_BYTES // 2:
+            raise Denied('Acceptance scope exceeds receipt bound')
+        return digest(canonical(value))
     if (not isinstance(value, dict) or set(value) not in ({'commands', 'execution', 'environment', 'image'},
                                                          {'commands', 'execution', 'environment', 'image', 'cache_input'})
             or 'cache_input' in value and not _digest(value['cache_input'])
@@ -310,6 +323,8 @@ def normalize(record, bound, *, producer):
     if bound is None:
         return None
     _scope(bound)
+    if 'ci' in bound:
+        raise Denied('Local producer cannot mint CI proof')
     if (not isinstance(record, dict) or any(record.get(k) is not True for k in
             ('passed', 'snapshot_representable', 'unchanged_during_verification', 'dependencies_unchanged'))
             or not _digest(record.get('code_digest')) or record.get('image') != bound['image']):
@@ -337,6 +352,12 @@ def normalize(record, bound, *, producer):
 
 
 def _validate(value, receipt_id):
+    if isinstance(value, dict) and type(value.get('schema')) is int and value['schema'] == 2:
+        from .ci_acceptance import validate
+        validate(value)
+        if digest(canonical(value)) != receipt_id:
+            raise Denied('Invalid acceptance receipt identity')
+        return value
     if (not isinstance(value, dict) or set(value) != {'schema', 'code_digest', 'scope', 'producer', 'passed', 'commands'}
             or type(value['schema']) is not int or value['schema'] != 1
             or not isinstance(value['scope'], dict) or not isinstance(value['producer'], dict)
@@ -355,7 +376,11 @@ def get(root, receipt_id):
     """Resolve only an exact immutable ID; no scope/index substitution."""
     if not _digest(receipt_id):
         raise Denied('Invalid acceptance receipt ID')
-    return _validate(_read(root, f'{_BASE}/objects/{receipt_id}.json'), receipt_id)
+    value = _validate(_read(root, f'{_BASE}/objects/{receipt_id}.json'), receipt_id)
+    if value['schema'] == 2:
+        from .ci_acceptance import publication_matches
+        publication_matches(root, value)
+    return value
 
 
 def _index(root, code, bound):
@@ -413,7 +438,13 @@ def effective_projection(project, snapshot):
                 return None, None
             name = _index(project.root, snapshot['code_digest'], bound)
             if not _present(project.root, name):
-                return None, None
+                from .ci_acceptance import bound as ci_bound
+                bound = ci_bound(project, snapshot, bound)
+                if bound is None:
+                    return None, None
+                name = _index(project.root, snapshot['code_digest'], bound)
+                if not _present(project.root, name):
+                    return None, None
             receipt_id = _selected(project.root, name, snapshot['code_digest'], bound)
             return ({'passed': True, 'code_digest': snapshot['code_digest'],
                      'source': 'retained_acceptance', 'receipt_id': receipt_id}, None)

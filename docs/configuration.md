@@ -2066,3 +2066,14 @@ and check jobs always use fresh, independent, stateless one-shot contexts for
 each command; `Sandbox.execute()` and experiments remain one-shot regardless of
 the role option. Read-only exec routed through `check_job` stays on that existing
 frozen-input route, not in a persistent session.
+
+## Optional project CI acceptance equivalence
+
+`project.toml` may contain an operator-owned `[ci_acceptance]` schema-1 policy.
+It is absent/disabled by default; no shipped policy is activated. It binds a
+versioned complete command/coverage/environment mapping to the exact local
+acceptance-scope digest and one authenticated workflow definition. Only the
+configured trusted VCS adapter can establish the independent run-attempt facts.
+See [trusted CI acceptance](ci-acceptance.md) for all fields, bounds, review gate
+and the operator-only retention command. `vcs_read` remains read-only; green
+status and ordinary CI waits do not establish equivalence.

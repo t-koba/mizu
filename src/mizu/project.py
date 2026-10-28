@@ -466,11 +466,13 @@ def check_recorded_batches(value) -> dict[str, tuple[str, ...]]:
 def check_project_settings(
         settings) -> tuple[list[str], tuple[str, ...], dict[str, tuple[str, ...]], dict | None]:
     """Validate the complete operator-owned project.toml schema in one place."""
-    keys(settings, {"roles", "verify", "attributes", "recorded_batches", "vcs"}, "project")
+    keys(settings, {"roles", "verify", "attributes", "recorded_batches", "vcs", "ci_acceptance"}, "project")
     from .selection import attributes
     attributes(settings.get("attributes", {}))
     roles = strings(settings.get("roles", []), "project.roles")
     verify = check_verify(settings.get("verify", []))
+    from .ci_acceptance import configured
+    configured(settings, verify)
     recorded_batches = check_recorded_batches(settings.get("recorded_batches"))
     project_vcs = settings.get("vcs", {})
     keys(project_vcs, {"lineage_target"}, "project.vcs")
