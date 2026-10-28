@@ -936,9 +936,13 @@ execution metadata reports `incomplete` with `resolvable: false`; a successful
 lookup with API and positive token bounds is only a resolution check, **not**
 proof of provider execution, authentication, availability or catalog completeness.
 Explicit model definitions remain intact even when inspection is unsupported.
-Pi-durable returns `unsupported` with `durable_native_provider_source_mismatch`
-without launching an engine: it cannot load the same native provider extensions.
-It does not silently substitute a pi.dev listing or claim native parity.
+Pi-durable catalog inspection is `unsupported` without launching an engine
+because it cannot load the same native provider extensions. With no extension
+resource configured, `error` is null; when an extension resource is configured,
+`error` is `extension_provided_model_not_supported_by_engine`. This diagnoses an
+unsupported source, not proof that the selected model requires the extension.
+It does not silently substitute a pi.dev listing or claim native parity, and
+ordinary pinned-model resolution remains unchanged.
 
 The single JSON result includes `engine`, `provider`, `selected_model`,
 `inference: "not_run"`, `source` (`registered_native_provider` or `unsupported`),
