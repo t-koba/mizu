@@ -4,6 +4,68 @@
 
 すべての CLI 操作は一般ユーザー権限で実行します。出力は JSON 形式（標準出力）、エラーは標準エラー出力に出力されます（`--config PATH` を指定する場合はサブコマンドの前に指定）。
 
+### Finish-only unit health metric
+
+`mizu status PROJECT` / `Project.status()` includes `finish_only_unit_rate`.
+Its `window` gives UTC `start`, `end`, `seconds: 86400` and
+`bounds: "[start,end)"`: the rolling prior 24 hours, including the start and
+excluding the observation instant. Membership uses each result's `finished_at`,
+not directory order or modification time. The helper accepts an explicit
+timezone-aware `as_of` for deterministic observations/tests.
+
+For every configured role, `roles` reports `finish_only_units` (numerator),
+`completed_units` (denominator), `rate` (fraction, not percent), `status`, and
+sanitized `reasons` counts. Normal run results with status `completed` or
+`waiting` count as completed units; `prepared`, `bounded`, `interrupted`, and
+consultation/delegation children do not. A finish-only unit has valid retained
+schema-1 `activity.counts` with a positive `tool_call:finish` and no other
+positive `tool_call:*` count. Model-request/time buckets do not count as tools;
+prompt, answer and summary contents are not inspected or returned.
+
+**The target is zero.** A known nonzero rate is a defect signal for unnecessary
+units, not useful progress; this metric does not itself change admission or
+scheduling. A known zero requires a nonempty denominator and complete inspected
+evidence. An empty window reports `status: "no_completed_units", rate: null`,
+not zero. Missing, malformed, unsafe, oversized, truncated, unclosed activity,
+or otherwise incomplete evidence reports `unknown` or `incomplete`, always
+with `rate: null`. Counts in those states are observed lower bounds only, not
+a complete ratio. An unattributable record or incomplete inventory affects all
+roles; a problem attributable to one role does not affect the others.
+
+The read-only scan examines at most 512 retained run entries, at most 64 KiB per
+JSON file and an 8 MiB aggregate read allowance. Successful reads charge their
+actual bytes; a refused/unstable read charges its entire allowance (up to
+64 KiB). There are at most two file attempts per entry (`result.json` plus its
+`started.json`); the scan and byte ceilings are unchanged. Activity maps allow at
+most 128 keys of at most 128 characters, with nonnegative signed-64-bit integer
+counts and zero open model requests. Duplicate JSON keys are refused, and JSON
+parsing applies the existing finite-number/depth guard before duplicate-key
+validation. File reads use the existing safe-read contract (no symlinks,
+hardlinks or special files; portable identity checks where openat pinning is
+unavailable). The `runs` root and each entry are validated as real
+directories via `lstat`, without following symlinks or Windows reparse
+points/junctions. A normal `result.json` never carries `parent_run` (children
+write `consultation.json`/`delegation.json`);
+any present value is invalid, never an excluded child. A missing `result.json`
+excludes a child only when its stored `started.json` is internally consistent:
+matching run name, valid bounded role and parent-run identifier distinct from
+itself, and a real existing parent run directory; otherwise the entry is
+incomplete. Malformed or unsafe existing results remain incomplete. A
+`completed`/`waiting` result additionally
+requires a matching valid `started.json` (same run and role, no `parent_run`);
+missing or mismatched started evidence never yields a known rate. A missing
+result never supplies a fabricated completion or tool count. A scan bound
+prevents a numeric rate rather than silently treating an unvisited suffix as
+empty. Output
+includes no run paths, IDs or arbitrary error
+text. The scan is not an atomic multi-file snapshot: an in-flight run without a
+result, or an older retained record that cannot be dated safely, can conservatively
+make it incomplete. Repair/complete the evidence and rerun status; no engine,
+VCS request, or evidence rewrite is performed. This is a retained-evidence view,
+not proof of coverage for records removed outside retention or of authenticity:
+local records can be altered, and structural checks cannot detect plausible
+forgeries.
+
 ### プロジェクト制御コマンド
 
 ```sh

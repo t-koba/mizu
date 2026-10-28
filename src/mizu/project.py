@@ -343,6 +343,7 @@ class Project:
         from .admission import waiting as admission_waiting
         from .check_jobs import deferrals, outstanding
         from .selection import project_status
+        from .run_health import finish_only_rates
         snapshot = self.snapshots.get()
         from .acceptance import effective_projection
         effective, effective_diagnostic = effective_projection(self, snapshot)
@@ -382,6 +383,7 @@ class Project:
                                           "no_progress_count": progress_count,
                                           "after": self.config.limits.no_progress_recovery_after}},
                 "idle_with_open_work": idle_diagnostic,
+                "finish_only_unit_rate": finish_only_rates(self),
                 "goal_digest": snapshot.get("goal_digest"), "wake_at": snapshot.get("wake_at"),
                 # A role the check queue holds now, with the bound that ends it.
                 "check_waits": deferrals(self),
