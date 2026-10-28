@@ -149,7 +149,8 @@ class WorkItemScopeTests(Fixture):
         item_id = decision["work_item"]["id"]
         first = self.change(item_id, 1)
         self.assertEqual(first["scope"], scope)
-        second = self.change(item_id, 2, status="blocked", reason="Waiting")
+        second = self.change(item_id, 2, status="blocked", reason="Waiting",
+                             wait={"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
         self.assertEqual(second["scope"], scope)
         third = self.change(item_id, 3, status="doing", reason="Resumed")
         self.assertEqual(third["scope"], scope)

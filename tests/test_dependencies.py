@@ -23,6 +23,26 @@ def _defer(project, source, wait, title="Need"):
     return item
 
 
+class SatisfactionEvidenceTests(unittest.TestCase):
+    def test_pure_predicate_preserves_revision_action_and_timestamp_semantics(self):
+        from mizu.insights import satisfaction_evidence
+        result = {"id": "target", "rev": "2", "title": "Result"}
+        stored = _wait(target="target", rev=2, action="reject")
+        record = {"rev": 2, "action": "reject", "created_at": "recorded timestamp"}
+        expected = {"insight": "target", "rev": 2, "action": "reject",
+                    "decided_at": "recorded timestamp", "title": "Result"}
+        # The existing predicate coerces insight revisions, compares decision
+        # revisions exactly, and requires a nonempty string (not a parsed date).
+        self.assertEqual(satisfaction_evidence(stored, result, record), expected)
+        for change in ({"rev": 1}, {"rev": "2"}, {"action": "accept"},
+                       {"created_at": ""}, {"created_at": None}, {"created_at": 1}):
+            with self.subTest(change=change):
+                self.assertIsNone(satisfaction_evidence(stored, result, {**record, **change}))
+        self.assertIsNone(satisfaction_evidence(stored, {**result, "rev": 3}, record))
+        self.assertIsNone(satisfaction_evidence({}, result, record))
+        self.assertIsNone(satisfaction_evidence(stored, result, None))
+
+
 class DependencyRegistrationTests(Fixture):
     def test_valid_dependency_registers(self):
         result = _submit(self.project, "worker", "Result")

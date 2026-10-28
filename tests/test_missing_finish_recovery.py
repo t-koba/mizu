@@ -142,7 +142,8 @@ class MissingFinishRecoveryTests(Fixture):
                 proposal["id"], "accept", "reviewed", "", "run-1", expected_rev=1)
             item_id = decision["work_item"]["id"]
             self.project.work_items.transition(
-                item_id, expected_rev=1, status="blocked", actor="worker")
+                item_id, expected_rev=1, status="blocked", actor="worker",
+                wait={"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
         ready_proposal = self.project.insights.submit(
             source="worker", title="Later actionable work",
             body="Ready work beyond the blocked page", base_snapshot=None)
@@ -172,7 +173,8 @@ class MissingFinishRecoveryTests(Fixture):
     def test_fully_blocked_queue_never_rotates(self):
         item_id = seed_open_work(self.project)
         self.project.work_items.transition(
-            item_id, expected_rev=1, status="blocked", actor="worker")
+            item_id, expected_rev=1, status="blocked", actor="worker",
+                wait={"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
         page = self.project.work_items.page_open(limit=100)
         self.assertTrue(page["total"] >= 1)
         self.assertTrue(all(row["status"] == "blocked" for row in page["items"]))

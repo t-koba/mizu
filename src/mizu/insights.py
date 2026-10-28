@@ -138,6 +138,28 @@ def _rev_of(record: dict) -> int:
     return rev if rev >= 1 else 1
 
 
+def satisfaction_evidence(stored: dict, result: dict, record: dict) -> dict | None:
+    """Pure current dependency evidence from an already loaded insight/decision."""
+    try:
+        requires = stored.get("requires")
+        if not isinstance(requires, dict):
+            return None
+        if not isinstance(record, dict):
+            return None
+        if (_rev_of(result) != requires.get("rev")
+                or record.get("rev") != _rev_of(result)
+                or record.get("action") != requires.get("action")):
+            return None
+        decided_at = record.get("created_at")
+        if not isinstance(decided_at, str) or not decided_at:
+            return None
+        return {"insight": result["id"], "rev": _rev_of(result),
+                "action": record.get("action"), "decided_at": decided_at,
+                "title": result.get("title", "")}
+    except (Denied, OSError, ValueError, TypeError, AttributeError):
+        return None
+
+
 def _decision_key(insight_id: str, rev: int) -> str:
     """Stable 128-bit event name, independent of action/intent and writer run."""
     return digest(canonical(["insight-substantive-decision", insight_id, rev]))[:32]
@@ -1207,18 +1229,7 @@ replacement insight without implying rejected substance.
             if raw.is_symlink():
                 return None
             record = read_json(raw, {})
-            if not isinstance(record, dict):
-                return None
-            if (_rev_of(result) != requires.get("rev")
-                    or record.get("rev") != _rev_of(result)
-                    or record.get("action") != requires.get("action")):
-                return None
-            decided_at = record.get("created_at")
-            if not isinstance(decided_at, str) or not decided_at:
-                return None
-            return {"insight": result["id"], "rev": _rev_of(result),
-                    "action": record.get("action"), "decided_at": decided_at,
-                    "title": result.get("title", "")}
+            return satisfaction_evidence(stored, result, record)
         except (Denied, OSError, ValueError, TypeError, AttributeError):
             return None
 

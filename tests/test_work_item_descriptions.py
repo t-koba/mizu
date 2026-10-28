@@ -55,7 +55,8 @@ class WorkItemDescriptionTests(Fixture):
         doing = self.store.transition(seed["id"], expected_rev=1, status="doing", actor="worker")
         history_bytes = (path.parent / "2.json").read_bytes()
         self.assertEqual(set(doing), EVENT_FIELDS)
-        blocked = self.store.transition(seed["id"], expected_rev=2, status="blocked", actor="worker")
+        blocked = self.store.transition(seed["id"], expected_rev=2, status="blocked", actor="worker",
+                wait={"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
         self.assertEqual(set(blocked), EVENT_FIELDS)
         self.assertEqual(self.store.get(seed["id"]), blocked)
         self.assertEqual(self.create(), {"record": first["record"], "created": False})
@@ -93,7 +94,8 @@ class WorkItemDescriptionTests(Fixture):
                                          **({"description": "Scope"} if version == 2 else {}))["record"]["work_item"]
                 item_id = seed["id"]
                 doing = self.store.transition(item_id, expected_rev=1, status="doing", actor="worker")
-                blocked = self.store.transition(item_id, expected_rev=2, status="blocked", actor="worker")
+                blocked = self.store.transition(item_id, expected_rev=2, status="blocked", actor="worker",
+                wait={"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
                 self.assertEqual(set(blocked), EVENT_FIELDS | ({"description"} if version == 2 else set()))
                 if version == 2:
                     self.assertEqual(blocked["description"], "Scope")

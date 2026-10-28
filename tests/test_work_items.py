@@ -355,12 +355,15 @@ class WorkItemTests(Fixture):
             self.store.get(self.item_id)
         self.assertFalse(self.directory.exists())
 
-    def test_blocked_wait_is_optional_and_normalizes_without_scheduler_registration(self):
-        for wait in ("later", {}, {"kind": "unknown"}, {"kind": "deadline", "at": "2030-01-01"}):
+    def test_new_block_requires_wait_but_legacy_no_wait_replays(self):
+        for wait in (None, "later", {}, {"kind": "unknown"}, {"kind": "deadline", "at": "2030-01-01"}):
             with self.subTest(wait=wait), self.assertRaises(Denied):
                 self.change("blocked", wait=wait)
         self.assertFalse(self.directory.exists())
-        blocked = self.change("blocked")
+        blocked = self.change("blocked", wait={"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
+        # Simulate a pre-policy immutable event, not a supported new write.
+        blocked["wait"] = None
+        write_json(self.directory / "2.json", blocked)
         self.assertIsNone(blocked["wait"])
         self.assertEqual(blocked["holder"], "worker")
         self.assertEqual(self.store.get(self.item_id), blocked)

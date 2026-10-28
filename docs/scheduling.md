@@ -64,7 +64,7 @@ read in evaluator order. Owned check results and operator records are checked be
 the existing project wake-generation cursor remains a separate signal.
 Ready work for a named role requires the `work_items_transition` capability. The writer work order (`work_order`) never admits a run: `review_due` is display only.
 It means an unheld `open` item the role can claim, or a `doing` item held by
-that role, with no structured wait. Satisfied blocked waits below are ready
+that role, with no structured wait. Satisfied or dead blocked waits below are ready
 for their holder, or claimable by any transition-capable role when unheld.
 Another role's held work never admits it. A changed eligible ID set admits the writer
 even after `done`, an unexpired run-level `wait`, or a no-progress park. This
@@ -221,7 +221,7 @@ this slice changes on-change dispatch, not schedule modes or spacing.
 
 Both full and delta prompts always include `ready_work`, independently of the
 ordinary `open_work_items` page, filtered by the receiving role/holder. It has `items`, `total`, `overflow_count`,
-`truncated`, `unseeded_decisions`, and `coverage_complete`. Each item contains
+`truncated`, `unseeded_decisions`, `coverage_complete`, and a bounded `unknown_blocked` count. Each item contains
 `id`, `title`, `status`, `stale`, `redecision`, ledger `updated_at`, and
 `age_seconds`: time since the latest work-item ledger update (normally creation
 or a transition), not time since the daemon last ran. Age is
@@ -237,9 +237,19 @@ with their open or blocked siblings. No per-task transition or wait registration
 is needed. Once satisfied, an unheld blocked seed is claimable just like unheld
 open work; a held blocked item is routed only to its holder. Dependency
 `recipient` keeps its existing condition semantics, not task assignment.
-Its prompt row includes the normalized `wait` and `wait_satisfied: true`;
-the ledger stays blocked at the same revision until the writer decides what
-work or evidence remains. A missing or unsatisfied wait is not ready. CI
+Its prompt row includes the normalized `wait`, `wait_liveness` (`state`,
+`reason`, `wait_kind`), and `wait_satisfied: true` only for a due condition.
+Legacy blocks without a wait and confidently impossible `insight_decided`
+targets (missing or currently withdrawn) also re-enter for writer replanning,
+with `wait_satisfied: false`. A superseded decision is pending: the stable
+target ID follows its current revision, not the obsolete decision. Unsafe or
+unavailable target evidence is unknown, never a release: an `unknown` blocked
+item is excluded from `ready_work` without suppressing unrelated known-ready
+work, and the page reports `coverage_complete: false` with the bounded
+`unknown_blocked` count so a zero `total` never reads as an exhaustive claim.
+The ledger stays
+blocked at the same revision until the writer decides what work or evidence
+remains. An ordinary pending wait is not ready. CI
 waits keep their existing receipt-bound result notifications. Re-evaluation
 uses current local time, published code and exact-revision decisions; it
 neither imports acceptance nor closes work automatically.
@@ -255,16 +265,48 @@ one ready row; prompts retain at most
 size, as for `page_open`. Reads never change item status or resolve waits.
 Unsafe or malformed stores provide no ready-work wake (other explicit wakes
 keep their existing behavior); prompt construction fails closed rather than
-silently omitting the unreadable projection. Unseeded legacy decisions are
-reported as a coverage gap, never guessed ready. Retrying reads yields a new
+silently omitting the unreadable projection. Unseeded legacy decisions and
+`unknown` blocked liveness are reported as coverage gaps, never guessed ready:
+an `unknown` item is skipped while known ready rows are still returned, with
+`unknown_blocked` counting the skipped role-eligible blocked items. Retrying reads yields a new
 live view; admission and prompt reads are not a frozen transaction.
 
-A blocked item, even one without a structured wait, is not ready. Exact-SHA
-CI wait evidence is a separate holder-routed wake, not ready work.
+New transitions to `blocked` require a supported observable wait; historical
+no-wait events remain readable and replayable, without rewriting history.
+Exact-SHA CI wait evidence is a separate holder-routed wake, not ready work.
 A run-level `wait` does not block unrelated ready ledger work: record a work
 item as blocked when it is not actionable. Thus leaving an `open`/`doing` item
 while finishing `wait` or `done` intentionally allows another writer unit at
 the configured cadence. Cache-affinity ordering is separate.
+
+### Blocked-work liveness status
+
+`Project.status().blocked_work` is a read-only live diagnostic over the ledger,
+not a new authority or watcher. It never locks, recovers, writes, assigns or
+transitions work. Rows carry `id`, `rev`, `holder`, `wait_kind`, `state`, and a
+bounded reason code. States are `absent` (legacy no-wait), `pending`, `due`,
+`impossible` (missing/withdrawn insight target or an exact dependency revision
+superseded or substantively decided with a different action), `receipt_bound` (CI, not
+reevaluated by this view), and `unknown`. Missing legacy bodies, orphan
+identity/decision records, unsafe paths, inconsistent revisions, incomplete
+archives and malformed evidence cannot prove an impossible releaser.
+
+The default is 25 rows; the internal read API accepts 1–100. Rows and response
+retain the existing 8192-byte/1-MiB bounds. Selection retains O(limit) rows in
+problem/actionable rows (`absent`, `impossible`, `due`, `unknown`) before
+`pending`/`receipt_bound` rows, with ledger order within each group; scan time
+follows ledger size. `total` and fixed state `counts`
+cover the full scan, including omitted rows. `truncated` and `overflow_count`
+report omitted seeded rows, independently of inventory `coverage_complete`.
+Unseeded decisions or unknown observations set coverage false and total/counts
+to null, with `diagnostic: "incomplete"`; an unsafe, malformed or incomplete
+ledger scan returns `diagnostic: "unreadable"`, empty rows, null totals/counts,
+null truncation/overflow/unseeded count, and false coverage. These are unknown
+results, never evidence of zero blockers. There is no cursor: use the existing
+work-item read/explain APIs for the authoritative ledger and full history.
+Retries simply observe a new live view; no external facts or new CI facts are
+polled. Deadline, published-code and exact dependency-result conditions retain
+their existing meaning. Question/answer routing is outside this slice.
 
 ### Externality of a blocker
 
@@ -289,8 +331,8 @@ observation recorded at writer run completion is true. That observation is
 one bounded existence probe (`page_ready(limit=1)`) taken before the run's
 snapshot is created and stored immutably in the progress record (schema 2 or 3)
 (`ready_work` True/False, or null when the probe was unreadable at finish);
-`open`/`doing`, or a `blocked` item whose structured wait is satisfied,
-counts as ready. `done` and `bounded` never count, progress
+Open/doing work, and blocked items whose releaser is due, absent, or confidently
+impossible, count as ready. `done` and `bounded` never count, progress
 (`has_progress` true) clears it, and a recorded false leaves it inactive.
 The value is recorded at finish: later work creation, drops, or due
 transitions never change the published run's diagnostic; only a newer writer

@@ -169,6 +169,10 @@ def _stable_ready_for_hash(ready_work) -> dict:
     stable.pop("signature", None)
     if not isinstance(stable.get("total"), int):
         raise Denied("Invalid ready-work projection")
+    if type(stable.get("unknown_blocked")) is not int or stable["unknown_blocked"] < 0:
+        raise Denied("Invalid ready-work unknown count")
+    if type(stable.get("coverage_complete")) is not bool:
+        raise Denied("Invalid ready-work coverage")
     return stable
 
 

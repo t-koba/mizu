@@ -59,6 +59,49 @@ class CiWaitFixture(Fixture):
 
 
 class CiWaitTests(CiWaitFixture):
+    def test_blocked_liveness_never_releases_receipt_bound_ci(self):
+        blocked = self.block()
+        def check():
+            view = self.store.blocked_liveness_readonly()
+            self.assertTrue(view["coverage_complete"])
+            self.assertEqual(view["items"][0]["state"], "receipt_bound")
+            self.assertEqual(self.store.page_ready()["total"], 0)
+            self.assertEqual(self.store.get(blocked["id"]), blocked)
+        with patch("mizu.ci_waits.poll", side_effect=AssertionError("no diagnostic polling")):
+            check()
+        self.poll()
+        self.assertEqual(len(ci_waits.pending(self.store, "worker")), 1)
+        check()  # Even a recorded terminal result is not generic ready work.
+
+    def test_blocked_problem_rows_precede_pending_and_receipt_bound_rows(self):
+        with patch("mizu.work_items.now", return_value="2000-01-01T00:00:00+00:00"):
+            self.block("pending", wait={"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
+            self.block("ci")
+        with patch("mizu.work_items.now", return_value="2001-01-01T00:00:00+00:00"):
+            absent = self.block("absent", wait={"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
+            absent["wait"] = None  # Preserve legacy no-wait reads.
+            write_json(self.project.root / "work-items" / absent["id"] / "2.json", absent)
+            impossible = self.block("impossible", wait={"kind": "insight_decided", "insight": "f" * 32})
+            due = self.block("due", wait={"kind": "deadline", "at": "2000-01-01T00:00:00+00:00"})
+            target = self.project.insights.submit(source="worker", title="Unknown target",
+                                                  body="Evidence", base_snapshot=None)
+            unknown = self.block("unknown", wait={"kind": "insight_decided", "insight": target["id"]})
+        (self.project.root / "inbox" / f"{target['id']}.json").write_bytes(b"[]")
+        view = self.store.blocked_liveness_readonly(limit=4)
+        expected = sorted([absent, impossible, due, unknown], key=lambda item: item["id"])
+        self.assertEqual([row["id"] for row in view["items"]], [item["id"] for item in expected])
+        self.assertEqual({row["state"] for row in view["items"]}, {"absent", "impossible", "due", "unknown"})
+        self.assertEqual((view["overflow_count"], view["truncated"]), (2, True))
+        self.assertFalse(view["coverage_complete"])
+        self.assertIsNone(view["counts"])  # Unknown is still fail-closed.
+        self.store.transition(unknown["id"], expected_rev=2, status="open", actor="worker")
+        view = self.store.blocked_liveness_readonly(limit=3)
+        self.assertEqual({row["state"] for row in view["items"]}, {"absent", "impossible", "due"})
+        self.assertEqual(view["counts"], {"absent": 1, "impossible": 1, "due": 1,
+                                         "unknown": 0, "pending": 1, "receipt_bound": 1})
+        self.assertEqual((view["total"], view["overflow_count"], view["truncated"]), (5, 2, True))
+        self.assertTrue(view["coverage_complete"])
+
     def test_diagnosis_is_exact_current_bounded_and_pure(self):
         name = "Offline checks / core (windows-latest, 3.13)"
         wait = self.block(wait={**self.wait, "checks": [name]})["wait"]

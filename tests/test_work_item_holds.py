@@ -136,7 +136,7 @@ class WorkItemHoldTests(Fixture):
             self.change(extra)
         self.change(items[0], scope="Revised scope", reason="Clarify scope")
         self.change(items[0], "open")
-        self.change(items[1], "blocked")
+        self.change(items[1], "blocked", wait={"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
         self.change(items[2], "dropped", reason="No longer needed")
         snapshot = self.snapshot()
         self.change(items[3], snapshot_id=snapshot["id"])
@@ -159,7 +159,7 @@ class WorkItemHoldTests(Fixture):
             self.assertEqual(view["doing_since"], start)
             self.assertEqual(view["doing_age_seconds"], 86400)
             self.assertTrue(view["doing_stale"])
-        self.change(item_id, "blocked")
+        self.change(item_id, "blocked", wait={"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
         with patch("mizu.work_items.now", return_value="2030-01-03T00:00:00+00:00"):
             self.change(item_id)
             view = self.store.projection(item_id)

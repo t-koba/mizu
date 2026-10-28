@@ -184,7 +184,16 @@ def _ready_work_age(updated_at, current_time):
 
 
 def _ready_work_projection(page, *, context=None):
-    """Display one captured ready page and retain its signature for the unit."""
+    """Display one captured ready page and retain its signature for the unit.
+
+    The projection carries the bounded ``unknown_blocked`` count and
+    ``coverage_complete`` from the ready scan, so an incomplete scan never
+    reads as an exhaustive zero.
+    """
+    if type(page.get("unknown_blocked")) is not int or page["unknown_blocked"] < 0:
+        raise Denied("Invalid ready-work unknown count")
+    if type(page.get("coverage_complete")) is not bool:
+        raise Denied("Invalid ready-work coverage")
     if context is not None:
         context.ready_work_signature = page["signature"]
     current_time = time.time()
@@ -192,11 +201,13 @@ def _ready_work_projection(page, *, context=None):
                         ("id", "title", "status", "stale", "redecision", "updated_at",
                          "doing_since", "doing_age_seconds", "doing_stale")},
                        "age_seconds": _ready_work_age(row["updated_at"], current_time),
-                       **({"wait": row["wait"], "wait_satisfied": True}
+                       **({"wait": row["wait"], "wait_liveness": row["wait_liveness"],
+                           "wait_satisfied": row["wait_liveness"]["state"] == "due"}
                           if row["status"] == "blocked" else {})}
                       for row in page["items"]],
             **{key: page[key] for key in ("total", "overflow_count", "truncated",
-                                         "unseeded_decisions", "coverage_complete")}}
+                                         "unseeded_decisions", "coverage_complete",
+                                         "unknown_blocked")}}
 
 
 def _work_order_projection(context) -> dict | None:

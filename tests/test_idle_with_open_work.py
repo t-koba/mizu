@@ -267,7 +267,7 @@ class IdleWithOpenWorkTests(Fixture):
         self.assertTrue(self.status_idle()["active"])
 
     def test_blocked_without_due_at_finish_records_not_ready(self):
-        self.item("blocked-plain", "blocked")
+        self.item("blocked-plain", "blocked", {"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
         snap = self.run_writer("wait")
         self.assertIs(snap["progress"]["ready_work"], False)
         self.assertEqual(self.status_idle()["reason"], "no_ready_work")

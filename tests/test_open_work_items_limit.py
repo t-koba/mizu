@@ -119,7 +119,8 @@ class OpenWorkItemsLimitTests(Fixture):
         second = self.create("two")["record"]["work_item"]
         self.store.transition(first["id"], expected_rev=1, status="doing", actor="worker")
         self.store.transition(second["id"], expected_rev=1, status="blocked", actor="worker",
-                              reason="Waiting")
+                              reason="Waiting",
+                              wait={"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
         self.assert_full(lambda: self.create("three"), 2)
         self.store.transition(first["id"], expected_rev=2, status="dropped", actor="worker",
                               reason="Merged")

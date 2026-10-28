@@ -662,9 +662,11 @@ records its revision, update time, caller-supplied actor, from/to transition,
 and explicit reason/wait/snapshot/verification fields (null when absent).
 Actor is trusted internal attribution, not a new authorization grant. `doing`
 assigns the actor as holder, `blocked` preserves the holder or assigns the
-actor, and other statuses clear it. A blocked transition may include an
-Insights-style wait (stored only, no scheduler wake), or a work-item-only `ci`
-wait pinned to a completed immutable publication receipt. The latter wakes only
+actor, and other statuses clear it. New transitions to `blocked` require a
+supported structured wait: an Insights-style wait (stored only, no scheduler
+wake), or a work-item-only `ci` wait pinned to a completed immutable publication
+receipt. Historical blocked records without waits remain readable and are never
+rewritten or released automatically. The latter wait wakes only
 its current holder on retained terminal evidence, without changing item status.
 Dropping requires a nonempty reason. A new completion revalidates the
 immutable snapshot manifest named by its earlier delivery binding; it need not
@@ -745,8 +747,8 @@ observational: it does not account progress or affect scheduling/wakeup.
 The separately granted `work_items_transition` operation exposes only
 `Project.work_items.transition`: required `id`, positive `expected_rev`, and
 status (`open`, `doing`, `blocked`, `done`, `dropped`), with optional nonempty
-reason (1–4000 characters), structured wait, accepted scope, and 64-character
-lowercase digest `snapshot_id` (status-dependent: delivery binding on `doing`,
+reason (1–4000 characters), structured wait (required for new blocked
+transitions), accepted scope, and 64-character lowercase digest `snapshot_id` (status-dependent: delivery binding on `doing`,
 exact prior binding on `done`). The configured worker
 example role alone holds this grant; `work_items_read` does not imply it, and
 consultation/delegation roles are explicitly forbidden from holding it. The
@@ -758,9 +760,10 @@ on a doing-to-doing transition with unchanged scope (the binding event stores
 `snapshot_id` as null); then close with
 `snapshot_id` exactly equal to that binding and valid embedded or retained
 acceptance proof. The live workspace may have advanced independently.
-`dropped` requires a reason, and a `blocked` transition may include the same
+`dropped` requires a reason, and new `blocked` transitions require the same
 structured wait schema and normalization semantics as `decide`, or a
-work-item-only `{kind:"ci", publication_id, checks}` wait. Existing wait kinds
+work-item-only `{kind:"ci", publication_id, checks}` wait. Historical blocked
+records without waits remain readable and are not rewritten. Existing wait kinds
 remain stored on the item only, without scheduler effects. CI waits validate a
 completed immutable publication receipt at registration and on stored reads,
 binding the recorded branch and published SHA; absent or uncertain receipts

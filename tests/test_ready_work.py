@@ -56,8 +56,7 @@ class ReadyWorkTests(Fixture):
 
     def test_blocked_rows_cannot_hide_ready_work_or_wake_on_their_own(self):
         for key in range(3):
-            # A blocked row without a wait also remains non-ready.
-            self.item(str(key), "blocked")
+            self.item(str(key), "blocked", wait={"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
         snapshot = self.parked("done")
         self.assertFalse(should_run(self.project, snapshot, role_name="worker"))
         self.assertEqual(self.project.work_items.page_ready(limit=1)["total"], 0)
@@ -172,7 +171,7 @@ class ReadyWorkTests(Fixture):
 
     def test_prompt_ready_page_is_independent_bounded_and_shared(self):
         for index in range(3):
-            self.item(f"blocked-{index}", "blocked")
+            self.item(f"blocked-{index}", "blocked", wait={"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
         with patch("mizu.work_items.now", return_value="2026-01-01T01:00:00+01:00"):
             ready = [self.item(f"ready-{index}") for index in range(3)]
         ctx = self.context()
@@ -202,7 +201,8 @@ class ReadyWorkTests(Fixture):
         for prompt in (prompt_for(ctx), prompt_delta_for(ctx, [])):
             self.assertEqual(json.loads(prompt)["ready_work"], {
                 "items": [], "total": 0, "overflow_count": 0, "truncated": False,
-                "unseeded_decisions": 0, "coverage_complete": True})
+                "unseeded_decisions": 0, "coverage_complete": True,
+                "unknown_blocked": 0})
 
     def test_prompt_age_is_safe_for_future_missing_invalid_and_extreme_times(self):
         cases = [("2026-01-01T00:00:00+00:00", 0, 0),
@@ -260,9 +260,8 @@ class SatisfiedWorkWaitTests(Fixture):
         self.assertTrue(ready['wait_satisfied'])
         self.assertEqual(ready['wait']['kind'], 'deadline')
 
-    def test_unexpired_and_unstructured_blocks_stay_out_of_ready_page(self):
+    def test_unexpired_block_stays_out_of_ready_page(self):
         self.item('future', 'blocked', {'kind': 'deadline', 'at': '2099-01-01T00:00:00+00:00'})
-        self.item('manual', 'blocked')
         self.assertEqual(self.project.work_items.page_ready()['total'], 0)
 
     def test_code_change_wait_wakes_only_on_published_code_change(self):
@@ -337,7 +336,8 @@ class ReadySetChangeTests(Fixture):
         engine = self.engine()
         engine.run(self.project, 'worker')
         self.project.work_items.transition(item['id'], expected_rev=1, actor='worker',
-                                           status='blocked', reason='Needs reassessment')
+                                           status='blocked', reason='Needs reassessment',
+                                           wait={'kind': 'deadline', 'at': '2099-01-01T00:00:00+00:00'})
         self.assertTrue(should_run(self.project, self.project.snapshots.get(), role_name='worker'))
         engine.run(self.project, 'worker', event_trigger=True)
         self.assertFalse(should_run(self.project, self.project.snapshots.get(), role_name='worker'))
@@ -365,7 +365,8 @@ class ReadySetChangeTests(Fixture):
         snapshot = self.project.snapshots.get()
         self.assertFalse(should_run(self.project, snapshot, role_name='worker'))
         # Controlled wait fact, no clock sleeps or ledger transition.
-        with patch.object(self.project.insights, '_wait_due', return_value=True):
+        with patch('mizu.work_items.liveness', return_value={
+                'state': 'due', 'reason': 'condition_met', 'wait_kind': 'deadline'}):
             self.assertTrue(should_run(self.project, snapshot, role_name='worker'))
             self.assertEqual(engine.run(self.project, 'worker', event_trigger=True)['status'], 'completed')
             self.assertFalse(should_run(self.project, self.project.snapshots.get(), role_name='worker'))

@@ -24,7 +24,7 @@ from pathlib import Path
 
 from .smoke_refs import record_lock, validate_refs, require_pairs
 from . import insight_archive
-from .work_item_waits import stored_wait
+from .work_item_waits import stored_wait, liveness
 from .errors import Denied, LimitExceeded, OpenWorkItemsFull
 from .fs import (DIGEST, PREVIEW_BYTES, canonical, digest, identifier, lock, now, safe_read,
                  sync_dir, text_preview, write_json)
@@ -837,7 +837,7 @@ class WorkItems:
     def _optional_record(self, name: str) -> dict | None:
         """Read one optional bounded record, refusing unsafe store paths."""
         parts = name.split("/")
-        if (len(parts) != 2 or parts[0] not in ("inbox", "decisions")
+        if (len(parts) != 2 or parts[0] not in ("inbox", "decisions", "insight-ids")
                 or not parts[1].endswith(".json")):
             raise Denied("Invalid work-item origin record path")
         identifier(parts[1][:-5])
@@ -1601,7 +1601,7 @@ class WorkItems:
                                         order_fingerprint=True)
 
     def page_ready(self, *, limit=25, role_name=None) -> dict:
-        """Return actionable open/doing items and blocked items whose wait is due.
+        """Return open/doing work and blocked work needing replanning.
 
         Same bounds, ordering, recovery, lock and fail-closed contract as
         page_open. Filter before selection/counting, scanning the ledger with
@@ -1613,9 +1613,15 @@ class WorkItems:
         transitions are performed. With role_name, only unheld open items
         and that role's held doing/blocked items are eligible. Authorization
         to transition is checked by the caller. Satisfied generic waits re-enter
-        this page for reassessment; they never imply completion. CI waits retain
+        this page for reassessment, as do absent or confidently impossible
+        releasers; they never imply completion. CI waits retain
         their receipt-bound event path. Legacy unseeded decisions
-        remain explicit coverage gaps, never inferred ready work.
+        remain explicit coverage gaps, never inferred ready work. Unreadable
+        liveness (``unknown``) excludes only that blocked item and never
+        releases it; known ready rows are still returned with
+        ``coverage_complete`` false and a bounded ``unknown_blocked`` count,
+        so a zero total is not an exhaustive claim. Malformed ledger or
+        unsafe work-item state still fails closed.
         """
         if role_name is not None:
             identifier(role_name)
@@ -1668,7 +1674,7 @@ class WorkItems:
         return ("seed", seed)
 
     @staticmethod
-    def _open_row(item: dict, view: dict) -> tuple:
+    def _open_row(item: dict, view: dict, *, wait_liveness=None) -> tuple:
         """Build one bounded open-page row and its ordering key."""
         sort_key = (OPEN_STATUS_ORDER[item["status"]],
                     _timestamp_order(item["created_at"]),
@@ -1680,6 +1686,8 @@ class WorkItems:
                     ("current_origin_rev", "stale", "redecision", "doing_since", "doing_age_seconds", "doing_stale")})
         if item["status"] == "blocked":
             row["wait"] = item["wait"]
+            if wait_liveness is not None:
+                row["wait_liveness"] = wait_liveness
         if "description" in item:
             preview, clipped = text_preview(item["description"], 1024)
             row["description_preview"] = preview
@@ -1755,7 +1763,8 @@ class WorkItems:
         return sort_key, row
 
     def _page_open_impl(self, *, cursor, limit, readonly: bool, ready_only: bool = False,
-                        role_name: str | None = None, order_fingerprint: bool = False):
+                        role_name: str | None = None, order_fingerprint: bool = False,
+                        blocked_only: bool = False):
         """Collect the bounded open page with an explicit recovery mode.
 
         Callers hold insights.lock when ``readonly`` is False; the read-only
@@ -1769,9 +1778,12 @@ class WorkItems:
         events = self._iter_item_events(recover=not readonly)
         published_snapshot = None
         selected = []
+        counts = {state: 0 for state in
+                  ("absent", "pending", "due", "impossible", "receipt_bound", "unknown")}
         total = 0
         eligible = 0
         unseeded_decisions = 0
+        unknown_blocked = 0
         ready_sum = 0
         order_sum = 0
         for event_id, event in events:
@@ -1790,24 +1802,28 @@ class WorkItems:
                 leaf = canonical(["work-order-scope-v1", item["id"], item.get("scope"),
                                   view["current_origin_rev"], view["stale"], view["redecision"]])
                 order_sum = (order_sum + int(digest(leaf), 16)) % (1 << 256)
-            if ready_only:
-                if role_name is not None:
-                    if item["status"] == "open":
-                        if item.get("holder") is not None:
-                            continue
-                    elif item.get("holder") != role_name and not (
-                            item["status"] == "blocked" and item.get("holder") is None):
+            if ready_only and role_name is not None:
+                if item["status"] == "open":
+                    if item.get("holder") is not None:
                         continue
-                if item["status"] == "blocked":
-                    wait = item.get("wait")
-                    if not wait or wait.get("kind") == "ci":
-                        continue
-                    if wait.get("kind") == "code_change" and published_snapshot is None:
-                        published_snapshot = self.snapshots.get()
-                    if not self.insights._wait_due(wait, published_snapshot):
-                        continue
-                elif item.get("wait") is not None:
+                elif item.get("holder") != role_name and not (
+                        item["status"] == "blocked" and item.get("holder") is None):
                     continue
+            if (ready_only or blocked_only) and item["status"] == "blocked":
+                wait = item.get("wait")
+                if wait and wait["kind"] == "code_change" and published_snapshot is None:
+                    published_snapshot = self.snapshots.get()
+                state = liveness(self, wait, published_snapshot)
+                if ready_only:
+                    if state["state"] == "unknown":
+                        unknown_blocked += 1
+                        continue
+                    if state["state"] not in ("due", "impossible", "absent"):
+                        continue
+                if blocked_only:
+                    counts[state["state"]] += 1
+            elif blocked_only or (ready_only and item.get("wait") is not None):
+                continue
             if ready_only:
                 # Order-independent set fingerprint: unique seeded IDs, no sort
                 # or retained ID list. Domain-separated SHA-256 leaves summed
@@ -1815,7 +1831,12 @@ class WorkItems:
                 ready_sum = (ready_sum + int(digest(
                     b"ready-item-v1\0" + item["id"].encode()), 16)) % (1 << 256)
             total += 1
-            sort_key, row = self._open_row(item, view)
+            sort_key, row = self._open_row(item, view, wait_liveness=(
+                state if ready_only and item["status"] == "blocked" else None))
+            if blocked_only:
+                sort_key = (state["state"] in ("pending", "receipt_bound"), *sort_key)
+                row = {key: item[key] for key in ("id", "rev", "holder")}
+                row.update(state)
             if cursor_key is not None and sort_key <= cursor_key:
                 continue
             eligible += 1
@@ -1828,11 +1849,21 @@ class WorkItems:
         overflow_count = max(0, eligible - len(rows))
         more = overflow_count > 0
         result = {"items": rows, "total": total, "cursor": cursor,
-                  "next_cursor": _open_cursor_token(rows[-1]) if more and rows else None,
+                  "next_cursor": _open_cursor_token(rows[-1]) if more and rows and not blocked_only else None,
                   "overflow_count": overflow_count, "truncated": more,
                   "unseeded_decisions": unseeded_decisions,
                   "coverage_complete": unseeded_decisions == 0}
+        if blocked_only:
+            complete = unseeded_decisions == 0 and counts["unknown"] == 0
+            result = {"items": rows, "total": total if complete else None,
+                    "counts": counts if complete else None,
+                    "overflow_count": overflow_count, "truncated": more,
+                    "unseeded_decisions": unseeded_decisions,
+                    "coverage_complete": complete, "diagnostic": None if complete else "incomplete"}
         if ready_only:
+            complete = unseeded_decisions == 0 and unknown_blocked == 0
+            result["unknown_blocked"] = unknown_blocked
+            result["coverage_complete"] = complete
             result["signature"] = digest(canonical(
                 ["ready-set-v1", total, f"{ready_sum:064x}"]))
         if len(canonical(result)) > MAX_OPEN_PAGE_BYTES:
@@ -1885,6 +1916,26 @@ class WorkItems:
         last-key cursor pages a live view and does not freeze membership.
         """
         return self._page_open_impl(cursor=cursor, limit=limit, readonly=True)
+
+    def blocked_liveness_readonly(self, *, limit=25) -> dict:
+        """Bounded diagnostic only; unknown inventory never becomes a zero.
+
+        Uses the open-page row/byte limits and read-only scan (no lock,
+        recovery or writes). Counts cover the full seeded scan, even when
+        rows truncate. Problem/actionable rows precede pending/receipt-bound rows,
+        with ledger order within each group. Unseeded decisions or unknown
+        observations invalidate counts/total; malformed or unsafe inventory
+        invalidates the whole view.
+        The ledger, not this live projection, remains authoritative.
+        """
+        if type(limit) is not int or not 1 <= limit <= MAX_OPEN_PAGE_ROWS:
+            raise Denied("Work-item page limit must be an integer in [1, 100]")
+        try:
+            return self._page_open_impl(cursor=None, limit=limit, readonly=True, blocked_only=True)
+        except (Denied, LimitExceeded, OSError, ValueError, TypeError, AttributeError):
+            return {"items": [], "total": None, "counts": None, "overflow_count": None,
+                    "truncated": None, "unseeded_decisions": None,
+                    "coverage_complete": False, "diagnostic": "unreadable"}
 
     def page_closed_readonly(self, *, limit=10) -> dict:
         """Return the newest seeded terminal items without lock or recovery.
@@ -1941,6 +1992,8 @@ class WorkItems:
             current = self._get(item_id, history_revisions=history_revisions)
             if current["rev"] != expected_rev:
                 raise Denied("Work item changed; re-read before transitioning")
+            if status == "blocked" and wait is None:
+                raise Denied("New blocked transitions require a supported observable wait")
             registered = None
             if wait is not None:
                 if status != "blocked":

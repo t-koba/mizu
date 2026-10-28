@@ -398,6 +398,7 @@ class Project:
                 "active": {p.stem: read_json(p) for p in (self.root / "active").glob("*.json") if not p.is_symlink()},
                 "pending_insights": self.insights.list(limit=self.config.limits.pending_insights),
                 "work_order": self.work_order_status(),
+                "blocked_work": self.work_items.blocked_liveness_readonly(),
                 "budget": {"used_requests": budget["used"], "limit_requests": budget["limit"],
                            "shared_used_requests": budget["shared_used"],
                            "shared_limit_requests": budget["shared_limit"],

@@ -272,10 +272,13 @@ class ContextTests(Fixture):
         for name, role in self.config.roles.items():
             if name != "worker":
                 self.assertNotIn("work_items_transition", role.capabilities, name)
-        schema = DEFINITIONS["work_items_transition"][1]
+        description, schema = DEFINITIONS["work_items_transition"]
+        self.assertIn("new transitions to blocked require a supported observable wait", description)
+        self.assertIn("receipt-bound work-item-only CI wait", description)
         item_id = "wi_" + "a" * 32
         validate({"id": item_id, "expected_rev": 1, "status": "doing"}, schema)
-        validate({"id": item_id, "expected_rev": 1, "status": "blocked"}, schema)
+        validate({"id": item_id, "expected_rev": 1, "status": "blocked",
+                  "wait": {"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"}}, schema)
         validate({"id": item_id, "expected_rev": 2, "status": "blocked",
                   "wait": {"kind": "code_change"}}, schema)
         work_wait = schema["properties"]["wait"]["properties"]
@@ -317,16 +320,14 @@ class ContextTests(Fixture):
         self.assertEqual((result["rev"], result["status"], result["actor"]), (2, "doing", "worker"))
         self.assertEqual(self.project.work_items.get(item["id"]), result)
 
-    def test_work_items_transition_accepts_blocked_without_wait(self):
+    def test_work_items_transition_refuses_blocked_without_wait(self):
         item = self._accepted_work_item()
         ctx = self.context("worker")
-        result = ctx.handle("work_items_transition", {"id": item["id"],
-                                                       "expected_rev": item["rev"],
-                                                       "status": "blocked"})
-        self.assertEqual(result["status"], "blocked")
-        self.assertIsNone(result["wait"])
-        self.assertEqual(result["actor"], "worker")
-        self.assertEqual(self.project.work_items.get(item["id"]), result)
+        with self.assertRaisesRegex(Denied, "supported observable wait"):
+            ctx.handle("work_items_transition", {"id": item["id"],
+                                                "expected_rev": item["rev"],
+                                                "status": "blocked"})
+        self.assertEqual(self.project.work_items.get(item["id"]), item)
         self.assertFalse((self.project.root / "waits").exists())
 
     def test_work_items_transition_stale_cas_refuses_without_write(self):
