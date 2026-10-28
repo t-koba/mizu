@@ -309,6 +309,30 @@ and receipt checks adds work. It justifies neither a cutover nor an index; any
 future migration needs a separate design and evidence for source-current
 acknowledgement, correction/replay, backup/restore and full-size bounds.
 
+## Structured wait and obligation shadow preflight (fixture only)
+
+Experiment `7e65ad00a6ac4c27af77a1435f592728` compared the current
+`Insights.due_waits` and `pending_obligations` paths with temporary
+`insight.wait` and `insight.obligation` SharedRecords envelopes. The deterministic
+fixture held four due deadlines, one satisfied dependency wait, and four
+unresolved obligations. Per-source business payloads and event-time order
+matched after excluding each transport's distinct acknowledgement token; a
+cross-role SharedRecords acknowledgement was refused. After one explicit wait
+consumption and one obligation receipt, then revising an unacknowledged waiter,
+the current projections still matched. The shadow retained all nine immutable
+records; three no longer appeared in current source projections, including the
+revised waiter. Therefore SharedRecords records alone cannot replace the
+source-current revision, dependency and registration checks.
+
+The nine legacy event rows totaled 3,735 canonical bytes (largest 599); the
+SharedRecords envelopes totaled 6,303 bytes (largest 875). In the measured
+post-partial-ack fixture state, nine local samples had median 8.143 ms for the
+current source projections and 16.732 ms for those projections plus shared
+record/receipt validation. These are disposable local fixture measurements,
+not production or Windows estimates. They show no performance case for a
+cutover or index and preserve the need for current-source filtering; no runtime,
+wake or admission path was changed.
+
 ## Bounded disposable pilot
 
 The high-volume representative was `insight.decision`, because the current decision-event reader already handles exact per-role receipts and has a 205-event oldest-first regression. The experiment created 205 rejected insights in an isolated test `Fixture`, repeated each read five times, built the normal prompt locally, and projected the same events into a scratch common envelope (`kind`, stable decision event ID, author, insight/revision subject, bounded payload) with scratch per-role receipts. It changed no source files and used no model/provider, network, CI runner or deployment. Evidence: experiment `0adfa0cbd6e46e847d04f211c87795caf7a1398b2a6d83758097ece8382de1ea`.
