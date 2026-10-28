@@ -94,6 +94,24 @@ class WorkItemHoldTests(Fixture):
         self.assertEqual(sorted(observed), [("reviewer", "claimed"), ("worker", "claimed")])
         self.assertEqual({self.store.get(item_id)["holder"] for item_id in items}, {"worker", "reviewer"})
 
+    def test_same_status_doing_transfer_checks_recipient_capacity(self):
+        worker_item = self.item("worker-held")
+        reviewer_item = self.item("reviewer-held")
+        self.change(worker_item, actor="worker")
+        self.change(reviewer_item, actor="reviewer")
+
+        with self.assertRaisesRegex(Denied, "doing slots full for worker"):
+            self.change(reviewer_item, actor="worker", scope="Worker scope",
+                        reason="Transfer the active hold to worker")
+        unchanged = self.store.get(reviewer_item)
+        self.assertEqual((unchanged["rev"], unchanged["holder"]), (2, "reviewer"))
+
+        self.change(worker_item, "open")
+        transferred = self.change(reviewer_item, actor="worker", scope="Worker scope",
+                                  reason="Transfer the active hold after releasing capacity")
+        self.assertEqual(transferred["holder"], "worker")
+        self.assertEqual(transferred["status"], "doing")
+
     def test_blocked_items_do_not_count_and_denied_claim_is_not_appended(self):
         first, second = self.item("first"), self.item("second")
         self.change(first)

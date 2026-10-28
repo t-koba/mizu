@@ -519,8 +519,8 @@ class PerRoleSpendTests(Fixture):
     def test_role_override_applies_per_role(self):
         from mizu.config import load, role_requests_per_run, role_tools_per_run
         text = self.file.read_text()
-        text = text.replace('[roles.worker]\nprofile = "primary"',
-                            '[roles.worker]\nprofile = "primary"\nrequests_per_run = 200\ntools_per_run = 400')
+        text = text.replace('[roles.worker]',
+                            '[roles.worker]\nrequests_per_run = 200\ntools_per_run = 400')
         self.file.write_text(text)
         config = load(self.file)
         self.assertEqual(role_requests_per_run(config, config.roles["worker"]), 200)
@@ -532,8 +532,8 @@ class PerRoleSpendTests(Fixture):
     def test_role_override_refuses_bad_values(self):
         from mizu.config import load
         text = self.file.read_text()
-        text = text.replace('[roles.worker]\nprofile = "primary"',
-                            '[roles.worker]\nprofile = "primary"\nrequests_per_run = 0')
+        text = text.replace('[roles.worker]',
+                            '[roles.worker]\nrequests_per_run = 0')
         self.file.write_text(text)
         with self.assertRaises(Exception):
             load(self.file)
@@ -549,8 +549,8 @@ class PerRoleSpendTests(Fixture):
     def test_wrap_up_override_applies_per_role(self):
         from mizu.config import load, role_wrap_up_requests, role_wrap_up_tools
         text = self.file.read_text()
-        text = text.replace('[roles.worker]\nprofile = "primary"',
-                            '[roles.worker]\nprofile = "primary"\nwrap_up_requests = 7\nwrap_up_tools = 9')
+        text = text.replace('[roles.worker]',
+                            '[roles.worker]\nwrap_up_requests = 7\nwrap_up_tools = 9')
         self.file.write_text(text)
         config = load(self.file)
         self.assertEqual(role_wrap_up_requests(config, config.roles["worker"]), 7)
@@ -568,8 +568,8 @@ class PerRoleSpendTests(Fixture):
         for bad_key, bad_literal in cases:
             with self.subTest(key=bad_key, value=bad_literal):
                 text = self.file.read_text()
-                text = text.replace('[roles.worker]\nprofile = "primary"',
-                                    '[roles.worker]\nprofile = "primary"\n'
+                text = text.replace('[roles.worker]',
+                                    '[roles.worker]\n'
                                     f"{bad_key} = {bad_literal}")
                 self.file.write_text(text)
                 with self.assertRaises(Exception):
@@ -587,8 +587,8 @@ class PerRoleSpendTests(Fixture):
         from mizu.config import load
         from mizu.errors import LimitExceeded
         text = self.file.read_text()
-        text = text.replace('[roles.worker]\nprofile = "primary"',
-                            '[roles.worker]\nprofile = "primary"\nrequests_per_run = 1\nwrap_up_requests = 1')
+        text = text.replace('[roles.worker]',
+                            '[roles.worker]\nrequests_per_run = 1\nwrap_up_requests = 1')
         self.file.write_text(text)
         config = load(self.file)
         ctx = self.context("worker")
@@ -612,8 +612,8 @@ class PerRoleSpendTests(Fixture):
         from mizu.config import load
         from mizu.errors import LimitExceeded
         text = self.file.read_text()
-        text = text.replace('[roles.worker]\nprofile = "primary"',
-                            '[roles.worker]\nprofile = "primary"\ntools_per_run = 1\nwrap_up_tools = 1')
+        text = text.replace('[roles.worker]',
+                            '[roles.worker]\ntools_per_run = 1\nwrap_up_tools = 1')
         self.file.write_text(text)
         config = load(self.file)
         ctx = self.context("worker")
@@ -631,8 +631,8 @@ class PerRoleSpendTests(Fixture):
     def test_budget_and_tool_gates_use_role_effective(self):
         from mizu.config import load
         text = self.file.read_text()
-        text = text.replace('[roles.worker]\nprofile = "primary"',
-                            '[roles.worker]\nprofile = "primary"\nrequests_per_run = 1\ntools_per_run = 1')
+        text = text.replace('[roles.worker]',
+                            '[roles.worker]\nrequests_per_run = 1\ntools_per_run = 1')
         self.file.write_text(text)
         config = load(self.file)
         ctx = self.context("worker")
@@ -690,8 +690,8 @@ class PerRoleSpendTests(Fixture):
                     text = text.replace("delegate_wrap_up_requests = 2",
                                         f"delegate_wrap_up_requests = {share}")
                 if role_total is not None:
-                    text = text.replace('[roles.worker]\nprofile = "primary"',
-                                        '[roles.worker]\nprofile = "primary"\n'
+                    text = text.replace('[roles.worker]',
+                                        '[roles.worker]\n'
                                         f"wrap_up_requests = {role_total}")
                 self.file.write_text(text)
                 config = load(self.file)

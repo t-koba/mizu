@@ -2020,7 +2020,10 @@ class WorkItems:
             if registered is not None:
                 require_pairs(self.root, registered.get("smoke_refs", []))
             self._validate_transition(current, record)
-            if current["status"] != "doing" and status == "doing":
+            # A same-status doing revision by another role transfers the
+            # holder, so it is a new claim against that role's active slots.
+            if (status == "doing"
+                    and (current["status"] != "doing" or current["holder"] != actor)):
                 self._require_doing_capacity(actor)
             if len(canonical(record)) > PREVIEW_BYTES:
                 raise LimitExceeded("Work-item event exceeds byte bound")

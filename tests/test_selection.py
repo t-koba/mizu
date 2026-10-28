@@ -936,7 +936,15 @@ class SelectionTests(SelectionFixture):
         self.assertFalse(restored.control()['armed'])
 
     def test_toml_and_cli_preview_observe_delete(self):
-        text = self.file.read_text().replace('[roles.worker]\nprofile = "primary"', '[roles.worker]\nselector = "dynamic"')
+        text = self.file.read_text()
+        start = text.index("[roles.worker]")
+        end = text.find("\n[roles.", start + len("[roles.worker]"))
+        if end < 0:
+            end = len(text)
+        worker = text[start:end]
+        self.assertIn('profile = "primary"', worker)
+        worker = worker.replace('profile = "primary"', 'selector = "dynamic"', 1)
+        text = text[:start] + worker + text[end:]
         text += '''\n[selectors.dynamic]
 retry_seconds = 30
 [[selectors.dynamic.rules]]

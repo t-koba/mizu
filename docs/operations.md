@@ -853,13 +853,15 @@ Windows の匿名 pipe は既存の PeekNamedPipe 経路を使います。
 
 `[limits].work_items_doing` defaults to **1** active `doing` item per role;
 `roles.<name>.work_items_doing` may override it (integer **1–100**, the existing
-page-row ceiling). Entering `doing` counts validated current holders across the
-ledger atomically with the transition CAS under `insights.lock`. The actor comes
-from the role, never a tool argument. A denied claim appends nothing; re-read and
-release (`open`), block, complete or drop existing work before retrying. Blocked
-waits consume no doing slot. Lowering the cap never invalidates history: existing
+page-row ceiling). Entering `doing` or transferring an existing `doing` hold
+to a different role counts validated current holders across the ledger atomically
+with the transition CAS under `insights.lock`. The actor comes from the role,
+never a tool argument. A denied claim appends nothing; re-read and release
+(`open`), block, complete or drop existing work before retrying. Blocked waits
+consume no doing slot. Lowering the cap never invalidates history: existing
 over-limit holds remain readable and can be released, blocked, completed or
-dropped. Same-doing scope/delivery revisions consume no new slot.
+dropped. Same-holder scope/delivery revisions consume no new slot; a revision
+that transfers the hold checks the recipient's capacity as a claim.
 
 Open-work rows (including read-only CLI status), by-ID explanations, submitter
 status and ready-work prompt rows expose `doing_since`, `doing_age_seconds` and
