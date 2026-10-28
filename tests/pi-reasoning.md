@@ -59,11 +59,26 @@ assistant messages do.
 
 ## Limits
 
-This is a real installed-SDK integration test, not a live-provider or installed
-CLI/launcher test. It uses a test-only model/provider, no production profile
+The replay coverage above is a real installed-SDK integration test, not a
+live-provider or installed CLI test. It uses a test-only model/provider, no production profile
 changes, no network and no inference. Signatures are opaque fixtures, not
 cryptographically validated. Coverage is same-model Anthropic Messages replay;
 it does not claim other providers' serialization, cross-model reasoning
 conversion, crash-mid-stream recovery, branch/bug-report text formatting, or
 Mizu adapter RPC/extension wiring. Existing bridge and durable tests cover
 separate adapter contracts. No persistent-exec-session mode is implemented here.
+
+
+## Native provider catalog control path
+
+The same offline SDK gate also exercises a fake reviewed provider extension
+through the production catalog launcher and ordinary Pi RPC `get_state` (no
+prompt/inference). It lists an absent-from-bundle model with provider-filtered
+refresh, restarts from the provider-published cache, then explicitly pins that
+model and resolves it in the ordinary launcher. A second registered provider
+records that it never receives a network-enabled refresh. Offline/auth failures
+retain cached native rows; overlay-only and missing hooks are unsupported, and
+unknown freshness is not inferred from the shared store's timestamp. Separate
+Python control-plane tests cover explicit `--refresh`, bounded single dispatch,
+selection preservation and pi-durable's explicit unsupported source mismatch.
+These fixtures prove adapter wiring, not a live provider or OS sandbox boundary.

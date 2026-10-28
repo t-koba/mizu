@@ -314,3 +314,175 @@ test('Pi durable production tools deliver host result text, reopen a completed u
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+// Native catalog tests use the installed SDK, real reviewed extension loader and
+// file store. Provider refresh is synthetic; no inference or external service.
+import { readFile, writeFile } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import { catalog, inspectNativeCatalog } from '../adapters/pi/catalog.mjs';
+
+const nativeModel = { id: 'new-provider-only-model', name: 'Native fixture', provider: 'native-fixture',
+  api: 'openai-completions', baseUrl: 'https://fixture.invalid', reasoning: false,
+  input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  contextWindow: 8192, maxTokens: 1024 };
+
+async function nativeFixture(directory) {
+  const extension = join(directory, 'provider.mjs');
+  await writeFile(extension, `
+    import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+    const trace = ${JSON.stringify(join(directory, 'refreshes.jsonl'))};
+    const failure = ${JSON.stringify(join(directory, 'failure.txt'))};
+    const model = ${JSON.stringify(nativeModel)};
+    export default pi => {
+      let models = [];
+      pi.registerProvider({ id: 'unrelated-native', name: 'Other',
+        auth: { apiKey: { name: 'Fixture', resolve: async () => undefined } }, getModels: () => [],
+        async refreshModels(ctx) {
+          appendFileSync(trace, JSON.stringify({ id: 'unrelated-native', network: ctx.allowNetwork })+'\\n');
+          if (ctx.allowNetwork) throw new Error('unrelated network refresh forbidden');
+        } });
+      pi.registerProvider({ id: model.provider, name: 'Fixture',
+        auth: { apiKey: { name: 'Fixture', resolve: async () => ({ auth: { apiKey: 'fixture-key' } }) } },
+        getModels: () => models,
+        async refreshModels(ctx) {
+          appendFileSync(trace, JSON.stringify({ id: model.provider, network: ctx.allowNetwork, force: ctx.force })+'\\n');
+          if (!ctx.allowNetwork) {
+            if (ctx.stored) await ctx.publish({ update: () => { models = ctx.stored.models; } });
+            return;
+          }
+          if (existsSync(failure)) {
+            const code = readFileSync(failure, 'utf8');
+            throw Object.assign(new Error('unsafe fixture exception'), { code });
+          }
+          await ctx.publish({ persist: { models: [model], checkedAt: 1234567800000 }, update: () => { models = [model]; } });
+        },
+        stream() { throw new Error('inference must not run'); },
+        streamSimple() { throw new Error('inference must not run'); }
+      });
+    };
+  `);
+  return { provider: nativeModel.provider, model: 'pinned-old-model', agentDir: directory,
+    cwd: directory, resources: [{ kind: 'extension', path: extension }], options: {}, refresh: false };
+}
+
+test('native catalog: real extension listing, provider-only cache, explicit selection and ordinary resolution', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'mizu-native-catalog-'));
+  const originalFetch = globalThis.fetch;
+  let fetches = 0;
+  globalThis.fetch = () => { fetches++; throw new Error('network forbidden'); };
+  try {
+    const cfg = await nativeFixture(directory);
+    const before = JSON.stringify(cfg);
+    const sdk = await installed('pi', 'pi-coding-agent');
+    const bundled = await sdk.ModelRuntime.create({ authPath: join(directory, 'auth.json'),
+      modelsPath: null, allowModelNetwork: false });
+    assert.equal(bundled.getModel(nativeModel.provider, nativeModel.id), undefined);
+    const overlay = await inspectNativeCatalog(bundled, { ...cfg, provider: 'openai', refresh: true });
+    assert.equal(overlay.status, 'unsupported');
+    assert.equal(overlay.source, 'unsupported');
+    assert.deepEqual(overlay.models, []);
+    const empty = await catalog(cfg);
+    assert.deepEqual(empty.models, []);
+    assert.equal(empty.refresh, 'not_requested');
+    const listed = await catalog({ ...cfg, refresh: true });
+    assert.equal(listed.status, 'available');
+    assert.equal(listed.source, 'registered_native_provider');
+    assert.deepEqual(listed.models, [{ id: nativeModel.id, resolvable: true }]);
+    const refreshes = (await readFile(join(directory, 'refreshes.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
+    assert.deepEqual(refreshes.filter(row => row.network), [{ id: nativeModel.provider, network: true, force: true }]);
+    assert.equal(listed.selected_model, 'pinned-old-model');
+    assert.equal(JSON.stringify(cfg), before, 'inspection does not change the selection');
+    assert.equal(listed.last_successful_observation, null);
+    assert.equal(listed.freshness, 'unknown');
+    assert.equal(listed.completeness, 'unknown');
+    assert.deepEqual((await catalog(cfg)).models, listed.models, 'native hook restores on restart');
+    for (const [code, expected] of [['ENETUNREACH', 'offline'], ['auth', 'auth_failed']]) {
+      await writeFile(join(directory, 'failure.txt'), code);
+      const failed = await catalog({ ...cfg, refresh: true });
+      assert.equal(failed.error, expected);
+      assert.equal(failed.refresh, 'failed');
+      assert.deepEqual(failed.models, listed.models, 'real native hook retains restored cache on failure');
+      assert.equal(failed.last_successful_observation, null);
+    }
+
+    // Explicit operator selection: exercise the ordinary launcher through RPC
+    // get_state only. No bridge requests, prompts or inference are admitted.
+    const effective = join(directory, 'effective.json');
+    const bridge = join(directory, 'bridge.json');
+    await writeFile(bridge, JSON.stringify({ tools: [] }));
+    await writeFile(effective, JSON.stringify({ ...cfg, model: nativeModel.id,
+      engine_tools: [], mcp_servers: {}, systemPrompt: 'No inference.', sessionDir: directory }));
+    const child = spawnSync(process.execPath, ['adapters/pi/launcher.mjs', effective], {
+      input: '{"id":"state","type":"get_state"}\n', encoding: 'utf8', timeout: 20000,
+      env: { ...process.env, MIZU_BRIDGE_CONFIG: bridge }, maxBuffer: 1024 * 1024 });
+    assert.equal(child.error, undefined);
+    assert.equal(child.status, 0, child.stderr);
+    const state = child.stdout.trim().split('\n').map(line => JSON.parse(line))
+      .find(row => row.id === 'state');
+    assert.equal(state.success, true, child.stdout);
+    assert.equal(state.data.model.id, nativeModel.id);
+    assert.equal(fetches, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('native catalog gates wrappers and filters refresh; incomplete, offline and auth reports are safe', async () => {
+  const cfg = { provider: nativeModel.provider, model: 'pinned', refresh: true };
+  const refreshes = [];
+  const provider = { id: cfg.provider, getModels: () => [nativeModel], refreshModels() {} };
+  const runtime = { getRegisteredNativeProvider: () => undefined,
+    getModel: () => nativeModel, getModels: () => { throw new Error('merged listing forbidden'); },
+    refresh: async options => { refreshes.push(options); return { aborted: false, errors: new Map() }; } };
+  assert.equal((await inspectNativeCatalog(runtime, cfg)).status, 'unsupported');
+  assert.deepEqual(refreshes, [], 'overlay-only builtin is never refreshed');
+  runtime.getRegisteredNativeProvider = () => ({ ...provider, refreshModels: undefined });
+  assert.equal((await inspectNativeCatalog(runtime, cfg)).status, 'unsupported');
+  runtime.getRegisteredNativeProvider = () => provider;
+  assert.equal((await inspectNativeCatalog(runtime, cfg)).status, 'available');
+  assert.deepEqual(refreshes, [{ providers: [cfg.provider], allowNetwork: true, force: true }]);
+  await inspectNativeCatalog(runtime, { ...cfg, refresh: false });
+  assert.deepEqual(refreshes.at(-1), { providers: [cfg.provider], allowNetwork: false, force: false });
+  for (const [code, expected] of [['ENETUNREACH', 'offline'], ['auth', 'auth_failed'], ['oauth', 'auth_failed'], ['secret', 'refresh_failed']]) {
+    runtime.refresh = async () => ({ aborted: false,
+      errors: new Map([[cfg.provider, Object.assign(new Error('unsafe fixture exception'), { code })]]) });
+    const report = await inspectNativeCatalog(runtime, cfg);
+    assert.equal(report.status, 'error');
+    assert.equal(report.error, expected);
+    assert.equal(report.refresh, 'failed');
+    assert.deepEqual(report.models, [{ id: nativeModel.id, resolvable: true }], 'cached list survives failure');
+    assert.ok(!JSON.stringify(report).includes('unsafe fixture exception'));
+  }
+  provider.getModels = () => [{ ...nativeModel, maxTokens: undefined }];
+  const incomplete = await inspectNativeCatalog(runtime, cfg);
+  assert.equal(incomplete.status, 'error', 'refresh error remains visible even with incomplete metadata');
+  assert.equal(incomplete.models[0].resolvable, false);
+  runtime.refresh = async () => ({ aborted: false, errors: new Map() });
+  assert.equal((await inspectNativeCatalog(runtime, cfg)).status, 'incomplete');
+  provider.getModels = () => [{ ...nativeModel, provider: 'wrong-source' }];
+  assert.equal((await inspectNativeCatalog(runtime, cfg)).error, 'invalid_native_listing');
+});
+
+test('catalog launcher needs no bridge and never exposes setup diagnostics', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'mizu-catalog-cli-'));
+  try {
+    const cfg = await nativeFixture(directory);
+    const effective = join(directory, 'effective.json');
+    await writeFile(effective, JSON.stringify({ ...cfg, refresh: true }));
+    const child = () => spawnSync(process.execPath, ['adapters/pi/launcher.mjs', '--model-catalog', effective],
+      { encoding: 'utf8', timeout: 20000, env: { ...process.env, MIZU_BRIDGE_CONFIG: '' }, maxBuffer: 1024 * 1024 });
+    const listed = child();
+    assert.equal(listed.status, 0, listed.stderr);
+    assert.equal(JSON.parse(listed.stdout).models[0].id, nativeModel.id);
+    assert.equal(listed.stderr, '');
+    await writeFile(cfg.resources[0].path, "export default () => { console.error('unsafe fixture diagnostic'); throw new Error('unsafe fixture exception'); };");
+    const failed = child();
+    assert.equal(failed.status, 0);
+    assert.equal(JSON.parse(failed.stdout).error, 'provider_setup_failed');
+    assert.equal(failed.stderr, '');
+    assert.ok(!failed.stdout.includes('unsafe fixture'));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

@@ -79,6 +79,9 @@ def parser() -> argparse.ArgumentParser:
     selection.add_parser("status")
     p = selection.add_parser("delete")
     p.add_argument("group")
+    p = sub.add_parser("model-catalog", help="Inspect a configured provider catalog; no inference")
+    p.add_argument("--profile", required=True)
+    p.add_argument("--refresh", action="store_true", help="Explicitly permit this provider's network listing hook")
     p = sub.add_parser("doctor", help="Check platform, versions, isolation prerequisites and budget file")
     p.add_argument("--sandbox", action="store_true", help="Actually execute the rootless isolation smoke")
     p.add_argument("--sandbox-image", default=None, help="Ephemeral candidate image for this check only; never writes config")
@@ -614,6 +617,9 @@ def execute(args):
         from .project import Project
         from .runtime import Engine
         return Engine(config).preview(Project(config, args.project), _resolve_role(config, args.role), _attribute_input(args.attributes))
+    if args.command == "model-catalog":
+        from .model_catalog import inspect
+        return inspect(config, args.profile, refresh=args.refresh)
     if args.command == "doctor":
         from .doctor import check
         return check(_with_sandbox_image(config, getattr(args, "sandbox_image", None)), sandbox=args.sandbox)

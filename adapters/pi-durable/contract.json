@@ -13,7 +13,7 @@
   "request_unit": "model_request",
   "dependency_evidence": "package-lock.json",
   "durable": "pi-durable 1.3.0 Harness over file-backed SQLite with requestId resume binding; replay unsafe by default",
-  "model_resolution": "the pinned model resolves from Pi's bundled catalog plus the engine directory's models.json through Pi's own ModelRuntime, the same source the pi engine uses",
+  "model_resolution": "the pinned model resolves from Pi's bundled catalog plus the engine directory's models.json through Pi's own ModelRuntime, shared bundled/explicit sources only; Pi native provider extensions are not loaded, and model-catalog inspection reports unsupported source mismatch",
   "bridge_client": "vendored copy of adapters/pi/bridge-client.mjs: the pinned adapter digest covers its own protocol bytes, so framing and caps stay inside this contract instead of a shared import",
   "request_bound": "requests_per_run is the single per-unit spend bound: every provider request passes _budget admission, and a per-run refusal aborts the submission (request_bound)",
   "store_compat": 1,

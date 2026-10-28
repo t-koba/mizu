@@ -7,6 +7,7 @@ import { ModelRuntime, SettingsManager, SessionManager, createAgentSession,
   createToolSearchExtension, createMcpExtension, runRpcMode } from '@earendil-works/pi-coding-agent';
 import { register } from './register.mjs';
 import { meterRuntime } from './model-runtime.mjs';
+import { catalog } from './catalog.mjs';
 
 if (process.argv.includes('--check-contract')) {
   const checked = { 'ModelRuntime': ModelRuntime.create, 'createAgentSession': createAgentSession,
@@ -17,6 +18,19 @@ if (process.argv.includes('--check-contract')) {
   }
   process.stdout.write(JSON.stringify({ contract: 'managed-pi-sdk', exports: Object.keys(checked),
     inference: 'not_run' })+'\n');
+} else if (process.argv[2] === '--model-catalog') {
+  // Extension/provider diagnostics are untrusted and can contain secrets. Only
+  // the bounded catalog projection is returned on this operator control path.
+  const stdout = process.stdout.write;
+  let report;
+  process.stdout.write = process.stderr.write = () => true;
+  try {
+    report = await catalog(JSON.parse(readFileSync(process.argv[3], 'utf8')));
+  } catch {
+    report = { status: 'error', error: 'provider_setup_failed', inference: 'not_run' };
+  }
+  // Keep diagnostics suppressed for late provider callbacks too.
+  stdout.call(process.stdout, JSON.stringify(report)+'\n');
 } else {
   const cfg = JSON.parse(readFileSync(process.argv[2], 'utf8'));
   const bridge = JSON.parse(readFileSync(process.env.MIZU_BRIDGE_CONFIG, 'utf8'));

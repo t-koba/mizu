@@ -18,11 +18,12 @@
  * - harness.resume(): continue work a dead process left unfinished.
  * - harness.usage(): cumulative per provider/model + per tool spend.
  * - ModelRuntime resolves the pinned model from the bundled catalog plus the
- *   engine directory's models.json, exactly as the pi engine resolves it.
+ *   engine directory's models.json/cache. Unlike pi, native provider
+ *   extensions are not loaded; model-catalog reports that source mismatch.
  *
  * Authority preserved from the pi engine: exact provider/model pin resolved
- * from the same source Pi uses (the bundled catalog plus the engine
- * directory's models.json), bridge tools only (native host tools refused
+ * from the shared bundled/explicit sources (plus the engine directory's
+ * models.json/cache, not Pi's native provider extensions), bridge tools only (native host tools refused
  * Python-side), per-request budget admission and usage reporting around every
  * provider call, mizu_finish seal required.
  */

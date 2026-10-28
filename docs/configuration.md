@@ -887,15 +887,81 @@ No accounting read admits a provider request.
 Pi SDK knobs
 are refused on pi-durable profiles and durable policy is refused on pi
 profiles instead of silently ignored. Both Pi engines resolve the exact model
-from the same source through Pi's own model runtime: the bundled catalog plus
-the engine directory's `models.json`, so an operator-defined model behaves the
-same on the ephemeral roles and on the persistent worker. Pi operators bound
+through Pi's own model runtime: the bundled catalog plus the engine directory's
+`models.json` and cache. Pi also loads reviewed provider extensions; pi-durable
+does not load those extensions, so native-provider resolution parity is not
+claimed. Explicit `models.json` configuration remains available on both engines. Pi operators bound
 its live context through `options.settings.compaction` (`reserveTokens`,
 `keepRecentTokens`); pi-durable operators use the three `durable_compaction_*`
 keys above. Codex native configuration keys plus `options.turn` for native turn fields
 (such as `outputSchema`, `effort`, `serviceTier`); Claude
 `ClaudeAgentOptions` fields. Effort values are validated by the selected engine,
 not a Mizu enum. Models/providers have no fixed allowlist.
+
+### Operator provider catalog inspection
+
+```sh
+mizu model-catalog --profile primary
+mizu model-catalog --profile primary --refresh
+```
+
+This control command makes no inference request and never edits a profile's
+pinned provider/model. `--profile` is required. Without `--refresh`, catalog
+restoration is cache-only (`allowNetwork: false`). Only `--refresh` permits the
+selected registered native provider's listing hook to access the network, with
+`force: true` and `providers: [configured_provider]`; there is no global network
+refresh. Normal model runs remain catalog-network-off. To select a listed model,
+edit the profile's exact model ID explicitly; inspection itself does not select it.
+
+Pi uses the SDK resource/service loader to register the profile's reviewed local
+provider extensions, without creating an agent session, bridge, MCP server or
+calling inference. Only `getRegisteredNativeProvider(providerId).getModels()`
+is projected, never the composed SDK catalog. Built-in/overlay-only providers,
+missing listing/refresh hooks and invalid listings report `unsupported` (including
+when refresh was requested). A pi.dev overlay is not native evidence. Missing
+execution metadata reports `incomplete` with `resolvable: false`; a successful
+lookup with API and positive token bounds is only a resolution check, **not**
+proof of provider execution, authentication, availability or catalog completeness.
+Explicit model definitions remain intact even when inspection is unsupported.
+Pi-durable returns `unsupported` with `durable_native_provider_source_mismatch`
+without launching an engine: it cannot load the same native provider extensions.
+It does not silently substitute a pi.dev listing or claim native parity.
+
+The single JSON result includes `engine`, `provider`, `selected_model`,
+`inference: "not_run"`, `source` (`registered_native_provider` or `unsupported`),
+`status` (`available`, `incomplete`, `unsupported`, `error`), `models` (ID and
+`resolvable` only), `refresh` and a stable `error` code or null. `refresh` is
+`not_requested`, `unsupported`, `completed`, `failed`, `not_started` or `unknown`
+(the latter after an interrupted/failed child with uncertain completion).
+Provider auth/OAuth codes become `auth_failed`; recognized transport codes become
+`offline`; other failures become `refresh_failed`, with no raw exception text,
+URLs, headers or provider diagnostics. Cached native rows remain visible on
+refresh failure when the provider hook preserves/restores them. A failed refresh
+never implies that a cached row is current. Invalid/oversized listings fail
+closed rather than silently truncating them.
+
+`last_successful_observation` is null and `freshness`/`completeness` are `unknown`:
+the current SDK has no source-bound native success/completeness record. Its
+shared `models-cache.json` timestamps can also belong to an overlay and are not
+promoted to native provenance, even after a refresh returns without error.
+`refresh: completed` means the SDK operation returned without a reported error,
+not that the provider fetched a complete catalog. Cache persistence/restoration
+is owned by the native provider through the SDK store.
+
+Trust and bounds: this is an operator-only control path, not a model tool. It
+uses the configured engine command, login store, credentials environment and
+reviewed resource digest checks exactly at the existing trusted provider runtime
+boundary; it does not expose credentials to workspace tools/containers or add
+direct provider endpoints. Provider extensions remain trusted executable code,
+not sandboxed hostile code, just as in ordinary Pi runs. Inspection uses an
+empty temporary working directory, not a live project workspace. Python bounds
+the single child by `limits.model_request_seconds` and 1 MiB output; rows are
+bounded to 4096 IDs of at most 512 UTF-16 code units and 768 KiB serialized rows.
+No automatic retry is made after failure/cancellation; temporary control input
+is removed and no run/session/publication evidence is created. An operator may
+explicitly inspect/refresh again after an uncertain outcome. Deterministic offline
+SDK/launcher tests cover the source gate, cache and exact-model resolution; they
+do not prove an actual provider endpoint or new OS confinement.
 
 `resources` are reviewed local files or directory trees with `{kind, path, sha256}` (maximum 64).
 Tree hashes cover names, content and executable bits; no symlinks, at most 4096

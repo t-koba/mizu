@@ -102,12 +102,12 @@ class CheckTimeoutTests(unittest.TestCase):
         # JavaScript file, and one per shell wrapper on a POSIX host. The
         # account of the product's own CI is these counts, so they are
         # pinned here: a changed file set must change this account.
-        self.assertEqual(CHECK.later_phase_child_count(platform='posix'), 16)
-        self.assertEqual(CHECK.later_phase_child_count(platform='nt'), 9)
+        self.assertEqual(CHECK.later_phase_child_count(platform='posix'), 17)
+        self.assertEqual(CHECK.later_phase_child_count(platform='nt'), 10)
         self.assertEqual(len(CHECK.SDK_GATE_NAMES), 3)
         self.assertEqual(CHECK.later_phase_child_count(
-            platform='posix', sdk_suites=len(CHECK.SDK_GATE_NAMES)), 19)
-        self.assertEqual(len(CHECK.javascript_sources()), 8)
+            platform='posix', sdk_suites=len(CHECK.SDK_GATE_NAMES)), 20)
+        self.assertEqual(len(CHECK.javascript_sources()), 9)
         self.assertEqual(len(CHECK.shell_sources()), 7)
 
     def test_later_phase_is_bounded_as_a_whole_not_per_child(self):
