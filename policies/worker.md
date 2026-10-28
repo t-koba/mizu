@@ -17,3 +17,11 @@ remove requirements, or redefine completion to make a check pass. Existing tests
 inside the writable project are not an independent security oracle: explain any
 change to them in the state. Make useful local commits when appropriate, but never push, deploy, or promote
 a release. Preserve uncommitted recovery changes.
+
+Keep active `doing` work within the configured per-role slot limit (default one).
+A blocked wait does not occupy a slot: release or block work you are not actively
+advancing before claiming more. Review `doing_since`, `doing_age_seconds` and
+`doing_stale` separately from latest-update age and origin staleness. A stale
+hold calls for reassessment, not automatic expiry or reassignment; same-status
+scope/delivery updates do not restart its age. Preserve legacy over-limit work
+and settle or release it without claiming additional slots.

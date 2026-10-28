@@ -733,6 +733,7 @@ class WorkItemTests(Fixture):
             self.store.page_open()
 
     def test_page_open_orders_status_then_oldest_timestamp_and_id(self):
+        self.store.doing_limit = 3  # This ordering fixture deliberately holds three items.
         self.change("doing")
 
         def create(title, created_at):

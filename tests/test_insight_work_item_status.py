@@ -39,7 +39,8 @@ class InsightWorkItemStatusTests(Fixture):
         self.assertEqual(status, {
             "id": item["id"], "status": "blocked", "rev": 2, "holder": "worker",
             "updated_at": changed["updated_at"], "current_origin_rev": 1,
-            "stale": False, "reason_preview": "Investigate the dependency",
+            "stale": False, "doing_since": None, "doing_age_seconds": None, "doing_stale": False,
+            "reason_preview": "Investigate the dependency",
             "reason_truncated": False, "wait": changed["wait"]})
         self.assertNotIn("work_item_status", other)
         self.assertEqual(owner["body"], "Proposal body remains on the insight")

@@ -143,7 +143,11 @@ class Project:
         self.insights.snapshots = self.snapshots
         # Late acceptance is a separate projection; immutable snapshots stay unchanged.
         self.work_items = WorkItems(self.root, self.snapshots, self.insights, vcs=config.vcs,
-                                    effective_verification=self.effective_verification)
+                                    effective_verification=self.effective_verification,
+                                    doing_limit=config.limits.work_items_doing,
+                                    doing_limits={name: role.work_items_doing for name, role in config.roles.items()
+                                                  if role.work_items_doing is not None},
+                                    stale_seconds=config.limits.work_items_stale_seconds)
         self.insights.work_items = self.work_items
         from .role_state import RoleStateStore
         self.role_state = RoleStateStore(self.root / "role-state",

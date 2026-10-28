@@ -177,7 +177,8 @@ def _ready_work_projection(page, *, context=None):
         context.ready_work_signature = page["signature"]
     current_time = time.time()
     return {"items": [{**{key: row[key] for key in
-                        ("id", "title", "status", "stale", "redecision", "updated_at")},
+                        ("id", "title", "status", "stale", "redecision", "updated_at",
+                         "doing_since", "doing_age_seconds", "doing_stale")},
                        "age_seconds": _ready_work_age(row["updated_at"], current_time),
                        **({"wait": row["wait"], "wait_satisfied": True}
                           if row["status"] == "blocked" else {})}

@@ -269,6 +269,7 @@ class RetainedDeliveryTests(Fixture):
             self.store.get(self.item["id"])
 
     def test_unscoped_delivery_and_legacy_initial_scope_closure_remain_readable(self):
+        self.step("open")  # Release the unrelated setup hold before claiming this slice.
         seed = self.store.create(actor="worker", idempotency_key="unscoped", title="No scope")["record"]["work_item"]
         self.item = seed
         self.step("doing")

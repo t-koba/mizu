@@ -848,6 +848,32 @@ Windows の匿名 pipe は既存の PeekNamedPipe 経路を使います。
 最大16ポリシー分だけ保持し、パス名や検証結果をキャッシュしません。
 
 
+### Active work holds and review age
+
+`[limits].work_items_doing` defaults to **1** active `doing` item per role;
+`roles.<name>.work_items_doing` may override it (integer **1–100**, the existing
+page-row ceiling). Entering `doing` counts validated current holders across the
+ledger atomically with the transition CAS under `insights.lock`. The actor comes
+from the role, never a tool argument. A denied claim appends nothing; re-read and
+release (`open`), block, complete or drop existing work before retrying. Blocked
+waits consume no doing slot. Lowering the cap never invalidates history: existing
+over-limit holds remain readable and can be released, blocked, completed or
+dropped. Same-doing scope/delivery revisions consume no new slot.
+
+Open-work rows (including read-only CLI status), by-ID explanations, submitter
+status and ready-work prompt rows expose `doing_since`, `doing_age_seconds` and
+`doing_stale`. The first is the timestamp of the start of the current uninterrupted
+`doing` run, derived from the validated append-only chain; same-status revisions
+do not reset it. Non-doing records have null start/age and false `doing_stale`.
+Age is nonnegative whole seconds, separate from `updated_at` / ready-work
+`age_seconds` and origin `stale`. `[limits].work_items_stale_seconds` defaults to
+**86400** (24 hours; integer 1–31536000); review becomes stale at exactly that
+elapsed duration. A future start after clock rollback has age zero and is not
+stale. Malformed history fails closed, never an invented age. No stored records,
+page/history limits, ready-set signatures or wake rules change. These fields are
+review visibility only: no automatic expiry, reassignment, writer-authority
+change or admission bypass.
+
 ### Bind delivery before closing a work item
 With `work_items_transition`, first move the item to `doing`, then append a
 same-status `doing` revision with `snapshot_id` naming the exact retained

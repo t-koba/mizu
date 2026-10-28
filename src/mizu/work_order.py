@@ -153,7 +153,7 @@ def _read_stored(project_root: Path) -> dict:
 
 
 def _stable_ready_for_hash(ready_work) -> dict:
-    """Stable copy of the ready display without volatile ages."""
+    """Stable ready display without volatile age/review indicators."""
     if not isinstance(ready_work, dict) or not isinstance(ready_work.get("items"), list):
         raise Denied("Invalid ready-work projection")
     items = ready_work.get("items")
@@ -161,13 +161,28 @@ def _stable_ready_for_hash(ready_work) -> dict:
     for row in items:
         if not isinstance(row, dict):
             raise Denied("Invalid ready-work row")
-        stable_items.append({k: v for k, v in row.items() if k != "age_seconds"})
+        stable_items.append({k: v for k, v in row.items()
+                             if k not in {"age_seconds", "doing_age_seconds", "doing_stale"}})
     stable = dict(ready_work)
     stable["items"] = stable_items
     # Signature lives separately; display never carries it.
     stable.pop("signature", None)
     if not isinstance(stable.get("total"), int):
         raise Denied("Invalid ready-work projection")
+    return stable
+
+
+def _stable_open_for_hash(open_work_items) -> dict:
+    """Keep hold age/review visibility out of the durable work generation."""
+    if not isinstance(open_work_items, dict) or not isinstance(open_work_items.get("items"), list):
+        raise Denied("Invalid open-work page")
+    stable = dict(open_work_items)
+    stable["items"] = []
+    for row in open_work_items["items"]:
+        if not isinstance(row, dict):
+            raise Denied("Invalid open-work row")
+        stable["items"].append({k: v for k, v in row.items()
+                                if k not in {"doing_age_seconds", "doing_stale"}})
     return stable
 
 
@@ -184,7 +199,8 @@ def generation_from_captured(*, goal_digest, open_work_items, ready_work,
     structured waits). The separate constant-size scope/redecision
     fingerprint covers the full open inventory, not just the visible page. Volatile ready ages are stripped so wall time alone never
     moves the generation. Any malformed input raises Denied for the
-    caller to map to ``unavailable``.
+    caller to map to ``unavailable``. Age/review fields are prompt visibility,
+    not work identity, and never move the generation as time passes.
     """
     _validate_generation(goal_digest)
     if (not isinstance(open_work_items, dict)
@@ -194,6 +210,7 @@ def generation_from_captured(*, goal_digest, open_work_items, ready_work,
     if not isinstance(ready_signature, str) or DIGEST.fullmatch(ready_signature) is None:
         raise Denied("Invalid ready signature")
     _validate_generation(order_inventory)
+    stable_open = _stable_open_for_hash(open_work_items)
     stable_ready = _stable_ready_for_hash(ready_work)
     if not isinstance(pending_insights, list):
         raise Denied("Invalid pending insights")
@@ -218,7 +235,7 @@ def generation_from_captured(*, goal_digest, open_work_items, ready_work,
         if not isinstance(value, list):
             raise Denied(f"Invalid {name}")
     return digest(canonical(["work-order-generation-v5", goal_digest,
-                             open_work_items, stable_ready, ready_signature, order_inventory,
+                             stable_open, stable_ready, ready_signature, order_inventory,
                              pending_insights, open_backlog,
                              [ci_failures, ci_truncated],
                              decision_events, decision_page, diagnostics,

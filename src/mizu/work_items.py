@@ -146,10 +146,41 @@ def _directory(path: Path) -> bool:
 
 
 class WorkItems:
-    def __init__(self, root: Path, snapshots, insights, *, vcs=None, effective_verification=None):
+    def __init__(self, root: Path, snapshots, insights, *, vcs=None, effective_verification=None,
+                 doing_limit=1, doing_limits=None, stale_seconds=86400):
         self.root, self.snapshots, self.insights = root, snapshots, insights
         self.vcs = vcs or {}
         self.effective_verification = effective_verification
+        self.doing_limit, self.doing_limits = doing_limit, dict(doing_limits or {})
+        self.stale_seconds = stale_seconds
+        if any(type(value) is not int or not 1 <= value <= MAX_OPEN_PAGE_ROWS
+               for value in (doing_limit, *self.doing_limits.values())):
+            raise Denied("Work-item doing limit must be an integer in [1, 100]")
+        if type(stale_seconds) is not int or not 1 <= stale_seconds <= 31536000:
+            raise Denied("Work-item stale threshold must be an integer in [1, 31536000]")
+
+    def _require_doing_capacity(self, actor: str) -> None:
+        """Count validated holder state under insights.lock, never a page/index."""
+        limit = self.doing_limits.get(actor, self.doing_limit)
+        count = 0
+        for event_id, event in self._iter_item_events(recover=True):
+            kind, seed = self._seed_for_event(event_id, event, readonly=False)
+            if kind != "seed":
+                continue
+            revisions = self._history_revisions(seed["id"], recover=True)
+            item = self._get(seed["id"], seed_event=event, history_revisions=revisions)
+            if item["status"] == "doing" and item["holder"] == actor:
+                count += 1
+        if count >= limit:
+            raise Denied(f"Work-item doing slots full for {actor}: {count}/{limit}; "
+                         "release or block held work before claiming another item")
+
+    def _hold_projection(self, since: str | None) -> dict:
+        """Visibility only; future starts clamp to zero and cannot be stale."""
+        elapsed = None if since is None else _timestamp_order(now()) - _timestamp_order(since)
+        return {"doing_since": since,
+                "doing_age_seconds": None if elapsed is None else max(0, elapsed) // 1_000_000,
+                "doing_stale": elapsed is not None and elapsed >= self.stale_seconds * 1_000_000}
 
     def require_open_capacity(self, requested_delta: int) -> None:
         """Check a whole new-seed transaction while holding insights.lock.
@@ -1247,11 +1278,17 @@ class WorkItems:
 
     def _get(self, item_id: str, *, seed_event: dict | None = None,
              history_revisions=_HISTORY_UNSET) -> dict:
+        return self._current_hold(item_id, seed_event=seed_event,
+                                  history_revisions=history_revisions)[0]
+
+    def _current_hold(self, item_id: str, *, seed_event=None,
+                      history_revisions=_HISTORY_UNSET) -> tuple:
+        since = None
         current = None
         for current in self._iter_chain(item_id, seed_event=seed_event,
                                         history_revisions=history_revisions):
-            pass
-        return current
+            since = (since or current["updated_at"]) if current["status"] == "doing" else None
+        return current, since
 
     def get(self, item_id: str) -> dict:
         """Read one seed and at most 255 bounded full-state events under lock.
@@ -1298,8 +1335,9 @@ class WorkItems:
     def _build_projection(self, item_id: str, *, seed_event: dict | None = None, readonly: bool) -> dict:
         """Build a bounded projection with an explicit recovery mode."""
         history_revisions = self._history_revisions(item_id, recover=not readonly)
-        item = self._get(item_id, seed_event=seed_event, history_revisions=history_revisions)
-        view = {"item": item, **self._origin_projection_impl(item, readonly=readonly)}
+        item, since = self._current_hold(item_id, seed_event=seed_event, history_revisions=history_revisions)
+        view = {"item": item, **self._origin_projection_impl(item, readonly=readonly),
+                **self._hold_projection(since)}
         if len(canonical(view)) > MAX_PROJECTION_BYTES:
             raise LimitExceeded("Work-item projection exceeds byte bound")
         return view
@@ -1331,8 +1369,10 @@ class WorkItems:
             # ample fixed envelope space before admitting immutable history rows.
             row_budget = MAX_HISTORY_PAGE_BYTES - MAX_PROJECTION_BYTES - 1024
             current = None
+            since = None
             for record in self._iter_chain(item_id, history_revisions=history_revisions):
                 current = record
+                since = (since or record["updated_at"]) if record["status"] == "doing" else None
                 revision = record["rev"]
                 if revision <= after_rev or len(history) >= limit or stopped_for_bytes:
                     continue
@@ -1348,7 +1388,7 @@ class WorkItems:
 
             if after_rev > current["rev"]:
                 raise Denied("Work-item history cursor is ahead of current revision")
-            projection = {"item": current, **self._origin_projection(current)}
+            projection = {"item": current, **self._origin_projection(current), **self._hold_projection(since)}
             if len(canonical(projection)) > MAX_PROJECTION_BYTES:
                 raise LimitExceeded("Work-item projection exceeds byte bound")
             history_total = current["rev"]
@@ -1385,13 +1425,13 @@ class WorkItems:
 
     def _submitter_item_status(self, item_id: str, decision: dict) -> dict:
         history_revisions = self._recover_temporary_writes(item_id)
-        item = self._get(item_id, history_revisions=history_revisions)
+        item, since = self._current_hold(item_id, history_revisions=history_revisions)
         origin_decision = {"rev": decision["rev"], "action": decision["action"]}
         origin = self._origin_projection(item, current_decision=origin_decision)
         status = {"id": item["id"], "status": item["status"], "rev": item["rev"],
                   "holder": item["holder"], "updated_at": item["updated_at"],
                   "current_origin_rev": origin["current_origin_rev"],
-                  "stale": origin["stale"]}
+                  "stale": origin["stale"], **self._hold_projection(since)}
         reason = item.get("reason")
         if reason is not None:
             preview, clipped = text_preview(reason, 512)
@@ -1637,7 +1677,7 @@ class WorkItems:
                ("id", "title", "origin", "status", "rev", "holder",
                 "created_at", "updated_at")}
         row.update({key: view[key] for key in
-                    ("current_origin_rev", "stale", "redecision")})
+                    ("current_origin_rev", "stale", "redecision", "doing_since", "doing_age_seconds", "doing_stale")})
         if item["status"] == "blocked":
             row["wait"] = item["wait"]
         if "description" in item:
@@ -1961,6 +2001,8 @@ class WorkItems:
             if registered is not None:
                 require_pairs(self.root, registered.get("smoke_refs", []))
             self._validate_transition(current, record)
+            if current["status"] != "doing" and status == "doing":
+                self._require_doing_capacity(actor)
             if len(canonical(record)) > PREVIEW_BYTES:
                 raise LimitExceeded("Work-item event exceeds byte bound")
             write_json(self.root / "work-items" / item_id / f"{record['rev']}.json", record, exclusive=True)

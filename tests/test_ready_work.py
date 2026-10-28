@@ -463,7 +463,8 @@ class ReadySetChangeTests(Fixture):
         import tracemalloc
         store = self.project.work_items
         seed = self.item('template')
-        view = {'item': seed, 'current_origin_rev': None, 'stale': False, 'redecision': None}
+        view = {'item': seed, 'current_origin_rev': None, 'stale': False, 'redecision': None,
+                'doing_since': None, 'doing_age_seconds': None, 'doing_stale': False}
 
         def scan(count, reverse=False, limit=1):
             indices = range(count - 1, -1, -1) if reverse else range(count)

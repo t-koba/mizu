@@ -44,6 +44,7 @@ class WorkOrderTests(Fixture):
     def test_absent_current_review_due_unavailable_in_prompts_and_status(self):
         from mizu.unit_prompts import prompt_for, prompt_delta_for
         a = self.project.work_items.create(idempotency_key="a1", title="A", actor="worker")["record"]["work_item"]
+        self.project.work_items.transition(a["id"], expected_rev=1, status="doing", actor="worker")
         ctx = self.context("worker")
         full = json.loads(prompt_for(ctx))
         delta = json.loads(prompt_delta_for(ctx, []))
@@ -395,9 +396,9 @@ class WorkOrderTests(Fixture):
         self.assertEqual(plan._read_stored(self.project.root)["status"], "unavailable")
 
     def test_scope_binds_exact_prompt_page_and_signature_covers_beyond_page_ids(self):
-        # The generation hashes the exact bounded open-work page shown plus
+        # The generation hashes the stable bounded open-work page shown plus
         # the full ready signature (same-count substitution beyond the page
-        # still moves via the signature). Volatile ready ages never move it.
+        # still moves via the signature). Volatile age/review fields never move it.
         import copy
         a = self.project.work_items.create(idempotency_key="a1", title="A", actor="worker")["record"]["work_item"]
         ctx = self.context("worker")
@@ -432,12 +433,19 @@ class WorkOrderTests(Fixture):
             changed_open = dict(changed_open, total=changed_open.get("total", 0) + 1)
         changed = dict(base_kwargs, open_work_items=changed_open)
         self.assertNotEqual(plan.generation_from_captured(**changed), base)
-        # Volatile ready ages never move the generation.
-        aged = copy.deepcopy(opening["ready_work"])
-        for row in aged.get("items", []):
-            if isinstance(row, dict):
-                row["age_seconds"] = 999999
-        self.assertEqual(plan.generation_from_captured(**dict(base_kwargs, ready_work=aged)), base)
+        # Volatile ready/open ages and the derived review flag never move the
+        # generation; they remain visible in prompts without creating a new plan.
+        aged_ready = copy.deepcopy(opening["ready_work"])
+        for row in aged_ready.get("items", []):
+            row["age_seconds"] = 999999
+            row["doing_age_seconds"] = 999999
+            row["doing_stale"] = True
+        self.assertEqual(plan.generation_from_captured(**dict(base_kwargs, ready_work=aged_ready)), base)
+        aged_open = copy.deepcopy(opening["open_work_items"])
+        for row in aged_open.get("items", []):
+            row["doing_age_seconds"] = 999999
+            row["doing_stale"] = True
+        self.assertEqual(plan.generation_from_captured(**dict(base_kwargs, open_work_items=aged_open)), base)
 
     def test_decision_page_summary_is_frozen_hashed_and_used_by_status(self):
         from unittest.mock import patch
