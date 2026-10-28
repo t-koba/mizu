@@ -31,6 +31,7 @@ from .project import Project, check_project_settings, read_goal
 from .snapshot import open_store
 
 #: Project members covered by backup/restore (plus backup.json on restore).
+#: operator-record-index is derived and deliberately rebuilt, not backed up.
 MEMBERS = (
     "project.toml", "PROJECT.md", "control.json", "current.json", "safe-point.json", "snapshots", "objects",
     "inbox", "insight-ids", "insight-revisions", "insight-archive.sqlite3", "histories", ".ingest", "decisions",

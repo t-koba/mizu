@@ -142,7 +142,7 @@ DEFINITIONS = {
                    "offset": PAGE_FIELDS["offset"], "limit": {"type": "integer", "minimum": 1, "maximum": 8192}})),
     "search": ("Search configured feeds or the operator's search adapter. Returns results with stated scope and coverage. Continue with result_id and offset/limit instead of query; replay never searches again.",
                obj({"query": text(1000), "result_id": text(64), **PAGE_FIELDS})),
-    "record_read": ("Read an operator answer/notice through this unit's frozen SharedRecords manifest. Pages count Unicode characters and revalidate the exact digest. Reading is not acknowledgement: explicitly select handled ack_tokens in finish.ack_events. Answers/notices are not Insight proposals and must never be decided. No write authority.",
+    "record_read": ("Read an operator answer/notice through this unit's frozen SharedRecords manifest. Pages count Unicode characters and revalidate the exact digest. Reading is not acknowledgement: explicitly select handled ack_tokens in finish.ack_events. No write authority.",
                     obj({"ack_token": text(64), "offset": PAGE_FIELDS["offset"],
                          "limit": {"type": "integer", "minimum": 1, "maximum": READ_PAGE_CHARS}}, ("ack_token",))),
     "decision_read": ("Read the exact immutable shared decision envelope delivered in this unit by ack_token. Only this role's host-frozen manifest permits access, even after source or routing movement. Offset/limit count Unicode characters; limit 1-8192 (default 8192). Each page revalidates record_digest. Reading acknowledges nothing; finish.ack_events explicitly selects handled tokens. No activation or record-write authority.",

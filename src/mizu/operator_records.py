@@ -12,6 +12,7 @@ import heapq
 from .errors import ConfigError, Denied
 from .fs import DIGEST, identifier, lock, now
 from .shared_records import KindPolicy, SharedRecords
+from .operator_record_index import catalog, remember
 
 WRITER = 'operator.cli'
 ROUTES = {'answer': 'question_source', 'operator.notice': 'addressee'}
@@ -113,9 +114,12 @@ def _route(project, envelope):
     return role
 
 
-def _target(shared, envelope):
+def _target(envelope, indexed):
     target = envelope['payload']['target']
-    old, _ = shared.get(target['id'], expected_digest=target['digest'])
+    found = indexed.get(target['id'])
+    if found is None or found[1] != target['digest']:
+        raise Denied('Closure target is unavailable or changed')
+    old = found[0]
     if (old['kind'] != 'operator.notice' or old['writer'] != envelope['writer']
             or old['payload']['action'] == 'withdraw' or old['id'] == envelope['id']
             or old['payload']['addressee'] != envelope['payload']['addressee']):
@@ -129,7 +133,8 @@ def write(project, *, event_id, kind, body='', addressee=None, subject=None,
 
     No writer parameter: identity is bound by this host entry point. A retry
     reuses the retained timestamp and must match all immutable content exactly.
-    All records/closures serialize under one host lock; failures never repair.
+    All records/closures serialize under one host lock; retries repair missing
+    derived metadata, never canonical envelopes.
     """
     identifier(event_id)
     policy = configuration(project.config.operator_records)
@@ -163,12 +168,14 @@ def write(project, *, event_id, kind, body='', addressee=None, subject=None,
         shared._validate(envelope)
         _route(project, envelope)
         if target is not None:
-            _target(shared, envelope)
-            for old, _ in shared.records(namespace='operator'):
+            indexed = catalog(shared)
+            _target(envelope, indexed)
+            for old, _ in indexed.values():
                 if (old['id'] != record_id and old['payload']['target'] is not None
                         and old['payload']['target']['id'] == target['id']):
                     raise Denied('Notice already closed by another event')
         computed = shared.put(envelope, writer=WRITER)
+        remember(shared, envelope)  # canonical-first; also repairs exact retries
     return {'record': envelope, 'record_digest': computed}
 
 
@@ -188,10 +195,11 @@ def _pending(project, role):
     if not any(row['enabled'] for row in policy.values()):
         return empty, ()
     shared = store(project)
+    indexed = catalog(shared)
     closures = {}
-    for envelope, _ in shared.records(namespace='operator'):
+    for envelope, _ in indexed.values():
         if envelope['payload']['target'] is not None:
-            _target(shared, envelope)
+            _target(envelope, indexed)
             target_id = envelope['payload']['target']['id']
             if target_id in closures and closures[target_id] != envelope['id']:
                 raise Denied('Notice has conflicting closure events')
@@ -200,7 +208,7 @@ def _pending(project, role):
     count, wake_pending = 0, False
     def candidates():
         nonlocal count, wake_pending
-        for envelope, computed in shared.records(namespace='operator'):
+        for envelope, computed in indexed.values():
             if (not policy[envelope['kind']]['enabled'] or envelope['id'] in closed
                     or envelope['payload']['action'] == 'withdraw'):
                 continue

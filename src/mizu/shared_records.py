@@ -21,8 +21,10 @@ recompute its SHA-256; callers pin that digest in deliveries/retrieval. Files ar
 create-only, bounded, and never repaired. There is no index or timestamp cursor.
 Canonical files are sharded by the record ID's first component under
 ``shared-records/<namespace>/``; long namespace components use a bounded digest
-directory. Pre-partition flat ``shared-records/*.json`` files remain readable
-as legacy and never gain a second copy on exact replay.
+directory. This generic store has no index or timestamp cursor; source-specific
+derived projections, when needed, are owned outside this module. Pre-partition
+flat ``shared-records/*.json`` files remain readable as legacy and never gain a
+second copy on exact replay.
 Managed project directories must remain host-owned during writes, as required by
 fs.atomic_write; safe_read additionally pins read paths on supported platforms.
 A batch validates before writing, but an I/O failure may commit a prefix: replay

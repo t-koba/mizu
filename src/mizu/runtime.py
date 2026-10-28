@@ -4050,7 +4050,13 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
             except (Denied, LimitExceeded, OSError, ValueError):
                 value = False
         elif needed == "operator_records_due":
-            value = operator_records.due(project, role_name)
+            # A code-change/wait evaluation may name a placeholder role (for
+            # example before admission resolves configuration). It cannot have
+            # addressed operator records; don't let that suppress other causes.
+            value = (operator_records.due(project, role_name)
+                     if role_name is None or (role_name in project.roles
+                                              and role_name in project.config.roles)
+                     else False)
         elif needed == "outcome":
             value = role_record.get("outcome", "wait")
             if observer and value not in ("continue", "bounded", "done", "wait", "blocked"):

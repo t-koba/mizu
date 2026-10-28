@@ -72,10 +72,10 @@ hyphen), required for uncertain-response retries. Identity is
 are sharded by the record ID's first component under
 `shared-records/<namespace>/` (long namespace components use a bounded digest
 directory; operator records live under `shared-records/operator/`); pre-partition flat `shared-records/*.json` files
-remain readable by exact `get` and by the unfiltered scan without gaining a
-second copy on replay, while `records(namespace="operator")` scans only the
-operator partition so dispatch never rereads unrelated source history. Each
-enumerated envelope is validated once from its scanned bytes. The kind `answer`
+remain readable by exact `get`, the unfiltered scan and operator dispatch without
+gaining a second copy on replay. The generic `records(namespace="operator")`
+scanner still covers only the operator partition; dispatch instead uses the
+checked metadata projection described below. The kind `answer`
 is single-component; other envelope IDs and writers remain namespaced. An answer
 requires subject `{type="insight", id, rev}`; prefixes, missing revisions and
 unavailable revisions are refused. A retained prior revision can be answered.
@@ -113,8 +113,55 @@ the canonical envelope is at most 140000 UTF-8 bytes. All shape/key/type checks 
 closed. Writes/closure selection and manifest freezing share a host lock; a
 reused event ID must match every immutable field. Replay preserves the first
 host timestamp; a lost response is retried with the **same event ID and content**.
-No automatic retry, repair, timestamp cursor, second queue or mutable lifecycle
-pointer is introduced. Unsafe/corrupt records or receipts fail closed.
+No automatic retry, canonical-record repair, timestamp cursor, second queue or
+mutable lifecycle pointer is introduced. Exact retries may reconstruct only the
+disposable operator-routing projection from its unchanged canonical record.
+Unsafe/corrupt records, projections or receipts fail closed.
+
+### Derived operator routing metadata
+
+`operator-record-index/<SHA256(record ID)>.json` is a disposable host-only
+projection, outside generic `shared-records` scans and **excluded from backup**.
+A restore rebuilds it from retained canonical envelopes on first lookup. Each
+canonical JSON reference has exactly `{envelope, digest}`; `digest` is the
+SHA-256 of the complete canonical bytes. Operator `envelope` retains all fields
+except that `payload.body` is the empty string. Foreign legacy flat-file
+projections omit payload and subject (both `{}`) and are used only to classify
+identity, never to deliver another source's events. References are bounded by
+the existing shared-record byte bound; they contain no copied bodies, receipts,
+queue position or delivery cursor. Event identity remains globally
+`operator/PROJECT/EVENT_ID`, **never** recipient-dependent.
+
+Writes and lookups hold the existing operator-record lock. A write publishes the
+immutable envelope first, then its projection; an exact retry repairs a missing
+projection before returning. Lookup enumerates operator canonical filenames and
+all legacy flat filenames, checks completeness against reference filenames, and
+reconstructs only missing references by fully validating canonical content.
+Already-present malformed, dangling, duplicate/misnamed, conflicting or unsafe
+references refuse rather than being overwritten. Unpublished regular
+`.new-XXXXXXXX` atomic-write scratch files are not references. Identical
+legacy/sharded copies share one reference; conflicting copies refuse.
+
+On **every** lookup, all covered canonical bytes are safely read and hashed.
+For operator references, canonical JSON framing before and after the body value
+must match the projected metadata byte-for-byte, authenticating routing, subject,
+kind, time and closure target independently of the reference's digest. Foreign
+legacy identity prefixes and writer suffixes are checked against canonical bytes too. Changed
+canonical bytes or reference metadata fail closed, even for another recipient
+or a disabled kind (if all kinds are disabled, delivery stays closed without a
+lookup). Canonical bodies are fully decoded/validated on projection
+creation/recovery and on selected manifest freeze/read; warmed lookups decode
+only compact metadata for unrelated recipients. Closure uniqueness and exact
+target routing/digests are checked from that same authenticated metadata set.
+
+This bounds unrelated **body decoding**, not total history I/O: filename and
+metadata work remain linear in retained history, as do canonical byte reads and
+hashing, deliberately preserving global corruption detection without trusting
+mtime. Cold/recovery lookup still decodes missing projections' bodies. The index
+is not a second canonical source or queue; permanent envelopes and exact
+role-bound receipts remain authoritative. The existing event watches still
+observe canonical `shared-records/operator` publication, not index maintenance;
+a waiting query holds the same lock and can recover a canonical-first write.
 
 Unit full/delta prompts carry `operator_records` with up to 20 bounded references
 across both kinds, `pending_count`, `truncated` and `wake_pending` (whether any eligible unacknowledged

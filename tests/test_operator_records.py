@@ -269,9 +269,11 @@ class OperatorRecordTests(Fixture):
         backup(self.project, archive)
         restore(self.config, 'restored', archive)
         restored = Project(self.config, 'restored')
+        self.assertFalse((restored.root / 'operator-record-index').exists())
         shared = records.store(restored)
         self.assertTrue(shared.received('reviewer', answer_entry.record_id, answer_entry.record_digest))
         self.assertEqual(records.pending(restored, self.config.roles['reviewer'])[0], self.pending())
+        self.assertTrue((restored.root / 'operator-record-index').is_dir())
         self.assertEqual(shared.get(notice['record']['id'])[0], notice['record'])
 
     def test_duplicate_notice_closures_fail_closed(self):
