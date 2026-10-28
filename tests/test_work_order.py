@@ -157,11 +157,18 @@ class WorkOrderTests(Fixture):
         item_id = decision["work_item"]["id"]
         self.project.insights.revise(proposal["id"], source="worker", title="Revised", body="changed",
                                      base_snapshot=None, expected_rev=1)
-        page, before = self.project.work_items.page_open_for_order(limit=1)
+        # The open page includes live doing-age diagnostics. Freeze only that
+        # display clock across both reads so a second-boundary tick cannot make
+        # this ordering assertion flaky during a long full-suite run.
+        from unittest.mock import patch
+        fixed_now = self.project.work_items.projection(first["id"])["doing_since"]
+        with patch("mizu.work_items.now", return_value=fixed_now):
+            page, before = self.project.work_items.page_open_for_order(limit=1)
         self.assertNotEqual(page["items"][0]["id"], item_id)
         ready = self.project.work_items.page_ready(limit=1, role_name="worker")["signature"]
         self.project.insights.decide(proposal["id"], "defer", "reassessed", "later", "run2", expected_rev=2)
-        after_page, after = self.project.work_items.page_open_for_order(limit=1)
+        with patch("mizu.work_items.now", return_value=fixed_now):
+            after_page, after = self.project.work_items.page_open_for_order(limit=1)
         self.assertNotEqual(before, after)
         self.assertEqual(page, after_page)
         self.assertEqual(ready, self.project.work_items.page_ready(limit=1, role_name="worker")["signature"])
