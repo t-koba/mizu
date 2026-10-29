@@ -94,6 +94,45 @@ class DelegationGateContractTests(Fixture):
         self.assert_refused_without_effects("_engine_tool", {"name": "Read", "invocation_id": "native-2"})
         self.assert_refused_without_effects("finish", {"outcome": "wait", "summary": "wait"})
 
+    def test_reserved_transport_round_trips_through_bridge_protocol(self):
+        from mizu.bridge import Bridge
+        from mizu.fs import read_json
+        from mizu.mcp_proxy import forward
+
+        with Bridge(self.ctx.handle, [], timeout=2) as bridge:
+            config = read_json(bridge.config_file)
+            self.assertEqual(forward(config, "_hello", {}), {})
+            self.assertEqual(forward(config, "_budget", {"sequence": 1}), {"admitted": True})
+            self.assertEqual(forward(config, "_model_usage",
+                                     {"sequence": 1, "usage": {"input": 1}}), {"recorded": True})
+            self.assertEqual(forward(config, "_request_done",
+                                     {"sequence": 1, "failed": False}), {"recorded": True})
+            before = sorted((str(path.relative_to(self.ctx.run_dir)), path.read_bytes())
+                            for path in self.ctx.run_dir.rglob("*") if path.is_file())
+            denied = (
+                ("_engine_tool", {"name": "Read", "invocation_id": "native-bridge"}),
+                ("finish", {"outcome": "wait", "summary": "wait"}),
+                ("files", {}),
+                ("read", {"path": "app.py"}),
+                ("unclassified", {}),
+            )
+            for operation, arguments in denied:
+                with self.subTest(operation=operation), self.assertRaises(Denied):
+                    forward(config, operation, arguments)
+                after = sorted((str(path.relative_to(self.ctx.run_dir)), path.read_bytes())
+                               for path in self.ctx.run_dir.rglob("*") if path.is_file())
+                self.assertEqual(after, before)
+                self.assertEqual(self.ctx.tool_count, 0)
+                self.assertFalse(self.ctx.engine_tool_invocations)
+                self.assertEqual(self.ctx.request_count, 1)
+                self.assertFalse(self.ctx.progress_tool)
+                self.assertIsNone(self.ctx.finished)
+
+        self.assertTrue(self.ctx.hello.is_set())
+        self.assertEqual(self.ctx.request_count, 1)
+        self.assertFalse(self.ctx.request_deadlines)
+        self.assertTrue(self.ctx.runtime_usage)
+
     def test_engine_capture_boundaries_refuse_any_reserved_view(self):
         engine = __import__("mizu.runtime", fromlist=["Engine"]).Engine(self.config)
         self.ctx._slot_lease = True
