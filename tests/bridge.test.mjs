@@ -327,3 +327,39 @@ test('Pi re-selection refuses virtual models whose nested provider authority is 
     { provider: virtual.provider, model: virtual.id }, {}, authority), /virtual models/);
   assert.throws(() => authority.check(virtual), /not host-authorized/);
 });
+
+test('authority sections preserve source order and replace only the Mizu namespace', () => {
+  let hook;
+  const pi = { on: (name, fn) => { if (name === 'before_agent_start') hook = fn; } };
+  const policies = Array.from({ length: 12 }, (_, i) => [`mizu_authority_policy_${i}`, ` exact ${i}\r\n\n`]);
+  const authority_sections = [...policies, ['mizu_authority_charter', ' exact charter\n']];
+  // Canonical host JSON sorts object keys, but cannot reorder the pair array.
+  register(pi, Type, { tools: [] }, { authoritySections: JSON.parse(JSON.stringify(authority_sections)) });
+  const options = { sections: { unrelated: 'untouched', mizu_authority_policy_99: 'stale',
+    mizu_authority_charter: 'old charter' } };
+  hook({ systemPromptOptions: options });
+  assert.deepEqual(Object.entries(options.sections), [['unrelated', 'untouched'], ...authority_sections]);
+});
+
+
+test('production Pi authority registration fails closed on missing or ambiguous sections', () => {
+  const pi = { on() {} };
+  assert.throws(() => register(pi, Type, { tools: [] }, { requireAuthority: true }), /authority sections/);
+  for (const authority_sections of [
+    [],
+    [['mizu_authority_policy_0', 'policy']],
+    [['mizu_authority_policy_1', 'policy'], ['mizu_authority_charter', 'charter']],
+    [['mizu_authority_policy_0', 'policy'], ['mizu_authority_policy_0', 'duplicate'],
+      ['mizu_authority_charter', 'charter']],
+    [['mizu_authority_policy_0', 'policy'], ['mizu_authority_charter', 'charter'],
+      ['mizu_authority_policy_1', 'out of order']],
+  ]) {
+    assert.throws(() => register(pi, Type, { tools: [] }, { authoritySections: authority_sections, requireAuthority: true }),
+      /authority/);
+  }
+  let hook;
+  const valid = [['mizu_authority_policy_0', 'policy'], ['mizu_authority_charter', 'charter']];
+  register({ on: (name, fn) => { if (name === 'before_agent_start') hook = fn; } }, Type,
+    { tools: [] }, { authoritySections: valid, requireAuthority: true });
+  assert.equal(typeof hook, 'function');
+});

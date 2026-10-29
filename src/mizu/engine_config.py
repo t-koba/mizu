@@ -175,8 +175,9 @@ def local_settings_digest(config, engine):
 #: profile switch that changes only these keys continues the role's
 #: conversation with the current settings, and the durable resume grant
 #: excludes them as well, so an effort-only retune resumes instead of
-#: refusing. Any other effective, policy, model, engine, grant-option, or
-#: content change still starts a fresh bounded session or refuses resume.
+#: refusing. Other effective options still fork or refuse resume. Ordinary Pi
+#: additionally applies policy, charter and tool grants live (see its identity
+#: projection below); non-Pi identity remains content-bound.
 #: Names stay native per engine; Mizu imposes no common effort
 #: enum. Durable compaction thresholds ride along because the Harness reads
 #: its policy at every resolution: bounding live context must not throw the
@@ -242,14 +243,23 @@ def conversation_identity(context, settings):
     if settings.get('engine') == 'pi-durable':
         identity = durable_session_identity(settings)
     else:
-        capabilities = getattr(context, 'session_identity_capabilities', None)
-        if capabilities is None:
-            capabilities = context.role.capabilities
-        identity = {'settings': conversation_settings(settings), 'policy': role_policy_text(context.role),
-                    'goal': context.goal_digest, 'capabilities': capabilities,
+        projected = conversation_settings(settings)
+        # Ordinary Pi persists authority/tool deltas through its current SDK
+        # session path. Keep every other compatibility boundary, especially the
+        # adapter digest: this projection deliberately rekeys once, never scans
+        # or adopts old content-bound directories. Durable/non-Pi are unchanged.
+        if settings.get('engine') == 'pi':
+            projected = {k: v for k, v in projected.items() if k != 'engine_tools'}
+        identity = {'settings': projected,
                     'workspace': context.role.workspace, 'command': context.config.command(settings['engine']),
                     'adapter_digest': adapter_digest(settings['engine']),
                     'local_settings': local_settings_digest(context.config, settings['engine'])}
+        if settings.get('engine') != 'pi':
+            capabilities = getattr(context, 'session_identity_capabilities', None)
+            if capabilities is None:
+                capabilities = context.role.capabilities
+            identity.update(policy=role_policy_text(context.role), goal=context.goal_digest,
+                            capabilities=capabilities)
     return identity
 
 

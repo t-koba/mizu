@@ -48,7 +48,7 @@ if (process.argv.includes('--check-contract')) {
   const authority = cfg.reselection ? modelAuthority() : null;
   const meter = meterRuntime(modelRuntime, bridge, undefined, model => authority?.check(model));
   if (cfg.resources.some(r => !['extension','skill','prompt','theme'].includes(r.kind))) throw new Error('Unsupported Pi resource kind');
-  const factories = [{ name: 'mizu', factory: pi => register(pi, Type, bridge) }];
+  const factories = [{ name: 'mizu', factory: pi => register(pi, Type, bridge, { requireAuthority: true, authoritySections: cfg.authority_sections }) }];
   if (cfg.options.codemode) factories.push({ name: 'codemode', factory: createCodemodeExtension(), builtin: true });
   if (cfg.options.toolSearch) factories.push({ name: 'tool-search', factory: createToolSearchExtension(), builtin: true });
   if (Object.keys(cfg.mcp_servers).length) factories.push({ name: 'mcp', builtin: true,

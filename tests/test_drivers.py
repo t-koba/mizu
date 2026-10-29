@@ -90,11 +90,12 @@ class EngineConfigTests(Fixture):
         with self.assertRaises(LimitExceeded): admit_invocation(denied,unit='query')
         self.assertEqual(denied.request_count,0)
 
-    def test_session_identity_covers_options_grants_policy_model(self):
+    def test_session_identity_covers_options_resources_model(self):
         ctx=self.context('consult')
         settings=effective(self.config,ctx.role,'primary')
         original,_=session_record(ctx,'primary',settings)
-        for key,value in (('model','changed'),('options',{'thinkingLevel':'new','codemode':True}),('engine_tools',['tool']),('resources',[{'sha256':'a'*64}])):
+        # Ordinary Pi tool grants are live; other compatibility fields still fork.
+        for key,value in (('model','changed'),('options',{'thinkingLevel':'new','codemode':True}),('resources',[{'sha256':'a'*64}])):
             changed,_=session_record(ctx,'primary',{**settings,key:value})
             self.assertNotEqual(original,changed)
         save_session(original,'session',{})
@@ -1031,7 +1032,12 @@ class SyntheticEngineTests(Fixture):
                         ctx.config = config
                         PiDriver(config).execute(ctx, 'digest-only unit')
                         cfg = read_json(ctx.run_dir/'pi-effective.json')
-                        actual = cfg['systemPrompt']
+                        # Ordinary Pi now carries exact independent sections,
+                        # rather than rewriting the cached prefix on resume.
+                        from mizu.pi import BASE_SYSTEM_PROMPT, authority_sections, authority_projection
+                        self.assertEqual(cfg['systemPrompt'], BASE_SYSTEM_PROMPT)
+                        self.assertEqual(cfg['authority_sections'], [list(pair) for pair in authority_sections(ctx.role, ctx.goal).items()])
+                        actual = authority_projection(dict(cfg['authority_sections']))
                         self.assertEqual(bool(cfg['resume']), resumed)
                         self.assertEqual((ctx.run_dir/'system.md').read_bytes(), actual.encode('utf-8'))
                     else:
@@ -1051,8 +1057,9 @@ class SyntheticEngineTests(Fixture):
                             cfg = read_json(ctx.run_dir/'claude-effective.json')
                             actual = cfg['systemPrompt']
                             self.assertEqual(bool(cfg['resume']), resumed)
-                    self.assertEqual(actual, role_policy_text(ctx.role) + "\n# Project charter\n\n" + ctx.goal)
-                    self.assertEqual(actual, system_context_text(ctx.role, ctx.goal))
+                    if engine != 'pi':
+                        self.assertEqual(actual, role_policy_text(ctx.role) + "\n# Project charter\n\n" + ctx.goal)
+                        self.assertEqual(actual, system_context_text(ctx.role, ctx.goal))
                     self.assertNotIn("New unpublished live charter", actual)
                     if expected is not None:
                         self.assertEqual(actual, expected)

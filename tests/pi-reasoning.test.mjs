@@ -417,7 +417,9 @@ test('native catalog: real extension listing, provider-only cache, explicit sele
     const bridge = join(directory, 'bridge.json');
     await writeFile(bridge, JSON.stringify({ tools: [] }));
     await writeFile(effective, JSON.stringify({ ...cfg, model: nativeModel.id,
-      engine_tools: [], mcp_servers: {}, systemPrompt: 'No inference.', sessionDir: directory }));
+      engine_tools: [], mcp_servers: {}, systemPrompt: 'No inference.', sessionDir: directory,
+      authority_sections: [['mizu_authority_policy_0', 'No inference.'],
+        ['mizu_authority_charter', 'Synthetic catalog-only authority.']] }));
     const child = spawnSync(process.execPath, ['adapters/pi/launcher.mjs', effective], {
       input: '{"id":"state","type":"get_state"}\n', encoding: 'utf8', timeout: 20000,
       env: { ...process.env, MIZU_BRIDGE_CONFIG: bridge }, maxBuffer: 1024 * 1024 });
@@ -632,3 +634,160 @@ test('Pi completed tool batch upgrades once, preserves effects/history, and reop
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test('ordinary Pi authority and tools persist as positional deltas across file-backed resume and compaction',
+  { timeout: 30000 }, async () => {
+    const sdk = await installed('pi', 'pi-coding-agent');
+    const directory = await mkdtemp(join(tmpdir(), 'mizu-authority-pi-'));
+    let session;
+    try {
+      const remote = await endpoint('pi', false);
+      const runtime = await sdk.ModelRuntime.create({ authPath: join(directory, 'auth.json'),
+        modelsPath: null, modelsStorePath: join(directory, 'models.json'), refreshOnCreate: false });
+      runtime.registerNativeProvider(remote.provider);
+      const settingsManager = sdk.SettingsManager.inMemory({ compaction: { enabled: false, keepRecentTokens: 200 },
+        retry: { enabled: false }, cacheWarming: 'off' });
+      const addedTool = { ...bridgeTool, name: 'mizu_added', operation: 'added_probe' };
+      let sessionFile, manager, executions = [], cwd;
+      const oldSections = { mizu_authority_policy_0: '  old policy λ\r\n\n',
+        mizu_authority_policy_1: 'obsolete policy\n', mizu_authority_charter: 'old charter' };
+      const newSections = { mizu_authority_policy_0: '  new exact policy 雪\r\n\n',
+        mizu_authority_charter: '  new charter\n\n' };
+      const open = async (sections, tools) => {
+        session?.dispose();
+        // PiDriver gives each unit a fresh controller CWD while resuming the same session file.
+        cwd = await mkdtemp(join(directory, 'controller-'));
+        const resourceLoader = new sdk.DefaultResourceLoader({ cwd, agentDir: directory, settingsManager,
+          noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+          systemPrompt: 'You are an AI assistant running in Mizu.',
+          extensionFactories: [
+            { name: 'unrelated', factory: pi => pi.on('before_agent_start', event => {
+              event.systemPromptOptions.sections.unrelated_extension = 'keep unrelated section';
+              // Also prove that Mizu replaces, not merges, its entire owned namespace.
+              event.systemPromptOptions.sections.mizu_authority_stale = 'must be removed';
+            }) },
+            { name: 'mizu', factory: pi => register(pi, remote.ai.Type,
+              { tools }, { authoritySections: Object.entries(sections), request: async (_cfg, operation) => {
+                if (operation === '_hello') return {};
+                assert.ok(tools.some(t => t.operation === operation), 'only current host tools may execute');
+                executions.push(operation);
+                remote.reply(`tool-answer-${executions.length}`);
+                return hostResult;
+              } }) },
+          ] });
+        await resourceLoader.reload();
+        manager = sessionFile ? sdk.SessionManager.open(sessionFile, directory, cwd)
+          : sdk.SessionManager.create(cwd, directory);
+        ({ session } = await sdk.createAgentSession({ cwd, agentDir: directory, modelRuntime: runtime,
+          model: remote.model, settingsManager, resourceLoader, sessionManager: manager,
+          noTools: 'builtin', tools: tools.map(t => t.name) }));
+        sessionFile = manager.getSessionFile();
+      };
+      const messages = () => manager.buildSessionContext().messages;
+      const assertCurrent = sections => {
+        const current = remote.ai.getCurrentSystemMessage(messages());
+        assert.equal(current.sections.preamble, 'You are an AI assistant running in Mizu.');
+        assert.equal(current.sections.unrelated_extension,
+          '<unrelated_extension>\nkeep unrelated section\n</unrelated_extension>');
+        assert.deepEqual(Object.keys(current.sections).filter(k => k.startsWith('mizu_authority_')),
+          Object.keys(sections));
+        for (const [name, value] of Object.entries(sections)) {
+          assert.equal(current.sections[name], `<${name}>\n${value}\n</${name}>`);
+        }
+        // Use Pi AI itself to resolve both transport forms. Do not emulate
+        // replay/collapse in the fixture: provider request assertions follow below.
+        const collapsed = remote.ai.resolveTranscript({ messages: messages() }, false);
+        assert.equal(collapsed.messages.filter(m => m.role === 'system').length, 1);
+        assert.equal(remote.ai.getCurrentSystemPrompt(collapsed.messages),
+          remote.ai.getCurrentSystemPrompt(messages()));
+        const positional = remote.ai.resolveTranscript({ messages: messages() }, true);
+        assert.deepEqual(positional.messages, messages());
+      };
+      const assertCwdCurrent = () => {
+        assert.ok(remote.ai.getCurrentSystemMessage(messages()).sections.cwd.includes(cwd),
+          'Pi current CWD section tracks this unit after prompt preparation');
+      };
+      await open(oldSections, [bridgeTool]);
+      for (const id of ['authority-old-one', 'authority-old-two']) {
+        remote.reply(id, [text(`answer-${id} ${'old context '.repeat(600)}`)]);
+        await session.prompt(`input-${id}`);
+        remote.checked();
+      }
+      assertCurrent(oldSections);
+      assertCwdCurrent();
+      const firstFile = sessionFile;
+      const before = messages().filter(m => m.role === 'user');
+      await open(newSections, [bridgeTool, addedTool]);
+      assert.equal(sessionFile, firstFile, 'resume the same file, not a new session');
+      assert.deepEqual(messages().filter(m => m.role === 'user'), before, 'createAgentSession retained user history');
+      remote.reply('authority-new', [text('answer-authority-new'),
+        { type: 'tool_use', id: 'added-call', name: addedTool.name, input: toolInput }]);
+      await session.prompt('Use the newly added tool.');
+      remote.checked();
+      assert.deepEqual(executions, [addedTool.operation]);
+      assertCurrent(newSections);
+      assertCwdCurrent();
+      assert.ok(messages().some(m => m.role === 'system' && m.sections?.mizu_authority_policy_1 === null),
+        'obsolete source is removed by a positional system delta');
+      assert.ok(messages().some(m => m.role === 'system' && m.toolsAdded?.some(t => t.name === addedTool.name)),
+        'new tool declaration is persisted through the SDK tool path');
+      const actualRequest = remote.requests.at(-1);
+      const wire = JSON.stringify(actualRequest);
+      assert.ok(wire.includes('new exact policy 雪'));
+      assert.ok(wire.includes('input-authority-old-one'), 'provider still sees prior user history');
+      // This installed provider supports positional system updates: the old
+      // head stays cacheable and the exact replacement/removal reaches the wire.
+      const update = actualRequest.messages.find(m => m.role === 'system');
+      const updateText = update.content.filter(b => b.type === 'text').map(b => b.text).join('');
+      for (const [name, value] of Object.entries(newSections)) {
+        assert.ok(updateText.includes(`<${name}>\n${value}\n</${name}>`));
+      }
+      assert.ok(updateText.includes('Removed system prompt section "mizu_authority_policy_1"'));
+      assert.ok(updateText.includes(cwd), 'provider request carries this unit CWD update');
+      assert.ok(JSON.stringify(actualRequest.system).includes('old policy λ'));
+
+
+      await open(newSections, [bridgeTool]);
+      let removedErrors = 0;
+      session.subscribe(event => {
+        if (event.type === 'tool_execution_end' && event.toolName === addedTool.name) {
+          assert.equal(event.isError, true);
+          assert.match(JSON.stringify(event.result), /not found/);
+          removedErrors++;
+          remote.reply('removed-tool-refused');
+        }
+      });
+      remote.reply('try-stale-tool', [text('answer-try-stale-tool'),
+        { type: 'tool_use', id: 'stale-call', name: addedTool.name, input: toolInput }]);
+      await session.prompt('Attempt the removed historical tool.');
+      remote.checked();
+      assert.equal(removedErrors, 1);
+      assert.deepEqual(executions, [addedTool.operation], 'history never grants execution');
+      assert.deepEqual(remote.ai.getCurrentTools(messages()).map(t => t.name), [bridgeTool.name]);
+      assert.ok(messages().some(m => m.role === 'system' && m.toolsRemoved?.some(t => t.name === addedTool.name)));
+      assert.ok(!remote.requests.at(-1).tools?.some(t => t.name === addedTool.name),
+        'provider declarations use the current tool set after removal');
+
+      remote.summarize();
+      await session.compact();
+      remote.retain(messages());
+      remote.checked();
+      assertCurrent(newSections);
+      await open(newSections, [bridgeTool]);
+      assertCurrent(newSections); // Compaction checkpoint survives actual disk reopen.
+      remote.reply('after-authority-compaction');
+      await session.prompt('Continue after reopen.');
+      remote.checked();
+      assertCurrent(newSections);
+      assertCwdCurrent();
+      const after = JSON.stringify(remote.requests.at(-1));
+      assert.ok(after.includes('new exact policy 雪') && after.includes('new charter'));
+      assert.ok(!after.includes('old policy λ') && !after.includes('obsolete policy'));
+      assert.equal(sessionFile, firstFile);
+      const disk = await readFile(sessionFile, 'utf8');
+      assert.ok(disk.includes('compaction'), 'real compaction and system checkpoints are file backed');
+    } finally {
+      session?.dispose();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });

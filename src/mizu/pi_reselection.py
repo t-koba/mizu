@@ -79,8 +79,11 @@ def _family_owner(target, binding, identities):
     return record
 
 
+# Authority-delta identities have a new family-reference namespace as well as
+# new session keys. Never read/adopt old content-bound pointers on this one-time
+# rekey; leave those records untouched. Current ownership still fails closed.
 def _family_reference(root):
-    return _family_record(root / 'families' / 'family.json')
+    return _family_record(root / 'families-v2' / 'family.json')
 
 
 def family_directory(context, profile, settings, identity, ordinary):
@@ -92,7 +95,7 @@ def family_directory(context, profile, settings, identity, ordinary):
         root = ordinary.parent
         safe_path(root)
         owner = _family_record(ordinary / 'family-owner.json', target_name=ordinary.name)
-        refs = root / 'families'
+        refs = root / 'families-v2'
         safe_path(refs)
         if refs.exists() and not refs.is_dir():
             raise ConfigError('Invalid Pi family reference directory')
@@ -118,15 +121,10 @@ def family_directory(context, profile, settings, identity, ordinary):
         return isolated
     common, identities, _ = compatible(context, role, spec)
     decision = getattr(context, 'reselection_decision', None)
-    if profile in identities and getattr(context, 'turn_continuation', False):
-        # A host-created finish-only continuation narrows native tools without
-        # replacing the family history. Every other identity safeguard remains.
-        authority = context.turn_authority_role
-        if (authority is not None and authority.engine_tools == role.engine_tools
-                and set(settings['engine_tools']) <= set(role.engine_tools)):
-            identity = {**identity, 'settings': {**identity['settings'],
-                        'engine_tools': list(role.engine_tools)}}
-            ordinary = ordinary.parent / digest(canonical(identity))
+    # Ordinary Pi identity already excludes current grants/native tools, so a
+    # finish-only continuation needs no identity rewrite. The dispatch selector,
+    # model compatibility and family ownership checks below still apply; the
+    # current registration and Bridge, never historical declarations, admit tools.
     if (not isinstance(decision, dict) or decision.get('selector') != role.selector
             or decision.get('definition_sha256') != digest(canonical(spec))
             or decision.get('profile') != profile or profile not in identities
@@ -140,7 +138,7 @@ def family_directory(context, profile, settings, identity, ordinary):
     safe_path(root)
     if root.exists() and not root.is_dir():
         raise ConfigError('Invalid Pi session root')
-    refs = root / 'families'
+    refs = root / 'families-v2'
     # One active pointer per role bounds family state across config revisions;
     # its binding makes selector edits fail closed.
     reference = refs / 'family.json'

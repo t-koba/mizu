@@ -776,8 +776,8 @@ def role_event_poll_seconds(role: "Role") -> int:
     return EVENT_POLL_SECONDS_DEFAULT
 
 
-def role_policy_text(role: "Role") -> str:
-    """Composed role policy text: parts read as UTF-8 and joined in order.
+def role_policy_parts(role: "Role") -> list[str]:
+    """Exact independent policy sources, read as UTF-8 in order.
 
     Schema: tuple of policy paths on the role. Bounds: parts validated at
     config load (each at most 64 KiB, 16 parts, 256 KiB total). Trust:
@@ -802,7 +802,12 @@ def role_policy_text(role: "Role") -> str:
     total = sum(len(x.encode("utf-8")) for x in texts)
     if total > MAX_ROLE_POLICY_TOTAL:
         raise ConfigError("Composed role policy exceeds 256 KiB")
-    return "\n".join(piece.rstrip("\n") for piece in texts) + "\n"
+    return texts
+
+
+def role_policy_text(role: "Role") -> str:
+    """Composed policy; retain the historical newline normalization and bounds."""
+    return "\n".join(piece.rstrip("\n") for piece in role_policy_parts(role)) + "\n"
 
 
 def system_context_text(role: "Role", goal: str) -> str:

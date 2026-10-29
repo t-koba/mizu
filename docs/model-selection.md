@@ -408,8 +408,8 @@ candidates = [
 ]
 ```
 
-A profile switch that changes model, engine, grants, policy, or content
-starts a fresh bounded session; an effort-only switch (native reasoning-effort
+A profile switch that changes model, engine or compatibility-bound content
+starts a fresh bounded session (ordinary Pi applies authority/grants live); an effort-only switch (native reasoning-effort
 keys) continues the role's conversation with the current effort, so
 conversations are never transplanted across incompatible settings;
 returning to the earlier profile resumes its conversation. Routing applies
@@ -523,8 +523,9 @@ matching rule, exclusions, selected profile and classification-run reference.
 Main result/error records also reference the decision and failure action.
 Classification results are separate canonical run records, never counted twice
 through their parent. Private task text stays in normal inputs, not selection
-facts. Model sessions retain existing identity checks minus live effort keys:
-profiles differing beyond reasoning effort use different session namespaces;
+facts. Model sessions retain compatibility identity checks minus live effort keys
+(and ordinary Pi’s live authority/tool grants): other profile differences use
+different session namespaces;
 conversations are not transplanted. Consultations resolve each answering role through a bounded selector preview (no routing consumption, no classifier inference) instead of overriding its profile. A selector role
 requires `smoke --profile` so the paid probe has an exact target.
 
@@ -614,9 +615,10 @@ non-ephemeral Pi only**; every candidate in every rule must be compatible.
 Other engines, including `pi-durable`, are not supported by this option. Pi virtual
 models are also refused because their nested provider requests are not separately
 host-authorized.
-Compatibility retains all ordinary conversation identity safeguards (policy,
-goal, capabilities, workspace, command, resources, MCP, engine tools, native
-settings and adapter digest); only provider/model and the existing
+Compatibility retains all ordinary-Pi conversation identity safeguards (workspace,
+command, resources, MCP, native settings and adapter digest); policy, goal,
+capabilities and engine tools are live, not identity fields. Only provider/model
+and the existing
 `conversation_settings` live options may differ. Incompatibility refuses the
 dispatch, not a silent downgrade to ordinary sessions.
 
@@ -634,7 +636,7 @@ current selection. There are no downgrades within a submission. Host finish-only
 continuations retain the selected model rather than reselecting.
 
 For an enabled selector the host atomically establishes one bounded reference in
-`sessions/<role>/families/family.json`, under a local lock. Its stored
+`sessions/<role>/families-v2/family.json`, under a local lock. Its stored
 binding covers the selector definition, project, role and shared conversation
 identity, and points to exactly the entry
 candidate's ordinary **same-source** session directory, adopting it if present or
@@ -654,7 +656,10 @@ back to zero stops family routing but retains its reference. If the selected pro
 ordinary directory is family-owned, disabled runs use a stable fresh isolated
 per-profile key rather than append to shared history; unowned profiles keep their
 ordinary keys. Re-enabling the same family resolves its unchanged lineage.
-Adapter-source changes remain identity-bound and are not migrated; reset the role
+The authority-delta identity change deliberately rekeys once, leaving old
+content-bound directories and `families` pointers untouched without scanning or
+adopting them. After that boundary, adapter-source changes remain identity-bound
+and are not migrated; reset the role
 sessions before re-enabling a changed adapter family. Explicit role session reset removes family references and
 ownership claims together with ordinary session state.
 

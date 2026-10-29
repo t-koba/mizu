@@ -22,6 +22,15 @@ mismatch cannot be waived. The test never downloads dependencies.
   only bridge I/O injected; the durable SDK's Harness, tool loop, file-backed SQLite close/reopen,
   `resume()`, completed-unit request-ID deduplication, subsequent submission,
   `compact()`, summary placement and context projection.
+- Ordinary Pi's production authority-section hook through actual file-backed
+  `createAgentSession` resume: exact section replacement/removal, unrelated
+  extension section preservation, retained user history, real compaction and
+  reopen checkpoints. Pi AI resolves both positional and collapsed transcripts;
+  the faux provider observes the actual named updates/removals. Current tool
+  declarations are added/removed, and a call to a removed historical tool returns
+  an SDK error without executing host code. Host regressions separately check
+  policy byte bounds, identity boundaries, one-time rekey/no-scan behavior,
+  family ownership and current-grant admission.
 - The real coding SDK's safe-point reselection path: explicit `high` switches to an
   option-omitting profile and resolves to the installed SDK default; a reopened
   legacy transcript with `high` is reconciled under that profile before inference.

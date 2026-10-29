@@ -7,7 +7,7 @@ from pathlib import Path
 
 from . import platform as _platform
 from .bridge import Bridge
-from .config import Config, Role, system_context_text
+from .config import Config, Role, role_policy_parts
 from .engine_channel import Channel
 from .engine_config import effective, connected_servers, session_record, save_session, session_token_total, MAX_SESSION_TOKENS
 from .errors import RequestYieldExceeded
@@ -19,6 +19,28 @@ from .protocol import tool_definitions
 from .startup import RUNTIME_ENDPOINT, record_startup, startup_bound
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+# Fixed prefix; mutable authority belongs in independently replaceable sections.
+BASE_SYSTEM_PROMPT = "You are an AI assistant running in Mizu."
+
+
+def authority_sections(role: Role, goal: str) -> dict[str, str]:
+    """Host authority for ordinary Pi, with synthetic names, never source paths.
+
+    Policy sources use the shared UTF-8/per-file/aggregate bounds and fail
+    closed. The charter is the exact caller-pinned Context.goal, not a file
+    discovered in the workspace. Read per dispatch; no partial fallback.
+    """
+    return {**{f"mizu_authority_policy_{i}": text
+               for i, text in enumerate(role_policy_parts(role))},
+            "mizu_authority_charter": goal}
+
+
+def authority_projection(sections: dict[str, str]) -> str:
+    """Auditable host-owned prompt projection (Pi adds its own SDK sections)."""
+    return BASE_SYSTEM_PROMPT + "\n\n" + "\n\n".join(
+        f"<{name}>\n{text}\n</{name}>" for name, text in sections.items())
 
 
 class PiDriver:
@@ -38,15 +60,16 @@ class PiDriver:
         path, saved = session_record(context, profile, settings)
         reselection = Reselection(context)
         model = self.config.model(profile)
-        policy = system_context_text(context.role, context.goal)
-        atomic_write(context.run_dir / "system.md", policy.encode())
+        sections = authority_sections(context.role, context.goal)
+        atomic_write(context.run_dir / "system.md", authority_projection(sections).encode("utf-8"))
         cwd = context.run_dir / "controller"
         mkdir(cwd)
         agent_dir = self.config.agent_dir("pi")
         mkdir(agent_dir)
         write_json(context.run_dir / "pi-effective.json", {**settings, "mcp_servers": connected_servers(context, settings),
                    "agentDir": str(agent_dir), "cwd": str(cwd), "sessionDir": str(path.parent),
-                   "resume": saved["id"] if saved else None, "systemPrompt": policy,
+                   "resume": saved["id"] if saved else None, "systemPrompt": BASE_SYSTEM_PROMPT,
+                   "authority_sections": list(sections.items()),  # JSON object key sorting must not reorder sources.
                    **({"reselection": True} if reselection.enabled else {})})
         session_file = None
         observed = []

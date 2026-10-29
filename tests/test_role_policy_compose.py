@@ -46,7 +46,7 @@ class ComposedPolicyTests(Fixture):
         self.assertEqual(system_context_text(role, goal),
                          role_policy_text(role) + "\n# Project charter\n\n" + goal)
 
-    def test_charter_only_change_rekeys_normal_engines_not_durable(self):
+    def test_charter_only_change_rekeys_only_non_pi_engines(self):
         from mizu.engine_config import effective, session_record, save_session
         before = self.context("worker")
         settings = effective(self.config, before.role, before.role.profile)
@@ -62,7 +62,8 @@ class ComposedPolicyTests(Fixture):
             with self.subTest(engine=engine):
                 options = {**settings, "engine": engine, "session": "persistent"}
                 path, saved = session_record(after, after.role.profile, options)
-                if engine == "pi-durable":
+                if engine in ("pi", "pi-durable"):
+                    # Both Pi engines now apply authority live, through distinct SDK paths.
                     self.assertEqual(path, original)
                     self.assertEqual(saved["id"], "old-charter-session")
                 else:
@@ -89,7 +90,8 @@ class ComposedPolicyTests(Fixture):
     def test_session_identity_changes_with_any_part(self):
         from mizu.engine_config import effective, session_record
         ctx = self.context("worker")
-        settings = effective(self.config, ctx.role, ctx.role.profile)
+        # Non-Pi engines retain the content-bound policy identity.
+        settings = {**effective(self.config, ctx.role, ctx.role.profile), "engine": "codex"}
         first, _ = session_record(ctx, ctx.role.profile, settings)
         # Rewrite the underlying file; the same Role tuple now digests differently.
         target = self.config.roles["worker"].policy[0]

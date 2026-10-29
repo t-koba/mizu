@@ -1302,10 +1302,49 @@ Both modes carry only `goal_digest` for the charter. Every engine dispatch,
 including resume, places the ordered role policy and exact pinned charter in
 stable system instructions, independently of compactable unit history.
 Writers pin the live operator goal, observers pin the snapshot goal, and
-children inherit the parent's goal. Normal session fingerprints include that
-goal's digest; pi-durable preserves its live-configured store identity instead,
+children inherit the parent's goal. Codex/Claude session fingerprints include that
+goal's digest. Ordinary Pi applies authority sections live as described below;
+pi-durable preserves its separate live-configured store identity,
 with both resume-authority and turn grants binding the composed system text
 through `policy_text` to refuse stale crash recovery.
+Ordinary Pi (pinned SDK 1.3.0) uses a fixed base prompt plus host-resolved
+`mizu_authority_policy_0`, `mizu_authority_policy_1`, … in source order and
+`mizu_authority_charter` for the exact pinned goal. Sources are independently
+read as UTF-8 with the same 64 KiB per-file and 256 KiB aggregate policy bounds
+and fail-closed errors as composed policy; the configuration allows 1–16 files.
+Unlike the composed-text interface, section values preserve original whitespace.
+Names are synthetic, never policy source paths, and cannot collide with Pi's
+managed sections. `pi-effective.json` carries `systemPrompt` (the fixed base)
+and `authority_sections` (an ordered array of `[name, text]` pairs, so canonical
+JSON key sorting cannot reorder sources). `system.md` is the auditable
+host-owned base/section projection; it excludes Pi-generated sections such as cwd
+and any unrelated extension sections, and never adds source-path labels.
+
+The existing inline `register()` extension replaces only the `mizu_authority_`
+namespace in `before_agent_start.systemPromptOptions.sections`, leaving other
+extensions' current sections intact. Pi persists section diffs as positional
+SystemMessages, including removals when the source list shrinks. Do not append
+manual authority messages before `createAgentSession`: that API rebuilds initial
+system state. Pi replay and compaction checkpoints retain current sections;
+provider adapters either transmit positional updates or resolve them into the
+current leading prompt according to the provider's transcript support. This is
+not a promise of a provider cache hit. No extra inference or retry is introduced;
+reads fail before launch, and normal dispatch cancellation/errors apply.
+
+Only ordinary-Pi identity excludes policy text, goal digest, capabilities and
+`settings.engine_tools`, as well as its already-live thinking/cache options.
+Provider/model, session mode, workspace, command, resources, MCP, local model
+settings, all other effective settings and **adapter digest** still bind the
+conversation. Current SDK tool registration/loadout reconciles additions and
+removals; historical declarations are not executable grants. Current Bridge and
+host admission remain authoritative, including for finish-only continuations.
+This change deliberately causes a **one-time rekey** of existing ordinary-Pi
+sessions. Old directories are untouched: no scan or ambiguous adoption is
+attempted. Opt-in families likewise use the new `families-v2` reference namespace,
+leaving old `families` pointers untouched. Subsequent adapter changes remain
+identity-bound; this is not a general family migration facility. Non-Pi and
+pi-durable identity, prompts and execution paths are unchanged.
+
 Rotation is operator policy via `[limits] session_max_tokens`,
 `session_max_cost_usd`, and `session_max_age_seconds` (0 disables each, age bounds
 conversation lifetime from its stable creation surviving same-id saves):

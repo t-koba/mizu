@@ -50,7 +50,7 @@ class PiReselectionTests(Fixture):
             b, _ = self.record(context, 'alternate')
             self.assertNotEqual(a, b)
             self.assertFalse(Reselection(context).enabled)
-            self.assertFalse((a.parent.parent / 'families').exists())
+            self.assertFalse((a.parent.parent / 'families-v2').exists())
 
     def test_adopt_only_dispatch_candidate_and_resume_same_target(self):
         self.spec['reselection_interval_seconds'] = 0
@@ -67,7 +67,7 @@ class PiReselectionTests(Fixture):
         self.assertEqual(adopted, b)
         self.assertEqual(saved['id'], 'entry-history')
         self.assertEqual(b.read_bytes(), before_b)
-        ref = next((b.parent.parent / 'families').glob('*.json'))
+        ref = next((b.parent.parent / 'families-v2').glob('*.json'))
         ref.unlink()  # recover an atomic-write interruption from the owner record
         next_unit = self.bound('primary')
         resumed, record = self.record(next_unit, 'primary')
@@ -137,7 +137,7 @@ class PiReselectionTests(Fixture):
     def test_invalid_dangling_and_unsafe_reference_fail_closed(self):
         context = self.bound()
         path, _ = self.record(context, 'alternate')
-        ref = next((path.parent.parent / 'families').glob('*.json'))
+        ref = next((path.parent.parent / 'families-v2').glob('*.json'))
         original = read_json(ref)
         for value in ({}, {**original, 'target': '../elsewhere'}, {**original, 'binding': '0'*64},
                       {**original, 'entry': 'primary'}):
@@ -390,6 +390,49 @@ class PiReselectionTests(Fixture):
         self.assertIs(error.exception, refused)
         self.assertFalse(control.failed)
         self.assertIsNone(context.admission_error)
+
+    def test_old_content_bound_family_pointer_is_not_read_or_adopted(self):
+        from mizu.engine_config import conversation_identity, conversation_settings
+        from mizu.config import role_policy_text
+        from mizu.fs import canonical, digest, mkdir
+        context = self.bound('alternate')
+        settings = effective(self.config, context.role, 'alternate')
+        identity = conversation_identity(context, settings)
+        old = {**identity, 'settings': conversation_settings(settings),
+               'policy': role_policy_text(context.role), 'goal': context.goal_digest,
+               'capabilities': context.role.capabilities}
+        root = context.run_dir.parents[1] / 'sessions' / context.role.name
+        old_path = root / digest(canonical(old)) / 'session.json'
+        mkdir(old_path.parent)
+        save_session(old_path, 'old-family-history', {})
+        old_refs = root / 'families' / 'family.json'
+        mkdir(old_refs.parent)
+        # Even an unreadable old pointer is not inspected; this is a new key
+        # and reference namespace, not a speculative migration or root scan.
+        old_refs.write_bytes(b'old reference untouched')
+        before = old_path.read_bytes()
+        current, saved = self.record(context, 'alternate')
+        self.assertNotEqual(current, old_path)
+        self.assertIsNone(saved)
+        self.assertEqual(old_refs.read_bytes(), b'old reference untouched')
+        self.assertEqual(old_path.read_bytes(), before)
+        self.assertTrue((root / 'families-v2' / 'family.json').exists())
+
+    def test_authority_edits_keep_owned_family_but_not_opt_out_history(self):
+        context = self.bound('alternate')
+        original, _ = self.record(context, 'alternate')
+        save_session(original, 'family-history', {})
+        context.role.policy[0].write_text('new policy')
+        context.goal_digest = 'a' * 64
+        self.role = dataclasses.replace(self.role, capabilities=('finish',), engine_tools=('new-tool',))
+        self.config.roles['worker'] = self.role
+        context = self.bound('primary')
+        resumed, saved = self.record(context, 'primary')
+        self.assertEqual(resumed, original)
+        self.assertEqual(saved['id'], 'family-history')
+        self.spec['reselection_interval_seconds'] = 0
+        isolated, _ = self.record(self.bound('alternate'), 'alternate')
+        self.assertNotEqual(isolated, original)
 
     def test_narrowed_host_continuation_keeps_family_without_restoring_tools(self):
         self.role = dataclasses.replace(self.role, engine_tools=('read',))

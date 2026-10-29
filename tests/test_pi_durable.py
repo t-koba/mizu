@@ -881,11 +881,12 @@ class SessionContinuityTests(Fixture):
         other["options"] = {**settings["options"], "durable_backend": "other"}
         self.assertNotEqual(self._key("worker", other), before)
 
-    def test_other_engines_keep_rotation(self):
+    def test_non_pi_engines_keep_grant_rotation(self):
         import dataclasses
         from mizu.engine_config import effective
         role = self.config.roles["worker"]
-        before_settings = dict(self.config.profiles["primary"])
+        # Ordinary Pi now applies grants live. Codex/Claude remain content-bound.
+        before_settings = {**effective(self.config, role, "primary"), "engine": "codex"}
         before = self._key("worker", before_settings)
         roles = dict(self.config.roles)
         roles["worker"] = dataclasses.replace(
