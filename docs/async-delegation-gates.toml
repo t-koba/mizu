@@ -109,7 +109,6 @@ quiescence_release_rule = "Keep the reservation through cancellation, supervisor
 
 # Inventory gaps that must be closed before runner integration or a pilot.
 not_yet_proven = [
-  "Project.initialize can import a live managed workspace without binding to that source project's reservation.",
   "DelegationJobs persists run_id, but runtime does not yet bind it to the child run directory or authority.",
   "Driver quiescence only observes the direct process and reader threads; descendant/container recovery after supervisor death is absent.",
   "External MCP names are recorded in run configuration, but crash-time server/container reconciliation is absent.",
@@ -127,7 +126,7 @@ required_bindings = [
 mismatch_action = "Refuse launch or retain the existing reservation; never infer equivalence from role/profile names."
 
 [observed_lifecycle]
-project_initialize = "Creates a staged new project and refuses overwrite, but imports an arbitrary source path without checking whether it is an actively reserved project workspace."
+project_initialize = "Creates a staged new project and refuses overwrite. Managed workspace imports (including resolved aliases and lexical escape attempts) take the source workspace.lock before the non-initializing DelegationJobs.guard and retain it through source inspection and clone/copy. Active, corrupt, incomplete, unsafe or unreadable state refuses before target publication; external-directory imports are unchanged. This proves source-import serialization only, not child authority or process/container quiescence."
 project_restore = "Restores from an archive into a new unarmed project and refuses an existing destination; backup creation uses storage.quiescent before capture."
 probe = "probes.service_due uses a per-probe empty workspace and acquires workspace.lock for write roles; reservation must exclude this lock participant."
 automatic_prune = "Called before run admission; prune/snapshot collection enters storage.quiescent and its workspace exclusion."

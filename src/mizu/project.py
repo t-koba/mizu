@@ -1,9 +1,11 @@
 """Project lifecycle and operator-owned control files, separate from workspaces."""
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
+import stat
 import tempfile
 import tomllib
 import uuid
@@ -554,46 +556,98 @@ def _import_plain_directory(source: Path, workspace: Path, stage: Path, config: 
     temporary_store.materialize(captured, workspace)
 
 
+@contextlib.contextmanager
+def _import_source(config: Config, source: Path):
+    """Fence managed source capture, without initializing delegation state.
+
+    Inspect both lexical and resolved prefixes: an alias into a workspace (or
+    an escape out of one) must not turn a managed source into an external one.
+    Only path metadata is inspected before workspace.lock; content inspection
+    and capture stay inside it, ordered before the delegation store lock.
+    """
+    projects = (config.data / "projects").absolute()
+    roots = set()
+    try:
+        base = projects.resolve()
+        absolute = source.absolute()
+        for prefix in (absolute, *absolute.parents):
+            for path in (prefix, prefix.resolve()):
+                for parent in (projects, base):
+                    if path.is_relative_to(parent):
+                        parts = path.relative_to(parent).parts
+                        if len(parts) >= 2 and parts[1] == "workspace":
+                            roots.add(base / parts[0])
+        resolved = source.resolve()
+    except (OSError, RuntimeError):
+        raise Denied("Unreadable import source path") from None
+    if not roots:
+        yield resolved
+        return
+    try:
+        if len(roots) != 1:
+            raise Denied("Ambiguous managed import source")
+        root = roots.pop()
+        workspace = root / "workspace"
+        if not stat.S_ISDIR(root.lstat().st_mode):
+            raise Denied("Unsafe managed import source")
+        locks = root / "locks"
+        if locks.is_symlink() or (locks.exists() and not stat.S_ISDIR(locks.lstat().st_mode)):
+            raise Denied("Unsafe managed import locks")
+        with lock(locks / "workspace.lock"):
+            resolved = source.resolve()
+            if (not stat.S_ISDIR(workspace.lstat().st_mode)
+                    or not resolved.is_relative_to(workspace)):
+                raise Denied("Unsafe managed import source")
+            # A missing/unsafe initialization marker is unknown, not external.
+            safe_read(root, "project.toml", 65536)
+            from .delegation_jobs import DelegationJobs
+            DelegationJobs.guard(root)
+            yield resolved
+    except (OSError, RuntimeError, LimitExceeded):
+        raise Denied("Unreadable managed import source or reservation") from None
+
+
 def initialize(config: Config, name: str, source: Path, goal_file: Path,
                roles: list[str], verification: list[str], *, armed: bool = False) -> Project:
     identifier(name)
-    source, goal_file = source.resolve(), goal_file.resolve()
-    if not source.is_dir() or not goal_file.is_file():
-        raise ConfigError("Source directory and goal file must exist")
-    goal = read_goal(goal_file, "Goal must be nonempty and at most 64 KiB")
-    if not roles or any(role not in config.roles for role in roles):
-        raise ConfigError("Choose existing roles")
-    check_verify(verification)
-    parent = config.data / "projects"
-    mkdir(parent)
-    destination = parent / name
-    with lock(config.data / "locks" / f"init-{name}.lock", blocking=False):
-        if destination.exists():
-            raise Denied("Project already exists; initialization never overwrites it")
-        stage = Path(tempfile.mkdtemp(prefix=".init-", dir=parent))
-        try:
-            env = git_env()
-            if (source / ".git").exists():
-                _import_git_tree(source, stage / "workspace", env)
-            else:
-                _import_plain_directory(source, stage / "workspace", stage, config)
-            atomic_write(stage / "PROJECT.md", goal.encode())
-            text = "roles = " + json.dumps(roles) + "\nverify = " + json.dumps(verification) + "\n"
-            atomic_write(stage / "project.toml", text.encode())
-            write_json(stage / "control.json", {"armed": armed, "paused": not armed,
-                                                "draining": False,
-                                                "wake_generation": uuid.uuid4().hex, "updated_at": now(),
-                                                "reason": "Operator initialized armed" if armed else "Initialized unarmed; operator arm required"})
-            mkdir(stage / "spool" / "editor")
-            atomic_write(stage / "spool/editor/.mizu-outbox", b"Mizu Editor proposal outbox\n")
-            store = open_store(stage, config)
-            captured = store.capture_files(stage / "workspace")
-            initial = store.create(captured, goal=goal, state="Initialized; no autonomous work has run.",
-                                   run=None, outcome="wait", summary="Project initialized, unarmed.")
-            store.publish(initial)
-            os.rename(stage, destination)
-            sync_dir(parent)
-        except BaseException:
-            shutil.rmtree(stage, ignore_errors=True)
-            raise
-    return Project(config, name)
+    with _import_source(config, source) as source:
+        goal_file = goal_file.resolve()
+        if not source.is_dir() or not goal_file.is_file():
+            raise ConfigError("Source directory and goal file must exist")
+        goal = read_goal(goal_file, "Goal must be nonempty and at most 64 KiB")
+        if not roles or any(role not in config.roles for role in roles):
+            raise ConfigError("Choose existing roles")
+        check_verify(verification)
+        parent = config.data / "projects"
+        mkdir(parent)
+        destination = parent / name
+        with lock(config.data / "locks" / f"init-{name}.lock", blocking=False):
+            if destination.exists():
+                raise Denied("Project already exists; initialization never overwrites it")
+            stage = Path(tempfile.mkdtemp(prefix=".init-", dir=parent))
+            try:
+                env = git_env()
+                if (source / ".git").exists():
+                    _import_git_tree(source, stage / "workspace", env)
+                else:
+                    _import_plain_directory(source, stage / "workspace", stage, config)
+                atomic_write(stage / "PROJECT.md", goal.encode())
+                text = "roles = " + json.dumps(roles) + "\nverify = " + json.dumps(verification) + "\n"
+                atomic_write(stage / "project.toml", text.encode())
+                write_json(stage / "control.json", {"armed": armed, "paused": not armed,
+                                                    "draining": False,
+                                                    "wake_generation": uuid.uuid4().hex, "updated_at": now(),
+                                                    "reason": "Operator initialized armed" if armed else "Initialized unarmed; operator arm required"})
+                mkdir(stage / "spool" / "editor")
+                atomic_write(stage / "spool/editor/.mizu-outbox", b"Mizu Editor proposal outbox\n")
+                store = open_store(stage, config)
+                captured = store.capture_files(stage / "workspace")
+                initial = store.create(captured, goal=goal, state="Initialized; no autonomous work has run.",
+                                       run=None, outcome="wait", summary="Project initialized, unarmed.")
+                store.publish(initial)
+                os.rename(stage, destination)
+                sync_dir(parent)
+            except BaseException:
+                shutil.rmtree(stage, ignore_errors=True)
+                raise
+        return Project(config, name)
