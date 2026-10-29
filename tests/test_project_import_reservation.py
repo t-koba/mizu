@@ -59,7 +59,8 @@ class ProjectImportReservationTests(Fixture):
                     store.cancel('worker', binding[0])
                 elif phase == 'finished':
                     store.runner_finished(*binding, 'cancelled')
-                self.denied_import()
+                for source in (self.project.workspace, self.project.root):
+                    self.denied_import(source)
         # Terminal ledger entries permit imports without rewriting the store.
         store.runner_quiescent(*binding, 'Fixture state only; no child launched')
         before = (store.root / 'state.json').read_bytes()
@@ -69,18 +70,21 @@ class ProjectImportReservationTests(Fixture):
     def test_incomplete_corrupt_and_unreadable_store_refuse_without_repair(self):
         root = self.project.root / 'delegation-jobs'
         root.mkdir()
-        self.denied_import()
+        for source in (self.project.workspace, self.project.root):
+            self.denied_import(source)
         self.assertEqual(list(root.iterdir()), [])
         (root / 'store.lock').touch()
         for content in (None, b'{', b'{}', b'{"version":1,"active":null,"jobs":{}}'):
             with self.subTest(content=content):
                 if content is not None:
                     (root / 'state.json').write_bytes(content)
-                self.denied_import()
+                for source in (self.project.workspace, self.project.root):
+                    self.denied_import(source)
                 if content is not None:
                     self.assertEqual((root / 'state.json').read_bytes(), content)
         with patch('mizu.delegation_jobs.safe_read', side_effect=PermissionError):
-            self.denied_import()
+            for source in (self.project.workspace, self.project.root):
+                self.denied_import(source)
 
     def test_unsafe_store_symlink_refuses(self):
         store = DelegationJobs(self.project.root)
@@ -89,6 +93,7 @@ class ProjectImportReservationTests(Fixture):
         state.rename(saved)
         self.symlink(state, saved)
         self.denied_import()
+        self.denied_import(self.project.root)
 
     def test_absent_store_imports_without_initializing_and_external_is_unchanged(self):
         real_guard = DelegationJobs.guard
@@ -100,13 +105,47 @@ class ProjectImportReservationTests(Fixture):
         with patch.object(DelegationJobs, '__init__', side_effect=AssertionError('Store initialization')), \
              patch.object(DelegationJobs, 'guard', side_effect=guarded) as guard:
             imported = self.import_source()
-            guard.assert_called_once_with(self.project.root)
+            root_import = self.import_source(self.project.root, name='root-import')
+            self.assertEqual(guard.call_count, 2)
+            guard.assert_called_with(self.project.root)
         self.assertFalse((self.project.root / 'delegation-jobs').exists())
         self.assertEqual((imported.workspace / 'app.py').read_bytes(), b'VALUE = 2\n')
+        self.assertEqual((root_import.workspace / 'workspace/app.py').read_bytes(), b'VALUE = 2\n')
         self.start(DelegationJobs(self.project.root))
         with patch.object(DelegationJobs, 'guard', side_effect=AssertionError('External guard')):
             external = self.import_source(self.root / 'source', name='external')
         self.assertEqual((external.workspace / 'app.py').read_bytes(), b'VALUE = 2\n')
+
+    def test_non_workspace_project_subdirectory_does_not_become_root_import(self):
+        store = DelegationJobs(self.project.root)
+        self.start(store)
+        notes = self.project.root / 'notes'
+        notes.mkdir()
+        (notes / 'README.txt').write_text('Not the live workspace.\n')
+        imported = self.import_source(notes, name='notes-import')
+        self.assertEqual((imported.workspace / 'README.txt').read_text(),
+                         'Not the live workspace.\n')
+
+    def test_root_aliases_and_resolved_equivalents_are_guarded(self):
+        alias = self.root / 'root-alias'
+        self.symlink(alias, self.project.root)
+        imported = self.import_source(alias, name='root-alias-import')
+        self.assertEqual((imported.workspace / 'workspace/app.py').read_bytes(), b'VALUE = 2\n')
+        self.start(DelegationJobs(self.project.root))
+        for source in (alias, self.project.root / 'locks/..'):
+            self.denied_import(source)
+
+    def test_collection_and_ancestor_sources_are_ambiguous(self):
+        alias = self.root / 'collection-alias'
+        self.symlink(alias, self.project.root.parent)
+        self.import_source(self.root / 'source', name='second')
+        # Refuse without scanning the collection or choosing one workspace lock.
+        for source in (self.project.root.parent, self.config.data, self.root, alias,
+                       self.project.root / '..'):
+            with self.subTest(source=source.name), \
+                 patch.object(DelegationJobs, 'guard', side_effect=AssertionError('No single guard')):
+                self.denied_import(source)
+        self.assertFalse((self.project.root / 'delegation-jobs').exists())
 
     def test_aliases_and_managed_subdirectories_bind_to_the_source_project(self):
         nested = self.project.workspace / 'nested'
@@ -134,13 +173,21 @@ class ProjectImportReservationTests(Fixture):
         self.project.workspace.rename(saved)
         self.symlink(self.project.workspace, self.root / 'source')
         self.denied_import()
+        self.denied_import(self.project.root)
 
     def test_unknown_managed_workspace_never_falls_back_to_external(self):
         (self.project.root / 'project.toml').unlink()
         self.denied_import()
+        self.denied_import(self.project.root)
         self.assertFalse((self.project.root / 'delegation-jobs').exists())
 
     def test_start_first_blocks_import_then_guard_denies_without_capture(self):
+        self.start_first(self.project.workspace)
+
+    def test_root_start_first_blocks_import_before_capture(self):
+        self.start_first(self.project.root)
+
+    def start_first(self, source):
         store = DelegationJobs(self.project.root)
         attempting = threading.Event()
         workspace_lock = self.project.root / 'locks/workspace.lock'
@@ -156,7 +203,7 @@ class ProjectImportReservationTests(Fixture):
              patch.object(lifecycle, '_import_plain_directory') as capture, \
              ThreadPoolExecutor(max_workers=1) as pool:
             with lock(workspace_lock):
-                future = pool.submit(self.import_source)
+                future = pool.submit(self.import_source, source)
                 self.assertTrue(attempting.wait(5), 'Import did not attempt workspace.lock')
                 # Already holding the trusted start lock; do not reacquire it.
                 store.start('worker', 'first', {
@@ -172,6 +219,9 @@ class ProjectImportReservationTests(Fixture):
     def test_import_first_blocks_start_through_real_source_capture(self):
         self.import_first('_import_plain_directory')
 
+    def test_root_import_first_blocks_start_through_recursive_capture(self):
+        self.import_first('_import_plain_directory', self.project.root)
+
     @unittest.skipUnless(shutil.which('git'), 'Git unavailable')
     def test_import_first_blocks_start_through_real_git_clone(self):
         workspace = self.project.workspace
@@ -184,7 +234,7 @@ class ProjectImportReservationTests(Fixture):
             self.assertEqual(result.exit_code, 0, result.stderr)
         self.import_first('_import_git_tree')
 
-    def import_first(self, operation):
+    def import_first(self, operation, source=None):
         store = DelegationJobs(self.project.root)
         attempting, started = threading.Event(), threading.Event()
         original = getattr(lifecycle, operation)
@@ -208,7 +258,8 @@ class ProjectImportReservationTests(Fixture):
                 self.assertFalse(started.is_set(), 'Start slipped in during capture')
 
             with patch.object(lifecycle, operation, side_effect=capture):
-                imported = self.import_source()
+                imported = self.import_source(source)
             futures[0].result(timeout=10)
         self.assertTrue(started.is_set())
-        self.assertEqual((imported.workspace / 'app.py').read_bytes(), b'VALUE = 2\n')
+        relative = 'workspace/app.py' if source == self.project.root else 'app.py'
+        self.assertEqual((imported.workspace / relative).read_bytes(), b'VALUE = 2\n')

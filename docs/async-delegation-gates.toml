@@ -82,6 +82,7 @@ parent_live_tree_gates = [
 parent_live_tree_action = "Refuse every live-tree call; allow only an explicitly pinned immutable input whose identity matches the reservation source."
 external_workspace_entrypoints = [
   "Project.initialize source capture when source resolves under a managed project workspace",
+  "Project.initialize recursive source capture from a managed project root (including resolved aliases)",
 ]
 external_workspace_action = "Refuse import from an actively reserved workspace or import a previously pinned immutable snapshot; do not assume an arbitrary source path is external."
 
@@ -126,7 +127,7 @@ required_bindings = [
 mismatch_action = "Refuse launch or retain the existing reservation; never infer equivalence from role/profile names."
 
 [observed_lifecycle]
-project_initialize = "Creates a staged new project and refuses overwrite. Managed workspace imports (including resolved aliases and lexical escape attempts) take the source workspace.lock before the non-initializing DelegationJobs.guard and retain it through source inspection and clone/copy. Active, corrupt, incomplete, unsafe or unreadable state refuses before target publication; external-directory imports are unchanged. This proves source-import serialization only, not child authority or process/container quiescence."
+project_initialize = "Creates a staged new project and refuses overwrite. Managed workspace imports (including resolved aliases and lexical escape attempts) and exact managed project-root imports take the source workspace.lock before the non-initializing DelegationJobs.guard and retain it through source inspection and clone/copy. Collection-level sources that include managed projects fail closed rather than choosing one lock. Active, corrupt, incomplete, unsafe or unreadable state refuses before target publication; ordinary external-directory imports are unchanged. These guards prove source-import serialization only; they do not prove runtime reservation wiring, child authority or process/container quiescence."
 project_restore = "Restores from an archive into a new unarmed project and refuses an existing destination; backup creation uses storage.quiescent before capture."
 probe = "probes.service_due uses a per-probe empty workspace and acquires workspace.lock for write roles; reservation must exclude this lock participant."
 automatic_prune = "Called before run admission; prune/snapshot collection enters storage.quiescent and its workspace exclusion."

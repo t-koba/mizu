@@ -560,8 +560,9 @@ def _import_plain_directory(source: Path, workspace: Path, stage: Path, config: 
 def _import_source(config: Config, source: Path):
     """Fence managed source capture, without initializing delegation state.
 
-    Inspect both lexical and resolved prefixes: an alias into a workspace (or
-    an escape out of one) must not turn a managed source into an external one.
+    Inspect lexical and resolved paths: aliases into managed roots/workspaces
+    (or escapes out of workspaces) must not bypass the fence. Collection-level
+    imports are ambiguous and refused without traversing the collection.
     Only path metadata is inspected before workspace.lock; content inspection
     and capture stay inside it, ordered before the delegation store lock.
     """
@@ -578,6 +579,24 @@ def _import_source(config: Config, source: Path):
                         if len(parts) >= 2 and parts[1] == "workspace":
                             roots.add(base / parts[0])
         resolved = source.resolve()
+        # Do not recursively discover projects or choose one lock for a whole
+        # collection. Even an empty collection is not an external source.
+        for path in (absolute, resolved):
+            for parent in (projects, base):
+                if parent.is_relative_to(path):
+                    raise Denied("Ambiguous managed import source contains project collection")
+        # Only an exact project-root source recursively contains workspace.
+        # Do not classify unrelated subdirectories (for example snapshots)
+        # merely because one of their ancestors is the project root.
+        root_imports = set()
+        for path in (absolute, resolved):
+            for parent in (projects, base):
+                if path.is_relative_to(parent):
+                    parts = path.relative_to(parent).parts
+                    if len(parts) == 1:
+                        root_imports.add(base / parts[0])
+        root_import = bool(root_imports)
+        roots.update(root_imports)
     except (OSError, RuntimeError):
         raise Denied("Unreadable import source path") from None
     if not roots:
@@ -596,12 +615,13 @@ def _import_source(config: Config, source: Path):
         with lock(locks / "workspace.lock"):
             resolved = source.resolve()
             if (not stat.S_ISDIR(workspace.lstat().st_mode)
-                    or not resolved.is_relative_to(workspace)):
+                    or not (resolved.is_relative_to(workspace)
+                            or (root_import and resolved == root))):
                 raise Denied("Unsafe managed import source")
-            # A missing/unsafe initialization marker is unknown, not external.
-            safe_read(root, "project.toml", 65536)
             from .delegation_jobs import DelegationJobs
             DelegationJobs.guard(root)
+            # A missing/unsafe initialization marker is unknown, not external.
+            safe_read(root, "project.toml", 65536)
             yield resolved
     except (OSError, RuntimeError, LimitExceeded):
         raise Denied("Unreadable managed import source or reservation") from None
