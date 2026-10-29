@@ -664,7 +664,7 @@ class EngineTests(Fixture):
         config = dataclasses.replace(self.config, roles=roles)
         project = Project(config, "sample")
         proposal = project.insights.submit(source="worker", title="Idea", body="evidence",
-                                           base_snapshot=project.snapshots.get()["id"])
+                                           base_snapshot=project.snapshots.get()["id"], addressee="operator")
         Engine(config, driver=ScriptDriver()).run(project, "worker")
         self.assertFalse(should_run(project, project.snapshots.get(), role_name="worker"))
         # A rejection leaves no inbox-generation footprint, so only the

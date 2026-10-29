@@ -291,10 +291,10 @@ class ProgressAdmissionTests(Fixture):
 
     def test_persistent_obligations_and_non_due_ci_do_not_reset_streak(self):
         target = self.project.insights.submit(
-            source="worker", title="Result needed", body="Evidence.",
+            source="worker", title="Result needed", body="Evidence.", addressee="operator",
             base_snapshot=self.project.snapshots.get()["id"])
         item = self.project.insights.submit(
-            source="reviewer", title="Dependent finding", body="Evidence.",
+            source="reviewer", title="Dependent finding", body="Evidence.", addressee="operator",
             base_snapshot=self.project.snapshots.get()["id"])
         self.project.insights.decide(
             item["id"], "defer", "Needs result", "After decision", "test", expected_rev=1,
@@ -315,10 +315,10 @@ class ProgressAdmissionTests(Fixture):
 
     def test_new_obligation_is_input_once_even_without_inbox_generation_change(self):
         target = self.project.insights.submit(
-            source="worker", title="Result needed", body="Evidence.",
+            source="worker", title="Result needed", body="Evidence.", addressee="operator",
             base_snapshot=self.project.snapshots.get()["id"])
         item = self.project.insights.submit(
-            source="reviewer", title="Dependent finding", body="Evidence.",
+            source="reviewer", title="Dependent finding", body="Evidence.", addressee="operator",
             base_snapshot=self.project.snapshots.get()["id"])
         parked = self._parked_snapshot(count=4)
         generation = self.project.insights.generation()
@@ -818,7 +818,8 @@ class ReadOnlyProgressTests(Fixture):
         self.run_observer(outcome="wait")
         self.project.set_control(wake_generation="new-input")
         def submit(ctx):
-            ctx.handle("submit_insight", {"title": "A new observation", "body": "Measured evidence"})
+            ctx.handle("submit_insight", {"title": "A new observation", "body": "Measured evidence",
+                                        "addressee": "operator"})
         before = self.project.snapshots.get()["id"]
         self.run_observer(submit)
         progress = validate_progress(self.cursor()["progress"])

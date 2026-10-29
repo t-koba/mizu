@@ -28,7 +28,8 @@ class OperatorRecordTests(Fixture):
     def setUp(self):
         super().setUp()
         self.question = self.project.insights.submit(source='reviewer', title='Question',
-            body='Q: Which behavior?', base_snapshot=None, origin='not-the-asking-role')
+            body='Q: Which behavior?', base_snapshot=None, origin='not-the-asking-role',
+            addressee='operator')
         self.subject = {'type': 'insight', 'id': self.question['id'], 'rev': 1}
 
     def cli(self, *args):
@@ -394,7 +395,8 @@ class OperatorRecordTests(Fixture):
         shared = str(self.project.root / 'shared-records' / 'operator')
         self.assertIn(shared, watches['reviewer'])
         self.assertIn(shared, watches['searcher'])  # scheduled observer without subscriptions
-        self.assertNotIn('consult', watches)  # explicit-only remains explicit-only
+        self.assertIn(str(self.project.root / 'inbox'), watches['consult'])
+        self.assertNotIn(shared, watches['consult'])  # operator records remain explicit-only
         self.assertNotIn('worker', watches)  # daemon polls authoritative state directly
         executable = self.root / 'mizu-entry'
         executable.write_text('')

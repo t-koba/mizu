@@ -20,7 +20,7 @@ def _future():
 
 def _defer(project, source, wait, title="Finding"):
     item = project.insights.submit(source=source, title=title, body="evidence",
-                                   base_snapshot=project.snapshots.get()["id"])
+                                   base_snapshot=project.snapshots.get()["id"], addressee="operator")
     project.insights.decide(item["id"], "defer", "parked", "wait for it", "test", wait=wait, expected_rev=1)
     return item
 
