@@ -80,7 +80,7 @@ def _too_deep(raw: bytes) -> bool:
     return False
 
 
-def loads_finite(raw: bytes | str) -> Any:
+def loads_finite(raw: bytes | str, *, object_pairs_hook=None) -> Any:
     """Parse one JSON document, refusing non-finite numbers and deep nesting.
 
     ``parse_constant`` rejects NaN/Infinity literals; ``parse_float``
@@ -96,7 +96,8 @@ def loads_finite(raw: bytes | str) -> Any:
     if _too_deep(data):
         raise ValueError(JSON_DEPTH_REFUSED)
     return json.loads(raw, parse_constant=_reject_nonfinite_constant,
-                      parse_float=_reject_nonfinite_number)
+                      parse_float=_reject_nonfinite_number,
+                      object_pairs_hook=object_pairs_hook)
 #: Shell-input bound shared by the tool contract and the sandbox executor.
 SCRIPT_MAX = 65536
 

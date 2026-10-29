@@ -1291,3 +1291,61 @@ exact publication and scope evidence must match. The policy is disabled unless
 explicitly configured in private project settings. Do not enable it or apply it
 to a reported external case merely because a branch is green. See
 [the protocol, bounded receipts, retry and failure rules](ci-acceptance.md).
+
+### Bounded scheduler cache evidence (host only)
+
+An operator with the normal private configuration/project access can run:
+
+```sh
+mizu --config CONFIG usage PROJECT --cache-evidence
+```
+
+This separate, read-only mode leaves plain `mizu usage PROJECT` unchanged.
+It reads only that project's existing `runs/*/dispatch-attempts.json`, never
+calls a provider, writes telemetry, exposes model tools, or changes scheduling.
+The JSON schema-1 result has a fixed aggregate shape (under 8 KiB): UTC observed
+period, observed/eligible attempts, exclusive static exclusion reasons, pair
+counts, cache-read-share bins/quantiles, distributions **across** internal groups,
+and coverage counters. No group rows, identifiers/hashes, raw labels, prompts,
+paths or error strings are emitted. Group identity internally is the actual
+session key + generation + exact provider/model, not a synthetic grouping.
+Only aggregate observations may be returned through the existing operator Q&A.
+
+Bounds are 5,000 candidate directory entries (including non-directories), the
+200 newest run directories by directory mtime within those candidates, 256 KiB
+per file and 64 attempts per file, reusing existing source limits. Enumeration
+uses no-follow directory handling; source reads use private-root `safe_read`
+(refusing links/hardlinks/specials; portable platforms check reparse points and
+identity without claiming POSIX path-component pinning). A 2-second monotonic
+ceiling is checked around bounded operations and through analysis. This allows
+about six times the previously measured 0.3326-second synthetic scan median
+(200 files × 64 attempts); it is not a claim about production latency. A single
+stalled OS operation cannot be preempted; an overrun is reported as timeout.
+There are no retries; rerunning obtains a new bounded observation, not a cursor.
+
+Pairs are conservative: sort **all** observed attempts within each actual
+session-generation chronologically, then consider disjoint neighbors (1,2),
+(3,4), etc. Never filter invalid usage or unknown models out of the sequence.
+An invalid/missing interval blocks its sequence; any unattributable session
+blocks all pairs. Dropped/truncated files cannot supply pairs. Reject a pair
+if either endpoint overlaps any interval in that sequence (equal starts and
+nested intervals included), spans files, is ineligible, or differs in exact
+provider/model/engine. Touching intervals are allowed. Thus even interleaved
+files cannot create a false adjacency. Reported changes are second minus first
+cache-read share, not a causal effect. Share denominators use existing engine
+semantics: Codex input total; Pi/Claude input + cache-read + cache-write. Unknown
+or incomplete denominators are excluded, not filled with zeros.
+
+Quantiles use nearest ranks; four share bins are [0,.25), [.25,.5), [.5,.75),
+[.75,1]. Counts below five are explicitly sparse, including empty bins; empty
+quantiles are null. Group summaries expose only distributions of group attempt
+counts, pair counts and group medians, never a list of groups. `coverage.history`
+is always `unknown`: `observed_window_only` is not complete historical coverage.
+Missing/unreadable/unsafe/oversized/malformed files, dropped attempts, invalid
+measurements, reached bounds and timeouts produce `incomplete_unknown`; empty
+observations produce `empty_unknown`. File unavailability deliberately combines
+missing and unreadable sources without echoing their errors. The actual period
+covers parseable observed timestamps, not an asserted contiguous sampling
+window. Counts describe retained observations only, never zero activity across
+unseen history. This evidence authorizes no scheduler policy: FIFO, unknown
+affinity, quantum 0 and default-disabled handoff remain unchanged.

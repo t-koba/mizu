@@ -168,6 +168,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("project", help="Managed project name")
     p = sub.add_parser("usage", help="Summarize provider-reported token facts from completed runs; no LLM required")
     p.add_argument("project", help="Managed project name")
+    p.add_argument("--cache-evidence", action="store_true", help="Host-only bounded scheduler evidence aggregate (no rows)")
     p = sub.add_parser("backup", help="Write a paused checkpoint archive outside the tree")
     p.add_argument("project", help="Managed project name")
     p.add_argument("destination", type=Path, help="New archive file")
@@ -604,6 +605,14 @@ def execute(args):
         from .editor import serve
         serve(args.bundle, args.outbox)
         return None
+    if args.command == "usage" and args.cache_evidence:
+        from .project import Project
+        from .scheduler_evidence import summarize
+        try:
+            config = load(args.config)
+            return summarize(Project(config, args.project, read_only=True))
+        except (MizuError, OSError, ValueError, TypeError, KeyError, AttributeError):
+            raise ConfigError("Cannot read scheduler evidence with private project configuration") from None
     config = load(args.config)
     if args.command == "explain":
         from .project import Project
