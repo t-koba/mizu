@@ -444,6 +444,26 @@ class CiRequestTests(Fixture):
         self.assertEqual(listing["days"][0]["requests"], 1)
         self.assertEqual(listing["days"][0]["items"][0]["state"], "resolved")
 
+    def test_daily_uses_utc_dispatch_day_in_both_resolution_states(self):
+        store = CiRequests(self.project.root)
+        publication = self.receipt["publication_id"]
+        identity = request_id(publication, SHA, ["ci"])
+        marker = {"request_id": identity, "publication_id": publication,
+                  "sha": SHA, "workflows": ["ci"],
+                  "dispatched_at": "2026-10-21T00:30:00+09:00"}
+        store.mark_dispatch(identity, marker)
+        before = store.daily()
+        self.assertEqual(before["days"][0]["date"], "2026-10-20")
+        self.assertEqual(before["days"][0]["items"][0]["state"], "unresolved")
+        store.record_outcome(identity, {
+            "request_id": identity, "publication_id": publication,
+            "sha": SHA, "workflows": ["ci"], "runs": runs()["runs"],
+            "requested_at": "2026-10-22T00:00:00+00:00"})
+        after = store.daily()
+        self.assertEqual(after["days"][0]["date"], "2026-10-20")
+        self.assertEqual(after["days"][0]["requests"], 1)
+        self.assertEqual(after["days"][0]["items"][0]["state"], "resolved")
+
     def test_the_daily_listing_names_a_dispatch_whose_outcome_is_invalid(self):
         ctx = self.context(runs(), poll_enabled=True)
         self.request_covered(ctx, [])

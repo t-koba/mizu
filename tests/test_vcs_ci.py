@@ -563,6 +563,30 @@ class CiRunIdentityTests(Fixture):
         self.assertEqual(set(plain[0]), {"check", "state", "sha", "url"})
         self.assertNotIn("run", plain[0])
 
+    def test_status_run_does_not_establish_a_unique_job_execution(self):
+        # The contract allows repeated check names and opaque run identities.
+        # Neither a poll nor two same-named jobs gains a job/attempt identity
+        # from timestamp parsing; consumers cannot use this tuple as a key
+        # for daily cost deduplication.
+        row = {"check": "unit", "state": "success", "sha": SHA_A,
+               "run": "opaque-workflow-or-job",
+               "started_at": "2026-07-20T00:00:00+00:00",
+               "completed_at": "2026-07-20T00:01:00+00:00"}
+        poll = vcs.parse_status_checks({"checks": [row]})
+        repeated_poll = vcs.parse_status_checks({"checks": [dict(row)]})
+        two_rows = vcs.parse_status_checks({"checks": [row, dict(row)]})
+        self.assertEqual(poll, repeated_poll)
+        self.assertEqual(two_rows, poll + repeated_poll)
+        self.assertEqual(poll[0]["job_seconds"], 60)
+        self.assertEqual(set(poll[0]), set(row) | {"url", "job_seconds"})
+        # New structured identity fields require a deliberate schema change,
+        # not an adapter injecting unvalidated facts into the closed row set.
+        for key, value in (("repository", "b" * 64), ("workflow", "ci"),
+                           ("run_id", "workflow-1"), ("job_id", "job-1"),
+                           ("attempt", 2)):
+            with self.subTest(field=key), self.assertRaises(Denied):
+                vcs.parse_status_checks({"checks": [{**row, key: value}]})
+
     def test_status_refuses_bad_run_and_unknown_keys(self):
         for bad in ("", "x" * 129, "run\n1", "run\x001", 3, None,
                     "ci\x1b[2K", "ci\u202e", "ci\x7f"):

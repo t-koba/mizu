@@ -385,9 +385,20 @@ listed as `unresolved` with no provider run. The listing is a bounded page
 (`total`, `truncated`
 and `scan_stopped`, as the publication listing is), an unreadable or invalid
 record is skipped rather than returned unvalidated, a dispatch whose marker
-cannot be validated is not listed at all, and no provider is contacted. The derived job time of a run is not part of this view: it needs
-the check instants in the status rows, and a provider that reports none leaves
-it empty.
+cannot be validated is not listed at all, and no provider is contacted.
+
+Runner wall time is not part of this daily count view. Exact publication-bound
+`status` reads can already carry check start/completion instants and derived
+`job_seconds`, but the current schema cannot prove an exact execution join:
+request outcomes name workflow runs, while status `run` is opaque and has no
+separate workflow-run, check-job, attempt or repository identity. Matching SHA,
+check name, URL or run strings is not that proof. Repeated polls must not be
+summed, nor real reruns silently collapsed. No numeric daily total is emitted;
+missing execution evidence is unavailable, never zero. ADR-037 records the
+accepted UTC dispatch-day projection and its missing/running/unattributed/
+partial coverage requirements. It remains blocked on this evidence-contract
+gap, not on missing timestamp support. Existing counts and status durations
+are unchanged.
 
 A run's own record names the CI requests that run made. The run record
 carries `ci_requests`: the entries for the requests, each with the request

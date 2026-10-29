@@ -341,20 +341,42 @@ saving. The adapter contract this product drives exposes
 no provider usage endpoint, so nothing about a provider's billing enters the
 measure.
 
-The per-day view that groups those seconds by day is decided here and is not
-built yet, because the provider's status rows carry no check instants; the
-cost-visibility work item owns it. The requests a unit spent are already
-visible per day, through the local listing of the recorded requests, and a
-run's own record names the requests that run made, with their identity, their
-day, the work items they covered and whether each one is still unresolved. A
-request is dated by its dispatch, the day the provider was asked and a CI run
-may have been spent; a later answer never moves it. A dispatch whose outcome
-is unknown is named rather than hidden, because a CI run may have been spent,
-and an outcome record that cannot be read leaves the request named as
-unresolved rather than hiding it. The seconds view will count a re-run again,
-because a re-run spends
-runner time, and it is never presented as a saving. Until then no document may
-describe such a view as existing behaviour.
+The numeric per-day view is not implemented. Status rows now carry optional
+check instants and locally derived `job_seconds`, but those durations alone do
+not establish an execution identity. A status row's optional `run` is an opaque
+CI wake identity; it is not a typed workflow-run/check-job/attempt tuple. The
+request outcome names `workflow`, `run_id` and `head_sha`, but the status
+contract does not establish that its `run` equals that `run_id`, nor carry a
+workflow, check-job ID, attempt or repository identity for an exact join.
+An exact publication receipt pins branch and SHA, not those missing execution
+identities. Optional receipt lineage does not fill in the status job identity.
+Do not infer any of them from check names, URLs, timestamp changes or string
+equality between the two run fields. Under the current schema, aggregation
+must fail closed: unavailable is not zero, and summing polls is not a total.
+
+The accepted projection will derive from authoritative `CiRequests.daily`
+records and exact publication-bound status evidence, not another mutable cost
+store. Attribute executions to the request's UTC dispatch day, even when a
+later outcome or completion crosses midnight. Deduplicate repeated observations
+only by proven repository/SHA/workflow-run/check-job/attempt identity; count
+actual rerun executions separately. Retain evidence references and distinguish
+missing, running, unattributed and partial coverage. A bounded page or an
+incomplete execution enumeration cannot establish a complete daily total.
+The existing listing's 100-request page, 10000-entry scan and 1000-candidate
+validation bounds remain in force; truncation and `scan_stopped` must remain
+visible in any derived coverage. Missing identity or duration evidence must
+not become a zero total. Any observed subtotal must be explicitly partial,
+labelled runner wall seconds, never billing, credits, CPU time or savings.
+No provider rerun, policy change, private-state scrape or persistent second
+authority is justified by this gap.
+
+The requests a unit spent are already visible per day through the local
+listing. A run's own record names the requests it made, their identity, their
+UTC dispatch day, covered work items and resolution state. A later answer
+never moves a request to another day. An unknown or unreadable outcome leaves
+the dispatched request named as unresolved rather than hiding it. These count
+views and the existing status timestamps remain independent of the blocked
+numeric projection.
 
 The seven-day bound on a reported job is a bound on an untrusted duration:
 the product refuses a value it cannot sanity-check, and the refusal covers
