@@ -1260,6 +1260,20 @@ class Context:
         # The listing is also the top-level result, like the other read ops.
         return {**record, **listing}
 
+    def _op_vcs_read_ci_costs(self, args: dict) -> dict:
+        from .ci_costs import observed_costs
+        if set(args) - {"op", "limit", "offset"}:
+            raise Denied("CI costs take only limit and offset")
+        page = CiRequests(self.project.root).page(
+            limit=args.get("limit", 8), offset=args.get("offset", 0))
+        listing = observed_costs(page, lambda publication: self._op_vcs_read(
+            {"op": "status", "publication_id": publication}))
+        evidence_id, evidence = self._new_invocation_evidence("vcs-read")
+        record = {"op": "ci_costs", "trust": "external-untrusted",
+                  "evidence_id": evidence_id, "evidence": evidence, "result": listing}
+        write_json(self.run_dir / evidence, record)
+        return {**record, **listing}
+
     def _op_vcs_read(self, args: dict) -> dict:
         # Read-only VCS view: CI status, logs, PR comments, external
         # proposals, and CI-recorded artifact files via the trusted
@@ -1285,6 +1299,10 @@ class Context:
             return self._op_vcs_read_ci_requests(args)
         if self.role.workspace == "none":
             raise Denied("This role has no workspace")
+        if args["op"] == "ci_costs":
+            return self._op_vcs_read_ci_costs(args)
+        if "limit" in args or "offset" in args:
+            raise Denied("limit and offset are only valid for CI costs")
         if "code_digest" in args:
             # The digest filter belongs to the local publications listing
             # only; an addressed read never accepts it.

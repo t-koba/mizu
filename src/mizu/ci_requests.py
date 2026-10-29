@@ -115,10 +115,45 @@ class CiRequests:
         """
         if type(limit) is not int or not 1 <= limit <= 100:
             raise Denied("Invalid CI request listing limit")
+        rows, scan_stopped = self._rows()
+        page = rows[:limit]
+        days = []
+        for row in page:
+            if days and days[-1]["date"] == row["date"]:
+                day = days[-1]
+            else:
+                day = {"date": row["date"], "requests": 0, "covered_items": 0, "items": []}
+                days.append(day)
+            day["requests"] += 1
+            day["covered_items"] += len(row["covered"])
+            day["items"].append({key: row[key] for key in
+                                 ("request_id", "publication_id", "sha", "workflows",
+                                  "runs", "covered", "state")})
+        return {"days": days, "total": len(rows), "truncated": len(rows) > len(page),
+                "scan_stopped": scan_stopped}
+
+    def page(self, *, limit: int = 8, offset: int = 0) -> dict:
+        """Read at most eight validated dispatches for the derived cost view.
+
+        Same scan, validation and chronological order as daily(); pagination
+        is positional, not a snapshot cursor. No provider calls or writes.
+        """
+        if (type(limit) is not int or not 1 <= limit <= 8
+                or type(offset) is not int or not 0 <= offset < REQUEST_RECORD_LIMIT):
+            raise Denied("Invalid CI cost page")
+        rows, stopped = self._rows()
+        page = rows[offset:offset + limit]
+        end = offset + len(page)
+        return {"items": page, "total": len(rows), "offset": offset, "limit": limit,
+                "next_offset": end if end < len(rows) else None,
+                "truncated": offset > 0 or end < len(rows), "scan_stopped": stopped}
+
+    def _rows(self) -> tuple[list, bool]:
+        """One bounded validated scan shared by the count and cost views."""
         try:
             names = sorted(os.listdir(self.root))
         except (FileNotFoundError, NotADirectoryError):
-            return {"days": [], "total": 0, "truncated": False, "scan_stopped": False}
+            return [], False
         except OSError as exc:
             raise Denied("CI request evidence is unavailable") from exc
         rows = []
@@ -167,21 +202,7 @@ class CiRequests:
                 continue
             rows.append(row)
         rows.sort(key=lambda row: (row["date"], row["request_id"]))
-        page = rows[:limit]
-        days = []
-        for row in page:
-            if days and days[-1]["date"] == row["date"]:
-                day = days[-1]
-            else:
-                day = {"date": row["date"], "requests": 0, "covered_items": 0, "items": []}
-                days.append(day)
-            day["requests"] += 1
-            day["covered_items"] += len(row["covered"])
-            day["items"].append({key: row[key] for key in
-                                 ("request_id", "publication_id", "sha", "workflows",
-                                  "runs", "covered", "state")})
-        return {"days": days, "total": len(rows), "truncated": len(rows) > len(page),
-                "scan_stopped": scan_stopped}
+        return rows, scan_stopped
 
 
 def _summary(record: dict, identity: str, marker: dict) -> dict | None:

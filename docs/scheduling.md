@@ -387,18 +387,23 @@ and `scan_stopped`, as the publication listing is), an unreadable or invalid
 record is skipped rather than returned unvalidated, a dispatch whose marker
 cannot be validated is not listed at all, and no provider is contacted.
 
-Runner wall time is not part of this daily count view. Exact publication-bound
-`status` reads can already carry check start/completion instants and derived
-`job_seconds`, but the current schema cannot prove an exact execution join:
-request outcomes name workflow runs, while status `run` is opaque and has no
-separate workflow-run, check-job, attempt or repository identity. Matching SHA,
-check name, URL or run strings is not that proof. Repeated polls must not be
-summed, nor real reruns silently collapsed. No numeric daily total is emitted;
-missing execution evidence is unavailable, never zero. ADR-037 records the
-accepted UTC dispatch-day projection and its missing/running/unattributed/
-partial coverage requirements. It remains blocked on this evidence-contract
-gap, not on missing timestamp support. Existing counts and status durations
-are unchanged.
+Runner wall time is separate from this local count view. `vcs_read` with
+`ci_costs` derives an explicitly partial observed subtotal for a page of
+1–8 validated dispatches (`limit`, default 8; `offset` 0–999, default 0).
+It reuses one exact publication-bound status observation per receipt within
+the page and retains its evidence reference. Typed workflow-run/job/attempt/
+repository identity is required for attribution; legacy identityless checks,
+unresolved dispatches, missing/unavailable status, missing durations and
+running checks remain visible, never converted into zero time. Checks are
+attributed to the UTC dispatch day even across midnight. Identical execution
+tuples are deduplicated within the page; attempts remain distinct, conflicts
+are excluded. Page/scan truncation is visible. Pagination is positional and
+subtotals are page-local, not additive across pages or polls. No enumeration
+completeness is proven; `observed_wall_seconds` is null without timed execution
+evidence, and all coverage remains `partial`. The measure is runner wall time,
+not billing or savings. See ADR-037 and the configuration protocol for the
+exact schema, bounds, repository attestation and failure behavior. Existing
+`ci_requests` counts and CI scheduling policy are unchanged.
 
 A run's own record names the CI requests that run made. The run record
 carries `ci_requests`: the entries for the requests, each with the request

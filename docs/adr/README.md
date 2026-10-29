@@ -341,41 +341,54 @@ saving. The adapter contract this product drives exposes
 no provider usage endpoint, so nothing about a provider's billing enters the
 measure.
 
-The numeric per-day view is not implemented. Status rows now carry optional
-check instants and locally derived `job_seconds`, but those durations alone do
-not establish an execution identity. A status row's optional `run` is an opaque
-CI wake identity; it is not a typed workflow-run/check-job/attempt tuple. The
-request outcome names `workflow`, `run_id` and `head_sha`, but the status
-contract does not establish that its `run` equals that `run_id`, nor carry a
-workflow, check-job ID, attempt or repository identity for an exact join.
-An exact publication receipt pins branch and SHA, not those missing execution
-identities. Optional receipt lineage does not fill in the status job identity.
-Do not infer any of them from check names, URLs, timestamp changes or string
-equality between the two run fields. Under the current schema, aggregation
-must fail closed: unavailable is not zero, and summing polls is not a total.
+The read-only `vcs_read ci_costs` projection now derives observed subtotals
+from validated `CiRequests` dispatches and exact publication-ID status reads,
+not another mutable cost store. Its page is 1–8 requests (default 8), offset
+0–999 (default 0); the shared local scan remains bounded to 10000 directory
+entries and 1000 candidate records. `ci_requests` itself remains provider-free
+and unchanged. Each distinct receipt in a cost page causes at most one status
+read, using the existing receipt/branch/SHA validation and retained evidence;
+no head lookup or rerun. Status failure is explicit unavailable evidence, not
+an absent dispatch or a retry.
 
-The accepted projection will derive from authoritative `CiRequests.daily`
-records and exact publication-bound status evidence, not another mutable cost
-store. Attribute executions to the request's UTC dispatch day, even when a
-later outcome or completion crosses midnight. Deduplicate repeated observations
-only by proven repository/SHA/workflow-run/check-job/attempt identity; count
-actual rerun executions separately. Retain evidence references and distinguish
-missing, running, unattributed and partial coverage. A bounded page or an
-incomplete execution enumeration cannot establish a complete daily total.
-The existing listing's 100-request page, 10000-entry scan and 1000-candidate
-validation bounds remain in force; truncation and `scan_stopped` must remain
-visible in any derived coverage. Missing identity or duration evidence must
-not become a zero total. Any observed subtotal must be explicitly partial,
-labelled runner wall seconds, never billing, credits, CPU time or savings.
-No provider rerun, policy change, private-state scrape or persistent second
-authority is justified by this gap.
+The operator-confirmed identity contract adds an optional complete status
+bundle: `workflow_run_id`/`job_id` (1–128 ASCII digits), `run_attempt`
+(integer 1–1073741824), `repository` (`owner/name`, max 256). `job_id` equals
+existing `run`; the workflow-run ID names the CI-request outcome's `run_id`.
+All bundle fields plus `run` are required if any is present. Malformed/partial
+bundles deny the entire status response; legacy rows remain valid but
+unattributed. The adapter attests a fixed repository namespace; conflicting
+repository attestations within a page refuse attribution. This namespace is
+external-untrusted adapter evidence, not independently proved provenance.
+No repository or execution identity is inferred from URLs, check names,
+timestamps, opaque run fields or optional receipt lineage.
+
+The join checks validated request/publication identity and SHA, then typed
+workflow-run IDs explicitly recorded in the outcome. Deduplicate exact
+repository/SHA/workflow-run/job/attempt tuples within the page; real attempts
+count separately. Attribute to the UTC dispatch day even across midnight;
+conflicting durations or dispatch days for one execution are excluded and
+reported. Per-request coverage preserves unresolved dispatches, unavailable
+or missing checks, identityless/unmatched rows, running and durationless rows,
+and unobserved workflow runs, with successful status evidence references.
+`observed_wall_seconds` is null without timed attributed executions, not zero.
+The protocol documents all fields and bound/failure behavior.
+
+There is no complete-enumeration proof in this adapter contract: every result
+is `coverage: partial`, including an untruncated page. `total`, `next_offset`,
+`truncated` and `scan_stopped` describe the bounded request page, not execution
+completeness. Pagination is positional, and deduplication and sums are
+page-local: pages and repeated polls must not be added as daily totals.
+Runner wall seconds never claim billing, credits, CPU time or savings. No new
+configuration, policy, CI request, private-state scrape, external adapter
+change or persistent second authority is needed.
 
 The requests a unit spent are already visible per day through the local
 listing. A run's own record names the requests it made, their identity, their
 UTC dispatch day, covered work items and resolution state. A later answer
 never moves a request to another day. An unknown or unreadable outcome leaves
 the dispatched request named as unresolved rather than hiding it. These count
-views and the existing status timestamps remain independent of the blocked
+views and the existing status timestamps remain independent of the derived
 numeric projection.
 
 The seven-day bound on a reported job is a bound on an untrusted duration:
