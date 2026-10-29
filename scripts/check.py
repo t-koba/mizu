@@ -9,6 +9,7 @@ number of checks or tests it runs."""
 from __future__ import annotations
 import argparse
 import ast
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -733,19 +734,19 @@ def _valid_timing_counts(value):
     return sanitized
 
 
-def sanitize_timing_phases(checks) -> list:
-    """Return bounded, sanitized per-check/phase timing entries.
+def _sanitize_timing_phases(checks) -> tuple:
+    """Return bounded sanitized phase entries and the full valid-entry count.
 
-    Each entry holds only a stable phase name, status, duration, and safe
-    test counts. Details, exit codes, output tails, and failure diagnostics
+    Each entry holds only a stable phase name, status, duration, safe
+    test counts and a known timeout/budget reason. Details, exit codes, output tails, and failure diagnostics
     are never included. Malformed entries are skipped; over-limit entries
-    are truncated. This never governs the gate outcome.
+    are counted but omitted, so the artifact can explicitly report overflow.
+    This never governs the gate outcome.
     """
     try:
         phases = []
-        for entry in list(checks)[:TIMING_PHASE_MAX_ENTRIES * 2]:
-            if len(phases) >= TIMING_PHASE_MAX_ENTRIES:
-                break
+        expected = 0
+        for entry in checks:
             if not isinstance(entry, dict):
                 continue
             name = entry.get('name')
@@ -766,39 +767,128 @@ def sanitize_timing_phases(checks) -> list:
                 continue
             if counts is not None:
                 phase['tests'] = counts
-            phases.append(phase)
-        return phases
+            if entry.get('reason') in ('timeout', 'later-phase-budget-exhausted'):
+                phase['reason'] = entry['reason']
+            expected += 1
+            if len(phases) < TIMING_PHASE_MAX_ENTRIES:
+                phases.append(phase)
+        return phases, expected
     except (TypeError, ValueError, RuntimeError):
-        return []
+        return [], 0
 
 
-def write_timings_artifact(path: Path, *, tests: list, status: str, exit_code: int,
-                           elapsed_seconds: float, phases=()) -> None:
-    """Write the dedicated timing artifact with only sanitized evidence.
+def sanitize_timing_phases(checks) -> list:
+    return _sanitize_timing_phases(checks)[0]
 
-    Best-effort: never raises; timing evidence must not change the gate
-    outcome. Holds only stable test IDs, durations/completion flags, a bounded
-    hotspot/percentile summary, bounded sanitized per-check/phase entries
-    (stable name, status, duration, safe test counts only), and minimal
-    runtime metadata (versions, platform, timeout, total elapsed, gate
-    status). It never includes failure details, output tails, or diagnostics.
+
+# Each ASCII JSON file is at most 192 KiB, leaving room for the VCS
+# reader's JSON string escaping/envelope below its unchanged 512 KiB cap.
+TIMING_ARTIFACT_MAX_BYTES = 192 * 1024
+TIMING_ARTIFACT_MAX_PAGES = 128
+TIMING_TEST_FIELDS = ('test', 'duration_seconds', 'completed')
+
+
+def _timing_json(value) -> bytes:
+    return (json.dumps(value, ensure_ascii=True, separators=(',', ':'),
+                       allow_nan=False) + '\n').encode('utf-8')
+
+
+def _write_bounded_timing_json(path: Path, data: bytes) -> None:
+    if len(data) > TIMING_ARTIFACT_MAX_BYTES:
+        raise OverflowError('timing artifact byte bound')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Summary publication is last and atomic. Content-addressed detail names
+    # keep the early manifest valid during the final rewrite or an interruption.
+    temporary = path.with_name(path.name + '.tmp')
+    temporary.write_bytes(data)
+    temporary.replace(path)
+
+
+def write_timings_artifact(path: Path, *, tests: list, status: str, exit_code: int | None,
+                           elapsed_seconds: float, phases=(), source_sha=None,
+                           reason=None, collection_state='complete') -> None:
+    """Best-effort versioned summary and byte-bounded, hash-bound detail pages.
+
+    Only internal manifest identity is used, never CI environment/branch IDs.
+    Consumers must select the exact VCS receipt/run and validate every page in
+    the manifest. Overflow/I/O failures are explicit incomplete evidence, never
+    a different gate outcome. No raw output or diagnostics are exported.
     """
     try:
+        if source_sha is None:
+            source_sha = source_manifest_sha(ROOT)
         if not _valid_timing_seconds(elapsed_seconds):
             elapsed_seconds = 0.0
-        payload = {'suite': 'test-timings',
+        valid = [entry for entry in tests if isinstance(entry, dict)
+                 and _valid_timing_test(entry.get('test'))
+                 and _valid_timing_seconds(entry.get('duration_seconds'))
+                 and type(entry.get('completed')) is bool]
+        sanitized_phases, phases_expected = _sanitize_timing_phases(phases)
+        payload = {'suite': 'test-timings', 'schema_version': 2,
+                   'source_sha256': source_sha,
                    'mizu_version': __version__,
                    'python': sys.version.split()[0], 'os': sys.platform,
                    'unittest_timeout_seconds': _unittest_timeout_seconds(),
                    'unittest_elapsed_seconds': round(float(elapsed_seconds), 3),
                    'unittest_status': status if status in ('pass', 'fail', 'not_run') else 'fail',
-                   'unittest_exit_code': exit_code if type(exit_code) is int else 1,
-                   'summary': _timing_artifact_summary(tests),
-                   'tests': tests,
-                   'phases': sanitize_timing_phases(phases)}
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, indent=2) + '\n', encoding='utf-8')
-    except (OSError, ValueError, TypeError, RuntimeError):
+                   'unittest_exit_code': exit_code if type(exit_code) is int else None,
+                   'unittest_reason': 'timeout' if reason == 'timeout' else None,
+                   'collection_state': collection_state,
+                   'summary': _timing_artifact_summary(valid),
+                   'phases': sanitized_phases,
+                   'test_fields': TIMING_TEST_FIELDS,
+                   'artifact_status': ('overflow' if phases_expected > TIMING_PHASE_MAX_ENTRIES
+                                       else 'complete'), 'pages': []}
+        payload['phases_expected'] = phases_expected
+        directory = path.with_name(path.name + '.d')
+        page = {'suite': 'test-timing-details', 'schema_version': 1,
+                'source_sha256': source_sha, 'tests': []}
+        # Account in serialized UTF-8 bytes, including the page wrapper and
+        # separators. No character-count estimates or oversized singleton rows.
+        size = len(_timing_json(page))
+
+        def flush():
+            if not page['tests']:
+                return
+            if len(payload['pages']) >= TIMING_ARTIFACT_MAX_PAGES:
+                raise OverflowError('timing page count bound')
+            data = _timing_json(page)
+            digest = hashlib.sha256(data).hexdigest()
+            name = f'{digest}.json'
+            _write_bounded_timing_json(directory / name, data)
+            payload['pages'].append({'file': directory.name + '/' + name,
+                                     'sha256': digest, 'bytes': len(data),
+                                     'tests_recorded': len(page['tests']),
+                                     'tests_completed': sum(row[2] for row in page['tests'])})
+            page['tests'] = []
+
+        try:
+            for entry in valid:
+                row = [entry[key] for key in TIMING_TEST_FIELDS]
+                row_size = len(_timing_json(row)) - 1
+                added = row_size + bool(page['tests'])
+                if size + added > TIMING_ARTIFACT_MAX_BYTES:
+                    flush()
+                    size = len(_timing_json(page))
+                    added = row_size
+                if size + added > TIMING_ARTIFACT_MAX_BYTES:
+                    raise OverflowError('timing row byte bound')
+                page['tests'].append(row)
+                size += added
+            flush()
+        except (OSError, OverflowError) as exc:
+            payload['artifact_status'] = 'overflow' if isinstance(exc, OverflowError) else 'write_error'
+        data = _timing_json(payload)
+        if len(data) > TIMING_ARTIFACT_MAX_BYTES:
+            # Never silently truncate a phase/row or claim complete evidence.
+            # Counts and any written page manifest remain available for audit.
+            payload['artifact_status'] = 'overflow'
+            payload['phases'] = []
+            payload['summary'].pop('slowest_tests')
+            payload['summary'].pop('unfinished_tests')
+            data = _timing_json(payload)
+        _write_bounded_timing_json(path, data)
+    except (OSError, OverflowError, ValueError, TypeError, RuntimeError):
         pass
 
 
@@ -1214,7 +1304,8 @@ def main():
     # a policy.
     pending_timings: list = []
     pending_unittest_status = 'fail'
-    pending_unittest_exit = 1
+    pending_unittest_exit = None
+    pending_unittest_reason = None
     pending_unittest_elapsed = 0.0
     with tempfile.TemporaryDirectory(prefix='mizu-unittest-') as temporary:
         sidecar = Path(temporary) / 'failures.jsonl'
@@ -1243,10 +1334,8 @@ def main():
                 pending_unittest_status = str(unittest_entry.get('status', 'fail'))
             except (AttributeError, ValueError):
                 pending_unittest_status = 'fail'
-            try:
-                pending_unittest_exit = int(unittest_entry.get('exit_code', 1))
-            except (TypeError, ValueError):
-                pending_unittest_exit = 1
+            pending_unittest_exit = unittest_entry.get('exit_code')
+            pending_unittest_reason = unittest_entry.get('reason')
             try:
                 pending_unittest_elapsed = ended_at - timing_origin
             except TypeError:
@@ -1258,7 +1347,8 @@ def main():
                                    status=pending_unittest_status,
                                    exit_code=pending_unittest_exit,
                                    elapsed_seconds=pending_unittest_elapsed,
-                                   phases=checks)
+                                   phases=checks, source_sha=source_sha,
+                                   reason=pending_unittest_reason, collection_state='partial')
     if not shutil.which('node'):
         checks.append({'name': 'node-available', 'status': 'fail'})
     # bash is a POSIX convenience for shell-syntax checks, not a runtime
@@ -1333,7 +1423,8 @@ def main():
                                status=pending_unittest_status,
                                exit_code=pending_unittest_exit,
                                elapsed_seconds=pending_unittest_elapsed,
-                               phases=checks)
+                               phases=checks, source_sha=source_sha,
+                               reason=pending_unittest_reason)
     receipt = {'suite': 'offline', 'report_version': OFFLINE_REPORT_VERSION,
                'mizu_version': __version__, 'source_sha256': source_sha,
                'allowed_not_run': sorted(allowed_not_run), 'bash_available': has_bash,

@@ -76,9 +76,10 @@ jobs:
         if: runner.os == 'Linux' && matrix.python == '3.13'
         run: python scripts/package.py --output dist
       - name: Upload per-test timings
-        # Evidence only for the bound review: the dedicated timings file
-        # holds sanitized test IDs plus durations/completion and minimal
-        # runtime metadata. It never includes failure details or output tails;
+        # Evidence only: the versioned summary and hash-bound detail pages
+        # hold sanitized test IDs plus durations/completion and minimal
+        # runtime metadata; each JSON file is byte-bounded for VCS reads.
+        # It never includes failure details or output tails;
         # do not upload offline.json, which can contain diagnostics. Always
         # runs (even on timeout) with missing-file tolerance so a killed
         # child still reports its partial entry. Every cell publishes its
@@ -88,7 +89,9 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: test-timings-${{ matrix.os }}-${{ matrix.python }}
-          path: private-validation/test-timings.json
+          path: |
+            private-validation/test-timings.json
+            private-validation/test-timings.json.d/*.json
           retention-days: 7
           if-no-files-found: warn
   durable-contract:
@@ -121,7 +124,7 @@ jobs:
         run: npm ci --engine-strict --no-audit --no-fund --ignore-scripts
         working-directory: adapters/pi-durable
       - name: Unwaived offline and durable contracts
-        # The authoritative job publishes the same sanitized timing evidence
+        # The authoritative job publishes the same bounded summary/detail evidence
         # as the matrix cells, so its suite cost is measured where the
         # promotion gate is decided.
         run: python scripts/check.py --report private-validation/durable.json --test-timings private-validation/test-timings.json --fail-fast
@@ -133,6 +136,8 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: test-timings-durable
-          path: private-validation/test-timings.json
+          path: |
+            private-validation/test-timings.json
+            private-validation/test-timings.json.d/*.json
           retention-days: 7
           if-no-files-found: warn

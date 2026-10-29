@@ -3,6 +3,7 @@ from contextlib import nullcontext
 from functools import partial
 import importlib.util
 import io
+import hashlib
 import json
 import os
 import re
@@ -1096,6 +1097,163 @@ class GateReceiptOutputBudgetTests(unittest.TestCase):
 class UnittestTimingEvidenceTests(unittest.TestCase):
     """Per-test runtime evidence only; never a timeout policy or gate."""
 
+    def detail_tests(self, artifact, payload):
+        self.assertEqual(payload['schema_version'], 2)
+        self.assertEqual(payload['artifact_status'], 'complete')
+        self.assertEqual(payload['test_fields'], list(CHECK.TIMING_TEST_FIELDS))
+        tests = []
+        completed = 0
+        for manifest in payload['pages']:
+            data = (artifact.parent / manifest['file']).read_bytes()
+            self.assertEqual(len(data), manifest['bytes'])
+            self.assertLessEqual(len(data), CHECK.TIMING_ARTIFACT_MAX_BYTES)
+            self.assertEqual(hashlib.sha256(data).hexdigest(), manifest['sha256'])
+            page = json.loads(data)
+            self.assertEqual(page['schema_version'], 1)
+            self.assertEqual(page['source_sha256'], payload['source_sha256'])
+            self.assertEqual(len(page['tests']), manifest['tests_recorded'])
+            self.assertEqual(sum(row[2] for row in page['tests']), manifest['tests_completed'])
+            completed += manifest['tests_completed']
+            tests.extend(dict(zip(payload['test_fields'], row)) for row in page['tests'])
+        self.assertEqual(len(tests), payload['summary']['tests_recorded'])
+        self.assertEqual(completed, payload['summary']['tests_completed'])
+        return tests
+
+    def test_versioned_pages_round_trip_and_detect_missing_or_changed_pages(self):
+        tests = [{'test': f'sample.Suite.test_{index:04}_' + 'x' * 150,
+                  'duration_seconds': index / 1000, 'completed': index % 7 != 0}
+                 for index in range(3620)]
+        phases = [{'name': 'python-tests', 'status': 'fail', 'reason': 'timeout',
+                   'seconds': 12.345, 'tests': {'run': 3000, 'failed': 2, 'skipped': 1}}]
+        with tempfile.TemporaryDirectory() as temporary:
+            artifact = Path(temporary) / 'test-timings.json'
+            expected_source = CHECK.source_manifest_sha(ROOT)
+            # CI environment is not an authority for source or run identity.
+            with mock.patch.dict(os.environ, {'GITHUB_SHA': 'f' * 40, 'GITHUB_RUN_ID': 'untrusted'}):
+                CHECK.write_timings_artifact(artifact, tests=tests, status='fail', exit_code=None,
+                                            reason='timeout', elapsed_seconds=12.345, phases=phases)
+            payload = json.loads(artifact.read_bytes())
+            self.assertGreater(len(payload['pages']), 1)
+            self.assertEqual(self.detail_tests(artifact, payload), tests)
+            self.assertEqual(payload['source_sha256'], expected_source)
+            self.assertEqual(payload['mizu_version'], CHECK.__version__)
+            self.assertEqual(payload['python'], sys.version.split()[0])
+            self.assertEqual(payload['os'], sys.platform)
+            self.assertEqual(payload['unittest_timeout_seconds'], CHECK._unittest_timeout_seconds())
+            self.assertEqual(payload['unittest_elapsed_seconds'], 12.345)
+            self.assertIsNone(payload['unittest_exit_code'])
+            self.assertEqual(payload['unittest_reason'], 'timeout')
+            self.assertEqual(payload['phases_expected'], 1)
+            self.assertEqual(payload['phases'][0], {'name': 'python-tests', 'status': 'fail',
+                'reason': 'timeout', 'duration_seconds': 12.345, 'tests': phases[0]['tests']})
+            for path in [artifact] + list(artifact.with_name(artifact.name + '.d').glob('*.json')):
+                data = path.read_bytes()
+                self.assertLessEqual(len(data), CHECK.TIMING_ARTIFACT_MAX_BYTES)
+                # Even double-escaping inside the adapter envelope fits the reader.
+                envelope = json.dumps({'content': data.decode('utf-8')}).encode('utf-8')
+                self.assertLess(len(envelope), 524288)
+            page = artifact.parent / payload['pages'][0]['file']
+            original = page.read_bytes()
+            page.unlink()
+            with self.assertRaises(FileNotFoundError):
+                self.detail_tests(artifact, payload)
+            page.write_bytes(original.replace(b'sample', b'tamper', 1))
+            with self.assertRaises(AssertionError):
+                self.detail_tests(artifact, payload)
+
+    def test_interrupted_summary_rewrite_preserves_early_manifest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'timings.json'
+            tests = [{'test': 'sample.Suite.test_one', 'duration_seconds': 1.0, 'completed': True}]
+            CHECK.write_timings_artifact(path, tests=tests, status='pass', exit_code=0,
+                                        elapsed_seconds=1, collection_state='partial')
+            early = path.read_bytes()
+            write = CHECK._write_bounded_timing_json
+
+            def interrupt_summary(target, data):
+                if target == path:
+                    raise OSError('fixture summary interruption')
+                write(target, data)
+
+            with mock.patch.object(CHECK, '_write_bounded_timing_json', side_effect=interrupt_summary):
+                CHECK.write_timings_artifact(path, tests=tests + [
+                    {'test': 'sample.Suite.test_two', 'duration_seconds': 2.0, 'completed': False}],
+                    status='fail', exit_code=None, reason='timeout', elapsed_seconds=3)
+            self.assertEqual(path.read_bytes(), early)
+            self.assertEqual(json.loads(early)['collection_state'], 'partial')
+            self.assertEqual(self.detail_tests(path, json.loads(early)), tests)
+
+    def test_serialized_unicode_byte_bounds(self):
+        # Stable IDs remain ASCII; exercise non-ASCII serialization/metadata
+        # without broadening the value-free identifier grammar.
+        text = '雪😀' * 20
+        encoded = CHECK._timing_json({'os': text})
+        self.assertEqual(json.loads(encoded)['os'], text)
+        self.assertGreater(len(encoded), len(text.encode('utf-8')))
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'unicode.json'
+            raw = json.dumps({'os': text}, ensure_ascii=False).encode('utf-8')
+            with mock.patch.object(CHECK, 'TIMING_ARTIFACT_MAX_BYTES', len(raw) - 1):
+                with self.assertRaises(OverflowError):
+                    CHECK._write_bounded_timing_json(path, raw)
+                self.assertFalse(path.exists())
+            with mock.patch.object(CHECK, 'TIMING_ARTIFACT_MAX_BYTES', len(encoded)):
+                CHECK._write_bounded_timing_json(path, encoded)
+                self.assertEqual(path.read_bytes(), encoded)
+            with mock.patch.object(CHECK.sys, 'platform', text):
+                CHECK.write_timings_artifact(path, tests=[], status='pass', exit_code=0,
+                                            elapsed_seconds=0)
+            self.assertEqual(json.loads(path.read_bytes())['os'], text)
+
+    def test_overflow_and_io_failure_are_explicit_not_completion(self):
+        tests = [{'test': f'sample.Suite.test_{index:04}_' + 'x' * 450,
+                  'duration_seconds': 1.25, 'completed': False} for index in range(1000)]
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'timings.json'
+            write = CHECK._write_bounded_timing_json
+
+            def failing_page_write(target, data):
+                if target != path:
+                    raise OSError('fixture')
+                write(target, data)
+
+            for error in ('overflow', 'write_error'):
+                with self.subTest(error=error):
+                    context = (mock.patch.object(CHECK, 'TIMING_ARTIFACT_MAX_PAGES', 1)
+                               if error == 'overflow' else
+                               mock.patch.object(CHECK, '_write_bounded_timing_json',
+                                   side_effect=failing_page_write))
+                    with context:
+                        CHECK.write_timings_artifact(path, tests=tests, status='fail',
+                            exit_code=None, reason='timeout', elapsed_seconds=10)
+                    payload = json.loads(path.read_bytes())
+                    self.assertEqual(payload['artifact_status'], error)
+                    self.assertEqual(payload['summary']['tests_recorded'], 1000)
+                    self.assertEqual(payload['summary']['tests_completed'], 0)
+                    self.assertLess(sum(p['tests_recorded'] for p in payload['pages']), 1000)
+                    self.assertIsNone(payload['unittest_exit_code'])
+                    self.assertEqual(payload['unittest_reason'], 'timeout')
+            phases = [{'name': 'phase_' + str(i) + 'x' * 480, 'status': 'pass'} for i in range(500)]
+            CHECK.write_timings_artifact(path, tests=[], status='pass', exit_code=0,
+                                        elapsed_seconds=0, phases=phases)
+            payload = json.loads(path.read_bytes())
+            self.assertLessEqual(path.stat().st_size, CHECK.TIMING_ARTIFACT_MAX_BYTES)
+            self.assertEqual(payload['artifact_status'], 'overflow')
+            self.assertEqual(payload['phases_expected'], 500)
+            self.assertEqual(len(payload['phases']), 200)
+            self.assertEqual(payload['unittest_status'], 'pass')
+            self.assertEqual(payload['unittest_exit_code'], 0)
+            # Summary byte overflow remains explicit independently of the
+            # phase-count cap, and still reports every expected valid phase.
+            with mock.patch.object(CHECK, 'TIMING_ARTIFACT_MAX_BYTES', 80 * 1024):
+                CHECK.write_timings_artifact(path, tests=[], status='pass', exit_code=0,
+                                            elapsed_seconds=0, phases=phases)
+            payload = json.loads(path.read_bytes())
+            self.assertLessEqual(path.stat().st_size, 80 * 1024)
+            self.assertEqual(payload['artifact_status'], 'overflow')
+            self.assertEqual(payload['phases_expected'], 500)
+            self.assertEqual(payload['phases'], [])
+
     def run_timing_case(self, case):
         stream = io.StringIO()
         with tempfile.TemporaryDirectory() as temporary:
@@ -1371,7 +1529,7 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
                                           elapsed_seconds=2.5, phases=[])
             payload = json.loads(artifact.read_text(encoding='utf-8'))
             self.assertEqual(payload['suite'], 'test-timings')
-            self.assertEqual(payload['tests'], [])
+            self.assertEqual(self.detail_tests(artifact, payload), [])
             self.assertEqual(payload['unittest_elapsed_seconds'], 2.5)
             self.assertNotIn('details', json.dumps(payload))
             self.assertNotIn('diagnostic', json.dumps(payload).lower())
@@ -1398,7 +1556,7 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
                              ['sample.Suite.test_unfinished', 'sample.Suite.test_slow',
                               'sample.Suite.test_medium', 'sample.Suite.test_fast'])
             self.assertFalse(summary['slowest_tests'][0]['completed'])
-            self.assertEqual(payload['tests'], tests)
+            self.assertEqual(self.detail_tests(artifact, payload), tests)
 
             many_artifact = Path(temporary) / 'many-timings.json'
             many_tests = [
@@ -1474,7 +1632,7 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
             payload = json.loads(artifact.read_text(encoding='utf-8'))
             self.assertEqual(payload['summary']['unfinished_tests'],
                              ['tests.RealTests.test_hung'])
-            by_test = {entry['test']: entry for entry in payload['tests']}
+            by_test = {entry['test']: entry for entry in self.detail_tests(artifact, payload)}
             self.assertFalse(by_test['tests.RealTests.test_hung']['completed'])
             blob = json.dumps(payload['summary'])
             self.assertIn('tests.RealTests.test_hung', blob)
@@ -1529,7 +1687,8 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
         self.assertIn('name: test-timings-durable', workflow)
         upload = workflow.split('name: Upload per-test timings', 1)[1].split('  durable-contract:', 1)[0]
         self.assertEqual([line.strip() for line in upload.splitlines() if line.strip().startswith('path:')],
-                         ['path: private-validation/test-timings.json'])
+                         ['path: |'])
+        self.assertIn('private-validation/test-timings.json.d/*.json', upload)
         self.assertIn('retention-days: 7', workflow)
         self.assertIn('if-no-files-found: warn', workflow)
         self.assertIn('if: always()', workflow)
@@ -1612,8 +1771,12 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
             self.assertEqual(payload['suite'], 'test-timings')
             self.assertEqual(payload['unittest_status'], 'fail')
             self.assertEqual(payload['unittest_elapsed_seconds'], 8.0)
+            self.assertIsNone(payload['unittest_exit_code'])
+            self.assertEqual(payload['unittest_reason'], 'timeout')
+            self.assertEqual(payload['collection_state'], 'complete')
+            self.assertEqual(payload['source_sha256'], json.loads(report.read_text())['source_sha256'])
             self.assertIn('timed out after', json.loads(report.read_text(encoding='utf-8'))['checks'][1]['details'])
-            by_test = {entry['test']: entry for entry in payload['tests']}
+            by_test = {entry['test']: entry for entry in self.detail_tests(artifact, payload)}
             self.assertEqual(by_test['tests.RealTests.test_done'],
                              {'test': 'tests.RealTests.test_done',
                               'duration_seconds': 0.5, 'completed': True})
@@ -1626,8 +1789,11 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
             self.assertEqual(set(payload), {'suite', 'mizu_version', 'python', 'os',
                                             'unittest_timeout_seconds', 'unittest_elapsed_seconds',
                                             'unittest_status',
-                                            'unittest_exit_code', 'summary', 'tests', 'phases'})
-            for entry in payload['tests']:
+                                            'unittest_exit_code', 'summary', 'phases',
+                                            'schema_version', 'source_sha256', 'unittest_reason',
+                                            'collection_state', 'test_fields', 'artifact_status',
+                                            'pages', 'phases_expected'})
+            for entry in self.detail_tests(artifact, payload):
                 self.assertEqual(set(entry), {'test', 'duration_seconds', 'completed'})
             by_phase = {phase['name']: phase for phase in payload['phases']}
             # The timed-out unittest phase is present with fail status; later
@@ -1635,10 +1801,11 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
             # happens after checks finish.
             self.assertIn('python-unit-and-contract-tests', by_phase)
             self.assertEqual(by_phase['python-unit-and-contract-tests']['status'], 'fail')
+            self.assertEqual(by_phase['python-unit-and-contract-tests']['reason'], 'timeout')
             self.assertIn('python-syntax', by_phase)
             self.assertIn('source-manifest-stable', by_phase)
             for phase in payload['phases']:
-                self.assertEqual(set(phase) - {'duration_seconds', 'tests'}, {'name', 'status'})
+                self.assertEqual(set(phase) - {'duration_seconds', 'tests', 'reason'}, {'name', 'status'})
                 self.assertNotIn('details', phase)
                 self.assertNotIn('exit_code', phase)
             blob = json.dumps(payload)
@@ -1691,7 +1858,8 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
             self.assertEqual(payload['suite'], 'test-timings')
             self.assertEqual(payload['unittest_status'], 'pass')
             self.assertEqual(payload['unittest_exit_code'], 0)
-            by_test = {entry['test']: entry for entry in payload['tests']}
+            self.assertEqual(payload['collection_state'], 'partial')
+            by_test = {entry['test']: entry for entry in self.detail_tests(artifact, payload)}
             self.assertEqual(by_test['tests.RealTests.test_done'],
                              {'test': 'tests.RealTests.test_done',
                               'duration_seconds': 0.5, 'completed': True})
@@ -1702,8 +1870,11 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
             self.assertEqual(set(payload), {'suite', 'mizu_version', 'python', 'os',
                                             'unittest_timeout_seconds', 'unittest_elapsed_seconds',
                                             'unittest_status',
-                                            'unittest_exit_code', 'summary', 'tests', 'phases'})
-            for entry in payload['tests']:
+                                            'unittest_exit_code', 'summary', 'phases',
+                                            'schema_version', 'source_sha256', 'unittest_reason',
+                                            'collection_state', 'test_fields', 'artifact_status',
+                                            'pages', 'phases_expected'})
+            for entry in self.detail_tests(artifact, payload):
                 self.assertEqual(set(entry), {'test', 'duration_seconds', 'completed'})
             by_phase = {phase['name']: phase for phase in payload['phases']}
             self.assertIn('python-syntax', by_phase)
@@ -1712,7 +1883,7 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
             self.assertNotIn('source-manifest-stable', by_phase)
             self.assertNotIn('node-available', by_phase)
             for phase in payload['phases']:
-                self.assertEqual(set(phase) - {'duration_seconds', 'tests'}, {'name', 'status'})
+                self.assertEqual(set(phase) - {'duration_seconds', 'tests', 'reason'}, {'name', 'status'})
                 self.assertNotIn('details', phase)
                 self.assertNotIn('exit_code', phase)
             blob = json.dumps(payload)
@@ -1724,7 +1895,7 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
         # codes, output, and diagnostics are dropped. Malformed names,
         # statuses, durations, and counts are skipped; entries are bounded.
         checks = [
-            {'name': 'python-syntax', 'status': 'pass'},
+            {'name': 'python-syntax', 'status': 'pass', 'reason': 'untrusted reason'},
             {'name': 'python-unit-and-contract-tests', 'status': 'fail',
              'seconds': 12.5, 'exit_code': 1,
              'tests': {'run': 10, 'failed': 2, 'skipped': 1},
@@ -1758,10 +1929,30 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
         for leaked in ('raw_fixture_value', 'synthetic-private-host', 'fixture_value',
                        'secret', 'output tail', 'details', 'exit_code'):
             self.assertNotIn(leaked, blob)
-        # Bound: at most 200 phases even with many valid checks.
+        # Phase output stays capped; the artifact reports the full valid count.
         many = [{'name': f'phase-{index:04}', 'status': 'pass', 'seconds': 0.1}
                 for index in range(500)]
+        self.assertEqual(CHECK.TIMING_PHASE_MAX_ENTRIES, 200)
         self.assertEqual(len(CHECK.sanitize_timing_phases(many)), 200)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'timings.json'
+            for count in (200, 201, 500):
+                with self.subTest(valid_phases=count):
+                    # Invalid entries do not consume the cap or expected count,
+                    # even when valid phases occur beyond the old input bound.
+                    entries = [None] * 450 + many[:count]
+                    CHECK.write_timings_artifact(path, tests=[], status='pass', exit_code=0,
+                                                elapsed_seconds=0, phases=entries)
+                    payload = json.loads(path.read_bytes())
+                    self.assertEqual(payload['phases_expected'], count)
+                    self.assertEqual(payload['phases'], CHECK.sanitize_timing_phases(many))
+                    self.assertEqual(payload['artifact_status'],
+                                     'complete' if count == 200 else 'overflow')
+                    self.assertEqual(payload['unittest_status'], 'pass')
+                    self.assertEqual(payload['unittest_exit_code'], 0)
+        self.assertEqual(CHECK.sanitize_timing_phases([
+            {'name': 'node-tests', 'status': 'fail', 'reason': 'later-phase-budget-exhausted'}]),
+            [{'name': 'node-tests', 'status': 'fail', 'reason': 'later-phase-budget-exhausted'}])
         # Counts must be ints in range; bools and negatives are rejected.
         self.assertIsNone(CHECK._valid_timing_counts({'run': True}))
         self.assertIsNone(CHECK._valid_timing_counts({'run': -1}))
@@ -1783,7 +1974,7 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
             self.assertEqual(payload['suite'], 'test-timings')
             self.assertEqual(payload['unittest_status'], 'pass')
             self.assertEqual(payload['unittest_exit_code'], 0)
-            self.assertEqual(payload['tests'], tests)
+            self.assertEqual(self.detail_tests(artifact, payload), tests)
             self.assertEqual(payload['phases'],
                              [{'name': 'python-syntax', 'status': 'pass'},
                               {'name': 'python-unit-and-contract-tests', 'status': 'pass',

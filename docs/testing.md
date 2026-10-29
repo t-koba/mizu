@@ -216,15 +216,63 @@ empty or oversized sidecars yield no timing entries. Collection, parsing and
 artifact writing are best-effort diagnostics only, never a test pass/failure
 signal. There is no retry protocol; temporary sidecars are removed after use.
 
-The dedicated artifact contains only sanitized per-test IDs and
-`duration_seconds`/`completed` flags, a bounded summary (recorded/completed
-counts, completed-duration totals and percentiles, up to 20 slowest test
-records, and up to 20 unfinished test IDs ordered longest first), and minimal
-runtime metadata (suite, versions, platform, child timeout, total suite elapsed
-time, gate status). It never carries failure details, output tails or
-diagnostics; do not substitute the general
-`offline.json` receipt. Every CI cell supplies `--test-timings` and uploads
-only this dedicated file, one artifact per cell (`actions/upload-artifact`
+`--test-timings <path>` now writes a **schema 2 summary** at that path and
+**schema 1 detail pages** in the sibling `<path>.d/` directory (for example,
+`test-timings.json.d/`). The summary retains suite/runtime versions, platform,
+the `source_sha256` calculated by the gate's source-manifest implementation,
+child timeout, elapsed time, status, and nullable exit code. A killed child has
+`unittest_reason: "timeout"` and `unittest_exit_code: null`, not a fabricated
+process exit code. `collection_state` is `partial` for the early write after
+unittest collection and `complete` only after all gate phases return; this is
+not a claim that the suite passed or that every test finished.
+
+The summary contains recorded/completed counts, completed-duration totals and
+percentiles, up to 20 slowest test records and 20 unfinished IDs, and sanitized
+phase results (name, status, duration, safe test counts, and the known reasons `timeout` or
+`later-phase-budget-exhausted` where present), capped at 200 valid phase records.
+`phases_expected` counts all valid phase records, including those beyond the cap;
+more than 200 sets `artifact_status: "overflow"`, never complete evidence. There are no failure details, output
+tails or diagnostics. Do not substitute the general `offline.json` receipt.
+
+Detail pages contain `suite: "test-timing-details"`, `schema_version: 1`, the
+same `source_sha256`, and `tests` as positional rows in the summary's
+`test_fields` order: `[test, duration_seconds, completed]`. Every valid parsed
+test row is retained in order, including unfinished rows with `completed: false`.
+The summary's ordered `pages` manifest names each relative content-addressed
+file and its SHA-256, serialized byte length, recorded count and completed count.
+Reassembly requires **every** listed page, matching bytes/hash/schema/source and
+counts; the total row/completion counts must match `summary`. Do not infer
+completion from a missing page, an empty directory or the subset retrieved so far.
+Ignore unreferenced pages left by an earlier write.
+
+Both summary and pages use compact ASCII-escaped UTF-8 JSON and are checked
+against **196,608 serialized bytes (192 KiB) per file**, leaving space for JSON
+string escaping/envelopes under the unchanged 524,288-character VCS reader cap.
+Pages are split by actual serialized bytes, not Python character counts. The
+manifest permits at most 128 pages, enough for the existing bounded parser even
+with maximum-length IDs. `artifact_status: "complete"` means all parsed rows and
+valid phases were serialized, not that collection or tests completed. Phase-count, page-count,
+single-row or summary-size overflow produces `artifact_status: "overflow"`;
+page write failure produces `"write_error"`. The bounded failure summary retains
+expected test/completion/phase counts and any successfully written page manifest;
+summary overflow omits phase records and hotspot/unfinished lists explicitly under
+that non-complete status. Never use such evidence as a full sample. If even the
+summary cannot be written (for example, disk failure), missing/previous partial
+evidence remains incomplete. Artifact failures never change the gate outcome.
+
+Pages are published before an atomic summary replacement. Hash-named pages keep
+the early manifest valid if the final rewrite is interrupted. There is no retry
+or resume protocol. The embedded source digest is the same initial source
+manifest identity as the offline receipt; the final phases include the existing
+source-stability check. For authoritative source/run binding, select the artifact
+through the **exact publication receipt's published SHA and recorded CI run**,
+then verify the embedded source manifest identity and page manifest. Neither a
+caller-supplied SHA/run ID, CI environment variable nor a later branch head is
+an authority. Content digests detect missing/mixed pages; they do not authenticate
+an arbitrary externally supplied artifact or create a new CI receipt.
+
+Every CI cell supplies `--test-timings` and uploads only the summary and
+`test-timings.json.d/*.json`, one artifact per cell (`actions/upload-artifact`
 v4.6.2, 7-day retention, `if: always()` with missing-file tolerance), and the
 authoritative `durable-contract` job publishes its own. Each supported host's
 suite cost is therefore measured where it runs, so the one shared child bound
