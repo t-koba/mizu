@@ -1,0 +1,111 @@
+# Pre-integration policy contract for the single-child async-delegation pilot.
+# This file is not loaded by runtime: do not enable a runner until the listed
+# entrypoints are gated, the unknowns are resolved, and integration tests pass.
+version = 1
+status = "contract-only"
+runner_integration_allowed = false
+unknown_reservation = "treat-as-held"
+reserved_statuses = ["queued", "running", "cancel-requested"]
+terminal_execution_still_reserved = true
+release_status = "terminal-after-proven-quiescence"
+
+# The parent can keep using only these proven non-tree Context operations.
+parent_control_plane = [
+  "fetch", "probe", "search", "insights", "decision_read", "record_read",
+  "work_items_read", "work_items_legacy_read", "work_items_reconcile",
+  "work_items_create", "work_items_transition", "work_order", "decide",
+  "submit_insight", "revise_insight", "withdraw_insight", "attach_evidence",
+  "research_read", "research",
+]
+
+# These are conditional, not currently safe by default. The supplied input
+# must be immutable and exactly match the reservation's source snapshot.
+parent_snapshot_only = ["diff", "consult"]
+
+# finish is allowed only through a dedicated wait path for this exact job; it
+# must not do ordinary workspace bounds/final-capture work while reserved.
+parent_exact_job_wait = ["finish"]
+
+# Deny the rest of Context._DISPATCH while the parent is reserved. Unknown
+# operations and unsupported parameter values fail closed as well.
+parent_denied = [
+  "files", "read", "command_evidence_read", "experiment_evidence_read",
+  "exec", "experiment", "verify", "check_job", "sync", "vcs_publish",
+  "vcs_request", "vcs_retire", "vcs_dispose", "materialize", "delegate",
+  "report",
+]
+
+[parameterized.vcs_read]
+allow = ["status", "publications", "ci_requests", "ci_costs"]
+default = "deny"
+
+[requirements]
+diff = "Use only the parent's immutable context snapshot, and require its identity to equal reservation.request.source_snapshot."
+consult = "Refuse the current parent.workspace capture; allow only after an explicit immutable source snapshot is passed and verified equal to reservation.request.source_snapshot."
+finish = "Only outcome=wait with an exact wait job id equal to the active reservation; bypass all live-tree bounds/captures on that path. Current API has no such delegation wait field, so it is not yet available."
+vcs_read = "Only the listed read-only status/evidence suboperations; every other or malformed suboperation is denied."
+native_tools = "Deny parent native engine-tool calls, regardless of role grants, while reserved."
+external_mcp = "Disable parent MCP servers that see context.workspace; a read-only live mount can still observe partial child edits. A future exception requires an exact immutable snapshot mount."
+driver = "A parent model turn is allowed only with the control-plane Context gate active, no live-workspace native/MCP access, and a pinned or no-workspace working directory."
+
+[entrypoints]
+# Every route below needs the reservation check before reading, writing,
+# capturing, or launching anything against the live workspace.
+parent_live_tree_gates = [
+  "Context.handle/dispatch before handler side effects",
+  "Context._engine_tool before native adapter execution",
+  "Engine.run continuation workspace comparison capture after admission",
+  "Engine.run final capture and finish bounds",
+  "Engine.consult parent.workspace capture",
+  "Engine.delegate child invocation on parent.workspace",
+  "check_jobs.available source capture",
+  "sandbox exec/experiment/verify",
+  "materialize.apply",
+  "vcs_publish source capture",
+  "configured MCP containers mounted at context.workspace",
+  "adapter native-tool callbacks in Claude and Pi",
+  "Codex configured MCP servers and engine_tools refusal",
+  "Pi-durable native-tool and MCP refusal",
+  "persistent execution containers",
+]
+parent_live_tree_action = "Refuse every live-tree call; allow only an explicitly pinned immutable input whose identity matches the reservation source."
+
+# Reservation must also exclude other writers and maintenance, not only model
+# tool calls. Use one lock order and check before any preliminary capture.
+reservation_exclusion = [
+  "Engine._admit writable workspace lock",
+  "storage.quiescent backup/restore/collection",
+  "storage.maintain_automatic_prune snapshot/run retention",
+  "workspace_cache.maintain",
+  "probes.service_due role/workspace lock",
+  "new check-job source discovery",
+]
+reservation_exclusion_action = "Use the same durable reservation/lock check before any workspace access; never rely on a later check after capture."
+
+# The durable reservation remains held through these identities' teardown and
+# descendant reconciliation; process-main exit or a stop request is not proof.
+quiescence_required = [
+  "child run and driver process tree",
+  "bridge and all subprocess descendants",
+  "MCP/OCI containers bound to the child run",
+  "persistent execution containers",
+]
+quiescence_release_rule = "Keep the reservation through cancellation, supervisor death, and all descendant reconciliation; uncertain proof never releases it."
+
+# Inventory gaps that must be closed before runner integration or a pilot.
+not_yet_proven = [
+  "all project import/setup/restore paths outside storage.quiescent",
+  "adapter-specific descendant and container reconciliation after supervisor death",
+  "external MCP server behavior and teardown for every supported adapter",
+  "atomic ordering between reservation validation, tool gating, and workspace capture",
+]
+
+[child_authority]
+required_bindings = [
+  "exact source snapshot",
+  "effective role grants and tool limits",
+  "adapter options and native/MCP tool configuration",
+  "relevant policy/configuration inputs",
+  "child run identity and writable container identities",
+]
+mismatch_action = "Refuse launch or retain the existing reservation; never infer equivalence from role/profile names."
