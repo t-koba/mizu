@@ -1,6 +1,7 @@
 """Content-addressed, coherent views; never expose a moving worktree to readers."""
 from __future__ import annotations
 
+from collections import OrderedDict
 import datetime as dt
 import difflib
 import fnmatch
@@ -9,6 +10,7 @@ import itertools
 import os
 import re
 import stat
+import threading
 import time
 from pathlib import Path
 
@@ -22,6 +24,7 @@ from .vcs import REF_PREFIX
 
 
 _CURRENT_PARENT = object()
+_PATH_VALIDATION_CACHE_LIMIT = 256
 
 
 @lru_cache(maxsize=16)
@@ -255,6 +258,11 @@ class Snapshots:
         self.excludes = excludes
         self.max_file, self.max_bytes, self.max_files = max_file, max_bytes, max_files
         self.history_index = history_index
+        # Snapshot IDs bind the exact immutable path list. Cache only the
+        # deterministic path-policy walk; get() still reads and digest-checks
+        # the full manifest on every access before consulting this bounded cache.
+        self._path_validation_cache = OrderedDict()
+        self._path_validation_lock = threading.Lock()
         if create_dirs:
             mkdir(root / "objects")
             mkdir(root / "snapshots")
@@ -675,11 +683,33 @@ class Snapshots:
             raise Denied("Snapshot code digest mismatch")
         if not isinstance(record.get("goal"), str) or digest(record["goal"].encode()) != record.get("goal_digest"):
             raise Denied("Snapshot goal digest mismatch")
-        self.validate_paths(record["files"])
+        self._validate_paths_once(snapshot_id, record["files"])
         for entry in record["files"].values():
             if not isinstance(entry, dict) or not isinstance(entry.get("sha256"), str) or not DIGEST.fullmatch(entry["sha256"]) or type(entry.get("bytes")) is not int or not 0 <= entry["bytes"] <= self.max_file or type(entry.get("executable")) is not bool:
                 raise Denied("Invalid snapshot file metadata")
         return record
+
+    def _validate_paths_once(self, snapshot_id: str, files: dict) -> None:
+        """Reuse path-policy validation only after the manifest ID was verified.
+
+        The cache is process-local and bounded. Its key includes every runtime
+        input to path validation; a different exclusion policy or host platform
+        cannot reuse an earlier result. Concurrent misses may repeat the walk,
+        but safely converge on one cache entry.
+        """
+        key = (snapshot_id, tuple(self.excludes), _platform.IS_WINDOWS)
+        with self._path_validation_lock:
+            if key in self._path_validation_cache:
+                self._path_validation_cache.move_to_end(key)
+                return
+        self.validate_paths(files)
+        with self._path_validation_lock:
+            if key in self._path_validation_cache:
+                self._path_validation_cache.move_to_end(key)
+                return
+            self._path_validation_cache[key] = None
+            if len(self._path_validation_cache) > _PATH_VALIDATION_CACHE_LIMIT:
+                self._path_validation_cache.popitem(last=False)
 
     def _path_key(self, name):
         relative_parts(name)
