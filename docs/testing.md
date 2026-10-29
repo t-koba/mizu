@@ -472,3 +472,10 @@ failure, full/delta prompts, malformed registration IDs, UTF-8 byte bounds and
 corrupt/unsafe receipt paths. CI waits remain non-token observations with their
 existing acknowledgement semantics. Fake role handlers share
 `support.delivered_ack_tokens`; finishing by itself is deliberately not handling.
+
+`test_proposal_waits` uses offline fake proposal adapter responses and real local
+Publication, WorkItems and SharedRecords stores. It covers publication/head/base
+binding, work-item-only registration, incomplete and duplicate enumerations,
+endpoint movement, exact merged holder wake, CAS/replay, explicit receipts,
+source-current eligibility and unsafe filesystem paths. It does not claim a live
+merge, review approval, installation or deployment.

@@ -1160,7 +1160,7 @@ def proposal_insight_id(proposal_id: str) -> str:
     return "proposal-" + _digest(_canonical({"proposal": proposal_id}))[:32]
 
 
-def proposal_facts(proposal: dict) -> tuple[str, str]:
+def proposal_facts(proposal: dict, *, enumeration_complete: bool = False) -> tuple[str, str]:
     """Render stable, bounded facts for an external proposal observation.
 
     Identity, state, draft/mergeable flags, endpoints, check rows and
@@ -1210,6 +1210,8 @@ def proposal_facts(proposal: dict) -> tuple[str, str]:
     for review in row["reviews"] or []:
         lines.append(f"review: {review['reviewer']} {review['verdict']} {review['sha']}")
     lines.append("trust: external-untrusted")
+    if enumeration_complete:
+        lines.append("enumeration: complete")
     return title, "\n".join(lines) + "\n"
 
 
@@ -1222,10 +1224,14 @@ def _format_endpoint(role: str, endpoint: dict) -> str:
 
 def record_proposal_state(project, proposal: dict, *,
                           run: str | None = None,
-                          origin: str | None = None) -> dict:
+                          origin: str | None = None,
+                          enumeration_complete: bool = False) -> dict:
     """Record an external proposal observation; revise only on change.
 
     Schema: ``proposal`` is one validated ``parse_proposals`` row.
+    ``enumeration_complete`` is host-poller-only proof that the entire bounded
+    enumeration was validated with unique IDs and no pagination; the fact rides
+    in the existing observation body, never in a parallel receipt store.
     ``origin`` is an opaque trusted-caller label stored alongside the
     ``vcs`` authority; it never affects approval, routing, or dedup (the
     first-stored origin/run is preserved on repeats). Bounds: title <=
@@ -1239,7 +1245,7 @@ def record_proposal_state(project, proposal: dict, *,
     ``Denied`` on bad proposals or a foreign record under the stable ID.
     """
     row = parse_proposals({"proposals": [proposal]})[0]
-    title, body = proposal_facts(row)
+    title, body = proposal_facts(row, enumeration_complete=enumeration_complete)
     insight_id = proposal_insight_id(row["id"])
     try:
         current = project.insights.read(insight_id)

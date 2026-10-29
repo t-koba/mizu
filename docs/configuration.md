@@ -1660,9 +1660,9 @@ refresh and the best-effort daemon periodic fetch.
 | `diagnostic_bytes` | `2048` | Maximum stderr tail shown on a normally exited nonzero adapter call (0–8192; `0` disables); labelled `external-untrusted` and model-visible |
 | `ci_branch` | `""` | CI/reporting branch exposed only to `vcs_read` roles and included in the default CI wake set when nonempty |
 | `ci_wake_extra_branches` | `[]` | Add up to 64 valid branch names to the CI wake set; deduplicated with `ci_branch`; empty preserves existing default behavior |
-| `poll_enabled` | `false` | Explicit opt-in for daemon upstream/CI polling, including receipt-pinned work-item waits; `false` disables all daemon adapter calls and refuses new CI waits |
+| `poll_enabled` | `false` | Explicit opt-in for daemon upstream/CI polling, including receipt-pinned work-item waits; `false` disables all daemon adapter calls and refuses new receipt-bound waits |
 | `ci_wait_shared_records` | `false` | Host-only opt-in for the `ci.wait` SharedRecords holder route and explicit per-record `finish.ack_events`; no legacy auto-ack import, no change to polling or CI requests. Leave false until the gated cutover is validated. |
-| `poll_proposals_enabled` | `false` | Additional opt-in for daemon external-proposal observations; requires `poll_enabled = true` and a configured adapter; does not change CI polling |
+| `poll_proposals_enabled` | `false` | Additional opt-in for daemon external-proposal observations and explicit exact-proposal merge waits; requires `poll_enabled = true` and a configured adapter; does not change CI polling |
 | `poll_interval_seconds` | `300` | Daemon poll cadence in seconds (15–86,400) |
 | `poll_max_branches` | `4` | CI branches polled per daemon tick (1–64) |
 | `poll_fetch_timeout_seconds` | `30` | Daemon upstream-fetch adapter cap in seconds (1–300); each tick uses `min(timeout_seconds, this)` |
@@ -2146,3 +2146,68 @@ configured trusted VCS adapter can establish the independent run-attempt facts.
 See [trusted CI acceptance](ci-acceptance.md) for all fields, bounds, review gate
 and the operator-only retention command. `vcs_read` remains read-only; green
 status and ordinary CI waits do not establish equivalence.
+
+### Exact published-proposal merge waits
+
+A blocked work-item transition may explicitly request
+`{"kind":"proposal_merged","publication_id":"<64 hex>","proposal_id":"<exact VCS id>"}`.
+This is work-item-only (not an Insight deferral, decision task or installation
+wait). It uses the existing `work_items_transition` grant and requires both
+`vcs.poll_enabled` and `vcs.poll_proposals_enabled`, plus a configured adapter;
+all remain disabled by default. No merge/review approval or external write is
+granted by a wait.
+
+Registration validates the completed, local immutable Publication receipt, then
+reads the existing `vcs` proposal observation for that explicit ID. A complete
+observation must have been retained by proposal polling; missing, ambiguous,
+malformed, partial or deleted/unpinned endpoints are refused. Registration also
+requires exact membership in the latest durably recorded complete enumeration:
+the host-only `vcs-poll.json` field `proposal_complete_facts` maps at most 256
+proposal IDs to SHA-256 digests of canonical normalized `{title, body}` facts
+(including `enumeration: complete`). Polling publishes the whole map, including
+omissions, under `insights.lock` before per-row insight writes. A failed row write
+therefore cannot authorize stale facts; absent, malformed or unavailable inventory
+refuses registration. Partial/page polls preserve the last complete map. This
+inventory is not exposed in role prompts or VCS events, and stored waits do not
+depend on it. The proposal head
+ref (short and `refs/heads/` spellings compare equivalently) and exact SHA must
+match the receipt's branch and `published_sha`. The normalized wait persists
+both endpoints' exact `repo`, `ref` and `sha`, including the base revision.
+Callers cannot supply their own endpoint pins. Subsequent history replay validates
+the immutable receipt and stored endpoints without rebinding to newer observations.
+Normal work-item holder/authority, scope, smoke references and expected-revision
+CAS rules still apply; a stale CAS requires a fresh read, not automatic retry.
+
+Only a complete enumeration with exactly one matching ID in state `merged` at
+both pinned endpoints produces a wake. The existing proposal-page/timeout bounds
+are unchanged: at most 256 rows and one adapter call per due poll. For this wait,
+a complete enumeration is one page with neither input nor output cursor and
+`complete: true` (or the existing legacy response without completeness/cursor
+metadata). A partial page or a final page reached through a cursor never suffices;
+pages are not stitched into an allegedly atomic observation. All rows are validated
+and duplicate IDs refused before any proposal observation is recorded. Empty/missing
+rows, closed proposals, malformed data, changed head/base repo/ref/SHA, and branch
+movement cannot create merge evidence. Adapter failures preserve the cursor for
+retry on the next configured poll; there are no extra adapter calls or same-tick retries.
+
+A positive observation creates one immutable `proposal.wait` SharedRecords event
+per exact blocked revision, authenticated as `host.vcs`. This reuses generic
+shared-record receipts, not a parallel proposal receipt store. It retains only
+bounded normalized identities/endpoints, not raw adapter or prompt text. Its
+source event time is the blocked revision's `updated_at`; a later missing/moved
+observation does not erase a previously proven merge. Retained evidence is not
+new delivery authority: only the still-current blocked revision's holder can
+receive it. Deliveries are read-only, oldest-first, at most 10 events by default
+(mechanism maximum 100, each envelope at most 8192 bytes), and appear in
+`wait_events` with role/record/digest-bound `ack_token`s. An unacknowledged event
+replays, including after interruption/restart; exact repeated polls are no-ops.
+
+The holder explicitly selects handled tokens in `finish.ack_events`; omission
+acknowledges none. Foreign, stale, duplicate or undelivered tokens are refused
+before finish intent. Revision/holder and immutable event digest are rechecked
+before applying receipts after durable successful completion. Failed or
+bounded/bound-hit units and finishes registering `wait_for_check` apply no
+proposal receipts. Neither polling, delivery nor acknowledgement transitions or
+completes the work item: the holder keeps the completion decision. No wait is
+registered merely because a branch or publication exists. Review and installation
+waits remain unsupported.

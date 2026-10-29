@@ -8,8 +8,8 @@ from pathlib import Path
 from support import Fixture
 from mizu import vcs
 from mizu.errors import Denied
-from mizu.fs import PREVIEW_BYTES, canonical
-from mizu.runtime import poll_proposals, poll_project_vcs
+from mizu.fs import PREVIEW_BYTES, canonical, digest, read_json
+from mizu.runtime import poll_proposals, poll_project_vcs, refresh_poll_state
 from unittest import mock
 
 SHA_A = "a" * 40
@@ -396,6 +396,39 @@ class ProposalPollingTests(Fixture):
         self.assertIn(SHA_B, current["body"])
         self.assertEqual(len(calls), 3)
 
+    def test_complete_inventory_survives_restart_and_pages_without_event_exposure(self):
+        row = proposal()
+        title, body = vcs.proposal_facts(row, enumeration_complete=True)
+        expected = {row["id"]: digest(canonical({"title": title, "body": body}))}
+        responses = [
+            {"proposals": [row], "complete": True},
+            {"proposals": [], "complete": False, "cursor": "next-page"},
+            {"proposals": [], "complete": True},  # Terminal page, not enumeration.
+            {"proposals": [], "complete": True},
+        ]
+        with (mock.patch("mizu.runtime.poll_upstream", return_value=None),
+              mock.patch("mizu.runtime.poll_ci", return_value=None),
+              mock.patch("mizu.runtime.ci_waits.poll", return_value=None),
+              mock.patch("mizu.vcs.read_via", side_effect=responses)):
+            for tick, inventory in enumerate((expected, expected, expected, {})):
+                # Each tick starts with a new daemon's empty memory.
+                state = {}
+                events = poll_project_vcs(self._config(), self.project, state,
+                                          now=tick * 30, interval=15)
+                self.assertTrue(events[0]["ok"], events)
+                self.assertNotIn("proposal_complete_facts", json.dumps(events))
+                self.assertEqual(state["proposal_complete_facts"], inventory)
+                self.assertEqual(read_json(self.project.root / "vcs-poll.json")[
+                    "proposal_complete_facts"], inventory)
+
+    def test_refresh_inventory_cannot_retain_stale_in_memory_facts(self):
+        for shared in ({}, [], {"proposal_complete_facts": {}},
+                       {"proposal_complete_facts": None}):
+            state = {"proposal_complete_facts": {"stale": "a" * 64}}
+            refresh_poll_state(state, shared)
+            self.assertEqual(state["proposal_complete_facts"],
+                             shared.get("proposal_complete_facts") if isinstance(shared, dict) else None)
+
     def test_large_valid_checks_are_bounded_and_omitted_changes_revise(self):
         row = proposal()
         row["head"] = {"repo": "r" * 256, "ref": "h" * 256, "sha": SHA_A}
@@ -598,13 +631,13 @@ print(json.dumps(response))
         original = vcs.record_proposal_state
         fail_second = True
 
-        def record(project, row, *, origin):
+        def record(project, row, *, origin, enumeration_complete=False):
             nonlocal fail_second
             calls.append(row["id"])
             if row["id"].endswith("#second") and fail_second:
                 fail_second = False
                 raise OSError("second record failed")
-            return original(project, row, origin=origin)
+            return original(project, row, origin=origin, enumeration_complete=enumeration_complete)
 
         def reader(settings, op, params):
             return {"proposals": [first, second], "complete": False,

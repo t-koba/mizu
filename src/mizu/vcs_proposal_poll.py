@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from .errors import Denied
 from . import vcs as _vcs
-from .fs import now as now_iso
+from .fs import canonical, digest, lock, read_json, write_json, now as now_iso
+from .ci_observation import POLL_STATE_FILE
 from .vcs_poll_policy import (capped_vcs_settings, upstream_fetch_due,
                               vcs_poll_proposals_enabled,
                               vcs_poll_status_timeout)
@@ -29,7 +30,12 @@ def poll_proposals(config, project, state: dict, *, now: float,
     """Observe at most one external-proposal page on each opted-in tick.
 
     Schema: state stores ``last_proposal_poll`` and an opaque
-    ``proposal_cursor`` across ticks. Bounds: one normalized proposal page
+    ``proposal_cursor`` across ticks, plus host-only ``proposal_complete_facts``
+    (ID -> SHA-256 of canonical normalized title/body facts, at most 256 IDs)
+    in the shared poll cache. Only cursor-free complete enumerations replace
+    this inventory, including empty results, before row writes under the same
+    insights lock used by wait registration. It is never returned in events.
+    Bounds: one normalized proposal page
     (at most 256 rows) per due tick, using the existing status timeout cap.
     Trust: host-side observation only; validated rows are recorded through
     ``vcs.record_proposal_state`` and never imply state for missing rows.
@@ -37,7 +43,9 @@ def poll_proposals(config, project, state: dict, *, now: float,
     failures, while the cursor advances only after the entire page is
     recorded successfully. Evidence: one bounded ``proposal_poll`` event.
     Failure: adapter, malformed-page, or recording errors are visible as
-    ``ok=False``; a failed page preserves its input cursor for retry.
+    ``ok=False``; a failed page preserves its input cursor for retry. Complete
+    single-enumeration observations also release exact published-proposal waits
+    through shared records; cursor pages never prove merge-wait completeness.
     """
     if not vcs_poll_proposals_enabled(config):
         return None
@@ -74,12 +82,38 @@ def poll_proposals(config, project, state: dict, *, now: float,
         if complete is False and next_cursor == cursor:
             raise Denied("Incomplete VCS proposals cursor did not advance")
 
+        rows = _vcs.parse_proposals({"proposals": rows})
+        if len({row["id"] for row in rows}) != len(rows):
+            raise Denied("Duplicate VCS proposal id")
+        # A terminal page is not a complete enumeration when it had an input
+        # cursor. Do not combine moving pages into a fictional atomic view.
+        enumeration_complete = cursor is None and next_cursor is None and complete is not False
         observed = len(rows)
+        if enumeration_complete:
+            facts = {}
+            for row in rows:
+                title, body = _vcs.proposal_facts(row, enumeration_complete=True)
+                facts[row["id"]] = digest(canonical({"title": title, "body": body}))
+            # Publish omissions and changed facts before any row writes. A
+            # failed row update must not leave its older insight registrable.
+            # Registration holds this same lock; row writers acquire it anew.
+            with lock(project.root / "locks" / "insights.lock"):
+                shared = read_json(project.root / POLL_STATE_FILE, {})
+                if not isinstance(shared, dict):
+                    raise Denied("Invalid VCS poll state")
+                write_json(project.root / POLL_STATE_FILE,
+                           {**shared, "proposal_complete_facts": facts})
+                state["proposal_complete_facts"] = facts
         for row in rows:
-            receipt = _vcs.record_proposal_state(project, row, origin="daemon")
+            receipt = _vcs.record_proposal_state(
+                project, row, origin="daemon", enumeration_complete=enumeration_complete)
             recorded += 1
             if receipt.get("changed") is True:
                 changed += 1
+
+        if enumeration_complete:
+            from .proposal_waits import observe
+            observe(project, rows)
 
         # Do not move/clear the cursor until every validated row has been
         # recorded. Re-reading a partially committed page is safe because

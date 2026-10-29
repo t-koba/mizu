@@ -440,6 +440,7 @@ def _fresh_generation_for_role(project, role) -> str:
     from . import decision_delivery as _delivery
     from . import work_item_events as _tev
     from . import ci_waits as _ciw
+    from . import proposal_waits as _pww
     decision_state = _delivery.pending(project, role)
     decision_events = list(decision_state.get("events", []) or [])
     decision_page = _decision_page_summary(decision_state.get("page"))
@@ -455,7 +456,8 @@ def _fresh_generation_for_role(project, role) -> str:
     except Exception as exc:
         raise Denied("Work-order snapshot is unavailable") from exc
     wait_events = list(project.insights.due_waits(role.name, snapshot)
-                       + _ciw.pending(project.work_items, role.name, config=project.config))
+                       + _ciw.pending(project.work_items, role.name, config=project.config)
+                       + _pww.pending(project.work_items, role.name))
     obligations = list(project.insights.pending_obligations(role.name))
     return generation_from_captured(
         goal_digest=goal_digest, open_work_items=open_work_items,
@@ -573,7 +575,7 @@ def _is_actionable_locked(project, role_name: str, item_id: str, published_snaps
         if holder is not None and holder != role_name:
             return False
         wait = item.get("wait")
-        if not wait or not isinstance(wait, dict) or wait.get("kind") == "ci":
+        if not wait or not isinstance(wait, dict) or wait.get("kind") in ("ci", "proposal_merged"):
             return False
         try:
             if not project.insights._wait_due(wait, published_snapshot):

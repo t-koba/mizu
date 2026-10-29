@@ -1098,8 +1098,11 @@ class WorkItems:
         if not isinstance(value, dict):
             raise Denied("Blocked work items require a structured wait")
         kind = value.get("kind")
-        if kind == "ci":
-            from .ci_waits import normalize
+        if kind in ("ci", "proposal_merged"):
+            if kind == "ci":
+                from .ci_waits import normalize
+            else:
+                from .proposal_waits import normalize
             refs = validate_refs(value.get("smoke_refs", []))
             result = normalize(self.root, {k: v for k, v in value.items() if k != "smoke_refs"}, stored=True)
             return {**result, "smoke_refs": refs} if "smoke_refs" in value else result
@@ -2017,11 +2020,18 @@ class WorkItems:
             if wait is not None:
                 if status != "blocked":
                     raise Denied("Only blocked work items carry waits")
-                if isinstance(wait, dict) and wait.get("kind") == "ci":
-                    from .ci_waits import normalize
+                if isinstance(wait, dict) and wait.get("kind") in ("ci", "proposal_merged"):
+                    if wait["kind"] == "ci":
+                        from .ci_waits import normalize
+                    else:
+                        from .proposal_waits import normalize
+                        if not self.vcs.get("poll_proposals_enabled"):
+                            raise Denied("Proposal waits require automatic proposal polling")
                     if not self.vcs.get("poll_enabled") or not self.vcs.get("command"):
-                        raise Denied("CI waits require automatic VCS polling and an adapter")
-                    registered = normalize(self.root, {k: v for k, v in wait.items() if k != "smoke_refs"})
+                        raise Denied(f"{'CI' if wait['kind'] == 'ci' else 'Proposal'} waits require automatic VCS polling and an adapter")
+                    raw_wait = {k: v for k, v in wait.items() if k != "smoke_refs"}
+                    registered = (normalize(self.root, raw_wait, insights=self.insights)
+                                  if wait["kind"] == "proposal_merged" else normalize(self.root, raw_wait))
                     if "smoke_refs" in wait:
                         registered["smoke_refs"] = validate_refs(wait["smoke_refs"])
                 else:

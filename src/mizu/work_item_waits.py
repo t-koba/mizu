@@ -118,8 +118,9 @@ def liveness(store, wait, snapshot) -> dict:
     Insight-decided waits follow the current revision; dependency waits bind an
     exact revision/action and use pure satisfaction evidence for due checks.
     Missing/withdrawn targets and superseded/conflicting dependencies are impossible;
-    unavailable bodies or unsafe/inconsistent observations are unknown. CI is
-    deliberately not evaluated here: only its receipt-bound route can release it.
+    unavailable bodies or unsafe/inconsistent observations are unknown. CI and
+    proposal merge waits are deliberately not evaluated here: only their
+    receipt-bound routes can release them.
     """
     def result(state, reason):
         return {"state": state, "reason": reason,
@@ -130,8 +131,8 @@ def liveness(store, wait, snapshot) -> dict:
             return result("absent", "no_wait")
         wait = store._stored_wait(wait)
         kind = wait["kind"]
-        if kind == "ci":
-            return result("receipt_bound", "ci_receipt_route")
+        if kind in ("ci", "proposal_merged"):
+            return result("receipt_bound", f"{kind}_receipt_route")
         if kind == "deadline":
             due = dt.datetime.now(dt.timezone.utc) >= dt.datetime.fromisoformat(wait["at"])
         elif kind == "code_change":

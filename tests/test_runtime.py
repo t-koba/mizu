@@ -275,6 +275,7 @@ class ContextTests(Fixture):
         description, schema = DEFINITIONS["work_items_transition"]
         self.assertIn("new transitions to blocked require a supported observable wait", description)
         self.assertIn("receipt-bound work-item-only CI wait", description)
+        self.assertIn("work-item-only wait {kind:proposal_merged", description)
         item_id = "wi_" + "a" * 32
         validate({"id": item_id, "expected_rev": 1, "status": "doing"}, schema)
         validate({"id": item_id, "expected_rev": 1, "status": "blocked",
@@ -282,11 +283,19 @@ class ContextTests(Fixture):
         validate({"id": item_id, "expected_rev": 2, "status": "blocked",
                   "wait": {"kind": "code_change"}}, schema)
         work_wait = schema["properties"]["wait"]["properties"]
-        insight_wait = DEFINITIONS["decide"][1]["properties"]["wait"]["properties"]
-        self.assertEqual(work_wait["kind"]["enum"], insight_wait["kind"]["enum"] + ["ci"])
+        insight_schema = DEFINITIONS["decide"][1]
+        insight_wait = insight_schema["properties"]["wait"]["properties"]
+        self.assertEqual(work_wait["kind"]["enum"], insight_wait["kind"]["enum"] + ["ci", "proposal_merged"])
         for field in insight_wait.keys() - {"kind"}:
             self.assertEqual(work_wait[field], insight_wait[field])
-        self.assertEqual(work_wait.keys() - insight_wait.keys(), {"publication_id", "checks"})
+        self.assertEqual(work_wait.keys() - insight_wait.keys(), {"publication_id", "proposal_id", "checks"})
+        proposal_wait = {"kind": "proposal_merged", "publication_id": "a" * 64,
+                         "proposal_id": "forge:owner/repo#1"}
+        validate({"id": item_id, "expected_rev": 3, "status": "blocked", "wait": proposal_wait}, schema)
+        with self.assertRaises(Denied):
+            validate({"action": "defer", "id": "i" * 32, "rev": 1,
+                      "reason": "Need evidence", "revisit": "When evidence arrives",
+                      "wait": proposal_wait}, insight_schema)
         bad_arguments = (
             {},
             {"id": item_id, "status": "doing"},

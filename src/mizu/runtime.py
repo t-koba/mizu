@@ -25,7 +25,7 @@ from . import evidence_records, workspace_reads
 from .admission import admission, has_live_demand, role_exclusion
 from . import check_jobs
 from . import wait_events as structured_wait_events
-from . import ci_waits, dispatch_evidence, safe_point, work_item_events
+from . import proposal_waits, ci_waits, dispatch_evidence, safe_point, work_item_events
 from .ci_observation import (MAX_CI_CHECKS_PER_BRANCH, MAX_CI_FAILURES,
                              MAX_CI_FAILURE_BRANCHES, MAX_CI_WAKE_BRANCHES,
                              MAX_CI_WAKE_ROWS, POLL_STATE_FILE,
@@ -423,6 +423,7 @@ class Context:
         self.operator_record_page = {"events": [], "pending_count": 0, "truncated": False, "wake_pending": False}
         self.shared_ci_waits = False
         self.ci_wait_manifest = ()
+        self.proposal_wait_manifest = ()
         self.shared_decisions = False
         self.decision_manifest = ()
         self.decision_page = None
@@ -1775,7 +1776,8 @@ class Context:
                        if "registration_id" in event and "ack_token" in event}
         records = {entry.ack_token for entry in self.operator_record_manifest}
         ci_tokens = {entry.ack_token for entry in self.ci_wait_manifest} if self.shared_ci_waits else set()
-        delivered = records | decisions.keys() | terminal.keys() | waits.keys() | obligations.keys() | ci_tokens
+        proposal_tokens = {entry.ack_token for entry in self.proposal_wait_manifest}
+        delivered = proposal_tokens | records | decisions.keys() | terminal.keys() | waits.keys() | obligations.keys() | ci_tokens
         if (not isinstance(tokens, list) or len(tokens) > 512
                 or any(not isinstance(token, str) or len(token) > 64 for token in tokens)
                 or len(set(tokens)) != len(tokens)
@@ -1787,9 +1789,10 @@ class Context:
             decision_delivery.validate(self, [token for token in tokens if token in decisions])
         if self.shared_ci_waits:
             ci_waits.validate_selection(self, [token for token in tokens if token in ci_tokens])
+        proposal_waits.validate_selection(self, [token for token in tokens if token in proposal_tokens])
         operator_records.validate(self, [token for token in tokens if token in records])
         for token in tokens:
-            if token in records or token in ci_tokens:
+            if token in records or token in ci_tokens or token in proposal_tokens:
                 continue
             if token in decisions:
                 if self.shared_decisions:
@@ -2455,7 +2458,8 @@ class Engine:
         terminal_page = work_item_events.delivery(role_name, terminal_page)
         terminal_events = terminal_page["events"]
         ci_events, ci_manifest = ci_waits.delivery(work_items, role_name, self.config)
-        wait_events = project.insights.due_waits(role_name, snapshot) + ci_events
+        proposal_events, proposal_manifest = proposal_waits.delivery(work_items, role_name)
+        wait_events = project.insights.due_waits(role_name, snapshot) + ci_events + proposal_events
         # Dependency obligations addressed to this role ride along when
         # it runs for other reasons; they never admit a run on their
         # own, so no new wake source is implied.
@@ -2559,7 +2563,7 @@ class Engine:
         if _dispatch.skipped == "unchanged":
             return {"skip": {"skipped": "unchanged", "snapshot": snapshot["id"],
                     "code_digest": snapshot["code_digest"]}}
-        return {'next_task': next_task, 'ci_manifest': ci_manifest, 'shared_ci_waits': ci_waits.enabled(self.config), 'record_state': record_state, 'decision_state': decision_state, 'snapshot': snapshot, 'sources': sources, 'terminal_events': terminal_events, 'terminal_page': terminal_page, 'wait_events': wait_events, 'obligations': obligations, 'ci_present': ci_present, 'ci_failures': ci_failures, 'prior_wait_expired': prior_wait_expired, 'decision_events': decision_events, 'decision_receipt_diagnostics': receipt_diagnostics, '_dispatch': _dispatch}
+        return {'next_task': next_task, 'proposal_manifest': proposal_manifest, 'ci_manifest': ci_manifest, 'shared_ci_waits': ci_waits.enabled(self.config), 'record_state': record_state, 'decision_state': decision_state, 'snapshot': snapshot, 'sources': sources, 'terminal_events': terminal_events, 'terminal_page': terminal_page, 'wait_events': wait_events, 'obligations': obligations, 'ci_present': ci_present, 'ci_failures': ci_failures, 'prior_wait_expired': prior_wait_expired, 'decision_events': decision_events, 'decision_receipt_diagnostics': receipt_diagnostics, '_dispatch': _dispatch}
 
     def run(self, project: Project, role_name: str, *, attributes=None, retry_busy: bool = False,
                 enqueue_busy: bool = False, event_trigger: bool = False, probes_serviced: bool = False) -> dict:
@@ -2876,6 +2880,7 @@ class Engine:
                 context.wait_events = wait_events
                 context.shared_ci_waits = dispatch_state["shared_ci_waits"]
                 context.ci_wait_manifest = dispatch_state["ci_manifest"]
+                context.proposal_wait_manifest = dispatch_state["proposal_manifest"]
                 context.obligations = obligations
                 context.progress_obligations_digest = _progress_obligations_digest(obligations)
                 role_cursor = _role_cursor(project, role_name) if role.workspace != "write" else snapshot
@@ -3315,6 +3320,8 @@ class Engine:
                             project.insights.root, role_name, selected_obligations)
                 with contextlib.suppress(OSError, ValueError, TypeError, AttributeError, Denied, LimitExceeded):
                     ci_waits.complete(context, finished)
+                with contextlib.suppress(OSError, ValueError, TypeError, AttributeError, Denied, LimitExceeded):
+                    proposal_waits.complete(context, finished)
                 if check_wait is not None:
                     check_jobs.set_wait(project, role_name, check_wait["id"], check_wait["wait_until"], continuation={
                         "run": run_id, "snapshot": snapshot["id"], "code_digest": snapshot["code_digest"],
@@ -3980,7 +3987,8 @@ def _role_events_due(project: Project, snapshot: dict, role_name=None) -> bool:
             return True
         try:
             if (project.insights.due_waits(name, snapshot)
-                    or ci_waits.pending(project.work_items, name, limit=1, config=project.config)):
+                    or ci_waits.pending(project.work_items, name, limit=1, config=project.config)
+                    or proposal_waits.pending(project.work_items, name, limit=1)):
                 return True
         except (Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError, AttributeError):
             pass
@@ -4109,7 +4117,7 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
                 name for name in project.roles
                 if project.config.roles[name].workspace == "write"]
             try:
-                value = any(check_jobs.wake_ready(project, name) or ci_waits.pending(project.work_items, name, limit=1, config=project.config) for name in names)
+                value = any(check_jobs.wake_ready(project, name) or ci_waits.pending(project.work_items, name, limit=1, config=project.config) or proposal_waits.pending(project.work_items, name, limit=1) for name in names)
             except (Denied, LimitExceeded, OSError, ValueError):
                 value = False
         elif needed == "operator_records_due":
@@ -4187,11 +4195,15 @@ def refresh_poll_state(state: dict, shared: dict) -> dict:
 
     Schema: ``state`` is daemon in-memory poll state (fetch, CI, proposal
     timestamp/cursor); ``shared`` is the flat ``vcs-poll.json`` mapping.
-    Returns the ``ci`` sub-state.
-    Bounds: numeric timestamps only; anything else is ignored. Trust: local
+    Returns the ``ci`` sub-state. The host-only complete proposal inventory is
+    refreshed wholesale (including absence); registration validates its bounds
+    and facts, so stale in-memory membership cannot restore a missing inventory.
+    Bounds: timestamps must be numeric. Trust: local
     operator state, never model input. Failure: never raises.
     """
     ci_state = state.setdefault("ci", {})
+    state["proposal_complete_facts"] = (shared.get("proposal_complete_facts")
+                                        if isinstance(shared, dict) else None)
     if not isinstance(shared, dict):
         return ci_state
     for key, target in (("last_fetch", state), ("last_poll", ci_state),
@@ -4260,6 +4272,7 @@ def poll_project_vcs(config, project, state: dict, *, now: float, interval: floa
                             "last_poll": ci_state.get("last_poll"),
                             "last_proposal_poll": state.get("last_proposal_poll"),
                             "proposal_cursor": state.get("proposal_cursor"),
+                            "proposal_complete_facts": state.get("proposal_complete_facts"),
                             "last_ci_wait_poll": state.get("last_ci_wait_poll"),
                             "ci_wait_cursor": state.get("ci_wait_cursor"),
                             "failures": _clean_ci_failures(ci_state.get("failures")),
