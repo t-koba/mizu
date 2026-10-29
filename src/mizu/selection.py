@@ -175,8 +175,11 @@ def validate_selectors(value, profiles, base):
     for key, spec in value.items():
         name(key)
         table(spec, {'rules', 'classify_rules', 'classifier', 'on_error', 'retry_seconds',
-                     'recommendation_validity'}, 'selector')
+                     'recommendation_validity', 'reselection_interval_seconds'}, 'selector')
         seconds(spec.get('retry_seconds'))
+        interval = spec.get('reselection_interval_seconds', 0)
+        if type(interval) is not int or not 0 <= interval <= 31536000:
+            raise ConfigError('reselection_interval_seconds must be 0..31536000')
         validity = spec.get('recommendation_validity', 'once')
         if validity not in ('once', 'sticky'):
             raise ConfigError('recommendation_validity must be once or sticky')
@@ -190,6 +193,8 @@ def validate_selectors(value, profiles, base):
                 profile = candidate.get('profile')
                 if not isinstance(profile, str) or profile not in profiles or profile in seen:
                     raise ConfigError('Candidates require distinct configured profiles')
+                if interval and (profiles[profile]['engine'] != 'pi' or profiles[profile]['session'] != 'persistent'):
+                    raise ConfigError('Re-selection requires persistent Pi candidates')
                 seen.add(profile)
                 name(candidate.get('group', profile))
                 validate_condition(candidate.get('when', {}))
@@ -868,6 +873,9 @@ def select(config, role, facts, sources, *, at=None, classification=None):
                 'profile': None, 'rule': None, 'excluded': [],
                 'facts': evidence_facts, 'attribute_sources': sources,
                 'classification': classification, 'next_evaluation_at': at + spec['retry_seconds']}
+    if spec.get('reselection_interval_seconds', 0):
+        decision['reselection_facts'] = {k: v for k, v in facts.items()
+                                       if k not in ('observations', 'history', 'candidate')}
     times = [decision['next_evaluation_at']]
     unblocks = []
     for obs in observations.values():

@@ -2,10 +2,15 @@
  * See tests/pi-reasoning.md for scope. No Pi serializer is reimplemented here.
  */
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { meterRuntime, installReselection, modelAuthority, resolveThinkingLevel } from '../adapters/pi/model-runtime.mjs';
+import { DEFAULT_THINKING_LEVEL as sdkDefaultThinkingLevel }
+  from '../adapters/pi/node_modules/@earendil-works/pi-coding-agent/dist/core/defaults.js';
+import { MODEL_THINKING_LEVELS }
+  from '../adapters/pi/node_modules/@earendil-works/pi-ai/dist/providers/model-schema.js';
 import { register } from '../adapters/pi/register.mjs';
 import { buildBridgeTools } from '../adapters/pi-durable/launcher.mjs';
 
@@ -68,7 +73,7 @@ function sse(model, blocks) {
     { headers: { 'content-type': 'text/event-stream' } });
 }
 
-async function endpoint(adapter) {
+async function endpoint(adapter, includeReasoning = true) {
   const ai = await installed(adapter, 'pi-ai');
   const { anthropicProvider } = await installed(adapter, 'pi-ai', 'providers/anthropic');
   const api = await installed(adapter, 'pi-ai', 'api/anthropic-messages');
@@ -77,6 +82,7 @@ async function endpoint(adapter) {
   const model = { ...catalog.find(m => m.reasoning), provider: 'replay-contract',
     baseUrl: 'https://replay.invalid', contextWindow: 100000, maxTokens: 2048 };
   assert.ok(model.id, 'installed Anthropic reasoning model is required');
+  const allowedModels = new Set([model.id]);
   let expected = [];
   let pending;
   let summary = false;
@@ -86,7 +92,7 @@ async function endpoint(adapter) {
   const fetch = async (_url, init) => {
     try {
       const payload = JSON.parse(init.body);
-      assert.equal(payload.model, model.id);
+      assert.ok(allowedModels.has(payload.model));
       requests.push(structuredClone(payload));
       assert.ok(summary || pending, 'unexpected provider request (no scripted response)');
       if (summary) {
@@ -103,7 +109,7 @@ async function endpoint(adapter) {
         emitted.push(response);
         expected.push(response);
       }
-      return sse(model.id, response.blocks);
+      return sse(payload.model, response.blocks);
     } catch (error) {
       failures.push(error);
       throw error; // Fail closed; never delegate to global fetch or a network.
@@ -118,10 +124,10 @@ async function endpoint(adapter) {
     streamSimple: (m, c, o) => api.streamSimple(m, c, options(o)),
   };
   return {
-    ai, model, provider, emitted, requests,
+    ai, model, provider, emitted, requests, allowModel: id => allowedModels.add(id),
     reply(id, extra = [text(`answer-${id}`)]) {
       assert.equal(pending, undefined);
-      const response = { id, blocks: [...thinking(id), ...extra] };
+      const response = { id, blocks: [...(includeReasoning ? thinking(id) : []), ...extra] };
       pending = response;
       return response;
     },
@@ -140,8 +146,8 @@ async function endpoint(adapter) {
       return expected.length;
     },
     checked() {
-      assert.equal(pending, undefined, 'scripted provider response was consumed');
       assert.equal(failures.length, 0, failures[0]?.message);
+      assert.equal(pending, undefined, 'scripted provider response was consumed');
     },
   };
 }
@@ -317,7 +323,7 @@ test('Pi durable production tools deliver host result text, reopen a completed u
 
 // Native catalog tests use the installed SDK, real reviewed extension loader and
 // file store. Provider refresh is synthetic; no inference or external service.
-import { readFile, writeFile } from 'node:fs/promises';
+import { writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { catalog, inspectNativeCatalog } from '../adapters/pi/catalog.mjs';
 
@@ -483,6 +489,146 @@ test('catalog launcher needs no bridge and never exposes setup diagnostics', asy
     assert.equal(failed.stderr, '');
     assert.ok(!failed.stdout.includes('unsafe fixture'));
   } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+
+test('Pi selected thinking level uses profile overrides and the pinned SDK default', () => {
+  const model = { provider: 'provider', id: 'model' };
+  assert.equal(resolveThinkingLevel({ options: {} }, model), sdkDefaultThinkingLevel);
+  for (const level of MODEL_THINKING_LEVELS) {
+    assert.equal(resolveThinkingLevel({ options: { thinkingLevel: level } }, model), level,
+      `runtime accepts pinned SDK thinking level ${level}`);
+  }
+  assert.equal(resolveThinkingLevel({ options: { settings: { defaultThinkingLevel: 'low' } } }, model), 'low');
+  assert.equal(resolveThinkingLevel({ options: { settings: { defaultThinkingLevel: 'low',
+    modelThinkingLevels: { 'provider/model': 'high' } } } }, model), 'high');
+  assert.equal(resolveThinkingLevel({ options: { thinkingLevel: 'minimal',
+    settings: { defaultThinkingLevel: 'low', modelThinkingLevels: { 'provider/model': 'high' } } } }, model), 'minimal');
+  assert.throws(() => resolveThinkingLevel({ options: { thinkingLevel: 'not-a-level' } }, model),
+    /Invalid selected Pi thinking level/);
+});
+
+test('Pi completed tool batch upgrades once, preserves effects/history, and reopens under host model authority', { timeout: 30000 }, async () => {
+  const sdk = await installed('pi', 'pi-coding-agent');
+  const directory = await mkdtemp(join(tmpdir(), 'mizu-reselection-pi-'));
+  let session;
+  try {
+    const remote = await endpoint('pi', false);
+    const preferred = { ...remote.model, id: 'preferred-fixture-model' };
+    remote.allowModel(preferred.id);
+    remote.provider.getModels = () => [remote.model, preferred];
+    const runtime = await sdk.ModelRuntime.create({ authPath: join(directory, 'auth.json'),
+      modelsPath: null, modelsStorePath: join(directory, 'models.json'), refreshOnCreate: false });
+    runtime.registerNativeProvider(remote.provider);
+    const authority = modelAuthority();
+    const settingsManager = sdk.SettingsManager.inMemory({ compaction: { enabled: false },
+      retry: { enabled: false }, cacheWarming: 'off' });
+    let effects = 0;
+    const operations = [];
+    let manager;
+    const call = async (_cfg, operation, args) => {
+      operations.push(operation);
+      if (operation === '_hello' || operation === '_model_usage' || operation === '_request_done' || operation === '_budget') return {};
+      if (operation === bridgeTool.operation) {
+        effects++;
+        remote.reply('tool-answer');
+        return hostResult;
+      }
+      if (operation === '_pi_reselect') {
+        assert.equal(effects, 1, 'all host effects completed before selection');
+        const results = manager.buildSessionContext().messages.filter(m => m.role === 'toolResult');
+        assert.equal(results.length, 1, 'completed result persisted before selection');
+        const durable = await readFile(manager.getSessionFile(), 'utf8');
+        assert.ok(durable.includes('toolResult') && durable.includes('Distinctive host-tool result'),
+          'same completed result is durable in the SDK file before host selection');
+        if (switchToPreferred) {
+          switchToPreferred = false;
+          return { switch: { provider: preferred.provider, model: preferred.id,
+            authorization: 'fixture-authorization', options: {} } };
+        }
+        return { switch: null };
+      }
+      assert.equal(operation, '_pi_reselect_applied');
+      assert.deepEqual(args, { provider: preferred.provider, model: preferred.id, authorization: 'fixture-authorization' });
+      assert.equal(session.model.id, preferred.id);
+      assert.equal(session.thinkingLevel, sdkDefaultThinkingLevel);
+      return { applied: true };
+    };
+    const meter = meterRuntime(runtime, {}, call, model => authority.check(model));
+    const resourceLoader = new sdk.DefaultResourceLoader({ cwd: directory, agentDir: directory, settingsManager,
+      noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+      systemPrompt: 'Offline re-selection contract.',
+      extensionFactories: [{ name: 'mizu', factory: pi => register(pi, remote.ai.Type,
+        { tools: [bridgeTool] }, { request: call }) }] });
+    await resourceLoader.reload();
+    manager = sdk.SessionManager.create(directory, directory);
+    ({ session } = await sdk.createAgentSession({ cwd: directory, agentDir: directory, modelRuntime: runtime,
+      model: remote.model, thinkingLevel: 'high', settingsManager, resourceLoader, sessionManager: manager,
+      noTools: 'builtin', tools: [bridgeTool.name] }));
+    const config = { provider: remote.model.provider, model: remote.model.id, options: { thinkingLevel: 'high' } };
+    const resumeConfig = { provider: preferred.provider, model: preferred.id, options: {} };
+    let switchToPreferred = true;
+    await installReselection(session, runtime, config, {}, authority, call);
+    remote.reply('tool-call', [text('answer-tool-call'),
+      { type: 'tool_use', id: 'probe-call', name: bridgeTool.name, input: toolInput }]);
+    await session.prompt('Use the host tool.');
+
+    await meter.flush();
+    remote.checked();
+    assert.equal(effects, 1);
+    assert.equal(remote.requests.length, 2, 'no inference/probe beyond the natural two requests');
+    assert.equal(operations.filter(op => op === '_budget').length, 2);
+    assert.equal(remote.requests[0].model, remote.model.id);
+    assert.equal(remote.requests[1].model, preferred.id);
+    assertHostOutput(remote.requests[1]);
+    assert.equal(operations.filter(op => op === '_pi_reselect_applied').length, 1);
+    const filename = manager.getSessionFile();
+    const id = manager.getSessionId();
+    session.dispose();
+    manager = sdk.SessionManager.open(filename, directory, directory);
+    assert.equal(manager.getSessionId(), id);
+    const resumed = await sdk.createAgentSession({ cwd: directory, agentDir: directory, modelRuntime: runtime,
+      model: remote.model, thinkingLevel: 'medium', settingsManager, resourceLoader, sessionManager: manager,
+      noTools: 'builtin', tools: [bridgeTool.name] });
+    assert.equal(resumed.modelFallbackMessage, undefined, 'exact host-selected model remains authoritative on family resume');
+    ({ session } = resumed);
+    // Simulate an older family transcript whose final profile left thinking high.
+    // The new unit selects B, which omits thinkingLevel, so reconciliation must
+    // apply the profile's effective SDK default before any inference.
+    session.setThinkingLevel('high');
+    session.dispose();
+    manager = sdk.SessionManager.open(filename, directory, directory);
+    const resumedOmitted = await sdk.createAgentSession({ cwd: directory, agentDir: directory, modelRuntime: runtime,
+      model: preferred, settingsManager, resourceLoader, sessionManager: manager,
+      noTools: 'builtin', tools: [bridgeTool.name] });
+    assert.equal(resumedOmitted.session.thinkingLevel, 'high', 'SDK restores the prior transcript setting before host reconciliation');
+    ({ session } = resumedOmitted);
+    await installReselection(session, runtime, resumeConfig, {}, authority, call);
+    assert.equal(session.thinkingLevel, sdkDefaultThinkingLevel, 'selected profile omission resolves to the pinned SDK default');
+    session.dispose();
+
+    // The next unit can still start under profile A and explicitly restore its
+    // own level while adopting the same family history.
+    manager = sdk.SessionManager.open(filename, directory, directory);
+    const resumedA = await sdk.createAgentSession({ cwd: directory, agentDir: directory, modelRuntime: runtime,
+      model: remote.model, thinkingLevel: 'high', settingsManager, resourceLoader, sessionManager: manager,
+      noTools: 'builtin', tools: [bridgeTool.name] });
+    assert.equal(resumedA.modelFallbackMessage, undefined, 'exact host-selected model remains available on family resume');
+    ({ session } = resumedA);
+    await installReselection(session, runtime, config, {}, authority, call);
+    assert.equal(session.thinkingLevel, 'high');
+    remote.reply('next-unit');
+    await session.prompt('Continue without repeating the tool.');
+    await meter.flush();
+    remote.checked();
+    assert.equal(remote.requests.at(-1).model, remote.model.id);
+    assertHostOutput(remote.requests.at(-1));
+    assert.equal(effects, 1);
+    assert.equal(remote.requests.length, 3);
+  } finally {
+    session?.dispose();
     await rm(directory, { recursive: true, force: true });
   }
 });

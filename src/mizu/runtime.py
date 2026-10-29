@@ -2862,6 +2862,8 @@ class Engine:
                 context._slot_lease = True
                 context._admission_observation_sink = record_admission
                 context.ephemeral = self.ephemeral
+                context.reselection_role = selection_role
+                context.reselection_decision = decision
                 if recovery is not None:
                     safe_point.recover(project.snapshots, recovery, run_id)
                     context.safe_point_yield_requested = True
@@ -3064,6 +3066,7 @@ class Engine:
                             reselected = prepare(self, project, selection_role, snapshot,
                                                  attributes, preview=True)
                         decision = reselected
+                        context.reselection_decision = decision
                         selection_attempt += 1
                         write_json(run_dir / "selection.json", decision)
                         role = dataclasses.replace(selection_role, profile=decision["profile"],

@@ -22,6 +22,11 @@ mismatch cannot be waived. The test never downloads dependencies.
   only bridge I/O injected; the durable SDK's Harness, tool loop, file-backed SQLite close/reopen,
   `resume()`, completed-unit request-ID deduplication, subsequent submission,
   `compact()`, summary placement and context projection.
+- The real coding SDK's safe-point reselection path: explicit `high` switches to an
+  option-omitting profile and resolves to the installed SDK default; a reopened
+  legacy transcript with `high` is reconciled under that profile before inference.
+  Separate resolver assertions cover profile model override, global default,
+  explicit option precedence and invalid-level refusal.
 - Each adapter's **own installed pi-ai** Anthropic Messages response parser,
   transcript normalization, message transformation and HTTP request serializer.
   A test-only injected provider delegates to the real `stream`/`streamSimple`

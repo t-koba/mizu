@@ -247,3 +247,83 @@ test('runtime completion pairs admission even without usage or on provider failu
   assert.deepEqual(completed, admitted);
   assert.deepEqual(calls.filter(([op])=>op==='_request_done').map(([,args])=>args.failed), [false, true]);
 });
+
+test('Pi re-selection failures poison inference rather than using an uncertain model', async () => {
+  const { installReselection, modelAuthority } = await import('../adapters/pi/model-runtime.mjs');
+  for (const fault of ['prepare', 'unavailable', 'apply', 'projection', 'ack']) {
+    let branch = [];
+    let applying = false;
+    const fallback = { provider: 'fixture', id: 'fallback' };
+    const preferred = { provider: 'fixture', id: 'preferred' };
+    const session = {
+      model: fallback, thinkingLevel: 'off',
+      sessionManager: { getBranch: () => branch },
+      agent: { prepareNextTurnWithContext: async () => ({ context: { messages: ['completed-result'] } }) },
+      async setModel(model) {
+        if (applying && fault === 'apply') throw new Error('application failed');
+        this.model = model;
+        if (!(applying && fault === 'projection')) branch = [{ type: 'model_change', provider: model.provider, modelId: model.id }];
+      },
+      setThinkingLevel(level) { this.thinkingLevel = level; },
+    };
+    const authority = modelAuthority();
+    const runtime = { getModel: (_provider, id) => id === 'fallback' ? fallback : fault === 'unavailable' ? null : preferred };
+    const operations = [];
+    const call = async (_bridge, operation) => {
+      operations.push(operation);
+      if (operation === '_pi_reselect') {
+        if (fault === 'prepare') throw new Error('lost host response');
+        return { switch: { provider: preferred.provider, model: preferred.id, authorization: 'exact' } };
+      }
+      throw new Error('lost commit response');
+    };
+    await installReselection(session, runtime, { provider: fallback.provider, model: fallback.id }, {}, authority, call);
+    applying = true;
+    await assert.rejects(session.agent.prepareNextTurnWithContext({}), undefined, fault);
+    assert.throws(() => authority.check(session.model), /not host-authorized/);
+    assert.deepEqual(operations, fault === 'ack' ? ['_pi_reselect', '_pi_reselect_applied'] : ['_pi_reselect']);
+  }
+});
+
+
+test('Pi resume keeps matching transcript without a redundant model-change entry', async () => {
+  const { installReselection, modelAuthority } = await import('../adapters/pi/model-runtime.mjs');
+  const model = { provider: 'fixture', id: 'same' };
+  const branch = [{ type: 'model_change', provider: model.provider, modelId: model.id }];
+  let setModelCalls = 0;
+  const session = { model, sessionManager: { getBranch: () => branch },
+    agent: { prepareNextTurnWithContext: async () => ({}) },
+    async setModel(next) { setModelCalls++; this.model = next; },
+    setThinkingLevel(level) { this.thinkingLevel = level; } };
+  const authority = modelAuthority();
+  await installReselection(session, { getModel: () => model },
+    { provider: model.provider, model: model.id }, {}, authority);
+  authority.check(model);
+  assert.equal(setModelCalls, 0);
+  assert.equal(branch.length, 1);
+});
+
+test('Pi re-selection checks the SDK safe point before changing resumed history', async () => {
+  const { installReselection, modelAuthority } = await import('../adapters/pi/model-runtime.mjs');
+  const model = { provider: 'fixture', id: 'same' };
+  let setModelCalls = 0;
+  const session = { model, sessionManager: { getBranch: () => [] }, agent: {},
+    async setModel(next) { setModelCalls++; this.model = next; },
+    setThinkingLevel(level) { this.thinkingLevel = level; } };
+  await assert.rejects(installReselection(session, { getModel: () => model },
+    { provider: model.provider, model: model.id }, {}, modelAuthority()), /completed-result boundary/);
+  assert.equal(setModelCalls, 0);
+});
+
+test('Pi re-selection refuses virtual models whose nested provider authority is not explicit', async () => {
+  const { installReselection, modelAuthority } = await import('../adapters/pi/model-runtime.mjs');
+  const virtual = { provider: 'fixture', id: 'virtual', api: 'pi-virtual' };
+  const session = { model: virtual, sessionManager: { getBranch: () => [] },
+    agent: { prepareNextTurnWithContext: async () => ({}) },
+    async setModel(model) { this.model = model; } };
+  const runtime = { getModel: () => virtual };
+  const authority = modelAuthority();
+  await assert.rejects(installReselection(session, runtime,
+    { provider: virtual.provider, model: virtual.id }, {}, authority), /virtual models/);
+  assert.throws(() => authority.check(virtual), /not host-authorized/);
+});

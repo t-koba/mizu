@@ -3,8 +3,9 @@
 Selection is opt-in and runs once **before each work unit**, using the existing
 Pi, Codex or Claude driver. Profiles keep exact engine/provider/model/native
 options. There are no built-in provider rankings, quota interpretations or
-error-message heuristics. A selector never changes grants or switches an active
-conversation. Ordinary fixed-profile configurations retain their behavior.
+error-message heuristics. A selector never changes grants. By default it does not
+switch an active conversation; persistent Pi can explicitly opt into the upgrade
+policy below. Ordinary fixed-profile configurations retain their behavior.
 
 ## Configuration
 
@@ -602,3 +603,77 @@ usage attribution. Offline tests and actual installed Pi SDK with faux provider
 are separate from live-provider authentication, quota reset and real OCI tests.
 Activation remains an operator configuration change; no deployment or login is
 performed by selection.
+
+## Opt-in Pi upgrades within a submission
+
+`selectors.<name>.reselection_interval_seconds` is an integer from 0 to
+31,536,000 (seconds). Omitted or `0` retains once-per-unit selection and the
+ordinary profile-specific session keys. It does not change `retry_seconds`.
+A positive value enables host-authorized upgrades for **persistent,
+non-ephemeral Pi only**; every candidate in every rule must be compatible.
+Other engines, including `pi-durable`, are not supported by this option. Pi virtual
+models are also refused because their nested provider requests are not separately
+host-authorized.
+Compatibility retains all ordinary conversation identity safeguards (policy,
+goal, capabilities, workspace, command, resources, MCP, engine tools, native
+settings and adapter digest); only provider/model and the existing
+`conversation_settings` live options may differ. Incompatibility refuses the
+dispatch, not a silent downgrade to ordinary sessions.
+
+The adapter uses the pinned SDK's `Agent.prepareNextTurnWithContext`, after the
+completed assistant/tool-result batch and before the next inference. It is not
+`message_end`, submission settlement or scheduler preemption. Cadence is measured
+by the host monotonic clock from driver entry/last recheck. At every completed-result
+boundary the host first checkpoints the SDK session-file ID and cumulative usage;
+a failed or uncertain switch therefore does not orphan completed history. At due
+boundaries the host reuses captured selection facts and classification, refreshing
+only existing blocks, observations, history and expiry. It never runs a classifier,
+probe or recovery inference for this purpose. The first eligible candidate is applied only
+if strictly earlier in selector order (rule index, then candidate index) than the
+current selection. There are no downgrades within a submission. Host finish-only
+continuations retain the selected model rather than reselecting.
+
+For an enabled selector the host atomically establishes one bounded reference in
+`sessions/<role>/families/family.json`, under a local lock. Its stored
+binding covers the selector definition, project, role and shared conversation
+identity, and points to exactly the entry
+candidate's ordinary **same-source** session directory, adopting it if present or
+initializing it otherwise. It never merges histories or consults timestamps. Other
+candidates' separate histories remain untouched. There is one active family per role.
+Future dispatches resolve this reference before rotation, prompt projection, resume
+and save, so session ID, creation time, usage, generation and existing rotation
+policy remain authoritative.
+A host-created reduced-tool continuation can use that history but cannot restore
+any removed tools. A malformed, linked, mismatched or dangling reference refuses
+execution; it never re-adopts or starts fresh. A versioned ownership claim prevents
+a different selector family from aliasing the same mutable session directory;
+ambiguous ownership fails closed. Changing only polling/retry cadence does not
+change the family identity. Selector-policy or entry-profile identity changes are
+not migrated; reset the role sessions before using the edited family. Setting the interval
+back to zero stops family routing but retains its reference. If the selected profile's
+ordinary directory is family-owned, disabled runs use a stable fresh isolated
+per-profile key rather than append to shared history; unowned profiles keep their
+ordinary keys. Re-enabling the same family resolves its unchanged lineage.
+Adapter-source changes remain identity-bound and are not migrated; reset the role
+sessions before re-enabling a changed adapter family. Explicit role session reset removes family references and
+ownership claims together with ordinary session state.
+
+`_pi_reselect` and `_pi_reselect_applied` are authenticated internal bridge
+operations, not registered model tools. Preparation returns one exact model,
+live options and a single-use authorization identity; the adapter cannot propose
+a candidate. It applies the model through the same `AgentSession` and verifies
+both active model and transcript model selection before acknowledging. Before
+each application, thinking level resolves from the selected profile's explicit
+`thinkingLevel`, then its `settings.modelThinkingLevels` entry for that
+provider/model, then `settings.defaultThinkingLevel`, then the pinned Pi SDK
+default. The SDK setter clamps to model capabilities and records actual changes
+in the shared transcript; a previous candidate's thinking-level entry is never
+used as the new profile's default. Only then does the host update selection
+evidence. The ordinary `_budget` path still owns
+every request; counters, deadlines, role and grants are not reset. The runtime
+also refuses inference with any model other than the acknowledged selection.
+Failed or uncertain authorization/application stops inference with no retry or
+fallback that could bypass this handshake. On the next unit the host-selected
+entry model is explicitly applied and verified against the same saved history;
+ordinary SDK fallback refusals remain enabled. No provider/network availability
+or recovery request is added by model lookup/application.

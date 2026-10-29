@@ -154,6 +154,8 @@ def adapter_digest(engine):
     root = Path(__file__).resolve().parents[2]
     module = {'pi-durable': 'pi_durable'}.get(engine, engine)
     paths = [Path(__file__), Path(__file__).with_name(module+'.py'), Path(__file__).with_name('engine_channel.py')]
+    if engine == 'pi':
+        paths.append(Path(__file__).with_name('pi_reselection.py'))
     paths.extend(path for path in (root/'adapters'/engine).iterdir() if path.is_file())
     return digest(canonical({str(path.relative_to(root)): digest(path.read_bytes()) for path in sorted(paths)}))
 
@@ -236,7 +238,7 @@ def durable_session_identity(settings) -> dict:
     return {'engine': 'pi-durable', 'backend': backend, 'store_compat': compat}
 
 
-def session_record(context, profile, settings):
+def conversation_identity(context, settings):
     if settings.get('engine') == 'pi-durable':
         identity = durable_session_identity(settings)
     else:
@@ -248,9 +250,16 @@ def session_record(context, profile, settings):
                     'workspace': context.role.workspace, 'command': context.config.command(settings['engine']),
                     'adapter_digest': adapter_digest(settings['engine']),
                     'local_settings': local_settings_digest(context.config, settings['engine'])}
+    return identity
+
+
+def session_record(context, profile, settings):
+    identity = conversation_identity(context, settings)
     key = digest(canonical(identity))
     persistent = settings['session'] == 'persistent' and not context.ephemeral
     directory = context.run_dir.parents[1] / 'sessions' / context.role.name / key if persistent else context.run_dir / 'session'
+    from .pi_reselection import family_directory
+    directory = family_directory(context, profile, settings, identity, directory)
     mkdir(directory)
     path = directory / 'session.json'
     record = read_json(path, None)

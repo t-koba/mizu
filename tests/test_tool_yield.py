@@ -33,7 +33,8 @@ class ToolYieldTests(Fixture):
         """Real Context handles admission/refusal before a synthetic Pi event."""
         class BridgeStub:
             def __init__(self, handle, *args, **kwargs):
-                self.config_file = handle.__self__.run_dir / 'bridge.json'
+                context = getattr(handle.__self__, 'context', handle.__self__)
+                self.config_file = context.run_dir / 'bridge.json'
             def __enter__(self): return self
             def __exit__(self, *args): pass
 

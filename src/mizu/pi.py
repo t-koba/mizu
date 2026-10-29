@@ -13,6 +13,7 @@ from .engine_config import effective, connected_servers, session_record, save_se
 from .errors import RequestYieldExceeded
 from .errors import ConfigError, DeadlineWrapUp, ProtocolError, ModelFailure
 from .fs import atomic_write, mkdir, write_json
+from .pi_reselection import Reselection
 from .process import environment
 from .protocol import tool_definitions
 from .startup import RUNTIME_ENDPOINT, record_startup, startup_bound
@@ -35,6 +36,7 @@ class PiDriver:
         profile = profile or context.role.profile
         settings = effective(self.config, context.role, profile)
         path, saved = session_record(context, profile, settings)
+        reselection = Reselection(context)
         model = self.config.model(profile)
         policy = system_context_text(context.role, context.goal)
         atomic_write(context.run_dir / "system.md", policy.encode())
@@ -44,13 +46,14 @@ class PiDriver:
         mkdir(agent_dir)
         write_json(context.run_dir / "pi-effective.json", {**settings, "mcp_servers": connected_servers(context, settings),
                    "agentDir": str(agent_dir), "cwd": str(cwd), "sessionDir": str(path.parent),
-                   "resume": saved["id"] if saved else None, "systemPrompt": policy})
+                   "resume": saved["id"] if saved else None, "systemPrompt": policy,
+                   **({"reselection": True} if reselection.enabled else {})})
         session_file = None
         observed = []
         started = time.monotonic()
         context.model_evidence = {"profile": profile, **model, "engine": "pi", "requests": 0,
                                   "request_unit": "model_request", "usage": [], "usage_known": False}
-        with Bridge(context.handle, tool_definitions(context.role.capabilities), timeout=self.config.limits.model_request_seconds,
+        with Bridge(reselection.handle, tool_definitions(context.role.capabilities), timeout=self.config.limits.model_request_seconds,
                     on_close=context.cancel_operations) as bridge:
             env = environment(extra={"MIZU_BRIDGE_CONFIG": str(bridge.config_file)})
             env.update(credentials(self.config.file.parent / "credentials.env"))
@@ -79,6 +82,8 @@ class PiDriver:
                     if actual.get("id") != model["model"] or actual.get("provider") != model["provider"]:
                         raise ProtocolError("Pi selected a different model/provider")
                     session_file = event.get("data", {}).get("sessionFile")
+                    if reselection.enabled:
+                        reselection.bind_session(path, session_file, saved)
                     break
                 channel.send({"id": "work", "type": "prompt", "message": prompt})
                 while True:
@@ -140,6 +145,8 @@ class PiDriver:
                     save_session(path, session_file, {"tokens": _cumulative_tokens(saved, context)})
                 raise
             finally:
+                if reselection.pending is not None or reselection.failed:
+                    context.admission_error = 'Pi model authorization is uncertain'
                 context.request_failure_pending = False
                 context.model_evidence.update(requests=context.request_count, usage=list(context.runtime_usage.values()),
                                               usage_known=bool(context.runtime_usage), observed_models=observed+list(context.runtime_models.values()),

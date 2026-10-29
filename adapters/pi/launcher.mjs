@@ -6,7 +6,7 @@ import { ModelRuntime, SettingsManager, SessionManager, createAgentSession,
   createAgentSessionRuntime, createAgentSessionServices, createCodemodeExtension,
   createToolSearchExtension, createMcpExtension, runRpcMode } from '@earendil-works/pi-coding-agent';
 import { register } from './register.mjs';
-import { meterRuntime } from './model-runtime.mjs';
+import { meterRuntime, installReselection, modelAuthority } from './model-runtime.mjs';
 import { catalog } from './catalog.mjs';
 
 if (process.argv.includes('--check-contract')) {
@@ -45,7 +45,8 @@ if (process.argv.includes('--check-contract')) {
   const modelRuntime = await ModelRuntime.create({ authPath: join(cfg.agentDir, 'auth.json'),
     modelsPath: join(cfg.agentDir, 'models.json'), modelsStorePath: join(cfg.agentDir, 'models-cache.json'),
     allowModelNetwork: false });
-  const meter = meterRuntime(modelRuntime, bridge);
+  const authority = cfg.reselection ? modelAuthority() : null;
+  const meter = meterRuntime(modelRuntime, bridge, undefined, model => authority?.check(model));
   if (cfg.resources.some(r => !['extension','skill','prompt','theme'].includes(r.kind))) throw new Error('Unsupported Pi resource kind');
   const factories = [{ name: 'mizu', factory: pi => register(pi, Type, bridge) }];
   if (cfg.options.codemode) factories.push({ name: 'codemode', factory: createCodemodeExtension(), builtin: true });
@@ -75,6 +76,7 @@ if (process.argv.includes('--check-contract')) {
       thinkingLevel: cfg.options.thinkingLevel, excludeTools: cfg.options.excludeTools, scopedModels: cfg.options.scopedModels, settingsManager, sessionManager, resourceLoader,
       noTools: 'builtin', tools: [...bridge.tools.map(t => t.name), ...cfg.engine_tools] });
     if (result.modelFallbackMessage) throw new Error('Session resume changed the selected model');
+    if (cfg.reselection) await installReselection(result.session, modelRuntime, cfg, bridge, authority);
     result.session.subscribe(event => {
       if (event.type === 'agent_settled') meter.flush().catch(error => { process.stderr.write(String(error)); process.exitCode = 1; });
     });
