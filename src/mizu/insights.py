@@ -52,7 +52,7 @@ from pathlib import Path
 from .smoke_refs import record_lock, validate_refs, require_pairs
 from . import insight_archive, wait_events
 from .work_item_waits import WAIT_KINDS, normalize_wait
-from .errors import Denied, LimitExceeded
+from .errors import Busy, Denied, LimitExceeded
 from .shared_records import Delivery, KindPolicy, RECEIPT_BYTES, RECORD_BYTES, SharedRecords
 from .work_item_seed import (make_seed, validate_scope, validate_seed, validate_tasks,
                              task_id, task_seeds)
@@ -2160,7 +2160,7 @@ replacement insight without implying rejected substance.
                 return False
         return True
 
-    def gc_decided(self, *, keep_days: int | None = None) -> int:
+    def gc_decided(self, *, keep_days: int | None = None, blocking: bool = True) -> int:
         """Archive long-decided proposals, then remove their live inbox copies.
 
         ``keep_days`` defaults to ``[limits] retention_days`` (31; 0 disables).
@@ -2169,7 +2169,8 @@ replacement insight without implying rejected substance.
         a FULL SQLite commit precedes unlink; retries reconcile duplicate copies.
         Returns the removed live count (ingest's historical ``reaped`` field).
         Per-file I/O/archive failures retain the inbox; archives are never deleted.
-        Prior-revision history remains exclusively in insight-revisions/.
+        Prior-revision history remains exclusively in insight-revisions/. With
+        ``blocking=False``, lock contention raises Busy without waiting or mutation.
         """
         if keep_days is None:
             keep_days = self.retention_days
@@ -2177,7 +2178,7 @@ replacement insight without implying rejected substance.
             return 0
         removed = 0
         cutoff = time.time() - keep_days * 86400
-        with record_lock(self.root):
+        with record_lock(self.root, blocking=blocking):
             for path in sorted((self.root / "inbox").glob("*.json")):
                 if path.is_symlink():
                     continue
@@ -2238,5 +2239,13 @@ replacement insight without implying rejected substance.
                     write_json(self.root / "rejected" / f"{quarantine_id}.json",
                                {"name": path.name, "error": str(exc), "created_at": now()})
                     rejected += 1
-            reaped = self.gc_decided(keep_days=keep_days)
+            # Archiving is maintenance, not a prerequisite for durable editor
+            # ingestion or run admission. Keep the reference-safe lock order,
+            # but defer this sweep instead of waiting up to the global lock
+            # timeout; the daemon retries it on its next ingestion pass. Actual
+            # editor submissions still require the blocking record lock above.
+            try:
+                reaped = self.gc_decided(keep_days=keep_days, blocking=False)
+            except Busy:
+                reaped = 0
         return {"accepted": accepted, "rejected": rejected, "reaped": reaped}

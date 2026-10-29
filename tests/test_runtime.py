@@ -10,6 +10,7 @@ from mizu.config import load
 from mizu.errors import Busy, Cancelled, ConfigError, Denied, LimitExceeded, ProtocolError
 from mizu.fs import digest, lock, mkdir, read_json, write_json
 from mizu.project import Project, initialize
+from mizu.smoke_refs import shared_lock
 from mizu.runtime import Engine, should_run
 
 
@@ -606,6 +607,21 @@ class EngineTests(Fixture):
         with lock(self.project.root / "locks/workspace.lock"):
             with self.assertRaises(Busy):
                 Engine(self.config, driver=ScriptDriver()).run(self.project, "worker")
+
+    def test_smoke_gc_contention_does_not_defer_run_admission(self):
+        class ReachedAdmission(Exception):
+            pass
+
+        engine = Engine(self.config, driver=ScriptDriver())
+        with patch('mizu.fs._LOCAL_BLOCKING_TIMEOUT', 0.01), \
+                patch.object(self.project.insights, "gc_decided",
+                             wraps=self.project.insights.gc_decided) as sweep:
+            with shared_lock(self.config.data):
+                with patch.object(engine, "_admit", side_effect=ReachedAdmission):
+                    with self.assertRaises(ReachedAdmission):
+                        engine.run(self.project, "worker", probes_serviced=True)
+        self.assertEqual(sweep.call_args.kwargs.get("blocking"), False)
+        self.assertFalse((self.project.root / "runs").exists())
 
     def test_unchanged_review_avoids_model_call(self):
         driver = ScriptDriver()

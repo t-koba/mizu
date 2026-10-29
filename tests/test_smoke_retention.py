@@ -13,7 +13,7 @@ from mizu import smoke_retention as retention
 from mizu.errors import Busy, Denied, LimitExceeded
 from mizu.fs import digest, read_json, write_json
 from mizu.insights import Insights
-from mizu.smoke_refs import shared_lock, validate_refs
+from mizu.smoke_refs import record_lock, shared_lock, validate_refs
 from mizu.work_items import WorkItems
 from mizu.work_item_waits import normalize_wait, stored_wait
 
@@ -281,6 +281,28 @@ class SmokeRetentionTests(unittest.TestCase):
             self.assertEqual(insights.gc_decided(keep_days=1), 1)
         self.assertEqual(self.run_retention()['candidates'], [self.a])
         self.assertEqual(insights.read(record['id'])['evidence'][0]['smoke_refs'], [self.a])
+
+    def test_editor_gc_defers_cross_project_lock_contention_and_retries(self):
+        insights, _ = self.owner('primary')
+        other, _ = self.owner('other')
+        record = self.insight(insights)
+        insights.decide(record['id'], 'reject', 'Not needed', '', 'run', expected_rev=1)
+        inbox = insights.root / 'inbox' / f"{record['id']}.json"
+        cutoff_now = dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=40)
+        with patch('mizu.insights.time.time', return_value=cutoff_now.timestamp()), \
+                patch('mizu.fs._LOCAL_BLOCKING_TIMEOUT', 0.01), \
+                patch.object(insights, 'gc_decided', wraps=insights.gc_decided) as sweep:
+            with record_lock(other.root):
+                result = insights.ingest_editor(keep_days=1)
+            self.assertEqual(result, {'accepted': 0, 'rejected': 0, 'reaped': 0})
+            self.assertTrue(inbox.is_file())
+            # Once the other project's shared critical section ends, the next
+            # ordinary ingestion pass completes the unchanged retention sweep.
+            result = insights.ingest_editor(keep_days=1)
+        self.assertEqual([call.kwargs.get('blocking') for call in sweep.call_args_list],
+                         [False, False])
+        self.assertEqual(result['reaped'], 1)
+        self.assertFalse(inbox.exists())
 
     def test_legacy_open_reconciliation_preserves_typed_decision_refs(self):
         self.pair()

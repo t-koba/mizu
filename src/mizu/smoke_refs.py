@@ -46,12 +46,13 @@ def shared_lock(data: Path, *, blocking=False):
 
 
 @contextlib.contextmanager
-def record_lock(root: Path):
+def record_lock(root: Path, *, blocking: bool = True):
     # Standalone record stores (e.g. import tools/tests) have no shared data
     # owner. Managed project roots always use <data>/projects/<project>.
-    shared = shared_lock(root.parent.parent, blocking=True) if root.parent.name == "projects" else contextlib.nullcontext()
+    # Preserve the same global-before-project order in both blocking modes.
+    shared = shared_lock(root.parent.parent, blocking=blocking) if root.parent.name == "projects" else contextlib.nullcontext()
     with shared:
-        with lock(root / "locks" / "insights.lock"):
+        with lock(root / "locks" / "insights.lock", blocking=blocking):
             yield
 
 
