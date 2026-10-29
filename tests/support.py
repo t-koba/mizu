@@ -90,7 +90,7 @@ class Fixture(unittest.TestCase):
                                   ["worker", "searcher", "reviewer", "reporter", "consult"], ["python3 -m unittest"])
         self.project.set_control(armed=True, paused=False, wake_generation="test-wake")
 
-    def context(self, name="worker"):
+    def context(self, name="worker", *, reservation_view=None):
         import uuid
         run = self.project.root / "runs" / uuid.uuid4().hex
         mkdir(run)
@@ -100,7 +100,8 @@ class Fixture(unittest.TestCase):
         if role.workspace != "write":
             workspace = run / "input"
             self.project.snapshots.materialize(snap, workspace)
-        return Context(self.config, self.project, role, run, snap, workspace)
+        return Context(self.config, self.project, role, run, snap, workspace,
+                       reservation_view=reservation_view)
 
     def admitted_call(self, engine, operation, args):
         """Exercise a child API from an Engine.run caller, never forge a lease.

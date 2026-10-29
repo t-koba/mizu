@@ -1,8 +1,14 @@
-# Pre-integration policy contract for the single-child async-delegation pilot.
-# This file is not loaded by runtime: do not enable a runner until the listed
-# entrypoints are gated, the unknowns are resolved, and integration tests pass.
+# Runtime-loaded parent-access policy and remaining integration contract.
+# Loaded only for a trusted injected reservation view, never for ordinary calls.
+# Context gates plus admission/maintenance fences are partial; do not enable a
+# runner until every entrypoint is gated and authority/quiescence evidence passes.
+# View schema: {id: SHA256, owner: role, status: reserved_statuses entry,
+# request: {source_snapshot: SHA256}}; extra trusted store fields are ignored.
+# None preserves ordinary access; every malformed/unknown or non-owner view
+# denies all operations. This fixed view supplies no atomic reservation lookup.
+# Only this explicit bridge-protocol set is permitted; other callbacks deny.
 version = 1
-status = "contract-only"
+status = "pre-integration-gates"
 runner_integration_allowed = false
 unknown_reservation = "treat-as-held"
 reserved_statuses = ["queued", "running", "cancel-requested"]
@@ -18,12 +24,17 @@ parent_control_plane = [
   "research_read", "research",
 ]
 
-# These are conditional, not currently safe by default. The supplied input
-# must be immutable and exactly match the reservation's source snapshot.
+# Bridge protocol needed to run a parent control-plane turn. Native tool
+# preflight (_engine_tool) is deliberately absent and remains denied.
+parent_transport = ["_hello", "_budget", "_model_usage", "_request_done"]
+
+# Only diff currently implements this condition. consult remains denied: its
+# callback captures the live tree and its schema has no explicit pinned input.
+# Input must be immutable and exactly match the reservation source snapshot.
 parent_snapshot_only = ["diff", "consult"]
 
-# finish is allowed only through a dedicated wait path for this exact job; it
-# must not do ordinary workspace bounds/final-capture work while reserved.
+# finish remains denied. A future dedicated wait path must bind this exact job
+# and skip ordinary workspace bounds/final capture; the current API cannot.
 parent_exact_job_wait = ["finish"]
 
 # Deny the rest of Context._DISPATCH while the parent is reserved. Unknown

@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .delegation_jobs import DelegationJobs
-from . import decision_delivery, lineage, operator_records
+from . import decision_delivery, delegation_gates, lineage, operator_records
 from . import platform as _platform
 from . import run_activity as _run_activity
 from . import evidence_records, workspace_reads
@@ -310,7 +310,10 @@ def check_consult_role(role_name: str, role) -> None:
 class Context:
     def __init__(self, config: Config, project: Project, role: Role, run_dir: Path,
                  snapshot: dict, workspace: Path, *, stop: threading.Event | None = None,
-                 consult=None, delegate=None, goal: str | None = None):
+                 consult=None, delegate=None, goal: str | None = None,
+                 reservation_view=None):
+        # Trusted host injection only; never populated from model arguments.
+        self._reservation_view = reservation_view
         self.config, self.project, self.role = config, project, role
         self.run_dir, self.snapshot, self.workspace = run_dir, snapshot, workspace
         self.goal = (project.goal if role.workspace == "write" else snapshot["goal"]) if goal is None else goal
@@ -792,6 +795,8 @@ class Context:
         if not isinstance(operation, str) or not isinstance(arguments, dict):
             raise Denied("Invalid operation")
         with self.mutex:
+            delegation_gates.check_access(self._reservation_view, self.role.name,
+                                          self.snapshot, operation, arguments)
             checkpoint_protocol = self.checkpoint_seal_only and operation in ("_model_usage", "_request_done")
             if self.host_cancelled() or (self.operations_stopped.is_set() and not checkpoint_protocol):
                 raise Cancelled("Run is stopped or paused")
@@ -1020,6 +1025,8 @@ class Context:
                 self.operation_active.clear()
 
     def dispatch(self, op: str, args: dict) -> dict:
+        delegation_gates.check_access(self._reservation_view, self.role.name,
+                                      self.snapshot, op, args)
         handler = self._DISPATCH.get(op)
         if handler is None:
             raise Denied("Unknown operation")
@@ -3169,6 +3176,9 @@ class Engine:
                                   "wait_until": time.time() + float(
                                       finished.get("wait_seconds")
                                       or self.config.limits.default_wait_seconds)}
+                if role.workspace == "write":
+                    delegation_gates.refuse_live_tree(context._reservation_view,
+                                                     "Final workspace capture")
                 context.close_exec()
                 if role.workspace == "write":
                     captured = project.snapshots.capture_files(workspace)
@@ -3495,6 +3505,7 @@ class Engine:
             check_consult_role(role_name, self.config.roles[role_name])
         if not parent._slot_lease or parent.closed:
             raise Busy("Consultation requires a live admitted caller execution slot")
+        delegation_gates.refuse_live_tree(parent._reservation_view, "Consultation capture")
         parent.close_exec()
         capture = parent.project.snapshots.capture_files(parent.workspace)
         snap = parent.project.snapshots.create(capture, goal=parent.goal, state=parent.snapshot["state"],
@@ -3604,6 +3615,7 @@ class Engine:
             raise Denied("Delegation needs a self-contained task")
         if not parent._slot_lease or parent.closed:
             raise Busy("Delegation requires a live admitted caller execution slot")
+        delegation_gates.refuse_live_tree(parent._reservation_view, "Delegation capture")
         role = self.config.roles[role_name]
         # The child works the caller's tree, so it inherits the caller's
         # workspace value: live listing and writable execution for a writer

@@ -1,144 +1,205 @@
-"""Pre-integration contract tests for the reservation-held parent gate.
-
-These exercise the policy matrix, not runtime enforcement or a child runner.
-Runner integration still requires adapter/lock race tests and supported-system
-quiescence smokes before the contract can be enabled.
-"""
-import tempfile
+"""Real Context gate tests, not runner/adapter/quiescence integration proof."""
+import dataclasses
 import tomllib
-import unittest
-from pathlib import Path
+from unittest.mock import Mock, patch
 
-from mizu import delegation_jobs
+from support import Fixture
+from mizu import delegation_gates, delegation_jobs
+from mizu.errors import Denied
 from mizu.runtime import Context
 
 
-MATRIX_PATH = Path(__file__).resolve().parents[1] / "docs" / "async-delegation-gates.toml"
+MATRIX_PATH = delegation_gates.POLICY_PATH
 with MATRIX_PATH.open("rb") as source:
     MATRIX = tomllib.load(source)
 
 
-_CATEGORIES = (
-    "parent_control_plane", "parent_snapshot_only", "parent_exact_job_wait",
-    "parent_denied",
-)
+class DelegationGateContractTests(Fixture):
+    def setUp(self):
+        super().setUp()
+        self.view = {
+            "id": "a" * 64, "owner": "worker", "status": "running",
+            "request": {"source_snapshot": self.project.snapshots.get()["id"]},
+        }
+        self.ctx = self.context(reservation_view=self.view)
+        # Exercise the fence with all grants, so a capability refusal cannot
+        # accidentally satisfy a reservation test.
+        self.ctx.role = dataclasses.replace(
+            self.ctx.role, capabilities=tuple(Context._DISPATCH), engine_tools=("Read",))
 
+    def assert_refused_without_effects(self, operation, arguments):
+        count = self.ctx.tool_count
+        evidence = dict(self.ctx.engine_tool_invocations)
+        progress = self.ctx.progress_tool
+        requests = self.ctx.request_count
+        files = sorted(str(path.relative_to(self.ctx.run_dir))
+                       for path in self.ctx.run_dir.rglob("*"))
+        with patch.dict(Context._DISPATCH, {operation: Mock()}) as handlers:
+            for entry in (self.ctx.handle, self.ctx.dispatch):
+                with self.subTest(entry=entry.__name__, operation=operation, arguments=arguments):
+                    with self.assertRaises(Denied):
+                        entry(operation, arguments)
+                    handlers[operation].assert_not_called()
+                    self.assertEqual(self.ctx.tool_count, count)
+                    self.assertEqual(self.ctx.engine_tool_invocations, evidence)
+                    self.assertIsNone(self.ctx.finished)
+                    self.assertEqual(self.ctx.progress_tool, progress)
+                    self.assertEqual(self.ctx.request_count, requests)
+                    self.assertEqual(files, sorted(str(path.relative_to(self.ctx.run_dir))
+                                                  for path in self.ctx.run_dir.rglob("*")))
 
-def _parent_allowed(operation, *, reservation_state, job_id=None,
-                    source_snapshot=None, requested_job_id=None, outcome=None,
-                    snapshot_id=None, explicit_pinned_input=False,
-                    wait_path_skips_live_tree=False, vcs_operation=None):
-    """Reference policy oracle used to test the pre-integration contract."""
-    if reservation_state == "clear":
-        return None  # normal runtime authorization remains responsible
-    if reservation_state not in {"active", "unknown"}:
-        return False
-    if operation in MATRIX["parent_control_plane"]:
-        return True
-    if operation == "vcs_read":
-        return vcs_operation in MATRIX["parameterized"]["vcs_read"]["allow"]
-    if operation in MATRIX["parent_snapshot_only"]:
-        return (reservation_state == "active" and explicit_pinned_input
-                and isinstance(source_snapshot, str)
-                and snapshot_id == source_snapshot)
-    if operation in MATRIX["parent_exact_job_wait"]:
-        return (reservation_state == "active" and outcome == "wait"
-                and isinstance(job_id, str) and requested_job_id == job_id
-                and wait_path_skips_live_tree)
-    return False
-
-
-class DelegationGateContractTests(unittest.TestCase):
     def test_matrix_classifies_every_public_context_operation_once(self):
-        classified = [operation for category in _CATEGORIES for operation in MATRIX[category]]
-        classified.append("vcs_read")  # sub-operation policy is separate above
+        classified = [operation for category in (
+            "parent_control_plane", "parent_snapshot_only", "parent_exact_job_wait",
+            "parent_denied") for operation in MATRIX[category]]
+        classified.append("vcs_read")
         self.assertEqual(len(classified), len(set(classified)))
         self.assertEqual(set(classified), set(Context._DISPATCH))
 
-    def test_parent_control_plane_remains_available_when_reservation_is_held_or_unknown(self):
-        for state in ("active", "unknown"):
+    def test_control_plane_allowlist_reaches_handlers(self):
+        # Parameter schemas remain the normal handle path's responsibility;
+        # bypass only that validation for this exhaustive dispatch inventory.
+        with patch("mizu.runtime.validate"):
             for operation in MATRIX["parent_control_plane"]:
-                with self.subTest(state=state, operation=operation):
-                    self.assertTrue(_parent_allowed(operation, reservation_state=state))
+                handler = Mock(return_value={"allowed": True})
+                with self.subTest(operation=operation), patch.dict(Context._DISPATCH, {operation: handler}):
+                    self.assertEqual(self.ctx.handle(operation, {}), {"allowed": True})
+                    self.assertEqual(self.ctx.dispatch(operation, {}), {"allowed": True})
+                    self.assertEqual(handler.call_count, 2)
+        # Also execute real local read handlers with ordinary schema validation.
+        self.assertIsInstance(self.ctx.handle("work_items_read", {}), dict)
+        self.assertIsInstance(self.ctx.dispatch("research_read", {}), dict)
 
-    def test_live_tree_and_unclassified_operations_fail_closed(self):
-        for state in ("active", "unknown"):
-            for operation in MATRIX["parent_denied"]:
-                with self.subTest(state=state, operation=operation):
-                    self.assertFalse(_parent_allowed(operation, reservation_state=state))
-        for operation in ("_engine_tool", "new_unclassified_operation"):
-            with self.subTest(operation=operation):
-                self.assertFalse(_parent_allowed(operation, reservation_state="unknown"))
+    def test_diff_reads_exact_pinned_snapshot_not_changed_live_tree(self):
+        expected = self.ctx.dispatch("diff", {})
+        (self.project.workspace / "app.py").write_text("child partial edits\n")
+        with patch.object(self.project.snapshots, "capture_files", side_effect=AssertionError("live capture")):
+            self.assertEqual(self.ctx.handle("diff", {}), expected)
+            self.assertEqual(self.ctx.dispatch("diff", {}), expected)
+        self.ctx.snapshot = {**self.ctx.snapshot, "id": "b" * 64}
+        self.assert_refused_without_effects("diff", {})
 
-    def test_snapshot_operations_need_exact_immutable_binding(self):
-        for operation in MATRIX["parent_snapshot_only"]:
-            with self.subTest(operation=operation):
-                self.assertFalse(_parent_allowed(
-                    operation, reservation_state="active", source_snapshot="a" * 64,
-                    snapshot_id="a" * 64, explicit_pinned_input=False))
-                self.assertFalse(_parent_allowed(
-                    operation, reservation_state="active", source_snapshot="a" * 64,
-                    snapshot_id="b" * 64, explicit_pinned_input=True))
-                self.assertFalse(_parent_allowed(
-                    operation, reservation_state="unknown", source_snapshot="a" * 64,
-                    snapshot_id="a" * 64, explicit_pinned_input=True))
-                self.assertTrue(_parent_allowed(
-                    operation, reservation_state="active", source_snapshot="a" * 64,
-                    snapshot_id="a" * 64, explicit_pinned_input=True))
+    def test_parent_transport_protocol_is_explicit_but_native_preflight_is_not(self):
+        self.assertEqual(set(MATRIX["parent_transport"]),
+                         {"_hello", "_budget", "_model_usage", "_request_done"})
+        self.assertNotIn("_engine_tool", MATRIX["parent_transport"])
+        self.assertNotIn("finish", MATRIX["parent_transport"])
+        self.assertEqual(self.ctx.handle("_hello", {}), {})
+        self.assertTrue(self.ctx.hello.is_set())
+        self.assertEqual(self.ctx.handle("_budget", {"sequence": 1}), {"admitted": True})
+        self.assertEqual(self.ctx.handle("_model_usage", {"sequence": 1, "usage": {"input": 1}}),
+                         {"recorded": True})
+        self.assertEqual(self.ctx.handle("_request_done", {"sequence": 1, "failed": False}),
+                         {"recorded": True})
+        self.assert_refused_without_effects("_engine_tool", {"name": "Read", "invocation_id": "native-2"})
+        self.assert_refused_without_effects("finish", {"outcome": "wait", "summary": "wait"})
 
-    def test_finish_is_only_an_exact_wait_that_skips_tree_capture(self):
-        args = {"reservation_state": "active", "job_id": "job-exact",
-                "requested_job_id": "job-exact", "outcome": "wait",
-                "wait_path_skips_live_tree": True}
-        self.assertTrue(_parent_allowed("finish", **args))
-        for change in ({"requested_job_id": "other"}, {"outcome": "done"},
-                       {"wait_path_skips_live_tree": False}):
-            with self.subTest(change=change):
-                self.assertFalse(_parent_allowed("finish", **{**args, **change}))
-        self.assertFalse(_parent_allowed(
-            "finish", **{**args, "reservation_state": "unknown", "job_id": None}))
+    def test_engine_capture_boundaries_refuse_any_reserved_view(self):
+        engine = __import__("mizu.runtime", fromlist=["Engine"]).Engine(self.config)
+        self.ctx._slot_lease = True
+        with patch.object(self.project.snapshots, "capture_files", side_effect=AssertionError("live capture")):
+            with self.assertRaisesRegex(Denied, "Consultation capture"):
+                engine.consult(self.ctx, {"question": "pinned?"})
+            with self.assertRaisesRegex(Denied, "Delegation capture"):
+                engine.delegate(self.ctx, {"role": "reporter", "task": "test"})
+        self.assertFalse(self.ctx.closed)
+        with self.assertRaises(Denied):
+            delegation_gates.refuse_live_tree(self.view, "final capture")
+        self.assertIsNone(delegation_gates.refuse_live_tree(None, "final capture"))
 
-    def test_vcs_read_suboperations_are_narrow_and_unknowns_deny(self):
-        policy = MATRIX["parameterized"]["vcs_read"]
-        self.assertEqual(policy["default"], "deny")
-        for operation in policy["allow"]:
-            with self.subTest(operation=operation):
-                self.assertTrue(_parent_allowed(
-                    "vcs_read", reservation_state="active", vcs_operation=operation))
-        for operation in ("log", "comments", "proposals", "acquire", "artifact", "unknown"):
-            with self.subTest(operation=operation):
-                self.assertFalse(_parent_allowed(
-                    "vcs_read", reservation_state="active", vcs_operation=operation))
+    def test_vcs_suboperations_are_narrow_and_validate_before_counters(self):
+        for operation in MATRIX["parameterized"]["vcs_read"]["allow"]:
+            handler = Mock(return_value={"allowed": True})
+            with self.subTest(operation=operation), patch.dict(Context._DISPATCH, vcs_read=handler):
+                self.assertEqual(self.ctx.handle("vcs_read", {"op": operation}), {"allowed": True})
+                self.assertEqual(self.ctx.dispatch("vcs_read", {"op": operation}), {"allowed": True})
+                self.assertEqual(handler.call_count, 2)
+        for args in ({"op": op} for op in ("log", "comments", "proposals", "acquire", "artifacts", "artifact", "unknown")):
+            self.assert_refused_without_effects("vcs_read", args)
+        for args in ({}, {"op": None}, {"op": []}, {"op": 3}, {"op": "status", "limit": 0},
+                     {"op": "status", "unrecognized": True}, {"op": "status", "sha": []}, []):
+            self.assert_refused_without_effects("vcs_read", args)
 
-    def test_job_store_keeps_parent_gate_until_quiescence(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            store = delegation_jobs.DelegationJobs(Path(temporary))
-            request = {"role": "helper", "task": "test reservation gating",
-                       "profile": None, "source_snapshot": "a" * 64}
-            job_id = store.start("worker", "key", request)["id"]
-            reservation = store.reservation()
-            token = reservation["token"]
-            self.assertIn(reservation["status"], MATRIX["reserved_statuses"])
-            self.assertEqual(reservation["status"], "queued")
-            self.assertFalse(_parent_allowed("exec", reservation_state="active"))
-            self.assertTrue(_parent_allowed("work_items_read", reservation_state="active"))
+    def test_live_tree_consult_finish_native_and_unclassified_deny(self):
+        self.ctx.consult = Mock(side_effect=AssertionError("consult callback"))
+        self.ctx.delegate = Mock(side_effect=AssertionError("delegate callback"))
+        for operation in MATRIX["parent_denied"] + ["consult", "finish", "unclassified", "_engine_tool"]:
+            args = {"name": "Read", "invocation_id": "native-1"} if operation == "_engine_tool" else {}
+            self.assert_refused_without_effects(operation, args)
+        for outcome in ("wait", "done", "continue"):
+            self.assert_refused_without_effects("finish", {"outcome": outcome, "summary": "hold"})
+        # Model arguments cannot substitute the immutable Context snapshot.
+        self.assert_refused_without_effects("consult", {"snapshot_id": self.view["request"]["source_snapshot"]})
+        self.ctx.consult.assert_not_called()
+        self.ctx.delegate.assert_not_called()
 
-            store.runner_started(job_id, token)
-            store.cancel("worker", job_id)
-            store.runner_finished(job_id, token, "cancelled")
-            still_reserved = store.reservation()
-            self.assertIsNotNone(still_reserved)
-            self.assertIn(still_reserved["status"], MATRIX["reserved_statuses"])
-            self.assertEqual(still_reserved["status"], "cancel-requested")
-            self.assertEqual(still_reserved["execution"], "cancelled")
-            self.assertFalse(_parent_allowed("exec", reservation_state="active"))
+    def test_unknown_malformed_and_non_owner_views_deny_every_operation(self):
+        views = [False, "unknown", [], {}, {**self.view, "owner": "reviewer"},
+                 {**self.view, "status": "terminal"}, {**self.view, "status": []},
+                 {**self.view, "id": "invalid"}, {**self.view, "request": None},
+                 {**self.view, "request": {}},
+                 {**self.view, "request": {"source_snapshot": "invalid"}}]
+        for view in views:
+            self.ctx._reservation_view = view
+            for operation in Context._DISPATCH:
+                with self.subTest(view=view, operation=operation):
+                    self.assert_refused_without_effects(operation, {"op": "status"} if operation == "vcs_read" else {})
+            self.assert_refused_without_effects("_engine_tool", {"name": "Read", "invocation_id": "native-1"})
 
-            store.runner_quiescent(job_id, token, "Teardown proven by test fixture")
-            self.assertIsNone(store.reservation())
-            self.assertIsNone(_parent_allowed("exec", reservation_state="clear"))
+    def test_policy_is_fail_closed_and_loaded_only_when_gate_is_present(self):
+        for error in (FileNotFoundError(), PermissionError(), ValueError(),
+                      Denied("unsafe policy")):
+            with patch("mizu.delegation_gates.safe_read", side_effect=error) as read_policy:
+                self.assert_refused_without_effects("work_items_read", {})
+                self.assertTrue(read_policy.called)
+                self.ctx._reservation_view = None
+                read_policy.reset_mock()
+                self.assertIsInstance(self.ctx.handle("files", {}), dict)
+                self.assertEqual(self.ctx.handle("_engine_tool", {
+                    "name": "Read", "invocation_id": "native-1"}), {"allowed": True})
+                self.assertIsInstance(self.ctx.dispatch("diff", {}), dict)
+                read_policy.assert_not_called()
+                self.ctx._reservation_view = self.view
+        for change in ({"parent_control_plane": "files"}, {"parent_control_plane": [None]},
+                       {"parameterized": {}}, {"reserved_statuses": []},
+                       {"parent_transport": []},
+                       {"runner_integration_allowed": True}, {"version": 2}):
+            with patch("mizu.delegation_gates.tomllib.loads", return_value={**MATRIX, **change}):
+                self.assert_refused_without_effects("work_items_read", {})
+
+    def test_absent_gate_keeps_native_grants_and_normal_handlers(self):
+        ctx = self.context()
+        self.assertIsNone(ctx._reservation_view)
+        self.assertIsInstance(ctx.handle("files", {}), dict)
+        self.assertIsInstance(ctx.dispatch("read", {"path": "app.py"}), dict)
+        with self.assertRaisesRegex(Denied, "explicit grant"):
+            ctx.handle("_engine_tool", {"name": "Read", "invocation_id": "native-1"})
+        # Injected view is not an accepted tool parameter.
+        with self.assertRaises(Denied):
+            ctx.handle("diff", {"reservation_view": self.view})
+
+    def test_job_store_view_keeps_gate_until_proven_quiescence(self):
+        store = delegation_jobs.DelegationJobs(self.project.root)
+        request = {"role": "helper", "task": "test reservation gating", "profile": None,
+                   "source_snapshot": self.ctx.snapshot["id"]}
+        job_id = store.start("worker", "key", request)["id"]
+        self.ctx._reservation_view = store.reservation()
+        token = self.ctx._reservation_view["token"]
+        for transition in (lambda: None, lambda: store.runner_started(job_id, token),
+                           lambda: store.cancel("worker", job_id),
+                           lambda: store.runner_finished(job_id, token, "cancelled")):
+            transition()
+            self.ctx._reservation_view = store.reservation()
+            self.assertIn(self.ctx._reservation_view["status"], MATRIX["reserved_statuses"])
+            self.assertIsInstance(self.ctx.handle("work_items_read", {}), dict)
+            self.assert_refused_without_effects("exec", {})
+        store.runner_quiescent(job_id, token, "Fixture proof only")
+        self.ctx._reservation_view = store.reservation()
+        self.assertIsNone(self.ctx._reservation_view)
+        self.assertIsInstance(self.ctx.handle("files", {}), dict)
 
     def test_runner_integration_stays_disabled_while_inventory_has_unknowns(self):
-        self.assertEqual(MATRIX["status"], "contract-only")
+        self.assertEqual(MATRIX["status"], "pre-integration-gates")
         self.assertFalse(MATRIX["runner_integration_allowed"])
         self.assertTrue(MATRIX["entrypoints"]["not_yet_proven"])
         entrypoints = MATRIX["entrypoints"]
@@ -170,7 +231,3 @@ class DelegationGateContractTests(unittest.TestCase):
         self.assertIn("supervisor-death reaper", lifecycle["mcp_containers"])
         self.assertIn("does not import", lifecycle["job_store"])
         self.assertIn("setsid descendant survive", lifecycle["process_group_experiment"])
-
-
-if __name__ == "__main__":
-    unittest.main()
