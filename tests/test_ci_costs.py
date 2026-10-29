@@ -140,6 +140,18 @@ class ProjectionTests(unittest.TestCase):
         zero = check(completed_at=check()["started_at"])
         self.assertEqual(observed_costs(page(request()), lambda _: status(zero))["observed_wall_seconds"], 0)
 
+    def test_running_and_missing_duration_states_do_not_become_cost(self):
+        terminal_without_end = check(state="success")
+        del terminal_without_end["completed_at"]
+        running_with_interval = check(state="in_progress", run="23", job_id="23")
+        out = observed_costs(page(request()),
+                             lambda _: status(terminal_without_end, running_with_interval))
+        report = out["days"][0]["requests"][0]
+        self.assertIsNone(out["observed_wall_seconds"])
+        self.assertEqual(report["running_rows"], 1)
+        self.assertEqual(report["missing_duration_rows"], 1)
+        self.assertEqual(report["state_timing_conflicts"], 1)
+
     def test_conflicting_duration_or_day_is_not_arbitrarily_selected(self):
         for requests, rows in (([request()], [check(), check(completed_at="2026-07-21T00:02:00Z")]),
                                ([request(), request(date="2026-07-21")], [check()])):

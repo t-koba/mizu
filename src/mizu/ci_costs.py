@@ -4,6 +4,7 @@ from __future__ import annotations
 from .errors import Denied, LimitExceeded
 
 IDENTITY = ("repository", "sha", "workflow_run_id", "job_id", "run_attempt")
+RUNNING_STATES = frozenset({"running", "in_progress", "queued", "pending"})
 
 
 def observed_costs(page: dict, status_read) -> dict:
@@ -35,6 +36,7 @@ def observed_costs(page: dict, status_read) -> dict:
         report = {**request, "status_evidence": None, "status": "unavailable",
                   "identityless_rows": 0, "unmatched_rows": 0, "matched_rows": 0,
                   "running_rows": 0, "missing_duration_rows": 0,
+                  "state_timing_conflicts": 0,
                   "unobserved_workflow_run_ids": [run["run_id"] for run in request["runs"]]}
         day["requests"].append(report)
         if status is None:
@@ -61,14 +63,20 @@ def observed_costs(page: dict, status_read) -> dict:
                 continue
             observed.add(row["workflow_run_id"])
             report["matched_rows"] += 1
-            if (row["state"] in {"running", "in_progress", "queued", "pending"}
-                    or ("started_at" in row and "completed_at" not in row)):
+            running = row["state"].casefold() in RUNNING_STATES
+            if running:
                 report["running_rows"] += 1
             if "job_seconds" not in row:
                 report["missing_duration_rows"] += 1
             identity = tuple(row[key] for key in IDENTITY)
             execution = executions.setdefault(identity, {"days": set(), "seconds": set()})
             execution["days"].add(request["date"])
+            if running:
+                # A nonterminal state and a complete interval contradict; do
+                # not count its time as a completed execution.
+                if "job_seconds" in row:
+                    report["state_timing_conflicts"] += 1
+                continue
             if "job_seconds" in row:
                 execution["seconds"].add(row["job_seconds"])
         report["unobserved_workflow_run_ids"] = sorted(run_ids - observed)
