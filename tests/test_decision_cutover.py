@@ -10,7 +10,7 @@ from mizu.admission import role_exclusion
 from mizu.config import load
 from mizu.errors import Busy, ConfigError, Denied, LimitExceeded
 from mizu.fs import canonical, digest, held, lock, read_json
-from mizu.insights import Insights, INSIGHT_DECISION_POLICY
+from mizu.insights import Insights, INSIGHT_DECISION_POLICY, INSIGHT_PENDING_POLICY
 from mizu.project import Project
 from mizu.runtime import Engine, _role_events_due, prompt_for
 from mizu.selection import work_inputs
@@ -461,3 +461,113 @@ class DecisionCutoverTests(Fixture):
         for value in ('0', '1048577', 'true', '1.0', '"750"'):
             self.file.write_text(text.replace('[roles.reviewer]', f'[roles.reviewer]\ndecision_page_bytes = {value}'))
             with self.subTest(value=value), self.assertRaises(ConfigError): load(self.file)
+
+    def submit_pending(self, title="Attention", *, source="searcher", addressee="reviewer"):
+        return self.project.insights.submit(source=source, title=title, body="Exact current body",
+                                            base_snapshot=None, kind="question",
+                                            addressee=addressee, urgency="high")
+
+    def test_pending_activation_maps_acknowledged_and_preserves_legacy(self):
+        self.submit_pending("First", addressee="reviewer")
+        self.submit_pending("Second", addressee="reviewer")
+        third = self.submit_pending("Third", addressee="worker")
+        reviewer_rows, _ = self.project.insights.pending_insight_events(
+            "reviewer", set(self.project.roles), limit=100)
+        self.assertEqual(len(reviewer_rows), 2)
+        acked = reviewer_rows[:1]
+        unacked = reviewer_rows[1:]
+        self.project.insights.acknowledge_decisions("reviewer", acked, sources="any")
+        before = self.receipts("decision-receipts")
+        self.assertEqual(len(before), 1)
+        marker = self.activate()
+        self.assertEqual(self.receipts("decision-receipts"), before)
+        reviewer_state = self.pending("reviewer", limit=100)
+        worker_state = self.pending("worker", limit=100)
+        self.assertTrue(reviewer_state["shared"])
+        self.assertTrue(worker_state["shared"])
+        self.assertEqual(len(reviewer_state["events"]), 1)
+        self.assertEqual(reviewer_state["events"][0]["insight"], unacked[0]["insight"])
+        self.assertEqual(len(worker_state["events"]), 1)
+        self.assertEqual(worker_state["events"][0]["insight"], third["id"])
+        # Report carries separate pending parity alongside decision fields.
+        report = read_json(self.project.root / delivery.REPORT_FILE)
+        reviewer_report = report["roles"]["reviewer"]
+        self.assertEqual(reviewer_report["current_ids"], [])
+        pending = reviewer_report["pending_insights"]
+        self.assertEqual(len(pending["current_ids"]), 2)
+        self.assertEqual(len(pending["legacy_received_ids"]), 1)
+        self.assertEqual(pending["shared_received_ids"], pending["legacy_received_ids"])
+        self.assertEqual(pending["shared_pending_ids"], pending["legacy_pending_ids"])
+        # Restart returns the marker without reimporting; legacy stays byte-identical.
+        restarted = Project(self.config, "sample")
+        self.assertEqual(reconciliation.activate_decision_delivery(restarted), marker)
+        self.assertEqual(self.receipts("decision-receipts"), before)
+        self.assertEqual(self.pending("reviewer", limit=100)["events"],
+                         reviewer_state["events"])
+
+    def test_pending_unexplained_and_removed_recipient_refuse_activation(self):
+        self.submit_pending(addressee="reviewer")
+        # Unexplained shared pending receipt with no legacy ack refuses.
+        store = SharedRecords(self.project.root, {"insight.decision": INSIGHT_DECISION_POLICY,
+                                                  "insight.pending": INSIGHT_PENDING_POLICY})
+        envelopes = dict(self.project.insights._pending_insight_envelopes_locked(
+            set(self.project.roles), "reviewer"))
+        rid = next(iter(envelopes))
+        store.put(envelopes[rid], writer="host.insights")
+        from dataclasses import asdict
+        manifest = store.freeze("reviewer", [rid])
+        store.acknowledge("reviewer", [asdict(manifest[0])], manifest=manifest)
+        before = self.receipts("shared-record-receipts")
+        with self.assertRaises(Denied):
+            self.activate()
+        self.assertIsNone(delivery.authority(self.project.root))
+        self.assertEqual(self.receipts("shared-record-receipts"), before)
+        # Remove the orphan and activate cleanly, then a removed-recipient receipt refuses.
+        for path in (self.project.root / "shared-record-receipts").rglob("*.json"):
+            path.unlink()
+        for path in (self.project.root / "shared-records").rglob("*.json"):
+            path.unlink()
+        marker = self.activate()
+        self.assertIsNotNone(marker)
+        # A pending receipt for a disabled recipient is unexplained.
+        store2 = SharedRecords(self.project.root, {"insight.decision": INSIGHT_DECISION_POLICY,
+                                                   "insight.pending": INSIGHT_PENDING_POLICY})
+        store2.put(envelopes[rid], writer="host.insights")
+        manifest2 = store2.freeze("retired", [rid])
+        store2.acknowledge("retired", [asdict(manifest2[0])], manifest=manifest2)
+        # Corrupt the marker to force re-entry check via fresh project is not needed:
+        # inventory runs before marker return, so remove marker files to re-exercise.
+        # Instead verify a fresh project with the same retired receipt refuses.
+        # Here the active marker already exists, so activation returns it; verify
+        # inventory on a pre-marker clone by deleting marker and re-activating.
+        (self.project.root / delivery.AUTHORITY_FILE).unlink()
+        (self.project.root / delivery.PLAN_FILE).unlink()
+        (self.project.root / delivery.REPORT_FILE).unlink()
+        with self.assertRaisesRegex(Denied, "Unexplained shared-only"):
+            self.activate()
+        self.assertIsNone(delivery.authority(self.project.root))
+
+    def test_pending_interrupted_prefix_exact_retry_before_marker(self):
+        for i in range(3):
+            self.submit_pending(f"Pending {i}", addressee="reviewer")
+        rows, _ = self.project.insights.pending_insight_events(
+            "reviewer", set(self.project.roles), limit=100)
+        self.project.insights.acknowledge_decisions("reviewer", rows, sources="any")
+        before = self.receipts("decision-receipts")
+        original = SharedRecords.acknowledge
+        def interrupted(store, role, selections=None, *, manifest):
+            original(store, role, selections[:1], manifest=manifest)
+            raise OSError("interrupted pending prefix")
+        with patch.object(SharedRecords, "acknowledge", interrupted), self.assertRaises(OSError):
+            self.activate()
+        self.assertIsNone(delivery.authority(self.project.root))
+        prefix = self.receipts("shared-record-receipts")
+        self.assertEqual(len(prefix), 1)
+        self.project.insights = Insights(self.project.root)
+        marker = self.activate()
+        self.assertIsNotNone(marker)
+        self.assertEqual(len(self.receipts("shared-record-receipts")), 3)
+        self.assertEqual(self.receipts("decision-receipts"), before)
+        for name, raw in prefix.items():
+            self.assertEqual(self.receipts("shared-record-receipts")[name], raw)
+        self.assertEqual(self.pending(limit=100)["events"], [])

@@ -1,9 +1,10 @@
 # Shared record delivery: design, implementation and activation
 
-**Status:** bounded immutable records, decision projection/pages/retrieval,
-exact legacy receipt reconciliation, and a host-only one-way runtime activation
-for `insight.decision`. Legacy remains the sole delivery/wake/ack authority for
-that kind until its explicit, parity-verified durable marker; no model tool or
+**Status:** bounded immutable records, decision and addressed pending-insight
+projection/pages/retrieval, exact legacy receipt reconciliation, and a host-only
+one-way runtime activation for `insight.decision` including `insight.pending`
+attention receipts. Legacy remains the sole delivery/wake/ack authority for
+those kinds until their explicit, parity-verified durable marker; no model tool or
 configuration default can activate that cutover. Operator-written `answer` and
 `operator.notice` records are a separate active SharedRecords slice, enabled
 only by their explicitly declared `operator_records` kind policy. Other source
@@ -676,9 +677,9 @@ remain the only active runtime authority for decisions.
 
 ### Exact schema and identity
 
-The returned JSON object has exactly the following schema (maps below use full
-shared record IDs `insight.decision/<event>`; lists are sorted by ID, not event
-time):
+The returned JSON object has exactly the following schema (decision maps below
+use full shared record IDs `insight.decision/<event>`; pending maps use
+`insight.pending/<event>`; lists are sorted by ID, not event time):
 
 ```text
 {
@@ -690,7 +691,11 @@ time):
     sources: {record_id: {
       record_digest, history_digest, insight_digest, decision_digest
     }},
-    legacy_receipts: {role: {record_id: {ack_token, receipt_digest}}}
+    legacy_receipts: {role: {record_id: {ack_token, receipt_digest}}},
+    pending_sources: {record_id: {
+      record_digest, inbox_digest, decision_digest, target
+    }},
+    pending_legacy_receipts: {role: {record_id: {ack_token, receipt_digest}}}
   },
   roles: {role: {
     current_ids: [record_id, ...],
@@ -700,7 +705,17 @@ time):
     shared_pending_ids: [record_id, ...],
     shared_receipt_digests: {record_id: digest},
     post_map_pending_ids: [record_id, ...],
-    post_map_parity: true
+    post_map_parity: true,
+    pending_insights: {
+      current_ids: [record_id, ...],
+      legacy_received_ids: [record_id, ...],
+      legacy_pending_ids: [record_id, ...],
+      shared_received_ids: [record_id, ...],
+      shared_pending_ids: [record_id, ...],
+      shared_receipt_digests: {record_id: digest},
+      post_map_pending_ids: [record_id, ...],
+      post_map_parity: true
+    }
   }}
 }
 ```
@@ -721,17 +736,32 @@ are never translated or scanned for acknowledgement. Unrelated stale corrupt
 receipt files remain irrelevant. Relevant corrupt or unsafe files fail closed,
 without repair or deletion; receipt-presence and timestamp changes invalidate
 apply, even when the received set would be unchanged.
+Addressed pending attention uses the same token/receipt mechanism with a
+distinct pending-insight token domain (`Insights._pending_insight_envelopes_locked`
+for each explicit enabled role, `INSIGHT_PENDING_POLICY` alongside
+`INSIGHT_DECISION_POLICY`). `pending_sources` binds each current
+`insight.pending/<event>` record digest, route target, exact inbox byte digest
+and decision-pointer byte digest (or explicit null absence), bounded at
+**512** current pending projections; `pending_legacy_receipts` binds every
+addressed role/record token and receipt digest (null for absence). Only exact
+current events already acknowledged in legacy map; unacknowledged attention
+never gains a shared receipt, and legacy receipts are never modified.
 
 `roles` is the deterministic observation/progress report. Existing shared
-receipts must be a valid exact subset of legacy-received identities. Anything
+receipts must be a valid exact subset of legacy-received identities, separately
+for decisions and for the nested `pending_insights` report. Anything
 else refuses preflight/apply, because it would hide a legacy-pending event.
-Every predicted post-map pending set equals its legacy pending set. The
+Every predicted post-map pending set equals its legacy pending set, for both
+decisions and pending attention. The plan also refuses a per-role combined
+shared-page projection where decision records plus still-unacknowledged
+addressed attention exceed the existing 512-row ceiling. The
 `plan_digest` deliberately excludes output progress: a new preflight after an
 interrupted apply has the **same identity** while its shared-received report
 can advance. The plan is host-retained evidence, not a model authorization
 credential. Apply validates report consistency and recomputes the entire input
 boundary from trusted routes and stores; it never uses a plan payload to create
-a record or choose recipients.
+a record or choose recipients. Decision report fields are unchanged; pending
+parity lives only in the nested `pending_insights` object.
 
 ### Apply, failure and restart
 
@@ -743,13 +773,15 @@ writes. This API adds no index, scan cache, page default or storage optimization
 The prior 205-event shadow scan evidence (3–5x slower reads) does not justify
 additional storage complexity here.
 
-Apply creates/validates projections only for currently routed,
+Apply creates/validates projections only for currently routed (or addressed),
 legacy-acknowledged records, then uses `SharedRecords.freeze` and explicit exact
-`acknowledge` selections for missing role/ID/full-envelope-digest receipts. It
+`acknowledge` selections for missing role/ID/full-envelope-digest receipts, first
+for decisions then for addressed pending attention. It
 never rewrites/deletes legacy receipts, maps a completion cursor, or invents a
 receipt for a legacy-pending event. Existing projections are validated in
 preflight without writes; an orphan shared receipt with no immutable record
-refuses. Valid existing shared receipts are reused unchanged.
+refuses. Valid existing shared receipts are reused unchanged. All report size
+bounds, including the post-map form, are checked before any writes.
 
 I/O interruption can leave an idempotent projection/receipt prefix. Retain the
 original plan across restart and call apply again with current trusted routes.
@@ -758,7 +790,8 @@ legacy-received identities. Original shared receipt byte digests must still be
 present and unchanged; corrupt, extra, missing-original or changed receipts
 refuse. This permits exact interrupted retries without putting output progress
 in input identity. Successful apply re-scans under the same locks, verifies each
-role's shared and legacy pending sets are equal, and returns the same schema
+role's shared and legacy pending sets are equal for decisions and for nested
+pending attention, and returns the same schema
 with the completed shared progress report. A failed call is not proof of a
 completed batch, and failure never rolls back an immutable prefix.
 
@@ -781,11 +814,14 @@ these locks cannot synchronize a host editing files behind the API.
 
 Activation holds the exact boundary above (all role exclusions, source record
 lock, all role receipt-writer locks) continuously through preflight, exact
-apply, complete per-role pending-set parity, and final marker publication.
+apply, complete per-role pending-set parity for decisions and pending attention,
+and final marker publication.
 It does not compare only the first dispatch page. Every existing shared decision
-receipt must be explained by an exact routed legacy receipt; extra receipts for
-stale, route-excluded or disabled recipients also refuse activation. Inventory
-reads use the shared store's safe directory and bounded receipt readers.
+and pending-attention receipt must be explained by an exact routed/addressed
+legacy receipt; extra receipts for
+stale, route-excluded, removed or disabled recipients also refuse activation. Inventory
+reads use the shared store's safe directory and bounded receipt readers and
+reject unexplained `insight.pending/` receipts just as for `insight.decision/`.
 Recognized `.new-<8 lowercase/digit/underscore characters>` atomic-write residue
 is safely read but not interpreted as a committed receipt. Other kinds are not
 imported or made authoritative. Legacy source records and receipts are never
@@ -917,9 +953,10 @@ instead (combined legacy prompt contribution bounded to 1 MiB by omitting only
 newest attention rows with visible truncation; decisions never omitted for
 bytes); no shared shadow delivery or automatic activation is added. Removed or
 unconfigured destinations are isolated without blocking valid routes; malformed
-sources still fail closed. Decision
-token identity and the decision-only reconciliation policy are unchanged.
-Consequently an explicit later authority switch can replay previously handled
-legacy attention: pending-insight receipt migration is not part of that existing
-cutover. See the insight routing contract in `architecture.md` for bounds,
+sources still fail closed.
+The cutover reconciliation now includes pending-attention receipts: exact
+addressed `insight.pending` envelopes, route targets, inbox and decision-pointer
+digests and legacy tokens are pinned in the plan boundary, mapped only from
+legacy-acknowledged attention, and verified for post-apply parity alongside
+decisions, without dual-read, auto-ack or activation-policy change. See the insight routing contract in `architecture.md` for bounds,
 coarse inbox wake hints, unresolved destinations and platform limits.

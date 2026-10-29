@@ -11,7 +11,7 @@ from mizu.admission import role_exclusion
 from mizu.decision_reconciliation import preflight_decision_receipts, apply_decision_receipts
 from mizu.errors import Busy, Denied, LimitExceeded
 from mizu.fs import MAX_FRAME, canonical, digest, held, lock, read_json, write_json
-from mizu.insights import Insights, INSIGHT_DECISION_POLICY, CorruptDecisionReceipt
+from mizu.insights import Insights, INSIGHT_DECISION_POLICY, INSIGHT_PENDING_POLICY, CorruptDecisionReceipt
 from mizu.shared_records import SharedRecords
 
 
@@ -445,5 +445,273 @@ class DecisionReconciliationTests(unittest.TestCase):
 
         with patch.object(self.insights, "_current_decision_event", selected), self.assertRaises(LimitExceeded):
             self.preflight()
+        self.assertEqual(self.shared_receipts(), {})
+        self.assertFalse((self.root / "shared-records").exists())
+
+    def submit_pending(self, index=0, *, source="searcher", addressee="reviewer"):
+        return self.insights.submit(source=source, title=f"Attention {index}", body=f"Body {index}",
+                                    base_snapshot=None, kind="question", addressee=addressee, urgency="high")
+
+    def pending_rows(self, role="reviewer"):
+        rows, _ = self.insights.pending_insight_events(role, set(self.routes), limit=100)
+        return rows
+
+    def pending_ack(self, role, rows):
+        self.insights.acknowledge_decisions(role, rows, sources="any")
+
+    def pending_rid(self, row):
+        return f"insight.pending/{row['event']}"
+
+    def test_pending_acknowledged_maps_and_unacknowledged_stays_pending(self):
+        first = self.submit_pending(0, addressee="reviewer")
+        second = self.submit_pending(1, addressee="reviewer")
+        third = self.submit_pending(2, addressee="worker")
+        reviewer = self.pending_rows("reviewer")
+        self.assertEqual(len(reviewer), 2)
+        worker = self.pending_rows("worker")
+        self.assertEqual(len(worker), 1)
+        empty = self.preflight()
+        self.assertEqual(empty["roles"]["reviewer"]["pending_insights"]["legacy_received_ids"], [])
+        self.assertEqual(empty["roles"]["reviewer"]["pending_insights"]["current_ids"],
+                         sorted(map(self.pending_rid, reviewer)))
+        self.assertEqual(empty["boundary"]["pending_legacy_receipts"]["reviewer"][
+                             self.pending_rid(reviewer[0])]["receipt_digest"], None)
+        self.pending_ack("reviewer", [reviewer[0]])
+        before = self.legacy_bytes()
+        plan = self.preflight()
+        self.assertEqual(plan["roles"]["reviewer"]["pending_insights"]["legacy_received_ids"],
+                         [self.pending_rid(reviewer[0])])
+        self.assertEqual(plan["roles"]["reviewer"]["pending_insights"]["legacy_pending_ids"],
+                         [self.pending_rid(reviewer[1])])
+        self.assertEqual(plan["roles"]["worker"]["pending_insights"]["legacy_received_ids"], [])
+        # Decision fields stay stable and empty.
+        self.assertEqual(plan["roles"]["reviewer"]["current_ids"], [])
+        self.assertEqual(plan["boundary"]["sources"], {})
+        plan = json.loads(canonical(plan))
+        result = self.apply(plan)
+        self.assertEqual(self.legacy_bytes(), before)
+        self.assertEqual(result["roles"]["reviewer"]["pending_insights"]["shared_received_ids"],
+                         [self.pending_rid(reviewer[0])])
+        self.assertEqual(result["roles"]["reviewer"]["pending_insights"]["shared_pending_ids"],
+                         [self.pending_rid(reviewer[1])])
+        self.assertEqual(result["roles"]["worker"]["pending_insights"]["shared_pending_ids"],
+                         [self.pending_rid(worker[0])])
+        self.assertEqual(len(self.shared_receipts()), 1)
+        # Exact retry preserves bytes and reports.
+        self.assertEqual(self.apply(plan), result)
+        self.assertEqual(self.legacy_bytes(), before)
+        # Legacy delivery still shows unacknowledged rows.
+        self.assertEqual(self.pending_rows("reviewer"), [reviewer[1]])
+        self.assertEqual(self.pending_rows("worker"), worker)
+
+    def test_pending_prepartition_record_and_receipt_reconcile_without_copy(self):
+        self.submit_pending()
+        row = self.pending_rows()[0]
+        self.pending_ack("reviewer", [row])
+        rid = self.pending_rid(row)
+        envelope = dict(self.insights._pending_insight_envelopes_locked(
+            set(self.routes), "reviewer"))[rid]
+        store = SharedRecords(self.root, {"insight.decision": INSIGHT_DECISION_POLICY,
+                                          "insight.pending": INSIGHT_PENDING_POLICY})
+        legacy_name = store._legacy_record_name(rid)
+        legacy_path = self.root / legacy_name
+        legacy_path.parent.mkdir(parents=True, exist_ok=True)
+        write_json(legacy_path, envelope, exclusive=True)
+        manifest = store.freeze("reviewer", [rid])
+        from dataclasses import asdict as _asdict
+        store.acknowledge("reviewer", [_asdict(manifest[0])], manifest=manifest)
+        legacy_receipts = self.legacy_bytes()
+
+        plan = self.preflight()
+        pending = plan["roles"]["reviewer"]["pending_insights"]
+        self.assertEqual(pending["shared_received_ids"], [rid])
+        result = self.apply(plan)
+        self.assertEqual(result["roles"]["reviewer"]["pending_insights"]["shared_received_ids"], [rid])
+        self.assertFalse((self.root / store._record_name(rid)).exists())
+        self.assertTrue(legacy_path.exists())
+        self.assertEqual(self.legacy_bytes(), legacy_receipts)
+
+    def test_pending_stale_receipt_after_revision_and_reroute_not_mapped(self):
+        item = self.submit_pending(0, addressee="reviewer")
+        row = self.pending_rows()[0]
+        self.pending_ack("reviewer", [row])
+        stale_rid = self.pending_rid(row)
+        self.insights.revise(item["id"], source="searcher", title="Revised", body="Changed",
+                             expected_rev=1, base_snapshot=None)
+        current = self.pending_rows()[0]
+        self.assertNotEqual(current["event"], row["event"])
+        plan = self.preflight()
+        self.assertEqual(plan["roles"]["reviewer"]["pending_insights"]["current_ids"],
+                         [self.pending_rid(current)])
+        self.assertEqual(plan["roles"]["reviewer"]["pending_insights"]["legacy_received_ids"], [])
+        self.assertNotIn(stale_rid, plan["boundary"]["pending_sources"])
+        before = self.legacy_bytes()
+        self.apply(plan)
+        self.assertEqual(self.shared_receipts(), {})
+        self.assertEqual(self.legacy_bytes(), before)
+        # Reroute via explicit addressee change is also stale.
+        item2 = self.submit_pending(1, addressee="reviewer")
+        row2 = next(r for r in self.pending_rows() if r["insight"] == item2["id"])
+        self.pending_ack("reviewer", [row2])
+        self.insights.revise(item2["id"], source="searcher", title="Rerouted", body="New route",
+                             expected_rev=1, base_snapshot=None, addressee="worker")
+        rerouted = self.insights.pending_insight_events("worker", set(self.routes), limit=100)[0]
+        self.assertEqual(rerouted[0]["insight"], item2["id"])
+        plan = self.preflight()
+        self.assertEqual(plan["roles"]["reviewer"]["pending_insights"]["legacy_received_ids"], [])
+        self.assertEqual(plan["roles"]["worker"]["pending_insights"]["legacy_received_ids"], [])
+        self.apply(plan)
+        self.assertEqual(self.shared_receipts(), {})
+
+    def test_pending_corrupt_moved_and_orphan_refuse_before_writes(self):
+        item = self.submit_pending()
+        row = self.pending_rows()[0]
+        self.pending_ack("reviewer", [row])
+        path = self.legacy_path("reviewer", row)
+        original = path.read_bytes()
+        plan = self.preflight()
+        for raw in (b"garbage", b"[]",
+                    canonical(dict(json.loads(original), ack_token="0" * 64))):
+            path.write_bytes(raw)
+            with self.subTest(raw=raw[:20]):
+                with self.assertRaises(CorruptDecisionReceipt):
+                    self.preflight()
+                with self.assertRaises(CorruptDecisionReceipt):
+                    self.apply(plan)
+                self.assertEqual(path.read_bytes(), raw)
+                self.assertEqual(self.shared_receipts(), {})
+        path.write_bytes(original)
+        # Moved receipt (symlink) refuses before writes.
+        target = self.root / "pending-target.json"
+        target.write_bytes(original)
+        path.unlink()
+        try:
+            path.symlink_to(target)
+        except OSError:
+            self.skipTest("symlinks unavailable")
+        else:
+            with self.assertRaises((Denied, OSError)):
+                self.preflight()
+            with self.assertRaises((Denied, OSError)):
+                self.apply(plan)
+            self.assertEqual(self.shared_receipts(), {})
+            path.unlink()
+            os.link(target, path)
+            with self.assertRaises(Denied):
+                self.preflight()
+            self.assertEqual(self.shared_receipts(), {})
+            path.unlink()
+            target.unlink()
+            path.write_bytes(original)
+        # Orphan shared receipt with no legacy ack refuses.
+        fresh = self.submit_pending(1, addressee="worker")
+        worker_row = next(r for r in self.pending_rows("worker") if r["insight"] == fresh["id"])
+        worker_rid = self.pending_rid(worker_row)
+        both = SharedRecords(self.root, {"insight.decision": INSIGHT_DECISION_POLICY,
+                                         "insight.pending": INSIGHT_PENDING_POLICY})
+        envelopes = dict(self.insights._pending_insight_envelopes_locked(set(self.routes), "worker"))
+        both.put(envelopes[worker_rid], writer="host.insights")
+        from dataclasses import asdict as _asdict
+        manifest = both.freeze("worker", [worker_rid])
+        both.acknowledge("worker", [_asdict(manifest[0])], manifest=manifest)
+        before = self.legacy_bytes()
+        with self.assertRaises(Denied):
+            self.preflight()
+        with self.assertRaisesRegex(Denied, "Shared pending receipts exceed exact legacy receipts"):
+            self.apply(plan)
+        self.assertEqual(self.legacy_bytes(), before)
+        # Cleanup orphan for other tests is per-fixture, no further action.
+
+    def test_pending_interrupted_prefix_exact_retry(self):
+        for i in range(3):
+            self.submit_pending(i, addressee="reviewer")
+        rows = self.pending_rows()
+        self.pending_ack("reviewer", rows)
+        before = self.legacy_bytes()
+        plan = self.preflight()
+        original = SharedRecords.acknowledge
+        def interrupted(store, role, selections=None, *, manifest):
+            original(store, role, selections[:1], manifest=manifest)
+            raise OSError("injected pending interruption after one exact receipt")
+        with patch.object(SharedRecords, "acknowledge", interrupted), self.assertRaises(OSError):
+            self.apply(plan)
+        prefix = self.shared_receipts()
+        self.assertEqual(len(prefix), 1)
+        self.insights = Insights(self.root)
+        retry = self.preflight()
+        self.assertEqual(retry["boundary"], plan["boundary"])
+        self.assertEqual(retry["plan_digest"], plan["plan_digest"])
+        result = self.apply(json.loads(canonical(plan)))
+        self.assertEqual(len(self.shared_receipts()), 3)
+        self.assertEqual(result["roles"]["reviewer"]["pending_insights"]["shared_pending_ids"], [])
+        self.assertEqual(self.legacy_bytes(), before)
+        for name, raw in prefix.items():
+            self.assertEqual(self.shared_receipts()[name], raw)
+
+    def test_pending_pinned_plan_invalidated_by_source_route_and_receipt_movement(self):
+        item = self.submit_pending(addressee="reviewer")
+        row = self.pending_rows()[0]
+        self.pending_ack("reviewer", [row])
+        plan = self.preflight()
+        # Source movement via revision invalidates the pinned boundary.
+        self.insights.revise(item["id"], source="searcher", title="Moved", body="new",
+                             expected_rev=1, base_snapshot=None)
+        with self.assertRaisesRegex(Denied, "boundary changed"):
+            self.apply(plan)
+        # Route membership movement invalidates even with identical sources.
+        fresh_root = Path(self.temp.name) / "project2"
+        fresh = Insights(fresh_root)
+        fresh_item = fresh.submit(source="searcher", title="Attention 0", body="Body 0",
+                                  base_snapshot=None, kind="question", addressee="reviewer", urgency="high")
+        fresh_rows, _ = fresh.pending_insight_events("reviewer", set(self.routes), limit=100)
+        fresh.acknowledge_decisions("reviewer", fresh_rows, sources="any")
+        fresh_plan = preflight_decision_receipts(fresh, self.routes, enabled_roles=list(self.routes))
+        # Pending enumeration uses the enabled set; narrowing still binds the
+        # same pending target, but a removed enabled role invalidates.
+        removed = {"reviewer": {"actions": ["reject", "defer"], "sources": "own"},
+                   "worker": {"actions": ["reject", "defer"], "sources": "any"}}
+        with self.assertRaisesRegex(Denied, "boundary changed|must name every enabled"):
+            apply_decision_receipts(fresh, fresh_plan, removed, enabled_roles=list(removed))
+        # Receipt movement (new ack after plan) invalidates.
+        item2 = self.submit_pending(9, addressee="worker")
+        plan2 = self.preflight()
+        worker_row = next(r for r in self.pending_rows("worker") if r["insight"] == item2["id"])
+        self.pending_ack("worker", [worker_row])
+        with self.assertRaisesRegex(Denied, "boundary changed"):
+            self.apply(plan2)
+        self.assertEqual(self.shared_receipts(), {})
+
+    def test_pending_post_map_and_count_bounds_checked_before_writes(self):
+        self.submit_pending(addressee="reviewer")
+        self.pending_ack("reviewer", self.pending_rows())
+        plan = self.preflight()
+        post = copy.deepcopy(plan)
+        for report in post["roles"].values():
+            pending = report["pending_insights"]
+            pending["shared_received_ids"] = pending["legacy_received_ids"]
+            pending["shared_pending_ids"] = pending["legacy_pending_ids"]
+            pending["shared_receipt_digests"] = {rid: "0" * 64 for rid in pending["legacy_received_ids"]}
+        bound = len(canonical(plan))
+        self.assertGreater(len(canonical(post)), bound)
+        with patch("mizu.decision_reconciliation.MAX_FRAME", bound):
+            with self.assertRaises(LimitExceeded):
+                self.preflight()
+            with self.assertRaises(LimitExceeded):
+                self.apply(plan)
+        self.assertEqual(self.shared_receipts(), {})
+        self.assertFalse((self.root / "shared-records").exists())
+
+        # The runtime page shares one 512-row projection ceiling across decision
+        # projections and unacknowledged addressed-insight events. Refuse an
+        # activation plan that would publish a page the runtime cannot serve.
+        self.submit_pending(1, addressee="reviewer")
+        self.decide(2, action="reject", source="reviewer")
+        decision_rows = self.insights._decision_projection_envelopes_locked(limit=512)
+        envelope = next(iter(decision_rows.values()))
+        padded = {f"insight.decision/synthetic-{index:04d}": envelope
+                  for index in range(512)}
+        with patch.object(self.insights, "_decision_projection_envelopes_locked", return_value=padded):
+            with self.assertRaisesRegex(LimitExceeded, "Insight delivery projection"):
+                self.preflight()
         self.assertEqual(self.shared_receipts(), {})
         self.assertFalse((self.root / "shared-records").exists())
