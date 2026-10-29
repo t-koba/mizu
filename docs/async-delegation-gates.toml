@@ -69,6 +69,10 @@ parent_live_tree_gates = [
   "persistent execution containers",
 ]
 parent_live_tree_action = "Refuse every live-tree call; allow only an explicitly pinned immutable input whose identity matches the reservation source."
+external_workspace_entrypoints = [
+  "Project.initialize source capture when source resolves under a managed project workspace",
+]
+external_workspace_action = "Refuse import from an actively reserved workspace or import a previously pinned immutable snapshot; do not assume an arbitrary source path is external."
 
 # Reservation must also exclude other writers and maintenance, not only model
 # tool calls. Use one lock order and check before any preliminary capture.
@@ -94,10 +98,11 @@ quiescence_release_rule = "Keep the reservation through cancellation, supervisor
 
 # Inventory gaps that must be closed before runner integration or a pilot.
 not_yet_proven = [
-  "all project import/setup/restore paths outside storage.quiescent",
-  "adapter-specific descendant and container reconciliation after supervisor death",
-  "external MCP server behavior and teardown for every supported adapter",
-  "atomic ordering between reservation validation, tool gating, and workspace capture",
+  "Project.initialize can import a live managed workspace without binding to that source project's reservation.",
+  "DelegationJobs persists run_id, but runtime does not yet bind it to the child run directory or authority.",
+  "Driver quiescence only observes the direct process and reader threads; descendant/container recovery after supervisor death is absent.",
+  "External MCP names are recorded in run configuration, but crash-time server/container reconciliation is absent.",
+  "Atomic ordering between reservation validation, tool gating, and workspace capture is not implemented.",
 ]
 
 [child_authority]
@@ -109,3 +114,14 @@ required_bindings = [
   "child run identity and writable container identities",
 ]
 mismatch_action = "Refuse launch or retain the existing reservation; never infer equivalence from role/profile names."
+
+[observed_lifecycle]
+project_initialize = "Creates a staged new project and refuses overwrite, but imports an arbitrary source path without checking whether it is an actively reserved project workspace."
+project_restore = "Restores from an archive into a new unarmed project and refuses an existing destination; backup creation uses storage.quiescent before capture."
+probe = "probes.service_due uses a per-probe empty workspace and acquires workspace.lock for write roles; reservation must exclude this lock participant."
+automatic_prune = "Called before run admission; prune/snapshot collection enters storage.quiescent and its workspace exclusion."
+driver_channel = "EngineChannel.close terminates the spawned process group/Job Object, joins pipe readers, and attempts normal MCP cleanup; Channel.quiescent checks direct process exit and reader threads, not descendant or container membership."
+mcp_containers = "connected_servers generates random container names and holds cleanup names in memory; adapter effective configuration records the generated command before driver execution, but no supervisor-death reaper was found."
+sandbox_containers = "One-shot and persistent exec write command-start evidence with generated container names before launch; sandbox labels include project/role/run. Normal teardown removes by name, but no reservation-bound crash reconciler was found."
+job_store = "DelegationJobs persists a stable run_id, but runtime does not import the store or bind its identity to Engine.run yet."
+process_group_experiment = "A bounded Linux sandbox reproduction observed a setsid descendant survive SIGTERM to its parent's process group; a direct signal then stopped it. This is not a systemd/cgroup, OCI, or Windows recovery smoke."

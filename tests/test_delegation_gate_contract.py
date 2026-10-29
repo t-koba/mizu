@@ -149,6 +149,9 @@ class DelegationGateContractTests(unittest.TestCase):
                      "configured MCP containers mounted at context.workspace"):
             with self.subTest(entrypoint=name):
                 self.assertIn(name, entrypoints["parent_live_tree_gates"])
+        self.assertIn("Project.initialize source capture when source resolves under a managed project workspace",
+                      entrypoints["external_workspace_entrypoints"])
+        self.assertIn("actively reserved workspace", entrypoints["external_workspace_action"])
         self.assertTrue(entrypoints["reservation_exclusion"])
         self.assertIn("storage.maintain_automatic_prune snapshot/run retention",
                       entrypoints["reservation_exclusion"])
@@ -162,6 +165,11 @@ class DelegationGateContractTests(unittest.TestCase):
         self.assertIn("effective role grants and tool limits", authority["required_bindings"])
         self.assertTrue(any("writable container identities" in item for item in authority["required_bindings"]))
         self.assertIn("Refuse launch", authority["mismatch_action"])
+        lifecycle = MATRIX["observed_lifecycle"]
+        self.assertIn("not descendant", lifecycle["driver_channel"])
+        self.assertIn("supervisor-death reaper", lifecycle["mcp_containers"])
+        self.assertIn("does not import", lifecycle["job_store"])
+        self.assertIn("setsid descendant survive", lifecycle["process_group_experiment"])
 
 
 if __name__ == "__main__":
