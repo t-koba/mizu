@@ -21,6 +21,7 @@ import tomllib
 import uuid
 from pathlib import Path
 
+from .delegation_jobs import DelegationJobs
 from .admission import check_slot_exclusions, role_exclusions
 from .errors import Busy, Denied, LimitExceeded
 from .fs import (DIGEST, PREVIEW_BYTES, atomic_write, canonical, digest,
@@ -48,6 +49,7 @@ def quiescent(project: Project, *, require_pause: bool = True, snapshot_gc: bool
         raise Denied("Pause the project before storage maintenance")
     with contextlib.ExitStack() as stack:
         stack.enter_context(lock(project.root / "locks" / "workspace.lock", blocking=False))
+        DelegationJobs.guard(project.root)
         exclusions = role_exclusions(project.root, tuple(project.config.roles))
         if snapshot_gc:
             # Include never-used slots: a runner must not start a capture during GC.

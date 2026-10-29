@@ -18,6 +18,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from .delegation_jobs import DelegationJobs
 from . import decision_delivery, lineage, operator_records
 from . import platform as _platform
 from . import run_activity as _run_activity
@@ -2399,6 +2400,9 @@ class Engine:
             admission_kwargs["observation_sink"] = observe
         elapsed = stack.enter_context(admission(self.config, resources, wait=wait, enqueue=enqueue,
                                                 **admission_kwargs))
+        # Trusted starts hold workspace.lock too. Recheck after admission has
+        # acquired it, before safe-point inspection or any live-tree work.
+        DelegationJobs.guard(project.root)
         if role.workspace == "write":
             safe_point.guard(project.snapshots, role_name)
         return elapsed
@@ -2570,6 +2574,7 @@ class Engine:
         if role_name not in project.roles:
             raise Denied("Role is not enabled for this project")
         role = self.config.roles[role_name]
+        DelegationJobs.guard(project.root)
         from .workspace_cache import maintain
         maintain(project)  # Before probes/admission take any execution locks.
         from .storage import maintain_automatic_prune

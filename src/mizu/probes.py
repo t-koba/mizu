@@ -10,6 +10,7 @@ import time
 import uuid
 from pathlib import Path
 
+from .delegation_jobs import DelegationJobs
 from .admission import role_exclusion
 from .budget import Budget
 from .config import Role, load, role_requests_per_run, role_tools_per_run
@@ -368,12 +369,14 @@ def _service(config, store, identity, stop, resolve, reload_config, at, clock):
                 writer_locked = current.roles[c['role']].workspace == 'write'
                 if writer_locked:
                     stack.enter_context(lock(project.root / 'locks' / 'workspace.lock', blocking=False))
+                    DelegationJobs.guard(project.root)
                 stack.enter_context(slot(current))
                 current, reason, project = fresh_authorization()
                 if reason is None and current.limits.parallel_runs != slot_limit:
                     reason = 'configuration_changed'
                 if reason is None and not writer_locked and current.roles[c['role']].workspace == 'write':
                     stack.enter_context(lock(project.root / 'locks' / 'workspace.lock', blocking=False))
+                    DelegationJobs.guard(project.root)
                     current, reason, project = fresh_authorization()
                     if reason is None and current.limits.parallel_runs != slot_limit:
                         reason = 'configuration_changed'

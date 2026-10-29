@@ -16,6 +16,7 @@ import time
 import unicodedata
 from pathlib import Path
 
+from .delegation_jobs import DelegationJobs
 from .admission import check_slot_exclusions, role_exclusions
 from .errors import Busy, Denied, LimitExceeded
 from .fs import lock, read_json, relative_parts, write_json
@@ -169,6 +170,7 @@ def maintain(project):
             return {'status': 'not-due'}
         with contextlib.ExitStack() as stack:
             stack.enter_context(lock(project.root / 'locks/workspace.lock', blocking=False))
+            DelegationJobs.guard(project.root)
             paths = sorted(set(role_exclusions(project.root, tuple(project.config.roles))
                                + check_slot_exclusions(project.root, project.config.limits.parallel_checks)))
             for path in paths:

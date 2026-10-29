@@ -508,6 +508,26 @@ class RecoveryProbeTests(SelectionFixture):
         self.assertEqual(Budget(self.config.data / 'budget', 100).usage('sample')['used'], 1)
         self.assertTrue(active(self.contribution(action), 1011))
 
+    def test_writer_reservation_or_unreadable_store_defers_without_spend(self):
+        from mizu.delegation_jobs import DelegationJobs
+        self.setup_probe()
+        store = DelegationJobs(self.project.root)
+        with lock(self.project.root / 'locks/workspace.lock'):
+            store.start('worker', 'probe-gate', {
+                'role': 'helper', 'task': 'Reservation fixture', 'profile': None,
+                'source_snapshot': 'a' * 64})
+        # No process holds workspace.lock: the durable reservation alone fences.
+        for instant, corrupt in ((1010, False), (1020, True)):
+            with self.subTest(corrupt=corrupt):
+                if corrupt:
+                    (store.root / 'state.json').write_bytes(b'{')
+                result, driver = self.service(at=instant)
+                self.assertEqual(result['status'], 'deferred')
+                self.assertEqual(result['reason'], 'configuration_denied')
+                self.assertEqual(result['requests'], 0)
+                self.assertEqual(driver.calls, [])
+        self.assertEqual(Budget(self.config.data / 'budget', 100).usage('sample')['used'], 0)
+
     def test_budget_denial_locks_and_controls_do_not_spend(self):
         action = self.setup_probe()
         config = dataclasses.replace(self.config, limits=dataclasses.replace(self.config.limits, daily_requests=0))

@@ -52,7 +52,7 @@ import secrets
 import stat
 from pathlib import Path
 
-from .errors import Denied
+from .errors import Denied, LimitExceeded
 from .fs import (DIGEST, canonical, digest, identifier, loads_finite, lock,
                  safe_read, safe_write, sync_dir, write_json)
 
@@ -143,6 +143,37 @@ class DelegationJobs:
                        exclusive=True)
         with self._locked():
             self._load()
+
+    @classmethod
+    def existing_reservation(cls, project_root: Path):
+        """Read without initializing a store; only an absent directory is clear.
+
+        Invalid, incomplete or unreadable existing state is denied, never
+        repaired. The store lock serializes reads with ledger mutations; trusted
+        starts must additionally hold workspace.lock, as must callers needing
+        a stable no-reservation decision across live-tree access. No liveness or
+        quiescence is inferred from acquiring either process lock.
+        """
+        store = cls.__new__(cls)
+        store.root = Path(project_root) / 'delegation-jobs'
+        try:
+            store._directory(store.root.parent)
+            try:
+                store._directory(store.root)
+            except FileNotFoundError:
+                return None
+            # A completed initialization has both files. Do not create a
+            # missing lock while inspecting an interrupted initialization.
+            (store.root / 'store.lock').lstat()
+            return store.reservation()
+        except (OSError, LimitExceeded):
+            raise Denied('Unreadable delegation state') from None
+
+    @classmethod
+    def guard(cls, project_root: Path):
+        """Refuse live-workspace admission while a reservation may be active."""
+        if cls.existing_reservation(project_root) is not None:
+            raise Denied('Project has an active delegation reservation')
 
     @staticmethod
     def _directory(path):
