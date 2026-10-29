@@ -277,27 +277,25 @@ class InsightRoutingLegacyTests(Fixture):
         self.assertEqual(watches['consult'], [str(self.project.root / 'inbox')])
         self.assertNotIn('operator', watches)
 
-    def test_source_scan_bounded_to_512_records(self):
+    def test_irrelevant_retained_inbox_does_not_block_routed_attention(self):
         from mizu.fs import write_json
         base = "2026-01-01T00:00:00+00:00"
         for i in range(513):
             iid = f"{i:032x}"
-            record = {"id": iid, "source": "searcher", "title": f"Overflow {i}",
+            record = {"id": iid, "source": "searcher", "title": f"Human item {i}",
                       "body": "Exact current body", "base_snapshot": None, "run": None,
                       "origin": None, "kind": "question", "addressee": "operator",
                       "urgency": "high", "created_at": base, "rev": 1,
                       "evidence": [], "updated_at": base}
             write_json(self.project.root / "inbox" / f"{iid}.json", record, exclusive=True)
-        with self.assertRaises(LimitExceeded):
-            self.pending()
-        # Exact ceiling: 512 fits without expansion or silent omission.
-        (self.project.root / "inbox" / f"{512:032x}.json").unlink()
+        self.assertEqual(self.pending(limit=100)['events'], [])
+        # The role still finds a matching source after unrelated retained items.
+        routed = self.submit('Routed past human history')
         state = self.pending(limit=100)
-        self.assertLessEqual(len(state['events']), 100)
+        self.assertEqual([e['insight'] for e in state['events']], [routed['id']])
         if self.shared:
-            self.assertLessEqual(state['page']['pending_count'], 512)
+            self.assertEqual(state['page']['pending_count'], 1)
         else:
-            # Legacy limit truncation stays silent; overflow itself never does.
             self.assertEqual(state['manifest'], ())
 
     def test_combined_payload_bounded_to_max_frame_oldest_first(self):
@@ -499,3 +497,37 @@ class InsightRoutingSharedTests(InsightRoutingLegacyTests):
             delivery.read(self.context_with_delivery('reporter'), {'ack_token': token})
         with self.assertRaises(LimitExceeded):
             delivery.pending(self.project, replace(role, decision_page_bytes=1))
+
+    def test_acknowledged_shared_history_does_not_consume_live_projection_bound(self):
+        from dataclasses import asdict
+        from mizu.smoke_refs import record_lock
+
+        from mizu.fs import write_json
+        base = "2026-01-01T00:00:00+00:00"
+        for i in range(513):
+            iid = f"{i:032x}"
+            record = {"id": iid, "source": "searcher", "title": f"Previously acknowledged {i}",
+                      "body": "Exact current body", "base_snapshot": None, "run": None,
+                      "origin": None, "kind": "question", "addressee": "reviewer",
+                      "urgency": "high", "created_at": base, "rev": 1,
+                      "evidence": [], "updated_at": base}
+            write_json(self.project.root / "inbox" / f"{iid}.json", record, exclusive=True)
+        configured = set(self.project.roles) & self.config.roles.keys()
+        with record_lock(self.project.root):
+            envelopes = [envelope for _, envelope in
+                         self.project.insights._pending_insight_envelopes_locked(
+                             configured, 'reviewer')]
+        self.assertEqual(len(envelopes), 513)
+        store = SharedRecords(self.project.root, INSIGHT_DELIVERY_POLICIES)
+        for start in range(0, len(envelopes), 128):
+            batch = envelopes[start:start + 128]
+            for envelope in batch:
+                store.put(envelope, writer='host.insights')
+            manifest = store.freeze('reviewer', [envelope['id'] for envelope in batch])
+            store.acknowledge('reviewer', [asdict(entry) for entry in manifest],
+                              manifest=manifest)
+
+        newest = self.submit('New attention after acknowledged history')
+        state = self.pending(limit=100)
+        self.assertEqual([event['insight'] for event in state['events']], [newest['id']])
+        self.assertEqual(state['page']['pending_count'], 1)

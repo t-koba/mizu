@@ -53,7 +53,7 @@ from .smoke_refs import record_lock, validate_refs, require_pairs
 from . import insight_archive, wait_events
 from .work_item_waits import WAIT_KINDS, normalize_wait
 from .errors import Denied, LimitExceeded
-from .shared_records import Delivery, KindPolicy, RECORD_BYTES, SharedRecords
+from .shared_records import Delivery, KindPolicy, RECEIPT_BYTES, RECORD_BYTES, SharedRecords
 from .work_item_seed import (make_seed, validate_scope, validate_seed, validate_tasks,
                              task_id, task_seeds)
 from .fs import MAX_FRAME, PREVIEW_BYTES, canonical, digest, identifier, lock, now, read_json, safe_read, write_json, mkdir, DIGEST
@@ -1764,25 +1764,22 @@ replacement insight without implying rejected substance.
                 raise LimitExceeded("Decision projection exceeds record count bound")
         return pending
 
-    def _pending_insight_envelopes_locked(self, configured_roles):
-        """Strict current-source scan; legacy omissions never invent a route.
+    def _pending_insight_envelopes_locked(self, configured_roles, role_name):
+        """Stream exact current-source candidates for one configured recipient.
 
-        Caller holds record_lock. Projections are derived, not content authority.
-        Removed/unconfigured destinations stay visibly unresolved in the host
-        inbox without fallback and without blocking valid routes for other
-        configured recipients. The source scan is bounded to the existing
-        512-record projection ceiling and fails visibly on overflow.
+        Caller holds record_lock. Each source read is individually bounded and
+        callers bound retained projections/pages; do not cap unrelated inbox
+        history before routing filters, since old human/decided items must not
+        prevent a configured role from seeing its own pending attention.
+        Legacy omissions never invent a route.
         """
+        identifier(role_name)
         inbox = self.root / "inbox"
         if not insight_archive._directory(inbox):
             return
-        count = 0
         for path in inbox.iterdir():
             if path.suffix != ".json":
                 continue
-            count += 1
-            if count > 512:
-                raise LimitExceeded("Insight source scan exceeds record count bound")
             item = json.loads(safe_read(self.root, f"inbox/{path.name}", self.maximum))
             if type(item) is not dict or item.get("id") != path.stem:
                 raise Denied("Malformed pending insight source")
@@ -1796,7 +1793,8 @@ replacement insight without implying rejected substance.
             if addressee is None or addressee == "operator":
                 continue
             target = item["source"] if addressee == "writer" else addressee
-            if target == "operator":  # human source's writer alias is still human
+            if (target == "operator" or target not in configured_roles
+                    or target != role_name):  # human writer alias remains host-only
                 continue
             decision_path = self.root / "decisions" / path.name
             try:
@@ -1813,11 +1811,6 @@ replacement insight without implying rejected substance.
             if effective is not None:
                 # Decisions (including deferrals) retain their existing delivery
                 # policy; attention is reopened by a new insight revision.
-                continue
-            if target not in configured_roles:
-                # Isolate the bad route: leave the insight visibly unresolved
-                # in the host inbox, never fall back to writer/another role,
-                # and never block valid events for other recipients.
                 continue
             payload = {k: item[k] for k in ("title", "body", "source", "created_at")}
             payload.update(insight=item["id"], rev=rev, kind="insight.pending",
@@ -1843,7 +1836,7 @@ replacement insight without implying rejected substance.
             diagnostics = []
 
             def eligible():
-                for _, envelope in self._pending_insight_envelopes_locked(configured_roles):
+                for _, envelope in self._pending_insight_envelopes_locked(configured_roles, role_name):
                     payload = envelope["payload"]
                     if payload["target"] != role_name:
                         continue
@@ -1906,7 +1899,20 @@ replacement insight without implying rejected substance.
             store = SharedRecords(self.root, INSIGHT_DELIVERY_POLICIES)
             if configured_roles is not None:
                 pending = {}
-                for rid, envelope in self._pending_insight_envelopes_locked(configured_roles):
+                for rid, envelope in self._pending_insight_envelopes_locked(configured_roles, role_name):
+                    computed = digest(canonical(envelope))
+                    # Previously acknowledged pending-insight records remain in
+                    # the immutable source inbox. Validate them, but do not let
+                    # that retained history consume this role's live projection
+                    # ceiling or block a newer unacknowledged event.
+                    exists = any(store._read(name, RECORD_BYTES) is not None
+                                 for name in store._record_names(rid))
+                    if exists:
+                        store.get(rid, expected_digest=computed)
+                        if store.received(role_name, rid, computed):
+                            continue
+                    elif store._read(store._receipt_name(role_name, rid), RECEIPT_BYTES) is not None:
+                        raise Denied("Shared insight receipt has no immutable record")
                     pending[rid] = envelope
                     if len(projected) + len(pending) > 512:
                         raise LimitExceeded("Insight delivery projection exceeds record count bound")

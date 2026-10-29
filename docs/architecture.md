@@ -418,9 +418,13 @@ target-bound, oldest-first, sharing the existing decision-event count limit
 (1–100). In active shared mode they also share the configured decision page byte
 budget and manifest-only `decision_read` references; an attention-only role with
 no explicit budget uses the existing 1 MiB transport ceiling. The combined
-current projection is bounded to 512 records, and the legacy source scan is
-bounded to the same 512-record ceiling (`LimitExceeded` on overflow, never a
-silent omission). In legacy mode the combined decision/attention prompt
+current shared projection is bounded to 512 records. The legacy source scan
+streams individually bounded inbox records and filters to the current recipient
+before retaining attention rows; the prompt/result bounds stay at the existing
+1–100 count limit. Its scan work scales with retained inbox history, but unrelated
+human-addressed, decided, removed-role, and other-recipient records do not
+consume the recipient's projection bound or block its pending route. In legacy
+mode the combined decision/attention prompt
 contribution is bounded to the existing 1 MiB transport ceiling by omitting only
 newest attention rows (oldest attention prefix kept, exact tokens preserved,
 omitted rows stay pending, truncation visible via the returned page); current
