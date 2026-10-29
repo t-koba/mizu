@@ -1,7 +1,7 @@
 """One terminal sidecar for an exhausted, fully validated WorkItems chain.
 
 Authority is the existing transition grant/runtime actor, not a new caller
-field. The chain hash covers canonical seed and revisions, each followed by LF.
+field. The chain hash covers each canonical seed/revision plus one additional LF.
 No state supplied by this record can alter scope, origin or delivery evidence.
 """
 from .errors import Denied, LimitExceeded

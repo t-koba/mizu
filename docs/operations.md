@@ -985,10 +985,11 @@ and retained delivery/verification evidence before exclusively atomically
 writing the single `work-items/<id>/retirement.json`. Its schema is exactly:
 `schema: 1`, `request`, `request_sha256`, `chain_sha256`, `created_at`.
 `request` contains exactly `id`, `expected_rev`, `status`, `actor`, `reason`;
-reason is trimmed before binding. Request identity is SHA-256 of canonical JSON;
-the chain hash is SHA-256 of the canonical seed followed by all ascending
-canonical revision records, each followed by a single LF. `created_at` is a
-timezone-aware timestamp from the first commit. The sidecar has the existing
+reason is trimmed before binding. Request identity is SHA-256 of canonical JSON.
+The chain hash appends `canonical(record) + b"\n"` for the seed and every
+ascending revision; because `canonical()` already ends in LF, this is two LF
+bytes after each record. `created_at` is a timezone-aware timestamp from the
+first commit. The sidecar has the existing
 bounded safe-file read limit, while its derived state retains the ordinary
 event byte limit. This is append-only authenticated store evidence, not a
 signature granting authority to external JSON writers.
