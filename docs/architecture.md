@@ -389,6 +389,29 @@ trusted host callers, preserved across revisions, never routed on, and never
 grants operator approval. Ordinary prompts, lists, and reads expose only
 the current content, its current decision/evidence gap and `rev`; obsolete
 claims are replaced, never appended. The first submission creates `rev` 1.
+New insights store `kind` (`proposal` or `question`), `addressee` (`writer`,
+`operator`, or a configured role name), and `urgency` (`low`, `normal`, or
+`high`), defaulting to `proposal`/`writer`/`normal`. Core storage validates
+addressee syntax using the configured-role identifier bound (1–63 lowercase
+ASCII letters/digits/underscore/hyphen, first character alphanumeric); model
+tool submissions additionally validate explicit addressees against configured
+roles plus the two named attention targets. These fields are optional tool
+inputs, not authority: source/decision/receipt rules are unchanged. This storage
+stage does not route or wake the addressee, create an operator model role or
+human-read receipt, or change scheduling/admission; urgency is display-only.
+
+Legacy records lacking any field keep it absent (visibly unspecified), including
+in bounded list/archive summaries and reads. No default is injected on read and
+`Q:` prose is never interpreted as metadata. Omitted revision fields inherit
+only explicitly stored values; a missing legacy field stays missing. Explicit
+metadata-only changes create and archive revisions and affect content identity.
+Stable-ID submit retries with omitted metadata preserve the stored shape;
+legacy retry digests remain unchanged. Auto-ID dedup compares metadata too,
+using new defaults for omitted inputs while returning legacy matches unchanged;
+explicit metadata never matches an absent legacy field. The existing byte
+limit includes metadata, invalid explicit values (including null) fail closed,
+and old revisions remain accessible only through history.
+
 The original submitter may revise under the stable ID via compare-and-swap on
 `expected_rev`; identical retries are no-ops that do not advance the inbox
 generation, while a meaningful revision archives the prior record to

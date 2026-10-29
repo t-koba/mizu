@@ -415,7 +415,8 @@ def _preflight(metadata, root, names):
 
 
 def collect_refs(metadata: Metadata, pairs: dict, *, roots=None) -> set:
-    from .insights import Insights, _effective_decision, _rev_of, MAX_EVIDENCE_ENTRIES, MAX_EVIDENCE_CHARS
+    from .insights import (Insights, _effective_decision, _rev_of, MAX_EVIDENCE_ENTRIES,
+                           MAX_EVIDENCE_CHARS, INSIGHT_METADATA_DEFAULTS, insight_metadata)
     from .work_items import WorkItems
     explicit_roots = roots is not None
     roots = entries(metadata.data / "projects", MAX_PROJECTS, optional=True) if roots is None else roots
@@ -470,7 +471,7 @@ def collect_refs(metadata: Metadata, pairs: dict, *, roots=None) -> set:
         store = ReferenceItems(root, snapshots, insights)
         for path in entries(root / "inbox", MAX_ENTRIES, optional=True):
             record = metadata.read(path)
-            if (set(record) - {"id", "source", "title", "body", "base_snapshot", "run", "origin", "created_at", "updated_at", "rev", "evidence"}
+            if (set(record) - {"id", "source", "title", "body", "base_snapshot", "run", "origin", "created_at", "updated_at", "rev", "evidence", *INSIGHT_METADATA_DEFAULTS}
                     or path.suffix != ".json" or record.get("id") != path.stem
                     or type(record.get("rev", 1)) is not int or record.get("rev", 1) < 1
                     or not isinstance(record.get("evidence", []), list)
@@ -478,6 +479,7 @@ def collect_refs(metadata: Metadata, pairs: dict, *, roots=None) -> set:
                     or not all(isinstance(record.get(k), str) for k in ("title", "body", "source"))):
                 raise Denied("Malformed current Insight reference record")
             identifier(record["id"])
+            insight_metadata(record)
             rev = _rev_of(record)
             decision_path = root / "decisions" / path.name
             decision = metadata.read(decision_path) if decision_path.exists() else None

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from .errors import Denied
 from .fs import PREVIEW_BYTES, page, write_json
+from .insights import insight_metadata
 
 #: Explicit paged insight retrieval may walk the whole pending set (tool
 #: page limit, same bound as `mizu insight list`); prompt
@@ -48,13 +49,21 @@ def decide(context, args: dict) -> dict:
                                         scope=args.get("scope"), work_items=args.get("work_items"))
 
 
+def _metadata(context, args: dict) -> dict:
+    metadata = insight_metadata(args)
+    if ("addressee" in metadata and metadata["addressee"] not in
+            {"writer", "operator", *context.config.roles}):
+        raise Denied("Insight addressee must be writer, operator, or a configured role")
+    return metadata
+
+
 def submit_insight(context, args: dict) -> dict:
     # Model submissions carry runtime-bound provenance only (source/run);
     # no origin field is exposed, so stored origin stays unknown and can
     # never elevate to operator authority.
     return context.project.insights.submit(source=context.role.name, title=args["title"], body=args["body"],
                                          base_snapshot=context.snapshot["id"], run=context.run_dir.name,
-                                         origin=None)
+                                         origin=None, **_metadata(context, args))
 
 
 def revise_insight(context, args: dict) -> dict:
@@ -64,7 +73,8 @@ def revise_insight(context, args: dict) -> dict:
     # current snapshot, like a fresh submission about the current tree.
     return context.project.insights.revise(args["id"], source=context.role.name, title=args["title"],
                                          body=args["body"], base_snapshot=context.snapshot["id"],
-                                         run=context.run_dir.name, expected_rev=args["rev"])
+                                         run=context.run_dir.name, expected_rev=args["rev"],
+                                         **_metadata(context, args))
 
 
 def withdraw_insight(context, args: dict) -> dict:

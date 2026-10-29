@@ -58,6 +58,22 @@ class SmokeRetentionTests(unittest.TestCase):
         return {p.relative_to(self.data).as_posix():
                 ('dir' if p.is_dir() else p.read_bytes()) for p in self.data.rglob('*')}
 
+    def test_insight_attention_metadata_is_validated_without_changing_pins(self):
+        self.pair()
+        insights, _ = self.owner()
+        item = self.insight(insights, [self.a])
+        path = insights.root / 'inbox' / f'{item["id"]}.json'
+        record = read_json(path)
+        record.update(kind='question', addressee='operator', urgency='high')
+        write_json(path, record)
+        self.assertEqual(self.run_retention()['pinned'], [self.a])
+        for field in ('kind', 'addressee', 'urgency'):
+            write_json(path, {**record, field: None})
+            with self.assertRaises(Denied):
+                self.run_retention(apply=True)
+        write_json(path, {k: v for k, v in record.items() if k not in ('kind', 'addressee', 'urgency')})
+        self.assertEqual(self.run_retention()['pinned'], [self.a])
+
     def test_atomic_pair_identity_and_project(self):
         pair = self.pair(project=True)
         manifest = retention.read_pair(retention.Metadata(self.data), self.a)

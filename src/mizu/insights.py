@@ -226,8 +226,38 @@ def _validate_keyed_substantive_event(event, insight_id: str, rev: int, key: str
     return event
 
 
+# Omission is distinct from an explicit value, including null (which is invalid).
+_UNSPECIFIED = object()
+INSIGHT_METADATA_DEFAULTS = {"kind": "proposal", "addressee": "writer", "urgency": "normal"}
+
+
+def insight_metadata(record: dict) -> dict:
+    """Validate/project only stored fields; legacy omissions stay unspecified.
+
+    Addressee syntax matches configured role identifiers (1–63 printable ASCII
+    letters/digits/underscore/hyphen, starting with a letter or digit). This is
+    attention metadata, never a source identity or decision/routing authority.
+    Configuration membership belongs to the submitting context, not storage.
+    """
+    out = {key: record[key] for key in INSIGHT_METADATA_DEFAULTS if key in record}
+    for key, value in out.items():
+        if key == "addressee":
+            identifier(value)
+        elif (not isinstance(value, str) or value not in
+              ({"proposal", "question"} if key == "kind" else {"low", "normal", "high"})):
+            raise Denied(f"Invalid insight {key}")
+    return out
+
+
+def _identity_payload(record: dict) -> dict:
+    return {**{k: record.get(k) for k in
+               ("id", "source", "title", "body", "base_snapshot", "run", "origin")},
+            **insight_metadata(record)}
+
+
 def _content_sha(record: dict) -> str:
     payload = {k: record.get(k) for k in ("id", "source", "title", "body", "base_snapshot")}
+    payload.update(insight_metadata(record))
     payload["rev"] = _rev_of(record)
     return digest(canonical(payload))
 
@@ -253,6 +283,7 @@ def _check_origin(origin: str | None) -> str | None:
 
 def _normalize(record: dict) -> dict:
     out = dict(record)
+    insight_metadata(out)
     out["rev"] = _rev_of(record)
     if "origin" not in out:
         out["origin"] = None
@@ -292,13 +323,16 @@ def _archive_summary(item: dict) -> dict:
     """Bounded archive page summary matching the live list shape.
 
     ``item`` is one archived row already merged with its archival
-    ``decision``. Only identifiers, timestamps, the decision and evidence
-    counts/timestamps are projected; ``body`` and full ``evidence`` text
-    stay behind ``read``.
+    ``decision``. Identifiers, typed metadata, timestamps, the decision and
+    evidence counts/timestamps are projected; ``body`` and full ``evidence``
+    text stay behind ``read``.
     """
     if item.get("body_unavailable") is True:
-        return {k: item[k] for k in ("id", "rev", "created_at", "body_unavailable") if k in item}
+        record = {k: item[k] for k in ("id", "rev", "created_at", "body_unavailable") if k in item}
+        record.update(insight_metadata(item))
+        return record
     record = {k: item[k] for k in ("id", "source", "origin", "title", "created_at", "base_snapshot") if k in item}
+    record.update(insight_metadata(item))
     if "origin" not in record:
         record["origin"] = None
     record["rev"] = _rev_of(item)
@@ -372,8 +406,14 @@ class Insights:
 
     def submit(self, *, source: str, title: str, body: str, base_snapshot: str | None,
                run: str | None = None, insight_id: str | None = None,
-               origin: str | None = None) -> dict:
-        """Submit a proposal with authority ``source`` and opaque ``origin``.
+               origin: str | None = None, kind=_UNSPECIFIED,
+               addressee=_UNSPECIFIED, urgency=_UNSPECIFIED) -> dict:
+        """Submit an insight with authority ``source`` and opaque ``origin``.
+
+        New metadata defaults to proposal/writer/normal. Explicit metadata is
+        content identity; stable-ID retry omissions preserve stored values or
+        legacy absence. Auto-ID dedup uses defaults but never fills omissions
+        in the stored match. Addressee/urgency never grant authority or route.
 
         ``origin`` labels the actual caller sharing the transport and never
         confers authority: approval, revise, withdraw and event routing read
@@ -395,6 +435,10 @@ class Insights:
         """
         identifier(source)
         origin = _check_origin(origin)
+        specified = insight_metadata({k: v for k, v in
+                                      (("kind", kind), ("addressee", addressee), ("urgency", urgency))
+                                      if v is not _UNSPECIFIED})
+        metadata = {**INSIGHT_METADATA_DEFAULTS, **specified}
         explicit = bool(insight_id)
         if explicit:
             insight_id = identifier(insight_id)
@@ -404,7 +448,7 @@ class Insights:
             raise Denied("base_snapshot must be a SHA-256 ID or null")
         probe_id = insight_id if explicit else "0" * 32
         probe = {"id": probe_id, "source": source, "title": title, "body": body,
-                 "base_snapshot": base_snapshot, "run": run, "origin": origin}
+                 "base_snapshot": base_snapshot, "run": run, "origin": origin, **specified}
         if len(canonical(probe)) > self.maximum:
             raise Denied("Insight exceeds byte limit")
         with record_lock(self.root):
@@ -413,7 +457,9 @@ class Insights:
                 best_key = None
                 for key, _, item in self._live_entries(pending=True):
                     if (not isinstance(key[0], str) or item.get("source") != source
-                            or item.get("title") != title or item.get("body") != body):
+                            or item.get("title") != title or item.get("body") != body
+                            or any(item.get(k, default) != metadata[k] or (k in specified and k not in item)
+                                   for k, default in INSIGHT_METADATA_DEFAULTS.items())):
                         continue
                     if best_key is None or key < best_key:
                         best, best_key = item, key
@@ -423,16 +469,26 @@ class Insights:
                     return out
                 insight_id = identifier(uuid.uuid4().hex)
             payload = {"id": insight_id, "source": source, "title": title, "body": body,
-                       "base_snapshot": base_snapshot, "run": run, "origin": origin}
-            if len(canonical(payload)) > self.maximum:
-                raise Denied("Insight exceeds byte limit")
+                       "base_snapshot": base_snapshot, "run": run, "origin": origin, **metadata}
             path = self.root / "inbox" / f"{insight_id}.json"
             identity_path = self.root / "insight-ids" / f"{insight_id}.json"
             identity = read_json(identity_path)
-            sha = digest(canonical(payload))
             old = read_json(path)
             if old is None:
                 old = insight_archive.read(self.root, insight_id)
+            if old is not None:
+                # Omitted fields on a stable-ID retry preserve its exact shape.
+                for key in INSIGHT_METADATA_DEFAULTS:
+                    payload.pop(key, None)
+                payload.update({**insight_metadata(old), **specified})
+            elif identity and not specified:
+                # Retained pre-metadata identities may have no surviving body.
+                legacy = {k: v for k, v in payload.items() if k not in INSIGHT_METADATA_DEFAULTS}
+                if identity.get("sha256") == digest(canonical(legacy)):
+                    payload = legacy
+            if len(canonical(payload)) > self.maximum:
+                raise Denied("Insight exceeds byte limit")
+            sha = digest(canonical(payload))
             if identity and identity.get("sha256") != sha:
                 # A revised identity exists; direct submit with different
                 # content is refused (use revise with expected_rev).
@@ -442,7 +498,7 @@ class Insights:
                     current_payload = {k: old.get(k) if k != "origin" else old.get("origin") for k in payload}
                     if current_payload == payload:
                         return _normalize(old)
-                    core = ("id", "source", "title", "body", "base_snapshot")
+                    core = ("id", "source", "title", "body", "base_snapshot", *INSIGHT_METADATA_DEFAULTS)
                     if all(old.get(k) == payload.get(k) for k in core):
                         return _normalize(old)
                 raise Denied("Insight ID was reused with different content")
@@ -452,7 +508,7 @@ class Insights:
             if old is None and (self.root / "decisions" / f"{insight_id}.json").exists():
                 raise Denied("Decided ID has no retained identity; reuse refused")
             if old:
-                core = ("id", "source", "title", "body", "base_snapshot")
+                core = ("id", "source", "title", "body", "base_snapshot", *INSIGHT_METADATA_DEFAULTS)
                 if any(old.get(k) != payload.get(k) for k in core):
                     raise Denied("Insight ID was reused with different content")
                 if {k: old.get(k) if k != "origin" else old.get("origin") for k in payload} != payload:
@@ -470,14 +526,17 @@ class Insights:
 
     def revise(self, insight_id: str, *, source: str, title: str, body: str,
                base_snapshot: str | None, run: str | None = None,
-               expected_rev: int | None = None) -> dict:
+               expected_rev: int | None = None, kind=_UNSPECIFIED,
+               addressee=_UNSPECIFIED, urgency=_UNSPECIFIED) -> dict:
         """Replace obsolete claims under a stable ID; prior version goes to audit.
 
+        Omitted metadata inherits only explicitly stored values; legacy
+        omissions remain absent. Metadata-only changes create revisions.
         Schema: title 1–200 chars, nonempty body, base_snapshot SHA-256 or
         null. Bounds: same PREVIEW_BYTES bound as submit. Trust: ``source``
         must equal the original submitter; ``expected_rev`` (when given)
         must equal the current rev (compare-and-swap). Retry: identical
-        content (title/body/base_snapshot) is a no-op returning current
+        content (title/body/base_snapshot and metadata) is a no-op returning current
         without bumping rev, archiving, or waking; ``run`` is provenance
         recorded only on meaningful change, so a same-content retry with a
         different ``run`` preserves the stored ``run`` and repairs identity.
@@ -509,6 +568,9 @@ replacement insight without implying rejected substance.
             raise Denied("base_snapshot must be a SHA-256 ID or null")
         if expected_rev is not None and (type(expected_rev) is not int or expected_rev < 1):
             raise Denied("expected_rev must be a positive integer")
+        specified = insight_metadata({k: v for k, v in
+                                      (("kind", kind), ("addressee", addressee), ("urgency", urgency))
+                                      if v is not _UNSPECIFIED})
         with record_lock(self.root):
             path = self.root / "inbox" / f"{insight_id}.json"
             old = read_json(path)
@@ -516,7 +578,8 @@ replacement insight without implying rejected substance.
                 old = insight_archive.read(self.root, insight_id)
             _origin = _normalize(old).get("origin") if old else None
             payload = {"id": insight_id, "source": source, "title": title, "body": body,
-                       "base_snapshot": base_snapshot, "run": run, "origin": _origin}
+                       "base_snapshot": base_snapshot, "run": run, "origin": _origin,
+                       **(insight_metadata(old) if old else {}), **specified}
             if len(canonical(payload)) > self.maximum:
                 raise Denied("Insight exceeds byte limit")
             if not old:
@@ -527,8 +590,9 @@ replacement insight without implying rejected substance.
             if expected_rev is not None and expected_rev != current_rev:
                 raise Denied("Insight revision conflict; reread the current revision")
             if (old.get("title") == title and old.get("body") == body
-                    and old.get("base_snapshot") == base_snapshot):
-                stored_payload = {k: old.get(k) for k in ("id", "source", "title", "body", "base_snapshot", "run", "origin")}
+                    and old.get("base_snapshot") == base_snapshot
+                    and insight_metadata(old) == insight_metadata(payload)):
+                stored_payload = _identity_payload(old)
                 try:
                     write_json(self.root / "insight-ids" / f"{insight_id}.json",
                                {"id": insight_id, "sha256": digest(canonical(stored_payload)),
@@ -553,7 +617,7 @@ replacement insight without implying rejected substance.
                 if (not isinstance(existing, dict) or existing.get("id") != insight_id
                         or _rev_of(existing) != current_rev
                         or any(existing.get(k) != old.get(k)
-                               for k in ("source", "title", "body", "base_snapshot", "origin"))):
+                               for k in ("source", "title", "body", "base_snapshot", "origin", *INSIGHT_METADATA_DEFAULTS))):
                     raise Denied("Insight revision archive conflict; reread the current revision")
                 write_json(archive_path, archive)
             else:
@@ -562,9 +626,7 @@ replacement insight without implying rejected substance.
                 except Denied:
                     # Lost a same-rev race under the lock; reread to converge.
                     raise Denied("Insight revision conflict; reread the current revision")
-            record = {"id": insight_id, "source": source, "title": title, "body": body,
-                      "base_snapshot": base_snapshot, "run": run,
-                      "origin": _origin, "evidence": [],
+            record = {**payload, "evidence": [],
                       "created_at": old.get("created_at"), "rev": current_rev + 1,
                       "updated_at": stamped}
             write_json(path, record)
@@ -670,6 +732,7 @@ replacement insight without implying rejected substance.
                 if action is not None and (not decision or decision.get("action") != action):
                     continue
                 record = {k: item[k] for k in ("id", "source", "origin", "title", "created_at", "base_snapshot") if k in item}
+                record.update(insight_metadata(item))
                 if "origin" not in record:
                     record["origin"] = None
                 record["rev"] = item_rev
@@ -1915,6 +1978,7 @@ replacement insight without implying rejected substance.
             return False
         identifier(item["source"])
         _check_origin(item.get("origin"))
+        insight_metadata(item)
         if (not isinstance(item.get("title"), str) or not 1 <= len(item["title"]) <= 200
                 or not isinstance(item.get("body"), str) or not item["body"].strip()
                 or (item.get("base_snapshot") is not None and
@@ -1967,8 +2031,7 @@ replacement insight without implying rejected substance.
                     if decided_at > cutoff:
                         continue
                     record = _normalize(item)
-                    payload = {k: record.get(k) for k in
-                               ("id", "source", "title", "body", "base_snapshot", "run", "origin")}
+                    payload = _identity_payload(record)
                     identity_path = self.root / "insight-ids" / path.name
                     write_json(identity_path,
                                {"id": item["id"], "sha256": digest(canonical(payload)),

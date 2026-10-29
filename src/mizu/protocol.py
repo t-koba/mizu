@@ -126,6 +126,12 @@ WORK_ITEM_WAIT_SCHEMA = obj({**WAIT_SCHEMA["properties"],
     "checks": dict(array({"type": "string", "minLength": 1, "maxLength": 256}, 64),
                    minItems=1, uniqueItems=True)}, ("kind",))
 
+INSIGHT_METADATA_SCHEMA = {
+    "kind": {"type": "string", "enum": ["proposal", "question"]},
+    "addressee": {**text(63), "minLength": 1, "pattern": r"^[a-z0-9][a-z0-9_-]{0,62}$"},
+    "urgency": {"type": "string", "enum": ["low", "normal", "high"]},
+}
+
 DEFINITIONS = {
     "diff": ("Read the bounded difference between this published snapshot and the role's last observed snapshot when that cursor is still retained and ancestral, otherwise the preceding distinct code snapshot. The result names base_snapshot.", obj()),
     "files": ("List visible workspace files without reading their contents; use offset/limit for subsequent pages.", obj(PAGE_FIELDS)),
@@ -233,11 +239,11 @@ DEFINITIONS = {
                                                 ("title", "description"))},
                     "work_item_intent": {"type": "string", "enum": ["create", "none"]}},
                    ("id", "action", "reason", "rev"))),
-    "submit_insight": ("Submit an immutable proposal. Sender identity is assigned by the runtime, not the model.",
-                       obj({"title": text(200), "body": text(60000)}, ("title", "body"))),
-    "revise_insight": ("Revise one of this role's own proposals under its stable ID; prior content is archived. Sender identity is assigned by the runtime; recorded only for the original submitter, bound to the read rev.",
+    "submit_insight": ("Submit an insight. Metadata defaults to proposal/writer/normal. Addressee records an attention request only; it does not currently send a targeted notification or wake the addressee, and the normal pending-insight view remains unchanged. Urgency is display-only. Sender identity is assigned by the runtime, not the model.",
+                       obj({"title": text(200), "body": text(60000), **INSIGHT_METADATA_SCHEMA}, ("title", "body"))),
+    "revise_insight": ("Revise one of this role's own proposals under its stable ID; prior content is archived. Omitted metadata inherits stored values, preserving legacy absence; metadata-only changes create revisions. Sender identity is assigned by the runtime; recorded only for the original submitter, bound to the read rev.",
                        obj({"id": text(64), "title": text(200), "body": text(60000),
-                            "rev": {"type": "integer", "minimum": 1}}, ("id", "title", "body", "rev"))),
+                            "rev": {"type": "integer", "minimum": 1}, **INSIGHT_METADATA_SCHEMA}, ("id", "title", "body", "rev"))),
     "withdraw_insight": ("Withdraw one of this role's own proposals as author retraction. A current accept/modify blocks withdrawal unless the role also has withdraw_decided. Sender identity is assigned by the runtime and the action is bound to the read rev.",
                        obj({"id": text(64), "reason": text(4000),
                             "rev": {"type": "integer", "minimum": 1}}, ("id", "reason", "rev"))),
