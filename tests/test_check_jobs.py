@@ -377,8 +377,10 @@ class JobTests(Fixture):
     def test_check_wait_holds_the_role_only_until_its_bound(self):
         from support import ScriptDriver
         from mizu.runtime import Engine, should_run
+        finish_requested_at = []
         def act(ctx, *_):
             job = ctx._op_verify({})
+            finish_requested_at.append(time.time())
             ctx._op_finish({'outcome': 'wait', 'summary': 'Waiting for frozen check',
                             'state': 'Independent work complete', 'wait_for_check': job['id'],
                             'wait_seconds': 60})
@@ -388,10 +390,11 @@ class JobTests(Fixture):
         self.assertEqual(result['waiting_for_check']['id'], result['finish']['wait_for_check'])
         # The bound is the wait the unit sealed with, not the configured
         # default: the recorded wake_at is the truth the operator reads.
+        requested_at = finish_requested_at[0]
         self.assertAlmostEqual(result['waiting_for_check']['wait_until'],
-                               time.time() + 60, delta=1)
+                               requested_at + 60, delta=1)
         self.assertNotAlmostEqual(result['waiting_for_check']['wait_until'],
-                                   time.time() + self.config.limits.default_wait_seconds,
+                                   requested_at + self.config.limits.default_wait_seconds,
                                    delta=1)
         self.assertTrue(check_jobs.waiting(self.project, 'worker'))
         snapshot = self.project.snapshots.get()
