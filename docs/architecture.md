@@ -396,9 +396,58 @@ addressee syntax using the configured-role identifier bound (1–63 lowercase
 ASCII letters/digits/underscore/hyphen, first character alphanumeric); model
 tool submissions additionally validate explicit addressees against configured
 roles plus the two named attention targets. These fields are optional tool
-inputs, not authority: source/decision/receipt rules are unchanged. This storage
-stage does not route or wake the addressee, create an operator model role or
-human-read receipt, or change scheduling/admission; urgency is display-only.
+inputs, not decision authority. Undecided current revisions now route a bounded
+`kind=insight.pending` event through the existing `decision_events` transport to
+the configured **project** role. `writer` means the submitting source role, not
+the project's publishing role. `operator` (including an operator source's writer
+alias) stays in the human host open-insight inbox: no model role, human read-ack,
+or operator wake is created. A removed/unconfigured destination is isolated:
+it stays visibly unresolved in the host inbox with no fallback destination or
+inferred resolution and never blocks valid routes for other configured
+recipients; malformed sources still fail closed. Legacy omissions do not
+invent routes. Current decisions, including deferrals, retain their existing
+subscription/admission behavior rather than gaining a duplicate attention wake;
+a new insight revision reopens attention. Urgency stays display-only, with no
+admission bypass, priority ordering or response deadline enabled.
+
+Attention rows contain `event`, `insight`, `rev`, `source`, `target`, `addressee`,
+`title`, `body`, `created_at`, `kind=insight.pending`, and the explicitly stored
+`insight_kind` and `urgency` when present. Evidence notes remain on the source
+insight, not in a new mutable delivery identity. Events are revision/content/
+target-bound, oldest-first, sharing the existing decision-event count limit
+(1–100). In active shared mode they also share the configured decision page byte
+budget and manifest-only `decision_read` references; an attention-only role with
+no explicit budget uses the existing 1 MiB transport ceiling. The combined
+current projection is bounded to 512 records, and the legacy source scan is
+bounded to the same 512-record ceiling (`LimitExceeded` on overflow, never a
+silent omission). In legacy mode the combined decision/attention prompt
+contribution is bounded to the existing 1 MiB transport ceiling by omitting only
+newest attention rows (oldest attention prefix kept, exact tokens preserved,
+omitted rows stay pending, truncation visible via the returned page); current
+decision events are never omitted for bytes. Shared envelopes are immutable
+derivations of Insights, never a second content authority. Absent the existing
+decision-authority marker, delivery uses the existing legacy exact per-token
+receipt mechanism, with a distinct pending-insight token domain; existing
+decision token identities are unchanged. Corrupt legacy receipt content yields
+a bounded unresolved diagnostic; unsafe stores fail closed. Active shared mode
+never falls back to legacy delivery or receipts. This routing does not activate
+SharedRecords or change decision cutover/reconciliation/shadow policy. That
+existing reconciliation maps **decision** receipts only: if the host later
+explicitly switches a legacy project to shared authority, previously handled
+pending-insight attention can replay. No cross-authority pending-receipt
+migration or replay-free cutover is claimed by this stage; that needs a separately
+scoped reconciliation change, not a dual-read fallback.
+
+The role explicitly selects handled tokens in `finish.ack_events`; only durable
+successful finish (and writer publication) applies receipts. Reading or finishing
+alone acknowledges nothing. No answer, decision or insight status transition is
+automatic, and no decide grant is added. New dispatches omit superseded routes;
+a frozen unit may still explicitly acknowledge its exact old delivered payload,
+which cannot suppress the new revision/target. The existing event-trigger gate,
+role exclusion and admission limits are reused. Linux/macOS non-daemon role
+watches add the inbox as a coarse hint (including attention-only roles); daemons
+recheck on existing ticks. Windows keeps its existing scheduled/manual delivery
+limits; no new scheduler or installed service changes are made here.
 
 Legacy records lacking any field keep it absent (visibly unspecified), including
 in bounded list/archive summaries and reads. No default is injected on read and

@@ -52,8 +52,8 @@ def decide(context, args: dict) -> dict:
 def _metadata(context, args: dict) -> dict:
     metadata = insight_metadata(args)
     if ("addressee" in metadata and metadata["addressee"] not in
-            {"writer", "operator", *context.config.roles}):
-        raise Denied("Insight addressee must be writer, operator, or a configured role")
+            {"writer", "operator", *(set(context.project.roles) & context.config.roles.keys())}):
+        raise Denied("Insight addressee must be writer, operator, or a configured role in this project")
     return metadata
 
 

@@ -3940,61 +3940,47 @@ def _on_change_observed(cursor: dict, snapshot: dict) -> bool:
 
 
 def _role_events_due(project: Project, snapshot: dict, role_name=None) -> bool:
-    """True when a routed decision/terminal event or due wait reaches a role.
+    """Routed decisions/insight attention, terminal events or waits due to a role.
 
-    The checked set is the running role when named, else every write role in
-    the project. Decision registration and wait expiry leave no inbox or
-    snapshot generation footprint of their own (the operator CLI can defer
-    with a wait outside any run), so the writer gate must consult the event
-    and wait stores directly before suppressing dispatch. Historically,
-    unreadable legacy stores read as no events; admission itself still fails
-    loudly inside Engine.run. Shared decision authority/budget/store errors
-    propagate instead of quietly suppressing the wake or using legacy state.
+    Inspect the named role, else project write roles. Exact decision/attention
+    authority, route, budget and store failures propagate: never suppress a wake
+    by treating invalid delivery as an empty queue. Legacy decision-history
+    isolation remains in its source scanner; terminal/wait probing is unchanged.
     """
-    shared = decision_delivery.authority(project.insights.root) is not None
-    try:
-        names = [role_name] if role_name in project.roles else [
-            name for name in project.roles
-            if name in project.config.roles and project.config.roles[name].workspace == "write"]
-        for name in names:
-            try:
-                if "check_job" in project.config.roles[name].capabilities and check_jobs.wake_ready(project, name):
-                    return True
-                terminal_triggers = project.config.roles[name].work_item_events
-                if terminal_triggers and work_item_events.pending(
-                        project.work_items, name, terminal_triggers,
-                        sources=project.config.roles[name].work_item_sources, limit=1)["events"]:
-                    return True
-            except (Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError, AttributeError):
-                pass
-            try:
-                triggers = project.config.roles[name].decision_events
-                sources = getattr(project.config.roles[name], "decision_sources", "own") or "own"
-                if triggers:
-                    state = decision_delivery.pending(
-                        project, project.config.roles[name],
-                        actions=triggers if sources == "any" else tuple(a for a in triggers if a != "defer"),
-                        limit=1)
-                    pending, troubled = state["events"], state["diagnostics"]
-                    if sources == "any":
-                        if any(isinstance(e, dict) for e in pending) or any(
-                                isinstance(d, dict) for d in troubled):
-                            return True
-                    elif (any(isinstance(e, dict) and e.get("action") != "defer" for e in pending)
-                          or any(isinstance(d, dict) and d.get("action") != "defer" for d in troubled)):
-                        return True
-            except (Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError, AttributeError):
-                if shared or decision_delivery.authority(project.insights.root) is not None:
-                    raise
-            try:
-                if (project.insights.due_waits(name, snapshot)
-                        or ci_waits.pending(project.work_items, name, limit=1, config=project.config)):
-                    return True
-            except (Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError, AttributeError):
-                pass
-    except (Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError, AttributeError):
-        if shared or decision_delivery.authority(project.insights.root) is not None:
-            raise
+    decision_delivery.authority(project.insights.root)
+    names = [role_name] if role_name in project.roles else [
+        name for name in project.roles
+        if name in project.config.roles and project.config.roles[name].workspace == "write"]
+    for name in names:
+        try:
+            if "check_job" in project.config.roles[name].capabilities and check_jobs.wake_ready(project, name):
+                return True
+            terminal_triggers = project.config.roles[name].work_item_events
+            if terminal_triggers and work_item_events.pending(
+                    project.work_items, name, terminal_triggers,
+                    sources=project.config.roles[name].work_item_sources, limit=1)["events"]:
+                return True
+        except (Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError, AttributeError):
+            pass
+        triggers = project.config.roles[name].decision_events
+        sources = getattr(project.config.roles[name], "decision_sources", "own") or "own"
+        state = decision_delivery.pending(
+            project, project.config.roles[name],
+            actions=triggers if sources == "any" else tuple(a for a in triggers if a != "defer"),
+            limit=1)
+        pending, troubled = state["events"], state["diagnostics"]
+        if sources == "any":
+            if pending or troubled:
+                return True
+        elif (any(e.get("action") != "defer" for e in pending)
+              or any(d.get("action") != "defer" for d in troubled)):
+            return True
+        try:
+            if (project.insights.due_waits(name, snapshot)
+                    or ci_waits.pending(project.work_items, name, limit=1, config=project.config)):
+                return True
+        except (Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError, AttributeError):
+            pass
     return False
 
 

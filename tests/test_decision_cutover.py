@@ -300,8 +300,11 @@ class DecisionCutoverTests(Fixture):
         delivery.acknowledge(first, {handled})
         self.role(decision_events=('reject', 'defer'))
         remaining = self.pending(limit=100)
-        self.assertEqual(len(remaining['events']), 2)
-        self.assertEqual(remaining['events'][0]['ack_token'], first.decision_events[0]['ack_token'])
+        decisions = [e for e in remaining['events'] if e.get('kind') != 'insight.pending']
+        addressed = [e for e in remaining['events'] if e.get('kind') == 'insight.pending']
+        self.assertEqual(len(decisions), 2)
+        self.assertEqual([(e['insight'], e['rev']) for e in addressed], [(item['id'], 2)])
+        self.assertEqual(decisions[0]['ack_token'], first.decision_events[0]['ack_token'])
         self.assertEqual(len(self.pending('worker', limit=100)['events']), 2)  # stale source filtered
         self.assertEqual(self.receipts('decision-receipts'), {})
 

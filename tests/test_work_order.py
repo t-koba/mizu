@@ -74,10 +74,16 @@ class WorkOrderTests(Fixture):
     def test_delta_omitted_pending_bodies_share_full_generation_and_status(self):
         from unittest.mock import patch
         from mizu.unit_prompts import prompt_for, prompt_delta_for
+        from mizu import decision_delivery
+
+        def delivered_context():
+            ctx = self.context("worker")
+            decision_delivery.bind(ctx, decision_delivery.pending(self.project, ctx.role))
+            return ctx
 
         item = self.project.work_items.create(idempotency_key="delta-pending", title="A", actor="worker")["record"]["work_item"]
         insight = self.project.insights.submit(source="worker", title="Pending", body="body", base_snapshot=None)
-        ctx = self.context("worker")
+        ctx = delivered_context()
         with patch.object(self.project.insights, "projection", wraps=self.project.insights.projection) as projection:
             delta = json.loads(prompt_delta_for(ctx, []))
             full = json.loads(prompt_for(ctx))
@@ -89,8 +95,8 @@ class WorkOrderTests(Fixture):
         self.assertEqual(generation, full["work_order"]["opening_generation"])
         ctx.handle("work_order", {"items": [item["id"]], "rationale": "reviewed",
                                   "expected_rev": 0, "expected_generation": generation})
-        fresh_delta = json.loads(prompt_delta_for(self.context("worker"), []))
-        fresh_full = json.loads(prompt_for(self.context("worker")))
+        fresh_delta = json.loads(prompt_delta_for(delivered_context(), []))
+        fresh_full = json.loads(prompt_for(delivered_context()))
         self.assertEqual(fresh_delta["pending_insights"], [])
         self.assertEqual([row["id"] for row in fresh_full["pending_insights"]], [insight["id"]])
         for shown in (fresh_delta["work_order"], fresh_full["work_order"], self.project.work_order_status()):
@@ -107,10 +113,10 @@ class WorkOrderTests(Fixture):
         self.assertEqual(frozen_full["pending_insights"], full["pending_insights"])
         self.assertEqual(frozen_delta["work_order"]["opening_generation"], generation)
         self.assertEqual(frozen_full["work_order"]["status"], "current")
-        next_delta = json.loads(prompt_delta_for(self.context("worker"), []))
+        next_delta = json.loads(prompt_delta_for(delivered_context(), []))
         self.assertIn(later["id"], next_delta["open_insights"]["ids"])
         self.assertEqual(next_delta["work_order"]["status"], "review_due")
-        self.assertEqual(json.loads(prompt_for(self.context("worker")))["work_order"]["status"], "review_due")
+        self.assertEqual(json.loads(prompt_for(delivered_context()))["work_order"]["status"], "review_due")
         self.assertEqual(self.project.work_order_status()["status"], "review_due")
 
     def test_off_page_scope_change_requires_review_without_changing_ready_or_page(self):

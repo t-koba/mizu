@@ -1,10 +1,13 @@
 """Single runtime authority for insight decisions; activation is host policy only."""
 from dataclasses import asdict, replace
+from datetime import datetime
+
+import json
 
 from .config import role_decision_events_limit
-from .errors import Denied
+from .errors import Denied, LimitExceeded
 from .fs import DIGEST, MAX_FRAME, canonical, digest, loads_finite, safe_read
-from .insights import INSIGHT_DECISION_POLICY
+from .insights import INSIGHT_DELIVERY_POLICIES, DECISION_RECEIPT_DIAGNOSTIC_LIMIT
 from .shared_records import SharedRecords
 
 AUTHORITY_FILE = "decision-authority.json"
@@ -45,23 +48,88 @@ def page_bytes(role):
     return value
 
 
-def pending(project, role, *, actions=None, limit=None):
+def pending(project, role, *, actions=None, limit=None, include_insights=True):
     """One branch only, shared failures propagate. Manifest is host-only unit state."""
     shared = authority(project.insights.root) is not None
+    if role.name == "operator":
+        raise Denied("Operator insights belong to the human host inbox")
+    configured_roles = set(project.roles) & project.config.roles.keys()
     actions = role.decision_events if actions is None else actions
     limit = role_decision_events_limit(project.config, role) if limit is None else limit
     sources = getattr(role, "decision_sources", "own") or "own"
     if shared:
-        budget = page_bytes(role) if role.decision_events else 1  # no subscription, no delivery
-        if actions:
+        budget = page_bytes(role) if role.decision_events else (role.decision_page_bytes or MAX_FRAME)
+        if actions or include_insights:
             page, manifest = project.insights.shared_decision_page(
-                role.name, actions, max_bytes=budget, limit=limit, sources=sources, prompt=True)
+                role.name, actions, max_bytes=budget, limit=limit, sources=sources, prompt=True,
+                configured_roles=configured_roles if include_insights else None)
         else:
             page, manifest = {"events": [], "pending_count": 0, "truncated": False,
                               "count_truncated": False, "byte_truncated": False}, ()
         return dict(shared=True, events=page["events"], diagnostics=[], page=page, manifest=manifest)
     events, diagnostics = (project.insights.decision_events_with_diagnostics(
         role.name, actions, limit=limit, sources=sources) if actions else ([], []))
+    if include_insights:
+        insights, troubled = project.insights.pending_insight_events(role.name, configured_roles, limit=limit)
+        # Each candidate list is already limited to `limit`; exactly `limit`
+        # rows means the true total may be larger, so the combined total is
+        # incomplete. Never present that incomplete total as exact.
+        decision_capped = bool(actions) and len(events) == limit
+        insight_capped = len(insights) == limit
+        source_capped = decision_capped or insight_capped
+        combined_all = [*events, *insights]
+        diagnostics = (diagnostics + troubled)[:DECISION_RECEIPT_DIAGNOSTIC_LIMIT]
+        combined_all.sort(key=lambda e: (datetime.fromisoformat(e.get("decided_at", e.get("created_at"))),
+                                         e.get("kind") == "insight.pending", e["event"]))
+        if source_capped:
+            pending_total = None
+            count_truncated = True
+        else:
+            pending_total = len(combined_all)
+            count_truncated = pending_total > limit
+        limited = combined_all[:limit]
+        delivered = list(limited)
+        # Bound the combined legacy decision/attention prompt contribution to
+        # the existing fixed MAX_FRAME transport bound without a new knob.
+        # Preserve all current decision events and exact ack tokens; enforce
+        # the bound by omitting only newest attention rows (oldest attention
+        # prefix kept, oldest-first replay preserved). Omitted attention rows
+        # stay pending and truncation is visible via the returned page.
+        if any(e.get("kind") == "insight.pending" for e in delivered):
+            def _legacy_summary(evts):
+                if source_capped:
+                    return {"pending_count": None,
+                            "truncated": True,
+                            "count_truncated": True,
+                            "byte_truncated": len(evts) < len(limited)}
+                return {"pending_count": pending_total,
+                        "truncated": len(evts) < pending_total,
+                        "count_truncated": count_truncated,
+                        "byte_truncated": len(evts) < min(pending_total, limit)}
+            def _legacy_size(evts):
+                return len(json.dumps({"decision_events": evts,
+                                       "decision_page": _legacy_summary(evts)},
+                                      ensure_ascii=True).encode("utf-8"))
+            if _legacy_size([]) > MAX_FRAME:
+                raise LimitExceeded("Legacy decision page metadata exceeds byte bound")
+            while delivered and _legacy_size(delivered) > MAX_FRAME:
+                for idx in range(len(delivered) - 1, -1, -1):
+                    if delivered[idx].get("kind") == "insight.pending":
+                        del delivered[idx]
+                        break
+                else:
+                    # The decision-only payload itself exceeds the bound; it
+                    # was deliverable before attention existed. Preserve the
+                    # exact pre-existing decision rows instead of newly
+                    # failing because attention was present. All attention is
+                    # already omitted above and stays pending.
+                    break
+            if len(delivered) < len(limited):
+                summary = _legacy_summary(delivered)
+                page = {"events": list(delivered), **summary}
+                return dict(shared=False, events=delivered, diagnostics=diagnostics,
+                            page=page, manifest=())
+        events = delivered
     return dict(shared=False, events=events, diagnostics=diagnostics, page=None, manifest=())
 
 
@@ -70,7 +138,7 @@ def store(context):
     # authority mutation/corruption cannot authorize a different receipt writer.
     if not context.shared_decisions or authority(context.project.insights.root) is None:
         raise Denied("Shared decision unit authority changed")
-    return SharedRecords(context.project.insights.root, {"insight.decision": INSIGHT_DECISION_POLICY})
+    return SharedRecords(context.project.insights.root, INSIGHT_DELIVERY_POLICIES)
 
 
 def validate(context, tokens):
@@ -108,5 +176,5 @@ def bind(context, state):
     context.decision_page = state["page"]
     context.decision_events = state["events"]
     context.decision_receipt_diagnostics = state["diagnostics"]
-    if state["shared"] and context.role.decision_events and "decision_read" not in context.role.capabilities:
+    if state["shared"] and state["manifest"] and "decision_read" not in context.role.capabilities:
         context.role = replace(context.role, capabilities=(*context.role.capabilities, "decision_read"))

@@ -111,6 +111,44 @@ INSIGHT_DECISION_POLICY = KindPolicy(
 )
 
 
+def _validate_pending_projection(subject: dict, payload: dict) -> None:
+    required = {"event", "insight", "rev", "title", "body", "source", "created_at",
+                "kind", "target", "addressee"}
+    if (set(subject) != {"event", "insight", "rev"}
+            or not required <= set(payload) <= required | {"insight_kind", "urgency"}
+            or subject != {key: payload[key] for key in subject}
+            or payload["kind"] != "insight.pending"
+            or type(payload["rev"]) is not int or payload["rev"] < 1
+            or any(not isinstance(payload[k], str) or not payload[k].strip()
+                   for k in ("title", "body", "created_at"))):
+        raise Denied("Invalid pending insight projection")
+    for key in ("event", "insight", "source", "target", "addressee"):
+        identifier(payload[key])
+    metadata = {"addressee": payload["addressee"]}
+    if "insight_kind" in payload:
+        metadata["kind"] = payload["insight_kind"]
+    if "urgency" in payload:
+        metadata["urgency"] = payload["urgency"]
+    insight_metadata(metadata)
+    target = payload["source"] if payload["addressee"] == "writer" else payload["addressee"]
+    if target != payload["target"] or target == "operator":
+        raise Denied("Invalid pending insight target")
+    stamp = dt.datetime.fromisoformat(payload["created_at"])
+    if stamp.utcoffset() is None or len(payload["created_at"]) > 64:
+        raise Denied("Invalid pending insight timestamp")
+    identity = {k: v for k, v in payload.items() if k != "event"}
+    if payload["event"] != digest(canonical(identity))[:32]:
+        raise Denied("Invalid pending insight event identity")
+
+
+INSIGHT_PENDING_POLICY = KindPolicy(
+    writers=frozenset({"host.insights"}), validate=_validate_pending_projection,
+    maximum=RECORD_BYTES,
+)
+INSIGHT_DELIVERY_POLICIES = {"insight.decision": INSIGHT_DECISION_POLICY,
+                             "insight.pending": INSIGHT_PENDING_POLICY}
+
+
 class CorruptDecisionReceipt(Exception):
     """One safely-read per-token receipt has invalid content/semantics.
 
@@ -1505,6 +1543,12 @@ replacement insight without implying rejected substance.
         """Bind a host token to the role, immutable decision and frozen payload."""
         identifier(role_name)
         event = identifier(payload["event"])
+        if payload.get("kind") == "insight.pending":
+            frozen = {k: v for k, v in payload.items() if k != "ack_token"}
+            _validate_pending_projection({k: frozen[k] for k in ("event", "insight", "rev")}, frozen)
+            if frozen["target"] != role_name:
+                raise Denied("Pending insight acknowledgement target mismatch")
+            return digest(canonical({"role": role_name, "pending_insight": frozen}))
         record = json.loads(safe_read(self.root, f"decision-history/{event}.json", MAX_DECISION_EVENT_BYTES))
         return digest(canonical({"role": role_name, "decision": record,
                                  "payload": {k: v for k, v in payload.items() if k != "ack_token"}}))
@@ -1720,9 +1764,107 @@ replacement insight without implying rejected substance.
                 raise LimitExceeded("Decision projection exceeds record count bound")
         return pending
 
+    def _pending_insight_envelopes_locked(self, configured_roles):
+        """Strict current-source scan; legacy omissions never invent a route.
+
+        Caller holds record_lock. Projections are derived, not content authority.
+        Removed/unconfigured destinations stay visibly unresolved in the host
+        inbox without fallback and without blocking valid routes for other
+        configured recipients. The source scan is bounded to the existing
+        512-record projection ceiling and fails visibly on overflow.
+        """
+        inbox = self.root / "inbox"
+        if not insight_archive._directory(inbox):
+            return
+        count = 0
+        for path in inbox.iterdir():
+            if path.suffix != ".json":
+                continue
+            count += 1
+            if count > 512:
+                raise LimitExceeded("Insight source scan exceeds record count bound")
+            item = json.loads(safe_read(self.root, f"inbox/{path.name}", self.maximum))
+            if type(item) is not dict or item.get("id") != path.stem:
+                raise Denied("Malformed pending insight source")
+            identifier(item["id"])
+            identifier(item.get("source"))
+            rev = item.get("rev", 1)
+            if type(rev) is not int or rev < 1:
+                raise Denied("Malformed pending insight revision")
+            metadata = insight_metadata(item)
+            addressee = metadata.get("addressee")
+            if addressee is None or addressee == "operator":
+                continue
+            target = item["source"] if addressee == "writer" else addressee
+            if target == "operator":  # human source's writer alias is still human
+                continue
+            decision_path = self.root / "decisions" / path.name
+            try:
+                decision_path.lstat()
+            except FileNotFoundError:
+                decision = None
+            else:
+                decision = json.loads(safe_read(self.root, f"decisions/{path.name}", MAX_DECISION_EVENT_BYTES))
+                if (type(decision) is not dict or decision.get("id") != item["id"]
+                        or type(decision.get("rev", 1)) is not int or decision.get("rev", 1) < 1
+                        or decision.get("action") not in _DECISION_ACTIONS | {"withdraw"}):
+                    raise Denied("Malformed pending insight decision")
+            effective = _effective_decision(rev, decision)
+            if effective is not None:
+                # Decisions (including deferrals) retain their existing delivery
+                # policy; attention is reopened by a new insight revision.
+                continue
+            if target not in configured_roles:
+                # Isolate the bad route: leave the insight visibly unresolved
+                # in the host inbox, never fall back to writer/another role,
+                # and never block valid events for other recipients.
+                continue
+            payload = {k: item[k] for k in ("title", "body", "source", "created_at")}
+            payload.update(insight=item["id"], rev=rev, kind="insight.pending",
+                           target=target, addressee=addressee)
+            payload.update({("insight_kind" if k == "kind" else k): v
+                            for k, v in metadata.items() if k != "addressee"})
+            payload["event"] = digest(canonical(payload))[:32]
+            subject = {k: payload[k] for k in ("event", "insight", "rev")}
+            _validate_pending_projection(subject, payload)
+            envelope = {"schema": 1, "id": f"insight.pending/{payload['event']}",
+                        "kind": "insight.pending", "created_at": payload["created_at"],
+                        "writer": "host.insights", "subject": subject, "payload": payload}
+            if len(canonical(envelope)) > INSIGHT_PENDING_POLICY.maximum:
+                raise LimitExceeded("Pending insight envelope exceeds byte bound")
+            yield envelope["id"], envelope
+
+    def pending_insight_events(self, role_name, configured_roles, *, limit=10):
+        """Legacy exact receipts, same count bound and fail-closed receipt reader."""
+        identifier(role_name)
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise Denied("Pending insight event limit must be in [1, 100]")
+        with record_lock(self.root):
+            diagnostics = []
+
+            def eligible():
+                for _, envelope in self._pending_insight_envelopes_locked(configured_roles):
+                    payload = envelope["payload"]
+                    if payload["target"] != role_name:
+                        continue
+                    event = dict(payload, ack_token=self._decision_token(role_name, payload))
+                    try:
+                        received = self._decision_received(role_name, event)
+                    except CorruptDecisionReceipt as corrupt:
+                        if len(diagnostics) < DECISION_RECEIPT_DIAGNOSTIC_LIMIT:
+                            diagnostics.append({"event": event["event"], "ack_token": event["ack_token"],
+                                                "action": "pending", "reason": corrupt.reason})
+                        continue
+                    if not received:
+                        yield event
+
+            events = heapq.nsmallest(limit, eligible(), key=lambda e: (
+                dt.datetime.fromisoformat(e["created_at"]), e["event"]))
+            return events, diagnostics
+
     def shared_decision_page(self, role_name: str, actions, *, max_bytes: int,
                              limit: int = 10, sources: str = "own",
-                             prompt: bool = False) -> tuple[dict, tuple[Delivery, ...]]:
+                             prompt: bool = False, configured_roles=None) -> tuple[dict, tuple[Delivery, ...]]:
         """Host-only bounded page and exact current-unit manifest; no receipts written.
 
         max_bytes covers canonical(page) by default, or actual prompt decision
@@ -1753,7 +1895,7 @@ replacement insight without implying rejected substance.
             return len(canonical(page))
 
         wanted = set(actions)
-        if not wanted:
+        if not wanted and configured_roles is None:
             empty = {"events": [], "pending_count": 0, "truncated": False,
                      "count_truncated": False, "byte_truncated": False}
             if size(empty) > max_bytes:
@@ -1761,12 +1903,22 @@ replacement insight without implying rejected substance.
             return empty, ()
         with record_lock(self.root):
             projected = self._project_decision_records_locked(limit=512)
-            store = SharedRecords(self.root, {"insight.decision": INSIGHT_DECISION_POLICY})
+            store = SharedRecords(self.root, INSIGHT_DELIVERY_POLICIES)
+            if configured_roles is not None:
+                pending = {}
+                for rid, envelope in self._pending_insight_envelopes_locked(configured_roles):
+                    pending[rid] = envelope
+                    if len(projected) + len(pending) > 512:
+                        raise LimitExceeded("Insight delivery projection exceeds record count bound")
+                projected.update({rid: (envelope, store.put(envelope, writer="host.insights"))
+                                  for rid, envelope in pending.items()})
             eligible = []
             for record_id, (envelope, computed) in projected.items():
                 payload = envelope["payload"]
-                if (payload["action"] not in wanted
-                        or (sources == "own" and payload["source"] != role_name)):
+                routed = (payload["target"] == role_name if payload.get("kind") == "insight.pending"
+                          else payload["action"] in wanted
+                          and (sources != "own" or payload["source"] == role_name))
+                if not routed:
                     # Filtered rows still need a post-put integrity/path check.
                     store.get(record_id, expected_digest=computed)
                     continue
@@ -1794,7 +1946,10 @@ replacement insight without implying rejected substance.
                 row = dict(envelope["payload"], ack_token="0" * 64)
                 if size(page(events + [row])) > max_bytes:
                     payload = envelope["payload"]
-                    row = {key: payload[key] for key in ("event", "insight", "rev", "action")}
+                    keys = (("event", "insight", "rev", "kind", "target")
+                            if payload.get("kind") == "insight.pending"
+                            else ("event", "insight", "rev", "action"))
+                    row = {key: payload[key] for key in keys}
                     row.update(preview=payload["title"][:80], ack_token="0" * 64,
                                ref={"record_id": record_id, "record_digest": computed,
                                     "bytes": len(canonical(envelope))})
@@ -1897,7 +2052,8 @@ replacement insight without implying rejected substance.
                 if (not isinstance(event, dict) or not isinstance(event.get("ack_token"), str)
                         or not DIGEST.fullmatch(event["ack_token"])
                         or event["ack_token"] in tokens
-                        or (sources == "own" and event.get("source") != role_name)
+                        or (event.get("kind") != "insight.pending" and sources == "own"
+                            and event.get("source") != role_name)
                         or self._decision_token(role_name, event) != event["ack_token"]):
                     raise Denied("Invalid decision acknowledgement")
                 tokens.add(event["ack_token"])

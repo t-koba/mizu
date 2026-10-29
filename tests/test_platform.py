@@ -641,12 +641,13 @@ class ServiceRendererTests(unittest.TestCase):
         event = plistlib.loads(mac[base + "-event.plist"].encode())
         self.assertIn("WatchPaths", str(event))
         self.assertEqual(event["StartInterval"], 60)
-        # A role with neither schedule nor subscriptions stays explicit-run only.
+        # A role without a schedule/subscriptions watches only addressed insights.
         roles["reporter"] = dataclasses.replace(
             roles["reporter"], interval_seconds=0, calendar=(), daemon=False,
             decision_events=())
         bare = dataclasses.replace(config, roles=roles)
-        self.assertEqual(event_watches(bare, self.project), {})
+        self.assertEqual(event_watches(bare, self.project),
+                         {"reporter": [str(self.project.root / "inbox")]})
 
     def test_unscheduled_on_change_watches_code_pointer_on_all_platforms(self):
         import dataclasses

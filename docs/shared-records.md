@@ -895,3 +895,30 @@ Legacy auto-ack files are not mapped. The shared store owns the only new
 receipts, and existing backup/restore includes both generic directories. See
 [the full source contract](scheduling.md#exact-sha-work-item-ci-waits) for
 failure/retry, diagnostics and unchanged polling/admission semantics.
+
+
+### Configured insight attention
+
+Runtime insight attention uses the existing decision delivery boundary, not a
+new activation tool or source authority. An undecided current revision with an
+explicit stored addressee projects `insight.pending` to the configured project
+role (`writer` resolves to its source). Human `operator` attention stays in the
+host open-insight inbox. Legacy omissions do not imply a target.
+
+In an already-active shared project, `decision_events` may contain
+`kind=insight.pending` rows alongside decision events; `insight_kind` carries the
+stored proposal/question metadata. The same bounded page, exact role/digest
+manifest, `decision_read` reference reader and explicit `finish.ack_events`
+application boundary are used. A frozen old manifest can acknowledge only its
+old payload, never a replacement revision/target. When the decision authority
+marker is absent, the existing legacy exact per-token receipt path is used
+instead (combined legacy prompt contribution bounded to 1 MiB by omitting only
+newest attention rows with visible truncation; decisions never omitted for
+bytes); no shared shadow delivery or automatic activation is added. Removed or
+unconfigured destinations are isolated without blocking valid routes; malformed
+sources still fail closed. Decision
+token identity and the decision-only reconciliation policy are unchanged.
+Consequently an explicit later authority switch can replay previously handled
+legacy attention: pending-insight receipt migration is not part of that existing
+cutover. See the insight routing contract in `architecture.md` for bounds,
+coarse inbox wake hints, unresolved destinations and platform limits.

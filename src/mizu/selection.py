@@ -795,7 +795,7 @@ def work_inputs(project, role, snapshot, bounds):
         if bounds['max_decisions']:
             state = decision_delivery.pending(
                 project, role, actions=tuple(a for a in role.decision_events if a in EVIDENCE_ACTIONS),
-                limit=bounds['max_decisions'])
+                limit=bounds['max_decisions'], include_insights=False)
             # A page reference is delivery, not evidence loss. Resolve only its
             # frozen full-envelope identity; classifier text bounds still apply.
             from .shared_records import SharedRecords

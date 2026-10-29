@@ -141,7 +141,10 @@ def event_watches(config: Config, project: Project) -> dict[str, list[str]]:
     configuration, so an event-only role (event subscriptions or unscheduled
     ``on_change`` without any schedule) still gets a trigger, while a role with
     neither a schedule nor event subscriptions nor unscheduled ``on_change``
-    stays explicit-run only.
+    watches only the inbox for explicitly addressed insight attention. Every
+    non-daemon project role watches ``inbox``; Engine's existing event gate
+    admits only the exact current target's unacknowledged event, not unrelated
+    inbox changes. Daemons use the same pending selector at their existing ticks.
     Enabled operator records additionally watch the sharded operator partition
     ``shared-records/operator`` for these roles and scheduled observers;
     addressed SharedRecords pending state admits runs. The parent
@@ -156,7 +159,7 @@ def event_watches(config: Config, project: Project) -> dict[str, list[str]]:
     watches: dict[str, list[str]] = {}
     for name in project.roles:
         role = config.roles[name]
-        if role.daemon:
+        if role.daemon or name == "operator":
             continue
         scheduled = bool(role.interval_seconds or role.calendar)
         unscheduled_on_change = bool(role.on_change and not scheduled)
@@ -165,6 +168,7 @@ def event_watches(config: Config, project: Project) -> dict[str, list[str]]:
         scheduled_write = bool(
             role.workspace == "write" and (role.interval_seconds or role.calendar))
         if not (has_subscription or scheduled_write or unscheduled_on_change or (scheduled and operator_enabled)):
+            watches[name] = [str(project.root / "inbox")]
             continue
         if has_subscription or scheduled_write:
             watches[name] = [str(project.root / "decision-history"), str(project.root / "waits")]
@@ -177,6 +181,7 @@ def event_watches(config: Config, project: Project) -> dict[str, list[str]]:
                 watches[name].append(str(project.root / "work-items"))
         else:
             watches[name] = []
+        watches[name].append(str(project.root / "inbox"))
         if operator_enabled:
             watches[name].append(str(project.root / "shared-records" / "operator"))
         if unscheduled_on_change:

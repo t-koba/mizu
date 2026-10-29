@@ -97,27 +97,36 @@ def _decision_task(context: Context) -> str | None:
     diagnostics = list(getattr(context, "decision_receipt_diagnostics", []) or [])
     if not events and not diagnostics:
         return None
+    legacy_page_note = (
+        " The legacy decision page was byte-bounded; decision_page marks omitted newest attention rows, "
+        "which remain pending."
+        if not getattr(context, "shared_decisions", False)
+        and isinstance(getattr(context, "decision_page", None), dict)
+        and getattr(context, "decision_page", {}).get("byte_truncated") else "")
     if events and diagnostics:
-        return (f"Delivered decision events: {len(events)}. "
+        return (f"Delivered decision/insight attention events: {len(events)}. "
                 f"Corrupt receipt diagnostics shown: {len(diagnostics)} (bounded; more may exist; see "
                 "decision_receipt_diagnostics; do not acknowledge those tokens; "
                 "corrupt bytes stay unchanged pending operator recovery). "
                 "Select each handled row's ack_token in finish.ack_events; omitted rows "
                 "remain pending oldest-first, including deferrals. Finishing alone "
-                "does not acknowledge decisions. Handling is defined by role policy.")
+                "does not acknowledge events. insight.pending requests attention only, not decision authority; "
+                "handling never answers, decides or changes insight status automatically. Handling is defined by role policy."
+                + legacy_page_note)
     if diagnostics:
         return (f"Corrupt receipt diagnostics shown: {len(diagnostics)} (bounded; more may exist; see "
                 "decision_receipt_diagnostics; do not acknowledge those tokens; "
                 "corrupt bytes stay unchanged pending operator recovery). "
                 "No deliverable decision events; handling is defined by role policy.")
-    return (f"Delivered decision events: {len(events)}. "
+    return (f"Delivered decision/insight attention events: {len(events)}. "
             "Select each handled row's ack_token in finish.ack_events; omitted rows "
             "remain pending oldest-first, including deferrals. Finishing alone "
-            "does not acknowledge decisions. Handling is defined by role policy." +
+            "does not acknowledge events. insight.pending requests attention only, not decision authority; "
+            "handling never answers, decides or changes insight status automatically. Handling is defined by role policy." +
             (" Oversized rows carry ref: use decision_read with that row's ack_token "
              "and offset/limit to read its digest-pinned full envelope. decision_page "
              "states pending count and truncation; omitted rows stay pending."
-             if getattr(context, "shared_decisions", False) else ""))
+             if getattr(context, "shared_decisions", False) else legacy_page_note))
 
 
 def _open_backlog(context: Context, caps: set) -> dict:
