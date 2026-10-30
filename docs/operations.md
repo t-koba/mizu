@@ -1305,11 +1305,15 @@ It reads only that project's existing `runs/*/dispatch-attempts.json`, never
 calls a provider, writes telemetry, exposes model tools, or changes scheduling.
 The JSON schema-1 result has a fixed aggregate shape (under 8 KiB): UTC observed
 period, observed/eligible attempts, exclusive static exclusion reasons, pair
-counts, cache-read-share bins/quantiles, distributions **across** internal groups,
+counts, cache-read-share bins/quantiles, idle-gap seconds quantiles, distributions
+**across** internal groups,
 and coverage counters. No group rows, identifiers/hashes, raw labels, prompts,
 paths or error strings are emitted. Group identity internally is the actual
 session key + generation + exact provider/model, not a synthetic grouping.
 Only aggregate observations may be returned through the existing operator Q&A.
+The 8 KiB bound still includes idle-gap quantiles: the fixed shape with
+conservative 24-character numeric placeholders and 32-character timestamps
+remains below it, including the CLI's indented JSON (covered synthetically).
 
 Bounds are 5,000 candidate directory entries (including non-directories), the
 200 newest run directories by directory mtime within those candidates, 256 KiB
@@ -1332,7 +1336,10 @@ if either endpoint overlaps any interval in that sequence (equal starts and
 nested intervals included), spans files, is ineligible, or differs in exact
 provider/model/engine. Touching intervals are allowed. Thus even interleaved
 files cannot create a false adjacency. Reported changes are second minus first
-cache-read share, not a causal effect. Share denominators use existing engine
+cache-read share, not a causal effect. `pairs.idle_gap_seconds` aggregates only
+that same valid pair set: next start minus previous end in seconds (zero for
+touching intervals). Its `count` equals `pairs.valid`; it exposes no pair or
+group rows. Share denominators use existing engine
 semantics: Codex input total; Pi/Claude input + cache-read + cache-write. Unknown
 or incomplete denominators are excluded, not filled with zeros.
 

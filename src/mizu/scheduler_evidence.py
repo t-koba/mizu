@@ -203,7 +203,7 @@ def summarize(project):
             sequences[row["sequence"]].append(row)
         if row["group"]:
             groups[row["group"]].append(row)
-    changes, group_changes = [], defaultdict(list)
+    changes, gaps, group_changes = [], [], defaultdict(list)
     pair_excluded = Counter({reason: 0 for reason in PAIR_REASONS})
     pair_candidates = unpaired = 0
     unknown_sessions = any(r["sequence"] is None for r in rows)
@@ -236,6 +236,7 @@ def summarize(project):
             else:
                 change = b["share"] - a["share"]
                 changes.append(change)
+                gaps.append((b["start"] - a["end"]).total_seconds())
                 group_changes[a["group"]].append(change)
     expired()
     shares = [r["share"] for r in rows if r["reason"] is None]
@@ -255,7 +256,8 @@ def summarize(project):
                            "last": max(timestamps).isoformat() if timestamps else None},
             "attempts": {"observed": len(rows), "eligible": len(shares), "excluded": dict(excluded)},
             "pairs": {"candidates": pair_candidates, "valid": len(changes), "excluded": dict(pair_excluded),
-                      "unpaired": unpaired, "change_quantiles": _distribution(changes)},
+                      "unpaired": unpaired, "change_quantiles": _distribution(changes),
+                      "idle_gap_seconds": _distribution(gaps)},
             "cache_read_share": {**_distribution(shares), "bins": [
                 {"lower": low, "upper": high, "count": count, "sparse": count < SPARSE_BELOW}
                 for (low, high), count in zip(((0, .25), (.25, .5), (.5, .75), (.75, 1)), bins)]},

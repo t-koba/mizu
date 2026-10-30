@@ -100,6 +100,39 @@ class SchedulerEvidenceTests(Fixture):
         self.assertTrue(all(b["sparse"] for b in view["cache_read_share"]["bins"]))
         self.assertTrue(view["groups"]["median_changes"]["sparse"])
 
+    def test_idle_gap_seconds_use_only_disjoint_valid_pairs(self):
+        rows = [attempt(i) for i in range(10)]
+        for index, gap in enumerate((0, .25, .5, .75, 1)):
+            rows[index * 2 + 1]["started_at"] = (
+                dt.datetime.fromisoformat(rows[index * 2]["ended_at"])
+                + dt.timedelta(seconds=gap)).isoformat()
+        self.write(list(reversed(rows)))
+        view = self.view()
+        self.assertEqual(view["pairs"]["idle_gap_seconds"], {
+            "count": view["pairs"]["valid"], "sparse": False,
+            "quantiles": {"p0": 0, "p25": .25, "p50": .5, "p75": .75, "p100": 1}})
+        self.write(rows[:2])
+        self.assertEqual(self.view()["pairs"]["idle_gap_seconds"], {
+            "count": 1, "sparse": True,
+            "quantiles": dict.fromkeys(("p0", "p25", "p50", "p75", "p100"), 0)})
+
+    def test_idle_gap_seconds_exclude_invalid_and_overlapping_pairs(self):
+        for bad in (dict(status="started"), dict(usage={"status": "unknown"}),
+                    dict(started_at=None), dict(started_at=attempt(0)["started_at"]),
+                    dict(ended_at=attempt(0)["ended_at"]),
+                    dict(models=[{"provider": "other", "model": "other"}])):
+            with self.subTest(bad=bad):
+                # A separate session supplies one valid positive gap; no invalid
+                # or overlapping endpoint may contribute a zero or negative gap.
+                self.write([attempt(0), attempt(1, **bad),
+                            attempt(2, session={"key": "b" * 64, "generation": 1}),
+                            attempt(3, session={"key": "b" * 64, "generation": 1})])
+                view = self.view()
+                self.assertEqual(view["pairs"]["valid"], 1)
+                self.assertEqual(view["pairs"]["idle_gap_seconds"], {
+                    "count": 1, "sparse": True,
+                    "quantiles": dict.fromkeys(("p0", "p25", "p50", "p75", "p100"), 1)})
+
     def test_ended_driver_error_attempt_remains_measurable(self):
         self.write([attempt(0), attempt(1, status="raised")])
         view = self.view()
@@ -114,6 +147,7 @@ class SchedulerEvidenceTests(Fixture):
                 self.write([attempt(0), attempt(1, **bad), attempt(2)])
                 view = self.view()
                 self.assertEqual(view["pairs"]["valid"], 0)
+                self.assertEqual(view["pairs"]["idle_gap_seconds"]["count"], 0)
                 self.assertEqual(view["pairs"]["candidates"], 1)
                 self.assertEqual(view["pairs"]["unpaired"], 1)
         self.write([attempt(0), attempt(1, session={}), attempt(2)])
@@ -165,6 +199,9 @@ class SchedulerEvidenceTests(Fixture):
         self.assertEqual(empty["coverage"]["status"], "empty_unknown")
         self.assertEqual(empty["coverage"]["history"], "unknown")
         self.assertIsNone(empty["cache_read_share"]["quantiles"]["p50"])
+        self.assertEqual(empty["pairs"]["idle_gap_seconds"], {
+            "count": 0, "sparse": True,
+            "quantiles": dict.fromkeys(("p0", "p25", "p50", "p75", "p100"))})
         self.write([attempt(0), attempt(1)], dropped=7)
         missing = self.project.root / "runs" / "missing"
         mkdir(missing)
@@ -194,6 +231,28 @@ class SchedulerEvidenceTests(Fixture):
         oversized.write_bytes(b" " * (evidence.MAX_BYTES + 1))
         self.assertEqual(self.view()["coverage"]["oversized_files"], 1)
         self.assertLess(len(json.dumps(view)), 8192)
+
+    def test_fixed_output_shape_retains_eight_kib_headroom(self):
+        self.write([attempt(0), attempt(1)])
+
+        def width_envelope(value):
+            # Counts are bounded by scan limits (including summed 63-bit
+            # dropped counts: <=22 digits). Float repr needs <=24 bytes.
+            # Quoted placeholders overestimate both, even for null quantiles.
+            if isinstance(value, dict):
+                return {key: width_envelope(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [width_envelope(item) for item in value]
+            if isinstance(value, bool):
+                return False  # longer than true
+            if value is None or isinstance(value, (int, float)):
+                return "9" * 24
+            return value
+
+        envelope = width_envelope(self.view())
+        envelope["period_utc"] = dict.fromkeys(("first", "last"), "9" * 32)
+        for indent in (None, 2):  # include the CLI's pretty JSON and newline
+            self.assertLess(len(json.dumps(envelope, indent=indent)) + 1, 8192)
 
     def test_candidate_enumeration_and_file_limits(self):
         for index in range(6):
