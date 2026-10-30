@@ -15,19 +15,72 @@ from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock, patch
 
 from support import Fixture
+from mizu import fs as fs_module
 from mizu import project as lifecycle
+from mizu import snapshot as snapshot_module
 from mizu.delegation_jobs import DelegationJobs
 from mizu.errors import Denied
 from mizu.fs import held, lock
 from mizu.process import run
 
 
-def _import_failure_json(exc):
+_IMPORT_DIAGNOSTIC_FIXED_TARGETS = frozenset({
+    '<redacted>', 'PROJECT.md', 'control.json', 'current.json',
+    'locks/control.lock', 'locks/publication.lock', 'locks/workspace.lock',
+    'project.toml', 'spool/editor/.mizu-outbox', 'workspace/app.py',
+})
+_IMPORT_DIAGNOSTIC_TARGET_PATTERNS = tuple(re.compile(pattern, re.ASCII) for pattern in (
+    r'histories/[0-9a-f]{64}\.json',
+    r'objects/[0-9a-f]{64}',
+    r'snapshots/[0-9a-f]{64}\.json',
+))
+
+
+def _sanitize_import_target(target):
+    """Keep only the known synthetic fixture paths; never serialize arbitrary names."""
+    if isinstance(target, str) and (target in _IMPORT_DIAGNOSTIC_FIXED_TARGETS or
+                                    any(pattern.fullmatch(target)
+                                        for pattern in _IMPORT_DIAGNOSTIC_TARGET_PATTERNS)):
+        return target
+    return '<redacted>'
+
+
+def _fixture_import_target(root, name, project_root, workspace_root):
+    """Map a captured read to an allowlisted path relative to the test project."""
+    if not isinstance(name, str):
+        return '<redacted>'
+    try:
+        root = Path(root)
+        project_root = Path(project_root)
+        workspace_root = Path(workspace_root)
+        if root == workspace_root:
+            target = f'workspace/{name}'
+        elif root == project_root:
+            target = name
+        else:
+            return '<redacted>'
+    except Exception:
+        return '<redacted>'
+    return _sanitize_import_target(target)
+
+
+def _has_oserror(exc):
+    """Recognize the safe-read wrapper's OSError cause without formatting it."""
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc, OSError):
+            return True
+        exc = exc.__cause__ or (None if exc.__suppress_context__ else exc.__context__)
+    return False
+
+
+def _import_failure_json(exc, *, target='<redacted>'):
     """Test-only allowlist: <=4 exceptions, <=6 frames each, no exception text.
 
-    Names are ASCII tokens (48 characters max); filenames are basenames only.
-    The resulting ASCII JSON line is bounded below 8 KiB. Never format an
-    exception or traceback: those include messages, source lines and paths.
+    Names are ASCII tokens (48 characters max); targets are known fixture-
+    relative paths only; filenames are basenames. Never format an exception
+    or traceback: those include messages, source lines and absolute paths.
     """
     def token(value, pattern):
         return value if re.fullmatch(pattern, value, flags=re.ASCII) else '<redacted>'
@@ -54,18 +107,40 @@ def _import_failure_json(exc):
                     entry[key] = value
         chain.append(entry)
         exc = exc.__cause__ or (None if exc.__suppress_context__ else exc.__context__)
-    return json.dumps({'operation': 'managed-import', 'target': 'project.toml',
+    return json.dumps({'operation': 'managed-import',
+                       'target': _sanitize_import_target(target),
                        'chain': chain}, ensure_ascii=True, separators=(',', ':'))
 
 
-def _diagnosed_managed_import(import_source):
+def _diagnosed_managed_import(import_source, *, project_root=None, workspace_root=None):
     """Used only at the known managed-import call; never diagnose external input."""
+    target = '<redacted>'
+    original_read = snapshot_module.safe_read_info
+
+    def tracked_read(root, name, maximum):
+        nonlocal target
+        try:
+            return original_read(root, name, maximum)
+        except Exception as exc:
+            if _has_oserror(exc) and project_root is not None and workspace_root is not None:
+                target = _fixture_import_target(root, name, project_root, workspace_root)
+            raise
+
+    def invoke():
+        if project_root is None or workspace_root is None:
+            return import_source()
+        # safe_read resolves fs.safe_read_info dynamically; SnapshotStore holds
+        # its own imported alias, so both test-only boundaries must be wrapped.
+        with patch.object(fs_module, 'safe_read_info', side_effect=tracked_read), \
+             patch.object(snapshot_module, 'safe_read_info', side_effect=tracked_read):
+            return import_source()
+
     try:
-        return import_source()
+        return invoke()
     except Exception as exc:
         if sys.platform == 'win32':
             try:
-                payload = _import_failure_json(exc).encode('ascii')
+                payload = _import_failure_json(exc, target=target).encode('ascii')
                 if len(payload) <= 8192:
                     # Parent-owned scratch path, not an artifact. No stderr output.
                     path = os.environ['MIZU_PROJECT_IMPORT_DIAGNOSTIC']
@@ -109,7 +184,7 @@ class ProjectImportDiagnosticTests(unittest.TestCase):
         data = json.loads(output)
         self.assertEqual(set(data), {'operation', 'target', 'chain', 'source_sha',
                                      'source_manifest_sha256', 'python'})
-        self.assertEqual((data['operation'], data['target']), ('managed-import', 'project.toml'))
+        self.assertEqual((data['operation'], data['target']), ('managed-import', '<redacted>'))
         self.assertEqual((data['source_sha'], data['source_manifest_sha256']), ('a' * 40, 'b' * 64))
         self.assertEqual(data['python'], '.'.join(map(str, sys.version_info[:3])))
         denied, error = data['chain']
@@ -120,6 +195,31 @@ class ProjectImportDiagnosticTests(unittest.TestCase):
         self.assertEqual(error['frames'], [{'file': 'canary.py', 'function': 'fail', 'line': 5}])
         self.assertIs(raised.exception.__cause__.__traceback__.tb_frame.f_code,
                       namespace['fail'].__code__)
+
+    def test_failed_safe_read_exports_only_fixture_relative_target(self):
+        from test_check_offline import CHECK
+        failure = Denied('DENIED_CANARY')
+        failure.__cause__ = PermissionError(13, 'MESSAGE_CANARY', 'FILE_CANARY')
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch.object(CHECK, 'ROOT', Path(temporary)), \
+             patch.object(sys, 'platform', 'win32'), \
+             patch.dict(os.environ, {'GITHUB_SHA': 'a' * 40}):
+            root = Path(temporary)
+            project_root = root / 'fixture-project'
+            workspace_root = project_root / 'workspace'
+            with patch.object(fs_module, '_safe_read_openat', side_effect=failure), \
+                 patch.object(fs_module, '_safe_read_portable', side_effect=failure):
+                with self.assertRaises(Denied) as raised:
+                    with CHECK.project_import_diagnostic(os.environ, root, 'b' * 64):
+                        _diagnosed_managed_import(
+                            lambda: snapshot_module.safe_read_info(workspace_root, 'app.py', 1024),
+                            project_root=project_root, workspace_root=workspace_root)
+            output = (root / 'private-validation/project-import-diagnostic.json').read_text()
+        self.assertIs(raised.exception, failure)
+        self.assertLessEqual(len(output.encode('ascii')), 8192)
+        self.assertEqual(json.loads(output)['target'], 'workspace/app.py')
+        for secret in ('MESSAGE_CANARY', 'FILE_CANARY', 'DENIED_CANARY', str(project_root)):
+            self.assertNotIn(secret, output)
 
     def test_chain_and_frame_bounds(self):
         def fail(depth):
@@ -245,9 +345,12 @@ class ProjectImportReservationTests(Fixture):
 
         with patch.object(DelegationJobs, '__init__', side_effect=AssertionError('Store initialization')), \
              patch.object(DelegationJobs, 'guard', side_effect=guarded) as guard:
-            imported = _diagnosed_managed_import(self.import_source)
+            imported = _diagnosed_managed_import(
+                self.import_source, project_root=self.project.root,
+                workspace_root=self.project.workspace)
             root_import = _diagnosed_managed_import(
-                lambda: self.import_source(self.project.root, name='root-import'))
+                lambda: self.import_source(self.project.root, name='root-import'),
+                project_root=self.project.root, workspace_root=self.project.workspace)
             self.assertEqual(guard.call_count, 2)
             guard.assert_called_with(self.project.root)
         self.assertFalse((self.project.root / 'delegation-jobs').exists())
@@ -257,6 +360,33 @@ class ProjectImportReservationTests(Fixture):
         with patch.object(DelegationJobs, 'guard', side_effect=AssertionError('External guard')):
             external = self.import_source(self.root / 'source', name='external')
         self.assertEqual((external.workspace / 'app.py').read_bytes(), b'VALUE = 2\n')
+
+    def test_diagnostic_captures_managed_project_marker_read_target(self):
+        from test_check_offline import CHECK
+        failure = Denied('DENIED_CANARY')
+        failure.__cause__ = PermissionError(13, 'MESSAGE_CANARY', 'FILE_CANARY')
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch.object(CHECK, 'ROOT', Path(temporary)), \
+             patch.object(sys, 'platform', 'win32'), \
+             patch.dict(os.environ, {'GITHUB_SHA': 'a' * 40}):
+            root = Path(temporary)
+            with patch.object(DelegationJobs, 'guard', return_value=None), \
+                 patch.object(fs_module, '_safe_read_openat', side_effect=failure), \
+                 patch.object(fs_module, '_safe_read_portable', side_effect=failure):
+                with self.assertRaises(Denied) as raised:
+                    with CHECK.project_import_diagnostic(os.environ, root, 'b' * 64):
+                        _diagnosed_managed_import(
+                            self.import_source, project_root=self.project.root,
+                            workspace_root=self.project.workspace)
+            output = (root / 'private-validation/project-import-diagnostic.json').read_text()
+        self.assertIs(raised.exception, failure)
+        data = json.loads(output)
+        self.assertEqual(data['target'], 'project.toml')
+        self.assertEqual([entry['type'] for entry in data['chain']],
+                         ['Denied', 'PermissionError'])
+        self.assertEqual(data['chain'][1]['errno'], 13)
+        for secret in ('MESSAGE_CANARY', 'FILE_CANARY', 'DENIED_CANARY', str(self.root)):
+            self.assertNotIn(secret, output)
 
     def test_non_workspace_project_subdirectory_does_not_become_root_import(self):
         store = DelegationJobs(self.project.root)

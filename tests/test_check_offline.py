@@ -493,11 +493,31 @@ class ProjectImportDiagnosticExportTests(unittest.TestCase):
                 'chain': [{'type': 'RuntimeError', 'frames': [
                     {'file': 'canary.py', 'function': 'fail', 'line': 7}]}]}
 
+    def test_accepts_only_allowlisted_fixture_relative_targets(self):
+        valid = ('<redacted>', 'PROJECT.md', 'control.json', 'current.json',
+                 'locks/control.lock', 'locks/publication.lock', 'locks/workspace.lock',
+                 'project.toml', 'spool/editor/.mizu-outbox', 'workspace/app.py',
+                 'histories/' + 'a' * 64 + '.json', 'objects/' + 'b' * 64,
+                 'snapshots/' + 'c' * 64 + '.json')
+        for target in valid:
+            with self.subTest(target=target):
+                data = self.payload()
+                data['target'] = target
+                self.assertTrue(CHECK._valid_project_import_diagnostic(data))
+        for target in ('/workspace/app.py', 'etc/passwd', 'locks/other.lock',
+                       'histories/' + 'g' * 64 + '.json'):
+            with self.subTest(target=target):
+                data = self.payload()
+                data['target'] = target
+                self.assertFalse(CHECK._valid_project_import_diagnostic(data))
+
     def test_rejects_private_malformed_or_out_of_bounds_scratch_without_masking_failure(self):
         invalid = [b'not JSON MESSAGE_CANARY', b'x' * 8193, b'\xff', b'[]']
         for path, value in [
                 (('message',), 'MESSAGE_CANARY'),
                 (('target',), 'PATH_CANARY/project.toml'),
+                (('target',), 'locks/unknown.lock'),
+                (('target',), '../project.toml'),
                 (('operation',), 'safe_read'),
                 (('chain',), []), (('chain',), self.payload()['chain'] * 5),
                 (('chain', 0, 'message'), 'MESSAGE_CANARY'),

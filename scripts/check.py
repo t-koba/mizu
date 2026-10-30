@@ -1072,10 +1072,20 @@ def provision_targets(allowed_not_run) -> set:
 # One Windows test's value-free evidence; never part of timing/report output.
 PROJECT_IMPORT_DIAGNOSTIC_ENV = 'MIZU_PROJECT_IMPORT_DIAGNOSTIC'
 PROJECT_IMPORT_DIAGNOSTIC_BYTES = 8192
+_PROJECT_IMPORT_DIAGNOSTIC_TARGETS = frozenset({
+    '<redacted>', 'PROJECT.md', 'control.json', 'current.json',
+    'locks/control.lock', 'locks/publication.lock', 'locks/workspace.lock',
+    'project.toml', 'spool/editor/.mizu-outbox', 'workspace/app.py',
+})
+_PROJECT_IMPORT_DIAGNOSTIC_TARGET_PATTERNS = tuple(re.compile(pattern, re.ASCII) for pattern in (
+    r'histories/[0-9a-f]{64}\.json',
+    r'objects/[0-9a-f]{64}',
+    r'snapshots/[0-9a-f]{64}\.json',
+))
 
 
 def _valid_project_import_diagnostic(data):
-    """Strict scratch schema: no messages, source text, paths, or extra fields."""
+    """Strict scratch schema: no messages, contents, absolute paths, or extra fields."""
     def token(value, pattern):
         return isinstance(value, str) and (value == '<redacted>' or
                                            re.fullmatch(pattern, value, re.ASCII) is not None)
@@ -1083,9 +1093,14 @@ def _valid_project_import_diagnostic(data):
     def integer(value, low, high):
         return type(value) is int and low <= value <= high
 
+    def target(value):
+        return isinstance(value, str) and (value in _PROJECT_IMPORT_DIAGNOSTIC_TARGETS or
+                                           any(pattern.fullmatch(value)
+                                               for pattern in _PROJECT_IMPORT_DIAGNOSTIC_TARGET_PATTERNS))
+
     if not isinstance(data, dict) or set(data) != {'operation', 'target', 'chain'}:
         return False
-    if data['operation'] != 'managed-import' or data['target'] != 'project.toml':
+    if data['operation'] != 'managed-import' or not target(data['target']):
         return False
     chain = data['chain']
     if not isinstance(chain, list) or not 1 <= len(chain) <= 4:
