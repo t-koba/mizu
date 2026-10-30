@@ -666,14 +666,17 @@ Each call holds, together and in this order:
 All remain held through scan, comparison, projection writes, receipt writes and
 post-apply verification. Runtime already holds its own role exclusion through
 finish/ack. Direct legacy ack acquires only that role's receipt lock: it never
-acquires a source or role lock while holding it. Source mutations take
-`record_lock` and never acquire role exclusions or receipt locks in reverse
-order. Concurrent
-reconciliation attempts serialize or fail `Busy`; no caller waits for an active
-run while holding the source lock. Locks are released on exception/death and
-are never unlinked. Preflight can create lock infrastructure but creates **no
-immutable projections or receipts**. Legacy delivery and exact acknowledgement
-remain the only active runtime authority for decisions.
+acquires a source or role lock while holding it. Mutations of the decision
+boundary take `record_lock` and never acquire role exclusions or receipt locks
+in reverse order. Reference-neutral Insight submissions and evidence appends
+with omitted or empty `smoke_refs` take only the per-project record lock; they do
+not change the live smoke-reference set. Pin-bearing mutations and
+multi-record decision/wait/task transactions retain the global-before-project
+path. Concurrent reconciliation attempts serialize or fail `Busy`; no caller
+waits for an active run while holding the source lock. Locks are released on
+exception/death and are never unlinked. Preflight can create lock infrastructure
+but creates **no immutable projections or receipts**. Legacy delivery and exact
+acknowledgement remain the only active runtime authority for decisions.
 
 ### Exact schema and identity
 

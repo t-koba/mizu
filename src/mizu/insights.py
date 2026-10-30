@@ -49,7 +49,7 @@ import uuid
 import os
 from pathlib import Path
 
-from .smoke_refs import record_lock, validate_refs, require_pairs
+from .smoke_refs import record_lock, project_record_lock, validate_refs, require_pairs
 from . import insight_archive, wait_events
 from .work_item_waits import WAIT_KINDS, normalize_wait
 from .errors import Busy, Denied, LimitExceeded
@@ -489,7 +489,10 @@ class Insights:
                  "base_snapshot": base_snapshot, "run": run, "origin": origin, **specified}
         if len(canonical(probe)) > self.maximum:
             raise Denied("Insight exceeds byte limit")
-        with record_lock(self.root):
+        # New submissions cannot introduce smoke references. Keep only the
+        # project-local lock so large inbox dedup scans do not serialize other
+        # projects behind the shared retention lock.
+        with project_record_lock(self.root):
             if not explicit:
                 best = None
                 best_key = None
@@ -730,7 +733,12 @@ replacement insight without implying rejected substance.
             raise Denied("Evidence attach requires the revision read (expected_rev)")
         if isinstance(expected_rev, bool) or not isinstance(expected_rev, int) or expected_rev < 1:
             raise Denied("Evidence revision must be a positive revision number")
-        with record_lock(self.root):
+        # Appending evidence without new references leaves the active pin set
+        # unchanged; an empty explicit list is likewise reference-neutral.
+        # Any nonempty (or malformed non-list) value stays on the global path.
+        project_only = smoke_refs is None or (type(smoke_refs) is list and not smoke_refs)
+        record_guard = project_record_lock if project_only else record_lock
+        with record_guard(self.root):
             current = self.read(insight_id)
             rev = _rev_of(current)
             if expected_rev != rev:

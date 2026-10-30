@@ -1,5 +1,7 @@
-"""Typed smoke IDs and the shared, short reference/publication critical section.
+"""Typed smoke IDs and lock ordering for shared smoke-reference state.
 
+Pin-sensitive record transactions acquire the shared lock before the project
+lock; audited reference-neutral operations may use the project lock alone.
 IDs are scoped by their containing project/owner record; Insight entries also
 store the exact revision. History keeps IDs, but only current live owners pin.
 """
@@ -46,13 +48,20 @@ def shared_lock(data: Path, *, blocking=False):
 
 
 @contextlib.contextmanager
+def project_record_lock(root: Path, *, blocking: bool = True):
+    """Serialize one project's records; caller must prove no shared-pin mutation."""
+    with lock(root / "locks" / "insights.lock", blocking=blocking):
+        yield
+
+
+@contextlib.contextmanager
 def record_lock(root: Path, *, blocking: bool = True):
     # Standalone record stores (e.g. import tools/tests) have no shared data
     # owner. Managed project roots always use <data>/projects/<project>.
     # Preserve the same global-before-project order in both blocking modes.
     shared = shared_lock(root.parent.parent, blocking=blocking) if root.parent.name == "projects" else contextlib.nullcontext()
     with shared:
-        with lock(root / "locks" / "insights.lock", blocking=blocking):
+        with project_record_lock(root, blocking=blocking):
             yield
 
 

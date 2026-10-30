@@ -58,6 +58,34 @@ class SmokeRetentionTests(unittest.TestCase):
         return {p.relative_to(self.data).as_posix():
                 ('dir' if p.is_dir() else p.read_bytes()) for p in self.data.rglob('*')}
 
+    def test_reference_neutral_insight_operations_skip_shared_lock(self):
+        first, _ = self.owner('first')
+        second, _ = self.owner('second')
+        # Hold the real shared lock, then make any attempt to reacquire it fail
+        # immediately; these per-project operations must not need that lock.
+        with shared_lock(self.data):
+            with patch('mizu.smoke_refs.shared_lock', side_effect=Busy('shared lock held')) as shared:
+                created = first.submit(source='worker', title='New', body='No refs', base_snapshot=None)
+                updated = second.submit(source='worker', title='Other', body='No refs', base_snapshot=None)
+                first.attach_evidence(created['id'], source='worker', text='No refs', expected_rev=1)
+                first.attach_evidence(created['id'], source='worker', text='Empty refs',
+                                      expected_rev=1, smoke_refs=[])
+                self.assertEqual(shared.call_count, 0)
+        self.assertEqual(len(first.read(created['id'])['evidence']), 2)
+        self.assertEqual(first.read(created['id'])['evidence'][1]['smoke_refs'], [])
+        self.assertEqual(second.read(updated['id'])['evidence'], [])
+
+    def test_reference_bearing_evidence_keeps_shared_lock(self):
+        self.pair()
+        insights, _ = self.owner()
+        item = self.insight(insights)
+        with patch('mizu.smoke_refs.shared_lock', side_effect=Busy('shared lock held')) as shared:
+            with self.assertRaises(Busy):
+                insights.attach_evidence(item['id'], source='worker', text='Pinned',
+                                         expected_rev=1, smoke_refs=[self.a])
+        shared.assert_called_once()
+        self.assertEqual(insights.read(item['id'])['evidence'], [])
+
     def test_insight_attention_metadata_is_validated_without_changing_pins(self):
         self.pair()
         insights, _ = self.owner()

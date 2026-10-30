@@ -859,8 +859,10 @@ recognized quarantine recovery remains available.
 
 Pair publication, typed-reference changes and retirement share
 `data_dir/locks/smoke-retention.lock`; prune/publication acquire it nonblocking,
-while record writers retain the existing bounded writer wait; reference writers acquire it
-before the record-store lock they mutate. Delivery binding nests it between
+while pin-sensitive record writers retain the existing bounded writer wait and
+acquire it before the per-project record lock. Reference-neutral Insight
+submissions and evidence appends with omitted or empty `smoke_refs` use only the
+per-project lock. Delivery binding nests the shared lock between
 `publication.lock` and `insights.lock`; snapshot and smoke-bundle publishers take
 only their own lock. Retention never acquires workspace or role-execution locks,
 avoiding a cycle with live writers. The live provider
