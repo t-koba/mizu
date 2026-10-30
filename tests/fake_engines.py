@@ -35,8 +35,11 @@ def finish(bridge, *, resumed=False):
         forward(bridge, 'read', {'path': 'app.py'})
         if scenario == 'recover-missing':
             return
+        state = 'Retained dirty work'
+        if scenario == 'recover-continue':
+            state += '\nNext: Resume the synthetic task'
         forward(bridge, 'finish', {'outcome': scenario.removeprefix('recover-'),
-                                 'summary': 'Recovered existing workspace', 'state': 'Retained dirty work'})
+                                 'summary': 'Recovered existing workspace', 'state': state})
         return
     if scenario.startswith('seal-'):
         if len(bridge['tools']) != 1:

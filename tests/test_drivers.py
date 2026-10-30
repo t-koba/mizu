@@ -281,7 +281,7 @@ class SyntheticEngineTests(Fixture):
                     self.assertEqual(ctx.request_count, 2)
                     self.assertEqual(ctx.execution_attempt, 1)
                     self.assertEqual(ctx.finished['outcome'], outcome)
-                    self.assertEqual(ctx.finished['state'], 'Retain state')
+                    self.assertEqual(ctx.finished['state'], 'Retain state\nNext: Resume the synthetic task')
                     self.assertEqual(ctx.role, role)
                     self.assertTrue(ctx.operations_stopped.is_set())
                     self.assertEqual(ctx.request_deadlines, {})
