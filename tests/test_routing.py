@@ -51,7 +51,7 @@ class RoutingFixture(Fixture):
     def finish_next(self, profile, reason=None):
         from mizu.runtime import Engine
         from support import ScriptDriver
-        args = {"outcome": "continue", "summary": "unit done", "state": "next",
+        args = {"outcome": "continue", "summary": "unit done", "state": 'next\nNext: Inspect the test result',
                 "next_profile": profile}
         if reason is not None:
             args["next_reason"] = reason
@@ -68,7 +68,7 @@ class RoutingFixture(Fixture):
 class RoutingValidationTests(RoutingFixture):
     def test_finish_rejects_malformed_recommendation(self):
         ctx = self.context("worker")
-        base = {"outcome": "continue", "summary": "work", "state": "next"}
+        base = {"outcome": "continue", "summary": "work", "state": 'next\nNext: Inspect the test result'}
         with self.assertRaises(Denied):
             ctx.handle("finish", {**base, "next_profile": "Deep!!"})
         with self.assertRaises(Denied):
@@ -80,7 +80,7 @@ class RoutingValidationTests(RoutingFixture):
 
     def test_whitespace_reason_without_profile_leaves_no_trace(self):
         ctx = self.context("worker")
-        ctx.handle("finish", {"outcome": "continue", "summary": "work", "state": "next",
+        ctx.handle("finish", {"outcome": "continue", "summary": "work", "state": 'next\nNext: Inspect the test result',
                               "next_reason": "   "})
         self.assertNotIn("next_profile", ctx.finished)
         self.assertNotIn("next_reason", ctx.finished)
@@ -95,7 +95,7 @@ class RoutingValidationTests(RoutingFixture):
 class RoutingLifecycleTests(RoutingFixture):
     def finish_next(self, profile, reason=None):
         from mizu.runtime import Engine
-        args = {"outcome": "continue", "summary": "unit done", "state": "next",
+        args = {"outcome": "continue", "summary": "unit done", "state": 'next\nNext: Inspect the test result',
                 "next_profile": profile}
         if reason is not None:
             args["next_reason"] = reason
@@ -177,7 +177,7 @@ class RoutingLifecycleTests(RoutingFixture):
         (self.project.root / "routing").write_bytes(b"blocked")
         def callback(context, prompt, _profile):
             context.handle("finish", {"outcome": "continue", "summary": "unit done",
-                                      "state": "next", "next_profile": "deep"})
+                                      "state": 'next\nNext: Inspect the test result', "next_profile": "deep"})
         result = Engine(self.config, driver=ScriptDriver(callback)).run(self.project, "worker")
         self.assertEqual(result["status"], "completed")
 
@@ -197,7 +197,7 @@ class RoutingValidityTests(RoutingFixture):
         from support import ScriptDriver
         def callback(context, prompt, _profile):
             context.handle("finish", {"outcome": "continue", "summary": "unit done",
-                                      "state": "next"})
+                                      "state": 'next\nNext: Inspect the test result'})
         result = Engine(self.config, driver=ScriptDriver(callback)).run(self.project, "worker")
         self.assertEqual(result["status"], "completed")
         return result

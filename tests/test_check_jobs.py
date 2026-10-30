@@ -322,7 +322,7 @@ class JobTests(Fixture):
         def act(ctx, *_):
             ctx._op_check_job({'action': 'result', 'id': job['id']})
             ctx.bound_hit = 'requests'
-            ctx._op_finish({'outcome': 'continue', 'summary': 'Bound reached', 'state': 'Unfinished work'})
+            ctx._op_finish({'outcome': 'continue', 'summary': 'Bound reached', 'state': 'Unfinished work\nNext: Inspect the test result'})
         Engine(self.config, driver=ScriptDriver(act)).run(self.project, 'worker')
         self.assertFalse(check_jobs.read(self.project, job['id'])['acknowledged'])
 
@@ -2483,7 +2483,7 @@ class TerminalResultWakeTests(Fixture):
         from mizu.runtime import Engine, should_run
         def finish(ctx, *_):
             ctx.handle('finish', {'outcome': 'continue', 'summary': 'No change',
-                                  'state': ctx.snapshot['state']})
+                                  'state': 'Now: No change\nNext: Inspect the check result'})
         driver = ScriptDriver(finish)
         engine = Engine(self.config, driver=driver)
         # Consume initial goal/operator inputs, then publish a no-progress finish.

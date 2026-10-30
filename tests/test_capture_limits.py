@@ -54,14 +54,14 @@ class CaptureLimitTests(Fixture):
         ctx = self.context()
         (ctx.workspace / "big.profraw").write_bytes(b"x" * 200)
         with self.assertRaises(Denied) as refused:
-            ctx._op_finish({"summary": "Remove the stray profile", "state": "cleaning",
+            ctx._op_finish({"summary": "Remove the stray profile", "state": 'cleaning\nNext: Inspect the test result',
                             "outcome": "continue"})
         self.assertIn("big.profraw", str(refused.exception))
         self.assertIsNone(ctx.finished)
         # The writer removes the file and finishes again within the same run.
         (ctx.workspace / "big.profraw").unlink()
         self.assertEqual(ctx._op_finish({"summary": "Removed the stray profile",
-                                         "state": "clean", "outcome": "continue"}),
+                                         "state": 'clean\nNext: Inspect the test result', "outcome": "continue"}),
                          {"sealed": True})
 
     def test_non_object_health_json_does_not_interrupt_terminal_failure_recording(self):
@@ -84,7 +84,7 @@ class CaptureLimitTests(Fixture):
         ctx = self.context()
         (ctx.workspace / "big.profraw").write_bytes(b"x" * 200)
         with self.assertRaises(Denied):
-            ctx._op_finish({"summary": "work", "state": "cleaning", "outcome": "continue"})
+            ctx._op_finish({"summary": "work", "state": 'cleaning\nNext: Inspect the test result', "outcome": "continue"})
         cause = ctx.capture_limit
         self.assertIn("big.profraw", cause)
         _record_health_failure(self.project, "worker", "run-1", Denied("boom"), 1, cause=cause)
@@ -102,7 +102,7 @@ class CaptureLimitTests(Fixture):
         cause = "Snapshot file exceeds the byte limit: big.profraw (200 > 64 bytes)"
 
         def work(ctx, *_):
-            ctx.handle("finish", {"outcome": "continue", "summary": "work", "state": "done"})
+            ctx.handle("finish", {"outcome": "continue", "summary": "work", "state": 'done\nNext: Inspect the test result'})
 
         with patch.object(snapshot_module.Snapshots, "capture_files",
                           side_effect=CaptureLimitExceeded(cause)):
@@ -119,12 +119,12 @@ class CaptureLimitTests(Fixture):
         ctx = self.context()
         (ctx.workspace / "big.profraw").write_bytes(b"x" * 200)
         with self.assertRaises(Denied):
-            ctx._op_finish({"summary": "work", "state": "cleaning", "outcome": "continue"})
+            ctx._op_finish({"summary": "work", "state": 'cleaning\nNext: Inspect the test result', "outcome": "continue"})
         cause = ctx.capture_limit
         _record_health_failure(self.project, "worker", "run-1", Denied("boom"), 3, cause=cause)
         # The writer removes the file: the workspace is representable again.
         (ctx.workspace / "big.profraw").unlink()
-        ctx._op_finish({"summary": "work", "state": "clean", "outcome": "continue"})
+        ctx._op_finish({"summary": "work", "state": 'clean\nNext: Inspect the test result', "outcome": "continue"})
         self.assertIsNone(ctx.capture_limit)
         self.assertTrue(ctx.capture_resolved)
         _record_health_failure(self.project, "worker", "run-2", Denied("boom"), 3,
@@ -140,7 +140,7 @@ class CaptureLimitTests(Fixture):
         def unrepresentable(ctx, *_):
             (ctx.workspace / "big.profraw").write_bytes(b"x" * 200)
             ctx.handle("finish", {"outcome": "continue", "summary": "work",
-                                  "state": "cleaning"})
+                                  "state": 'cleaning\nNext: Inspect the test result'})
 
         with self.assertRaises(Denied):
             Engine(self.config, driver=ScriptDriver(unrepresentable)).run(self.project, "worker")
@@ -160,7 +160,7 @@ class CaptureLimitTests(Fixture):
         (self.project.workspace / "big.profraw").unlink()
 
         def succeeding(ctx, *_):
-            ctx.handle("finish", {"outcome": "continue", "summary": "work", "state": "clean"})
+            ctx.handle("finish", {"outcome": "continue", "summary": "work", "state": 'clean\nNext: Inspect the test result'})
 
         Engine(self.config, driver=ScriptDriver(succeeding)).run(self.project, "worker")
         health = read_json(self.project.root / "health" / "worker.json")
@@ -171,7 +171,7 @@ class CaptureLimitTests(Fixture):
         ctx = self.context()
         (ctx.workspace / "big.profraw").write_bytes(b"x" * 200)
         with self.assertRaises(Denied):
-            ctx._op_finish({"summary": "work", "state": "cleaning", "outcome": "continue"})
+            ctx._op_finish({"summary": "work", "state": 'cleaning\nNext: Inspect the test result', "outcome": "continue"})
         cause = ctx.capture_limit
         _record_health_failure(self.project, "worker", "run-1", Denied("boom"), 3, cause=cause)
         # A later unrelated failure keeps the cause that still applies.

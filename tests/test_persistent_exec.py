@@ -197,7 +197,7 @@ class PersistentExecTests(Fixture):
     def test_missing_completion_and_cleanup_failure_poison_context(self):
         self.call(':')
         session = self.ctx.exec_session
-        with self.assertRaisesRegex(Denied, 'updated short state'):
+        with self.assertRaisesRegex(Denied, 'standalone Next: <step>'):
             self.ctx._op_finish({'summary': 'done', 'outcome': 'continue'})
         self.assertIs(self.ctx.exec_session, session)
         self.assertFalse(session.closed)
@@ -212,7 +212,7 @@ class PersistentExecTests(Fixture):
         with self.assertRaisesRegex(Denied, 'cleanup failed'):
             self.call(':')
         with self.assertRaisesRegex(Denied, 'cleanup failed'):
-            self.ctx._op_finish({'summary': 'done', 'outcome': 'continue', 'state': 'next'})
+            self.ctx._op_finish({'summary': 'done', 'outcome': 'continue', 'state': 'next\nNext: Inspect the test result'})
 
     def test_verify_and_check_jobs_are_independent_one_shots(self):
         self.call('export MIZU_TEST=dirty; cd /tmp')
@@ -275,7 +275,7 @@ class PersistentLifecycleTests(Fixture):
                     observed.append(ctx)
                     if failure:
                         raise Denied('driver fault')
-                    ctx.handle('finish', {'outcome': 'continue', 'summary': 'closed', 'state': 'next'})
+                    ctx.handle('finish', {'outcome': 'continue', 'summary': 'closed', 'state': 'next\nNext: Inspect the test result'})
                     session.close.assert_called_once()
                 engine = Engine(self.config, driver=ScriptDriver(callback))
                 if failure:

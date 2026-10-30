@@ -14,6 +14,8 @@ WRITER_CONTINUATION_CONTRACT = (
     "To propose an immediate writer continuation, finish with outcome=continue (or a "
     "host-sealed bounded outcome) and include exactly one standalone "
     "`Next: <actionable step>` line in state, naming a new proposed follow-up. "
+    "A malformed writer continue is refused before sealing or acknowledgements; "
+    "correct state to that form and retry finish. "
     "Next alone does not admit: the host requires a parent snapshot and a "
     "validated progress record with at least one selected true `tool`, `code`, "
     "`decision`, or `insight` signal. A state-only Next does not admit and may "

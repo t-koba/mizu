@@ -430,7 +430,7 @@ class ReadySetChangeTests(Fixture):
         self.project.config = self.config
         def finish(ctx, *_):
             ctx.handle('finish', {'outcome': 'continue', 'summary': 'Observed only',
-                                  'state': 'An ordinary free-text rewrite'})
+                                  'state': 'An ordinary free-text rewrite\nNext: Inspect the test result'})
         engine = self.engine(finish)
         engine.run(self.project, 'worker')
         snapshot = self.project.snapshots.get()

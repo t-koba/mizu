@@ -74,7 +74,7 @@ class ProgressAdmissionTests(Fixture):
         generation = self.project.insights.generation()
         base = self.project.snapshots.create(
             self.project.snapshots.capture_files(self.project.workspace),
-            goal=self.project.goal, state=current["state"], run=None,
+            goal=self.project.goal, state="Now: Baseline inputs\nNext: Continue the progress experiment", run=None,
             outcome="wait", summary="Baseline inputs for a progress test",
             wake_at=time.time() + 3600, inbox_seen=generation,
             wake_generation=self.project.control().get("wake_generation", ""),
@@ -100,7 +100,7 @@ class ProgressAdmissionTests(Fixture):
         progress = self._record(role=role, selected=selected, count=count, stamp=stamp)
         snapshot = self.project.snapshots.create(
             self.project.snapshots.capture_files(self.project.workspace),
-            goal=self.project.goal, state=current["state"], run=None, outcome=outcome,
+            goal=self.project.goal, state="Now: Baseline inputs\nNext: Continue the progress experiment", run=None, outcome=outcome,
             summary="Progress disposition test", wake_at=wake_at,
             inbox_seen=self.project.insights.generation(),
             wake_generation=self.project.control().get("wake_generation", ""),
@@ -216,7 +216,7 @@ class ProgressAdmissionTests(Fixture):
             ctx.handle("finish", {"outcome": "continue", "summary": "State was reworded",
                                    "state": value})
         state = self._recorded_run(
-            lambda ctx, base: finish_with_state(ctx, base, "Now: a distinct recorded state."))
+            lambda ctx, base: finish_with_state(ctx, base, "Now: a distinct recorded state.\nNext: Continue the progress experiment"))
         self.assertTrue(state["progress"]["signals"]["state"])
         self.assertNotIn("state", state["progress"]["selected"])
         self.assertFalse(state["progress"]["has_progress"])
@@ -227,7 +227,7 @@ class ProgressAdmissionTests(Fixture):
             self.config.limits, progress_signals=DEFAULT_PROGRESS_SIGNALS + ("state",))
         opted_in_config = dataclasses.replace(self.config, limits=opted_in_limits)
         opted_in = self._recorded_run(
-            lambda ctx, base: finish_with_state(ctx, base, "Now: another paraphrase."),
+            lambda ctx, base: finish_with_state(ctx, base, "Now: another paraphrase.\nNext: Continue the progress experiment"),
             custom_config=opted_in_config)
         self.assertIn("state", opted_in["progress"]["selected"])
         self.assertTrue(opted_in["progress"]["has_progress"])
@@ -632,7 +632,7 @@ class PerRoleProgressSignalsTests(Fixture):
         generation = self.project.insights.generation()
         base = self.project.snapshots.create(
             self.project.snapshots.capture_files(self.project.workspace),
-            goal=self.project.goal, state=current["state"], run=None,
+            goal=self.project.goal, state="Now: Baseline inputs\nNext: Continue the progress experiment", run=None,
             outcome="wait", summary="Baseline inputs for a progress test",
             wake_at=time.time() + 3600, inbox_seen=generation,
             wake_generation=self.project.control().get("wake_generation", ""),

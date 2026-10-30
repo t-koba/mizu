@@ -63,7 +63,7 @@ def finish(bridge, *, resumed=False):
                     raise AssertionError('Failed finish was retried successfully')
             return
         outcome = scenario.removeprefix('seal-')
-        forward(bridge, 'finish', {'outcome': outcome, 'summary': 'Synthetic checkpoint seal', 'state': 'Retain state'})
+        forward(bridge, 'finish', {'outcome': outcome, 'summary': 'Synthetic checkpoint seal', 'state': 'Retain state\nNext: Resume the synthetic task'})
         forward(bridge, '_model_usage', {'sequence': 1, 'usage': {'outputTokens': 5}})
         for operation, args in (('finish', {'outcome': 'continue', 'summary': 'must not overwrite'}),
                                 ('files', {}), ('_budget', {'sequence': 2}), ('_hello', {}),

@@ -71,7 +71,7 @@ class IdleWithOpenWorkTests(Fixture):
         self.project.snapshots.publish(created)
         return self.project.snapshots.get()
 
-    def run_writer(self, outcome="wait", with_progress=False, state="Parked"):
+    def run_writer(self, outcome="wait", with_progress=False, state="Parked\nNext: Inspect ready work"):
         self.ensure_baseline(state=state)
         def finish(ctx, prompt, profile):
             if with_progress:

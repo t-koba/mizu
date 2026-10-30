@@ -368,7 +368,7 @@ class ContinuationTests(ContinuationFixture):
     def test_ordinary_engine_continue_runs_once_without_preparing_intent(self):
         def seal(context, *_):
             context.handle("finish", {"outcome": "continue", "summary": "normal seal",
-                                      "state": "normal next state"})
+                                      "state": 'normal next state\nNext: Inspect the test result'})
         driver = ScriptDriver(seal)
         result = Engine(self.config, driver=driver).run(self.project, "worker")
         self.assertEqual(len(driver.calls), 1)
@@ -976,7 +976,7 @@ class EngineContinuationTests(ContinuationFixture):
 
     def test_ordinary_continue_runs_once_without_preparation_or_reservation(self):
         def work(ctx, *_):
-            ctx.handle("finish", {"outcome": "continue", "summary": "One execution", "state": "Next"})
+            ctx.handle("finish", {"outcome": "continue", "summary": "One execution", "state": 'Next\nNext: Inspect the test result'})
         driver = ScriptDriver(work)
         with patch.object(c, "reservation", side_effect=AssertionError("ordinary admission only")):
             result = Engine(self.config, driver=driver).run(self.project, "worker")
@@ -1387,7 +1387,7 @@ class ChainedContinuationTests(ContinuationFixture):
                                           snapshot=seal["id"]))
             return seal
         def work(context, *_):
-            context.handle("finish", {"outcome": "continue", "summary": "seal", "state": "state"})
+            context.handle("finish", {"outcome": "continue", "summary": "seal", "state": 'state\nNext: Inspect the test result'})
         driver = ScriptDriver(work)
         engine = Engine(self.config, driver=driver)
         with patch.object(self.store, "create", side_effect=host_prepare):

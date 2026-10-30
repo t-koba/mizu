@@ -158,7 +158,7 @@ class VcsSyncTests(Fixture):
             (ctx.workspace / "app.py").write_bytes(b"VALUE = 3\n")
             ctx.handle("finish", {"outcome": "continue",
                                   "summary": "Synced upstream and resolved edit",
-                                  "state": "Resolved; next is verification."})
+                                  "state": 'Resolved; next is verification.\nNext: Inspect the test result'})
 
         result = Engine(config, driver=ScriptDriver(callback=work)).run(project, "worker")
         self.assertEqual(result["status"], "completed")

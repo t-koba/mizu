@@ -532,6 +532,54 @@ class ContextTests(Fixture):
         with self.assertRaises(Denied):
             ctx.handle("_budget", {"sequence": 1})
 
+    def test_writer_continue_refuses_invalid_next_before_side_effects(self):
+        item = self.project.insights.submit(source="worker", title="Finding", body="Evidence",
+                                            base_snapshot=None)
+        self.project.insights.decide(item["id"], "reject", "Not material", "", "test", expected_rev=1)
+        events = self.project.insights.decision_events("worker", ("reject",))
+        self.assertEqual(len(events), 1)
+        snapshots = {p.name: p.read_bytes() for p in (self.project.root / "snapshots").iterdir()}
+        for state in (None, "", "Now: Continue work", "Now: Work done. Next: Check result",
+                      "Next: Check result\nNext: Report result", "Next:", "Next: ",
+                      "Next: none", "Next: Nothing.", "Next: n/a", "Next:Check result",
+                      " Next: Check result", "Next: Check result "):
+            with self.subTest(state=state):
+                ctx = self.context()
+                ctx.decision_events = events
+                args = {"outcome": "continue", "summary": "Work completed",
+                        "ack_events": [events[0]["ack_token"]]}
+                if state is not None:
+                    args["state"] = state
+                with patch("mizu.runtime.operator_records.validate") as validate, \
+                        patch("mizu.runtime.structured_wait_events.received") as received, \
+                        patch.object(ctx, "close_exec") as close_exec:
+                    with self.assertRaisesRegex(Denied, "exactly one standalone Next: <step>"):
+                        ctx.handle("finish", args)
+                    validate.assert_not_called()
+                    received.assert_not_called()
+                    close_exec.assert_not_called()
+                self.assertIsNone(ctx.finished)
+                self.assertFalse((ctx.run_dir / "finish-intent.json").exists())
+                self.assertEqual(self.project.insights.decision_events("worker", ("reject",)), events)
+                self.assertEqual({p.name: p.read_bytes() for p in
+                                  (self.project.root / "snapshots").iterdir()}, snapshots)
+                # A refusal leaves the same unit open for correction, not sealed.
+                args["state"] = "Now: Work completed\nNext: Check the focused test result"
+                self.assertTrue(ctx.handle("finish", args)["sealed"])
+
+    def test_next_diagnostic_leaves_other_roles_and_outcomes_unchanged(self):
+        for workspace in ("read", "none"):
+            with self.subTest(workspace=workspace):
+                ctx = self.context("searcher")
+                ctx.role = dataclasses.replace(ctx.role, workspace=workspace)
+                self.assertTrue(ctx.handle("finish", {"outcome": "continue", "summary": "Observed"})["sealed"])
+        for outcome in ("wait", "blocked", "done"):
+            with self.subTest(outcome=outcome):
+                ctx = self.context()
+                ctx.verification = {"passed": True}
+                self.assertTrue(ctx.handle("finish", {"outcome": outcome, "summary": "Observed",
+                                                       "state": "No immediate follow-up"})["sealed"])
+
     def test_done_requires_verification(self):
         with self.assertRaises(Denied):
             self.context().handle("finish", {"outcome": "done", "summary": "Trust me", "state": "Done"})
@@ -927,7 +975,7 @@ class PromptProjectionTests(Fixture):
 
     def test_finish_refuses_unknown_next_profile(self):
         from mizu.errors import Denied
-        finish = {"outcome": "continue", "summary": "s", "state": "n",
+        finish = {"outcome": "continue", "summary": "s", "state": "Next: Check the result",
                   "next_reason": "why", "next_profile": "no-such-profile"}
         with self.assertRaisesRegex(Denied, "no configured profile"):
             self.context("worker").handle("finish", dict(finish))

@@ -158,7 +158,7 @@ class RoleCleanupTests(Fixture):
                 seen["project"] = cleanup(self.config, self.project.root, None)
                 seen["scoped"] = cleanup(self.config, self.project.root, ctx.role.name)
             ctx.handle("finish", {"outcome": "continue", "summary": "swept",
-                                  "state": "Now: swept.\nNext: none.\nTasks: none\nBlocking: none"})
+                                  "state": 'Now: swept.\nNext: Report the result.\nTasks: none\nBlocking: none'})
 
         result = Engine(self.config, driver=ScriptDriver(callback)).run(self.project, "worker")
         self.assertEqual(result["status"], "completed")

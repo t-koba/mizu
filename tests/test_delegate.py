@@ -162,7 +162,7 @@ class DelegateTests(Fixture):
                 child_spend["child_requests"] = ctx.request_count
                 child_spend["child_tools"] = ctx.tool_count
                 ctx.handle("finish", {"outcome": "continue", "summary": "child saw marker",
-                                      "state": "Now: done.\nNext: none.\nTasks: none\nBlocking: none"})
+                                      "state": "Now: done.\nNext: Report the child result.\nTasks: none\nBlocking: none"})
 
         result = Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
         self.assertEqual(result["status"], "completed")
@@ -613,7 +613,7 @@ class DelegateTests(Fixture):
                     if ctx.role.name == "helper":
                         raise error
                     seen.update(ctx.handle("delegate", {"role": "helper", "task": "probe"}))
-                    ctx.handle("finish", {"outcome": "continue", "summary": "caller sealed", "state": "Caller sealed"})
+                    ctx.handle("finish", {"outcome": "continue", "summary": "caller sealed", "state": "Caller sealed\nNext: Report the child result"})
                 result = Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
                 self.assertEqual(result["status"], "completed")
                 self.assertEqual(seen["status"], "bounded" if bound else "interrupted")
@@ -649,7 +649,7 @@ class DelegateTests(Fixture):
         refusal = InfraExceeded("parent daily budget")
         def callback(ctx, *_):
             if ctx.role.name == "helper":
-                ctx.handle("finish", {"outcome": "continue", "summary": "child sealed", "state": "Child sealed"})
+                ctx.handle("finish", {"outcome": "continue", "summary": "child sealed", "state": "Child sealed\nNext: Report the child result"})
                 return
             ctx.handle("delegate", {"role": "helper", "task": "probe"})
             with patch("mizu.runtime.Budget.take", side_effect=refusal):
@@ -669,7 +669,7 @@ class DelegateTests(Fixture):
         def callback(ctx, *_):
             if ctx.role.name == "helper":
                 ctx.handle("finish", {"outcome": "continue", "summary": "child sealed",
-                                      "state": "Child sealed"})
+                                      "state": "Child sealed\nNext: Report the child result"})
                 engine.stop.set()
                 return
             seen.update(ctx.handle("delegate", {"role": "helper", "task": "probe"}))
@@ -692,11 +692,11 @@ class DelegateTests(Fixture):
                 def callback(ctx, *_):
                     if ctx.role.name == "helper":
                         ctx.bound_hit = "tools"
-                        ctx.handle("finish", {"outcome": "continue", "summary": "child bounded", "state": "Child bounded"})
+                        ctx.handle("finish", {"outcome": "continue", "summary": "child bounded", "state": "Child bounded\nNext: Report the child result"})
                         return
                     with patch("mizu.runtime.write_json", side_effect=failing_write):
                         seen.update(ctx.handle("delegate", {"role": "helper", "task": "probe"}))
-                    ctx.handle("finish", {"outcome": "continue", "summary": "caller sealed", "state": "Caller sealed"})
+                    ctx.handle("finish", {"outcome": "continue", "summary": "caller sealed", "state": "Caller sealed\nNext: Report the child result"})
                 result = Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
                 self.assertEqual(result["status"], "completed")
                 self.assertEqual(seen["status"], "interrupted")

@@ -117,7 +117,11 @@ characters; the step must be 1–4,096 printable characters with no surrounding
 whitespace. Empty, duplicate, malformed and `none`/`nothing`/`n/a` declarations
 are absent. This is an explicit writer declaration, not natural-language
 classification: use `wait` with the exact check or a deadline when the next
-step is not actionable yet.
+step is not actionable yet. A writer `finish` with `outcome=continue` and no
+parseable declaration is refused before sealing or acknowledgement side effects.
+Correct `state` to include exactly one standalone `Next: <step>` line and retry
+`finish` in the same unit. This diagnostic does not apply to other outcomes or
+non-writer roles, and a corrected line alone does not grant admission.
 
 Readiness requires `continue` or `bounded`, a validated role-matching progress
 record, and at least one selected work signal (`tool`, `code`, `decision`, or

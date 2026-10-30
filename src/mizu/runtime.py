@@ -1773,6 +1773,10 @@ class Context:
     def _op_finish(self, args: dict) -> dict:
         if not args["summary"].strip():
             raise Denied("A nonempty work summary is required")
+        if (self.role.workspace == "write" and args["outcome"] == "continue"
+                and _declared_next(args.get("state")) is None):
+            raise Denied("Writer continue requires exactly one standalone Next: <step> line in state; "
+                         "correct state and retry finish with an actionable step")
         tokens = args.get("ack_events", [])
         decisions = {event["ack_token"]: event for event in self.decision_events}
         terminal = {event["ack_token"]: event for event in self.work_item_events}
