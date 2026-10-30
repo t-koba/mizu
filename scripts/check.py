@@ -1182,6 +1182,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--fail-fast', action='store_true',
                         help='Stop the Python suite at its first failure; successful gates still run every test')
+    parser.add_argument('--test-shard', type=int, choices=(0, 1),
+                        help='Run one SHA-256 test-ID shard of two (CI prototype, not full acceptance)')
     parser.add_argument('--report', type=Path, help='Write a portable JSON validation receipt')
     parser.add_argument('--test-timings', type=Path,
                         help='Write best-effort sanitized per-test timing evidence to this path')
@@ -1427,6 +1429,8 @@ def main():
             timing_sidecar = Path(temporary) / 'timings.jsonl'
             timing_origin = time.monotonic()
             command.extend((str(timing_sidecar), str(timing_origin)))
+        if args.test_shard is not None:
+            command.extend(('--test-shard', str(args.test_shard)))
         if args.fail_fast:
             command.append('--fail-fast')
         with project_import_diagnostic(env, Path(temporary), source_sha):
@@ -1537,7 +1541,8 @@ def main():
                                elapsed_seconds=pending_unittest_elapsed,
                                phases=checks, source_sha=source_sha,
                                reason=pending_unittest_reason)
-    receipt = {'suite': 'offline', 'report_version': OFFLINE_REPORT_VERSION,
+    receipt = {'suite': 'offline' if args.test_shard is None else 'offline-shard',
+               'report_version': OFFLINE_REPORT_VERSION,
                'mizu_version': __version__, 'source_sha256': source_sha,
                'allowed_not_run': sorted(allowed_not_run), 'bash_available': has_bash,
                'node_version': checked_node_version,
@@ -1547,6 +1552,8 @@ def main():
                                'budget_seconds': phase.budget,
                                'consumed_seconds': round(phase.consumed, 3)},
                'not_run': ['installed-Pi', 'rootless-Podman', 'live-provider', '24-hour-soak', 'cross-distribution-deployment']}
+    if args.test_shard is not None:
+        receipt['test_shard'] = args.test_shard
     if args.report:
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(json.dumps(receipt, indent=2) + '\n')

@@ -271,6 +271,24 @@ caller-supplied SHA/run ID, CI environment variable nor a later branch head is
 an authority. Content digests detect missing/mixed pages; they do not authenticate
 an arbitrary externally supplied artifact or create a new CI receipt.
 
+The Windows/Python 3.12 sharding prototype alone runs `--test-shard 0` and
+`--test-shard 1`. Unittest discovery is unchanged; the parity of the SHA-256
+hash of each unique stable test ID (UTF-8, low bit of the final digest byte)
+assigns it to exactly one shard, retaining discovery order and fixture behavior.
+Duplicate or unavailable stable IDs fail sharded discovery. With no flag,
+`scripts/check.py` still runs full unsharded acceptance. Shard receipts use
+`suite: "offline-shard"` and `test_shard`, not reusable full offline receipts.
+Each shard also runs all other checks with the same waivers and bounds.
+
+The original Windows/3.12 matrix cell is excluded and replaced by exactly one
+aggregate named `core (windows-latest, 3.12)` under `Offline checks`. It runs
+with `always()` and accepts only `success` from the whole two-shard matrix;
+failure, cancellation, skip or missing result cannot pass. Timing and diagnostic
+artifact names include `-shard-0` or `-shard-1`. Complete ID coverage must be
+checked across both timing manifests, and wall time, queueing and total runner
+seconds must be measured before adopting this prototype; local partition checks
+alone establish neither CI identity nor cost savings. No timeout is raised.
+
 Every CI cell supplies `--test-timings` and uploads only the summary and
 `test-timings.json.d/*.json`, one artifact per cell (`actions/upload-artifact`
 v4.6.2, 7-day retention, `if: always()` with missing-file tolerance), and the

@@ -600,15 +600,38 @@ class ProjectImportDiagnosticExportTests(unittest.TestCase):
 
     def test_workflow_selects_only_exact_diagnostic_file_on_windows(self):
         workflow = (ROOT / '.github/workflows/ci.yml').read_text(encoding='utf-8')
-        upload = workflow.split('      - name: Upload managed-import diagnostic\n')[1].split(
-            '  durable-contract:', 1)[0]
-        self.assertIn("if: always() && runner.os == 'Windows'", upload)
-        self.assertIn('actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02', upload)
-        self.assertEqual([line.strip() for line in upload.splitlines() if 'path:' in line],
-                         ['path: private-validation/project-import-diagnostic.json'])
-        self.assertIn('name: project-import-diagnostic-${{ matrix.os }}-${{ matrix.python }}', upload)
-        self.assertIn('retention-days: 7', upload)
-        self.assertIn('if-no-files-found: ignore', upload)
+        parts = workflow.split('      - name: Upload managed-import diagnostic\n')
+        self.assertEqual(len(parts), 3,
+                         'expected exactly the core-matrix and Windows-3.12-shard diagnostic blocks')
+        core_upload = parts[1].split('  windows-312-shards:', 1)[0]
+        shard_upload = parts[2].split('  windows-312-core:', 1)[0]
+        pinned = 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
+        exact_path = ['path: private-validation/project-import-diagnostic.json']
+        # Core matrix cell: Windows-only condition with a per-cell artifact name.
+        self.assertEqual([line.strip() for line in core_upload.splitlines()
+                          if line.strip().startswith('if:')],
+                         ["if: always() && runner.os == 'Windows'"])
+        self.assertEqual(core_upload.count(pinned), 1)
+        self.assertEqual([line.strip() for line in core_upload.splitlines() if 'path:' in line],
+                         exact_path)
+        self.assertIn('name: project-import-diagnostic-${{ matrix.os }}-${{ matrix.python }}',
+                      core_upload)
+        self.assertNotIn('project-import-diagnostic-windows-latest-3.12-shard', core_upload)
+        self.assertIn('retention-days: 7', core_upload)
+        self.assertIn('if-no-files-found: ignore', core_upload)
+        # Windows 3.12 shard cells: the job already runs on windows-latest,
+        # so the step uses a bare always() with a per-shard artifact name.
+        self.assertEqual([line.strip() for line in shard_upload.splitlines()
+                          if line.strip().startswith('if:')],
+                         ['if: always()'])
+        self.assertEqual(shard_upload.count(pinned), 1)
+        self.assertEqual([line.strip() for line in shard_upload.splitlines() if 'path:' in line],
+                         exact_path)
+        self.assertIn('name: project-import-diagnostic-windows-latest-3.12-shard-${{ matrix.shard }}',
+                      shard_upload)
+        self.assertNotIn('${{ matrix.os }}', shard_upload)
+        self.assertIn('retention-days: 7', shard_upload)
+        self.assertIn('if-no-files-found: ignore', shard_upload)
 
 
 class UnittestFailureSummaryTests(unittest.TestCase):
@@ -1806,7 +1829,8 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
         self.assertIn('--test-timings private-validation/test-timings.json', workflow)
         # Every cell collects the evidence, so each supported host's suite
         # cost is measured where it runs.
-        self.assertEqual(workflow.count('--test-timings private-validation/test-timings.json'), 2)
+        # Core matrix, Windows/3.12 shard matrix, and authoritative durable job.
+        self.assertEqual(workflow.count('--test-timings private-validation/test-timings.json'), 3)
         # One artifact per cell, each named for its own cell.
         self.assertIn('name: test-timings-${{ matrix.os }}-${{ matrix.python }}', workflow)
         self.assertIn('name: test-timings-durable', workflow)
@@ -1842,7 +1866,8 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
         # Two runs on one cell would exceed that cell's job budget and
         # lose the timing evidence it exists for.
         self.assertIsNone(condition(gate))
-        self.assertEqual(workflow.count('name: Offline core and transport contracts'), 1)
+        # One declaration in each matrix job; each concrete cell runs it once.
+        self.assertEqual(workflow.count('name: Offline core and transport contracts'), 2)
         self.assertIn('--test-timings private-validation/test-timings.json', gate)
 
     def test_timings_artifact_survives_timeout_with_only_evidence(self):

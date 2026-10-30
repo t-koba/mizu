@@ -19,12 +19,15 @@ read. Timings are evidence only and never change the gate outcome. A killed
 child leaves its last start without a stop, which the parent reports as an
 unfinished entry with elapsed duration at child exit/timeout. Unittest's own
 progress/error display is sanitized too; arbitrary output from tests still streams normally. Discovery and verbosity
-match `unittest discover -s tests -v`.
+match `unittest discover -s tests -v`. The optional `--test-shard 0|1`
+partitions discovery by SHA-256 stable-ID parity; omission remains unsharded.
 """
 from __future__ import annotations
 
+import argparse
 from contextlib import ExitStack
 from functools import partial
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -53,6 +56,38 @@ def stable_test_id(test) -> str:
             and re.fullmatch(r'[A-Za-z_]\w*(?:\.(?:[A-Za-z_]\w*|<locals>))*', identifier, re.ASCII)):
         return identifier
     return 'unknown_test'
+
+
+def test_cases(suite):
+    for test in suite:
+        if isinstance(test, unittest.TestSuite):
+            yield from test_cases(test)
+        else:
+            yield test
+
+
+def select_shard(suite, shard):
+    """Keep discovery order and fixtures; assign each unique stable ID once."""
+    if shard not in (0, 1):
+        raise ValueError('invalid test shard')
+    selected, seen = [], set()
+    for test in test_cases(suite):
+        identifier = stable_test_id(test)
+        if identifier == 'unknown_test' or identifier in seen:
+            raise ValueError('sharding requires unique stable test IDs')
+        seen.add(identifier)
+        if hashlib.sha256(identifier.encode('utf-8')).digest()[-1] % 2 == shard:
+            selected.append(test)
+    return unittest.TestSuite(selected)
+
+
+class ShardLoader(unittest.TestLoader):
+    def __init__(self, shard):
+        super().__init__()
+        self.shard = shard
+
+    def discover(self, *args, **kwargs):
+        return select_shard(super().discover(*args, **kwargs), self.shard)
 
 
 def failure_record(kind, test, err=None) -> dict:
@@ -176,11 +211,15 @@ def main():
     # A script normally starts with scripts/ on sys.path; -m unittest starts
     # with the working directory. Preserve root-level test-helper imports.
     sys.path[0] = os.getcwd()
-    fail_fast = '--fail-fast' in sys.argv[1:]
-    arguments = [arg for arg in sys.argv[1:] if arg != '--fail-fast']
-    fd = os.open(arguments[0], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    timing_path = arguments[1] if len(arguments) > 1 else None
-    timing_origin = float(arguments[2]) if len(arguments) > 2 else None
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('sidecar')
+    parser.add_argument('timing_path', nargs='?')
+    parser.add_argument('timing_origin', nargs='?', type=float)
+    parser.add_argument('--fail-fast', action='store_true')
+    parser.add_argument('--test-shard', type=int, choices=(0, 1))
+    args = parser.parse_args()
+    fd = os.open(args.sidecar, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    timing_path, timing_origin = args.timing_path, args.timing_origin
     with os.fdopen(fd, 'w', encoding='utf-8') as sidecar, ExitStack() as stack:
         timing = None
         if timing_path is not None:
@@ -204,8 +243,10 @@ def main():
                     timing_origin=timing_origin), **kwargs)
 
         unittest.main(module=None,
-                      argv=[sys.argv[0], 'discover', '-s', 'tests', '-v'] + (['-f'] if fail_fast else []),
-                      testRunner=Runner)
+                      argv=[sys.argv[0], 'discover', '-s', 'tests', '-v'] + (['-f'] if args.fail_fast else []),
+                      testRunner=Runner,
+                      testLoader=(unittest.defaultTestLoader if args.test_shard is None
+                                  else ShardLoader(args.test_shard)))
 
 
 if __name__ == '__main__':
