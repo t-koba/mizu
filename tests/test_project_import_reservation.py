@@ -1,10 +1,15 @@
 """Managed import fencing with real workspace locks; no child runner claims."""
 import contextlib
+import io
+import json
+import re
+import sys
+from collections import deque
 import shutil
 import unittest
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from support import Fixture
 from mizu import project as lifecycle
@@ -12,6 +17,117 @@ from mizu.delegation_jobs import DelegationJobs
 from mizu.errors import Denied
 from mizu.fs import held, lock
 from mizu.process import run
+
+
+def _read_failure_line(exc):
+    """Test-only allowlist: <=4 exceptions, <=6 frames each, no exception text.
+
+    Names are ASCII tokens (48 characters max); filenames are basenames only.
+    The resulting ASCII JSON line is bounded below 8 KiB. Never format an
+    exception or traceback: those include messages, source lines and paths.
+    """
+    def token(value, pattern):
+        return value if re.fullmatch(pattern, value, flags=re.ASCII) else '<redacted>'
+
+    chain = []
+    while exc is not None and len(chain) < 4:
+        frames = deque(maxlen=6)
+        tb = exc.__traceback__
+        while tb is not None:
+            code = tb.tb_frame.f_code
+            basename = code.co_filename.replace('\\', '/').rsplit('/', 1)[-1]
+            frames.append({
+                'file': token(basename, r'[A-Za-z_][A-Za-z0-9_]{0,44}\.py'),
+                'function': token(code.co_name, r'(?:[A-Za-z_][A-Za-z0-9_]{0,47}|<module>)'),
+                'line': min(max(tb.tb_lineno, 0), 2**31 - 1),
+            })
+            tb = tb.tb_next
+        entry = {'type': token(type(exc).__name__, r'[A-Za-z_][A-Za-z0-9_]{0,47}'),
+                 'frames': list(frames)}
+        if isinstance(exc, OSError):
+            for key in ('errno', 'winerror'):
+                value = getattr(exc, key, None)
+                if type(value) is int and -(2**31) <= value < 2**31:
+                    entry[key] = value
+        chain.append(entry)
+        exc = exc.__cause__ or (None if exc.__suppress_context__ else exc.__context__)
+    return json.dumps({'operation': 'safe_read', 'target': 'project.toml',
+                       'chain': chain}, ensure_ascii=True, separators=(',', ':'))
+
+
+def _diagnosed_project_read(read, root, name, maximum):
+    try:
+        return read(root, name, maximum)
+    except Denied as exc:
+        if sys.platform == 'win32' and name == 'project.toml' and maximum == 65536:
+            try:
+                print(_read_failure_line(exc), file=sys.stderr)
+            except Exception:
+                pass  # Diagnostics must never replace the original failure.
+        raise
+
+
+class ProjectReadDiagnosticTests(unittest.TestCase):
+    def test_sanitized_failure_canary(self):
+        # Synthetic paths/messages only; no actual private data in the fixture.
+        failure = Denied('DENIED_CANARY')
+        namespace = {'failure': failure}
+        exec(compile("def fail(root, name, maximum):\n"
+                     "    try:\n"
+                     "        error = OSError(13, 'MESSAGE_CANARY', 'FILE_CANARY')\n"
+                     "        error.winerror = 5\n"
+                     "        raise error\n"
+                     "    except OSError as cause:\n"
+                     "        raise failure from cause\n",
+                     r'C:\PATH_CANARY\canary.py', 'exec'), namespace)
+        captured = io.StringIO()
+        with patch.object(sys, 'platform', 'win32'), contextlib.redirect_stderr(captured):
+            with self.assertRaises(Denied) as raised:
+                _diagnosed_project_read(namespace['fail'], 'ROOT_CANARY', 'project.toml', 65536)
+        self.assertIs(raised.exception, failure)
+        output = captured.getvalue()
+        self.assertEqual(len(output.splitlines()), 1)
+        self.assertLess(len(output.encode('ascii')), 8192)
+        for secret in ('MESSAGE_CANARY', 'FILE_CANARY', 'PATH_CANARY',
+                       'DENIED_CANARY', 'ROOT_CANARY'):
+            self.assertNotIn(secret, output)
+        data = json.loads(output)
+        self.assertEqual(set(data), {'operation', 'target', 'chain'})
+        self.assertEqual((data['operation'], data['target']), ('safe_read', 'project.toml'))
+        denied, error = data['chain']
+        self.assertEqual(denied['type'], 'Denied')
+        self.assertEqual((error['type'], error['errno'], error['winerror']), ('PermissionError', 13, 5))
+        self.assertEqual(error['frames'], [{'file': 'canary.py', 'function': 'fail', 'line': 5}])
+        self.assertIs(raised.exception.__cause__.__traceback__.tb_frame.f_code,
+                      namespace['fail'].__code__)
+
+    def test_chain_and_frame_bounds(self):
+        def fail(depth):
+            if depth:
+                fail(depth - 1)
+            raise Denied('Not serialized')
+
+        try:
+            fail(12)
+        except Denied as exc:
+            exc.__cause__ = exc  # Even cyclic chains are bounded.
+            output = _read_failure_line(exc)
+        chain = json.loads(output)['chain']
+        self.assertEqual(len(chain), 4)
+        self.assertTrue(all(len(entry['frames']) == 6 for entry in chain))
+        self.assertLess(len(output.encode('ascii')), 8192)
+
+    def test_success_and_non_windows_failure_are_silent_and_preserved(self):
+        failure = Denied('Synthetic failure')
+        captured = io.StringIO()
+        with contextlib.redirect_stderr(captured), patch.object(sys, 'platform', 'linux'):
+            self.assertEqual(_diagnosed_project_read(lambda *args: b'ok', None,
+                                                    'project.toml', 65536), b'ok')
+            with self.assertRaises(Denied) as raised:
+                _diagnosed_project_read(Mock(side_effect=failure), None,
+                                        'project.toml', 65536)
+        self.assertIs(raised.exception, failure)
+        self.assertEqual(captured.getvalue(), '')
 
 
 class ProjectImportReservationTests(Fixture):
@@ -97,13 +213,20 @@ class ProjectImportReservationTests(Fixture):
 
     def test_absent_store_imports_without_initializing_and_external_is_unchanged(self):
         real_guard = DelegationJobs.guard
+        real_read = lifecycle.safe_read
+
+        def diagnosed_read(root, name, maximum):
+            if root == self.project.root:
+                return _diagnosed_project_read(real_read, root, name, maximum)
+            return real_read(root, name, maximum)
 
         def guarded(root):
             self.assertTrue(held(root / 'locks/workspace.lock'))
             return real_guard(root)
 
         with patch.object(DelegationJobs, '__init__', side_effect=AssertionError('Store initialization')), \
-             patch.object(DelegationJobs, 'guard', side_effect=guarded) as guard:
+             patch.object(DelegationJobs, 'guard', side_effect=guarded) as guard, \
+             patch.object(lifecycle, 'safe_read', side_effect=diagnosed_read):
             imported = self.import_source()
             root_import = self.import_source(self.project.root, name='root-import')
             self.assertEqual(guard.call_count, 2)
