@@ -45,14 +45,88 @@ silently replaced by `latest`.
 For Pi package updates, Dependabot's npm entry covers both adapters but
 explicitly ignores `@earendil-works/*`: its per-dependency grouping cannot satisfy
 the lockstep invariant, and a partial update would fail the lockstep gate. Those
-packages therefore are not release-detection signals from Dependabot. Watch the
-upstream release notes and feeds, and use `docs/upstream.md` to confirm the
-currently adopted version. When considering a newer stable Pi release, review
+packages therefore are not release-detection signals from Dependabot. The opt-in
+host check below can deliver a release signal for writer review; use
+`docs/upstream.md` to confirm the currently adopted version. When considering a
+newer stable Pi release, review
 the package-specific changelogs, move every Pi package in both adapters to that
 same version, regenerate both lockfiles with the configured offline materializer,
 install from the approved offline npm cache, and run the Pi SDK gate plus the
 full check. Make this lockstep adoption one reviewed commit; do not claim that
 Dependabot produces a single release-wide PR.
+
+## Opt-in Pi release notice (operator host only)
+
+An operator may run this one-shot CLI command using the intended Mizu source or
+installed distribution and its private host configuration:
+
+```sh
+mizu --config /path/to/config.toml pi-release-check PROJECT --role WRITER_ROLE
+```
+
+`PROJECT` must already exist and `WRITER_ROLE` must be an explicitly named,
+configured role in that project. This is not a model tool. It requires the
+existing explicit notice policy and web allowlist in the private configuration
+(merge with existing settings; do not duplicate TOML tables):
+
+```toml
+[operator_records."operator.notice"]
+enabled = true
+route = "addressee"
+retention = "permanent"
+wake = true
+
+[web]
+hosts = ["api.github.com"]
+```
+
+The fixed authoritative **release signal** is
+`https://api.github.com/repos/earendil-works/pi/releases/latest`, not an npm
+package listing. The command uses the existing host `Web` transport: configured
+byte/time bounds, public-DNS pinning, redirect destination checks and shared
+cache apply. The one full source receipt is temporary for this command and is
+removed after parsing; no per-poll receipt directory accumulates. An optional
+configured destination decider must also permit the fetch; it does not replace
+this command's allowlist prerequisite. No credentials
+are injected. The JSON receipt must retain the exact API source and final URL,
+`application/json`, an exact stable `vX.Y.Z` tag (no prerelease/build suffix or
+leading-zero components), literal false draft/prerelease flags, a valid UTC
+publication timestamp, and the exact official GitHub `/releases/tag/vX.Y.Z` URL.
+Missing, duplicate, malformed or inconsistent fields fail closed; upstream
+release prose is never put in a notice. This does **not** verify that every
+lockstep package has been published, is compatible, or should be adopted.
+
+The baseline is the common Pi pin in **the CLI's own source/distribution**,
+not the managed project's mutable workspace. Both adapter manifests and
+lockfiles must agree, including required packages, root declarations and nested
+Pi resolutions (the same validator backs the offline lockstep gate). The command
+compares stable versions numerically. Equal/older observations return JSON with
+`newer: false` and no notice. A newer observation writes an immutable
+`operator.notice` through the existing SharedRecords contract, addressed only to
+the supplied role; its body includes baseline, tag, date, official URLs and
+`external-untrusted; review only; no package availability or compatibility claim`.
+Normal pending delivery, configured notice wake policy and explicit role
+acknowledgement apply. This is review input, never an adoption decision.
+
+Stdout is one JSON result with baseline, tag, source and `newer`; a newer
+result also includes the immutable notice envelope/digest. The selected release
+metadata and official URLs are durable in the notice; the raw upstream response
+is not retained by this command. Normal configured web caching may return an
+earlier observation within its TTL. Failures exit nonzero without writing a new
+notice (temporary receipt data is removed).
+Retry the same command after a failed or interrupted invocation: the event ID is
+`pi-release-` plus the first 48 hexadecimal SHA-256 characters of the exact tag.
+Exact retries reuse the original notice, even after explicit acknowledgement;
+they neither duplicate nor reactivate it. A changed baseline, date or addressee
+for an already recorded tag conflicts and fails closed instead of rewriting the
+record; review that conflict rather than inventing another event ID. Interrupts
+around a notice write are resolved by the same exact retry contract.
+
+No schedule is installed or active by default. An operator may arrange periodic
+invocation with their host scheduler, selecting the project, role, configuration
+and interval explicitly and monitoring nonzero exits. The command does not alter
+scheduler, daemon, CI, service installation, dependencies or lockfiles. No live
+network check or release adoption is part of the offline acceptance suite.
 
 ## Build distribution
 
