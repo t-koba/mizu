@@ -99,9 +99,6 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--live", action="store_true", required=True, help="Explicit consent to a paid, read-only Pi/provider probe")
     p.add_argument("--profile", help="Model profile for the probe")
     p.add_argument("--role", default=None, help="Read-only probe role (default: configured consult_role, else single configured role, else required)")
-    p = sub.add_parser("pi-release-check", help="Operator-only one-shot stable Pi release notice; no adoption")
-    p.add_argument("project")
-    p.add_argument("--role", required=True, help="Explicit project role to review the release")
     p = sub.add_parser("record", help="Operator-only immutable answers and notices; no Insight decisions")
     p.add_argument("project")
     p.add_argument("action", choices=("publish", "withdraw", "supersede"))
@@ -694,9 +691,6 @@ def execute(args):
             return _cmd_publication_list(config, project, args)
         project = Project(config, args.project)
         return _cmd_publication_record(config, project, args)
-    if args.command == "pi-release-check":
-        from .pi_release import check
-        return check(Project(config, args.project), ROOT, args.role)
     if args.command == "record":
         from .operator_records import write
         if (args.subject_id is None) != (args.subject_rev is None):
