@@ -1,7 +1,8 @@
 """Typed smoke IDs and lock ordering for shared smoke-reference state.
 
-Pin-sensitive record transactions acquire the shared lock before the project
-lock; audited reference-neutral operations may use the project lock alone.
+Record writes acquire the shared lock before the project lock: even unpinned
+inbox writes create temporaries that the strict retention scan must not see.
+The read-only unresolved-count scan uses the project lock alone.
 IDs are scoped by their containing project/owner record; Insight entries also
 store the exact revision. History keeps IDs, but only current live owners pin.
 """
@@ -49,7 +50,7 @@ def shared_lock(data: Path, *, blocking=False):
 
 @contextlib.contextmanager
 def project_record_lock(root: Path, *, blocking: bool = True):
-    """Serialize one project's records; caller must prove no shared-pin mutation."""
+    """Serialize one project's records; caller must prove no shared-scan interference."""
     with lock(root / "locks" / "insights.lock", blocking=blocking):
         yield
 

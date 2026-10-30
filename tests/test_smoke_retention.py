@@ -58,22 +58,85 @@ class SmokeRetentionTests(unittest.TestCase):
         return {p.relative_to(self.data).as_posix():
                 ('dir' if p.is_dir() else p.read_bytes()) for p in self.data.rglob('*')}
 
-    def test_reference_neutral_insight_operations_skip_shared_lock(self):
+    def test_unresolved_counts_skip_other_project_shared_lock(self):
         first, _ = self.owner('first')
         second, _ = self.owner('second')
-        # Hold the real shared lock, then make any attempt to reacquire it fail
-        # immediately; these per-project operations must not need that lock.
+        self.insight(second)
+        # Project A holds the real global-before-project locks. Project B's
+        # read-only scan must finish before A releases them.
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with record_lock(first.root):
+                future = pool.submit(second.unresolved_counts, ['worker', 'reviewer'])
+                self.assertEqual(future.result(timeout=10), {'worker': 1, 'reviewer': 0})
+
+    def test_submit_and_unpinned_evidence_keep_shared_lock(self):
+        insights, _ = self.owner()
+        item = self.insight(insights)
         with shared_lock(self.data):
+            # Instrument acquisition to fail immediately rather than wait on
+            # the lock held above. No operation may reach an inbox write.
             with patch('mizu.smoke_refs.shared_lock', side_effect=Busy('shared lock held')) as shared:
-                created = first.submit(source='worker', title='New', body='No refs', base_snapshot=None)
-                updated = second.submit(source='worker', title='Other', body='No refs', base_snapshot=None)
-                first.attach_evidence(created['id'], source='worker', text='No refs', expected_rev=1)
-                first.attach_evidence(created['id'], source='worker', text='Empty refs',
-                                      expected_rev=1, smoke_refs=[])
-                self.assertEqual(shared.call_count, 0)
-        self.assertEqual(len(first.read(created['id'])['evidence']), 2)
-        self.assertEqual(first.read(created['id'])['evidence'][1]['smoke_refs'], [])
-        self.assertEqual(second.read(updated['id'])['evidence'], [])
+                with self.assertRaises(Busy):
+                    insights.submit(source='worker', title='New', body='No refs', base_snapshot=None)
+                for refs in ({}, {'smoke_refs': []}):
+                    with self.subTest(refs=refs), self.assertRaises(Busy):
+                        insights.attach_evidence(item['id'], source='worker', text='No refs',
+                                                 expected_rev=1, **refs)
+                self.assertEqual(shared.call_count, 3)
+        self.assertEqual(insights.read(item['id'])['evidence'], [])
+        self.assertEqual(insights.unresolved_counts(['worker']), {'worker': 1})
+
+    def test_append_temporary_excludes_retention_until_publication(self):
+        self.pair()
+        insights, _ = self.owner()
+        item = self.insight(insights, [self.a])
+        mkstemp = tempfile.mkstemp
+        for refs in ({}, {'smoke_refs': []}):
+            with self.subTest(refs=refs):
+                entered, release = threading.Event(), threading.Event()
+
+                def paused_temporary(*args, **kwargs):
+                    fd, temporary = mkstemp(*args, **kwargs)
+                    if Path(temporary).parent == insights.root / 'inbox':
+                        entered.set()
+                        if not release.wait(10):
+                            os.close(fd)
+                            os.unlink(temporary)
+                            raise AssertionError('test coordination timed out')
+                    return fd, temporary
+
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    with patch('mizu.fs.tempfile.mkstemp', side_effect=paused_temporary):
+                        future = pool.submit(insights.attach_evidence, item['id'], source='worker',
+                                             text='Append', expected_rev=1, **refs)
+                        try:
+                            self.assertTrue(entered.wait(10))
+                            self.assertEqual(len(list((insights.root / 'inbox').glob('.new-*'))), 1)
+                            # Busy must come from the real global lock, before
+                            # the strict store scan can see the live temporary.
+                            with self.assertRaises(Busy):
+                                self.run_retention(apply=True)
+                        finally:
+                            release.set()
+                        future.result(timeout=10)
+                self.assertEqual(list((insights.root / 'inbox').glob('.new-*')), [])
+                result = self.run_retention(apply=True)
+                self.assertTrue(result['complete'])
+                self.assertEqual(result['pinned'], [self.a])
+                self.assertEqual(result['retired'], [])
+        self.assertEqual(len(insights.read(item['id'])['evidence']), 3)
+
+    def test_unknown_temporary_without_writer_still_fails_closed(self):
+        pair = self.pair()
+        insights, _ = self.owner()
+        self.insight(insights)
+        temporary = insights.root / 'inbox' / '.new-unknown'
+        temporary.write_bytes(b'{}')
+        with self.assertRaisesRegex(Denied, '^Unknown smoke reference store entry$'):
+            self.run_retention(apply=True)
+        self.assertTrue(pair.exists())
+        temporary.unlink()
+        self.assertEqual(self.run_retention(apply=True)['retired'], [self.a])
 
     def test_reference_bearing_evidence_keeps_shared_lock(self):
         self.pair()

@@ -34,6 +34,11 @@ trusted host callers, preserved across revisions, never routed on, and never
 grants operator approval. Model ``submit_insight`` exposes no origin field
 and is stored with ``origin`` None; the Editor outbox accepts only
 ``title``/``body``/``base_snapshot`` so capsule content cannot forge origin.
+
+Inbox writes hold the shared retention lock before the project record lock,
+even without smoke references: atomic-write temporaries must not overlap the
+strict retention scan. Only the read-only unresolved-count scan uses the
+project lock alone, remaining serialized with same-project writers.
 """
 from __future__ import annotations
 
@@ -489,10 +494,8 @@ class Insights:
                  "base_snapshot": base_snapshot, "run": run, "origin": origin, **specified}
         if len(canonical(probe)) > self.maximum:
             raise Denied("Insight exceeds byte limit")
-        # New submissions cannot introduce smoke references. Keep only the
-        # project-local lock so large inbox dedup scans do not serialize other
-        # projects behind the shared retention lock.
-        with project_record_lock(self.root):
+        # Even unpinned writes create inbox temporaries that retention must not scan.
+        with record_lock(self.root):
             if not explicit:
                 best = None
                 best_key = None
@@ -733,12 +736,8 @@ replacement insight without implying rejected substance.
             raise Denied("Evidence attach requires the revision read (expected_rev)")
         if isinstance(expected_rev, bool) or not isinstance(expected_rev, int) or expected_rev < 1:
             raise Denied("Evidence revision must be a positive revision number")
-        # Appending evidence without new references leaves the active pin set
-        # unchanged; an empty explicit list is likewise reference-neutral.
-        # Any nonempty (or malformed non-list) value stays on the global path.
-        project_only = smoke_refs is None or (type(smoke_refs) is list and not smoke_refs)
-        record_guard = project_record_lock if project_only else record_lock
-        with record_guard(self.root):
+        # All appends create inbox temporaries, including omitted/empty references.
+        with record_lock(self.root):
             current = self.read(insight_id)
             rev = _rev_of(current)
             if expected_rev != rev:
@@ -971,9 +970,10 @@ replacement insight without implying rejected substance.
     def unresolved_counts(self, sources) -> dict:
         """Count live unresolved inputs for each named source, fail-closed.
 
-        One bounded inbox scan under the Insights record lock for a
-        consistent snapshot; undecided plus deferred revisions count,
-        resolved and archive-only history do not. Each inbox row is safely
+        One bounded read-only inbox scan under the project record lock for a
+        consistent snapshot without the shared retention lock; undecided plus
+        deferred revisions count, resolved and archive-only history do not.
+        Each inbox row is safely
         read within ``self.maximum`` and each decision within the decision
         event bound. Unsafe, unreadable, vanished or malformed live entries
         raise rather than undercount; a missing decision only leaves its
@@ -986,7 +986,7 @@ replacement insight without implying rejected substance.
             identifier(name)
         wanted = set(names)
         counts = {name: 0 for name in wanted}
-        with record_lock(self.root):
+        with project_record_lock(self.root):
             inbox = self.root / "inbox"
             if not insight_archive._directory(inbox):
                 return counts

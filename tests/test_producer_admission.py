@@ -20,6 +20,7 @@ from mizu.errors import Busy, ConfigError, Denied, LimitExceeded
 from mizu.fs import lock, safe_read
 from mizu.insights import MAX_DECISION_EVENT_BYTES
 from mizu.project import Project
+from mizu.smoke_refs import record_lock
 from mizu.runtime import Engine, producer_hold, should_run
 from mizu.scheduling import ProducerFacts, evaluate_producer
 
@@ -153,7 +154,7 @@ class ProducerCountsTests(Fixture):
                             pass
                 finally:
                     contention_checked.set()
-            with lock(root / "locks" / "insights.lock"):
+            with record_lock(root):
                 yield
 
         def read_during_submission(*args):
@@ -167,15 +168,14 @@ class ProducerCountsTests(Fixture):
 
         with ThreadPoolExecutor(max_workers=1) as pool:
             with patch("mizu.insights.record_lock", observed_lock):
-                with patch("mizu.insights.project_record_lock", observed_lock):
-                    with patch("mizu.insights.safe_read", read_during_submission):
-                        future = pool.submit(submit_during_scan)
-                        try:
-                            self.assertEqual(self.project.insights.unresolved_counts(["searcher"]),
-                                             {"searcher": 1})
-                        finally:
-                            scan_started.set()
-                        future.result(timeout=60)
+                with patch("mizu.insights.safe_read", read_during_submission):
+                    future = pool.submit(submit_during_scan)
+                    try:
+                        self.assertEqual(self.project.insights.unresolved_counts(["searcher"]),
+                                         {"searcher": 1})
+                    finally:
+                        scan_started.set()
+                    future.result(timeout=60)
         self.assertEqual(self.project.insights.unresolved_count("searcher"), 2)
 
     def test_malformed_live_identity_source_and_revision_fail_closed(self):
