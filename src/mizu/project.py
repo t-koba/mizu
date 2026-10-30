@@ -543,10 +543,11 @@ def _import_git_tree(source: Path, workspace: Path, env: dict[str, str]) -> None
     config_managed_repo(workspace, env)
 
 
-def _import_plain_directory(source: Path, workspace: Path, stage: Path, config: Config) -> None:
+def _import_plain_directory(source: Path, workspace: Path, stage: Path, config: Config,
+                            *, exclude_dirs: tuple[str, ...] = ()) -> None:
     """Copy only the visible snapshot, not caches or secrets."""
     temporary_store = open_store(stage, config)
-    captured = temporary_store.capture_files(source)
+    captured = temporary_store.capture_files(source, exclude_dirs=exclude_dirs)
     if captured["skipped"]:
         raise Denied("Plain-directory import contains unsupported links or special files: " + ", ".join(captured["skipped"][:10]))
     if captured.get("reserved"):
@@ -600,7 +601,7 @@ def _import_source(config: Config, source: Path):
     except (OSError, RuntimeError):
         raise Denied("Unreadable import source path") from None
     if not roots:
-        yield resolved
+        yield resolved, ()
         return
     try:
         if len(roots) != 1:
@@ -622,7 +623,10 @@ def _import_source(config: Config, source: Path):
             DelegationJobs.guard(root)
             # A missing/unsafe initialization marker is unknown, not external.
             safe_read(root, "project.toml", 65536)
-            yield resolved
+            # Internal locks are control state, not imported content. Never
+            # reopen the held workspace lock during a project-root capture;
+            # same-named directories inside actual source remain visible.
+            yield resolved, ("locks",) if resolved == root else ()
     except (OSError, RuntimeError, LimitExceeded):
         raise Denied("Unreadable managed import source or reservation") from None
 
@@ -630,7 +634,7 @@ def _import_source(config: Config, source: Path):
 def initialize(config: Config, name: str, source: Path, goal_file: Path,
                roles: list[str], verification: list[str], *, armed: bool = False) -> Project:
     identifier(name)
-    with _import_source(config, source) as source:
+    with _import_source(config, source) as (source, exclude_dirs):
         goal_file = goal_file.resolve()
         if not source.is_dir() or not goal_file.is_file():
             raise ConfigError("Source directory and goal file must exist")
@@ -650,7 +654,8 @@ def initialize(config: Config, name: str, source: Path, goal_file: Path,
                 if (source / ".git").exists():
                     _import_git_tree(source, stage / "workspace", env)
                 else:
-                    _import_plain_directory(source, stage / "workspace", stage, config)
+                    _import_plain_directory(source, stage / "workspace", stage, config,
+                                            exclude_dirs=exclude_dirs)
                 atomic_write(stage / "PROJECT.md", goal.encode())
                 text = "roles = " + json.dumps(roles) + "\nverify = " + json.dumps(verification) + "\n"
                 atomic_write(stage / "project.toml", text.encode())

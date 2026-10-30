@@ -348,18 +348,26 @@ class Snapshots:
         else:
             self._capture_portable(workspace, files, skipped, reserved, 0, bounds_only=True)
 
-    def capture_files(self, workspace: Path, *, persist: bool = True) -> dict:
-        """Capture the manifest; persist=False only inspects, without storing objects."""
+    def capture_files(self, workspace: Path, *, persist: bool = True,
+                      exclude_dirs: tuple[str, ...] = ()) -> dict:
+        """Capture the manifest; persist=False only inspects, without storing objects.
+
+        exclude_dirs prunes exact workspace-relative directory paths, not
+        matching basenames elsewhere in the source tree.
+        """
         files: dict[str, dict] = {}
         skipped: list[str] = []
         reserved: list[str] = []
         total = 0
         if _platform.HAS_OPENAT and _platform.HAS_DIR_FD:
-            return self._capture_openat(workspace, files, skipped, reserved, total, persist=persist)
-        return self._capture_portable(workspace, files, skipped, reserved, total, persist=persist)
+            return self._capture_openat(workspace, files, skipped, reserved, total, persist=persist,
+                                    exclude_dirs=exclude_dirs)
+        return self._capture_portable(workspace, files, skipped, reserved, total, persist=persist,
+                                      exclude_dirs=exclude_dirs)
 
     def _capture_openat(self, workspace: Path, files: dict, skipped: list, reserved: list,
-                        total: int, *, bounds_only: bool = False, persist: bool = True) -> dict:
+                        total: int, *, bounds_only: bool = False, persist: bool = True,
+                        exclude_dirs: tuple[str, ...] = ()) -> dict:
         # fwalk does not traverse symlink directories; safe_read pins each component.
         for directory, dirs, names, directory_fd in os.fwalk(workspace, follow_symlinks=False):
             relative = Path(directory).relative_to(workspace)
@@ -372,7 +380,7 @@ class Snapshots:
                     else:
                         visible_dirs.append(d)
                     continue
-                if self.excluded(rel) or self._private_evidence(rel) or self._private(rel):
+                if rel in exclude_dirs or self.excluded(rel) or self._private_evidence(rel) or self._private(rel):
                     continue
                 if stat.S_ISLNK(os.stat(d, dir_fd=directory_fd, follow_symlinks=False).st_mode):
                     skipped.append(rel)
@@ -396,7 +404,8 @@ class Snapshots:
                 "reserved": reserved, "bytes": total}
 
     def _capture_portable(self, workspace: Path, files: dict, skipped: list, reserved: list,
-                          total: int, *, bounds_only: bool = False, persist: bool = True) -> dict:
+                          total: int, *, bounds_only: bool = False, persist: bool = True,
+                          exclude_dirs: tuple[str, ...] = ()) -> dict:
         # Fallback where openat/dir_fd is unavailable: walk without following
         # links, refuse any symlink, and read through the same safe_read path.
         for directory, dirs, names in os.walk(workspace, followlinks=False):
@@ -411,7 +420,7 @@ class Snapshots:
                     else:
                         visible_dirs.append(d)
                     continue
-                if self.excluded(rel) or self._private_evidence(rel) or self._private(rel):
+                if rel in exclude_dirs or self.excluded(rel) or self._private_evidence(rel) or self._private(rel):
                     continue
                 if full.is_symlink() or bool(getattr(full.lstat(), "st_file_attributes", 0) & 0x400):
                     skipped.append(rel)

@@ -337,6 +337,37 @@ class ProjectImportReservationTests(Fixture):
         self.denied_import()
         self.denied_import(self.project.root)
 
+    def test_root_import_omits_only_internal_locks_before_reading(self):
+        content = b'ordinary source content\n'
+        for source in (self.project.workspace, self.root / 'source'):
+            (source / 'locks').mkdir()
+            (source / 'locks/workspace.lock').write_bytes(content)
+        original_read = snapshot_module.safe_read_info
+
+        def deny_held_lock(root, name, maximum):
+            if Path(root) == self.project.root and name.startswith('locks/'):
+                self.assertTrue(held(self.project.root / 'locks/workspace.lock'))
+                raise PermissionError(13, 'Synthetic held-lock read denial')
+            return original_read(root, name, maximum)
+
+        # Cover the native walk and the portable walk used on Windows.
+        for portable in (False, True):
+            with self.subTest(portable=portable), \
+                 patch.object(snapshot_module._platform, 'HAS_OPENAT',
+                              False if portable else snapshot_module._platform.HAS_OPENAT), \
+                 patch.object(snapshot_module, 'safe_read_info', side_effect=deny_held_lock):
+                imported = self.import_source(self.project.root, name=f'root-{int(portable)}')
+                self.assertFalse((imported.workspace / 'locks').exists())
+                self.assertEqual((imported.workspace / 'workspace/locks/workspace.lock').read_bytes(),
+                                 content)
+                self.assertEqual((imported.workspace / 'workspace/app.py').read_bytes(),
+                                 b'VALUE = 2\n')
+                workspace = self.import_source(name=f'workspace-{int(portable)}')
+                external = self.import_source(self.root / 'source', name=f'external-{int(portable)}')
+                for project in (workspace, external):
+                    self.assertEqual((project.workspace / 'locks/workspace.lock').read_bytes(),
+                                     content)
+
     def test_absent_store_imports_without_initializing_and_external_is_unchanged(self):
         real_guard = DelegationJobs.guard
         def guarded(root):
@@ -520,13 +551,13 @@ class ProjectImportReservationTests(Fixture):
         with ThreadPoolExecutor(max_workers=1) as pool:
             futures = []
 
-            def capture(*args):
+            def capture(*args, **kwargs):
                 self.assertTrue(held(self.project.root / 'locks/workspace.lock'))
                 futures.append(pool.submit(start))
                 self.assertTrue(attempting.wait(5), 'Start did not attempt workspace.lock')
                 self.assertFalse(started.is_set())
                 self.assertIsNone(store.reservation())
-                original(*args)
+                original(*args, **kwargs)
                 self.assertFalse(started.is_set(), 'Start slipped in during capture')
 
             with patch.object(lifecycle, operation, side_effect=capture):
