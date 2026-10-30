@@ -1147,13 +1147,13 @@ frozen decision delivery; a terminal item correction that changes the current
 terminal revision/payload invalidates the older work-item token. No outcome,
 prose summary, or `wait_for_check` implies acknowledgement;
 explicit selections also work when the successful unit waits for a check.
-CI wait rows also appear in `wait_events`. By default they carry no `ack_token`
-and retain legacy auto-acknowledgement. Only `[vcs] ci_wait_shared_records = true`
-enables CI per-record tokens and the `ci_wait_delivery` prompt contract. On that
-route, explicit selected tokens are revalidated against the current blocked
-revision/holder and exact source evidence before intent and receipt writing;
-bounded/bound-hit runs and finishes registering `wait_for_check` write no CI
-receipt, even if selected. CI status and check-job data remain non-token sources.
+CI wait rows also appear in `wait_events` and always carry identity-bound
+`ack_token`s plus the `ci_wait_delivery` prompt contract. Explicit selections are
+revalidated against the current blocked revision/holder and exact source
+evidence before intent and receipt writing; bounded/bound-hit runs and finishes
+registering `wait_for_check` write no CI receipt, even if selected. Legacy
+per-item auto-ack files are not imported, so still-current rows without a shared
+receipt replay. CI status and check-job data remain non-token sources.
 Terminal work-item receipts use the same explicit selection contract, with their
 existing storage below.
 
@@ -1661,7 +1661,6 @@ refresh and the best-effort daemon periodic fetch.
 | `ci_branch` | `""` | CI/reporting branch exposed only to `vcs_read` roles and included in the default CI wake set when nonempty |
 | `ci_wake_extra_branches` | `[]` | Add up to 64 valid branch names to the CI wake set; deduplicated with `ci_branch`; empty preserves existing default behavior |
 | `poll_enabled` | `false` | Explicit opt-in for daemon upstream/CI polling, including receipt-pinned work-item waits; `false` disables all daemon adapter calls and refuses new receipt-bound waits |
-| `ci_wait_shared_records` | `false` | Host-only opt-in for the `ci.wait` SharedRecords holder route and explicit per-record `finish.ack_events`; no legacy auto-ack import, no change to polling or CI requests. Leave false until the gated cutover is validated. |
 | `poll_proposals_enabled` | `false` | Additional opt-in for daemon external-proposal observations and explicit exact-proposal merge waits; requires `poll_enabled = true` and a configured adapter; does not change CI polling |
 | `poll_interval_seconds` | `300` | Daemon poll cadence in seconds (15–86,400) |
 | `poll_max_branches` | `4` | CI branches polled per daemon tick (1–64) |

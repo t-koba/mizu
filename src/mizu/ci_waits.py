@@ -26,10 +26,6 @@ from .work_items import _directory, _timestamp
 MAX_CHECK_SET_BYTES = 2048
 
 
-class _CorruptAck(Denied):
-    """Safely read acknowledgement bytes failed content validation."""
-
-
 def normalize(root, value, *, stored=False):
     fields = {"kind", "publication_id", "checks"}
     if stored:
@@ -79,8 +75,8 @@ def _path(store, item, suffix="result"):
     return store.root / "evidence" / "ci-waits" / f"{item['id']}.{item['rev']}.{suffix}.json"
 
 
-def _read(store, item, suffix="result"):
-    path = _path(store, item, suffix)
+def _read(store, item):
+    path = _path(store, item)
     for parent in (path.parent.parent, path.parent):
         if not _directory(parent):
             return None
@@ -92,9 +88,9 @@ def _read(store, item, suffix="result"):
     try:
         record = loads_finite(raw)
     except (ValueError, UnicodeError) as exc:
-        raise (_CorruptAck if suffix == "ack" else Denied)("Invalid CI wait evidence") from exc
+        raise Denied("Invalid CI wait evidence") from exc
     if not isinstance(record, dict):
-        raise (_CorruptAck if suffix == "ack" else Denied)("Invalid CI wait evidence")
+        raise Denied("Invalid CI wait evidence")
     return record
 
 
@@ -152,11 +148,12 @@ def diagnose(wait, data):
     return result
 
 
-def status_diagnostics(store, role, publication, data, *, shared=False):
+def status_diagnostics(store, role, publication, data):
     """Read-only, holder-only bounded projection using this status response.
 
-    Stream local waits with bounded retention; safely read local evidence and acks,
-    but never write, acknowledge, transition or call the adapter. Omitted items/rows
+    Stream local waits with bounded retention; safely read source evidence and
+    shared receipts, but never write, acknowledge, transition or call the adapter.
+    Omitted items/rows
     are explicit; unsafe or unreadable evidence refuses the projection.
     """
     waits = (item for item in _items(store)
@@ -170,8 +167,8 @@ def status_diagnostics(store, role, publication, data, *, shared=False):
     rows = parse_status_checks(data)
     return {"items": [{"work_item": item["id"], "rev": item["rev"],
                        "checks": diagnose(item["wait"], data),
-                       **({"acknowledgement": "corrupt"} if (_ack_corrupt(store, item)
-                           or (shared and _shared_ack_corrupt(store, item))) else {})}
+                       **({"acknowledgement": "corrupt"}
+                          if _shared_ack_corrupt(store, item) else {})}
                       for item in selected[:MAX_DIAGNOSTIC_ITEMS]],
             "items_truncated": len(selected) > MAX_DIAGNOSTIC_ITEMS,
             "observed_checks": [{key: row[key] for key in ("check", "sha", "state", "run")
@@ -203,94 +200,18 @@ def _evidence(store, item, *, sync=True):
     return {**record, "evidence_digest": digest(canonical(record))}
 
 
-def _acknowledged(store, item, event):
-    ack = _read(store, item, "ack")
-    if ack is None:
-        return False
-    if (set(ack) != {"role", "evidence_digest", "acknowledged_at"}
-            or ack["role"] != item["holder"]
-            or ack["evidence_digest"] != event["evidence_digest"]
-            or not _timestamp(ack["acknowledged_at"])):
-        raise _CorruptAck("Invalid CI wait acknowledgement")
-    return True
-
-
-def _ack_corrupt(store, item):
-    # Validate evidence first: a broken shared store, unsafe path or bad result
-    # must never be reported as acknowledgement corruption.
-    event = _evidence(store, item, sync=False)
-    try:
-        if event is None:
-            if _read(store, item, "ack") is not None:
-                raise Denied("CI wait acknowledgement has no evidence")
-        else:
-            _acknowledged(store, item, event)
-    except _CorruptAck:
-        if event is None:
-            raise Denied("CI wait acknowledgement has no evidence")
-        return True
-    return False
-
-
 def _conclusion(rows):
     return "success" if all(r["state"] == "success" for r in rows) else "failure"
 
 
-def pending(store, role, *, limit=10, config=None):
-    """Freeze a current holder-routed delivery page under the lifecycle lock."""
+def pending(store, role, *, limit=10):
+    """Read current holder deliveries from exact SharedRecords receipts."""
     with lock(store.root / "locks" / "insights.lock"):
-        return (_shared_page(store, role, limit=limit, persist=False)[0] if enabled(config)
-                else _pending(store, role, limit=limit))
+        return _shared_page(store, role, limit=limit, persist=False)[0]
 
 
-def _pending(store, role, *, limit):
-    identifier(role)
-    if type(limit) is not int or not 1 <= limit <= 100:
-        raise Denied("Invalid CI wait delivery limit")
-    selected = []
-    for item in _items(store):
-        if item["holder"] != role:
-            continue
-        try:
-            event = _evidence(store, item)
-            if event is None or _acknowledged(store, item, event):
-                continue
-        except (Denied, LimitExceeded, OSError, ValueError):
-            # Bad per-waiter evidence must not hide another holder-routed event.
-            continue
-        # Oldest blocked revision first; retain only the bounded delivery page.
-        selected.append((item["updated_at"], item["id"], event))
-        selected.sort(key=lambda row: row[:2])
-        del selected[limit:]
-    return [row[2] for row in selected]
-
-
-def acknowledge(store, role, events):
-    identifier(role)
-    with lock(store.root / "locks" / "insights.lock"):
-        for event in events:
-            if not isinstance(event, dict) or event.get("kind") != "ci" or "work_item" not in event:
-                continue
-            item = store._get(event["work_item"], history_revisions=store._history_revisions(
-                event["work_item"], recover=False))
-            if (item["status"] != "blocked" or item["holder"] != role
-                    or item["rev"] != event.get("rev")):
-                continue
-            try:
-                if _evidence(store, item) != event or _acknowledged(store, item, event):
-                    continue
-                write_json(_path(store, item, "ack"),
-                           {"role": role, "evidence_digest": event["evidence_digest"],
-                            "acknowledged_at": observed_now()}, exclusive=True)
-            except (Denied, LimitExceeded, OSError, ValueError):
-                # Leave this event unacknowledged and continue the frozen batch.
-                continue
-
-
-# CI is still the source authority. SharedRecords owns only immutable envelopes,
+# CI remains the source authority. SharedRecords owns only immutable envelopes,
 # manifests and explicit per-role receipts; legacy auto-acks are never imported.
-def enabled(config):
-    return config is not None and config.vcs.get("ci_wait_shared_records", False) is True
 
 
 def _validate_record(subject, payload):
@@ -401,17 +322,13 @@ def _shared_page(store, role, *, limit=10, persist):
     return events, manifest
 
 
-def delivery(store, role, config):
+def delivery(store, role, *, limit=10):
     """Freeze only current holder deliveries; no model-supplied manifest."""
-    if not enabled(config):
-        return pending(store, role), ()
     with lock(store.root / "locks" / "insights.lock"):
-        return _shared_page(store, role, persist=True)
+        return _shared_page(store, role, limit=limit, persist=True)
 
 
 def _selected(context, tokens):
-    if not context.shared_ci_waits or not enabled(context.config):
-        raise Denied("Shared CI wait authority changed")
     shared = shared_store(context.project.work_items)
     allowed = shared._manifest(context.role.name, context.ci_wait_manifest)
     if len(set(tokens)) != len(tokens) or any(token not in allowed for token in tokens):
@@ -439,15 +356,14 @@ def validate_selection(context, tokens):
 
 
 def complete(context, finished):
-    """Called only after successful completion, retaining the legacy no-ack gates."""
-    if (not context.wait_events or finished.get("wait_for_check")
+    """Apply only explicitly selected, current CI-wait receipts after success."""
+    if (not context.ci_wait_manifest or finished.get("wait_for_check")
             or finished.get("outcome") == "bounded" or context.bound_hit):
-        return
-    if not context.shared_ci_waits:
-        acknowledge(context.project.work_items, context.role.name, context.wait_events)
         return
     tokens = set(finished.get("ack_events", []))
     selected = [entry.ack_token for entry in context.ci_wait_manifest if entry.ack_token in tokens]
+    if not selected:
+        return
     with lock(context.project.root / "locks" / "insights.lock"):
         shared, entries = _selected(context, selected)
         shared.acknowledge(context.role.name, [asdict(entry) for entry in entries],

@@ -425,7 +425,6 @@ class Context:
         self.attempt_ordinal = 0
         self.operator_record_manifest = ()
         self.operator_record_page = {"events": [], "pending_count": 0, "truncated": False, "wake_pending": False}
-        self.shared_ci_waits = False
         self.ci_wait_manifest = ()
         self.proposal_wait_manifest = ()
         self.shared_decisions = False
@@ -1352,7 +1351,7 @@ class Context:
             raise Denied(f"VCS read is unavailable: {exc}") from exc
         if diagnose_waits:
             diagnostics = ci_waits.status_diagnostics(
-                self.project.work_items, self.role.name, publication, data, shared=ci_waits.enabled(self.config))
+                self.project.work_items, self.role.name, publication, data)
             data = {**data, "checks": [row for row in data["checks"]
                                        if row["sha"] == publication["published_sha"]]}
             if diagnostics is not None:
@@ -1783,7 +1782,7 @@ class Context:
         obligations = {event["ack_token"]: event for event in self.obligations
                        if "registration_id" in event and "ack_token" in event}
         records = {entry.ack_token for entry in self.operator_record_manifest}
-        ci_tokens = {entry.ack_token for entry in self.ci_wait_manifest} if self.shared_ci_waits else set()
+        ci_tokens = {entry.ack_token for entry in self.ci_wait_manifest}
         proposal_tokens = {entry.ack_token for entry in self.proposal_wait_manifest}
         delivered = proposal_tokens | records | decisions.keys() | terminal.keys() | waits.keys() | obligations.keys() | ci_tokens
         if (not isinstance(tokens, list) or len(tokens) > 512
@@ -1795,8 +1794,9 @@ class Context:
         # role may have revised/withdrawn a topic as part of handling it.
         if self.shared_decisions:
             decision_delivery.validate(self, [token for token in tokens if token in decisions])
-        if self.shared_ci_waits:
-            ci_waits.validate_selection(self, [token for token in tokens if token in ci_tokens])
+        selected_ci = [token for token in tokens if token in ci_tokens]
+        if selected_ci:
+            ci_waits.validate_selection(self, selected_ci)
         proposal_waits.validate_selection(self, [token for token in tokens if token in proposal_tokens])
         operator_records.validate(self, [token for token in tokens if token in records])
         for token in tokens:
@@ -2468,7 +2468,7 @@ class Engine:
             limit=role_work_item_events_limit(project.config, role))
         terminal_page = work_item_events.delivery(role_name, terminal_page)
         terminal_events = terminal_page["events"]
-        ci_events, ci_manifest = ci_waits.delivery(work_items, role_name, self.config)
+        ci_events, ci_manifest = ci_waits.delivery(work_items, role_name)
         proposal_events, proposal_manifest = proposal_waits.delivery(work_items, role_name)
         wait_events = project.insights.due_waits(role_name, snapshot) + ci_events + proposal_events
         # Dependency obligations addressed to this role ride along when
@@ -2574,7 +2574,7 @@ class Engine:
         if _dispatch.skipped == "unchanged":
             return {"skip": {"skipped": "unchanged", "snapshot": snapshot["id"],
                     "code_digest": snapshot["code_digest"]}}
-        return {'next_task': next_task, 'proposal_manifest': proposal_manifest, 'ci_manifest': ci_manifest, 'shared_ci_waits': ci_waits.enabled(self.config), 'record_state': record_state, 'decision_state': decision_state, 'snapshot': snapshot, 'sources': sources, 'terminal_events': terminal_events, 'terminal_page': terminal_page, 'wait_events': wait_events, 'obligations': obligations, 'ci_present': ci_present, 'ci_failures': ci_failures, 'prior_wait_expired': prior_wait_expired, 'decision_events': decision_events, 'decision_receipt_diagnostics': receipt_diagnostics, '_dispatch': _dispatch}
+        return {'next_task': next_task, 'proposal_manifest': proposal_manifest, 'ci_manifest': ci_manifest, 'record_state': record_state, 'decision_state': decision_state, 'snapshot': snapshot, 'sources': sources, 'terminal_events': terminal_events, 'terminal_page': terminal_page, 'wait_events': wait_events, 'obligations': obligations, 'ci_present': ci_present, 'ci_failures': ci_failures, 'prior_wait_expired': prior_wait_expired, 'decision_events': decision_events, 'decision_receipt_diagnostics': receipt_diagnostics, '_dispatch': _dispatch}
 
     def run(self, project: Project, role_name: str, *, attributes=None, retry_busy: bool = False,
                 enqueue_busy: bool = False, event_trigger: bool = False, probes_serviced: bool = False) -> dict:
@@ -2890,7 +2890,6 @@ class Engine:
                 write_json(run_dir / 'operator-record-delivery.json', context.operator_record_page)
                 context.work_item_events = terminal_events
                 context.wait_events = wait_events
-                context.shared_ci_waits = dispatch_state["shared_ci_waits"]
                 context.ci_wait_manifest = dispatch_state["ci_manifest"]
                 context.proposal_wait_manifest = dispatch_state["proposal_manifest"]
                 context.obligations = obligations
@@ -4004,7 +4003,7 @@ def _role_events_due(project: Project, snapshot: dict, role_name=None) -> bool:
             return True
         try:
             if (project.insights.due_waits(name, snapshot)
-                    or ci_waits.pending(project.work_items, name, limit=1, config=project.config)
+                    or ci_waits.pending(project.work_items, name, limit=1)
                     or proposal_waits.pending(project.work_items, name, limit=1)):
                 return True
         except (Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError, AttributeError):
@@ -4134,7 +4133,7 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
                 name for name in project.roles
                 if project.config.roles[name].workspace == "write"]
             try:
-                value = any(check_jobs.wake_ready(project, name) or ci_waits.pending(project.work_items, name, limit=1, config=project.config) or proposal_waits.pending(project.work_items, name, limit=1) for name in names)
+                value = any(check_jobs.wake_ready(project, name) or ci_waits.pending(project.work_items, name, limit=1) or proposal_waits.pending(project.work_items, name, limit=1) for name in names)
             except (Denied, LimitExceeded, OSError, ValueError):
                 value = False
         elif needed == "operator_records_due":

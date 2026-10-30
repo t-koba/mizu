@@ -57,6 +57,22 @@ class CiWaitFixture(Fixture):
         return Context(self.config, self.project, role, run,
                        self.project.snapshots.get(), self.project.workspace)
 
+    def delivery_context(self, role_name="worker", *, limit=10):
+        role = dataclasses.replace(self.config.roles[role_name],
+                                   capabilities=("vcs_read", "work_items_read"))
+        run = self.project.root / "runs" / uuid.uuid4().hex
+        run.mkdir(parents=True)
+        context = Context(self.config, self.project, role, run,
+                          self.project.snapshots.get(), self.project.workspace)
+        context.wait_events, context.ci_wait_manifest = ci_waits.delivery(
+            self.store, role_name, limit=limit)
+        return context
+
+    def acknowledge_delivery(self, context, events=None):
+        selected = context.wait_events if events is None else events
+        ci_waits.complete(context, {"outcome": "wait", "summary": "Handled selected CI results",
+                                    "ack_events": [event["ack_token"] for event in selected]})
+
 
 class CiWaitTests(CiWaitFixture):
     def test_blocked_liveness_never_releases_receipt_bound_ci(self):
@@ -241,10 +257,11 @@ class CiWaitTests(CiWaitFixture):
         from mizu.storage import backup, restore
         item = self.block("backup-roundtrip")
         observed, _ = self.poll()
-        events = ci_waits.pending(self.store, "worker")
+        context = self.delivery_context()
+        events = context.wait_events
         self.assertEqual(observed["observed"], 1)
         self.assertEqual(len(events), 1)
-        ci_waits.acknowledge(self.store, "worker", events)
+        self.acknowledge_delivery(context)
 
         # Preserve the point-of-no-return marker even when publication has no
         # receipt: restoring without it would authorize a fresh dispatch.
@@ -262,8 +279,12 @@ class CiWaitTests(CiWaitFixture):
         self.assertEqual(Publication.read_receipt(restored.root, self.publication.id), self.receipt)
         restored_item = restored.work_items.get(item["id"])
         self.assertEqual(restored_item["wait"], item["wait"])
-        self.assertEqual(ci_waits._evidence(restored.work_items, restored_item), events[0])
-        self.assertTrue(ci_waits._acknowledged(restored.work_items, restored_item, events[0]))
+        self.assertEqual(ci_waits._evidence(restored.work_items, restored_item),
+                         {key: value for key, value in events[0].items()
+                          if key not in ("record_id", "record_digest", "ack_token")})
+        entry = context.ci_wait_manifest[0]
+        self.assertTrue(ci_waits.shared_store(restored.work_items).received(
+            "worker", entry.record_id, entry.record_digest))
         self.assertEqual(ci_waits.pending(restored.work_items, "worker"), [])
 
         restored_uncertain = Publication(restored.root, "d" * 40, "e" * 64, "published", "push",
@@ -284,7 +305,9 @@ class CiWaitTests(CiWaitFixture):
         self.assertEqual(checks["unit"]["job_seconds"], 200)
         self.assertEqual(checks["unit"]["started_at"], "2026-07-20T05:00:00+00:00")
         # The stored evidence revalidates through the same parser.
-        self.assertEqual(ci_waits._evidence(self.store, self.store.get(item["id"])), events[0])
+        self.assertEqual(ci_waits._evidence(self.store, self.store.get(item["id"])),
+                         {key: value for key, value in events[0].items()
+                          if key not in ("record_id", "record_digest", "ack_token")})
 
     def test_registration_refuses_invalid_bounds_uncertain_receipts_and_disabled_polling(self):
         bad = [[], ["unit"] * 2, [""], ["x\x85"], ["x\n"], ["x" * 257], [1], ["x\ud800"],
@@ -332,11 +355,12 @@ class CiWaitTests(CiWaitFixture):
         self.assertEqual(ci_waits.pending(self.store, "worker")[0]["conclusion"], "success")
         self.assertEqual(self.store.get(item["id"])["status"], "blocked")
 
-    def test_terminal_failure_also_wakes_without_transition_and_ack_deduplicates(self):
+    def test_terminal_failure_wakes_and_only_explicit_receipt_stops_replay(self):
         item = self.block()
         result, _ = self.poll([self.rows()[0], {**self.rows()[1], "state": "failure"}])
         self.assertEqual(result["observed"], 1)
-        events = ci_waits.pending(self.store, "worker")
+        context = self.delivery_context()
+        events = context.wait_events
         self.assertEqual((len(events), events[0]["conclusion"], events[0]["rev"]), (1, "failure", 2))
         self.assertEqual(events[0]["publication_id"], self.publication.id)
         self.assertEqual(events[0]["trust"], "external-untrusted")
@@ -346,8 +370,8 @@ class CiWaitTests(CiWaitFixture):
         result, reader = self.poll()
         self.assertEqual(result["polled"], 0)
         reader.assert_not_called()
-        ci_waits.acknowledge(self.store, "worker", events)
-        ci_waits.acknowledge(self.store, "worker", events)
+        self.acknowledge_delivery(context)
+        self.acknowledge_delivery(context)
         self.assertEqual(ci_waits.pending(self.store, "worker"), [])
         self.assertFalse(_role_events_due(self.project, self.project.snapshots.get(), "worker"))
         self.assertEqual(self.store.get(item["id"]), item)
@@ -374,27 +398,27 @@ class CiWaitTests(CiWaitFixture):
         with patch("mizu.runtime.readonly_view", side_effect=lambda store: store):
             self.assertEqual(dispatch(), current)
 
-    def test_runtime_delivers_evidence_in_prompt_and_run_then_stops_waking(self):
+    def test_runtime_replays_unselected_explicit_ci_delivery(self):
+        item = self.block("replay", actor="reviewer")
         engine = Engine(self.config, driver=ScriptDriver())
-        for conclusion in ("success", "failure"):
-            with self.subTest(conclusion=conclusion):
-                item = self.block(conclusion, actor="reviewer")
-                engine.run(self.project, "reviewer")
-                self.poll(self.rows(state=conclusion))
-                delivered = engine.run(self.project, "reviewer")
-                self.assertEqual(delivered["status"], "completed")
-                run = self.project.root / "runs" / delivered["run"]
-                event = read_json(run / "wait-events.json")["events"][0]
-                prompt = json.loads(engine.driver.calls[-1][1])
-                self.assertEqual(prompt["wait_events"], [event])
-                self.assertNotIn("ack_token", event)  # CI retains its existing non-token acknowledgement.
-                self.assertEqual(event["work_item"], item["id"])
-                self.assertEqual(event["conclusion"], conclusion)
-                self.assertEqual(read_json(run / "started.json")["admission"], "wait")
-                self.assertEqual(self.store.get(item["id"]), item)
-                self.assertEqual(engine.run(self.project, "reviewer").get("skipped"), "unchanged")
+        engine.run(self.project, "reviewer")
+        self.poll(self.rows(state="success"))
+        first = engine.run(self.project, "reviewer")
+        self.assertEqual(first["status"], "completed")
+        first_event = read_json(self.project.root / "runs" / first["run"] / "wait-events.json")["events"][0]
+        self.assertIn("ack_token", first_event)
+        self.assertEqual(first_event["work_item"], item["id"])
+        self.assertEqual(first_event["conclusion"], "success")
+        self.assertEqual(self.store.get(item["id"]), item)
+        self.assertEqual(ci_waits.pending(self.store, "reviewer"), [first_event])
 
-    def test_stale_observation_and_old_delivery_cannot_reach_reopened_waiter(self):
+        second = engine.run(self.project, "reviewer")
+        self.assertEqual(second["status"], "completed")
+        second_event = read_json(self.project.root / "runs" / second["run"] / "wait-events.json")["events"][0]
+        self.assertEqual(second_event, first_event)
+        self.assertEqual(ci_waits.pending(self.store, "reviewer"), [first_event])
+
+    def test_stale_observation_and_old_token_cannot_ack_reopened_waiter(self):
         item = self.block()
         def changed_reader(*args):
             self.store.transition(item["id"], expected_rev=2, status="open", actor="worker")
@@ -404,17 +428,22 @@ class CiWaitTests(CiWaitFixture):
         self.assertEqual(result["observed"], 0)
         self.assertEqual(ci_waits.pending(self.store, "worker"), [])
         self.poll()
-        old = ci_waits.pending(self.store, "worker")
+        old_context = self.delivery_context("worker")
+        old = old_context.wait_events
+        self.assertEqual(len(old), 1)
         self.store.transition(item["id"], expected_rev=4, status="doing", actor="reviewer")
         current = self.store.transition(item["id"], expected_rev=5, status="blocked", actor="worker", wait=self.wait)
         self.assertEqual(ci_waits.pending(self.store, "worker"), [])
         self.assertEqual(ci_waits.pending(self.store, "reviewer"), [])
-        ci_waits.acknowledge(self.store, "worker", old)
+        with self.assertRaises(Denied):
+            self.acknowledge_delivery(old_context, old)
         self.poll()
-        fresh = ci_waits.pending(self.store, "reviewer")
+        fresh_context = self.delivery_context("reviewer")
+        fresh = fresh_context.wait_events
         self.assertEqual(fresh[0]["rev"], current["rev"])
         self.assertNotEqual(fresh[0]["evidence_digest"], old[0]["evidence_digest"])
-        ci_waits.acknowledge(self.store, "worker", old)
+        with self.assertRaises(Denied):
+            self.acknowledge_delivery(old_context, old)
         self.assertEqual(ci_waits.pending(self.store, "reviewer"), fresh)
 
     def test_bounded_rotation_throttle_errors_and_shared_state(self):
@@ -452,7 +481,8 @@ class CiWaitTests(CiWaitFixture):
             self.project.set_control(**control)
             self.assertFalse(should_run(self.project, snap, role_name="worker"))
         self.project.set_control(armed=True, paused=False, draining=False)
-        ci_waits.acknowledge(self.store, "worker", ci_waits.pending(self.store, "worker"))
+        context = self.delivery_context()
+        self.acknowledge_delivery(context)
         self.assertFalse(should_run(self.project, snap, role_name="worker"))
 
     def test_poll_project_persists_ci_wait_state(self):
@@ -492,23 +522,17 @@ class CiWaitTests(CiWaitFixture):
         self.assertLessEqual(len(canonical(self.store.page_open()["items"][0])), 8192)
         self.assertEqual(self.store.page_open()["items"][0]["id"], item["id"])
 
-    def test_bounded_delivery_and_partial_ack_replay(self):
+    def test_bounded_delivery_and_partial_explicit_ack_replay(self):
         items = [self.block(str(i)) for i in range(3)]
         self.poll()
         self.poll()
-        page = ci_waits.pending(self.store, "worker", limit=2)
+        context = self.delivery_context(limit=2)
+        page = context.wait_events
         self.assertEqual(len(page), 2)
-        with patch("mizu.ci_waits.write_json", wraps=write_json) as writer:
-            def fail_first(path, record, **kwargs):
-                if writer.call_count == 1:
-                    raise OSError("interrupted ack")
-                return write_json(path, record, **kwargs)
-            writer.side_effect = fail_first
-            ci_waits.acknowledge(self.store, "worker", page)
-            self.assertEqual(writer.call_count, 2)
+        self.acknowledge_delivery(context, [page[1]])
         remaining = ci_waits.pending(self.store, "worker")
         self.assertEqual(len(remaining), 2)
-        self.assertIn(page[0], remaining)
+        self.assertEqual(remaining[0], page[0])
         self.assertNotIn(page[1], remaining)
         self.assertTrue(all(self.store.get(i["id"])["status"] == "blocked" for i in items))
 
@@ -530,7 +554,8 @@ class CiWaitTests(CiWaitFixture):
         self.assertFalse(result["ok"])
         self.assertEqual(ci_waits.pending(self.store, "worker"), [])
         self.poll()
-        event = ci_waits.pending(self.store, "worker")[0]
+        context = self.delivery_context()
+        event = context.wait_events[0]
         path = ci_waits._path(self.store, item)
         record = read_json(path)
         record["conclusion"] = "failure"
@@ -539,7 +564,8 @@ class CiWaitTests(CiWaitFixture):
         result, reader = self.poll()
         self.assertFalse(result["ok"])
         reader.assert_not_called()
-        ci_waits.acknowledge(self.store, "worker", [event])
+        with self.assertRaises(Denied):
+            self.acknowledge_delivery(context)
         self.assertFalse(ci_waits._path(self.store, item, "ack").exists())
         self.assertEqual(read_json(path), record)
         self.assertEqual(event["conclusion"], "success")
@@ -547,18 +573,15 @@ class CiWaitTests(CiWaitFixture):
     def test_corrupt_result_does_not_block_delivery_ack_or_unrelated_poll(self):
         bad, good = [self.block(key) for key in ("bad", "good")]
         self.assertEqual(self.poll()[0]["observed"], 2)
-        events = {e["work_item"]: e for e in ci_waits.pending(self.store, "worker")}
         path = ci_waits._path(self.store, bad)
         record = read_json(path)
         record["conclusion"] = "failure"
         write_json(path, record)
         corrupted = path.read_bytes()
 
-        self.assertEqual(ci_waits.pending(self.store, "worker"), [events[good["id"]]])
-        # The corrupt event is first in a previously frozen delivery batch.
-        ci_waits.acknowledge(self.store, "worker", [events[bad["id"]], events[good["id"]]])
-        self.assertFalse(ci_waits._path(self.store, bad, "ack").exists())
-        self.assertTrue(ci_waits._path(self.store, good, "ack").exists())
+        context = self.delivery_context()
+        self.assertEqual([event["work_item"] for event in context.wait_events], [good["id"]])
+        self.acknowledge_delivery(context)
         self.assertEqual(ci_waits.pending(self.store, "worker"), [])
 
         third = self.block("third")
@@ -567,129 +590,54 @@ class CiWaitTests(CiWaitFixture):
         self.assertEqual((result["ok"], result["polled"], result["observed"]), (False, 1, 1))
         self.assertEqual(len(result["errors"]), 1)
         self.assertIn(bad["id"], result["errors"][0])
-        fresh = ci_waits.pending(self.store, "worker")
-        self.assertEqual([e["work_item"] for e in fresh], [third["id"]])
-        ci_waits.acknowledge(self.store, "worker", fresh)
+        fresh_context = self.delivery_context()
+        self.assertEqual([event["work_item"] for event in fresh_context.wait_events], [third["id"]])
+        self.acknowledge_delivery(fresh_context)
         self.assertEqual(ci_waits.pending(self.store, "worker"), [])
         self.assertEqual(path.read_bytes(), corrupted)
         for item in (bad, good, third):
             self.assertEqual(self.store.get(item["id"]), item)
 
-    def test_corrupt_ack_is_not_delivered_or_replaced_and_batch_continues(self):
-        bad, good = [self.block(key) for key in ("bad-ack", "good-ack")]
-        self.poll()
-        events = {e["work_item"]: e for e in ci_waits.pending(self.store, "worker")}
-        path = ci_waits._path(self.store, bad, "ack")
-        for payload in (b'{"role":"other"}', b'not json'):
-            with self.subTest(payload=payload):
-                path.write_bytes(payload)
-                self.assertNotIn(events[bad["id"]], ci_waits.pending(self.store, "worker"))
-                ci_waits.acknowledge(self.store, "worker", [events[bad["id"]], events[good["id"]]])
-                self.assertEqual(path.read_bytes(), payload)
-                self.assertTrue(ci_waits._path(self.store, good, "ack").exists())
-                self.assertEqual(ci_waits.pending(self.store, "worker"), [])
-
-    def test_status_reports_only_safely_read_corrupt_ack_and_keeps_delivery(self):
-        bad, good = [self.block(key) for key in ("bad-status", "good-status")]
-        self.poll()
-        events = {e["work_item"]: e for e in ci_waits.pending(self.store, "worker")}
-        path = ci_waits._path(self.store, bad, "ack")
-        evidence = ci_waits._path(self.store, bad).read_bytes()
-        valid = {"role": "worker", "evidence_digest": events[bad["id"]]["evidence_digest"],
-                 "acknowledged_at": "2025-01-01T00:00:00+00:00"}
-        reader = self.reader()
-        args = {"op": "status", "publication_id": self.publication.id}
-
-        def status():
-            with patch.object(vcs, "invoke", return_value={"checks": self.rows()}):
-                return reader.handle("vcs_read", args)["result"]["ci_waits"]["items"]
-
-        self.assertTrue(all("acknowledgement" not in row for row in status()))
-        cases = [b'not json', b'[]', canonical({**valid, "extra": 1}),
-                 canonical({**valid, "role": "editor"}),
-                 canonical({**valid, "evidence_digest": "0" * 64}),
-                 canonical({**valid, "acknowledged_at": "invalid"})]
-        for payload in cases:
-            with self.subTest(payload=payload):
-                path.write_bytes(payload)
-                result = {row["work_item"]: row for row in status()}
-                self.assertEqual(result[bad["id"]]["acknowledgement"], "corrupt")
-                self.assertNotIn("acknowledgement", result[good["id"]])
-                self.assertEqual(ci_waits.pending(self.store, "worker"), [events[good["id"]]])
-                self.assertEqual(path.read_bytes(), payload)
-                self.assertEqual(ci_waits._path(self.store, bad).read_bytes(), evidence)
-        path.write_bytes(canonical(valid))
-        self.assertTrue(all("acknowledgement" not in row for row in status()))
-        self.assertEqual(ci_waits.pending(self.store, "worker"), [events[good["id"]]])
-        ci_waits.acknowledge(self.store, "worker", [events[good["id"]]])
-        self.assertEqual(ci_waits.pending(self.store, "worker"), [])
-
-    def test_status_refuses_unsafe_or_unreadable_ack_and_broken_store(self):
+    def test_status_ignores_legacy_ack_files_and_reports_shared_source_only(self):
         item = self.block()
         self.poll()
-        path = ci_waits._path(self.store, item, "ack")
-        data = {"checks": self.rows()}
-        def status():
-            return ci_waits.status_diagnostics(self.store, "worker", self.receipt, data)
-        path.write_bytes(b'x' * (PREVIEW_BYTES + 1))
-        with self.assertRaises(LimitExceeded):
-            status()
-        path.unlink()
-        try:
-            path.symlink_to(ci_waits._path(self.store, item))
-        except (OSError, NotImplementedError):
-            pass  # symlinks may be unavailable on Windows
-        else:
-            with self.assertRaises((Denied, OSError)):
-                status()
-            path.unlink()
-        path.write_bytes(b'not json')
-        safe_read = ci_waits.safe_read
-        for error in (OSError("unreadable"), ValueError("read failed")):
-            def unreadable(root, name, maximum):
-                if name.endswith(".ack.json"):
-                    raise error
-                return safe_read(root, name, maximum)
-            with patch.object(ci_waits, "safe_read", side_effect=unreadable):
-                with self.assertRaises(type(error)):
-                    status()
-        with patch.object(ci_waits, "_items", side_effect=Denied("ledger corrupt")):
-            with self.assertRaisesRegex(Denied, "ledger corrupt"):
-                status()
-        ci_waits._path(self.store, item).write_bytes(b'not json')
-        with self.assertRaisesRegex(Denied, "evidence"):
-            status()
-        self.assertEqual(path.read_bytes(), b'not json')
+        legacy = ci_waits._path(self.store, item, "ack")
+        legacy.write_bytes(b"not json")
+        result = ci_waits.status_diagnostics(self.store, "worker", self.receipt,
+                                            {"checks": self.rows()})
+        self.assertNotIn("acknowledgement", result["items"][0])
+        self.assertEqual(len(ci_waits.pending(self.store, "worker")), 1)
+        self.assertEqual(legacy.read_bytes(), b"not json")
 
     def test_evidence_io_errors_are_local_and_poll_errors_are_bounded(self):
         bad = [self.block("unreadable-" + str(i)) for i in range(4)]
         good = self.block("readable")
         original = ci_waits._read
 
-        def unreadable(store, item, suffix="result"):
+        def unreadable(store, item):
             if item["id"] in {i["id"] for i in bad}:
                 raise OSError("unreadable result")
-            return original(store, item, suffix)
+            return original(store, item)
 
         with patch("mizu.ci_waits._read", side_effect=unreadable):
             result, reader = self.poll()
             reader.assert_called_once()
             self.assertEqual((result["ok"], result["polled"], result["observed"]), (False, 1, 1))
             self.assertEqual(len(result["errors"]), self.config.vcs["poll_max_branches"])
-            events = ci_waits.pending(self.store, "worker")
-            self.assertEqual([e["work_item"] for e in events], [good["id"]])
-            ci_waits.acknowledge(self.store, "worker", events)
+            context = self.delivery_context()
+            self.assertEqual([event["work_item"] for event in context.wait_events], [good["id"]])
+            self.acknowledge_delivery(context)
             self.assertEqual(ci_waits.pending(self.store, "worker"), [])
 
     def test_invalid_receipt_or_ledger_still_fails_globally(self):
         self.block()
         self.poll()
-        events = ci_waits.pending(self.store, "worker")
+        context = self.delivery_context()
         self.publication.path("receipt").unlink()
         with self.assertRaises(Denied):
             ci_waits.pending(self.store, "worker")
         with self.assertRaises(Denied):
-            ci_waits.acknowledge(self.store, "worker", events)
+            self.acknowledge_delivery(context)
         result, reader = self.poll()
         self.assertFalse(result["ok"])
         self.assertIn("error", result)  # global scan failure, not per-item errors

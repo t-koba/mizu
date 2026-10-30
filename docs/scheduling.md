@@ -474,37 +474,24 @@ nor otherwise transitions the item.
 Only the matching current blocked holder receives this evidence, in full and
 delta prompt `wait_events` and the run's `wait-events.json` (at most ten CI
 records per run, separately from insight waits). Reopened/replaced waits or a
-changed holder do not receive old evidence. With the default
-`[vcs] ci_wait_shared_records = false`, a completed, non-bounded run
-acknowledges the exact evidence digest in a create-only per-item/revision ack;
-there is no moving timestamp watermark. Unchanged terminal evidence is neither
-repolled nor redelivered after acknowledgement, avoiding scheduler spin even
-when the item remains blocked. Interrupted/failed/bounded delivery replays
-until acknowledged; a partial ack can only replay the remainder. Changing the
-wait requires the normal CAS lifecycle (leave `blocked`, then block again).
-There is no automatic retry of publication or CI rerun, no wait cancellation
-API beyond that lifecycle, and no auto-transition on either conclusion.
-
-The host may explicitly enable `ci_wait_shared_records` (default false; examples
-remain inactive). This changes only terminal waiter delivery/receipts, not
-polling, CI requests, status authority, routing or admission policy. Current
-WorkItems history and the completed Publication receipt are still replayed and
-validated. Terminal evidence is projected into the existing SharedRecords store
-as `ci.wait`, writer `host.ci`, identity `ci-wait:<item>:<blocked-rev>`, with the
-blocked revision's `updated_at` as event time. The payload is the exact validated
-external-untrusted result plus its evidence digest. The per-source 128 KiB
-evidence limit is preserved at poll/write and each shared envelope uses the
-existing generic record bound; no smaller aggregate cap is added. Pages stop at
-ten rows or the existing generic 1 MiB frame measured against the actual
-serialized `wait_events` prompt contribution (not canonical list framing),
-oldest blocked revision then item ID first, after source eligibility and explicit
-receipt filtering. A page stops before the next oldest row that would exceed
-the remaining frame; after the delivered prefix is explicitly receipted, replay
+changed holder do not receive old evidence. Each eligible result is projected
+into the existing SharedRecords store as `ci.wait`, writer `host.ci`, identity
+`ci-wait:<item>:<blocked-rev>`, with the blocked revision's `updated_at` as event
+time. Only current eligible sources without an exact explicit generic receipt
+enter the oldest-first bounded page (ten rows or the existing generic 1 MiB
+frame measured against the actual serialized `wait_events` prompt contribution).
+Legacy per-item auto-ack files are not imported or rewritten; still-current
+results without a shared receipt replay. Current WorkItems history, the completed
+Publication receipt, exact wait digest, holder and declared check set are still
+revalidated at delivery and acknowledgement. The per-source 128 KiB evidence
+limit and existing generic record bound are unchanged; no smaller aggregate cap
+is added. A page stops before the next oldest row that would exceed the
+remaining frame; after the delivered prefix is explicitly receipted, replay
 starts at that row. Each individually valid source event fits an empty frame
 under the per-source bound. No timestamp cursor is introduced.
 
 The unit freezes a holder-only host manifest. Rows add `record_id`,
-`record_digest` and `ack_token`; full and resumed prompts state the enabled
+`record_digest` and `ack_token`; full and resumed prompts state the
 `ci_wait_delivery` contract. Only unique exact tokens explicitly selected in
 `finish.ack_events` may produce generic per-role SharedRecords receipts after
 successful completion. Omitted/empty/partial selections leave other events
@@ -512,36 +499,19 @@ pending. Current revision, blocked status, holder, wait digest, exact publicatio
 and terminal evidence are rechecked both before finish intent and under the
 lifecycle lock before receipt writes. A stale selected source refuses the batch
 without any CI receipt. Bounded/bound-hit units and finishes registering another
-check wait write none. Finishing alone is never handling on this route.
+check wait write none. Finishing alone is never handling.
 
-Legacy `evidence/ci-waits/*.ack.json` files are not imported or consulted for
-shared delivery; an otherwise-current result may replay after activation.
-Status diagnostics remain holder-only, bounded and read-only, including corrupt
-legacy or shared receipt visibility. Unsafe/unreadable paths fail closed;
-corrupt bytes are never repaired. Records and receipts use existing backup and
-restore coverage. Interrupted create-only writes may leave a prefix: exact
-replay reuses it and unreceipted events remain pending. There is no second CI
-receipt store, model activation tool, or automatic deployment.
-
-Malformed or unreadable per-waiter result/ack records fail closed for that
-waiter: they are neither delivered nor acknowledged or overwritten. They do
-not prevent delivery, acknowledgement or polling of unrelated waiters. Polls
-retain valid observation counts alongside at most `poll_max_branches` per-item
-errors (each at most 512 characters). Invalid ledger/seed/history state or
-receipt bindings still fail the whole scan; they are not per-waiter evidence
-errors. An acknowledgement error does not abort the remaining batch;
-unacknowledged valid events remain eligible for replay.
-
-For the holder's exact-publication `vcs_read status` diagnostic, a selected
-item reports `acknowledgement: "corrupt"` only when safely read acknowledgement
-content is malformed or invalid against valid retained result evidence. Valid
-or absent acknowledgements omit the field; omission is not an acknowledgement
-inference. Reads are bounded and return no raw bytes; no record is changed.
-Unsafe paths, oversized/unreadable records, invalid result evidence and shared
-ledger errors refuse the projection rather than being labeled corruption. The
-existing ten-item bound and truncation flag apply, and neither this view nor
-its failures change polling or delivery. See [operations](operations.md) for
-the required grants and invocation.
+Status diagnostics remain holder-only, bounded and read-only; they report a
+corrupt shared receipt only after validating the current source evidence. Legacy
+per-item acknowledgement files are ignored, including malformed or unsafe files,
+because they are not authority on this route. Invalid or unreadable result
+evidence still fails closed for that waiter and does not block unrelated
+waiters. Invalid ledger/seed/history or shared receipt bindings fail the whole
+scan. Records and receipts use existing backup/restore coverage. Interrupted
+create-only writes may leave a prefix: exact replay reuses it and unreceipted
+events remain pending. There is no second CI receipt store, model activation
+tool, or automatic deployment. See [operations](operations.md) for required
+grants and invocation.
 
 Control and configured ordinary spacing remain in force (explicit
 `daemon_spacing_seconds` when set, else the policy default: `signals` uses the

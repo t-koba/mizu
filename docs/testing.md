@@ -469,9 +469,10 @@ They cover explicit mixed/partial/empty/omitted selections, role/source/payload
 binding before finish intent, exact registration consumption and same-timestamp
 re-registration, restart/backup/restore and idempotent/interrupted writes, result/publication
 failure, full/delta prompts, malformed registration IDs, UTF-8 byte bounds and
-corrupt/unsafe receipt paths. CI waits remain non-token observations with their
-existing acknowledgement semantics. Fake role handlers share
-`support.delivered_ack_tokens`; finishing by itself is deliberately not handling.
+corrupt/unsafe receipt paths. CI waiter results now carry explicit shared-record
+tokens; omitted selections replay, legacy per-item acknowledgements are ignored,
+and finishing by itself is deliberately not handling. Fake role handlers share
+`support.delivered_ack_tokens`.
 
 `test_proposal_waits` uses offline fake proposal adapter responses and real local
 Publication, WorkItems and SharedRecords stores. It covers publication/head/base

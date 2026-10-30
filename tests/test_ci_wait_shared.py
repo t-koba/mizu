@@ -1,5 +1,4 @@
-"""Opt-in CI source cutover; fake status adapter, no network/deployment changes."""
-import dataclasses
+"""CI source cutover; fake status adapter, no network/deployment changes."""
 import json
 from pathlib import Path as _Path
 from unittest.mock import patch
@@ -20,21 +19,19 @@ from mizu.unit_prompts import prompt_delta_for, prompt_for
 class SharedCiWaitTests(CiWaitFixture):
     def setUp(self):
         super().setUp()
-        self.config = dataclasses.replace(self.config, vcs={**self.config.vcs, "ci_wait_shared_records": True})
         self.project = Project(self.config, "sample")
         self.store = self.project.work_items
 
     def page(self, role="worker"):
-        return ci_waits.delivery(self.store, role, self.config)
+        return ci_waits.delivery(self.store, role)
 
     def pending(self, role="worker", limit=10):
-        return ci_waits.pending(self.store, role, limit=limit, config=self.config)
+        return ci_waits.pending(self.store, role, limit=limit)
 
     def context(self, role="worker"):
         context = self.reader(capabilities=("finish", "vcs_read", "work_items_read"))
         context.role = self.config.roles[role]
         context.wait_events, context.ci_wait_manifest = self.page(role)
-        context.shared_ci_waits = True
         return context
 
     def complete(self, context, tokens=None, **kwargs):
@@ -46,37 +43,34 @@ class SharedCiWaitTests(CiWaitFixture):
     def receipts(self):
         return list((self.project.root / "shared-record-receipts").rglob("*.json"))
 
-    def test_gate_is_boolean_default_off_and_off_route_is_unchanged(self):
+    def test_default_route_uses_explicit_receipts_and_ignores_legacy_ack_files(self):
         original = self.file.read_text()
-        self.assertFalse(load(self.file).vcs["ci_wait_shared_records"])
-        # Example, default and docs agree without enabling the route.
         example = (_Path(__file__).resolve().parents[1] / "config/config.example.toml").read_text()
-        self.assertIn("ci_wait_shared_records = false", example)
-        self.assertIn("ci_wait_shared_records", original)
-        for value in ('"true"', '1', '0.0', '[]'):
-            self.file.write_text(original.replace("ci_wait_shared_records = false",
-                                                  f"ci_wait_shared_records = {value}"))
-            with self.assertRaises(ConfigError):
-                load(self.file)
-        self.file.write_text(original.replace("ci_wait_shared_records = false",
-                                              "ci_wait_shared_records = true"))
-        self.assertTrue(load(self.file).vcs["ci_wait_shared_records"])
+        self.assertNotIn("ci_wait_shared_records", original)
+        self.assertNotIn("ci_wait_shared_records", example)
+        self.assertNotIn("ci_wait_shared_records", self.config.vcs)
+        legacy = original.replace("[vcs]", "[vcs]\nci_wait_shared_records = false", 1)
+        self.file.write_text(legacy)
+        with self.assertRaises(ConfigError):
+            load(self.file)
         self.file.write_text(original)
+
         item = self.block()
         self.poll()
-        off = dataclasses.replace(self.config, vcs={**self.config.vcs, "ci_wait_shared_records": False})
-        events, manifest = ci_waits.delivery(self.store, "worker", off)
-        self.assertEqual(events, ci_waits.pending(self.store, "worker"))
-        self.assertEqual(manifest, ())
-        self.assertNotIn("ack_token", events[0])
-        self.assertFalse((self.project.root / "shared-records").exists())
-        context = self.reader()
-        context.wait_events = events
-        ci_waits.complete(context, {"outcome": "wait"})
-        self.assertTrue(ci_waits._path(self.store, item, "ack").exists())
+        context = self.context()
+        event = context.wait_events[0]
+        self.assertIn("ack_token", event)
+        self.assertEqual(self.pending(), context.wait_events)
+        legacy_path = ci_waits._path(self.store, item, "ack")
+        legacy_ack = {"role": "worker", "evidence_digest": event["evidence_digest"],
+                      "acknowledged_at": "2025-01-01T00:00:00+00:00"}
+        legacy_path.write_bytes(canonical(legacy_ack))
+        self.assertEqual(self.pending(), context.wait_events)
         self.assertEqual(self.receipts(), [])
-        # A legacy auto-ack is deliberately NOT a receipt on the new route.
-        self.assertEqual(len(self.page()[0]), 1)
+        self.complete(context, [])
+        self.assertEqual(self.pending(), context.wait_events)
+        self.assertEqual(self.receipts(), [])
+        self.assertEqual(legacy_path.read_bytes(), canonical(legacy_ack))
 
     def test_payload_time_order_holder_and_readonly_wake(self):
         items = [self.block(str(i)) for i in range(3)]
@@ -119,7 +113,7 @@ class SharedCiWaitTests(CiWaitFixture):
         self.assertEqual(len(self.receipts()), 1)
         self.assertFalse(any((self.project.root / "evidence" / "ci-waits").glob("*.ack.json")))
         restarted = Project(self.config, "sample")
-        replay, _ = ci_waits.delivery(restarted.work_items, "worker", self.config)
+        replay, _ = ci_waits.delivery(restarted.work_items, "worker")
         self.assertEqual(replay, self.pending())
         self.assertNotIn(token, [e["ack_token"] for e in replay])
 
@@ -227,7 +221,7 @@ class SharedCiWaitTests(CiWaitFixture):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b'not json')
         def status(role="worker"):
-            return ci_waits.status_diagnostics(self.store, role, self.receipt, {"checks": self.rows()}, shared=True)
+            return ci_waits.status_diagnostics(self.store, role, self.receipt, {"checks": self.rows()})
         with patch.object(shared_records, "atomic_write", side_effect=AssertionError("write")), \
              patch.object(ci_waits, "sync_dir", side_effect=AssertionError("sync")):
             result = status()
@@ -246,9 +240,9 @@ class SharedCiWaitTests(CiWaitFixture):
             with self.assertRaises((Denied, OSError)):
                 status()
             path.unlink()
-        # Legacy corruption remains visible but never controls new delivery.
+        # Legacy corruption is ignored; only shared receipts have authority.
         ci_waits._path(self.store, item, "ack").write_bytes(b'not json')
-        self.assertEqual(status()["items"][0]["acknowledgement"], "corrupt")
+        self.assertNotIn("acknowledgement", status()["items"][0])
         self.assertEqual(len(self.pending()), 1)
 
     def test_eligibility_and_receipts_are_filtered_before_count_bound(self):
@@ -376,14 +370,14 @@ class SharedCiWaitTests(CiWaitFixture):
         backup(self.project, archive)
         restore(self.config, "restored", archive)
         restored = Project(self.config, "restored", read_only=True)
-        self.assertEqual(ci_waits.pending(restored.work_items, "worker", config=self.config), self.pending())
+        self.assertEqual(ci_waits.pending(restored.work_items, "worker"), self.pending())
         shared = ci_waits.shared_store(restored.work_items)
         for entry in context.ci_wait_manifest:
             self.assertEqual(shared.get(entry.record_id), ci_waits.shared_store(self.store).get(entry.record_id))
         first = context.ci_wait_manifest[0]
         self.assertTrue(shared.received("worker", first.record_id, first.record_digest))
 
-    def test_completion_gates_and_authority_change_write_no_receipts(self):
+    def test_completion_gates_and_unselected_rows_write_no_receipts(self):
         self.block()
         self.poll()
         context = self.context()
@@ -393,13 +387,11 @@ class SharedCiWaitTests(CiWaitFixture):
         self.complete(context, tokens)
         context.bound_hit = None
         self.complete(context, tokens, wait_for_check="another-check")
+        self.complete(context, [])
         self.assertEqual(self.receipts(), [])
-        context.config = dataclasses.replace(self.config, vcs={**self.config.vcs, "ci_wait_shared_records": False})
-        with self.assertRaises(Denied):
-            self.complete(context, tokens)
-        self.assertEqual(self.receipts(), [])
+        self.assertEqual(len(self.pending()), 1)
 
-    def test_engine_only_receipts_explicit_successful_selection_and_prompts_gate_contract(self):
+    def test_default_explicit_receipts_successful_selection_and_prompt_contract(self):
         item = self.block(actor="reviewer")
         self.poll()
         engine = Engine(self.config, driver=ScriptDriver())
@@ -425,39 +417,23 @@ class SharedCiWaitTests(CiWaitFixture):
         self.assertFalse(_role_events_due(self.project, self.project.snapshots.get(), "reviewer"))
         self.assertEqual(engine.run(self.project, "reviewer").get("skipped"), "unchanged")
 
-    def test_prompt_policy_consistency_gate_off_legacy_gate_on_explicit(self):
-        # Gate off: legacy rows carry no token and prompts carry no contract.
-        item = self.block()
+    def test_prompt_policy_matches_always_explicit_ci_receipts(self):
+        self.block()
         self.poll()
-        off = dataclasses.replace(self.config, vcs={**self.config.vcs, "ci_wait_shared_records": False})
-        events, manifest = ci_waits.delivery(self.store, "worker", off)
-        self.assertEqual(manifest, ())
-        self.assertNotIn("ack_token", events[0])
-        reader = self.reader(capabilities=("finish", "vcs_read", "work_items_read"))
-        reader.role = self.config.roles["worker"]
-        reader.wait_events, reader.ci_wait_manifest = events, manifest
-        reader.shared_ci_waits = False
-        self.assertNotIn("ci_wait_delivery", json.loads(prompt_for(reader)))
-        self.assertNotIn("ci_wait_delivery", json.loads(prompt_delta_for(reader, [])))
-        # Gate on: rows carry exact tokens and prompts state the explicit contract.
         context = self.context()
         self.assertIn("ack_token", context.wait_events[0])
-        full = json.loads(prompt_for(context))
-        delta = json.loads(prompt_delta_for(context, []))
-        for prompt in (full, delta):
+        for prompt in (json.loads(prompt_for(context)),
+                       json.loads(prompt_delta_for(context, []))):
             contract = prompt["ci_wait_delivery"]
             self.assertIn("Select only handled tokens", contract)
             self.assertIn("omitted/empty/partial", contract)
             self.assertIn("Finishing alone", contract)
-        # Policy, prompt contract and protocol agree on the conditional.
         policy = (_Path(__file__).resolve().parents[1] / "policies/shared.md").read_text()
-        self.assertIn("by default (`[vcs] ci_wait_shared_records = false`)", policy)
-        self.assertIn("carry no token and retain legacy auto-acknowledgement", policy)
-        self.assertIn("only when the host", policy)
-        self.assertIn("only exact explicitly selected tokens", policy)
+        self.assertIn("always carry identity-bound `ack_token`s", policy)
+        self.assertIn("Finishing alone never handles CI rows", policy)
         finish_text = protocol.DEFINITIONS["finish"][0]
-        self.assertIn("only when the host enables shared CI delivery", finish_text)
-        self.assertIn("otherwise legacy CI rows have no tokens", finish_text)
+        self.assertIn("always use explicit, identity-bound ack_tokens", finish_text)
+        self.assertNotIn("legacy CI rows have no tokens", finish_text)
 
     def test_failed_model_run_cannot_acknowledge(self):
         self.block(actor="reviewer")

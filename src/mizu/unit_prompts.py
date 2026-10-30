@@ -74,7 +74,7 @@ def _prompt_research_state(context: Context):
 
 
 def _ci_wait_contract(context: Context) -> dict:
-    if not getattr(context, "shared_ci_waits", False):
+    if not getattr(context, "ci_wait_manifest", ()):
         return {}
     return {"ci_wait_delivery": (
         "CI wait ack_tokens are enabled. Select only handled tokens in finish.ack_events; "

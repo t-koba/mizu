@@ -34,10 +34,9 @@ Omitted or empty selection acknowledges none; finishing, a summary, an outcome,
 or waiting for a check never implies handling. Unselected rows remain pending
 oldest-first. Tokens bind this role and the exact delivered event, not history
 or untrusted evidence; never copy tokens from other roles or sources. CI wait
-rows also appear in `wait_events`: by default (`[vcs] ci_wait_shared_records = false`)
-they carry no token and retain legacy auto-acknowledgement; only when the host
-enables shared CI delivery do their `ack_token` values use this protocol, and then
+rows also appear in `wait_events` and always carry identity-bound `ack_token`s;
 only exact explicitly selected tokens are receipted after successful completion.
-Finishing alone never handles CI rows. CI/status and check jobs
+Finishing alone never handles CI rows, and legacy per-item auto-ack files are
+not imported. CI/status and check jobs
 do not use this token contract. Acknowledging a dependency observation records
 handling only: it neither assigns work nor satisfies the dependency.
