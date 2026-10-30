@@ -9,10 +9,12 @@ number of checks or tests it runs."""
 from __future__ import annotations
 import argparse
 import ast
+from contextlib import contextmanager
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -1067,6 +1069,100 @@ def provision_targets(allowed_not_run) -> set:
     return wanted
 
 
+# One Windows test's value-free evidence; never part of timing/report output.
+PROJECT_IMPORT_DIAGNOSTIC_ENV = 'MIZU_PROJECT_IMPORT_DIAGNOSTIC'
+PROJECT_IMPORT_DIAGNOSTIC_BYTES = 8192
+
+
+def _valid_project_import_diagnostic(data):
+    """Strict scratch schema: no messages, source text, paths, or extra fields."""
+    def token(value, pattern):
+        return isinstance(value, str) and (value == '<redacted>' or
+                                           re.fullmatch(pattern, value, re.ASCII) is not None)
+
+    def integer(value, low, high):
+        return type(value) is int and low <= value <= high
+
+    if not isinstance(data, dict) or set(data) != {'operation', 'target', 'chain'}:
+        return False
+    if data['operation'] != 'managed-import' or data['target'] != 'project.toml':
+        return False
+    chain = data['chain']
+    if not isinstance(chain, list) or not 1 <= len(chain) <= 4:
+        return False
+    for entry in chain:
+        if not isinstance(entry, dict) or not {'type', 'frames'} <= set(entry) <= {
+                'type', 'frames', 'errno', 'winerror'}:
+            return False
+        if not token(entry['type'], r'[A-Za-z_][A-Za-z0-9_]{0,47}'):
+            return False
+        if any(not integer(entry[key], -(2**31), 2**31 - 1)
+               for key in ('errno', 'winerror') if key in entry):
+            return False
+        if not isinstance(entry['frames'], list) or len(entry['frames']) > 6:
+            return False
+        for frame in entry['frames']:
+            if not isinstance(frame, dict) or set(frame) != {'file', 'function', 'line'}:
+                return False
+            if not (token(frame['file'], r'[A-Za-z_][A-Za-z0-9_]{0,44}\.py') and
+                    token(frame['function'], r'(?:[A-Za-z_][A-Za-z0-9_]{0,47}|<module>)') and
+                    integer(frame['line'], 0, 2**31 - 1)):
+                return False
+    return True
+
+
+@contextmanager
+def project_import_diagnostic(env, scratch, source_sha):
+    """Pass a fresh scratch sidecar to the suite, then best-effort export.
+
+    Windows only. The fixed artifact must resolve inside this repository's
+    private-validation directory. Reject invalid/missing CI SHA or scratch
+    schema, read at most 8193 bytes, and reserialize only validated data with
+    commit/manifest/Python metadata. No raw sidecar or diagnostic goes to logs.
+    Setup/export failure never changes the child/gate result. Remove stale
+    output before running, so success without an eligible failure emits none.
+    """
+    env.pop(PROJECT_IMPORT_DIAGNOSTIC_ENV, None)
+    output = None
+    sidecar = scratch / 'project-import-diagnostic.json'
+    commit = env.get('GITHUB_SHA', '')
+    try:
+        if sys.platform == 'win32':
+            root = ROOT.resolve(strict=True)
+            directory = root / 'private-validation'
+            candidate = directory / 'project-import-diagnostic.json'
+            if directory.resolve() == directory:
+                candidate.unlink(missing_ok=True)
+                if (re.fullmatch(r'[0-9a-f]{40}', commit, re.ASCII) and
+                        re.fullmatch(r'[0-9a-f]{64}', source_sha, re.ASCII)):
+                    output = candidate
+                    env[PROJECT_IMPORT_DIAGNOSTIC_ENV] = str(sidecar)
+    except Exception:
+        pass
+    try:
+        yield
+    finally:
+        env.pop(PROJECT_IMPORT_DIAGNOSTIC_ENV, None)
+        try:
+            if output is not None and output.parent.resolve() == output.parent:
+                with sidecar.open('rb') as stream:
+                    raw = stream.read(PROJECT_IMPORT_DIAGNOSTIC_BYTES + 1)
+                if len(raw) > PROJECT_IMPORT_DIAGNOSTIC_BYTES:
+                    raise ValueError('oversized diagnostic')
+                data = json.loads(raw.decode('ascii'))
+                if not _valid_project_import_diagnostic(data):
+                    raise ValueError('invalid diagnostic')
+                data.update(source_sha=commit, source_manifest_sha256=source_sha,
+                            python='.'.join(map(str, sys.version_info[:3])))
+                payload = json.dumps(data, ensure_ascii=True, separators=(',', ':')).encode('ascii')
+                if len(payload) <= PROJECT_IMPORT_DIAGNOSTIC_BYTES:
+                    output.parent.mkdir(parents=True, exist_ok=True)
+                    with output.open('xb') as stream:
+                        stream.write(payload)
+        except Exception:
+            pass
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--fail-fast', action='store_true',
@@ -1318,9 +1414,10 @@ def main():
             command.extend((str(timing_sidecar), str(timing_origin)))
         if args.fail_fast:
             command.append('--fail-fast')
-        ended_at = execute('python-unit-and-contract-tests', command,
-                count=unittest_counts, failure_summary=lambda: unittest_failure_summary(sidecar),
-                timeout=_unittest_timeout_seconds())
+        with project_import_diagnostic(env, Path(temporary), source_sha):
+            ended_at = execute('python-unit-and-contract-tests', command,
+                    count=unittest_counts, failure_summary=lambda: unittest_failure_summary(sidecar),
+                    timeout=_unittest_timeout_seconds())
         if args.test_timings and timing_sidecar is not None and timing_origin is not None:
             try:
                 pending_timings = parse_unittest_timings(

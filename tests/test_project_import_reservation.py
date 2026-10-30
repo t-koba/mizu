@@ -2,6 +2,9 @@
 import contextlib
 import io
 import json
+import os
+from pathlib import Path
+import tempfile
 import re
 import sys
 from collections import deque
@@ -19,7 +22,7 @@ from mizu.fs import held, lock
 from mizu.process import run
 
 
-def _read_failure_line(exc):
+def _import_failure_json(exc):
     """Test-only allowlist: <=4 exceptions, <=6 frames each, no exception text.
 
     Names are ASCII tokens (48 characters max); filenames are basenames only.
@@ -51,28 +54,36 @@ def _read_failure_line(exc):
                     entry[key] = value
         chain.append(entry)
         exc = exc.__cause__ or (None if exc.__suppress_context__ else exc.__context__)
-    return json.dumps({'operation': 'safe_read', 'target': 'project.toml',
+    return json.dumps({'operation': 'managed-import', 'target': 'project.toml',
                        'chain': chain}, ensure_ascii=True, separators=(',', ':'))
 
 
-def _diagnosed_project_read(read, root, name, maximum):
+def _diagnosed_managed_import(import_source):
+    """Used only at the known managed-import call; never diagnose external input."""
     try:
-        return read(root, name, maximum)
-    except Denied as exc:
-        if sys.platform == 'win32' and name == 'project.toml' and maximum == 65536:
+        return import_source()
+    except Exception as exc:
+        if sys.platform == 'win32':
             try:
-                print(_read_failure_line(exc), file=sys.stderr)
+                payload = _import_failure_json(exc).encode('ascii')
+                if len(payload) <= 8192:
+                    # Parent-owned scratch path, not an artifact. No stderr output.
+                    path = os.environ['MIZU_PROJECT_IMPORT_DIAGNOSTIC']
+                    with open(path, 'xb') as stream:
+                        stream.write(payload)
             except Exception:
                 pass  # Diagnostics must never replace the original failure.
         raise
 
 
-class ProjectReadDiagnosticTests(unittest.TestCase):
+class ProjectImportDiagnosticTests(unittest.TestCase):
     def test_sanitized_failure_canary(self):
-        # Synthetic paths/messages only; no actual private data in the fixture.
+        # Exercise the parent's actual scratch/export boundary with synthetic
+        # secrets only. This fails outside safe_read, unlike the old canary.
+        from test_check_offline import CHECK
         failure = Denied('DENIED_CANARY')
         namespace = {'failure': failure}
-        exec(compile("def fail(root, name, maximum):\n"
+        exec(compile("def fail():\n"
                      "    try:\n"
                      "        error = OSError(13, 'MESSAGE_CANARY', 'FILE_CANARY')\n"
                      "        error.winerror = 5\n"
@@ -81,20 +92,29 @@ class ProjectReadDiagnosticTests(unittest.TestCase):
                      "        raise failure from cause\n",
                      r'C:\PATH_CANARY\canary.py', 'exec'), namespace)
         captured = io.StringIO()
-        with patch.object(sys, 'platform', 'win32'), contextlib.redirect_stderr(captured):
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch.object(CHECK, 'ROOT', Path(temporary)), \
+             patch.object(sys, 'platform', 'win32'), \
+             patch.dict(os.environ, {'GITHUB_SHA': 'a' * 40}), \
+             contextlib.redirect_stderr(captured):
             with self.assertRaises(Denied) as raised:
-                _diagnosed_project_read(namespace['fail'], 'ROOT_CANARY', 'project.toml', 65536)
+                with CHECK.project_import_diagnostic(os.environ, Path(temporary), 'b' * 64):
+                    _diagnosed_managed_import(namespace['fail'])
+            output = (Path(temporary) / 'private-validation/project-import-diagnostic.json').read_text()
         self.assertIs(raised.exception, failure)
-        output = captured.getvalue()
-        self.assertEqual(len(output.splitlines()), 1)
-        self.assertLess(len(output.encode('ascii')), 8192)
-        for secret in ('MESSAGE_CANARY', 'FILE_CANARY', 'PATH_CANARY',
-                       'DENIED_CANARY', 'ROOT_CANARY'):
+        self.assertEqual(captured.getvalue(), '')
+        self.assertLessEqual(len(output.encode('ascii')), 8192)
+        for secret in ('MESSAGE_CANARY', 'FILE_CANARY', 'PATH_CANARY', 'DENIED_CANARY'):
             self.assertNotIn(secret, output)
         data = json.loads(output)
-        self.assertEqual(set(data), {'operation', 'target', 'chain'})
-        self.assertEqual((data['operation'], data['target']), ('safe_read', 'project.toml'))
+        self.assertEqual(set(data), {'operation', 'target', 'chain', 'source_sha',
+                                     'source_manifest_sha256', 'python'})
+        self.assertEqual((data['operation'], data['target']), ('managed-import', 'project.toml'))
+        self.assertEqual((data['source_sha'], data['source_manifest_sha256']), ('a' * 40, 'b' * 64))
+        self.assertEqual(data['python'], '.'.join(map(str, sys.version_info[:3])))
         denied, error = data['chain']
+        self.assertEqual(set(denied), {'type', 'frames'})
+        self.assertEqual(set(error), {'type', 'frames', 'errno', 'winerror'})
         self.assertEqual(denied['type'], 'Denied')
         self.assertEqual((error['type'], error['errno'], error['winerror']), ('PermissionError', 13, 5))
         self.assertEqual(error['frames'], [{'file': 'canary.py', 'function': 'fail', 'line': 5}])
@@ -111,23 +131,29 @@ class ProjectReadDiagnosticTests(unittest.TestCase):
             fail(12)
         except Denied as exc:
             exc.__cause__ = exc  # Even cyclic chains are bounded.
-            output = _read_failure_line(exc)
+            output = _import_failure_json(exc)
         chain = json.loads(output)['chain']
         self.assertEqual(len(chain), 4)
         self.assertTrue(all(len(entry['frames']) == 6 for entry in chain))
-        self.assertLess(len(output.encode('ascii')), 8192)
+        self.assertLessEqual(len(output.encode('ascii')), 8192)
 
-    def test_success_and_non_windows_failure_are_silent_and_preserved(self):
-        failure = Denied('Synthetic failure')
-        captured = io.StringIO()
-        with contextlib.redirect_stderr(captured), patch.object(sys, 'platform', 'linux'):
-            self.assertEqual(_diagnosed_project_read(lambda *args: b'ok', None,
-                                                    'project.toml', 65536), b'ok')
-            with self.assertRaises(Denied) as raised:
-                _diagnosed_project_read(Mock(side_effect=failure), None,
-                                        'project.toml', 65536)
-        self.assertIs(raised.exception, failure)
-        self.assertEqual(captured.getvalue(), '')
+    def test_success_non_windows_and_capture_failure_preserve_outcome(self):
+        failure = RuntimeError('Synthetic failure')
+        with tempfile.TemporaryDirectory() as temporary:
+            sidecar = Path(temporary) / 'capture.json'
+            with patch.dict(os.environ, {'MIZU_PROJECT_IMPORT_DIAGNOSTIC': str(sidecar)}):
+                with patch.object(sys, 'platform', 'win32'):
+                    self.assertEqual(_diagnosed_managed_import(lambda: 'ok'), 'ok')
+                with patch.object(sys, 'platform', 'linux'):
+                    with self.assertRaises(RuntimeError) as raised:
+                        _diagnosed_managed_import(Mock(side_effect=failure))
+                self.assertIs(raised.exception, failure)
+                self.assertFalse(sidecar.exists())
+                with patch.object(sys, 'platform', 'win32'), \
+                     patch('builtins.open', side_effect=OSError('Synthetic write failure')):
+                    with self.assertRaises(RuntimeError) as raised:
+                        _diagnosed_managed_import(Mock(side_effect=failure))
+                self.assertIs(raised.exception, failure)
 
 
 class ProjectImportReservationTests(Fixture):
@@ -213,22 +239,15 @@ class ProjectImportReservationTests(Fixture):
 
     def test_absent_store_imports_without_initializing_and_external_is_unchanged(self):
         real_guard = DelegationJobs.guard
-        real_read = lifecycle.safe_read
-
-        def diagnosed_read(root, name, maximum):
-            if root == self.project.root:
-                return _diagnosed_project_read(real_read, root, name, maximum)
-            return real_read(root, name, maximum)
-
         def guarded(root):
             self.assertTrue(held(root / 'locks/workspace.lock'))
             return real_guard(root)
 
         with patch.object(DelegationJobs, '__init__', side_effect=AssertionError('Store initialization')), \
-             patch.object(DelegationJobs, 'guard', side_effect=guarded) as guard, \
-             patch.object(lifecycle, 'safe_read', side_effect=diagnosed_read):
-            imported = self.import_source()
-            root_import = self.import_source(self.project.root, name='root-import')
+             patch.object(DelegationJobs, 'guard', side_effect=guarded) as guard:
+            imported = _diagnosed_managed_import(self.import_source)
+            root_import = _diagnosed_managed_import(
+                lambda: self.import_source(self.project.root, name='root-import'))
             self.assertEqual(guard.call_count, 2)
             guard.assert_called_with(self.project.root)
         self.assertFalse((self.project.root / 'delegation-jobs').exists())

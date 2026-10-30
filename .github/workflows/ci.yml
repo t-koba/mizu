@@ -94,6 +94,15 @@ jobs:
             private-validation/test-timings.json.d/*.json
           retention-days: 7
           if-no-files-found: warn
+      - name: Upload managed-import diagnostic
+        # Only the bounded, schema-validated sidecar; never raw scratch/logs.
+        if: always() && runner.os == 'Windows'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: project-import-diagnostic-${{ matrix.os }}-${{ matrix.python }}
+          path: private-validation/project-import-diagnostic.json
+          retention-days: 7
+          if-no-files-found: ignore
   durable-contract:
     # Authoritative durable coverage: the pinned Pi SDK is provisioned here in
     # a network-enabled setup step, then the whole gate runs unwaived and

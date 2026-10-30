@@ -486,6 +486,111 @@ class PiSdkDepsProbeTests(unittest.TestCase):
         self.assertEqual((state, details), ("ready", ""))
 
 
+class ProjectImportDiagnosticExportTests(unittest.TestCase):
+    @staticmethod
+    def payload():
+        return {'operation': 'managed-import', 'target': 'project.toml',
+                'chain': [{'type': 'RuntimeError', 'frames': [
+                    {'file': 'canary.py', 'function': 'fail', 'line': 7}]}]}
+
+    def test_rejects_private_malformed_or_out_of_bounds_scratch_without_masking_failure(self):
+        invalid = [b'not JSON MESSAGE_CANARY', b'x' * 8193, b'\xff', b'[]']
+        for path, value in [
+                (('message',), 'MESSAGE_CANARY'),
+                (('target',), 'PATH_CANARY/project.toml'),
+                (('operation',), 'safe_read'),
+                (('chain',), []), (('chain',), self.payload()['chain'] * 5),
+                (('chain', 0, 'message'), 'MESSAGE_CANARY'),
+                (('chain', 0, 'type'), 'PATH_CANARY/Error'),
+                (('chain', 0, 'errno'), True), (('chain', 0, 'winerror'), 2**31),
+                (('chain', 0, 'frames'), self.payload()['chain'][0]['frames'] * 7),
+                (('chain', 0, 'frames', 0, 'file'), 'PATH_CANARY/canary.py'),
+                (('chain', 0, 'frames', 0, 'function'), 'bad name'),
+                (('chain', 0, 'frames', 0, 'line'), -1),
+                (('chain', 0, 'frames', 0, 'locals'), 'MESSAGE_CANARY')]:
+            data = self.payload()
+            owner = data
+            for key in path[:-1]:
+                owner = owner[key]
+            owner[path[-1]] = value
+            invalid.append(json.dumps(data).encode('ascii'))
+        with tempfile.TemporaryDirectory() as temporary, \
+             mock.patch.object(CHECK, 'ROOT', Path(temporary)), \
+             mock.patch.object(sys, 'platform', 'win32'):
+            root = Path(temporary)
+            for raw in invalid:
+                with self.subTest(raw=invalid.index(raw)):
+                    env = {'GITHUB_SHA': 'a' * 40}
+                    failure = RuntimeError('Synthetic original failure')
+                    with self.assertRaises(RuntimeError) as raised:
+                        with CHECK.project_import_diagnostic(env, root, 'b' * 64):
+                            Path(env[CHECK.PROJECT_IMPORT_DIAGNOSTIC_ENV]).write_bytes(raw)
+                            raise failure
+                    self.assertIs(raised.exception, failure)
+                    self.assertNotIn(CHECK.PROJECT_IMPORT_DIAGNOSTIC_ENV, env)
+                    self.assertFalse((root / 'private-validation/project-import-diagnostic.json').exists())
+
+    def test_missing_capture_invalid_identity_and_export_failure_do_not_change_outcome(self):
+        with tempfile.TemporaryDirectory() as temporary, \
+             mock.patch.object(CHECK, 'ROOT', Path(temporary)), \
+             mock.patch.object(sys, 'platform', 'win32'):
+            root = Path(temporary)
+            output = root / 'private-validation/project-import-diagnostic.json'
+            output.parent.mkdir()
+            output.write_text('STALE_CANARY')
+            env = {'GITHUB_SHA': 'a' * 40}
+            with CHECK.project_import_diagnostic(env, root, 'b' * 64):
+                pass
+            self.assertFalse(output.exists())
+            for platform, commit, manifest in [('linux', 'a' * 40, 'b' * 64),
+                                               ('win32', '', 'b' * 64),
+                                               ('win32', 'PATH_CANARY', 'b' * 64),
+                                               ('win32', 'a' * 40, 'bad')]:
+                with mock.patch.object(sys, 'platform', platform):
+                    env = {'GITHUB_SHA': commit, CHECK.PROJECT_IMPORT_DIAGNOSTIC_ENV: 'ignored'}
+                    with CHECK.project_import_diagnostic(env, root, manifest):
+                        self.assertNotIn(CHECK.PROJECT_IMPORT_DIAGNOSTIC_ENV, env)
+                self.assertFalse(output.exists())
+            failure = RuntimeError('Synthetic original failure')
+            with self.assertRaises(RuntimeError) as raised:
+                with CHECK.project_import_diagnostic({'GITHUB_SHA': 'a' * 40}, root, 'b' * 64):
+                    (root / 'project-import-diagnostic.json').write_text(json.dumps(self.payload()))
+                    # A directory at the export destination makes exclusive open fail.
+                    output.mkdir()
+                    raise failure
+            self.assertIs(raised.exception, failure)
+            self.assertTrue(output.is_dir())
+
+    def test_refuses_artifact_directory_escape(self):
+        with tempfile.TemporaryDirectory() as temporary, \
+             mock.patch.object(CHECK, 'ROOT', Path(temporary)), \
+             mock.patch.object(sys, 'platform', 'win32'):
+            root = Path(temporary)
+            outside = root / 'outside-canary'
+            outside.mkdir()
+            try:
+                (root / 'private-validation').symlink_to(outside, target_is_directory=True)
+            except OSError:
+                self.skipTest('Directory symlinks unavailable')
+            env = {'GITHUB_SHA': 'a' * 40}
+            with CHECK.project_import_diagnostic(env, root, 'b' * 64):
+                self.assertNotIn(CHECK.PROJECT_IMPORT_DIAGNOSTIC_ENV, env)
+                (root / 'project-import-diagnostic.json').write_text(json.dumps(self.payload()))
+            self.assertEqual(list(outside.iterdir()), [])
+
+    def test_workflow_selects_only_exact_diagnostic_file_on_windows(self):
+        workflow = (ROOT / '.github/workflows/ci.yml').read_text(encoding='utf-8')
+        upload = workflow.split('      - name: Upload managed-import diagnostic\n')[1].split(
+            '  durable-contract:', 1)[0]
+        self.assertIn("if: always() && runner.os == 'Windows'", upload)
+        self.assertIn('actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02', upload)
+        self.assertEqual([line.strip() for line in upload.splitlines() if 'path:' in line],
+                         ['path: private-validation/project-import-diagnostic.json'])
+        self.assertIn('name: project-import-diagnostic-${{ matrix.os }}-${{ matrix.python }}', upload)
+        self.assertIn('retention-days: 7', upload)
+        self.assertIn('if-no-files-found: ignore', upload)
+
+
 class UnittestFailureSummaryTests(unittest.TestCase):
     def run_case(self, case):
         """Exercise the real TextTestResult and the parent's sidecar reader."""
@@ -1685,7 +1790,7 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
         # One artifact per cell, each named for its own cell.
         self.assertIn('name: test-timings-${{ matrix.os }}-${{ matrix.python }}', workflow)
         self.assertIn('name: test-timings-durable', workflow)
-        upload = workflow.split('name: Upload per-test timings', 1)[1].split('  durable-contract:', 1)[0]
+        upload = workflow.split('name: Upload per-test timings', 1)[1].split('      - name:', 1)[0]
         self.assertEqual([line.strip() for line in upload.splitlines() if line.strip().startswith('path:')],
                          ['path: |'])
         self.assertIn('private-validation/test-timings.json.d/*.json', upload)
