@@ -1840,7 +1840,7 @@ replacement insight without implying rejected substance.
         identifier(role_name)
         if type(limit) is not int or not 1 <= limit <= 100:
             raise Denied("Pending insight event limit must be in [1, 100]")
-        with record_lock(self.root):
+        with project_record_lock(self.root):
             diagnostics = []
 
             def eligible():

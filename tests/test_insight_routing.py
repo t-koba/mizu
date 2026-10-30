@@ -2,19 +2,23 @@
 
 Synthetic drivers only: no model, service manager, network or deployment.
 """
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import replace
 import json
+import threading
 from unittest.mock import patch
 
 from support import Fixture, ScriptDriver
 from mizu import decision_delivery as delivery
 from mizu.decision_reconciliation import activate_decision_delivery
-from mizu.errors import Denied, LimitExceeded
+from mizu.errors import Busy, Denied, LimitExceeded
 from mizu.fs import read_json, write_json
 from mizu.insights import INSIGHT_DELIVERY_POLICIES
 from mizu.runtime import Engine, _role_events_due
 from mizu.services import event_watches
 from mizu.shared_records import SharedRecords
+from mizu.smoke_refs import project_record_lock, shared_lock
 
 
 class InsightRoutingLegacyTests(Fixture):
@@ -531,3 +535,105 @@ class InsightRoutingSharedTests(InsightRoutingLegacyTests):
         state = self.pending(limit=100)
         self.assertEqual([event['insight'] for event in state['events']], [newest['id']])
         self.assertEqual(state['page']['pending_count'], 1)
+
+
+class PendingInsightLockTests(Fixture):
+    def submit(self, title):
+        return self.project.insights.submit(source='searcher', title=title,
+            body='Exact current body', base_snapshot=None,
+            kind='question', addressee='reviewer', urgency='high')
+
+    def pending(self):
+        return self.project.insights.pending_insight_events('reviewer', self.config.roles)
+
+    def test_pending_read_skips_shared_lock_with_exact_events_and_diagnostics(self):
+        # Deliberately submit out of chronological order. Exercise both receipt
+        # suppression and fail-closed diagnostics as well as payload/token replay.
+        for day in (4, 2, 3, 1):
+            with patch('mizu.insights.now', return_value=f'2026-01-0{day}T00:00:00+00:00'):
+                self.submit(f'Day {day}')
+        events, diagnostics = self.pending()
+        self.assertEqual(diagnostics, [])
+        self.assertEqual([e['title'] for e in events], ['Day 1', 'Day 2', 'Day 3', 'Day 4'])
+        self.project.insights.acknowledge_decisions('reviewer', events[:1])
+        receipt = (self.project.root / 'decision-receipts' / 'reviewer'
+                   / f"{events[1]['ack_token']}.json")
+        receipt.write_bytes(b'{invalid')
+        expected = self.pending()
+        self.assertEqual(expected[0], events[2:])
+        self.assertEqual(expected[1], [{'event': events[1]['event'],
+            'ack_token': events[1]['ack_token'], 'action': 'pending', 'reason': 'malformed_json'}])
+        before = {p.relative_to(self.project.root): p.read_bytes()
+                  for p in self.project.root.rglob('*') if p.is_file()}
+        # Release the held lock before pool cleanup even if result times out.
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with shared_lock(self.config.data):
+                result = pool.submit(self.pending).result(timeout=10)
+                self.assertEqual(result, expected)
+        self.assertEqual({p.relative_to(self.project.root): p.read_bytes()
+                          for p in self.project.root.rglob('*') if p.is_file()}, before)
+
+    def test_pending_read_still_blocks_on_same_project_lock(self):
+        self.submit('Before')
+        expected = self.pending()
+        contended = threading.Event()
+
+        @contextmanager
+        def observed_lock(root):
+            self.assertEqual(root, self.project.root)
+            # Prove contention at the real lock, not by sleeping and hoping
+            # the reader has reached its acquisition.
+            with self.assertRaises(Busy):
+                with project_record_lock(root, blocking=False):
+                    pass
+            contended.set()
+            with project_record_lock(root):
+                yield
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with project_record_lock(self.project.root):
+                with patch('mizu.insights.project_record_lock', observed_lock):
+                    future = pool.submit(self.pending)
+                    self.assertTrue(contended.wait(10))
+                    self.assertFalse(future.done())
+            self.assertEqual(future.result(timeout=10), expected)
+
+    def test_pending_read_serializes_actual_same_project_submit(self):
+        self.submit('Before')
+        expected = self.pending()
+        entered, release, contended = (threading.Event() for _ in range(3))
+        envelopes = self.project.insights._pending_insight_envelopes_locked
+
+        def paused_read(*args, **kwargs):
+            entered.set()
+            self.assertTrue(release.wait(10), 'pending read release timed out')
+            return envelopes(*args, **kwargs)
+
+        @contextmanager
+        def observed_writer_lock(root, *, blocking=True):
+            self.assertEqual(root, self.project.root)
+            with self.assertRaises(Busy):
+                with project_record_lock(root, blocking=False):
+                    pass
+            contended.set()
+            with project_record_lock(root, blocking=blocking):
+                yield
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            with patch.object(self.project.insights, '_pending_insight_envelopes_locked', paused_read):
+                reader = pool.submit(self.pending)
+                try:
+                    self.assertTrue(entered.wait(10))
+                    # Observe the actual submit's global-before-project path;
+                    # the pending read keeps its imported project-lock alias.
+                    with patch('mizu.smoke_refs.project_record_lock', observed_writer_lock):
+                        writer = pool.submit(self.submit, 'After')
+                        self.assertTrue(contended.wait(10))
+                        self.assertFalse(writer.done())
+                        release.set()
+                        self.assertEqual(reader.result(timeout=10), expected)
+                        submitted = writer.result(timeout=10)
+                finally:
+                    release.set()
+        self.assertEqual(self.project.insights.read(submitted['id'])['title'], 'After')
+        self.assertEqual({e['title'] for e in self.pending()[0]}, {'Before', 'After'})

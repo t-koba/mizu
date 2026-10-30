@@ -2,7 +2,7 @@
 
 Record writes acquire the shared lock before the project lock: even unpinned
 inbox writes create temporaries that the strict retention scan must not see.
-The read-only unresolved-count scan uses the project lock alone.
+Read-only unresolved-count and pending-insight scans use the project lock alone.
 IDs are scoped by their containing project/owner record; Insight entries also
 store the exact revision. History keeps IDs, but only current live owners pin.
 """

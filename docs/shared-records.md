@@ -668,15 +668,17 @@ post-apply verification. Runtime already holds its own role exclusion through
 finish/ack. Direct legacy ack acquires only that role's receipt lock: it never
 acquires a source or role lock while holding it. Mutations of the decision
 boundary take `record_lock` and never acquire role exclusions or receipt locks
-in reverse order. Only the read-only Insight `unresolved_counts` scan takes the
-per-project record lock alone: it serializes with same-project writers without
-blocking on another project's shared retention lock. Insight submissions and all
-evidence appends, even with omitted or empty `smoke_refs`, retain the
-global-before-project path because their inbox atomic-write temporaries must not
-overlap retention's strict store scan. Pin-bearing mutations and multi-record
-decision/wait/task transactions also retain that path; unknown store entries
-still fail closed when no writer owns the shared lock. Concurrent reconciliation
-attempts serialize or fail `Busy`; no caller
+in reverse order. Only the read-only Insight `unresolved_counts` and legacy
+`pending_insight_events` scans take the per-project record lock alone: both
+remain serialized with same-project writers without blocking on another
+project's shared retention lock, and pending-event selection reads only
+project-local inbox/decision/receipt data, not shared smoke pairs. Insight
+submissions and all evidence appends, even with omitted or empty `smoke_refs`,
+retain the global-before-project path because their inbox atomic-write
+temporaries must not overlap retention's strict store scan. Pin-bearing
+mutations and multi-record decision/wait/task transactions also retain that
+path; unknown store entries still fail closed when no writer owns the shared
+lock. Concurrent reconciliation attempts serialize or fail `Busy`; no caller
 waits for an active run while holding the source lock. Locks are released on
 exception/death and are never unlinked. Preflight can create lock infrastructure
 but creates **no immutable projections or receipts**. Legacy delivery and exact

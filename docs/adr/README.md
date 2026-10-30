@@ -862,10 +862,11 @@ Pair publication, typed-reference changes and retirement share
 while record writers retain the existing bounded writer wait and acquire it
 before the per-project record lock. Insight submissions and all evidence appends
 keep this ordering even with omitted or empty `smoke_refs`: their inbox
-atomic-write temporaries must not overlap retention's strict store scan. Only
-the read-only `unresolved_counts` scan uses the per-project lock alone, remaining
-serialized with same-project writers while independent of another project's
-shared lock. Unknown store entries without an active writer still fail closed.
+atomic-write temporaries must not overlap retention's strict store scan. The
+read-only `unresolved_counts` and legacy `pending_insight_events` scans use the
+per-project lock alone, remaining serialized with same-project writers while
+independent of another project's shared lock. Unknown store entries without an
+active writer still fail closed.
 Delivery binding nests the shared lock between
 `publication.lock` and `insights.lock`; snapshot and smoke-bundle publishers take
 only their own lock. Retention never acquires workspace or role-execution locks,
