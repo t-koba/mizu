@@ -1,12 +1,13 @@
 """First runtime-bound inventory, not a general numeric-literal linter.
 
-Only named, direct module-level Assign/AnnAssign declarations in the five
-files below are covered, using the bounded candidate vocabulary below. Numeric
-literal/arithmetic expressions are inventoried without evaluating source. This
-does not lint arbitrary numeric literals, aliases, nested declarations or other
-modules. Expand coverage as the behavior-based inventory reaches other owners.
-Classification records current ownership, not approval to leave policy in code;
-safety ceilings here are defensive read bounds, not intrinsic format limits.
+The five files below cover named, direct module-level Assign/AnnAssign bounds
+and direct numeric literal/arithmetic values at a short resource-call keyword
+set. Expressions are inventoried without evaluating source. This does not lint
+arbitrary numeric literals, aliases, nested declarations, arbitrary call args,
+local arithmetic or other modules. Expand coverage as the behavior-based
+inventory reaches other owners. Classification records current ownership, not
+approval to leave policy in code; safety ceilings here are defensive read
+bounds, not intrinsic format limits.
 """
 import ast
 from pathlib import Path
@@ -59,6 +60,38 @@ DECLARATIONS = {
 }
 
 
+CALL_KEYWORDS = frozenset({
+    'timeout', 'timeout_seconds', 'maximum', 'max_bytes', 'max_files',
+    'max_entries', 'max_depth', 'limit',
+})
+# (enclosing scope, callee, keyword, occurrence): (expression, class, rationale)
+CALLS = {
+    'usage.py': {},
+    'workspace_cache.py': {
+        ('_preflight', 'run', 'timeout', 0): (
+            '10', 'policy', 'workspace cache / Git root command wall-time budget'),
+        ('_preflight', 'run', 'maximum', 0): (
+            '4096', 'safety', 'workspace cache / Git root output read bound'),
+        ('_preflight', 'run', 'timeout', 1): (
+            '10', 'policy', 'workspace cache / tracked-path command wall-time budget'),
+        ('_due', 'read_json', 'max_bytes', 0): (
+            '4096', 'safety', 'workspace cache / bounded automatic due-state read'),
+    },
+    'ci_requests.py': {},
+    'publication.py': {
+        ('source_commit', 'process.run', 'timeout', 0): (
+            '5', 'policy', 'publication / local Git HEAD command wall-time budget'),
+        ('source_commit', 'process.run', 'maximum', 0): (
+            '4096', 'safety', 'publication / local Git HEAD output read bound'),
+    },
+    'smoke_retention.py': {
+        ('collect_refs', 'ReferenceSnapshots', 'max_bytes', 0): (
+            '2 ** 63 - 1', 'mechanism',
+            'smoke retention / disable duplicate snapshot byte cap; outer metadata reader is bounded'),
+    },
+}
+
+
 def numeric(node):
     if isinstance(node, ast.Constant):
         return type(node.value) in (int, float)
@@ -84,6 +117,44 @@ def inventory(tree):
                 if target.id in found:
                     raise AssertionError(f'Duplicate bound declaration: {target.id}')
                 found[target.id] = ast.unparse(value)
+    return found
+
+
+def callee_name(node):
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return f'{callee_name(node.value)}.{node.attr}'
+    return ast.unparse(node)
+
+
+def call_inventory(tree):
+    found, occurrences = {}, {}
+
+    class Calls(ast.NodeVisitor):
+        def __init__(self):
+            self.scope = []
+
+        def visit_FunctionDef(self, node):
+            self.scope.append(node.name)
+            self.generic_visit(node)
+            self.scope.pop()
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+        visit_ClassDef = visit_FunctionDef
+
+        def visit_Call(self, node):
+            callee = callee_name(node.func)
+            for keyword in node.keywords:
+                if keyword.arg not in CALL_KEYWORDS or not numeric(keyword.value):
+                    continue
+                base = ('.'.join(self.scope) or '<module>', callee, keyword.arg)
+                index = occurrences.get(base, 0)
+                occurrences[base] = index + 1
+                found[(*base, index)] = ast.unparse(keyword.value)
+            self.generic_visit(node)
+
+    Calls().visit(tree)
     return found
 
 
@@ -133,6 +204,54 @@ if True:
                 self.assertNotEqual(inventory(ast.parse(source)), original)
         with self.assertRaisesRegex(AssertionError, 'Duplicate bound declaration'):
             inventory(ast.parse('MAX_ITEMS = 1\nMAX_ITEMS = 2'))
+
+
+    def test_resource_call_literal_inventory(self):
+        categories = {'policy', 'configured policy', 'mechanism', 'format', 'safety'}
+        for filename, declarations in CALLS.items():
+            with self.subTest(file=filename):
+                for expression, category, rationale in declarations.values():
+                    self.assertIn(category, categories)
+                    self.assertTrue(rationale.strip())
+                tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
+                self.assertEqual(call_inventory(tree), {
+                    site: entry[0] for site, entry in declarations.items()
+                })
+
+    def test_call_detector_scope_and_mismatch_detection(self):
+        source = '''
+def outer():
+    run(timeout=5, maximum=2)
+    run(timeout=6)
+    read_json(max_bytes=2 ** 10)
+    run(timeout_seconds=20)
+    other(max_files=3, max_entries=4, max_depth=2)
+    page(limit=1)
+    run(timeout=LIMIT)
+
+def sibling():
+    run(timeout=7)
+'''
+        expected = {
+            ('outer', 'run', 'timeout', 0): '5',
+            ('outer', 'run', 'maximum', 0): '2',
+            ('outer', 'run', 'timeout', 1): '6',
+            ('outer', 'read_json', 'max_bytes', 0): '2 ** 10',
+            ('outer', 'run', 'timeout_seconds', 0): '20',
+            ('outer', 'other', 'max_files', 0): '3',
+            ('outer', 'other', 'max_entries', 0): '4',
+            ('outer', 'other', 'max_depth', 0): '2',
+            ('outer', 'page', 'limit', 0): '1',
+            ('sibling', 'run', 'timeout', 0): '7',
+        }
+        self.assertEqual(call_inventory(ast.parse(source)), expected)
+        for changed in (
+                source + '\nnew_call(timeout=1)\n',
+                source.replace('run(timeout=6)', 'run(timeout=8)'),
+                source.replace('run(timeout=5, maximum=2)', 'run(timeout=5)'),
+                source.replace('def sibling():', 'def renamed():')):
+            with self.subTest(changed=changed), self.assertRaises(AssertionError):
+                self.assertEqual(call_inventory(ast.parse(changed)), expected)
 
 
 if __name__ == '__main__':
