@@ -2,6 +2,7 @@
 import argparse
 import copy
 import dataclasses
+import errno
 import importlib.util
 import json
 import os
@@ -304,6 +305,63 @@ class InstallCITests(Fixture):
 
 @unittest.skipUnless(os.name == 'posix' and shutil.which('bash'), 'POSIX Bash wrapper')
 class InstallWrapperCITests(unittest.TestCase):
+    def read_wrapper_trace(self, root, mode_index, returncode):
+        trace = root / 'trace.jsonl'
+        try:
+            return trace.read_text()
+        except OSError as error:
+            # Only fixed, relative identities may leave this disposable fixture.
+            stage_paths = {'prefix': 'prefix with spaces', 'bin': 'bin with spaces',
+                           'config': 'private configuration/config.toml'}
+            try:
+                observed = json.loads((root / 'setup.invoked.json').read_text())
+            except (OSError, ValueError):
+                observed = None
+            error.add_note('wrapper trace diagnostic: ' + json.dumps({
+                'mode_index': mode_index, 'wrapper_returncode': returncode,
+                'root_exists': root.exists(), 'trace_exists': trace.exists(),
+                'setup_invoked': (root / 'setup.invoked.json').exists(),
+                'cli_invoked': (root / 'cli.invoked').exists(),
+                'fixture_paths': {'root': '.', 'trace': 'trace.jsonl',
+                    'wrapper': 'scripts/test-install.sh',
+                    'setup': 'scripts/fake-setup.py', 'cli': 'scripts/fake-cli.py'},
+                'stage_paths': stage_paths if observed == stage_paths else None,
+                'errno': error.errno,
+            }, sort_keys=True))
+            raise
+
+    def test_missing_trace_diagnostic_is_bounded_and_private(self):
+        with tempfile.TemporaryDirectory(prefix='mizu-wrapper-') as temporary:
+            root = Path(temporary)
+            sentinel = 'SYNTHETIC-CREDENTIAL-DO-NOT-EMIT'
+            stage_paths = {'prefix': 'prefix with spaces', 'bin': 'bin with spaces',
+                           'config': 'private configuration/config.toml'}
+            (root / 'setup.invoked.json').write_text(json.dumps(stage_paths))
+            (root / 'cli.invoked').touch()
+            (root / 'config.toml').write_text(sentinel)
+            for observed in (stage_paths, {'config': str(root / sentinel)}):
+                with self.subTest(valid_stage_paths=observed == stage_paths):
+                    (root / 'setup.invoked.json').write_text(json.dumps(observed))
+                    with self.assertRaises(FileNotFoundError) as caught:
+                        self.read_wrapper_trace(root, 2, 0)
+                    error = caught.exception
+                    self.assertEqual(error.errno, errno.ENOENT)
+                    self.assertEqual(error.filename, str(root / 'trace.jsonl'))
+                    note, = error.__notes__
+                    details = json.loads(note.removeprefix('wrapper trace diagnostic: '))
+                    self.assertEqual(details, {
+                        'mode_index': 2, 'wrapper_returncode': 0,
+                        'root_exists': True, 'trace_exists': False,
+                        'setup_invoked': True, 'cli_invoked': True,
+                        'fixture_paths': {'root': '.', 'trace': 'trace.jsonl',
+                            'wrapper': 'scripts/test-install.sh',
+                            'setup': 'scripts/fake-setup.py', 'cli': 'scripts/fake-cli.py'},
+                        'stage_paths': stage_paths if observed == stage_paths else None,
+                        'errno': errno.ENOENT,
+                    })
+                    for private in (temporary, sentinel, str(error)):
+                        self.assertNotIn(private, note)
+
     def test_all_modes_reach_same_bounded_smoke_flow_with_mock_setup_and_cli(self):
         # This proves wrapper control flow, not real installation or live Pi.
         with tempfile.TemporaryDirectory(prefix='mizu-wrapper-') as temporary:
@@ -313,7 +371,10 @@ class InstallWrapperCITests(unittest.TestCase):
             shutil.copy2(ROOT / 'scripts/test-install.sh', scripts / 'test-install.sh')
             trace = root / 'trace.jsonl'
             cli = scripts / 'fake-cli.py'
-            cli.write_text('import json, sys\n'
+            cli_marker = root / 'cli.invoked'
+            setup_marker = root / 'setup.invoked.json'
+            cli.write_text('import json, pathlib, sys\n'
+                f'pathlib.Path({str(cli_marker)!r}).touch()\n'
                 f'with open({str(trace)!r}, "a") as log: log.write(json.dumps(["cli", *sys.argv[1:]]) + "\\n")\n'
                 'print(json.dumps({"armed": False, "control": {"paused": True}}))\n')
             launcher = '#!/usr/bin/env bash\nexec ' + shlex.quote(sys.executable) + ' ' + shlex.quote(str(cli)) + ' \"$@\"\n'
@@ -321,8 +382,12 @@ class InstallWrapperCITests(unittest.TestCase):
             setup = scripts / 'fake-setup.py'
             setup.write_text('import json, pathlib, sys\n'
                 'args = sys.argv[1:]\n'
-                f'with open({str(trace)!r}, "a") as log: log.write(json.dumps(["setup", *args]) + "\\n")\n'
                 'def option(name): return pathlib.Path(args[args.index(name) + 1])\n'
+                'stage = option("--prefix").parent\n'
+                f'pathlib.Path({str(setup_marker)!r}).write_text(json.dumps({{\n'
+                '    key: option(flag).relative_to(stage).as_posix() for key, flag in\n'
+                '    [("prefix", "--prefix"), ("bin", "--bin-dir"), ("config", "--config")]}))\n'
+                f'with open({str(trace)!r}, "a") as log: log.write(json.dumps(["setup", *args]) + "\\n")\n'
                 'config = option("--config"); config.parent.mkdir(parents=True, exist_ok=True)\n'
                 f'if not config.exists(): config.write_text({config_text!r})\n'
                 'bin_dir = option("--bin-dir"); bin_dir.mkdir(exist_ok=True)\n'
@@ -339,13 +404,16 @@ class InstallWrapperCITests(unittest.TestCase):
             (scripts / 'setup.sh').chmod(0o755)
             selections = [[], ['source report.json'],
                           ['--reuse-ci-checks', 'operator config.toml', 'sample', 'a' * 64]]
-            for selection in selections:
+            for mode_index, selection in enumerate(selections):
                 with self.subTest(selection=selection):
                     trace.unlink(missing_ok=True)
+                    (root / 'setup.invoked.json').unlink(missing_ok=True)
+                    (root / 'cli.invoked').unlink(missing_ok=True)
                     result = subprocess.run(['bash', str(scripts / 'test-install.sh'), *selection],
                         capture_output=True, text=True, timeout=30)
                     self.assertEqual(result.returncode, 0, result.stderr)
-                    calls = [json.loads(line) for line in trace.read_text().splitlines()]
+                    calls = [json.loads(line) for line in
+                             self.read_wrapper_trace(root, mode_index, result.returncode).splitlines()]
                     installs = [row for row in calls if row[0] == 'setup']
                     self.assertEqual(len(installs), 2)
                     forwarded = (['--reuse-source-checks', *selection] if len(selection) == 1 else selection)
