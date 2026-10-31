@@ -498,3 +498,33 @@ binding, work-item-only registration, incomplete and duplicate enumerations,
 endpoint movement, exact merged holder wake, CAS/replay, explicit receipts,
 source-current eligibility and unsafe filesystem paths. It does not claim a live
 merge, review approval, installation or deployment.
+
+### Synthetic systemd/OCI recovery CI smoke
+
+`delegation-recovery-smoke` is a separate, eight-minute GitHub-hosted Ubuntu
+24.04 job, not an async runner, handoff, or pilot. Ordinary discovery of
+`test_delegation_recovery_smoke.py` runs only small offline reservation tests.
+Do not run its explicit `--prepare` / `--live` modes on a development host.
+Missing systemd, cgroup-v2, or usable rootless Podman evidence fails this job;
+it is not a skip or proof for other environments.
+
+The fixture records unique unit/cgroup and container names before launch and
+the full container ID before start in a private, atomic, fsynced JSON record.
+It kills only the synthetic supervisor, proves its `setsid` descendant remains
+in the recorded cgroup, and invokes a separate `--recover` process. An
+`always()` cleanup step uses the same record after controller failure. Cleanup
+is scoped to those exact identities: the reservation remains held until both
+systemd inactivity plus cgroup emptiness/absence and container absence are
+independently proven. Unknown evidence, mismatched identities, or incomplete
+launch acknowledgement fail closed (even after best-effort cleanup). No retry
+launch, scheduler access, credentials, production identities, or runtime sockets
+in role sandboxes are involved. The record is disposable CI scratch, not a
+production reservation or a claim of general process quiescence.
+
+Commands have time/output bounds; the unit has PID/CPU/RAM/runtime/stop caps
+and `PrivateNetwork=yes`. The single minimal container has PID/CPU/RAM/runtime
+caps, no networking, no
+host mounts, a read-only root without writable tmpfs, no capabilities, and no
+logs. Only tool/image provisioning uses network. Cancellation that kills the entire
+CI host cannot establish cleanup; the disposable-host boundary is not evidence
+that the reservation was released.
