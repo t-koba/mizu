@@ -30,7 +30,8 @@ class CiLogSelectorTests(Fixture):
         # Synthetic request capture, not a provider/CI integration test.
         code = ("import sys,json; req=json.load(sys.stdin); "
                 "print(json.dumps({'request': req, 'log': 'bounded log', "
-                "'trust': 'adapter-supplied'}))")
+                "'trust': 'adapter-supplied', "
+                "**({k: req[k] for k in ('check', 'sha')} if 'check' in req else {})}))")
         role = self.config.roles["worker"]
         role = dataclasses.replace(role, capabilities=(*role.capabilities, "vcs_read"))
         self.config = dataclasses.replace(
@@ -48,6 +49,30 @@ class CiLogSelectorTests(Fixture):
                     self.assertEqual(out["result"], {
                         "request": args, "log": "bounded log",
                         "trust": "external-untrusted"})
+
+    def test_selected_log_denies_missing_or_mismatched_response_bindings(self):
+        args = {"branch": "main", "sha": SHA_A, "check": "unit"}
+        payloads = (
+            {"log": "ALL JOBS"},  # Adapter ignores the selector.
+            {"log": "selected log", "check": "unit"},
+            {"log": "selected log", "sha": SHA_A},
+            {"log": "selected log", "check": "other", "sha": SHA_A},
+            {"log": "selected log", "check": "unit", "sha": SHA_B},
+        )
+        for payload in payloads:
+            with self.subTest(payload=payload), self.assertRaisesRegex(
+                    Denied, "Log response must match the requested check and sha"):
+                vcs.read_via(adapter_settings(status_code(payload)), "log", args)
+
+    def test_log_response_bindings_are_consumed_only_for_selected_requests(self):
+        payload = {"log": "selected log", "check": "unit", "sha": SHA_A,
+                   "trust": "adapter-supplied"}
+        settings = adapter_settings(status_code(payload))
+        for params in ({"check": "unit", "sha": SHA_A}, {"sha": SHA_A}, {}):
+            with self.subTest(params=params):
+                out = vcs.read_via(settings, "log", {"branch": "main", **params})
+                expected = ({"log": "selected log"} if "check" in params else payload)
+                self.assertEqual(out, {**expected, "trust": "external-untrusted"})
 
     def test_invalid_selector_matches_status_name_validation_without_invocation(self):
         invalid = (None, False, 1, [], {}, "", "x" * 257, "ci\r", "ci\n",

@@ -770,6 +770,8 @@ def read_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
     optional ``sha`` passes through when given, and status rows for other
     SHAs are filtered out by default. Log reads retain their existing optional
     SHA; an exact ``check`` selector per ``check_ci_name`` requires that SHA.
+    Selected log responses echo the exact top-level ``check`` and ``sha``;
+    these transport bindings are validated and stripped before returning.
     Omitting ``check`` retains the existing full-log request and response.
     Host-only ``preserve_status_rows`` keeps
     mismatched rows for strict declared-set wait evaluation (not a tool argument).
@@ -948,6 +950,10 @@ def read_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
         return {"op": op, "branch": branch, "proposals": parse_proposals(data),
                 "complete": complete, "cursor": cursor_out,
                 "trust": "external-untrusted"}
+    if op == "log" and "check" in request:
+        if data.get("check") != request["check"] or data.get("sha") != sha:
+            raise Denied("Log response must match the requested check and sha")
+        data = {key: value for key, value in data.items() if key not in {"check", "sha"}}
     return {**data, "trust": "external-untrusted"}
 
 
