@@ -441,9 +441,15 @@ class WorkItems:
             return {"record": record, "created": True}
 
     def _iter_item_events(self, *, recover: bool):
+        task_sources = set()
+        ambiguous_task_sources = set()
         for event_id, event in self._iter_decision_events(recover=recover):
             if "work_items" in event or "work_item_specs" in event:
                 for seed in task_seeds(event):
+                    if seed["id"] in task_sources:
+                        ambiguous_task_sources.add(seed["id"])
+                    else:
+                        task_sources.add(seed["id"])
                     yield seed["id"][3:], event
             else:
                 yield event_id, event
@@ -463,9 +469,12 @@ class WorkItems:
                     try:
                         decision.lstat()
                     except FileNotFoundError:
-                        group = self._task_event(entry.name)
+                        # Reuse only this scan's fully validated task sources.
+                        if entry.name in ambiguous_task_sources:
+                            raise Denied("Ambiguous task seed sources")
+                        group = entry.name in task_sources
                         revisions = self._history_revisions(entry.name, recover=recover)
-                        if group is not None:
+                        if group:
                             continue
                         if revisions or (directory / entry.name / "legacy.json").exists():
                             raise Denied("Work-item history has no immutable seed")

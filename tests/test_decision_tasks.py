@@ -9,6 +9,7 @@ from mizu.errors import Denied, LimitExceeded
 from mizu.fs import PREVIEW_BYTES, canonical, write_json
 from mizu.insights import _decision_key
 from mizu.work_item_seed import MAX_DECISION_TASKS, task_id
+from mizu.work_item_read_view import readonly_view
 
 
 class DecisionTaskTests(Fixture):
@@ -242,6 +243,79 @@ class DecisionTaskTests(Fixture):
             self.decide(work_items=self.tasks)
         write_json(self.current_path, event)
         self.assertEqual(self.decide(work_items=self.tasks), event)
+
+    def test_group_revision_reads_enumerate_history_once(self):
+        ids = []
+        unrelated = 0
+        groups = 0
+        for task_count, event_count in ((2, 4), (6, 4), (6, 12)):
+            while len(ids) < task_count:
+                proposal = self.insights.submit(
+                    source="worker", title="Group", body="review", base_snapshot=None)
+                event = self.insights.decide(
+                    proposal["id"], "accept", "Whole scope", "", "run", expected_rev=1,
+                    work_items=self.tasks)
+                groups += 1
+                for seed in event["work_items"]:
+                    item_id = seed["id"]
+                    self.store.transition(item_id, expected_rev=1, status="doing", actor="worker")
+                    self.store.transition(item_id, expected_rev=2, status="open", actor="worker")
+                    ids.append(item_id)
+            while unrelated < event_count:
+                proposal = self.insights.submit(
+                    source="worker", title="No task", body="review", base_snapshot=None)
+                self.insights.decide(proposal["id"], "accept", "No task", "", "run",
+                                     expected_rev=1, work_item_intent="none")
+                unrelated += 1
+            cursor = None
+            seen = []
+            while True:
+                expected = self.store.page_open(cursor=cursor, limit=2)
+                view = readonly_view(self.store)
+                visits = []
+                original = view._iter_decision_events
+
+                def events(*, recover):
+                    for event_id, event in original(recover=recover):
+                        visits.append(event_id)
+                        yield event_id, event
+
+                with patch.object(view, "_iter_decision_events", side_effect=events) as scan:
+                    actual = view.page_open_readonly(cursor=cursor, limit=2)
+                self.assertEqual(actual, expected)
+                self.assertEqual(scan.call_count, 1)
+                self.assertEqual(len(visits), groups + unrelated)
+                self.assertEqual(actual["total"], task_count)
+                self.assertTrue(actual["coverage_complete"])
+                for row in actual["items"]:
+                    self.assertEqual((row["status"], row["rev"], row["holder"]), ("open", 3, None))
+                    seen.append(row["id"])
+                cursor = actual["next_cursor"]
+                if cursor is None:
+                    break
+            expected_ids = sorted(ids, key=lambda item_id: (
+                self.store.get(item_id)["created_at"], item_id))
+            self.assertEqual(seen, expected_ids)
+            visits.clear()
+            with patch.object(view, "_iter_decision_events", side_effect=events) as scan:
+                self.assertEqual(view.count_open_readonly(), task_count)
+            self.assertEqual(scan.call_count, 1)
+            self.assertEqual(len(visits), groups + unrelated)
+            self.assertEqual(self.store.count_open(), task_count)
+
+    def test_copied_group_source_fails_key_validation(self):
+        event = self.decide(work_items=self.tasks)
+        item_id = event["work_items"][0]["id"]
+        self.store.transition(item_id, expected_rev=1, status="doing", actor="worker")
+        # A second filename cannot authenticate the same keyed task manifest.
+        other_key = "0" * 32 if self.key != "0" * 32 else "1" * 32
+        write_json(self.event_path.with_name(f"{other_key}.json"), event)
+        for reader in (self.store.page_open, self.store.count_open,
+                       readonly_view(self.store).page_open_readonly,
+                       readonly_view(self.store).count_open_readonly):
+            with self.subTest(reader=reader.__name__), self.assertRaisesRegex(
+                    Denied, "Invalid decision key binding"):
+                reader()
 
     def test_omitted_list_retains_single_seed_and_no_work_shapes(self):
         event = self.decide()
