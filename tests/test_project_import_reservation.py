@@ -668,9 +668,12 @@ class ProjectStagingTests(Fixture):
 
     def test_cross_filesystem_refuses_before_stage_creation_and_before_rename(self):
         staging = self.config.data / 'staging/projects'
+        destination = self.config.data / 'projects/staged'
         original_stat, original_import = Path.lstat, lifecycle._import_plain_directory
+        original_rename = lifecycle.os.rename
         for late in (False, True):
             mismatch = not late
+            publication_attempts = []
 
             def device(path):
                 info = original_stat(path)
@@ -683,14 +686,28 @@ class ProjectStagingTests(Fixture):
                 original_import(*args, **kwargs)
                 mismatch = True
 
+            def guard_project_publication(source, target, *args, **kwargs):
+                # `os.rename` is process-global; Windows atomic_write uses it
+                # for immutable files inside the stage. Forward those writes,
+                # and forbid only the stage-to-active-project publication.
+                try:
+                    source_path, target_path = Path(source), Path(target)
+                except TypeError:
+                    return original_rename(source, target, *args, **kwargs)
+                if (source_path.parent == staging and source_path.name.startswith('.init-')
+                        and target_path == destination):
+                    publication_attempts.append((source_path.name, target_path.name))
+                    raise AssertionError('Project stage publication was attempted')
+                return original_rename(source, target, *args, **kwargs)
+
             with self.subTest(late=late), patch.object(Path, 'lstat', device), \
                  patch.object(lifecycle, '_import_plain_directory', side_effect=capture), \
                  patch.object(lifecycle.tempfile, 'mkdtemp', wraps=tempfile.mkdtemp) as create, \
-                 patch.object(lifecycle.os, 'rename') as rename:
+                 patch.object(lifecycle.os, 'rename', side_effect=guard_project_publication):
                 with self.assertRaisesRegex(Denied, 'share a filesystem|identity changed'):
                     self.initialize()
                 self.assertEqual(create.call_count, int(late))
-                rename.assert_not_called()
+                self.assertEqual(publication_attempts, [])
             self.assertEqual(len(list(staging.iterdir())), int(late))
             for leftover in staging.iterdir():
                 shutil.rmtree(leftover)
