@@ -548,9 +548,10 @@ class OperationsTests(Fixture):
             launcher = release / "bin" / "mizu"
             launcher.write_text('print("mizu 0.1.0")\n')
             launcher.chmod(0o755)
-            write_json(release / "source-manifest.json", {})
+            manifest = install.source_manifest(release)
+            write_json(release / "source-manifest.json", manifest)
             write_json(release / "installation.json", {"version": "0.1.0",
-                         "source_sha256": digest(canonical({})), "mode": mode,
+                         "source_sha256": digest(canonical(manifest)), "mode": mode,
                          "validation": "local-install-checks-passed"})
             return release
         first = stage_release("r1", "pi")
