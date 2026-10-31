@@ -302,10 +302,20 @@ The original Windows/3.12 matrix cell is excluded and replaced by exactly one
 aggregate named `core (windows-latest, 3.12)` under `Offline checks`. It runs
 with `always()` and accepts only `success` from the whole two-shard matrix;
 failure, cancellation, skip or missing result cannot pass. Timing and diagnostic
-artifact names include `-shard-0` or `-shard-1`. Complete ID coverage must be
-checked across both timing manifests, and wall time, queueing and total runner
-seconds must be measured before adopting this prototype; local partition checks
-alone establish neither CI identity nor cost savings. No timeout is raised.
+artifact names include `-shard-0` or `-shard-1`. For the retained run
+`41109593884` at SHA `ff2c0ef8193eb5cf832e9ded46a6834259a711ce`, the operator's
+host-side comparison report records verified artifact-manifest hashes, 1,977
+unique completed shard-0 IDs and 1,882 shard-1 IDs, no duplicates, unfinished
+IDs or overlap, and exact union with 3,859 IDs discovered from the exact source
+archive on Linux/Python 3.14.4. The sorted-ID-set SHA-256 is
+`e060d4a389786e8499525b9cb016b95bfa7bac9864c119eda5f97a31f8315f48`.
+This closes ID-set parity against that exact-source Linux discovery only; it is
+not an independently observed unsharded Windows/Python 3.12 execution. The
+reported shard unittest elapsed times (863.344 s and 661.782 s) are not total
+runner time, and no cost-savings result is established. Wall time, queueing and
+total runner seconds must still be measured before adopting this prototype; do
+not infer CI identity or cost savings from local partition checks alone. No
+timeout is raised.
 
 Every CI cell supplies `--test-timings` and uploads only the summary and
 `test-timings.json.d/*.json`, one artifact per cell (`actions/upload-artifact`
