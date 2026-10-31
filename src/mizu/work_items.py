@@ -1898,12 +1898,15 @@ class WorkItems:
             return result, digest(canonical(["work-order-inventory-v1", total, f"{order_sum:064x}"]))
         return result
 
-    def _page_closed_impl(self, *, limit, readonly: bool) -> dict:
-        """Collect the newest seeded terminal items with an explicit mode."""
+    def _page_closed_impl(self, *, limit, readonly: bool, include_items=False):
+        """Collect the newest seeded terminal items with an explicit mode.
+
+        Internal receipt projections can retain the validated current items for
+        just the selected page, without resolving their immutable sources again.
+        """
         if type(limit) is not int or not 0 <= limit <= MAX_CLOSED_PAGE_ROWS:
             raise Denied("Closed work-item page limit must be an integer in [0, 100]")
         events = self._iter_item_events(recover=not readonly)
-        published_snapshot = None
         selected = []
         total = 0
         for event_id, event in events:
@@ -1918,7 +1921,7 @@ class WorkItems:
             if limit == 0:
                 continue
             sort_key, row = self._closed_row(item)
-            candidate = (_ReverseKey(sort_key), sort_key, row)
+            candidate = (_ReverseKey(sort_key), sort_key, row, item if include_items else None)
             if len(selected) < limit:
                 heapq.heappush(selected, candidate)
             elif sort_key < selected[0][1]:
@@ -1930,6 +1933,8 @@ class WorkItems:
                   "overflow_count": overflow_count, "truncated": more}
         if len(canonical(result)) > MAX_CLOSED_PAGE_BYTES:
             raise LimitExceeded("Closed work-item page exceeds byte bound")
+        if include_items:
+            return result, [entry[3] for entry in sorted(selected, key=lambda value: value[1])]
         return result
 
     def page_open_readonly(self, *, cursor=None, limit=25) -> dict:

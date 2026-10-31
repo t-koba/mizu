@@ -734,6 +734,103 @@ class WorkItemEventTests(Fixture):
         ack_hint.assert_called_once_with(self.project.root / "work-items", None, follow_symlinks=False)
         self.assertFalse(_role_events_due(self.project, self.project.snapshots.get(), "reviewer"))
 
+    def grouped_terminal_fixture(self, *, groups=4, unrelated=24):
+        proposals, decisions, items = [], [], []
+        for n in range(groups + unrelated):
+            proposal = self.project.insights.submit(
+                source="reviewer" if n % 2 == 0 else "searcher",
+                title=f"Grouped ledger {n}", body="Evidence", base_snapshot=None)
+            decision = self.project.insights.decide(
+                proposal["id"], "accept", "Reviewed", "", "run", expected_rev=1,
+                **({"work_items": [{"title": f"Slice {i}", "description": "Deliver slice"}
+                                   for i in range(2)]} if n < groups else {"work_item_intent": "none"}))
+            if n < groups:
+                proposals.append(proposal)
+                decisions.append(decision)
+                for seed in decision["work_items"]:
+                    # Ties and clock rollback keep the existing id tie-breaks relevant.
+                    with patch("mizu.work_items.now", return_value=f"2030-01-{groups-n:02d}T00:00:00Z"):
+                        items.append(self.store.transition(seed["id"], expected_rev=1,
+                                                           status="dropped", actor="worker", reason="Retired"))
+        return proposals, decisions, items
+
+    def test_grouped_cli_readers_share_one_scan_with_exact_role_parity(self):
+        proposals, _, _ = self.grouped_terminal_fixture()
+        # Unknown routing is included only by any-source subscribers.
+        (self.project.root / "inbox" / f"{proposals[0]['id']}.json").unlink()
+        template = self.config.roles["reviewer"]
+        roles = {name: dataclasses.replace(template, work_item_events=actions, work_item_sources=route)
+                 for name, actions, route in
+                 [("reviewer", ("dropped",), "own"), ("searcher", ("done", "dropped"), "own"),
+                  ("worker", ("done",), "any")]
+                 + [(f"role-{n}", ("dropped",), "any") for n in range(5)]}
+        for name, role in roles.items():
+            page = events.pending(self.store, name, role.work_item_events, sources=role.work_item_sources)
+            events.acknowledge(self.store, name, page["events"][:1])
+        expected = []
+        for name in sorted(roles):
+            role = roles[name]
+            page = events.pending(self.store, name, role.work_item_events, sources=role.work_item_sources)
+            summary = {k: v for k, v in page.items() if k not in ("events", "overflow_count", "truncated")}
+            summary.update(pending_event_ids=[row["event"] for row in page["events"]],
+                           pending_ids_truncated=page["truncated"], pending_overflow_count=page["overflow_count"])
+            expected.append(summary)
+        base = self.store.page_closed_readonly(limit=8)
+        for row in base["items"]:
+            item = self.store._get(row["id"])
+            payload = events._payload(self.store, item)
+            row["event_acknowledgements"] = {
+                name: events._received(self.store, name, item) for name in sorted(roles)
+                if payload["type"] in roles[name].work_item_events
+                and (roles[name].work_item_sources == "any" or payload["origin_source"] == name)}
+        original = self.store._iter_decision_events
+        counts = [0, 0]
+        def counted(**kwargs):
+            counts[0] += 1
+            for entry in original(**kwargs):
+                counts[1] += 1
+                yield entry
+        with patch.object(self.store, "_iter_decision_events", side_effect=counted), \
+                patch("mizu.work_items.lock", side_effect=AssertionError("read lock")), \
+                patch.object(events, "write_json", side_effect=AssertionError("read write")):
+            self.assertEqual(events.closed_page(self.store, roles, limit=8), base)
+            self.assertEqual(counts, [1, 28])
+            for limit in (1, 4, 8):
+                counts[:] = [0, 0]
+                result = events.progress(self.store, roles, limit=limit)
+                self.assertEqual(result["roles"], expected[:limit])
+                self.assertEqual(result["truncated"], limit < 8)
+                self.assertEqual(counts, [1, 28])
+            counts[:] = [0, 0]
+            limited = events.closed_page(self.store, roles, limit=1)
+            self.assertEqual(limited["items"], base["items"][:1])
+            self.assertEqual((limited["total"], limited["overflow_count"]), (8, 7))
+            self.assertEqual(counts, [1, 28])
+
+    def test_shared_cli_scan_still_rejects_source_chain_and_receipt_corruption(self):
+        _, decisions, items = self.grouped_terminal_fixture(groups=1, unrelated=0)
+        roles = {name: dataclasses.replace(self.config.roles["reviewer"], work_item_events=("dropped",),
+                                            work_item_sources="any") for name in ("reviewer", "searcher")}
+        source = self.project.root / "decision-history" / f"{decisions[0]['decision_key']}.json"
+        chain = self.project.root / "work-items" / items[0]["id"] / "2.json"
+        events.acknowledge(self.store, "searcher", self.page("searcher", sources="any")["events"])
+        receipt = self.project.root / "work-item-receipts/searcher" / f"{items[0]['id']}.2.json"
+        for path, mutate in (
+                (source, lambda value: value["work_items"][0].update(title="Forged")),
+                (chain, lambda value: value.update(transition={"from": "doing", "to": "dropped"})),
+                (receipt, lambda value: value.update(role="reviewer"))):
+            original = path.read_bytes()
+            value = read_json(path)
+            mutate(value)
+            write_json(path, value)
+            try:
+                for reader in (lambda: events.closed_page(self.store, roles, limit=2),
+                               lambda: events.progress(self.store, roles)):
+                    with self.subTest(path=path.name), self.assertRaises(Denied):
+                        reader()
+            finally:
+                path.write_bytes(original)
+
     def test_cli_progress_is_bounded_and_read_only(self):
         # Persist an opt-in so the CLI's read-only Project uses it.
         self.file.write_text(self.file.read_text().replace(

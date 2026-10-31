@@ -89,16 +89,66 @@ def pending(store, role, actions, *, sources="own", limit=10):
     are counted as incomplete coverage, never guessed into terminal events.
     Unsafe/malformed stores fail closed. No reads have recovery side effects.
     """
-    identifier(role)
-    if (sources not in ("own", "any") or len(set(actions)) != len(actions)
-            or any(a not in ("done", "dropped") for a in actions)):
-        raise Denied("Invalid work-item event subscription")
+    return _pending_pages(store, [(role, actions, sources)], limit)[0]
+
+
+class _PendingPage:
+    """Bounded per-role heaps and counts for a shared validated traversal."""
+
+    def __init__(self, role, actions, sources, limit):
+        identifier(role)
+        if (sources not in ("own", "any") or len(set(actions)) != len(actions)
+                or any(a not in ("done", "dropped") for a in actions)):
+            raise Denied("Invalid work-item event subscription")
+        self.role, self.actions, self.sources, self.limit = role, actions, sources, limit
+        self.selected = []
+        self.acknowledged_heap = []
+        self.acknowledged = self.eligible = self.unknown = 0
+
+    def add(self, store, item, row):
+        if row["origin_source"] is None:
+            self.unknown += 1
+        if self.sources == "own" and row["origin_source"] != self.role:
+            return
+        key = (_timestamp_order(item["updated_at"]), item["id"], item["rev"])
+        if _received(store, self.role, item):
+            self.acknowledged += 1
+            candidate = (key, _identity(item))
+            # Only the most recent ten exact acknowledgements, not a receipt listing.
+            if len(self.acknowledged_heap) < ACKED_ID_SAMPLE:
+                heapq.heappush(self.acknowledged_heap, candidate)
+            elif key > self.acknowledged_heap[0][0]:
+                heapq.heapreplace(self.acknowledged_heap, candidate)
+            return
+        self.eligible += 1
+        candidate = (_ReverseKey(key), key, row)
+        if len(self.selected) < self.limit:
+            heapq.heappush(self.selected, candidate)
+        elif key < self.selected[0][1]:
+            heapq.heapreplace(self.selected, candidate)
+
+    def result(self, unseeded):
+        rows = [entry[2] for entry in sorted(self.selected, key=lambda value: value[1])]
+        acknowledged_ids = [event_id for _, event_id in sorted(self.acknowledged_heap)]
+        result = {"role": self.role, "subscribed": list(self.actions), "sources": self.sources,
+                  "events": rows, "pending": self.eligible, "acknowledged": self.acknowledged,
+                  "acknowledged_event_ids": acknowledged_ids,
+                  "acknowledged_ids_truncated": self.acknowledged > len(acknowledged_ids),
+                  "overflow_count": self.eligible - len(rows), "truncated": self.eligible > len(rows),
+                  "unknown_routing": self.unknown, "routing_complete": self.unknown == 0,
+                  "unseeded_decisions": unseeded if self.actions else 0,
+                  "coverage_complete": unseeded == 0 or not self.actions}
+        if len(canonical(result)) > MAX_CLOSED_PAGE_BYTES:
+            raise LimitExceeded("Work-item events exceed page byte bound")
+        return result
+
+
+def _pending_pages(store, subscriptions, limit):
+    pages = [_PendingPage(*subscription, limit) for subscription in subscriptions]
     if type(limit) is not int or not 1 <= limit <= 100:
         raise Denied("Work-item event limit must be in [1, 100]")
-    selected = []
-    acknowledged_heap = []
-    acknowledged = eligible = unseeded = unknown = 0
-    if actions:
+    unseeded = 0
+    if any(page.actions for page in pages):
         for event_id, event in store._iter_item_events(recover=False):
             kind, seed = store._seed_for_event(event_id, event, readonly=True)
             if kind == "unseeded":
@@ -107,43 +157,12 @@ def pending(store, role, actions, *, sources="own", limit=10):
                 continue
             item = store._get(seed["id"], seed_event=event,
                               history_revisions=store._history_revisions(seed["id"], recover=False))
-            if item["status"] not in actions:
-                continue
-            row = _payload(store, item)
-            if row["origin_source"] is None:
-                unknown += 1
-            if sources == "own" and row["origin_source"] != role:
-                continue
-            key = (_timestamp_order(item["updated_at"]), item["id"], item["rev"])
-            if _received(store, role, item):
-                acknowledged += 1
-                candidate = (key, _identity(item))
-                # Keep only the most recent ten exact acknowledgements so the
-                # read view shows position without an unbounded receipt listing.
-                if len(acknowledged_heap) < ACKED_ID_SAMPLE:
-                    heapq.heappush(acknowledged_heap, candidate)
-                elif key > acknowledged_heap[0][0]:
-                    heapq.heapreplace(acknowledged_heap, candidate)
-                continue
-            eligible += 1
-            candidate = (_ReverseKey(key), key, row)
-            if len(selected) < limit:
-                heapq.heappush(selected, candidate)
-            elif key < selected[0][1]:
-                heapq.heapreplace(selected, candidate)
-    rows = [entry[2] for entry in sorted(selected, key=lambda value: value[1])]
-    acknowledged_ids = [event_id for _, event_id in sorted(acknowledged_heap)]
-    result = {"role": role, "subscribed": list(actions), "sources": sources,
-              "events": rows, "pending": eligible, "acknowledged": acknowledged,
-              "acknowledged_event_ids": acknowledged_ids,
-              "acknowledged_ids_truncated": acknowledged > len(acknowledged_ids),
-              "overflow_count": eligible - len(rows), "truncated": eligible > len(rows),
-              "unknown_routing": unknown, "routing_complete": unknown == 0,
-              "unseeded_decisions": unseeded,
-              "coverage_complete": unseeded == 0}
-    if len(canonical(result)) > MAX_CLOSED_PAGE_BYTES:
-        raise LimitExceeded("Work-item events exceed page byte bound")
-    return result
+            matching = [page for page in pages if item["status"] in page.actions]
+            if matching:
+                row = _payload(store, item)
+                for page in matching:
+                    page.add(store, item, row)
+    return [page.result(unseeded) for page in pages]
 
 
 def _token(role, payload):
@@ -242,9 +261,9 @@ def progress(store, roles, *, limit=100):
     # only roles do not have a work-item acknowledgement position to report.
     names = sorted(name for name, role in roles.items() if role.work_item_events)
     rows = []
-    for name in names[:limit]:
-        role = roles[name]
-        page = pending(store, name, role.work_item_events, sources=role.work_item_sources, limit=10)
+    subscriptions = [(name, roles[name].work_item_events, roles[name].work_item_sources)
+                     for name in names[:limit]]
+    for page in _pending_pages(store, subscriptions, 10):
         summary = {key: value for key, value in page.items()
                    if key not in ("events", "overflow_count", "truncated")}
         summary["pending_event_ids"] = [event["event"] for event in page["events"]]
@@ -265,12 +284,8 @@ def closed_page(store, roles, *, limit=10):
     Every matching role is included in sorted order, or the entire read fails
     closed at the existing row/page byte bounds. No locks or recovery.
     """
-    page = store.page_closed_readonly(limit=limit)
-    for row in page["items"]:
-        item = store._get(row["id"], history_revisions=store._history_revisions(row["id"], recover=False))
-        _, expected = store._closed_row(item)
-        if row != expected:
-            raise Denied("Closed work-item row differs from terminal event")
+    page, items = store._page_closed_impl(limit=limit, readonly=True, include_items=True)
+    for row, item in zip(page["items"], items):
         payload = _payload(store, item)
         acknowledgements = {}
         row["event_acknowledgements"] = acknowledgements
