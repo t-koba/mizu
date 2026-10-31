@@ -50,7 +50,7 @@ response must survive into the next actual tool-result HTTP request, where both
 adapters must deliver the exact distinctive host-result JSON text under the
 matching tool-call ID, without an error flag. Tool arguments and bridge operation
 are also checked. This exercises Mizu's result mapping, not generic probe tools:
-Pi coding uses `content`; Pi durable 1.3 uses `output`. A mere tool-result block
+Pi coding uses `content`; Pi durable 1.4 uses `output`. A mere tool-result block
 with empty text is insufficient. A completed durable unit's
 history must survive a real store reopen and reach the provider on the next unit
 without rerunning its tool. Both SDKs perform real compaction, demonstrably remove

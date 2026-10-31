@@ -60,6 +60,30 @@ cache, and run the Pi SDK gate plus the full check. Make this lockstep adoption
 one reviewed commit; do not claim that Dependabot produces a single
 release-wide PR.
 
+### Pi 1.4.0 durable database migration and rollback
+
+`@earendil-works/pi-durable` 1.4.0 automatically migrates a SQLite database to
+schema version 2 when it is first opened. After that migration, pi-durable
+1.3.0 and earlier cannot open the database. This change does not migrate any
+live state during development or publication; the first 1.4.0 runtime open is
+the migration boundary.
+
+Before installing 1.4.0 on a deployment with existing durable SQLite stores,
+quiesce the affected project and every process that can hold its durable store
+open, then use the deployment's existing SQLite-consistent release backup for
+`<data_dir>/durable/`. Keep that
+pre-migration backup through the rollback window. If a rollback to 1.3.0 is
+needed, stop the 1.4.0 runtime and restore the pre-migration database backup
+before starting 1.3.0; downgrading package files alone cannot reverse schema
+version 2. Use the existing deployment backup/restore process, not a raw copy
+of a live SQLite file. `mizu backup PROJECT` archives project data and does not
+include the global `<data_dir>/durable/` stores, so it is not this backup.
+
+The Mizu adapter keeps `store_compat` unchanged so 1.4.0 continues the existing
+conversation through its forward migration. That identity choice does not make
+a migrated database readable by 1.3.0. Mizu does not perform the live migration
+or create a durable-store backup automatically.
+
 ## Build distribution
 
 ```sh

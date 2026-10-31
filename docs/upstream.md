@@ -5,17 +5,20 @@ Python Agent SDK 0.2.163 の公開仕様と配布物を確認した。2026-10-06
 stable の Pi 1.0.4 へ追随し、adapters/pi の両 Pi 依存を 1.0.4 に固定した。2026-10-11 に Pi 1.1.0（2026-10-07 公開）へ追随し、adapters/pi の両依存と
 adapters/pi-durable の3依存を 1.1.0 に固定した。
 2026-10-19 に Pi 1.3.0 へ追随し、adapters/pi の2依存と
-adapters/pi-durable の3依存を同じリリースに固定した。両 lock は既存 lock を
-入力に含めた offline materialize で再生成し、Pi 以外の既存解決バージョンを維持した。
-実行物のバージョンは証跡であり、Mizu が旧実行物を判定・変換・拒否する
-ための条件ではない。内部の設定・bridge・保存記録には世代番号を持たせない。
+adapters/pi-durable の3依存を同じリリースに固定した。2026-10-31 に Pi 1.4.0 へ追随し、
+adapters/pi の2依存と adapters/pi-durable の4依存（Chord を含む）を 1.4.0 に固定した。
+両 lock は既存 lock を入力に含めた trusted materialize で再生成した。Pi 1.4.0 の依存グラフに伴う
+`marked-cjk-friendly` の追加と不要になった nested package の削除を除き、非 Pi パッケージの解決版は変更していない。
+実行物のバージョンは証跡であり、
+Mizu が旧実行物を判定・変換・拒否するための条件ではない。内部の設定・bridge・保存記録には
+世代番号を持たせない。
 
 ## Pi
 
-[1.3.0 の変更履歴](https://github.com/earendil-works/pi/blob/v1.3.0/packages/coding-agent/CHANGELOG.md)、
-[公開 SDK](https://github.com/earendil-works/pi/blob/v1.3.0/packages/coding-agent/docs/sdk.md)、
-[拡張 API](https://github.com/earendil-works/pi/blob/v1.3.0/packages/coding-agent/docs/extensions.md)、
-[RPC](https://github.com/earendil-works/pi/blob/v1.3.0/packages/coding-agent/docs/rpc.md)
+[1.4.0 の変更履歴](https://github.com/earendil-works/pi/blob/v1.4.0/packages/coding-agent/CHANGELOG.md)、
+[公開 SDK](https://github.com/earendil-works/pi/blob/v1.4.0/packages/coding-agent/docs/sdk.md)、
+[拡張 API](https://github.com/earendil-works/pi/blob/v1.4.0/packages/coding-agent/docs/extensions.md)、
+[RPC](https://github.com/earendil-works/pi/blob/v1.4.0/packages/coding-agent/docs/rpc.md)
 を参照した。v1.0.1 から v1.0.4 の差分を評価し、Mizu が使う公開入口
 （`ModelRuntime`、`createAgentSession`、`runRpcMode`、設定・拡張・型）に
 契約破壊がないことを確認してから固定した。v1.0.4 から v1.1.0 の差分も同様に評価した：
@@ -25,8 +28,16 @@ adapters/pi-durable の3依存を同じリリースに固定した。両 lock �
 v1.3.0 ではモデル切替時の reasoning replay と一時的な service-unavailable retry が変わる。
 pi-durable / Chord の公開契約も含め、実配布物の SDK 検査と
 `tests/pi-reasoning.test.mjs` の実 serializer・模擬 provider による replay gate で確認する。
-両 lock は既存 lock を保った offline materialize で再生成し、Pi 以外のパッケージの解決版は
-変更していない。
+Pi 1.4.0 の `pi-durable` は `TaskRuntime.sleep()` を削除し、新しい sleeping task 状態と API を導入するが、
+Mizu の launcher は `TaskRuntime` / task graph API を使わず、既存の root submission / resume 契約のみを使用する。
+1.4.0 の実パッケージを使った replay と durable 契約テストは通過した。
+
+Pi Durable 1.4.0 の [変更履歴](https://github.com/earendil-works/pi/blob/v1.4.0/packages/durable/CHANGELOG.md)では、
+SQLite open 時に schema v2 へ自動移行し、移行後の DB は 1.3.0 以前から開けないとされる。
+Mizu は file-backed SQLite のみを利用する。移行は製品コードでは行わず、運用環境で 1.4.0 が既存 DB を
+最初に開く時に発生する。`store_compat` は 1.4.0 が既存会話を移行・継続するため変更しないが、
+これは 1.3.0 への downgrade 互換性を意味しない。事前バックアップと復元手順は
+[release procedure](releasing.md#pi-140-durable-database-migration-and-rollback) に従う。
 
 pi-durable の launcher は Pi 自身の `ModelRuntime` で固定モデルを解決する。
 解決元は pi と同じ二つ: 同梱カタログと engine directory の `models.json`。

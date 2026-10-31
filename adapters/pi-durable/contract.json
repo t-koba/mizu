@@ -12,7 +12,7 @@
   "settlement_detail": "unanswered textual detail is preserved up to 4000 Unicode characters alongside the unchanged reason",
   "request_unit": "model_request",
   "dependency_evidence": "package-lock.json",
-  "durable": "pi-durable 1.3.0 Harness over file-backed SQLite with requestId resume binding; replay unsafe by default",
+  "durable": "pi-durable 1.4.0 Harness over file-backed SQLite with requestId resume binding; replay unsafe by default",
   "model_resolution": "pinned resolution uses the bundled catalog and engine models.json offline in both; pi-durable never loads provider extensions. Its catalog inspection matches Pi's unsupported native-listing result without extensions and returns extension_provided_model_not_supported_by_engine when one is configured, not proof the pin requires it",
   "bridge_client": "vendored copy of adapters/pi/bridge-client.mjs: the pinned adapter digest covers its own protocol bytes, so framing and caps stay inside this contract instead of a shared import",
   "request_bound": "requests_per_run is the single per-unit spend bound: every provider request passes _budget admission, and a per-run refusal aborts the submission (request_bound)",

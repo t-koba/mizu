@@ -4,7 +4,7 @@
  * submission to settlement and prints a single JSON result document to
  * stdout (stderr carries progress only). No RPC, no JSONL event stream.
  *
- * Durable contracts (from @earendil-works/pi-durable 1.3.0):
+ * Durable contracts (from @earendil-works/pi-durable 1.4.0):
  * - openNodeSqliteStorage(file): WAL SQLite; commits survive process crashes.
  * - Harness.open(storage, {models, registry, settings}): one Session line of
  *   commits. `settings.compaction` carries the operator live-context bound
@@ -205,7 +205,7 @@ export function buildBridgeTools(cfg, bridge, { request: call = request, onFinis
     parameters: typeSchema(Type, tool.inputSchema),
     execute: async (args) => {
       const result = await call(bridge, tool.operation, args);
-      // Pi durable 1.3 uses output for model-facing blocks (coding Pi uses content).
+      // Pi durable 1.4 uses output for model-facing blocks (coding Pi uses content).
       if (tool.operation === 'finish') {
         onFinish(result);
         return { output: [{ type: 'text', text: JSON.stringify(result) }], details: result,
