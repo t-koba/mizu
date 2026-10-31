@@ -65,7 +65,7 @@ CONFIGURED = {
         'max_bytes': ('1073741824', 'configured policy', 'workspace cache / aggregate removal threshold'),
         'check_interval_seconds': ('3600', 'configured policy', 'workspace cache / sweep cadence'),
         'max_entries': ('100000', 'configured policy', 'workspace cache / aggregate metadata entry budget'),
-        'max_depth': ('64', 'configured policy', 'workspace cache / per-root traversal depth budget'),
+        'max_depth': ('MAX_WORKSPACE_CACHE_DEPTH', 'configured policy', 'workspace cache / per-root traversal depth under safety ceiling'),
         'scan_seconds': ('10', 'configured policy', 'workspace cache / scan time after index lookup'),
         'git_timeout_seconds': ('10', 'configured policy', 'workspace cache / per-command Git timeout'),
         'git_output_bytes': ('8388608', 'configured policy', 'workspace cache / index listing output budget'),

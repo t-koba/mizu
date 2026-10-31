@@ -13,7 +13,7 @@ from unittest import mock
 from support import Fixture, ScriptDriver
 from mizu import check_jobs, workspace_cache as cache
 from mizu.admission import check_slot_exclusions, role_exclusion, role_exclusions
-from mizu.config import WorkspaceCache, load, workspace_cache_policy
+from mizu.config import TOML_INTEGER_MAX, WorkspaceCache, load, workspace_cache_policy
 from mizu.errors import Busy, ConfigError, Denied
 from mizu.fs import held, lock, write_json
 from mizu.process import Result, run
@@ -287,6 +287,23 @@ class WorkspaceCacheTests(Fixture):
                 self.assertEqual(cache.maintain(self.project)['status'], 'refused')
             self.assertTrue(directory.exists())
 
+    def test_above_default_budgets_reach_preflight(self):
+        self.make()
+        policy = workspace_cache_policy(dict(
+            roots=['__pycache__'], max_bytes=10, max_entries=100001,
+            scan_seconds=12, git_timeout_seconds=11, git_output_bytes=8388609))
+        object.__setattr__(self.config, 'workspace_cache', policy)
+        clock = iter([0, 11, 11])  # Scan exceeds the old 10-second ceiling.
+        with mock.patch.object(cache, 'time', SimpleNamespace(
+                time=cache.time.time, monotonic=lambda: next(clock))), \
+                mock.patch.object(cache, 'run', wraps=run) as git, \
+                mock.patch.object(cache, '_preflight', wraps=cache._preflight) as preflight:
+            self.assertEqual(cache.maintain(self.project)['status'], 'removed')
+        preflight.assert_called_once_with(self.project, policy)
+        self.assertEqual(policy.max_entries, 100001)
+        self.assertEqual([call.kwargs['timeout'] for call in git.call_args_list], [11, 11])
+        self.assertEqual([call.kwargs['maximum'] for call in git.call_args_list], [4096, 8388609])
+
     def exclusions(self):
         return sorted(set(role_exclusions(self.project.root, tuple(self.config.roles))
                           + check_slot_exclusions(self.project.root, self.config.limits.parallel_checks)))
@@ -395,12 +412,17 @@ print('excluded')
         self.assertEqual(dataclasses.asdict(WorkspaceCache()), expected)
         self.assertEqual(dataclasses.asdict(load(self.file).workspace_cache), expected)
         original = self.file.read_text()
-        for field, maximum in bounds.items():
-            for value in ('1', str(maximum), '0', str(maximum + 1),
+        for field, default in bounds.items():
+            maximum = 64 if field == "max_depth" else TOML_INTEGER_MAX
+            valid = {1, default, maximum}
+            if field != "max_depth":
+                valid.add(default + 1)
+            valid = set(map(str, valid))
+            for value in (*sorted(valid), '-1', '0', str(maximum + 1),
                           'true', 'false', '1.5', '"1"', '[]', '{}'):
                 with self.subTest(field=field, value=value):
-                    self.file.write_text(original.replace('roots = []', f'roots = []\n{field} = {value}'))
-                    if value in ('1', str(maximum)):
+                    self.file.write_text(original.replace(f'{field} = {default}', f'{field} = {value}'))
+                    if value in valid:
                         self.assertEqual(dataclasses.asdict(load(self.file).workspace_cache),
                                          {**expected, field: int(value)})
                     else:

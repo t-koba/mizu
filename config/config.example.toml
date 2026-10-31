@@ -29,8 +29,20 @@ exclude = [".git", ".pi", ".env", ".env.*", ".venv", "node_modules", "__pycache_
 # private/host state, links, and overlapping roots are refused.
 [workspace_cache]
 roots = []
-max_bytes = 1073741824          # Total logical file bytes; at/above clears all roots.
-check_interval_seconds = 3600  # Due checks at execution boundaries, no background timer.
+max_bytes = 1073741824          # 1–9223372036854775807 logical bytes; at/above clears all roots.
+check_interval_seconds = 3600  # 1–2678400; due checks at execution boundaries, no timer.
+# Following budgets are trusted operator choices, not total lock-hold bounds.
+# Except max_depth, their range is 1–9223372036854775807 (TOML representation).
+max_entries = 100000           # Scandir entries across roots; root directories excluded.
+max_depth = 64                 # 1–64 per root, root depth 0; conservative safety ceiling.
+# Depth stays capped pending a separate shutil.rmtree deletion-consumer audit;
+# this is not a native-platform validated recursion limit.
+scan_seconds = 10             # Starts after index lookup/normalization, not before Git.
+# Cooperative checks around filesystem operations cannot interrupt blocking I/O.
+# Deletion is outside the scan clock; locks remain held through deletion.
+git_timeout_seconds = 10      # Two independently timed commands: rev-parse, then ls-files.
+git_output_bytes = 8388608    # Captured index stdout+stderr; rev-parse keeps a 4096-byte cap.
+# Decoded/split/normalized path structures use memory beyond git_output_bytes.
 
 # Decision-to-work policy: the mechanism defaults to create for every source.
 # These example source defaults avoid tasks for operator/VCS dispositions;

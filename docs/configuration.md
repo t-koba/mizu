@@ -46,15 +46,31 @@ absolute paths, traversal, empty components, backslashes and `.git` components
 are refused. Case/Unicode-normalization aliases count as overlap.
 `max_bytes` is an integer from 1 through 2^63−1; the default is 1 GiB.
 `check_interval_seconds` is an integer from 1 through 2678400 (31 days),
-default 3600. Metadata/Git work budgets can only be lowered from these defaults:
+default 3600. Metadata/Git budgets have these defaults and ranges:
 
 | Setting | Integer range | Default | Scope |
 | --- | --- | --- | --- |
-| `max_entries` | 1–100000 | 100000 | Scandir entries (files and directories) counted across all roots; root directories themselves are not counted. |
-| `max_depth` | 1–64 | 64 | Directory traversal depth per root; each root starts at depth 0. |
-| `scan_seconds` | 1–10 | 10 | Shared metadata-scan deadline, starting after the Git index lookup, not an overall cleanup or deletion deadline. |
-| `git_timeout_seconds` | 1–10 | 10 | Timeout for **each** Git command (`rev-parse` and index listing), not a combined deadline. |
-| `git_output_bytes` | 1–8388608 | 8388608 | Combined stdout/stderr cap for the `ls-files` index listing only; `rev-parse` retains its fixed 4096-byte safety read. |
+| `max_entries` | 1–9223372036854775807 | 100000 | Scandir entries (files and directories) across all roots, excluding the root directories themselves. |
+| `max_depth` | 1–64 | 64 | Directory traversal depth per root, starting at 0. |
+| `scan_seconds` | 1–9223372036854775807 | 10 | Shared metadata-scan budget after index lookup. |
+| `git_timeout_seconds` | 1–9223372036854775807 | 10 | Independent timeout for each of the two Git commands. |
+| `git_output_bytes` | 1–9223372036854775807 | 8388608 | Combined captured stdout/stderr cap for the `ls-files` index listing. |
+
+The four larger ranges end at `TOML_INTEGER_MAX`, TOML's signed-64-bit
+representation bound, not a recommended resource budget. These are trusted
+operator budgets: large values permit correspondingly large resource use and
+**do not bound total lock-hold time**. The depth ceiling
+(`MAX_WORKSPACE_CACHE_DEPTH`) is a conservative safety bound retained pending
+a separate audit of the actual `shutil.rmtree` deletion consumer, not a
+native-platform validated recursion limit.
+
+Preflight runs two independently timed Git commands: `rev-parse` (with a fixed
+4096-byte output cap), then `ls-files` (with `git_output_bytes`). The latter cap
+covers captured index stdout/stderr only; decoded strings, split path lists and
+normalized path structures require additional memory. The scan clock begins
+after index lookup and path normalization. Its deadline is cooperative, checked
+around filesystem operations; it cannot interrupt a blocking filesystem call.
+Deletion follows successful preflight and is outside the scan clock.
 
 The separate root-identity response and automatic due-state JSON retain fixed
 4096-byte safety reads: they are one-path and one-small-record reads, and an
@@ -79,17 +95,14 @@ paths). The proof requires a local Git worktree rooted exactly at the workspace;
 ordinary `.git` directories and regular linked-worktree pointer files are
 supported. Plain imports, parent-repository discovery, unavailable/unreadable
 Git and incomplete Git output skip cleanup rather than infer non-membership.
-Index lookup disables fsmonitor and uses the configured per-command Git
-timeout and index-output cap (defaults: 10 seconds and 8 MiB). Comparisons also refuse case/Unicode aliases of tracked
-paths. Missing roots are harmless; existing roots, their ancestors, and their
+Index lookup disables fsmonitor; comparisons refuse case/Unicode aliases of
+tracked paths. Missing roots are harmless; existing roots, their ancestors, and their
 contents must have no symlinks or Windows reparse points. Nested `.git` entries,
 hardlinked files, special files, and any product-private/host-state path omitted
 from snapshots (including private-evidence trees and private-name files) are
 refused too.
-The scan reads metadata, not cache contents. Its configured budgets default to
-100000 entries across all roots, depth 64 per root and 10 seconds shared across
-roots after index lookup. Any unsafe root or
-incomplete scan refuses the **whole** candidate set before any deletion.
+The scan reads metadata, not cache contents. Any unsafe root or incomplete
+scan refuses the **whole** candidate set before any deletion.
 All managed workspace writers must use the harness exclusions; these locks
 are not protection against an unrelated host process mutating the tree.
 

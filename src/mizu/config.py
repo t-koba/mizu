@@ -907,13 +907,18 @@ def usage_policy(raw: dict) -> Usage:
     })
 
 
+#: Conservative safety ceiling pending a separate audit of the shutil.rmtree
+#: deletion consumer; not a native-platform validated recursion limit.
+MAX_WORKSPACE_CACHE_DEPTH = 64
+
+
 @dataclasses.dataclass(frozen=True)
 class WorkspaceCache:
     roots: tuple[str, ...] = ()
     max_bytes: int = 1073741824
     check_interval_seconds: int = 3600
     max_entries: int = 100000
-    max_depth: int = 64
+    max_depth: int = MAX_WORKSPACE_CACHE_DEPTH
     scan_seconds: int = 10
     git_timeout_seconds: int = 10
     git_output_bytes: int = 8388608
@@ -943,7 +948,7 @@ def workspace_cache_policy(raw: dict) -> WorkspaceCache:
     number(interval, "workspace_cache.check_interval_seconds", 1, 31 * 86400)
     bounds = {
         field.name: number(raw.get(field.name, field.default), f"workspace_cache.{field.name}",
-                           1, field.default)
+                           1, MAX_WORKSPACE_CACHE_DEPTH if field.name == "max_depth" else TOML_INTEGER_MAX)
         for field in fields if field.name not in {"roots", "max_bytes", "check_interval_seconds"}
     }
     return WorkspaceCache(roots, maximum, interval, **bounds)
