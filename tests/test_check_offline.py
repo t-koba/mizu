@@ -662,6 +662,115 @@ class UnittestFailureSummaryTests(unittest.TestCase):
             for value in values:
                 self.assertNotIn(value, text)
 
+    def test_wrapper_trace_diagnostic_survives_real_runner_and_summary(self):
+        spec = importlib.util.spec_from_file_location('wrapper_fixture', ROOT / 'tests/test_install_ci.py')
+        fixture = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fixture)
+        identifier = ('test_install_ci.InstallWrapperCITests.'
+                      'test_all_modes_reach_same_bounded_smoke_flow_with_mock_setup_and_cli')
+        sentinel = 'SYNTHETIC-CREDENTIAL-DO-NOT-EMIT'
+        stage = {'prefix': 'prefix with spaces', 'bin': 'bin with spaces',
+                 'config': 'private configuration/config.toml'}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'cli.invoked').touch()
+
+            class MissingTrace(unittest.TestCase):
+                def id(self):
+                    return identifier
+
+                def test_trace(self):
+                    try:
+                        fixture.InstallWrapperCITests().read_wrapper_trace(root, 2, 0)
+                    except FileNotFoundError as error:
+                        error.add_note(f'arbitrary note {temporary} {sentinel}')
+                        raise
+
+            for observed in (stage, {'config': str(root / sentinel)}):
+                with self.subTest(normalized=observed == stage):
+                    (root / 'setup.invoked.json').write_text(json.dumps(observed))
+                    result, output, data, summary = self.run_case(MissingTrace)
+                    self.assertEqual(len(result.errors), 1)
+                    self.assertEqual(json.loads(data)['wrapper_trace_diagnostic'], {
+                        'mode_index': 2, 'wrapper_returncode': 0,
+                        'root_exists': True, 'trace_exists': False,
+                        'setup_invoked': True, 'cli_invoked': True,
+                        'fixture_paths': {'root': '.', 'trace': 'trace.jsonl',
+                            'wrapper': 'scripts/test-install.sh',
+                            'setup': 'scripts/fake-setup.py', 'cli': 'scripts/fake-cli.py'},
+                        'stage_paths': stage if observed == stage else None, 'errno': 2,
+                    })
+                    self.assertIn(identifier, summary)
+                    self.assertIn('[FileNotFoundError]', summary)
+                    detail = ('wrapper trace diagnostic: mode=2 rc=0 root=1 trace=0 '
+                              'setup=1 cli=1 fixture_paths=.:trace.jsonl:scripts/test-install.sh:'
+                              'scripts/fake-setup.py:scripts/fake-cli.py stage_paths=' +
+                              ('prefix with spaces|bin with spaces|private configuration/config.toml'
+                               if observed == stage else 'null') + ' errno=2')
+                    self.assertIn(detail, summary)
+                    self.assertLessEqual(len(summary), 500)
+                    retained = '\n'.join(CHECK.failure_summary_lines([{
+                        'name': 'python-unit-and-contract-tests', 'status': 'fail',
+                        'exit_code': 1, 'details': summary,
+                    }]))
+                    self.assertIn(detail, retained)
+                    self.assert_private(output, data, summary, temporary, sentinel, 'arbitrary note')
+
+    def test_wrapper_trace_diagnostic_is_validated_at_both_boundaries(self):
+        identifier = ('test_install_ci.InstallWrapperCITests.'
+                      'test_all_modes_reach_same_bounded_smoke_flow_with_mock_setup_and_cli')
+        valid = {'mode_index': 0, 'wrapper_returncode': 0,
+                 'root_exists': False, 'trace_exists': False,
+                 'setup_invoked': False, 'cli_invoked': False,
+                 'fixture_paths': {'root': '.', 'trace': 'trace.jsonl',
+                     'wrapper': 'scripts/test-install.sh', 'setup': 'scripts/fake-setup.py',
+                     'cli': 'scripts/fake-cli.py'}, 'stage_paths': None, 'errno': None}
+        private = '/synthetic-private-host/SYNTHETIC-CREDENTIAL-DO-NOT-EMIT'
+        cases = [(identifier, FileNotFoundError, valid, True)]
+        for field, values in (
+                ('mode_index', (-1, 3, True, '0')),
+                ('wrapper_returncode', (-1, 1, 255, 256, False, '0')),
+                ('root_exists', (0,)), ('trace_exists', (True, None, 1)),
+                ('setup_invoked', (1,)), ('cli_invoked', ('true',)),
+                ('fixture_paths', (None, {**valid['fixture_paths'], 'root': private})),
+                ('stage_paths', ({'config': private},)),
+                ('errno', (True, -1, 0, 2**31, 2.0, private)), ('extra', (private,))):
+            cases.extend((identifier, FileNotFoundError, {**valid, field: value}, False)
+                         for value in values)
+        cases.extend((identifier, FileNotFoundError, value, False)
+                     for value in (None, [], private, {k: v for k, v in valid.items() if k != 'errno'}))
+        cases.extend(((identifier + '_other', FileNotFoundError, valid, False),
+                      (identifier, OSError, valid, False)))
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'failures.jsonl'
+            for test_id, error_type, diagnostic, accepted in cases:
+                with self.subTest(test_id=test_id, error_type=error_type, diagnostic=diagnostic):
+                    test = mock.Mock(id=lambda: test_id)
+                    error = error_type(private)
+                    error.add_note('wrapper trace diagnostic: ' + json.dumps(diagnostic))
+                    record = CHILD.failure_record('ERROR', test, (error_type, error, None))
+                    self.assertEqual('wrapper_trace_diagnostic' in record, accepted)
+                    self.assertNotIn(private, json.dumps(record))
+                    # Inject the input even when the child rejected it: the
+                    # parent cannot rely on the child's validation.
+                    record['wrapper_trace_diagnostic'] = diagnostic
+                    path.write_text(json.dumps(record))
+                    summary = CHECK.unittest_failure_summary(path)
+                    self.assertEqual('wrapper trace diagnostic:' in summary, accepted)
+                    if accepted and diagnostic['errno'] is None:
+                        self.assertIn('errno=null', summary)
+                    self.assertNotIn(private, summary)
+            for note in ('arbitrary note ' + private,
+                         'wrapper trace diagnostic: {malformed ' + private,
+                         'wrapper trace diagnostic:' + json.dumps(valid),
+                         'wrapper trace diagnostic: ' + 'x' * 2048):
+                error = FileNotFoundError(private)
+                error.add_note(note)
+                record = CHILD.failure_record('ERROR', mock.Mock(id=lambda: identifier),
+                                              (FileNotFoundError, error, None))
+                self.assertNotIn('wrapper_trace_diagnostic', record)
+                self.assertNotIn(private, json.dumps(record))
+
     def test_failure_summary_keeps_stable_id_repo_location_and_type(self):
         class FailureTest(unittest.TestCase):
             def test_expected_result(self):

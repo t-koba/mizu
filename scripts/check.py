@@ -515,12 +515,42 @@ def _unittest_timeout_seconds() -> int:
     return SUITE_CHILD_TIMEOUT_SECONDS
 
 
+WRAPPER_TRACE_TEST = ('test_install_ci.InstallWrapperCITests.'
+                      'test_all_modes_reach_same_bounded_smoke_flow_with_mock_setup_and_cli')
+
+
+def valid_wrapper_trace_diagnostic(test, error_type, value) -> bool:
+    """Only the missing-trace fixture's closed schema may cross this boundary."""
+    if (test != WRAPPER_TRACE_TEST
+            or error_type != 'FileNotFoundError' or not isinstance(value, dict)
+            or set(value) != {'mode_index', 'wrapper_returncode', 'root_exists',
+                'trace_exists', 'setup_invoked', 'cli_invoked', 'fixture_paths',
+                'stage_paths', 'errno'}):
+        return False
+    return (type(value['mode_index']) is int and 0 <= value['mode_index'] <= 2
+            and type(value['wrapper_returncode']) is int and value['wrapper_returncode'] == 0
+            and all(type(value[key]) is bool for key in
+                    ('root_exists', 'trace_exists', 'setup_invoked', 'cli_invoked'))
+            and value['trace_exists'] is False
+            and value['fixture_paths'] == {'root': '.', 'trace': 'trace.jsonl',
+                'wrapper': 'scripts/test-install.sh', 'setup': 'scripts/fake-setup.py',
+                'cli': 'scripts/fake-cli.py'}
+            and (value['stage_paths'] is None or value['stage_paths'] == {
+                'prefix': 'prefix with spaces', 'bin': 'bin with spaces',
+                'config': 'private configuration/config.toml'})
+            and (value['errno'] is None or
+                 (type(value['errno']) is int and 0 < value['errno'] <= 2147483647)))
+
+
 def unittest_failure_summary(sidecar: Path) -> str:
     """Read only the child's sanitized JSONL, never flattened traceback text.
 
-    The private, run-local sidecar holds kind/test/type/path/line records (see
-    check_unittest.py). Reject missing, empty, malformed, oversized or unsafe
-    metadata generically. Summary bounds remain 500 characters per failure and
+    The private, run-local sidecar holds kind/test/type/path/line records and
+    one exact-test closed-schema diagnostic (see check_unittest.py). Reject
+    missing, empty, malformed, oversized or unsafe
+    metadata generically. Independently validate the optional closed-schema
+    wrapper trace diagnostic; fixed path values are rendered in a compact order.
+    Summary bounds remain 500 characters per failure and
     1500 total; test counts still come from unittest's standard final output.
     """
     import re
@@ -533,7 +563,7 @@ def unittest_failure_summary(sidecar: Path) -> str:
         summaries = []
         for line in data.decode('utf-8').splitlines():
             record = json.loads(line)
-            if not isinstance(record, dict) or set(record) != {'kind', 'test', 'type', 'path', 'line'}:
+            if not isinstance(record, dict) or set(record) - {'wrapper_trace_diagnostic'} != {'kind', 'test', 'type', 'path', 'line'}:
                 return unavailable
             kind, test, error_type = record['kind'], record['test'], record['type']
             if (kind not in ('FAIL', 'ERROR', 'UNEXPECTED SUCCESS')
@@ -562,7 +592,26 @@ def unittest_failure_summary(sidecar: Path) -> str:
             elif number is not None:
                 return unavailable
             exception = f' [{error_type}]' if error_type else ''
-            summaries.append(f'{kind} {test}{location}{exception}'[:500])
+            diagnostic = record.get('wrapper_trace_diagnostic')
+            detail = ''
+            if kind == 'ERROR' and valid_wrapper_trace_diagnostic(test, error_type, diagnostic):
+                # Both maps have only one allowed value; no path strings from
+                # the child are interpolated into the summary.
+                paths = diagnostic['fixture_paths']
+                fixture_paths = ':'.join(paths[key] for key in
+                                         ('root', 'trace', 'wrapper', 'setup', 'cli'))
+                stages = diagnostic['stage_paths']
+                stage_paths = ('null' if stages is None else '|'.join(
+                    stages[key] for key in ('prefix', 'bin', 'config')))
+                error_number = ('null' if diagnostic['errno'] is None
+                                else str(diagnostic['errno']))
+                detail = (' wrapper trace diagnostic: '
+                          f"mode={diagnostic['mode_index']} rc={diagnostic['wrapper_returncode']} "
+                          f"root={int(diagnostic['root_exists'])} trace={int(diagnostic['trace_exists'])} "
+                          f"setup={int(diagnostic['setup_invoked'])} cli={int(diagnostic['cli_invoked'])} "
+                          f'fixture_paths={fixture_paths} stage_paths={stage_paths} '
+                          f'errno={error_number}')
+            summaries.append(f'{kind} {test}{location}{exception}{detail}'[:500])
         return '; '.join(summaries)[:1500] or unavailable
     except (OSError, ValueError, TypeError, RuntimeError):
         return unavailable

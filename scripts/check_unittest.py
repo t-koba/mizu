@@ -6,7 +6,9 @@ We exclusively create them (mode 0600) and flush one JSON line per event.
 The failure sidecar holds one line per failure/error or unexpected success.
 Records contain only kind, stable test ID, exception class name, and the
 innermost real repository-relative frame (path/line, or null/null).
-Exception values, chains, source lines and locals are never formatted.
+Only the exact missing-wrapper-trace test may also supply its validated, closed
+fixture diagnostic schema. Other notes, exception values, chains, source lines
+and locals are never formatted.
 The timing sidecar (optional second argv) holds one start line and one stop
 line per test, keyed only by stable test ID with monotonic offsets; the parent
 derives durations.
@@ -90,13 +92,54 @@ class ShardLoader(unittest.TestLoader):
         return select_shard(super().discover(*args, **kwargs), self.shard)
 
 
+WRAPPER_TRACE_TEST = ('test_install_ci.InstallWrapperCITests.'
+                      'test_all_modes_reach_same_bounded_smoke_flow_with_mock_setup_and_cli')
+
+
+def valid_wrapper_trace_diagnostic(test, error_type, value) -> bool:
+    """Only the missing-trace fixture's closed schema may cross this boundary."""
+    if (test != WRAPPER_TRACE_TEST
+            or error_type != 'FileNotFoundError' or not isinstance(value, dict)
+            or set(value) != {'mode_index', 'wrapper_returncode', 'root_exists',
+                'trace_exists', 'setup_invoked', 'cli_invoked', 'fixture_paths',
+                'stage_paths', 'errno'}):
+        return False
+    return (type(value['mode_index']) is int and 0 <= value['mode_index'] <= 2
+            and type(value['wrapper_returncode']) is int and value['wrapper_returncode'] == 0
+            and all(type(value[key]) is bool for key in
+                    ('root_exists', 'trace_exists', 'setup_invoked', 'cli_invoked'))
+            and value['trace_exists'] is False
+            and value['fixture_paths'] == {'root': '.', 'trace': 'trace.jsonl',
+                'wrapper': 'scripts/test-install.sh', 'setup': 'scripts/fake-setup.py',
+                'cli': 'scripts/fake-cli.py'}
+            and (value['stage_paths'] is None or value['stage_paths'] == {
+                'prefix': 'prefix with spaces', 'bin': 'bin with spaces',
+                'config': 'private configuration/config.toml'})
+            and (value['errno'] is None or
+                 (type(value['errno']) is int and 0 < value['errno'] <= 2147483647)))
+
+
 def failure_record(kind, test, err=None) -> dict:
     record = {'kind': kind, 'test': stable_test_id(test), 'type': None, 'path': None, 'line': None}
     if err is None:
         return record
-    exception_type, _, tb = err
+    exception_type, error, tb = err
     name = exception_type.__name__
     record['type'] = name if re.fullmatch(r'[A-Za-z_]\w{0,199}', name, re.ASCII) else 'Exception'
+    if kind == 'ERROR' and record['test'] == WRAPPER_TRACE_TEST and exception_type is FileNotFoundError:
+        notes = getattr(error, '__notes__', ())
+        if isinstance(notes, (list, tuple)) and len(notes) <= 16:
+            candidates = [note for note in notes
+                          if isinstance(note, str)
+                          and note.startswith('wrapper trace diagnostic: ')]
+            if len(candidates) == 1 and len(candidates[0]) <= 2048:
+                try:
+                    diagnostic = json.loads(candidates[0].removeprefix(
+                        'wrapper trace diagnostic: '))
+                    if valid_wrapper_trace_diagnostic(record['test'], name, diagnostic):
+                        record['wrapper_trace_diagnostic'] = diagnostic
+                except (ValueError, RecursionError):
+                    pass
     # Walk ONLY the supplied outer traceback, never __cause__/__context__.
     # Substring matching would mistake an unrelated host's tests/ for ours.
     while tb is not None:
