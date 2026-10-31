@@ -1312,18 +1312,21 @@ paths or error strings are emitted. Group identity internally is the actual
 session key + generation + exact provider/model, not a synthetic grouping.
 Only aggregate observations may be returned through the existing operator Q&A.
 The 8 KiB bound still includes idle-gap quantiles: the fixed shape with
-conservative 24-character numeric placeholders and 32-character timestamps
+conservative 40-character numeric placeholders and 32-character timestamps
 remains below it, including the CLI's indented JSON (covered synthetically).
 
-Bounds are 5,000 candidate directory entries (including non-directories), the
-200 newest run directories by directory mtime within those candidates, 256 KiB
-per file and 64 attempts per file, reusing existing source limits. Enumeration
-uses no-follow directory handling; source reads use private-root `safe_read`
-(refusing links/hardlinks/specials; portable platforms check reparse points and
-identity without claiming POSIX path-component pinning). A 2-second monotonic
-ceiling is checked around bounded operations and through analysis. This allows
-about six times the previously measured 0.3326-second synthetic scan median
-(200 files × 64 attempts); it is not a claim about production latency. A single
+Diagnostic budgets belong to the optional top-level
+[`[scheduler_evidence]`](configuration.md#scheduler-evidence-diagnostic), not
+`[usage]`: `candidate_entries = 5000` bounds directory enumeration (including
+non-directories), `files = 200` selects the newest run directories by directory
+mtime/name within those candidates, and `scan_seconds = 2` sets a cooperative
+monotonic deadline checked around bounded operations and through analysis.
+These are defaults, not hard maxima; increasing them can increase work and
+memory. The result's `limits` reports the configured budgets (`seconds` defaults
+to `2.0`). Dispatch-record limits stay 256 KiB and 64 attempts per file.
+Enumeration uses no-follow directory handling; source reads use private-root
+`safe_read` (refusing links/hardlinks/specials; portable platforms check reparse
+points and identity without claiming POSIX path-component pinning). A single
 stalled OS operation cannot be preempted; an overrun is reported as timeout.
 There are no retries; rerunning obtains a new bounded observation, not a cursor.
 

@@ -1,4 +1,7 @@
-"""Host-only, read-only aggregate of bounded dispatch evidence; no policy input.
+"""Host-only, read-only aggregate of bounded dispatch evidence.
+
+Configured budgets limit diagnostic work; this aggregate is never a scheduler
+policy input.
 
 Only fixed categories, counts, UTC timestamps and numeric distributions leave
 this module. Internal identities are never serialized, even as anonymous rows.
@@ -18,13 +21,8 @@ from . import platform
 from .dispatch_evidence import MAX_ATTEMPTS, MAX_BYTES
 from .errors import LimitExceeded, MizuError
 from .fs import loads_finite, safe_read
-from .config import Usage
 from .usage import cache_read_share, prompt_input_tokens
 
-# Aggregate evidence retains the usage defaults, independent of report overrides.
-MAX_RUNS_SCANNED = Usage.runs_scanned
-MAX_CACHE_AFFINITY_RUNS = Usage.cache_affinity_runs
-MAX_SECONDS = 2.0
 SPARSE_BELOW = 5
 _KEY = re.compile(r"[0-9a-f]{64}\Z")
 REASONS = ("invalid_record", "unknown_session", "invalid_interval",
@@ -127,7 +125,9 @@ def summarize(project):
     Deadline checks surround each bounded operation; a stalled OS read cannot
     be preempted. Reaching a limit conservatively marks coverage unknown.
     """
-    deadline = time.monotonic() + MAX_SECONDS
+    policy = project.config.scheduler_evidence
+    seconds = float(policy.scan_seconds)
+    deadline = time.monotonic() + seconds
     coverage = dict(candidate_entries=0, run_directories=0, files_attempted=0, files_read=0,
                     unavailable_files=0, malformed_files=0, oversized_files=0,
                     unsafe_entries=0, dropped_attempts=0, attempt_limit_files=0,
@@ -154,15 +154,15 @@ def summarize(project):
                         coverage["unsafe_entries"] += 1
                 except OSError:
                     coverage["unsafe_entries"] += 1
-                if coverage["candidate_entries"] >= MAX_RUNS_SCANNED:
+                if coverage["candidate_entries"] >= policy.candidate_entries:
                     coverage["candidate_limit"] = True
                     break
     except (OSError, ValueError):
         coverage["scan_unavailable"] = True
-    coverage["file_limit"] = len(candidates) > MAX_CACHE_AFFINITY_RUNS
+    coverage["file_limit"] = len(candidates) > policy.files
     rows = []
     unsafe_files = set()
-    for index, (_, name) in enumerate(heapq.nlargest(MAX_CACHE_AFFINITY_RUNS, candidates)):
+    for index, (_, name) in enumerate(heapq.nlargest(policy.files, candidates)):
         if expired():
             break
         coverage["files_attempted"] += 1
@@ -253,8 +253,8 @@ def summarize(project):
     coverage["status"] = ("incomplete_unknown" if any(coverage[k] for k in faults) or coverage["incomplete_attempts"]
                           else "observed_window_only" if rows else "empty_unknown")
     result = {"schema": 1, "coverage": coverage,
-            "limits": {"candidate_entries": MAX_RUNS_SCANNED, "files": MAX_CACHE_AFFINITY_RUNS,
-                       "bytes_per_file": MAX_BYTES, "attempts_per_file": MAX_ATTEMPTS, "seconds": MAX_SECONDS},
+            "limits": {"candidate_entries": policy.candidate_entries, "files": policy.files,
+                       "bytes_per_file": MAX_BYTES, "attempts_per_file": MAX_ATTEMPTS, "seconds": seconds},
             "period_utc": {"first": min(timestamps).isoformat() if timestamps else None,
                            "last": max(timestamps).isoformat() if timestamps else None},
             "attempts": {"observed": len(rows), "eligible": len(shares), "excluded": dict(excluded)},

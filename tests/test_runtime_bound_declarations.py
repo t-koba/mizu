@@ -5,7 +5,7 @@ and direct numeric literal/arithmetic values at a short resource-call keyword
 set. Expressions are inventoried without evaluating source. This does not lint
 arbitrary numeric literals, aliases, nested declarations, arbitrary call args,
 local arithmetic or other modules. Expand coverage as the behavior-based
-inventory reaches other owners. The configured slice checks Usage and
+inventory reaches other owners. The configured slice checks Usage, SchedulerEvidence and
 WorkspaceCache field defaults in config.py; validation is covered by their
 focused config tests. Classification records current ownership, not approval to leave policy in code; safety ceilings here are defensive read
 bounds, not intrinsic format limits.
@@ -59,6 +59,11 @@ CONFIGURED = {
         'unknown_keys': ('20', 'configured policy', 'usage / unknown-key diagnostic sample'),
         'cache_affinity_rows': ('200', 'configured policy', 'usage / affinity output sample'),
         'cache_affinity_runs': ('200', 'configured policy', 'usage / affinity history window'),
+    },
+    'SchedulerEvidence': {
+        'candidate_entries': ('5000', 'configured policy', 'scheduler evidence / diagnostic enumeration budget'),
+        'files': ('200', 'configured policy', 'scheduler evidence / diagnostic read window'),
+        'scan_seconds': ('2', 'configured policy', 'scheduler evidence / cooperative diagnostic deadline'),
     },
     'WorkspaceCache': {
         'roots': ('()', 'configured policy', 'workspace cache / opt-in regenerable roots'),

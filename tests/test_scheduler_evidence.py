@@ -1,5 +1,6 @@
 import contextlib
 import datetime as dt
+import dataclasses
 import io
 import json
 import os
@@ -8,6 +9,7 @@ from unittest.mock import patch
 from support import Fixture
 from mizu import scheduler_evidence as evidence
 from mizu.cli import execute, main, parser
+from mizu.config import MAX_USAGE_POLICY_COUNT, TOML_INTEGER_MAX, SchedulerEvidence
 from mizu.errors import ConfigError, Denied
 from mizu.fs import mkdir, write_json
 
@@ -237,7 +239,7 @@ class SchedulerEvidenceTests(Fixture):
 
         def width_envelope(value):
             # Counts are bounded by scan limits (including summed 63-bit
-            # dropped counts: <=22 digits). Float repr needs <=24 bytes.
+            # dropped counts: <=38 digits). Float repr needs <=24 bytes.
             # Quoted placeholders overestimate both, even for null quantiles.
             if isinstance(value, dict):
                 return {key: width_envelope(item) for key, item in value.items()}
@@ -246,7 +248,7 @@ class SchedulerEvidenceTests(Fixture):
             if isinstance(value, bool):
                 return False  # longer than true
             if value is None or isinstance(value, (int, float)):
-                return "9" * 24
+                return "9" * 40
             return value
 
         envelope = width_envelope(self.view())
@@ -257,8 +259,9 @@ class SchedulerEvidenceTests(Fixture):
     def test_candidate_enumeration_and_file_limits(self):
         for index in range(6):
             self.write([attempt(0)], name=f"run{index}")
-        with patch.object(evidence, "MAX_RUNS_SCANNED", 4), patch.object(evidence, "MAX_CACHE_AFFINITY_RUNS", 2):
-            view = self.view()
+        self.project.config = dataclasses.replace(
+            self.config, scheduler_evidence=SchedulerEvidence(candidate_entries=4, files=2))
+        view = self.view()
         self.assertEqual(view["coverage"]["candidate_entries"], 4)
         self.assertEqual(view["coverage"]["files_attempted"], 2)
         self.assertTrue(view["coverage"]["candidate_limit"])
@@ -269,10 +272,58 @@ class SchedulerEvidenceTests(Fixture):
             (path / "dispatch-attempts.json").unlink()
             path.rmdir()
             path.write_text("ignored")
-        with patch.object(evidence, "MAX_RUNS_SCANNED", 4):
-            view = self.view()
+        view = self.view()
         self.assertEqual(view["coverage"]["candidate_entries"], 4)
         self.assertEqual(view["coverage"]["unsafe_entries"], 4)
+
+    def test_cli_configured_limits_cutoffs_and_usage_independence(self):
+        for index in range(6):
+            target = self.write([attempt(index)], name=f"run{index}")
+            stamp = 1700000000000000000 + index * 1000000000
+            os.utime(target.parent, ns=(stamp, stamp))
+        args = parser().parse_args(["--config", str(self.file), "usage", self.project.name, "--cache-evidence"])
+        original = self.file.read_text()
+        self.file.write_text(original + "\n[usage]\nruns_scanned = 1\ncache_affinity_runs = 0\n")
+        view = execute(args)
+        self.assertEqual(view["limits"], dict(candidate_entries=5000, files=200, seconds=2.0,
+                                             bytes_per_file=262144, attempts_per_file=64))
+        self.assertIs(type(view["limits"]["seconds"]), float)
+        self.assertEqual(view["coverage"]["files_read"], 6)
+        for candidates, files, seconds in ((4, 2, 7), (5001, 201, 3),
+                                            (MAX_USAGE_POLICY_COUNT, MAX_USAGE_POLICY_COUNT, TOML_INTEGER_MAX)):
+            self.file.write_text(original + f"\n[scheduler_evidence]\ncandidate_entries = {candidates}\n"
+                                 f"files = {files}\nscan_seconds = {seconds}\n")
+            with patch.object(evidence, "safe_read", wraps=evidence.safe_read) as reader:
+                view = execute(args)
+            self.assertEqual(view["limits"], dict(candidate_entries=candidates, files=files,
+                                                 seconds=float(seconds), bytes_per_file=262144,
+                                                 attempts_per_file=64))
+            self.assertEqual(view["coverage"]["candidate_entries"], min(candidates, 6))
+            self.assertEqual(view["coverage"]["files_read"], min(files, candidates, 6))
+            self.assertEqual(reader.call_count, min(files, candidates, 6))
+            self.assertEqual(view["coverage"]["candidate_limit"], candidates <= 6)
+            self.assertEqual(view["coverage"]["file_limit"], files < min(candidates, 6))
+            # The file window selects newest-first, not enumeration order.
+            names = [call.args[1].split("/")[1] for call in reader.call_args_list]
+            self.assertEqual(names, sorted(names, reverse=True))
+        self.file.write_text(original + "\n[scheduler_evidence]\nscan_seconds = 7\n")
+        clock = [0]
+        read = evidence.safe_read
+
+        def slow_read(*args):
+            raw = read(*args)
+            clock[0] += 3.5
+            return raw
+
+        with patch.object(evidence.time, "monotonic", side_effect=lambda: clock[0]), patch.object(
+                evidence, "safe_read", side_effect=slow_read):
+            view = execute(args)
+        self.assertEqual(view["limits"]["seconds"], 7.0)
+        self.assertTrue(view["coverage"]["timeout"])
+        self.assertEqual(view["coverage"]["files_attempted"], 2)
+        self.assertEqual(view["coverage"]["files_read"], 1)
+        self.assertEqual(view["coverage"]["status"], "incomplete_unknown")
+        self.assertEqual(view["attempts"]["observed"], 1)
 
     def test_timeout_before_scan_and_after_read(self):
         self.write([attempt(0), attempt(1)])

@@ -29,8 +29,8 @@ ENGINES = ("pi", "pi-durable", "codex", "claude")
 RESERVED_ROLE_NAMES = frozenset({"operator", "vcs", "editor"})
 #: TOML signed-64-bit integer representation ceiling, not a resource budget.
 TOML_INTEGER_MAX = (1 << 63) - 1
-#: Usage counts flow through Python collection indexes; reserve one index for
-#: the extra candidate used to detect a truncated run window.
+#: Report/diagnostic counts flow through Python collection indexes. Usage scans
+#: reserve one index for the extra candidate that detects a truncated window.
 MAX_USAGE_POLICY_COUNT = min(TOML_INTEGER_MAX, sys.maxsize)
 MAX_USAGE_RUNS_SCANNED = MAX_USAGE_POLICY_COUNT - 1
 MAX_RESOURCES = 64
@@ -286,7 +286,7 @@ def _load_merged(top: Path) -> dict:
         allowed = {"data_dir", "engines", "timezone", "limits", "sandbox", "profiles",
                    "roles", "consult_role", "delegate_role", "web", "vcs", "materialize",
                    "exclude", "selectors", "include", "insight_decisions", "workspace_cache",
-                   "operator_records", "usage"}
+                   "operator_records", "usage", "scheduler_evidence"}
         unknown = set(data) - allowed
         if unknown:
             raise ConfigError(f"Unknown keys in {resolved}: {', '.join(sorted(unknown))}")
@@ -907,6 +907,24 @@ def usage_policy(raw: dict) -> Usage:
     })
 
 
+@dataclasses.dataclass(frozen=True)
+class SchedulerEvidence:
+    candidate_entries: int = 5000
+    files: int = 200
+    scan_seconds: int = 2
+
+
+def scheduler_evidence_policy(raw: dict) -> SchedulerEvidence:
+    fields = dataclasses.fields(SchedulerEvidence)
+    keys(raw, {field.name for field in fields}, "scheduler_evidence")
+    return SchedulerEvidence(**{
+        field.name: number(
+            raw.get(field.name, field.default), f"scheduler_evidence.{field.name}", 1,
+            TOML_INTEGER_MAX if field.name == "scan_seconds" else MAX_USAGE_POLICY_COUNT)
+        for field in fields
+    })
+
+
 #: Conservative safety ceiling pending a separate audit of the shutil.rmtree
 #: deletion consumer; not a native-platform validated recursion limit.
 MAX_WORKSPACE_CACHE_DEPTH = 64
@@ -982,6 +1000,7 @@ class Config:
 
     operator_records: dict = dataclasses.field(default_factory=dict)
     usage: Usage = dataclasses.field(default_factory=Usage)
+    scheduler_evidence: SchedulerEvidence = dataclasses.field(default_factory=SchedulerEvidence)
 
     def __post_init__(self):
         object.__setattr__(self, "tzinfo", resolve_timezone(self.timezone))
@@ -1024,7 +1043,7 @@ def load(file: Path) -> Config:
     keys(data, {"data_dir", "engines", "timezone", "limits", "sandbox", "profiles",
                 "roles", "consult_role", "delegate_role", "web", "vcs", "materialize",
                 "exclude", "selectors", "include", "insight_decisions", "workspace_cache",
-                "operator_records", "usage"}, "root")
+                "operator_records", "usage", "scheduler_evidence"}, "root")
     data.pop("include", None)
     from .operator_records import configuration as record_configuration
     records = record_configuration(data.get("operator_records", {}))
@@ -1561,4 +1580,5 @@ def load(file: Path) -> Config:
                   strings(data.get("exclude", [".git", ".pi", ".env", ".env.*", ".venv",
                                                 "node_modules", "__pycache__", "*.pyc", "*.pyo", ".pytest_cache"]), "exclude"), selectors, insight_decisions=decisions,
                   workspace_cache=workspace_cache_policy(data.get("workspace_cache", {})), operator_records=records,
-                  usage=usage_policy(data.get("usage", {})))
+                  usage=usage_policy(data.get("usage", {})),
+                  scheduler_evidence=scheduler_evidence_policy(data.get("scheduler_evidence", {})))

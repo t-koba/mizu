@@ -770,6 +770,36 @@ settings do not rewrite evidence or change run retirement or scheduler-evidence
 budgets. Standalone normalization and attempt-evidence helpers retain the usage
 default for unknown keys unless their caller supplies an explicit sample size.
 
+## Scheduler evidence diagnostic
+
+The optional top-level `[scheduler_evidence]` controls only the host-only,
+read-only `mizu usage PROJECT --cache-evidence` aggregate. It is independent of
+`[usage]` overrides and supplies no scheduler authority or model policy input.
+Omitted fields keep these defaults; unknown keys and non-table sections fail
+closed. All three fields are strict positive integers (not booleans).
+
+```toml
+[scheduler_evidence]
+candidate_entries = 5000
+files = 200
+scan_seconds = 2
+```
+
+| Key | Default | Range | Meaning |
+|---|---|---|---|
+| `candidate_entries` | 5000 | 1–`MAX_USAGE_POLICY_COUNT` | Directory entries examined, including non-directories; reaching this budget marks coverage unknown |
+| `files` | 200 | 1–`MAX_USAGE_POLICY_COUNT` | Newest run directories by mtime/name within those candidates; if the candidates exceed this window, `file_limit` marks coverage unknown |
+| `scan_seconds` | 2 | 1–`TOML_INTEGER_MAX` | Cooperative monotonic deadline checked around reads and through analysis; cannot preempt a stalled OS operation |
+
+The maxima are TOML/Python representation bounds as defined above, not resource
+budgets. Raising these values can increase diagnostic work and memory. Reported
+`limits` reflect the configured budgets, with `seconds` still a JSON number
+(default `2.0`). The dispatch-record bounds remain 256 KiB and 64 attempts per
+file; sparse bins still mean fewer than five observations. No retries, telemetry
+writes, scheduling changes or historical-completeness claims result from these
+settings. See [operations](operations.md#bounded-scheduler-cache-evidence-host-only)
+for privacy, coverage and timeout semantics.
+
 ## Shared smoke retention
 
 This policy belongs to `data_dir`, not a project or config overlay. The only

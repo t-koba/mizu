@@ -24,6 +24,14 @@ exclude = [".git", ".pi", ".env", ".env.*", ".venv", "node_modules", "__pycache_
 # cache_affinity_rows = 200 # Minimum 0; retained rows; zero still counts exact total.
 # unknown_keys = 20         # Minimum 0; zero hides key samples, not unknown-shape counts.
 
+# Host-only usage --cache-evidence diagnostic budgets, independent of [usage].
+# Strict positive integers; counts <= min(9223372036854775807, sys.maxsize),
+# seconds <= 9223372036854775807 (representation bounds, not resource budgets).
+# [scheduler_evidence]
+# candidate_entries = 5000  # Enumeration includes non-directories.
+# files = 200               # Newest run directories within those candidates.
+# scan_seconds = 2          # Cooperative deadline; cannot preempt stalled OS calls.
+
 # Optional regenerable workspace caches only. Empty roots disable cleanup.
 # Relative literal directory roots must be untracked and snapshot-excluded;
 # private/host state, links, and overlapping roots are refused.
