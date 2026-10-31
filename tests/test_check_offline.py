@@ -20,6 +20,8 @@ from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+UPLOAD_ARTIFACT_USE = re.compile(
+    r'^uses: actions/upload-artifact@[0-9a-f]{40}(?: # v[0-9]+\.[0-9]+\.[0-9]+)?$')
 
 
 def load_script(name):
@@ -605,13 +607,15 @@ class ProjectImportDiagnosticExportTests(unittest.TestCase):
                          'expected exactly the core-matrix and Windows-3.12-shard diagnostic blocks')
         core_upload = parts[1].split('  windows-312-shards:', 1)[0]
         shard_upload = parts[2].split('  windows-312-core:', 1)[0]
-        pinned = 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
         exact_path = ['path: private-validation/project-import-diagnostic.json']
         # Core matrix cell: Windows-only condition with a per-cell artifact name.
         self.assertEqual([line.strip() for line in core_upload.splitlines()
                           if line.strip().startswith('if:')],
                          ["if: always() && runner.os == 'Windows'"])
-        self.assertEqual(core_upload.count(pinned), 1)
+        core_uses = [line.strip() for line in core_upload.splitlines()
+                     if line.strip().startswith('uses: actions/upload-artifact@')]
+        self.assertEqual(len(core_uses), 1)
+        self.assertRegex(core_uses[0], UPLOAD_ARTIFACT_USE)
         self.assertEqual([line.strip() for line in core_upload.splitlines() if 'path:' in line],
                          exact_path)
         self.assertIn('name: project-import-diagnostic-${{ matrix.os }}-${{ matrix.python }}',
@@ -624,7 +628,10 @@ class ProjectImportDiagnosticExportTests(unittest.TestCase):
         self.assertEqual([line.strip() for line in shard_upload.splitlines()
                           if line.strip().startswith('if:')],
                          ['if: always()'])
-        self.assertEqual(shard_upload.count(pinned), 1)
+        shard_uses = [line.strip() for line in shard_upload.splitlines()
+                      if line.strip().startswith('uses: actions/upload-artifact@')]
+        self.assertEqual(len(shard_uses), 1)
+        self.assertRegex(shard_uses[0], UPLOAD_ARTIFACT_USE)
         self.assertEqual([line.strip() for line in shard_upload.splitlines() if 'path:' in line],
                          exact_path)
         self.assertIn('name: project-import-diagnostic-windows-latest-3.12-shard-${{ matrix.shard }}',
@@ -1823,8 +1830,13 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
 
     def test_workflow_uploads_only_dedicated_timings(self):
         workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
-        # Immutable v4.6.2 pin; short retention; always with missing-file tolerance.
-        self.assertIn('actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02', workflow)
+        # Every artifact action remains immutably pinned without freezing a release.
+        upload_uses = [line.strip() for line in workflow.splitlines()
+                       if line.strip().startswith('uses: actions/upload-artifact@')]
+        self.assertTrue(upload_uses)
+        for use in upload_uses:
+            with self.subTest(use=use):
+                self.assertRegex(use, UPLOAD_ARTIFACT_USE)
         self.assertIn('name: Upload per-test timings', workflow)
         self.assertIn('--test-timings private-validation/test-timings.json', workflow)
         # Every cell collects the evidence, so each supported host's suite
