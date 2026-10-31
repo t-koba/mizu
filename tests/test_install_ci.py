@@ -124,6 +124,13 @@ class InstallCITests(Fixture):
         with self.assertRaises(Denied):
             self.stage()
 
+    def test_existing_release_source_tampering_is_rejected_before_ci_reuse(self):
+        release = self.stage()
+        probe = release / 'src/probe.py'
+        probe.write_bytes(b'TAMPERED = 1\n')
+        with self.assertRaisesRegex(Denied, 'source files do not match'):
+            self.stage()
+
     def test_operator_config_project_and_receipt_load_without_adapter_calls(self):
         text = self.file.read_text().replace('check_reuse = false', 'check_reuse = true')
         text = text.replace('[vcs]\ncommand = []', '[vcs]\ncommand = ["synthetic-adapter-never-invoked"]')

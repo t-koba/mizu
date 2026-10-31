@@ -179,21 +179,21 @@ def validate_ci_source_checks(project, snapshot_id, manifest):
     return receipt_id, receipt
 
 
-def verify_release(release: Path):
+def verify_release(release: Path, *, expected_manifest=None):
     receipt = read_json(release / "installation.json")
     manifest = read_json(release / "source-manifest.json")
+    if not isinstance(receipt, dict) or not isinstance(manifest, dict):
+        raise Denied("Release installation metadata is malformed")
+    if expected_manifest is not None and manifest != expected_manifest:
+        raise Denied("Release source manifest differs from the current source")
     if digest(canonical(manifest)) != receipt.get("source_sha256"):
         raise Denied("Release source manifest does not match its installation receipt")
-    for name, expected in manifest.items():
-        relative = Path(name)
-        if relative.is_absolute() or any(part in (".", "..") for part in relative.parts):
-            raise Denied("Unsafe source manifest path")
-        path = release / relative
-        if any(parent.is_symlink() for parent in [path, *path.parents] if parent != release.parent):
-            raise Denied("Release source must not contain symlinks")
-        if (not path.is_file() or digest(path.read_bytes()) != expected["sha256"]
-                or bool(path.stat().st_mode & 0o111) != expected["executable"]):
-            raise Denied("Release source has changed after validation: " + name)
+    try:
+        actual_manifest = source_manifest(release)
+    except (OSError, ValueError) as exc:
+        raise Denied(f"Release source inventory is invalid: {exc}") from exc
+    if actual_manifest != manifest:
+        raise Denied("Release source files do not match its installation manifest")
     if receipt.get("pi_lock_sha256"):
         if digest((release / "adapters/pi/package-lock.json").read_bytes()) != receipt["pi_lock_sha256"]:
             raise Denied("Installed dependency lock changed after validation")
@@ -383,9 +383,9 @@ def stage(args):
     name = f"{__version__}-{sha[:12]}-" + ("core" if args.core_only else "pi")
     release = args.prefix / "releases" / name
     if release.exists():
-        receipt = read_json(release / "installation.json", {})
-        if receipt.get("source_sha256") != sha:
-            raise Denied("Existing release fingerprint differs")
+        if release.is_symlink():
+            raise Denied("Existing release must not be a symlink")
+        verify_release(release.resolve(), expected_manifest=manifest)
     else:
         mkdir(release.parent)
         temporary = Path(tempfile.mkdtemp(prefix=".stage-", dir=release.parent))

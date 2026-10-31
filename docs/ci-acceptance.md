@@ -217,7 +217,9 @@ match the supported projection schema, algorithm and digest. A legacy receipt
 without projection fields still needs every other binding, including a known
 source commit. The whole-capture code digest is never treated as a distribution
 manifest digest. These checks also apply when the release directory already
-exists; an existing candidate is not permission to bypass missing CI proof.
+exists: staging rechecks its complete distribution inventory and file hashes
+against the current manifest before reusing it. An existing candidate is not
+permission to bypass missing CI proof.
 
 Freshness is **local exact-input freshness**, not a live provider recheck.
 `current_attempt` was authenticated at ingestion. A later provider rerun or
