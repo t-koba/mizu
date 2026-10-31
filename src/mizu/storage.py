@@ -28,7 +28,8 @@ from .fs import (DIGEST, PREVIEW_BYTES, atomic_write, canonical, digest,
                  identifier, lock, mkdir, now, read_json, safe_read,
                  sync_dir, write_json, relative_parts)
 from . import acceptance, insight_archive
-from .project import Project, check_project_settings, read_goal
+from .project import (Project, _check_project_paths, _directory_identity,
+                      _discard_project_stage, _project_parents, check_project_settings, read_goal)
 from .snapshot import open_store
 
 #: Project members covered by backup/restore (plus backup.json on restore).
@@ -1404,15 +1405,17 @@ def restore(config, name: str, archive_path: Path, *, max_bytes: int = 107374182
     identifier(name)
     if max_bytes < 1:
         raise Denied("Restore byte limit must be positive")
-    parent = config.data / "projects"
-    mkdir(parent)
+    parent, staging, identities = _project_parents(config)
     destination = parent / name
     allowed = set(MEMBERS) | {"backup.json"}
     with lock(config.data / "locks" / f"init-{name}.lock", blocking=False):
         if destination.exists():
             raise Denied("Restore never overwrites an existing project")
-        stage = Path(tempfile.mkdtemp(prefix=".restore-", dir=parent))
+        _check_project_paths(identities)
+        stage = Path(tempfile.mkdtemp(prefix=".restore-", dir=staging))
         try:
+            identities[stage] = _directory_identity(stage)
+            _check_project_paths(identities)
             total = count = 0
             seen = set()
             with tarfile.open(archive_path, "r:gz") as archive:
@@ -1478,10 +1481,11 @@ def restore(config, name: str, archive_path: Path, *, max_bytes: int = 107374182
             from .smoke_retention import validate_restored_refs
             with shared_lock(config.data, blocking=True):
                 validate_restored_refs(config.data, stage)
+                _check_project_paths(identities)
                 os.rename(stage, destination)
+                sync_dir(staging)
                 sync_dir(parent)
         finally:
-            if stage.exists():
-                shutil.rmtree(stage)
+            _discard_project_stage(stage, identities)
     return {"project": name, "checkpoint": checkpoint["id"], "armed": False, "paused": True,
             "note": "Review restored goals, acceptance commands, policies and evidence before arming. Git history is not included."}

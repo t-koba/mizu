@@ -272,6 +272,7 @@ class ProjectImportReservationTests(Fixture):
     def assert_unpublished(self):
         self.assertFalse((self.project.root.parent / 'imported').exists())
         self.assertEqual(list(self.project.root.parent.glob('.init-*')), [])
+        self.assertEqual(list((self.config.data / 'staging/projects').glob('.init-*')), [])
 
     def denied_import(self, source=None):
         with patch.object(lifecycle, '_import_plain_directory') as plain, \
@@ -566,3 +567,249 @@ class ProjectImportReservationTests(Fixture):
         self.assertTrue(started.is_set())
         relative = 'workspace/app.py' if source == self.project.root else 'app.py'
         self.assertEqual((imported.workspace / relative).read_bytes(), b'VALUE = 2\n')
+
+
+class ProjectStagingTests(Fixture):
+    def initialize(self, name='staged'):
+        return lifecycle.initialize(self.config, name, self.root / 'source',
+                                    self.goal, ['worker'], [])
+
+    def test_initialization_stage_is_invisible_to_active_retention(self):
+        from mizu import smoke_retention as retention
+        data = self.config.data
+        staging = data / 'staging/projects'
+        original = lifecycle._import_plain_directory
+        (data / 'validation').mkdir()
+        for fail in (False, True):
+            with self.subTest(fail=fail):
+                name = f'staged-{int(fail)}'
+                active = set((data / 'projects').iterdir())
+                smoke_id = str(int(fail) + 1) * 32
+                retention.publish(data, smoke_id,
+                                  {'status': 'pass', 'time': '2000-01-01T00:00:00+00:00'}, None)
+                paused, release = threading.Event(), threading.Event()
+
+                def capture(source, workspace, stage, *args, **kwargs):
+                    original(source, workspace, stage, *args, **kwargs)
+                    self.assertEqual(stage.parent, staging)
+                    self.assertTrue(held(data / 'locks' / f'init-{name}.lock'))
+                    paused.set()
+                    self.assertTrue(release.wait(10), 'Stage was not released')
+                    if fail:
+                        raise Denied('Injected import failure')
+
+                with patch.object(lifecycle, '_import_plain_directory', side_effect=capture), \
+                     patch.object(lifecycle, 'sync_dir', wraps=lifecycle.sync_dir) as sync, \
+                     ThreadPoolExecutor(max_workers=2) as pool:
+                    future = pool.submit(self.initialize, name)
+                    try:
+                        self.assertTrue(paused.wait(5), 'Import did not pause')
+                        self.assertEqual(set((data / 'projects').iterdir()), active)
+                        self.assertEqual(len(list(staging.glob('.init-*'))), 1)
+                        result = pool.submit(retention.run, data, apply=True).result(timeout=5)
+                        self.assertTrue(result['complete'])
+                        self.assertEqual(result['retired'], [smoke_id])
+                        self.assertFalse(future.done())
+                    finally:
+                        release.set()
+                    if fail:
+                        with self.assertRaises(Denied):
+                            future.result(timeout=5)
+                        self.assertFalse((data / 'projects' / name).exists())
+                        sync.assert_not_called()
+                    else:
+                        project = future.result(timeout=5)
+                        self.assertEqual((project.workspace / 'app.py').read_bytes(), b'VALUE = 2\n')
+                        self.assertEqual(project.snapshots.get()['outcome'], 'wait')
+                        self.assertEqual([call.args[0] for call in sync.call_args_list],
+                                         [staging, data / 'projects'])
+                self.assertEqual(list(staging.iterdir()), [])
+                self.assertTrue(all(not p.name.startswith('.') for p in (data / 'projects').iterdir()))
+
+    def test_publication_parents_refuse_non_directories_and_symlinks(self):
+        data = self.config.data
+        for path in (data, data / 'projects', data / 'staging', data / 'staging/projects'):
+            for kind in ('file', 'symlink'):
+                with self.subTest(path=path.relative_to(data), kind=kind):
+                    saved = self.root / 'saved-parent'
+                    path.rename(saved)
+                    try:
+                        if kind == 'file':
+                            path.write_text('not a directory')
+                        else:
+                            try:
+                                path.symlink_to(saved, target_is_directory=True)
+                            except (OSError, NotImplementedError):
+                                continue  # File and synthetic reparse checks remain portable.
+                        with patch.object(lifecycle.tempfile, 'mkdtemp') as create:
+                            with self.assertRaises(Denied):
+                                self.initialize()
+                            create.assert_not_called()
+                    finally:
+                        if path.is_symlink() or path.is_file():
+                            path.unlink()
+                        saved.rename(path)
+        self.assertFalse((data / 'projects/staged').exists())
+
+    def test_publication_parents_refuse_reparse_points(self):
+        data = self.config.data
+        original = Path.lstat
+        for target in (data, data / 'projects', data / 'staging', data / 'staging/projects'):
+            def reparse(path):
+                info = original(path)
+                return Mock(st_mode=info.st_mode, st_dev=info.st_dev, st_reparse_tag=1) if path == target else info
+
+            with self.subTest(target=target.relative_to(data)), \
+                 patch.object(Path, 'lstat', reparse), \
+                 patch.object(lifecycle.tempfile, 'mkdtemp') as create:
+                with self.assertRaises(Denied):
+                    self.initialize()
+                create.assert_not_called()
+
+    def test_cross_filesystem_refuses_before_stage_creation_and_before_rename(self):
+        staging = self.config.data / 'staging/projects'
+        original_stat, original_import = Path.lstat, lifecycle._import_plain_directory
+        for late in (False, True):
+            mismatch = not late
+
+            def device(path):
+                info = original_stat(path)
+                if path == staging and mismatch:
+                    return Mock(st_mode=info.st_mode, st_dev=info.st_dev + 1, st_ino=info.st_ino, st_reparse_tag=0, st_file_attributes=0)
+                return info
+
+            def capture(*args, **kwargs):
+                nonlocal mismatch
+                original_import(*args, **kwargs)
+                mismatch = True
+
+            with self.subTest(late=late), patch.object(Path, 'lstat', device), \
+                 patch.object(lifecycle, '_import_plain_directory', side_effect=capture), \
+                 patch.object(lifecycle.tempfile, 'mkdtemp', wraps=tempfile.mkdtemp) as create, \
+                 patch.object(lifecycle.os, 'rename') as rename:
+                with self.assertRaisesRegex(Denied, 'share a filesystem|identity changed'):
+                    self.initialize()
+                self.assertEqual(create.call_count, int(late))
+                rename.assert_not_called()
+            self.assertEqual(len(list(staging.iterdir())), int(late))
+            for leftover in staging.iterdir():
+                shutil.rmtree(leftover)
+            self.assertFalse((self.config.data / 'projects/staged').exists())
+
+    def test_publication_rejects_replaced_directories_without_cleanup(self):
+        self._check_publication_replacement('directory')
+
+    def test_publication_rejects_replaced_symlinks_without_cleanup(self):
+        probe = self.root / 'link-probe'
+        try:
+            probe.symlink_to(self.root, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest('Directory symlinks unavailable on this platform')
+        probe.unlink()
+        self._check_publication_replacement('symlink')
+
+    def _check_publication_replacement(self, kind):
+        data = self.config.data
+        staging = data / 'staging/projects'
+        original = snapshot_module.Snapshots.publish
+        # Pause after the final stage write, before the publication check.
+        # Include both staging ancestors and the destination parent; a fresh
+        # real directory must be rejected just as strictly as a link.
+        for subject in ('stage', 'staging', 'staging-ancestor', 'destination'):
+            for fail in (False, True):
+                with self.subTest(subject=subject, kind=kind, fail=fail):
+                    paused, release = threading.Event(), threading.Event()
+                    stages = []
+
+                    def publish(store, snapshot):
+                        original(store, snapshot)
+                        stages.append(store.root)
+                        paused.set()
+                        if not release.wait(10):
+                            raise AssertionError('Publication was not released')
+                        if fail:
+                            raise Denied('Injected failure after stage replacement')
+
+                    with patch.object(snapshot_module.Snapshots, 'publish', publish), \
+                         ThreadPoolExecutor(max_workers=1) as pool:
+                        future = pool.submit(self.initialize, 'replaced')
+                        target = saved = stage = None
+                        try:
+                            self.assertTrue(paused.wait(5), 'Publication did not pause')
+                            stage = stages[0]
+                            target = {'stage': stage, 'staging': staging,
+                                      'staging-ancestor': staging.parent,
+                                      'destination': data / 'projects'}[subject]
+                            saved = self.root / 'original-directory'
+                            target.replace(saved)
+                            if kind == 'symlink':
+                                target.symlink_to(saved, target_is_directory=True)
+                            else:
+                                # A complete, plausible replacement must not publish.
+                                shutil.copytree(saved, target)
+                            (target / 'replacement-marker').write_text('untouched')
+                            with patch.object(lifecycle.os, 'rename') as rename, \
+                                 patch.object(lifecycle.shutil, 'rmtree', wraps=shutil.rmtree) as remove:
+                                release.set()
+                                with self.assertRaises(Denied):
+                                    future.result(timeout=5)
+                                rename.assert_not_called()
+                                remove.assert_not_called()
+                            self.assertFalse((data / 'projects/replaced').exists())
+                            self.assertEqual((target / 'replacement-marker').read_text(), 'untouched')
+                            self.assertTrue(saved.is_dir())
+                        finally:
+                            release.set()
+                            # Join before restoring fixture identities on assertion failure.
+                            try:
+                                future.result(timeout=5)
+                            except Denied:
+                                pass
+                            if saved is not None and saved.exists():
+                                if target.is_symlink():
+                                    target.unlink()
+                                else:
+                                    shutil.rmtree(target)
+                                saved.replace(target)
+                            if stage is not None and stage.exists():
+                                shutil.rmtree(stage)
+
+    def test_directory_identity_fails_closed_without_file_identity(self):
+        path = self.config.data
+        info = path.lstat()
+        fields = dict(st_mode=info.st_mode, st_dev=info.st_dev, st_ino=info.st_ino,
+                      st_reparse_tag=0, st_file_attributes=0)
+        for change in ({'st_mode': 0}, {'st_ino': 0}, {'st_ino': None}, {'st_dev': None},
+                       {'st_reparse_tag': 1}, {'st_file_attributes': 0x400}):
+            with self.subTest(change=change), \
+                 patch.object(Path, 'lstat', return_value=Mock(**(fields | change))):
+                with self.assertRaises(Denied):
+                    lifecycle._directory_identity(path)
+        fields.pop('st_ino')
+        with patch.object(Path, 'lstat', return_value=Mock(spec=list(fields), **fields)):
+            with self.assertRaises(Denied):
+                lifecycle._directory_identity(path)
+        with patch.object(Path, 'lstat', side_effect=OSError):
+            with self.assertRaises(Denied):
+                lifecycle._directory_identity(path)
+
+    def test_unidentifiable_new_stage_is_not_published_or_removed(self):
+        staging = self.config.data / 'staging/projects'
+        original = Path.lstat
+
+        def unidentified(path):
+            info = original(path)
+            if path.parent == staging and path.name.startswith('.init-'):
+                return Mock(st_mode=info.st_mode, st_dev=info.st_dev, st_ino=0,
+                            st_reparse_tag=0, st_file_attributes=0)
+            return info
+
+        with patch.object(Path, 'lstat', unidentified), \
+             patch.object(lifecycle.os, 'rename') as rename, \
+             patch.object(lifecycle.shutil, 'rmtree', wraps=shutil.rmtree) as remove:
+            with self.assertRaises(Denied):
+                self.initialize()
+            rename.assert_not_called()
+            remove.assert_not_called()
+        # Identity could not be established: leave the uncertain stage alone.
+        self.assertEqual(len(list(staging.iterdir())), 1)

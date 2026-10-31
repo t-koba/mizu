@@ -631,6 +631,61 @@ def _import_source(config: Config, source: Path):
         raise Denied("Unreadable managed import source or reservation") from None
 
 
+def _directory_identity(path: Path) -> tuple[int, int]:
+    """Identify a real directory, including on platforms with reparse points.
+
+    Zero/unavailable file IDs cannot bind a later path lookup, so fail closed.
+    These lstat checks detect replacements between lifecycle steps; they are
+    not an atomic rename/unlink primitive against hostile concurrent mutation.
+    """
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise Denied("Unsafe project publication directory") from exc
+    device, file_id = getattr(info, "st_dev", None), getattr(info, "st_ino", None)
+    if (not stat.S_ISDIR(info.st_mode) or getattr(info, "st_reparse_tag", 0)
+            or getattr(info, "st_file_attributes", 0) & 0x400
+            or type(device) is not int or device < 0
+            or type(file_id) is not int or file_id <= 0):
+        raise Denied("Unsafe project publication directory identity")
+    return device, file_id
+
+
+def _check_project_paths(identities: dict[Path, tuple[int, int]]) -> None:
+    for path, identity in identities.items():
+        if _directory_identity(path) != identity:
+            raise Denied("Project publication directory identity changed")
+
+
+def _discard_project_stage(stage: Path, identities: dict[Path, tuple[int, int]],
+                           *, ignore_errors: bool = False) -> None:
+    # Leave uncertain paths for operator recovery, never traverse a replacement.
+    if stage not in identities:
+        return
+    try:
+        _check_project_paths(identities)
+    except Denied:
+        return
+    shutil.rmtree(stage, ignore_errors=ignore_errors)
+
+
+def _project_parents(config: Config) -> tuple[Path, Path, dict[Path, tuple[int, int]]]:
+    """Prepare and bind isolated staging and active publication directories."""
+    parent = config.data / "projects"
+    staging = config.data / "staging" / "projects"
+    identities = {}
+    for path in (config.data, parent, staging.parent, staging):
+        try:
+            mkdir(path)
+        except OSError as exc:
+            raise Denied("Unsafe project publication directory") from exc
+        identities[path] = _directory_identity(path)
+    if identities[parent][0] != identities[staging][0]:
+        raise Denied("Project staging and destination must share a filesystem")
+    _check_project_paths(identities)
+    return parent, staging, identities
+
+
 def initialize(config: Config, name: str, source: Path, goal_file: Path,
                roles: list[str], verification: list[str], *, armed: bool = False) -> Project:
     identifier(name)
@@ -642,14 +697,16 @@ def initialize(config: Config, name: str, source: Path, goal_file: Path,
         if not roles or any(role not in config.roles for role in roles):
             raise ConfigError("Choose existing roles")
         check_verify(verification)
-        parent = config.data / "projects"
-        mkdir(parent)
+        parent, staging, identities = _project_parents(config)
         destination = parent / name
         with lock(config.data / "locks" / f"init-{name}.lock", blocking=False):
             if destination.exists():
                 raise Denied("Project already exists; initialization never overwrites it")
-            stage = Path(tempfile.mkdtemp(prefix=".init-", dir=parent))
+            _check_project_paths(identities)
+            stage = Path(tempfile.mkdtemp(prefix=".init-", dir=staging))
             try:
+                identities[stage] = _directory_identity(stage)
+                _check_project_paths(identities)
                 env = git_env()
                 if (source / ".git").exists():
                     _import_git_tree(source, stage / "workspace", env)
@@ -670,9 +727,11 @@ def initialize(config: Config, name: str, source: Path, goal_file: Path,
                 initial = store.create(captured, goal=goal, state="Initialized; no autonomous work has run.",
                                        run=None, outcome="wait", summary="Project initialized, unarmed.")
                 store.publish(initial)
+                _check_project_paths(identities)
                 os.rename(stage, destination)
+                sync_dir(staging)
                 sync_dir(parent)
             except BaseException:
-                shutil.rmtree(stage, ignore_errors=True)
+                _discard_project_stage(stage, identities, ignore_errors=True)
                 raise
         return Project(config, name)
