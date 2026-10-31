@@ -222,11 +222,27 @@ against the current manifest before reusing it. An existing candidate is not
 permission to bypass missing CI proof.
 
 Freshness is **local exact-input freshness**, not a live provider recheck.
-`current_attempt` was authenticated at ingestion. A later provider rerun or
-invalidation is not detectable from retained evidence alone; operators requiring
-that guarantee must not use this mode. Changed source, Git HEAD, snapshot,
-acceptance inputs, adapter configuration or policy cannot reuse the old index.
-No shipped configuration enables CI equivalence implicitly.
+`current_attempt` was authenticated at ingestion; it does not mean the run is
+still the provider's latest attempt now. Selection reads only the exact immutable
+receipt and its scope index. A second run/attempt for the same scope is refused
+rather than replacing the first-writer receipt, and this selector has no supported
+local provider-invalidation/supersession record to consult. A later provider
+rerun or invalidation is therefore not detectable here. If a trusted later
+observation says the retained attempt was superseded or invalidated, do not use
+that older receipt for staging: this feature cannot consume that observation and
+no stronger revocation-aware or latest-provider mode is supported. Do not add a
+TTL or infer freshness from an unrelated status read. Changed source, Git HEAD,
+snapshot, acceptance inputs, adapter configuration or policy cannot reuse the
+old index. No shipped configuration enables CI equivalence implicitly.
+
+For operator review, CI-mode CLI output and newly staged `installation.json`
+record `ci_acceptance_provenance`: `evidence_kind` (`retained-ci-acceptance`),
+`receipt_schema`, the content-addressed `receipt_id` (the ingestion identity),
+`publication_id`, exact provider `run` and `attempt`, and
+`current_attempt_at_ingestion`. The last field is explicitly historical, not a
+claim about provider state at install time. Reusing an already existing release
+does not rewrite its original installation metadata; the invocation output still
+shows the exact receipt selected for that staging request.
 
 `--reuse-ci-checks` and the separate existing core-only
 `--reuse-source-checks REPORT` option are mutually exclusive. The local-report
@@ -238,5 +254,6 @@ both installs and then executes the same version, idempotence, manifest and
 CLI import/report/editor/backup/restore checks as the default path. It does not
 satisfy live Pi, isolation, deployment or promotion acceptance. Installation
 metadata records `checks_provenance: retained-ci-acceptance`, the exact
-`ci_acceptance_receipt_id`, and retained CI check rows, never claims those checks
-ran inside the staged release, and retains `live_validation: not_run`.
+`ci_acceptance_receipt_id`, `ci_acceptance_provenance`, and retained CI check
+rows. It never claims those checks ran inside the staged release and retains
+`live_validation: not_run`.

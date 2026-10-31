@@ -105,6 +105,7 @@ class InstallCITests(Fixture):
                 patch.object(INSTALLER, 'command', side_effect=command or AssertionError('no source suite')):
             result = INSTALLER.stage(args or self.args())
             project.assert_called_once_with(self.project.config, 'sample', read_only=True)
+        self.last_result = result
         return Path(result['release'])
 
     def test_exact_match_skips_only_source_gate_and_records_exact_receipt(self):
@@ -116,9 +117,24 @@ class InstallCITests(Fixture):
         installed = json.loads((release / 'installation.json').read_text())
         self.assertEqual(installed['checks_provenance'], 'retained-ci-acceptance')
         self.assertEqual(installed['ci_acceptance_receipt_id'], self.receipt_id)
+        expected_provenance = {
+            'evidence_kind': 'retained-ci-acceptance',
+            'receipt_schema': 2,
+            'receipt_id': self.receipt_id,
+            'publication_id': self.publication['publication_id'],
+            'run': '123',
+            'attempt': 1,
+            'current_attempt_at_ingestion': True,
+        }
+        self.assertEqual(installed['ci_acceptance_provenance'], expected_provenance)
+        self.assertEqual(self.last_result['ci_acceptance_provenance'], expected_provenance)
         self.assertEqual(installed['checks'], self.receipt['evidence']['checks'])
         self.assertEqual(source_manifest(release), self.manifest)
         INSTALLER.verify_release(release)
+        # Existing release metadata is immutable; the invocation still displays
+        # the exact CI receipt selected for this reuse request.
+        self.assertEqual(self.stage(), release)
+        self.assertEqual(self.last_result['ci_acceptance_provenance'], expected_provenance)
         # Even an existing candidate cannot bypass newly absent proof.
         self.index.unlink()
         with self.assertRaises(Denied):

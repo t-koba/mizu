@@ -100,6 +100,9 @@ class CIAcceptanceTests(Fixture):
             self.assertEqual(ci_acceptance.retain(self.project, **self.selectors)['receipt_id'], receipt_id)
             with self.assertRaises(Denied):
                 ci_acceptance.retain(self.project, **{**self.selectors, 'attempt': 2})
+            # A later selector cannot supersede the immutable first-writer
+            # proof; installation continues to select that exact receipt only.
+            self.assertEqual(ci_acceptance.selected(self.project, self.snapshot['id'])[0], receipt_id)
         value = acceptance.get(self.project.root, receipt_id)
         self.assertEqual(value['publication_id'], self.selectors['publication_id'])
         self.assertEqual(value['scope']['ci']['snapshot_id'], self.snapshot['id'])

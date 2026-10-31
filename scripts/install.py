@@ -152,6 +152,23 @@ def validate_reused_source_checks(report, *, expected_sha: str):
     return entries
 
 
+def ci_acceptance_provenance(proof):
+    """Return the bounded, operator-visible identity of selected CI evidence."""
+    if proof is None:
+        return None
+    receipt_id, receipt = proof
+    evidence = receipt['evidence']
+    return {
+        'evidence_kind': 'retained-ci-acceptance',
+        'receipt_schema': receipt['schema'],
+        'receipt_id': receipt_id,
+        'publication_id': receipt['publication_id'],
+        'run': evidence['run'],
+        'attempt': evidence['attempt'],
+        'current_attempt_at_ingestion': evidence['current_attempt'],
+    }
+
+
 def validate_ci_source_checks(project, snapshot_id, manifest):
     """Bind trusted retained CI proof to this Git source and distribution.
 
@@ -466,6 +483,7 @@ def stage(args):
                         "validation": "local-install-checks-passed", "checks": check_entries,
                         "checks_provenance": checks_provenance,
                         "ci_acceptance_receipt_id": ci_proof[0] if ci_proof else None,
+                        "ci_acceptance_provenance": ci_acceptance_provenance(ci_proof),
                         "live_validation": "not_run"})
             os.rename(temporary, release)
         finally:
@@ -480,6 +498,8 @@ def stage(args):
             pi_command = json.dumps([node])
         result["configuration"] = configure(args.config, pi_command)
     result["mode"] = "core-only; no agent runtime installed" if args.core_only else "Pi installed; live validation still required"
+    if ci_proof is not None:
+        result["ci_acceptance_provenance"] = ci_acceptance_provenance(ci_proof)
     return result
 
 
