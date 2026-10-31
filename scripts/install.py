@@ -152,6 +152,33 @@ def validate_reused_source_checks(report, *, expected_sha: str):
     return entries
 
 
+def validate_ci_source_checks(project, snapshot_id, manifest):
+    """Bind trusted retained CI proof to this Git source and distribution.
+
+    No caller verdicts or provider I/O. Capture without persisting source;
+    whole-capture identity and public manifest identity are separate bindings.
+    """
+    from mizu import ci_acceptance
+    from mizu.distribution import public_projection, public_source_identity
+    from mizu.publication import PROJECTION_KEYS, Publication, source_commit
+    receipt_id, receipt = ci_acceptance.selected(project, snapshot_id)
+    capture = project.snapshots.capture_files(ROOT, persist=False)
+    if (capture['skipped'] or capture['reserved']
+            or capture['code_digest'] != receipt['code_digest']):
+        raise Denied("CI acceptance does not bind the complete current source capture")
+    if public_projection(capture['files']) != manifest:
+        raise Denied("CI source projection does not match the distribution manifest")
+    publication = Publication.read_receipt(project.root, receipt['publication_id'])
+    if source_commit(ROOT) != publication['source_commit']:
+        raise Denied("CI publication source commit does not match current Git HEAD")
+    if any(key in publication for key in PROJECTION_KEYS):
+        projection = public_source_identity(capture['files'])
+        if tuple(publication.get(key) for key in PROJECTION_KEYS) != (
+                projection['schema'], projection['algorithm'], projection['digest']):
+            raise Denied("CI publication public-source projection mismatch")
+    return receipt_id, receipt
+
+
 def verify_release(release: Path):
     receipt = read_json(release / "installation.json")
     manifest = read_json(release / "source-manifest.json")
@@ -333,6 +360,9 @@ def stage(args):
         raise Denied("Python >=3.11 is required")
     if _platform.is_root():
         raise Denied("Run setup as a normal user. The separate system-deps script is the only privileged step")
+    ci_selection = getattr(args, "reuse_ci_checks", None)
+    if ci_selection is not None and getattr(args, "reuse_source_checks", None) is not None:
+        raise Denied("CI reuse and local source-report reuse are mutually exclusive")
     if getattr(args, "reuse_source_checks", None) is not None and not args.core_only:
         raise Denied("Source-check reuse is only allowed with --core-only")
     node = shutil.which("node")
@@ -343,6 +373,12 @@ def stage(args):
         if tuple(map(int, version.split("."))) < tuple(map(int, NODE_MINIMUM.split("."))):
             raise Denied(f"The pinned Pi requires Node >={NODE_MINIMUM}; the existing Node was not changed")
     manifest = source_manifest()
+    ci_proof = None
+    if ci_selection is not None:
+        from mizu.project import Project
+        config_path, project_name, snapshot_id = ci_selection
+        project = Project(load(Path(config_path).expanduser()), project_name, read_only=True)
+        ci_proof = validate_ci_source_checks(project, snapshot_id, manifest)
     sha = digest(canonical(manifest))
     name = f"{__version__}-{sha[:12]}-" + ("core" if args.core_only else "pi")
     release = args.prefix / "releases" / name
@@ -377,7 +413,11 @@ def stage(args):
                 command([node, str(adapter / "launcher.mjs"), "--check-contract"], cwd=adapter)
                 pi_lock = digest((adapter / "package-lock.json").read_bytes())
             reuse_report = getattr(args, "reuse_source_checks", None)
-            if reuse_report is not None:
+            if ci_proof is not None:
+                _, ci_receipt = ci_proof
+                check_entries = ci_receipt['evidence']['checks']
+                checks_provenance = "retained-ci-acceptance"
+            elif reuse_report is not None:
                 # Explicit, content-bound reuse for core-only staging only.
                 # The staged-manifest equality check above stays mandatory;
                 # without an explicit receipt the full staged gate below runs.
@@ -424,7 +464,9 @@ def stage(args):
                         "pi_version": None if args.core_only else result, "pi_lock_sha256": pi_lock,
                         "node": node, "install_scripts_enabled": args.allow_install_scripts,  # requested permission, not proof scripts ran (npm v12 may still deny via allowScripts),
                         "validation": "local-install-checks-passed", "checks": check_entries,
-                        "checks_provenance": checks_provenance, "live_validation": "not_run"})
+                        "checks_provenance": checks_provenance,
+                        "ci_acceptance_receipt_id": ci_proof[0] if ci_proof else None,
+                        "live_validation": "not_run"})
             os.rename(temporary, release)
         finally:
             if temporary.exists():
@@ -447,7 +489,11 @@ def main():
     p.add_argument("--bin-dir", type=Path, default=Path.home() / ".local/bin", help="Directory for the mizu launcher link")
     p.add_argument("--config", type=Path, default=_platform.default_config_file(), help="Private config file to create on activation")
     p.add_argument("--core-only", action="store_true", help="Offline core installation, without Pi or permission to run agents")
-    p.add_argument("--reuse-source-checks", type=Path, default=None,
+    reuse = p.add_mutually_exclusive_group()
+    reuse.add_argument("--reuse-ci-checks", nargs=3, metavar=("CONFIG", "PROJECT", "SNAPSHOT"),
+                       help="Reuse trusted retained schema-2 CI acceptance for an exact snapshot "
+                            "under an existing operator config; no provider query or local fallback")
+    reuse.add_argument("--reuse-source-checks", type=Path, default=None,
                    help="Reuse an explicit prior offline source-gate report (core-only only); "
                         "the report must bind to this exact source manifest, Python, OS, schema, "
                         "passing result, and only explicitly declared core-only waivers")

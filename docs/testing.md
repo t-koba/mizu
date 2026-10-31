@@ -95,6 +95,24 @@ staged tree. Never substitute the general `offline.json` receipt implicitly;
 the CI core-installer step passes the prior report path explicitly, while a
 plain local `./scripts/test-install.sh` still executes the staged gate.
 
+A separate explicit `--reuse-ci-checks CONFIG PROJECT SNAPSHOT` mode can use only
+trusted retained schema-2 CI acceptance for the exact current source, Git commit,
+published snapshot and operator-configured scope. It is mutually exclusive with
+`--reuse-source-checks` and has no caller verdict, provider query, or local
+fallback. The default remains the full local staged gate. Both modes keep the
+manifest checks, pinned Pi provisioning when selected, and the same disposable
+installed-release smoke:
+
+```sh
+./scripts/test-install.sh --reuse-ci-checks /path/to/operator-config.toml PROJECT SNAPSHOT
+```
+
+See [trusted CI acceptance](ci-acceptance.md#explicit-reuse-for-staged-installation)
+for trust, bounds and failure behavior. In particular, provider attempt freshness
+is authenticated only at ingestion; a later provider rerun cannot be detected
+locally. CI reuse records `retained-ci-acceptance` provenance and an exact retained
+receipt ID, not a locally executed suite claim.
+
 On Windows without bash: run `python scripts/install.py --core-only ...` and test via `bin\mizu.cmd`. Missing bash marks shell-syntax checks as `not_run`; missing Node fails the suite. The Pi SDK, durable-contract, and reasoning-replay gates need the pinned adapter dependencies: absent dependencies fail closed with the provisioning remedy unless their exact gate is explicitly waived; a version mismatch always fails. Installer staging records mode-specific `not_run` waivers: core-only stages waive the Pi SDK, durable-contract, and replay gates because neither adapter is provisioned; full Pi stages run the Pi SDK contract gate against the installed `adapters/pi` and waive only durable-contract and replay, because `pi-durable` is not installed. The required `durable-contract` CI job provisions both pinned adapters from committed lockfiles in a network-enabled setup step, then runs all gates unwaived and offline; the CI matrix and installer-staging waivers are scoped fallbacks, not substitutes for that authoritative job.
 
 The gate installs the pinned dependencies itself when they are absent: it runs

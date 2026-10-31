@@ -132,6 +132,33 @@ def publication_matches(root, value):
         raise Denied('CI proof does not match the immutable publication')
 
 
+def selected(project, snapshot_id):
+    """Read only schema-2 proof for an exact published snapshot/current scope.
+
+    Missing, disabled or stale evidence refuses; never fall back to local proof,
+    ingest/repair evidence, or query the adapter. Provider freshness is known
+    only at ingestion, not rechecked here. Returns (receipt_id, receipt).
+    """
+    from . import acceptance
+    from .check_jobs import cache_guard
+    snapshot = project.snapshots.get(snapshot_id)
+    if (snapshot_id not in project.snapshots._history_ids()
+            or snapshot.get('skipped') or snapshot.get('reserved')):
+        raise Denied('CI reuse requires an exact representable published snapshot')
+    with cache_guard(project, blocking=False):
+        scope = bound(project, snapshot, acceptance._current_scope(project))
+        if scope is None:
+            raise Denied('CI reuse is disabled or the current acceptance scope is ineligible')
+        name = acceptance._index(project.root, snapshot['code_digest'], scope)
+        if not acceptance._present(project.root, name):
+            raise Denied('No retained CI acceptance for this snapshot and current scope')
+        receipt_id = acceptance._selected(project.root, name, snapshot['code_digest'], scope)
+        receipt = acceptance.get(project.root, receipt_id)
+        if receipt['schema'] != 2:
+            raise Denied('CI reuse requires schema-2 acceptance')
+        return receipt_id, receipt
+
+
 def retain(project, *, snapshot_id, publication_id, run, attempt):
     """Host CLI only. Identity selectors are not proof; query the trusted adapter.
 

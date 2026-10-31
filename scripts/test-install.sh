@@ -7,22 +7,23 @@ trap 'rm -rf -- "$TEMP"' EXIT
 PREFIX="$TEMP/prefix with spaces"
 BIN="$TEMP/bin with spaces"
 CONFIG="$TEMP/private configuration/config.toml"
-# Optional explicit reuse of a prior source-gate report for the core-only
-# staging gate: ./scripts/test-install.sh [source-report.json]. With no
-# argument the installer still runs its full staged gate. The path is never
-# defaulted to private-validation/offline.json; CI passes it explicitly.
+# No arguments: full staged source gate. A report is the separate existing
+# core-only local reuse mode; CI selection reads only trusted retained proof.
 REUSE_ARGS=()
 EXPECTED_PROVENANCE="staged-gate"
-if [ "$#" -gt 1 ]; then
-  echo "usage: test-install.sh [source-report.json]" >&2
-  exit 2
-fi
-if [ "$#" -eq 1 ]; then
+usage() { echo "usage: test-install.sh [source-report.json | --reuse-ci-checks CONFIG PROJECT SNAPSHOT]"; }
+if [ "$#" -eq 4 ] && [ "$1" = "--reuse-ci-checks" ]; then
+  REUSE_ARGS=("$@")
+  EXPECTED_PROVENANCE="retained-ci-acceptance"
+elif [ "$#" -eq 1 ]; then
   case "$1" in
-    -h|--help) echo "usage: test-install.sh [source-report.json]" ; exit 0 ;;
+    -h|--help) usage; exit 0 ;;
+    -*) usage >&2; exit 2 ;;
   esac
   REUSE_ARGS=(--reuse-source-checks "$1")
   EXPECTED_PROVENANCE="reused-source-gate"
+elif [ "$#" -ne 0 ]; then
+  usage >&2; exit 2
 fi
 "$ROOT/scripts/setup.sh" --core-only --prefix "$PREFIX" --bin-dir "$BIN" --config "$CONFIG" "${REUSE_ARGS[@]}" > "$TEMP/install.json"
 "$BIN/mizu" --version
@@ -32,7 +33,7 @@ config, root = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
 config.write_text(config.read_text().replace('data_dir = "~/.local/state/mizu"', 'data_dir = ' + json.dumps(str(root / 'state'))))
 (root / 'configuration-before').write_bytes(config.read_bytes())
 PY
-"$ROOT/scripts/setup.sh" --core-only --prefix "$PREFIX" --bin-dir "$BIN" --config "$CONFIG" > "$TEMP/reinstall.json"
+"$ROOT/scripts/setup.sh" --core-only --prefix "$PREFIX" --bin-dir "$BIN" --config "$CONFIG" "${REUSE_ARGS[@]}" > "$TEMP/reinstall.json"
 cmp -- "$CONFIG" "$TEMP/configuration-before"
 "$BIN/mizu" --config "$CONFIG" init demo --source "$ROOT/examples/demo" --goal "$ROOT/examples/PROJECT.md" --roles worker --verify 'python3 -m unittest discover -v' > "$TEMP/init.json"
 "$BIN/mizu" --config "$CONFIG" report demo > "$TEMP/report.json"

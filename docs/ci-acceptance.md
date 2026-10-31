@@ -177,3 +177,64 @@ does not rewrite or invalidate historical completion records. It does not accept
 model-supplied receipt bodies, infer implementation completion, or close anything
 automatically. The CLI does not grant current-workspace acceptance or allow a
 writer `finish(done)` without its normal verification authority.
+
+
+## Explicit reuse for staged installation
+
+The installer still runs the **full local staged source suite by default**.
+After the operator has configured equivalence and ingested trusted schema-2
+proof as above, an explicit selection can replace only that source-suite gate:
+
+```sh
+python3 scripts/install.py --stage-only --reuse-ci-checks /path/to/operator-config.toml PROJECT SNAPSHOT
+# Core-only disposable install and the same installed-release CLI smoke:
+./scripts/test-install.sh --reuse-ci-checks /path/to/operator-config.toml PROJECT SNAPSHOT
+```
+
+`CONFIG PROJECT SNAPSHOT` are selectors, not verdicts: CONFIG is an existing
+operator configuration, PROJECT identifies its retained evidence store, and
+SNAPSHOT is the exact 64-hex published Mizu snapshot ID (not a Git SHA or latest
+alias). The installer opens the project read-only and selects only the immutable
+CI index/receipt for that snapshot under the **current** configured acceptance
+scope and CI equivalence policy. A local receipt, even a green one, cannot win
+this selection. The receipt is capped at the existing 1 MiB acceptance bound;
+all configured checks must be present one-to-one with `success`, with exact
+coverage, environment, workflow, repository, run/attempt and publication bindings.
+The selector never calls a provider/adapter, dispatches CI, reads credentials,
+ingests evidence, or repairs an index. Missing, ineligible, stale, partial,
+non-green, tampered or mismatched evidence refuses without local fallback.
+Retry only after the operator has corrected the source/configuration or retained
+appropriate trusted evidence. There is no background job or cancellation state.
+
+Before reuse, staging captures the current source without persisting it. It
+requires zero capture skips and reserved paths, the exact snapshot/receipt whole
+`code_digest`, and a current local Git HEAD equal to the publication receipt's
+non-null `source_commit` (which need not equal the provider's `published_sha`).
+The captured public projection must equal the distribution `source_manifest`;
+the copied staged manifest must still equal that same manifest. A versioned
+publication projection, when carried/required by the publication schema, must
+match the supported projection schema, algorithm and digest. A legacy receipt
+without projection fields still needs every other binding, including a known
+source commit. The whole-capture code digest is never treated as a distribution
+manifest digest. These checks also apply when the release directory already
+exists; an existing candidate is not permission to bypass missing CI proof.
+
+Freshness is **local exact-input freshness**, not a live provider recheck.
+`current_attempt` was authenticated at ingestion. A later provider rerun or
+invalidation is not detectable from retained evidence alone; operators requiring
+that guarantee must not use this mode. Changed source, Git HEAD, snapshot,
+acceptance inputs, adapter configuration or policy cannot reuse the old index.
+No shipped configuration enables CI equivalence implicitly.
+
+`--reuse-ci-checks` and the separate existing core-only
+`--reuse-source-checks REPORT` option are mutually exclusive. The local-report
+validator and its environment/schema/waiver checks are unchanged. CI reuse works
+for core-only or Pi staging; full Pi staging still provisions the pinned Pi
+dependencies and runs their installed contract/version checks. It does not waive
+the installed-release smoke: the test-install wrapper forwards CI selection to
+both installs and then executes the same version, idempotence, manifest and
+CLI import/report/editor/backup/restore checks as the default path. It does not
+satisfy live Pi, isolation, deployment or promotion acceptance. Installation
+metadata records `checks_provenance: retained-ci-acceptance`, the exact
+`ci_acceptance_receipt_id`, and retained CI check rows, never claims those checks
+ran inside the staged release, and retains `live_validation: not_run`.
