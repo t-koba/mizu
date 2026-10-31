@@ -303,6 +303,7 @@ class RecoveryReservationTests(unittest.TestCase):
                 self.assertEqual(read_record(path)['reservation'],
                                  'released' if group is True and container is True else 'held')
 
+    @unittest.skipUnless(os.name == 'posix', 'private POSIX recovery record')
     def test_unavailable_host_keeps_the_persisted_reservation_held(self):
         module = sys.modules[__name__]
         with tempfile.TemporaryDirectory() as temporary:
