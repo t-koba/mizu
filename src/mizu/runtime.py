@@ -1296,8 +1296,9 @@ class Context:
         # takes a proposal id, the exact head sha, and the explicit
         # content scope (plus an optional base sha pin for full scope)
         # and needs no branch; artifact takes a branch, an artifact file
-        # name, and an optional sha filter. The publications op lists the
-        # project's recorded receipts from local durable evidence and
+        # name, an optional sha filter and paired byte offset/limit.
+        # The publications op lists the project's recorded receipts from
+        # local durable evidence and
         # contacts no provider.
         if args["op"] == "publications":
             # Local evidence listing: no adapter, no network, no workspace.
@@ -1309,8 +1310,8 @@ class Context:
             raise Denied("This role has no workspace")
         if args["op"] == "ci_costs":
             return self._op_vcs_read_ci_costs(args)
-        if "limit" in args or "offset" in args:
-            raise Denied("limit and offset are only valid for CI costs")
+        if args["op"] != "artifact" and ("limit" in args or "offset" in args):
+            raise Denied("limit and offset are only valid for CI costs or artifact pages")
         if "code_digest" in args:
             # The digest filter belongs to the local publications listing
             # only; an addressed read never accepts it.
@@ -1339,6 +1340,8 @@ class Context:
             params["base_sha"] = args["base_sha"]
         if "artifact" in args:
             params["artifact"] = args["artifact"]
+        if args["op"] == "artifact":
+            params.update({key: args[key] for key in ("offset", "limit") if key in args})
         diagnose_waits = (publication is not None
                           and {"vcs_read", "work_items_read"} <= set(self.role.capabilities))
         try:

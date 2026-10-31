@@ -1870,7 +1870,63 @@ partial, even on an untruncated page. No timed, attributed execution means
 This is runner wall time, not billable minutes, credits, CPU time or savings.
 
 
-`status` responses are normalized to `{op, branch, checks: [{check, state, sha, url?, run?, started_at?, completed_at?, job_seconds?, workflow_run_id?, job_id?, run_attempt?, repository?}], trust}` (at most 1024 checks; `check` 1-256 chars, `state` 1-64 chars, `sha` 40/64 hex, `url` max 4096 chars, optional `run` 1-128 chars without newlines/NUL as the opaque adapter run identity, stable per CI run across polls; omit `run` when the adapter cannot report it, in which case wake stays sha-keyed; optional `started_at`/`completed_at` timezone-aware ISO 8601 timestamps of at most 64 chars, which carry when a check started and completed so the job time of a run is derivable from the rows without a project-specific reporter; omit them when the provider cannot report them; when both times are present the completion must not precede the start (the comparison is on the parsed instants, so the same instants in another offset are accepted), an out-of-order pair is `Denied` for the whole response rather than a silently dropped row, and a row carrying both times also carries the derived `job_seconds` (at most seven days), which the product recomputes and never takes from the provider)); malformed shapes are `Denied`. `log`/`comments` pass through with `trust: external-untrusted`. `artifacts` responses are normalized to `{op, branch, sha?, artifacts: [{artifact, size?, digest?}], trust}` (at most 256 rows; `artifact` a relative Unix path 1-512 chars with no empty/`.`/`..` components, no leading slash, no backslashes; `size` an int >= 0 when present; `digest` 64 hex when present); `artifact` responses are normalized to `{op, branch, sha?, artifact, digest, content, trust}` (text at most 524288 chars, `digest` recomputed locally as sha256 over `fs.canonical(content)` like `acquire`; a name or digest mismatch is `Denied`). Results stay `external-untrusted`; an unconfigured adapter fails closed as today, and any role holding `vcs_read` with a visible workspace may use both ops. `proposals` responses are normalized to `{op, branch?, proposals: [{id, state, head, base, draft, mergeable?, checks?, reviews?, url?}], complete?, cursor?, trust}` (at most 256 proposals; `id` 1-128 chars, `state` `open`/`closed`/`merged`, endpoints live `{repo, ref, sha}` or explicit tombstones `{deleted: true, repo, ref}` for removed forks, `draft` bool, `mergeable` bool or unknown, CI check rows reused with each row keeping its own tested sha (rollup checks may run on a merge commit rather than the head sha, so the adapter omits rather than misattaches them), `reviews` at most 64 `{reviewer, verdict, sha}` rows (`approved`/`changes_requested`/`dismissed`, each bound to the exact revision reviewed; absent means unknown, never none), `url` max 4096 chars). The envelope may carry `complete` (bool) and an opaque `cursor` (max 256 chars) for truncated enumerations: callers resume with the cursor, observation flows on partial evidence, and safe mutation stays blocked while required evidence is unavailable. A missing or truncated row never implies terminal disposition; only a reported `state` does. Proposal observations are recorded as one deduplicated insight per proposal (`proposal-<32 hex>` from the proposal id): identical facts are a read-only no-op with no rev bump, while changed head/base/check/state facts revise the record (`record_proposal_state` returns `changed`). The body carries facts only, never per-run log URLs. Check details use a fixed 16-KiB UTF-8 budget; oversized sets retain a failure-first bounded preview plus a deterministic SHA-256 over all normalized check name/state/SHA facts, so omitted rows still trigger revisions and can be queried through `vcs_read proposals`. Missing rows in even a complete enumeration never imply closed, merged, or any other terminal state; only an explicit validated row can revise an existing record.
+### CI artifact text and byte-page reads
+
+`vcs_read` with `op="artifact"` reads one retained text file addressed by
+`branch`, `artifact` and optional exact `sha`. Omit **both** `offset` and
+`limit` for the existing whole-file mode; supplying exactly one is `Denied`.
+To page, supply both as integers (not booleans): `offset` is a UTF-8 byte
+position from 0 through 2097152 inclusive and `limit` is 1–8192 bytes.
+The shared tool schema exposes these maxima; CI-cost reads retain their
+separate 1–8 request limit and 0–999 positional offset bounds. Other VCS
+operations do not gain paging.
+
+The adapter request adds `offset` and `limit` only in page mode. The adapter
+response in **both** modes has exactly these fields:
+
+```text
+{artifact, digest, content, size, offset, next_offset, page_digest}
+```
+
+- `artifact` exactly echoes the requested relative name; `content` is valid
+  UTF-8 text, without replacement/repair of invalid bytes or lone surrogates.
+- `size` is the total file size in UTF-8 bytes, an integer from 0 through
+  `4 * MAX_ARTIFACT_CONTENT` = 2097152. This byte bound accommodates all
+  currently permitted text, not a larger character allowance: the adapter
+  must still refuse files over 524288 characters, including paged files.
+  A partial page cannot independently establish the whole-file character count.
+- `offset` exactly echoes the requested byte position (0 in whole-file mode).
+  The adapter must reject offsets inside a UTF-8 codepoint or beyond EOF.
+  Each page ends on a codepoint boundary and is at most `limit` bytes, possibly
+  shorter to avoid splitting a codepoint. If the limit cannot fit the next
+  codepoint, fail closed rather than return a no-progress page.
+- `next_offset` is exactly `offset + len(content.encode("utf-8"))` before
+  EOF, or JSON `null` **exactly** at EOF. Empty pages are permitted only at
+  EOF (including offset 0 for an empty file). Out-of-range, wrong-echo,
+  no-progress and inconsistent EOF responses are `Denied`.
+- `digest` is the lowercase 64-hex SHA-256 of the **whole file's raw UTF-8
+  bytes**, not `fs.canonical(content)` (the `acquire` contract is unchanged).
+  `page_digest` has the same format and hashes just this page's UTF-8 bytes.
+  Mizu recomputes and verifies `page_digest` on every response. It also
+  recomputes/verifies `digest` for whole-file reads and any page containing
+  the complete file (offset 0 through EOF). **A partial page's whole-file
+  digest is an adapter assertion, not a locally recomputed hash.**
+
+Callers assemble pages by the exact returned byte offsets, keep the same
+revision/name, require consistent `size` and whole-file `digest` on every
+page, and verify byte size and SHA-256 after assembly. Only that final check
+binds the assembled file to the reported whole-file digest. Repeat reads
+are read-only and safe to retry; no automatic page fetch or assembly occurs.
+A changed size/hash requires discarding the partial assembly and observing
+the source again, not mixing versions. Existing adapter timeout, response
+`max_bytes`, cancellation and evidence recording apply to each request;
+malformed metadata, digest mismatch or adapter failure yields `Denied`, never
+fallback to a whole read. These integrity checks do not authenticate source
+content: results and retained evidence remain `external-untrusted`. Supporting
+this response schema and codepoint-boundary rejection is the operator adapter's
+responsibility; this read-side API does not modify or deploy that adapter.
+
+`status` responses are normalized to `{op, branch, checks: [{check, state, sha, url?, run?, started_at?, completed_at?, job_seconds?, workflow_run_id?, job_id?, run_attempt?, repository?}], trust}` (at most 1024 checks; `check` 1-256 chars, `state` 1-64 chars, `sha` 40/64 hex, `url` max 4096 chars, optional `run` 1-128 chars without newlines/NUL as the opaque adapter run identity, stable per CI run across polls; omit `run` when the adapter cannot report it, in which case wake stays sha-keyed; optional `started_at`/`completed_at` timezone-aware ISO 8601 timestamps of at most 64 chars, which carry when a check started and completed so the job time of a run is derivable from the rows without a project-specific reporter; omit them when the provider cannot report them; when both times are present the completion must not precede the start (the comparison is on the parsed instants, so the same instants in another offset are accepted), an out-of-order pair is `Denied` for the whole response rather than a silently dropped row, and a row carrying both times also carries the derived `job_seconds` (at most seven days), which the product recomputes and never takes from the provider)); malformed shapes are `Denied`. `log`/`comments` pass through with `trust: external-untrusted`. `artifacts` responses are normalized to `{op, branch, sha?, artifacts: [{artifact, size?, digest?}], trust}` (at most 256 rows; `artifact` a relative Unix path 1-512 chars with no empty/`.`/`..` components, no leading slash, no backslashes; `size` an int >= 0 when present; `digest` 64 hex when present); `artifact` responses are normalized to `{op, branch, sha?, artifact, digest, content, size, offset, next_offset, page_digest, trust}` (see the byte-page contract below; whole-file reads remain available with the same 524288-character content cap). Results stay `external-untrusted`; an unconfigured adapter fails closed as today, and any role holding `vcs_read` with a visible workspace may use both ops. `proposals` responses are normalized to `{op, branch?, proposals: [{id, state, head, base, draft, mergeable?, checks?, reviews?, url?}], complete?, cursor?, trust}` (at most 256 proposals; `id` 1-128 chars, `state` `open`/`closed`/`merged`, endpoints live `{repo, ref, sha}` or explicit tombstones `{deleted: true, repo, ref}` for removed forks, `draft` bool, `mergeable` bool or unknown, CI check rows reused with each row keeping its own tested sha (rollup checks may run on a merge commit rather than the head sha, so the adapter omits rather than misattaches them), `reviews` at most 64 `{reviewer, verdict, sha}` rows (`approved`/`changes_requested`/`dismissed`, each bound to the exact revision reviewed; absent means unknown, never none), `url` max 4096 chars). The envelope may carry `complete` (bool) and an opaque `cursor` (max 256 chars) for truncated enumerations: callers resume with the cursor, observation flows on partial evidence, and safe mutation stays blocked while required evidence is unavailable. A missing or truncated row never implies terminal disposition; only a reported `state` does. Proposal observations are recorded as one deduplicated insight per proposal (`proposal-<32 hex>` from the proposal id): identical facts are a read-only no-op with no rev bump, while changed head/base/check/state facts revise the record (`record_proposal_state` returns `changed`). The body carries facts only, never per-run log URLs. Check details use a fixed 16-KiB UTF-8 budget; oversized sets retain a failure-first bounded preview plus a deterministic SHA-256 over all normalized check name/state/SHA facts, so omitted rows still trigger revisions and can be queried through `vcs_read proposals`. Missing rows in even a complete enumeration never imply closed, merged, or any other terminal state; only an explicit validated row can revise an existing record.
 
 Status execution identity is an optional complete bundle:
 `workflow_run_id` and `job_id` are strings of 1-128 ASCII digits;

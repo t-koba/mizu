@@ -24,6 +24,7 @@ fetch refreshes the store.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import os
 import re
@@ -573,10 +574,11 @@ ACQUIRE_SCOPES = frozenset({"head", "full"})
 MAX_ARTIFACTS = 256
 #: Maximum CI artifact file-name chars (relative Unix path, no traversal).
 MAX_ARTIFACT_NAME = 512
-#: Maximum artifact file content chars per ``artifact`` response (mirrors
-#: the default adapter byte bound; larger files are refused so the caller
-#: narrows scope instead of blowing the frame).
+#: Maximum whole artifact text characters, unchanged for full reads.
 MAX_ARTIFACT_CONTENT = 524288
+#: UTF-8 can require four bytes per permitted character.
+MAX_ARTIFACT_BYTES = 4 * MAX_ARTIFACT_CONTENT
+MAX_ARTIFACT_PAGE_BYTES = 8192
 
 
 def check_artifact_name(name: str) -> str:
@@ -626,25 +628,71 @@ def parse_artifacts(data: dict) -> list:
     return out
 
 
-def parse_artifact(data: dict, *, name: str) -> dict:
-    """Validate an ``artifact`` adapter response into a digest-bound receipt.
+def check_artifact_range(params: dict) -> dict:
+    """Validate opt-in byte paging; omitted pairs preserve whole-file reads."""
+    if "offset" not in params and "limit" not in params:
+        return {}
+    if "offset" not in params or "limit" not in params:
+        raise Denied("Artifact paging requires both offset and limit")
+    offset, limit = params["offset"], params["limit"]
+    if (type(offset) is not int or not 0 <= offset <= MAX_ARTIFACT_BYTES
+            or type(limit) is not int or not 1 <= limit <= MAX_ARTIFACT_PAGE_BYTES):
+        raise Denied("Invalid VCS artifact byte range")
+    return {"offset": offset, "limit": limit}
 
-    Schema: ``{"artifact", "digest", "content"}``; ``artifact`` must echo
-    the requested name, ``digest`` 64 lowercase hex, ``content`` text at
-    most 524288 chars. Trust: shape only; the digest binding is checked
-    by the caller against the content. Failure: ``Denied``.
+
+def parse_artifact(data: dict, *, name: str, offset: int = 0, limit=None) -> dict:
+    """Validate an artifact response and recompute its UTF-8 page hash.
+
+    Exact schema: {artifact, digest, content, size, offset, next_offset,
+    page_digest}. Sizes/positions are UTF-8 bytes; limit=None requires a
+    whole file (still capped at MAX_ARTIFACT_CONTENT characters). The
+    adapter must reject offsets inside codepoints and over-cap files.
+    Partial pages carry an adapter-asserted whole digest, NOT a locally
+    verified one. Callers must check consistent size/hash and verify the
+    assembled bytes. Trust remains external-untrusted. Failure: Denied.
     """
-    if not isinstance(data, dict) or set(data) != {"artifact", "digest", "content"}:
+    if limit is not None:
+        check_artifact_range({"offset": offset, "limit": limit})
+    elif type(offset) is not int or offset != 0:
+        raise Denied("Whole artifact reads start at zero")
+    keys = {"artifact", "digest", "content", "size", "offset", "next_offset", "page_digest"}
+    if not isinstance(data, dict) or set(data) != keys:
         raise Denied("Invalid VCS artifact content entry")
-    if data.get("artifact") != name:
+    if data["artifact"] != name:
         raise Denied("Artifact content must match the requested file")
-    content_digest = data.get("digest")
-    if not isinstance(content_digest, str) or not _SHA.fullmatch(content_digest):
-        raise Denied("Invalid VCS artifact content digest")
-    content = data.get("content")
+    for key in ("digest", "page_digest"):
+        if not isinstance(data[key], str) or not _SHA.fullmatch(data[key]):
+            raise Denied("Invalid VCS artifact content digest")
+    content = data["content"]
     if not isinstance(content, str) or len(content) > MAX_ARTIFACT_CONTENT:
         raise Denied("Invalid VCS artifact content")
-    return {"artifact": name, "digest": content_digest, "content": content}
+    try:
+        page = content.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise Denied("Artifact content must be valid UTF-8 text") from exc
+    size, echoed_offset, next_offset = data["size"], data["offset"], data["next_offset"]
+    if (type(size) is not int or not 0 <= size <= MAX_ARTIFACT_BYTES
+            or type(echoed_offset) is not int or echoed_offset != offset
+            or not 0 <= offset <= size):
+        raise Denied("Invalid VCS artifact size or offset echo")
+    end = offset + len(page)
+    if end > size or (limit is not None and len(page) > limit):
+        raise Denied("Artifact page exceeds the requested byte range")
+    if end == size:
+        if next_offset is not None:
+            raise Denied("Artifact EOF must have null next_offset")
+    elif (not page or type(next_offset) is not int or next_offset != end):
+        raise Denied("Invalid VCS artifact page progress")
+    complete = offset == 0 and end == size
+    if limit is None and not complete:
+        raise Denied("Whole artifact read must include the entire file")
+    page_digest = hashlib.sha256(page).hexdigest()
+    if data["page_digest"] != page_digest:
+        raise Denied("Artifact page digest mismatch")
+    if complete and data["digest"] != page_digest:
+        raise Denied("Artifact content digest mismatch")
+    return dict(data)
 
 
 def acquire_digest(content: str) -> str:
@@ -726,7 +774,9 @@ def read_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
     names both revisions. ``artifacts`` lists CI-recorded files for a
     branch revision (``{"branch", optional "sha"}``); ``artifact`` reads
     one listed text file (``{"branch", "artifact", optional "sha"}``)
-    with a digest recomputed locally like ``acquire``. Bounds: same
+    or a UTF-8 byte page with paired ``offset``/``limit``. Page hashes are
+    recomputed locally; the whole-file hash is checked only for complete
+    content (see ``parse_artifact``), using raw UTF-8 rather than canonical JSON. Bounds: same
     ``max_bytes``/timeout contract as ``invoke``. Trust: operator-owned
     adapter; results are external-untrusted. Failure: ``Denied`` on
     publish ops, bad params, a moved head or base (echo mismatch), a
@@ -793,11 +843,8 @@ def read_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
             out["sha"] = sha
         return out
     if op == "artifact":
-        # One CI-recorded text file: the adapter echoes the requested
-        # name plus the content digest, and the caller recomputes the
-        # digest instead of trusting the echo (same binding as acquire).
-        # An optional sha narrows to one run revision and is echoed in
-        # the receipt for citation.
+        # Read one file or byte page; partial whole-file hashes remain
+        # adapter assertions until the caller verifies assembled bytes.
         branch = params.get("branch")
         check_branch(branch)
         name = params.get("artifact")
@@ -808,12 +855,10 @@ def read_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
         request = {"op": op, "branch": branch, "artifact": name}
         if sha is not None:
             request["sha"] = sha
-        got = parse_artifact(invoke(settings, request, cancel=cancel), name=name)
-        if got["digest"] != acquire_digest(got["content"]):
-            raise Denied("Artifact content digest mismatch")
-        out = {"op": op, "branch": branch, "artifact": name,
-               "digest": got["digest"], "content": got["content"],
-               "trust": "external-untrusted"}
+        byte_range = check_artifact_range(params)
+        request.update(byte_range)
+        got = parse_artifact(invoke(settings, request, cancel=cancel), name=name, **byte_range)
+        out = {"op": op, "branch": branch, **got, "trust": "external-untrusted"}
         if sha is not None:
             out["sha"] = sha
         return out
