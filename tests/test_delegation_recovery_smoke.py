@@ -20,9 +20,10 @@ import uuid
 ROOT = Path(__file__).resolve().parents[1]
 CGROOT = Path('/sys/fs/cgroup')
 IMAGE = 'docker.io/library/busybox:1.37.0'
+COMMAND_DIAGNOSTIC_BYTES_MAX = 1024
 
 
-def command(*argv, seconds=10, codes=(0,), maximum=8192):
+def command(*argv, seconds=10, codes=(0,), maximum=8192, diagnostic_bytes=0):
     # Reuse the bounded pipe/group teardown primitive, not shell capture or an
     # unbounded log file. A timeout/output overflow is unknown, never absence.
     if str(ROOT / 'src') not in sys.path:
@@ -30,7 +31,18 @@ def command(*argv, seconds=10, codes=(0,), maximum=8192):
     from mizu.process import run
     result = run(list(argv), timeout=seconds, maximum=maximum)
     if result.reason != 'exited' or result.exit_code not in codes or result.survivors:
-        raise RuntimeError(f'{argv[0]} failed: {result.reason}/{result.exit_code}')
+        detail = ''
+        limit = (min(diagnostic_bytes, COMMAND_DIAGNOSTIC_BYTES_MAX)
+                 if type(diagnostic_bytes) is int and diagnostic_bytes > 0 else 0)
+        if result.reason == 'exited' and result.exit_code != 0 and limit > 0:
+            raw = result.stderr.encode('utf-8')[-limit:]
+            excerpt = raw.decode('utf-8', 'replace')
+            for path in (str(Path.home()), os.environ.get('RUNNER_TEMP')):
+                if path:
+                    excerpt = excerpt.replace(path, '<path>')
+            if excerpt.strip():
+                detail = f'; stderr_tail={excerpt!r}'
+        raise RuntimeError(f'{argv[0]} failed: {result.reason}/{result.exit_code}{detail}')
     return result
 
 
@@ -98,7 +110,8 @@ def require_host():
     if not (CGROOT / 'cgroup.controllers').read_text().strip():
         raise RuntimeError('requires cgroup v2 controllers')
     info = command('podman', 'info', '--format',
-                   '{{.Host.Security.Rootless}} {{.Host.CgroupVersion}} {{.Host.CgroupManager}}')
+                   '{{.Host.Security.Rootless}} {{.Host.CgroupVersion}} {{.Host.CgroupManager}}',
+                   diagnostic_bytes=COMMAND_DIAGNOSTIC_BYTES_MAX)
     if info.stdout.strip() != 'true v2 systemd':
         raise RuntimeError('requires rootless Podman with systemd/cgroup v2')
 
@@ -247,6 +260,21 @@ def live(path):
 
 
 class RecoveryReservationTests(unittest.TestCase):
+    def test_host_preflight_diagnostic_is_bounded_and_redacts_user_path(self):
+        if str(ROOT / 'src') not in sys.path:
+            sys.path.insert(0, str(ROOT / 'src'))
+        from mizu.process import Result
+        home = str(Path.home())
+        result = Result(exit_code=125, stdout='', stderr='x' * 4096 + home,
+                        reason='exited', seconds=0)
+        with mock.patch('mizu.process.run', return_value=result):
+            with self.assertRaises(RuntimeError) as raised:
+                command('podman', 'info', diagnostic_bytes=128)
+        message = str(raised.exception)
+        self.assertIn('stderr_tail=', message)
+        self.assertNotIn(home, message)
+        self.assertLess(len(message), 512)
+
     def test_only_both_affirmative_proofs_release(self):
         for group in (True, False, None, 'unknown', 1):
             for container in (True, False, None, 'unknown', 1):
