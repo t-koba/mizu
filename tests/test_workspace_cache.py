@@ -1,5 +1,6 @@
 """Workspace caches: eligibility before deletion, nonblocking quiescence."""
 import contextlib
+import dataclasses
 import json
 import os
 import shutil
@@ -34,8 +35,8 @@ class WorkspaceCacheTests(Fixture):
         self.assertEqual(result.exit_code, 0, result.stderr)
         return result
 
-    def policy(self, roots=('__pycache__',), maximum=10, interval=100):
-        object.__setattr__(self.config, 'workspace_cache', WorkspaceCache(roots, maximum, interval))
+    def policy(self, roots=('__pycache__',), maximum=10, interval=100, **bounds):
+        object.__setattr__(self.config, 'workspace_cache', WorkspaceCache(roots, maximum, interval, **bounds))
 
     def make(self, name='__pycache__', size=10):
         directory = self.workspace / name
@@ -91,14 +92,14 @@ class WorkspaceCacheTests(Fixture):
                        for entry in entries)
 
         with mock.patch.object(cache.os, 'scandir', cached_metadata):
-            self.assertEqual(cache._preflight(self.project, self.config.workspace_cache.roots),
+            self.assertEqual(cache._preflight(self.project, self.config.workspace_cache),
                              ([directory], 10))
         try:
             os.link(directory / 'cache.bin', directory / 'linked')
         except OSError:
             self.skipTest('Hardlinks unavailable')
         with mock.patch.object(cache.os, 'scandir', cached_metadata), self.assertRaises(Denied):
-            cache._preflight(self.project, self.config.workspace_cache.roots)
+            cache._preflight(self.project, self.config.workspace_cache)
         self.assertTrue((directory / 'cache.bin').exists())
         self.assertTrue((directory / 'linked').exists())
 
@@ -208,14 +209,11 @@ class WorkspaceCacheTests(Fixture):
         self.assertFalse(directory.exists())
         self.assertTrue((linked / 'app.py').exists())
 
-    def test_plain_workspace_unreadable_git_and_scan_bounds_refuse(self):
+    def test_plain_workspace_and_unreadable_git_refuse(self):
         directory = self.make()
         for patch in (
             mock.patch.object(cache, 'run', return_value=Result(1, '', '', 'exited', 0)),
             mock.patch.object(cache, 'run', return_value=Result(0, '', '', 'output_limit', 0)),
-            mock.patch.object(cache, 'MAX_ENTRIES', 0),
-            mock.patch.object(cache, 'MAX_DEPTH', -1),
-            mock.patch.object(cache, 'SCAN_SECONDS', -1),
         ):
             self.state.unlink(missing_ok=True)
             with patch:
@@ -225,6 +223,69 @@ class WorkspaceCacheTests(Fixture):
         (self.workspace / '.git').rename(self.workspace / 'unused-git-metadata')
         self.state.unlink()
         self.assertEqual(cache.maintain(self.project)['status'], 'refused')
+
+    def test_configured_entries_across_roots_and_depth_per_root(self):
+        roots = ('__pycache__', '.pytest_cache')
+        first, second = (self.make(root) for root in roots)
+        # Each root contains one file and one empty directory at depth 1.
+        for root in (first, second):
+            (root / 'child').mkdir()
+        for bounds in ({'max_entries': 3, 'max_depth': 1},
+                       {'max_entries': 5, 'max_depth': 1}):
+            self.policy(roots, **bounds)
+            self.state.unlink(missing_ok=True)
+            if bounds['max_entries'] == 5:
+                (second / 'child' / 'grandchild').mkdir()
+            self.assertEqual(cache.maintain(self.project)['status'], 'refused')
+            self.assertTrue(first.exists())
+            self.assertTrue(second.exists())
+        (second / 'child' / 'grandchild').rmdir()
+        self.policy(roots, max_entries=4, max_depth=1)
+        self.state.unlink()
+        self.assertEqual(cache.maintain(self.project)['status'], 'removed')
+
+    def test_configured_scan_deadline_starts_after_index_lookup(self):
+        directory = self.make()
+        self.policy(scan_seconds=1)
+        clock = [0]
+        def git(*args, **kwargs):
+            result = run(*args, **kwargs)
+            clock[0] += 20  # Git time is not charged to the metadata scan.
+            return result
+        scandir = os.scandir
+        def slow_scan(path):
+            clock[0] += 2
+            return scandir(path)
+        with mock.patch.object(cache, 'time', SimpleNamespace(
+                time=cache.time.time, monotonic=lambda: clock[0])), \
+                mock.patch.object(cache, 'run', side_effect=git):
+            with mock.patch.object(cache, 'os', SimpleNamespace(scandir=slow_scan)):
+                self.assertEqual(cache.maintain(self.project)['status'], 'refused')
+            self.assertTrue(directory.exists())
+            self.state.unlink()
+            self.assertEqual(cache.maintain(self.project)['status'], 'removed')
+
+    def test_configured_git_budgets_and_refusal_before_scan(self):
+        directory = self.make()
+        self.policy(git_timeout_seconds=1, git_output_bytes=1)
+        with mock.patch.object(cache, 'run', wraps=run) as git, \
+                mock.patch.object(cache, 'os', SimpleNamespace(scandir=mock.Mock(side_effect=AssertionError))):
+            self.assertEqual(cache.maintain(self.project)['status'], 'refused')
+        self.assertEqual([call.kwargs['timeout'] for call in git.call_args_list], [1, 1])
+        self.assertEqual([call.kwargs['maximum'] for call in git.call_args_list], [4096, 1])
+        self.assertTrue(directory.exists())
+        # Inject timeout outcomes independently; no slow subprocess is needed.
+        for command in ('rev-parse', 'ls-files'):
+            def timeout(argv, **kwargs):
+                self.assertEqual(kwargs['timeout'], 1)
+                if command in argv:
+                    return Result(None, '', '', 'timeout', 1)
+                return run(argv, **kwargs)
+            self.state.unlink()
+            with mock.patch.object(cache, 'run', side_effect=timeout), \
+                    mock.patch.object(cache, 'os', SimpleNamespace(scandir=mock.Mock(side_effect=AssertionError))):
+                self.assertEqual(cache.maintain(self.project)['status'], 'refused')
+            self.assertTrue(directory.exists())
 
     def exclusions(self):
         return sorted(set(role_exclusions(self.project.root, tuple(self.config.roles))
@@ -326,6 +387,25 @@ print('excluded')
             maintenance.reset_mock()
             check_jobs.run_one(self.project, threading.Event())
             self.assertEqual(maintenance.call_count, 1)
+
+    def test_scan_policy_defaults_and_ranges(self):
+        bounds = dict(max_entries=100000, max_depth=64, scan_seconds=10,
+                      git_timeout_seconds=10, git_output_bytes=8388608)
+        expected = dict(roots=(), max_bytes=1073741824, check_interval_seconds=3600, **bounds)
+        self.assertEqual(dataclasses.asdict(WorkspaceCache()), expected)
+        self.assertEqual(dataclasses.asdict(load(self.file).workspace_cache), expected)
+        original = self.file.read_text()
+        for field, maximum in bounds.items():
+            for value in ('1', str(maximum), '0', str(maximum + 1),
+                          'true', 'false', '1.5', '"1"', '[]', '{}'):
+                with self.subTest(field=field, value=value):
+                    self.file.write_text(original.replace('roots = []', f'roots = []\n{field} = {value}'))
+                    if value in ('1', str(maximum)):
+                        self.assertEqual(dataclasses.asdict(load(self.file).workspace_cache),
+                                         {**expected, field: int(value)})
+                    else:
+                        with self.assertRaisesRegex(ConfigError, f'workspace_cache.{field}'):
+                            load(self.file)
 
     def test_policy_load_and_validation(self):
         self.assertEqual(workspace_cache_policy({}), WorkspaceCache())

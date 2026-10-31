@@ -23,12 +23,6 @@ from .fs import lock, read_json, relative_parts, write_json
 from .process import run
 from .project import git_env
 
-# Bound metadata work, not cache bytes read (no file contents are opened).
-MAX_ENTRIES = 100000
-MAX_DEPTH = 64
-SCAN_SECONDS = 10
-GIT_BYTES = 8 * 1024 * 1024
-
 
 def _directory(path):
     info = path.lstat()
@@ -51,13 +45,13 @@ def _snapshot_protected(snapshots, name):
     return False
 
 
-def _preflight(project, roots):
+def _preflight(project, policy):
     """Prove every candidate safe before deleting any; return paths and bytes.
 
     A local Git worktree rooted exactly at the workspace is required to prove
     index non-membership; ordinary and linked worktrees are supported. Missing
     roots are harmless, but even missing candidates must be excluded.
-    Bounds/refusals cover the entire set, not each root independently.
+    Entry/time budgets and refusals cover the entire set; depth is per root.
     """
     workspace = project.workspace
     _directory(workspace)
@@ -70,7 +64,7 @@ def _preflight(project, roots):
             or getattr(info, 'st_file_attributes', 0) & 0x400):
         raise Denied('Workspace Git metadata is not local and regular')
     top = run(['git', '-C', str(workspace), 'rev-parse', '--show-toplevel'],
-              timeout=10, maximum=4096, env=git_env())
+              timeout=policy.git_timeout_seconds, maximum=4096, env=git_env())
     if top.exit_code != 0 or top.reason != 'exited':
         raise Denied('Cannot prove workspace Git root')
     try:
@@ -80,17 +74,18 @@ def _preflight(project, roots):
     except (OSError, RuntimeError, ValueError) as exc:
         raise Denied('Cannot prove workspace Git root') from exc
     indexed = run(['git', '-c', 'core.fsmonitor=false', '-C', str(workspace),
-                   'ls-files', '--cached', '-z'], timeout=10, maximum=GIT_BYTES, env=git_env())
+                   'ls-files', '--cached', '-z'], timeout=policy.git_timeout_seconds,
+                  maximum=policy.git_output_bytes, env=git_env())
     if indexed.exit_code != 0 or indexed.reason != 'exited':
         raise Denied('Cannot prove cache paths untracked')
     # Conservatively compare aliases on case-insensitive/normalizing hosts.
     def alias(name):
         return unicodedata.normalize('NFC', name).casefold()
     tracked = [alias(name) for name in indexed.stdout.split('\0')]
-    deadline = time.monotonic() + SCAN_SECONDS
+    deadline = time.monotonic() + policy.scan_seconds
     count = total = 0
     candidates = []
-    for root in roots:
+    for root in policy.roots:
         parts = relative_parts(root)
         if (any(part.casefold() == '.git' for part in parts)
                 or not project.snapshots.excluded(root)
@@ -114,12 +109,12 @@ def _preflight(project, roots):
         pending = [(path, 0)]
         while pending:
             directory, depth = pending.pop()
-            if depth > MAX_DEPTH or time.monotonic() > deadline:
+            if depth > policy.max_depth or time.monotonic() > deadline:
                 raise Denied('Cache scan bound exceeded')
             with os.scandir(directory) as entries:
                 for entry in entries:
                     count += 1
-                    if count > MAX_ENTRIES or time.monotonic() > deadline:
+                    if count > policy.max_entries or time.monotonic() > deadline:
                         raise Denied('Cache scan bound exceeded')
                     relative = (directory.relative_to(workspace) / entry.name).as_posix()
                     if entry.name.casefold() == '.git':
@@ -185,7 +180,7 @@ def maintain(project):
                 return {'status': 'fenced'}
             result = {'checked_at': instant, 'status': 'unsafe', 'removed_roots': 0, 'bytes': 0}
             try:
-                candidates, total = _preflight(project, policy.roots)
+                candidates, total = _preflight(project, policy)
                 result.update(status='below-threshold', bytes=total)
                 if total >= policy.max_bytes:
                     result['status'] = 'removed'

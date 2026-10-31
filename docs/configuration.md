@@ -30,6 +30,11 @@ Automatic reclamation is opt-in and separate from operator-invoked `prune`:
 roots = []
 max_bytes = 1073741824
 check_interval_seconds = 3600
+max_entries = 100000
+max_depth = 64
+scan_seconds = 10
+git_timeout_seconds = 10
+git_output_bytes = 8388608
 ```
 
 Empty `roots` disables all work, including locks and scans (the default).
@@ -41,7 +46,20 @@ absolute paths, traversal, empty components, backslashes and `.git` components
 are refused. Case/Unicode-normalization aliases count as overlap.
 `max_bytes` is an integer from 1 through 2^63−1; the default is 1 GiB.
 `check_interval_seconds` is an integer from 1 through 2678400 (31 days),
-default 3600. Unknown keys, invalid types and bounds fail configuration load.
+default 3600. Metadata/Git work budgets can only be lowered from these defaults:
+
+| Setting | Integer range | Default | Scope |
+| --- | --- | --- | --- |
+| `max_entries` | 1–100000 | 100000 | Scandir entries (files and directories) counted across all roots; root directories themselves are not counted. |
+| `max_depth` | 1–64 | 64 | Directory traversal depth per root; each root starts at depth 0. |
+| `scan_seconds` | 1–10 | 10 | Shared metadata-scan deadline, starting after the Git index lookup, not an overall cleanup or deletion deadline. |
+| `git_timeout_seconds` | 1–10 | 10 | Timeout for **each** Git command (`rev-parse` and index listing), not a combined deadline. |
+| `git_output_bytes` | 1–8388608 | 8388608 | Combined stdout/stderr cap for the `ls-files` index listing only; `rev-parse` retains its fixed 4096-byte safety read. |
+
+The separate root-identity response and automatic due-state JSON retain fixed
+4096-byte safety reads: they are one-path and one-small-record reads, and an
+oversize result prevents cleanup. Unknown keys, invalid types and bounds fail
+configuration load.
 
 A due check is attempted before a top-level role execution or check runner
 acquires its own execution locks. There is no timer, model request or automatic
@@ -61,15 +79,16 @@ paths). The proof requires a local Git worktree rooted exactly at the workspace;
 ordinary `.git` directories and regular linked-worktree pointer files are
 supported. Plain imports, parent-repository discovery, unavailable/unreadable
 Git and incomplete Git output skip cleanup rather than infer non-membership.
-Index lookup disables fsmonitor, has a 10-second deadline and an 8-MiB
-combined-output cap. Comparisons also refuse case/Unicode aliases of tracked
+Index lookup disables fsmonitor and uses the configured per-command Git
+timeout and index-output cap (defaults: 10 seconds and 8 MiB). Comparisons also refuse case/Unicode aliases of tracked
 paths. Missing roots are harmless; existing roots, their ancestors, and their
 contents must have no symlinks or Windows reparse points. Nested `.git` entries,
 hardlinked files, special files, and any product-private/host-state path omitted
 from snapshots (including private-evidence trees and private-name files) are
 refused too.
-The scan reads metadata, not cache contents, and is bounded across all roots
-by 100000 entries, 64 descendant levels and 10 seconds. Any unsafe root or
+The scan reads metadata, not cache contents. Its configured budgets default to
+100000 entries across all roots, depth 64 per root and 10 seconds shared across
+roots after index lookup. Any unsafe root or
 incomplete scan refuses the **whole** candidate set before any deletion.
 All managed workspace writers must use the harness exclusions; these locks
 are not protection against an unrelated host process mutating the tree.

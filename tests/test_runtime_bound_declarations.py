@@ -5,10 +5,9 @@ and direct numeric literal/arithmetic values at a short resource-call keyword
 set. Expressions are inventoried without evaluating source. This does not lint
 arbitrary numeric literals, aliases, nested declarations, arbitrary call args,
 local arithmetic or other modules. Expand coverage as the behavior-based
-inventory reaches other owners. The configured slice checks only Usage field
-defaults in config.py; validation is covered by test_config_usage.
-Classification records current ownership, not
-approval to leave policy in code; safety ceilings here are defensive read
+inventory reaches other owners. The configured slice checks Usage and
+WorkspaceCache field defaults in config.py; validation is covered by their
+focused config tests. Classification records current ownership, not approval to leave policy in code; safety ceilings here are defensive read
 bounds, not intrinsic format limits.
 """
 import ast
@@ -24,12 +23,7 @@ CANDIDATE = re.compile(
 # name: (exact ast.unparse(value), classification, owner / rationale)
 DECLARATIONS = {
     'usage.py': {},
-    'workspace_cache.py': {
-        'MAX_ENTRIES': ('100000', 'policy', 'workspace cache / metadata scan work budget'),
-        'MAX_DEPTH': ('64', 'policy', 'workspace cache / traversal depth budget'),
-        'SCAN_SECONDS': ('10', 'policy', 'workspace cache / preflight wall-time budget'),
-        'GIT_BYTES': ('8 * 1024 * 1024', 'policy', 'workspace cache / tracked-path output budget'),
-    },
+    'workspace_cache.py': {},
     'ci_requests.py': {
         'RECORD_BYTES': ('8192', 'safety', 'CI requests / bounded evidence-record read'),
         'REQUEST_SCAN_LIMIT': ('10000', 'policy', 'CI requests / directory scan work budget'),
@@ -56,7 +50,7 @@ DECLARATIONS = {
 }
 
 
-# Migrated declarations live in the owning config dataclass, not usage.py.
+# Migrated declarations live in the owning config dataclass.
 # This explicit slice does not inventory arbitrary configuration declarations.
 CONFIGURED = {
     'Usage': {
@@ -65,6 +59,16 @@ CONFIGURED = {
         'unknown_keys': ('20', 'configured policy', 'usage / unknown-key diagnostic sample'),
         'cache_affinity_rows': ('200', 'configured policy', 'usage / affinity output sample'),
         'cache_affinity_runs': ('200', 'configured policy', 'usage / affinity history window'),
+    },
+    'WorkspaceCache': {
+        'roots': ('()', 'configured policy', 'workspace cache / opt-in regenerable roots'),
+        'max_bytes': ('1073741824', 'configured policy', 'workspace cache / aggregate removal threshold'),
+        'check_interval_seconds': ('3600', 'configured policy', 'workspace cache / sweep cadence'),
+        'max_entries': ('100000', 'configured policy', 'workspace cache / aggregate metadata entry budget'),
+        'max_depth': ('64', 'configured policy', 'workspace cache / per-root traversal depth budget'),
+        'scan_seconds': ('10', 'configured policy', 'workspace cache / scan time after index lookup'),
+        'git_timeout_seconds': ('10', 'configured policy', 'workspace cache / per-command Git timeout'),
+        'git_output_bytes': ('8388608', 'configured policy', 'workspace cache / index listing output budget'),
     },
 }
 
@@ -77,12 +81,8 @@ CALL_KEYWORDS = frozenset({
 CALLS = {
     'usage.py': {},
     'workspace_cache.py': {
-        ('_preflight', 'run', 'timeout', 0): (
-            '10', 'policy', 'workspace cache / Git root command wall-time budget'),
         ('_preflight', 'run', 'maximum', 0): (
             '4096', 'safety', 'workspace cache / Git root output read bound'),
-        ('_preflight', 'run', 'timeout', 1): (
-            '10', 'policy', 'workspace cache / tracked-path command wall-time budget'),
         ('_due', 'read_json', 'max_bytes', 0): (
             '4096', 'safety', 'workspace cache / bounded automatic due-state read'),
     },

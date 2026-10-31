@@ -905,10 +905,16 @@ class WorkspaceCache:
     roots: tuple[str, ...] = ()
     max_bytes: int = 1073741824
     check_interval_seconds: int = 3600
+    max_entries: int = 100000
+    max_depth: int = 64
+    scan_seconds: int = 10
+    git_timeout_seconds: int = 10
+    git_output_bytes: int = 8388608
 
 
 def workspace_cache_policy(raw: dict) -> WorkspaceCache:
-    keys(raw, {"roots", "max_bytes", "check_interval_seconds"}, "workspace_cache")
+    fields = dataclasses.fields(WorkspaceCache)
+    keys(raw, {field.name for field in fields}, "workspace_cache")
     roots = strings(raw.get("roots", []), "workspace_cache.roots")
     if len(roots) > 32:
         raise ConfigError("workspace_cache.roots permits at most 32 roots")
@@ -928,7 +934,12 @@ def workspace_cache_policy(raw: dict) -> WorkspaceCache:
     interval = raw.get("check_interval_seconds", 3600)
     number(maximum, "workspace_cache.max_bytes", 1, 2**63 - 1)
     number(interval, "workspace_cache.check_interval_seconds", 1, 31 * 86400)
-    return WorkspaceCache(roots, maximum, interval)
+    bounds = {
+        field.name: number(raw.get(field.name, field.default), f"workspace_cache.{field.name}",
+                           1, field.default)
+        for field in fields if field.name not in {"roots", "max_bytes", "check_interval_seconds"}
+    }
+    return WorkspaceCache(roots, maximum, interval, **bounds)
 
 
 @dataclasses.dataclass(frozen=True)
