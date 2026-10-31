@@ -277,7 +277,9 @@ def _load_merged(top: Path) -> dict:
         # Unknown root keys still fail here per fragment so the error names
         # the fragment, then the final merged load re-checks the whole.
         allowed = {"data_dir", "engines", "timezone", "limits", "sandbox", "profiles",
-                   "roles", "consult_role", "delegate_role", "web", "vcs", "materialize", "exclude", "selectors", "include", "insight_decisions", "workspace_cache", "operator_records"}
+                   "roles", "consult_role", "delegate_role", "web", "vcs", "materialize",
+                   "exclude", "selectors", "include", "insight_decisions", "workspace_cache",
+                   "operator_records", "usage"}
         unknown = set(data) - allowed
         if unknown:
             raise ConfigError(f"Unknown keys in {resolved}: {', '.join(sorted(unknown))}")
@@ -878,6 +880,27 @@ def role_policy_bytes(role: "Role") -> bytes:
 
 
 @dataclasses.dataclass(frozen=True)
+class Usage:
+    # These defaults are also the current maxima; configuration may only lower them.
+    runs_scanned: int = 5000
+    recent_entries: int = 200
+    cache_affinity_runs: int = 200
+    cache_affinity_rows: int = 200
+    unknown_keys: int = 20
+
+
+def usage_policy(raw: dict) -> Usage:
+    fields = dataclasses.fields(Usage)
+    keys(raw, {field.name for field in fields}, "usage")
+    return Usage(**{
+        field.name: number(raw.get(field.name, field.default), f"usage.{field.name}",
+                           1 if field.name in ("runs_scanned", "recent_entries") else 0,
+                           field.default)
+        for field in fields
+    })
+
+
+@dataclasses.dataclass(frozen=True)
 class WorkspaceCache:
     roots: tuple[str, ...] = ()
     max_bytes: int = 1073741824
@@ -935,6 +958,7 @@ class Config:
     workspace_cache: WorkspaceCache = dataclasses.field(default_factory=WorkspaceCache)
 
     operator_records: dict = dataclasses.field(default_factory=dict)
+    usage: Usage = dataclasses.field(default_factory=Usage)
 
     def __post_init__(self):
         object.__setattr__(self, "tzinfo", resolve_timezone(self.timezone))
@@ -975,7 +999,9 @@ def load(file: Path) -> Config:
     file = file.expanduser().resolve()
     data = _load_merged(file)
     keys(data, {"data_dir", "engines", "timezone", "limits", "sandbox", "profiles",
-                "roles", "consult_role", "delegate_role", "web", "vcs", "materialize", "exclude", "selectors", "include", "insight_decisions", "workspace_cache", "operator_records"}, "root")
+                "roles", "consult_role", "delegate_role", "web", "vcs", "materialize",
+                "exclude", "selectors", "include", "insight_decisions", "workspace_cache",
+                "operator_records", "usage"}, "root")
     data.pop("include", None)
     from .operator_records import configuration as record_configuration
     records = record_configuration(data.get("operator_records", {}))
@@ -1511,4 +1537,5 @@ def load(file: Path) -> Config:
                   environments, limits, sandbox, profiles, roles, consult_role, delegate_role, timezone, web, vcs, mat,
                   strings(data.get("exclude", [".git", ".pi", ".env", ".env.*", ".venv",
                                                 "node_modules", "__pycache__", "*.pyc", "*.pyo", ".pytest_cache"]), "exclude"), selectors, insight_decisions=decisions,
-                  workspace_cache=workspace_cache_policy(data.get("workspace_cache", {})), operator_records=records)
+                  workspace_cache=workspace_cache_policy(data.get("workspace_cache", {})), operator_records=records,
+                  usage=usage_policy(data.get("usage", {})))

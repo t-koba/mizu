@@ -586,8 +586,8 @@ class CompletedRunRetentionTests(Fixture):
         self.assert_refused_without_deletion([free])
 
     def test_physical_run_bound_is_separate_from_entry_bound(self):
-        from mizu.usage import MAX_RUNS_SCANNED
-        self.assertEqual(runs.MAX_RUNS_SCANNED, MAX_RUNS_SCANNED)
+        from mizu.config import Usage
+        self.assertEqual(runs.MAX_RUNS_SCANNED, Usage.runs_scanned)
         a, b = self.run_record(), self.run_record()
         with mock.patch.object(runs, "MAX_RUNS_SCANNED", 2):
             self.assertEqual(self.candidates(), {a, b})

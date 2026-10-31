@@ -18,9 +18,12 @@ from . import platform
 from .dispatch_evidence import MAX_ATTEMPTS, MAX_BYTES
 from .errors import LimitExceeded, MizuError
 from .fs import loads_finite, safe_read
-from .usage import (MAX_CACHE_AFFINITY_RUNS, MAX_RUNS_SCANNED,
-                    cache_read_share, prompt_input_tokens)
+from .config import Usage
+from .usage import cache_read_share, prompt_input_tokens
 
+# Aggregate evidence retains the usage defaults, independent of report overrides.
+MAX_RUNS_SCANNED = Usage.runs_scanned
+MAX_CACHE_AFFINITY_RUNS = Usage.cache_affinity_runs
 MAX_SECONDS = 2.0
 SPARSE_BELOW = 5
 _KEY = re.compile(r"[0-9a-f]{64}\Z")

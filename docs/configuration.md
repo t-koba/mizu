@@ -517,7 +517,8 @@ Permanent decisions, insight archives, WorkItems, receipts and other audit
 records remain: an expired historical run ID may no longer resolve to full
 output, and usage reports can only aggregate surviving run output.
 
-The reference scan reuses `usage.py`'s 5,000 physical-run bound, separately from
+The reference scan retains the usage default of 5,000 physical runs (independent
+of `[usage]` report overrides), separately from
 its 100,000 directory-entry and distinct-pin bounds. Individual JSON is capped at
 1 MiB; combined envelope-read and metadata-subtree-preflight bytes are capped at
 64 MiB. Preflight checks every file/directory in a candidate run's payload and
@@ -692,6 +693,38 @@ multiply those scans and is deliberately not reused.
 Sessions are durable audit evidence: `mizu storage` reports their counts/bytes and `mizu storage --apply` never reclaims them. `mizu storage --apply` removes only unreferenced snapshot manifests and orphan objects under quiescence; it refuses when the preview reports any skipped manifest (`snapshots.skipped`, including unreadable or over-1-MiB manifests), any skipped reference record (`reference_records_skipped`, covering present-but-unreadable, malformed, over-1-MiB, wrong-shape, or failed history/run/artifact/inbox/current-pointer scans), or any skipped work-item history (`work_item_events_skipped`), because reachability is then unknown. `reference_records_skipped` counts unique record/scan paths, not failed checks (the active generation is counted at most once). JSON `null` records, invalid non-null snapshot IDs, and malformed history names, entries, digests, or active endpoints are incomplete. Pointer and history reads share the 1 MiB bound and do not follow symlinks. Missing optional run records and an absent `artifacts/latest.json` pointer are normal and not counted; an artifact directory without `evidence.json` is incomplete. Usable valid IDs are still reported, but an incomplete scan never proves references are absent. The web cache is shared under `data_dir`; the invoking project's `cache_seconds` decides expiry and a concurrent fetch recreates a removed entry, so `prune --apply` is safe to retry. Snapshots reference workspace objects only, never run logs, so compressed/dropped logs are disposable projections absent from later backups by construction.
 `daily_requests` counts logical admissions, not dollar amounts; enable a hard provider spend cap/pause by default (alert-only alarms are not sufficient for unattended runs). Use `mizu status` and `mizu budget` for per-project and shared day counts in the configured `timezone`, and `mizu usage` for token statistics.
 Day-files (`data/budget/YYYY-MM-DD.json`) keep the date in the configured `timezone` (UTC when unset) plus the shared aggregate, a per-project map, and the `zone` that wrote them, so two configs sharing `data_dir` with different `daily_requests` admit independently unless the optional shared total is reached. `mizu budget <project>` and `mizu status` report both numbers with the day and zone. Projects sharing one `data_dir` should share one `timezone`: different zones name different days for the same instant, splitting the shared total across day-files.
+
+## Usage reports
+
+`[usage]` controls read-only usage summary work, history windows and output
+samples. All fields are strict integers (booleans are rejected); omitted fields
+retain the defaults below. Unknown keys and non-table sections are rejected.
+These are policy budgets, not protocol limits. Lower values can reduce history
+coverage or displayed samples; reports retain their existing shape and flags.
+
+```toml
+[usage]
+runs_scanned = 5000
+recent_entries = 200
+cache_affinity_runs = 200
+cache_affinity_rows = 200
+unknown_keys = 20
+```
+
+| Key | Default | Range | Meaning |
+|---|---|---|---|
+| `runs_scanned` | 5000 | 1–5000 | Maximum physical runs whose report records are read after selecting newest-first by mtime/name; selecting still enumerates eligible run directories, and one extra candidate detects `truncated` |
+| `recent_entries` | 200 | 1–200 | Recent summary entries retained by finish time/run identity; `entries_truncated` compares the full selected-entry count |
+| `cache_affinity_runs` | 200 | 0–200 | Dispatch-evidence run window, also bounded by `runs_scanned`; `runs_truncated` compares the candidate list with this window |
+| `cache_affinity_rows` | 200 | 0–200 | Displayed newest-first attempts; `total` counts all valid attempts in the run window and `truncated` compares that total with this cap |
+| `unknown_keys` | 20 | 0–20 | Sorted unique unrecognized-key sample per normalization/group in the summary; zero hides key names without changing token totals or unknown-shape accounting |
+
+Zero affinity runs disables that history scan; zero affinity rows hides rows but
+still counts attempts in the selected window. Zero does not erase truncation:
+nonempty omitted candidates/rows still set the corresponding flag. These report
+settings do not rewrite evidence or change run retirement or scheduler-evidence
+budgets. Standalone normalization and attempt-evidence helpers retain the usage
+default for unknown keys unless their caller supplies an explicit sample size.
 
 ## Shared smoke retention
 

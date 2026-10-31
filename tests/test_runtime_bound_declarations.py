@@ -5,7 +5,9 @@ and direct numeric literal/arithmetic values at a short resource-call keyword
 set. Expressions are inventoried without evaluating source. This does not lint
 arbitrary numeric literals, aliases, nested declarations, arbitrary call args,
 local arithmetic or other modules. Expand coverage as the behavior-based
-inventory reaches other owners. Classification records current ownership, not
+inventory reaches other owners. The configured slice checks only Usage field
+defaults in config.py; validation is covered by test_config_usage.
+Classification records current ownership, not
 approval to leave policy in code; safety ceilings here are defensive read
 bounds, not intrinsic format limits.
 """
@@ -21,13 +23,7 @@ CANDIDATE = re.compile(
 )
 # name: (exact ast.unparse(value), classification, owner / rationale)
 DECLARATIONS = {
-    'usage.py': {
-        'MAX_RUNS_SCANNED': ('5000', 'policy', 'usage / history scan work budget'),
-        'MAX_RECENT_ENTRIES': ('200', 'policy', 'usage / recent-entry output sample'),
-        'MAX_UNKNOWN_KEYS': ('20', 'policy', 'usage / unknown-key diagnostic sample'),
-        'MAX_CACHE_AFFINITY_ROWS': ('200', 'policy', 'usage / affinity output sample'),
-        'MAX_CACHE_AFFINITY_RUNS': ('200', 'policy', 'usage / affinity history window'),
-    },
+    'usage.py': {},
     'workspace_cache.py': {
         'MAX_ENTRIES': ('100000', 'policy', 'workspace cache / metadata scan work budget'),
         'MAX_DEPTH': ('64', 'policy', 'workspace cache / traversal depth budget'),
@@ -56,6 +52,19 @@ DECLARATIONS = {
         'AUDIT_LIMIT': ('128', 'policy', 'smoke retention / retained audit-event count'),
         '_AUTOMATIC_SMOKE_RETENTION_STATE_BYTES': (
             '4096', 'safety', 'smoke retention / bounded automatic due-state read'),
+    },
+}
+
+
+# Migrated declarations live in the owning config dataclass, not usage.py.
+# This explicit slice does not inventory arbitrary configuration declarations.
+CONFIGURED = {
+    'Usage': {
+        'runs_scanned': ('5000', 'configured policy', 'usage / history scan work budget'),
+        'recent_entries': ('200', 'configured policy', 'usage / recent-entry output sample'),
+        'unknown_keys': ('20', 'configured policy', 'usage / unknown-key diagnostic sample'),
+        'cache_affinity_rows': ('200', 'configured policy', 'usage / affinity output sample'),
+        'cache_affinity_runs': ('200', 'configured policy', 'usage / affinity history window'),
     },
 }
 
@@ -170,6 +179,17 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
                 self.assertEqual(inventory(tree), {
                     name: entry[0] for name, entry in declarations.items()
                 })
+
+    def test_configured_declarations(self):
+        tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
+        for owner, declarations in CONFIGURED.items():
+            node = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == owner)
+            self.assertEqual({field.target.id: ast.unparse(field.value) for field in node.body
+                              if isinstance(field, ast.AnnAssign)},
+                             {name: entry[0] for name, entry in declarations.items()})
+            for _, category, rationale in declarations.values():
+                self.assertEqual(category, 'configured policy')
+                self.assertTrue(rationale.strip())
 
     def test_detector_scope_and_vocabulary(self):
         names = ['MAX_ITEMS', 'READ_LIMIT', 'READ_CAP', 'READ_TIMEOUT',

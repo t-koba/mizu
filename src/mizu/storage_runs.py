@@ -16,9 +16,11 @@ import uuid
 from pathlib import Path
 
 from .errors import Denied, LimitExceeded
-from .usage import MAX_RUNS_SCANNED
+from .config import Usage
 from .fs import DIGEST, canonical, digest, identifier, loads_finite, safe_read, sync_dir, write_json
 
+# Run retirement retains the usage default, independent of report overrides.
+MAX_RUNS_SCANNED = Usage.runs_scanned
 MAX_ENTRIES = 100_000
 MAX_BYTES = 64 * 1024 * 1024
 RECORD_BYTES = 1024 * 1024

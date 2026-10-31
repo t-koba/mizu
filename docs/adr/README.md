@@ -37,9 +37,11 @@ Fixed in code (not knobs): smoke probe 4 requests / 5 tools / 120 s (`smoke.py`)
 `PREVIEW_BYTES` 128 KiB / `READ_PAGE_CHARS` 8,192 / `MAX_FRAME` 1 MiB / `SCRIPT_MAX` 64 KiB (`fs.py`); include
 8 deep / 32 files / 1 MiB total / 32 entries per file (`config.py`); role policy 16 parts /
 64 KiB each / 256 KiB total; sandbox verify-command fan-out 32 (`project.py`) and
-`--userns=keep-id` floor (`sandbox.py`); lock liveness 30 s (`fs.py`); usage scans
-5000 runs / 200 recent entries (`usage.py`); fault taxonomy `INFRA_WAIT=(Busy, InfraExceeded)`
-(`runtime.py`/`errors.py`). Tunables live in `[limits]`/`[vcs]` with defaults in
+`--userns=keep-id` floor (`sandbox.py`); lock liveness 30 s (`fs.py`); usage
+record reads capped at 1 MiB; usage-summary defaults of 5000 runs / 200 recent
+entries can only be lowered in `[usage]`; fault taxonomy
+`INFRA_WAIT=(Busy, InfraExceeded)` (`runtime.py`/`errors.py`). Tunables live in
+`[limits]`/`[vcs]`/`[usage]` with defaults in
 `docs/configuration.md`.
 
 ## ADR-007 — Current native engine adapters
@@ -162,10 +164,12 @@ See `docs/configuration.md` "Limits" and `mizu prune` help.
 
 ## ADR-025 — Policy audit moves daemon poll bounds to config
 The audit moved only the daemon poll bounds into `[vcs]`; the proposed dashboard
-projection and configurable slice were not shipped. Spend caps, the fault taxonomy,
-framing/memory bounds, sandbox floors, and other fixed liveness bounds stay in code.
+projection remains unshipped. The usage-summary scan and output caps now live in
+`[usage]`, preserving their defaults and allowing only downward adjustments. Spend
+caps, the fault taxonomy, framing/memory bounds, sandbox floors, and other fixed
+liveness bounds stay in code.
 
-| Constant (code) | Value | Disposition | Why |
+| Bound / setting | Value | Disposition | Why |
 |---|---|---|---|
 | `SMOKE_REQUESTS/TOOLS/SECONDS` (`smoke.py`) | 4 / 5 / 120 s | Stays fixed | Paid spend cap with one benign-listing margin; opening it opens spend |
 | Infra-wait classes (`Busy`/`InfraExceeded` defer, `LimitExceeded` counts) | type-based | Stays fixed | Fault taxonomy prevents hiding real faults; operator controls brake via `max_failures` plus budget/disk thresholds |
@@ -174,7 +178,8 @@ framing/memory bounds, sandbox floors, and other fixed liveness bounds stay in c
 | `PREVIEW_BYTES`, `READ_PAGE_CHARS`, `MAX_FRAME`, `SCRIPT_MAX`, insight/report/finish/consult/search sizes | 128 KiB / 8,192 chars / 1 MiB / 64 KiB / 60 KiB / 48 KiB / 12+32 KiB / 8 KiB+8 / 1k+4k | Stays fixed | Framing and memory safety: unbounded reads or messages risk OOM and protocol desync |
 | `MAX_WEB_WORKER_INPUT_BYTES` (`web_worker.py`) | 3 MiB | Stays fixed | Covers 2x canonical expansion of the 1 MiB TOML budget plus escaped valid probe input; parent and child reject overflow before parsing |
 | Sandbox termination, `MAX_VERIFY_COMMANDS`, include depth/files/bytes, web redirect/media, restore `--max-bytes` | 1 s+5 s / 32 / 8+32+1 MiB / 3 / 1 GiB | Stays fixed | Termination, fan-out, recursion, and archive-bomb safety floors |
-| `MAX_RUNS_SCANNED`, `MAX_RECENT_ENTRIES`, record size caps (`usage.py`) | 5000 / 200 / 1 MiB | Stays fixed | Unbounded run scans stall usage; records stay complete on disk |
+| Usage summary bounds (`[usage]`) | 5000 runs / 200 recent entries / 200 affinity runs / 200 rows / 20 unknown keys | Moves to policy | Defaults preserve existing scan/sample behavior; settings only reduce work or displayed rows/keys |
+| Usage record JSON read cap | 1 MiB | Stays fixed | Records stay bounded and complete on disk |
 
 ## ADR-026 — In-process lock guard with a fixed 30 s liveness bound
 `fs.lock` serializes lock files within the process with a per-path guard keyed by canonical

@@ -1,10 +1,12 @@
+import dataclasses
 import hashlib
 import json
 from pathlib import Path
 from support import Fixture
 from mizu.cli import execute, parser
+from mizu.config import Usage, load
 from mizu.fs import mkdir, write_json
-from mizu.usage import normalize, summarize
+from mizu.usage import attempt_usage, normalize, summarize
 
 
 class UsageTests(Fixture):
@@ -19,6 +21,42 @@ class UsageTests(Fixture):
                                                        "model": model, "requests": requests,
                                                        "usage": usage if usage is not None else []},
                                              "snapshot": "x"})
+
+    def test_configured_summary_bounds_preserve_totals_and_order(self):
+        import os
+        for n in range(3):
+            self.write_run(f"run-{n}", finished_at=f"2026-09-01T0{n}:00:00+00:00",
+                           usage=[{"input_tokens": n + 1, "output_tokens": -1, "z": 1, "a": 2}])
+            os.utime(self.project.root / "runs" / f"run-{n}", (1000 + n, 1000 + n))
+        default = summarize(self.project)
+        self.file.write_text(self.file.read_text() +
+                             '\n[usage]\nruns_scanned = 2\nrecent_entries = 1\nunknown_keys = 1\n')
+        self.project.config = load(self.file)
+        facts = summarize(self.project)
+        self.assertEqual(set(facts), set(default))
+        self.assertEqual(facts["scanned_records"], 2)
+        self.assertEqual(facts["totals"]["input_tokens"], 5)
+        self.assertEqual(facts["totals"]["runs"], 2)
+        self.assertEqual([e["run"] for e in facts["recent_entries"]], ["run-2"])
+        self.assertEqual(facts["groups"][0]["unrecognized_keys"], ["a"])
+        self.assertTrue(facts["truncated"])
+        self.assertTrue(facts["entries_truncated"])
+        self.project.config = dataclasses.replace(self.project.config,
+                                                  usage=Usage(runs_scanned=3, recent_entries=3, unknown_keys=0))
+        exact = summarize(self.project)
+        self.assertFalse(exact["truncated"])
+        self.assertFalse(exact["entries_truncated"])
+        self.assertEqual(exact["groups"][0]["unrecognized_keys"], [])
+        self.assertEqual(exact["totals"], default["totals"])
+        self.assertEqual(exact["unknown_shapes"], default["unknown_shapes"])
+
+    def test_unknown_key_helper_defaults_and_zero(self):
+        entry = {"input_tokens": 1, **{f"key-{n:02d}": n for n in range(25)}}
+        for helper in (lambda **kw: normalize(entry, **kw),
+                       lambda **kw: attempt_usage([entry], "unknown", **kw)):
+            self.assertEqual(len(helper()["unrecognized_keys"]), 20)
+            self.assertEqual(helper(unknown_keys=1)["unrecognized_keys"], ["key-00"])
+            self.assertEqual(helper(unknown_keys=0)["unrecognized_keys"], [])
 
     def test_groups_sum_by_day_but_entries_keep_timestamps(self):
         # Same day, same model, different hours: one rate group, but the
@@ -320,6 +358,29 @@ class CacheAffinityTests(Fixture):
             self.assertNotIn("native_session_id", row)
             self.assertNotIn("session_id", row)
             self.assertNotIn("payload", row)
+
+    def test_configured_affinity_windows_and_zero(self):
+        import os
+        for n in range(3):
+            run_dir = self.write_usage_run(f"affinity-{n}")
+            write_json(run_dir / "dispatch-attempts.json",
+                       {"attempts": [self.attempt(0), self.attempt(1)]})
+            os.utime(run_dir, (1000 + n, 1000 + n))
+        for runs, affinity_runs, rows, scanned, total, run_truncated in (
+                (2, 1, 1, 1, 2, True), (1, 2, 2, 1, 2, True),
+                (3, 3, 0, 3, 6, False), (3, 0, 0, 0, 0, True)):
+            with self.subTest(runs=runs, affinity_runs=affinity_runs, rows=rows):
+                self.project.config = dataclasses.replace(self.config, usage=Usage(
+                    runs_scanned=runs, cache_affinity_runs=affinity_runs, cache_affinity_rows=rows))
+                affinity = summarize(self.project)["cache_affinity"]
+                self.assertEqual(affinity["runs_scanned"], scanned)
+                self.assertEqual(affinity["total"], total)
+                self.assertEqual(affinity["runs_truncated"], run_truncated)
+                self.assertEqual(len(affinity["attempts"]), min(total, rows))
+                self.assertEqual(affinity["truncated"], total > rows)
+                if affinity["attempts"]:
+                    self.assertEqual(affinity["attempts"][0]["run"], "affinity-2")
+                    self.assertEqual(affinity["attempts"][0]["execution_attempt"], 1)
 
     def test_bounded_truncated_most_recent_first(self):
         import os

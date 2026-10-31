@@ -11,14 +11,10 @@ import datetime as dt
 import heapq
 import re
 
+from .config import Usage
 from .errors import MizuError
 from .fs import read_json
 
-MAX_RUNS_SCANNED = 5000
-MAX_RECENT_ENTRIES = 200
-MAX_UNKNOWN_KEYS = 20
-MAX_CACHE_AFFINITY_ROWS = 200
-MAX_CACHE_AFFINITY_RUNS = 200
 _SESSION_KEY_RE = re.compile(r"[0-9a-f]{64}\Z")
 _CACHE_STATUSES = ("known", "partial", "unknown")
 _FIELDS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "other_tokens")
@@ -32,7 +28,8 @@ _CANONICAL = {name:name for name in _FIELDS}
 _METADATA = {"model", "cost", "cost_estimate_usd", "reasoning", "reasoning_output_tokens", "cacheWrite1h", "totalTokens"}
 
 
-def normalize(entry, engine: str = "unknown") -> dict:
+def normalize(entry, engine: str = "unknown", *,
+              unknown_keys: int = Usage.unknown_keys) -> dict:
     found = dict.fromkeys(_FIELDS, 0)
     if not isinstance(entry, dict):
         return {**found, "unrecognized_keys": [], "unknown_shape": True}
@@ -50,11 +47,12 @@ def normalize(entry, engine: str = "unknown") -> dict:
                 recognized = True
         elif key not in _METADATA:
             unknown.append(str(key))
-    return {**found, "unrecognized_keys": sorted(set(unknown))[:MAX_UNKNOWN_KEYS],
+    return {**found, "unrecognized_keys": sorted(set(unknown))[:unknown_keys],
             "unknown_shape": invalid or not recognized}
 
 
-def attempt_usage(observations: list, engine: str | None) -> dict:
+def attempt_usage(observations: list, engine: str | None, *,
+                  unknown_keys: int = Usage.unknown_keys) -> dict:
     """Strict attempt-only totals: omitted/invalid fields stay null, not zero.
 
     Unlike historical dashboard normalization, a total is known only when
@@ -82,13 +80,13 @@ def attempt_usage(observations: list, engine: str | None) -> dict:
     for entry in observations:
         if isinstance(entry, dict):
             unknown.update(key[:256] for key in entry if key not in fields and key not in _METADATA)
-            unknown = set(sorted(unknown)[:MAX_UNKNOWN_KEYS])
+            unknown = set(sorted(unknown)[:unknown_keys])
     known = sum(value is not None for value in totals.values())
     return {**totals, "observations": len(observations),
             "status": "known" if known == len(_FIELDS) else "partial" if known else "unknown",
             "unknown_reason": ("no_runtime_usage" if not observations else
                                "missing_or_unrecognized_fields" if known < len(_FIELDS) else None),
-            "unrecognized_keys": sorted(unknown)[:MAX_UNKNOWN_KEYS]}
+            "unrecognized_keys": sorted(unknown)[:unknown_keys]}
 
 
 def prompt_input_tokens(engine, input_tokens, cache_read_tokens, cache_write_tokens):
@@ -187,12 +185,12 @@ def _affinity_row(run_id: str, attempt: dict):
             "cache_read_share_of_input": cache_read_share(prompt_input, cache_read)}
 
 
-def _collect_cache_affinity(candidates) -> dict:
+def _collect_cache_affinity(candidates, policy: Usage) -> dict:
     """Recent shadow view over dispatch-attempts.json; read-only, bounded."""
     cap = _dispatch_max_bytes()
     rows: list = []
     skipped = 0
-    run_window = candidates[:min(MAX_RUNS_SCANNED, MAX_CACHE_AFFINITY_RUNS)]
+    run_window = candidates[:min(policy.runs_scanned, policy.cache_affinity_runs)]
     for run_dir in run_window:
         target = run_dir / "dispatch-attempts.json"
         try:
@@ -221,8 +219,8 @@ def _collect_cache_affinity(candidates) -> dict:
         except (OSError, ValueError, TypeError, AttributeError, MizuError):
             skipped += 1
     total = len(rows)
-    return {"attempts": rows[:MAX_CACHE_AFFINITY_ROWS], "total": total,
-            "truncated": total > MAX_CACHE_AFFINITY_ROWS, "skipped_records": skipped,
+    return {"attempts": rows[:policy.cache_affinity_rows], "total": total,
+            "truncated": total > policy.cache_affinity_rows, "skipped_records": skipped,
             "runs_scanned": len(run_window), "runs_truncated": len(candidates) > len(run_window)}
 
 def record_time(value) -> float:
@@ -278,14 +276,15 @@ def usage_views(model):
 
 
 def summarize(project) -> dict:
+    policy = project.config.usage
     tz = project.config.tzinfo
-    candidates = heapq.nlargest(MAX_RUNS_SCANNED + 1, (p for p in (project.root / "runs").glob("*")
+    candidates = heapq.nlargest(policy.runs_scanned + 1, (p for p in (project.root / "runs").glob("*")
                                 if p.is_dir() and not p.is_symlink()), key=lambda p: (_mtime(p), p.name))
-    truncated = len(candidates) > MAX_RUNS_SCANNED
+    truncated = len(candidates) > policy.runs_scanned
     groups, entries = {}, []
     scanned = skipped = unknown_shapes = entry_count = 0
     run_count = unknown_usage_runs = unknown_request_runs = 0
-    for run_dir in candidates[:MAX_RUNS_SCANNED]:
+    for run_dir in candidates[:policy.runs_scanned]:
         jobs = []
         canonical_found = False
         for name in ("result.json", "consultation.json", "error.json"):
@@ -314,7 +313,10 @@ def summarize(project) -> dict:
                     usages = ([item.get("usage") if isinstance(item, dict) else item for item in observations]
                               if isinstance(observations, list) else source.get("usage"))
                     known = isinstance(usages, list) and bool(usages) and source.get("usage_known", True)
-                    unknown_usage_runs += not (known and all(not normalize(item, str(source.get("engine", "unknown")))["unknown_shape"] for item in usages))
+                    unknown_usage_runs += not (known and all(
+                        not normalize(item, str(source.get("engine", "unknown")),
+                                      unknown_keys=policy.unknown_keys)["unknown_shape"]
+                        for item in usages))
                     jobs.extend((run_dir.name, record, view) for view in usage_views(record["model"]))
                 else:
                     continue
@@ -346,7 +348,8 @@ def summarize(project) -> dict:
             group["requests"] += requests
             group["request_units"][str(unit)] = group["request_units"].get(str(unit), 0) + requests
             usages = model.get("usage")
-            parts = [normalize(item, engine) for item in usages] if isinstance(usages, list) else []
+            parts = ([normalize(item, engine, unknown_keys=policy.unknown_keys)
+                      for item in usages] if isinstance(usages, list) else [])
             known = model.get("admission_only", False) or (bool(parts) and model.get("usage_known", True) and not any(p["unknown_shape"] for p in parts))
             entry["usage_known"] = bool(known)
             if not known:
@@ -355,7 +358,8 @@ def summarize(project) -> dict:
                 for field in _FIELDS:
                     group[field] += part[field]
                     entry[field] += part[field]
-                group["unrecognized_keys"] = sorted(set(group["unrecognized_keys"] + part["unrecognized_keys"]))[:MAX_UNKNOWN_KEYS]
+                group["unrecognized_keys"] = sorted(
+                    set(group["unrecognized_keys"] + part["unrecognized_keys"]))[:policy.unknown_keys]
                 if part["unknown_shape"]:
                     group["unknown_shapes"] += 1
                     entry["unknown_shapes"] += 1
@@ -369,7 +373,7 @@ def summarize(project) -> dict:
             entry_count += 1
             key = (record_time(entry.get("finished_at")), entry["run"])
             value = (*key, entry_count, entry)
-            if len(entries) < MAX_RECENT_ENTRIES:
+            if len(entries) < policy.recent_entries:
                 heapq.heappush(entries, value)
             elif key > entries[0][:2]:
                 heapq.heapreplace(entries, value)
@@ -377,9 +381,9 @@ def summarize(project) -> dict:
     ordered = sorted(groups.values(), key=lambda g: (g["day"], g["provider"], g["model"]))
     totals = {field: sum(g[field] for g in ordered) for field in ("runs", "requests", *_FIELDS, "unknown_usage_runs", "unknown_request_runs")}
     totals.update(runs=run_count, unknown_usage_runs=unknown_usage_runs, unknown_request_runs=unknown_request_runs)
-    affinity = _collect_cache_affinity(candidates)
+    affinity = _collect_cache_affinity(candidates, policy)
     return {"project": project.name, "groups": ordered, "totals": totals,
-            "recent_entries": recent, "entries_truncated": entry_count > MAX_RECENT_ENTRIES,
+            "recent_entries": recent, "entries_truncated": entry_count > policy.recent_entries,
             "scanned_records": scanned, "skipped_records": skipped, "unknown_shapes": unknown_shapes,
             "truncated": truncated, "cache_affinity": affinity,
             "note": "Provider-reported amounts; cached fields may be subsets of input. Not a bill."}
