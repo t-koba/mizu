@@ -109,10 +109,13 @@ def require_host():
         raise RuntimeError('requires non-root Ubuntu 24.04 trusted CI user')
     if not (CGROOT / 'cgroup.controllers').read_text().strip():
         raise RuntimeError('requires cgroup v2 controllers')
+    # cgroup v2 is checked from the kernel's controllers file above. Keep the
+    # Podman query to HostInfo fields present in supported versions; some
+    # Podman releases do not expose Host.CgroupVersion in their template.
     info = command('podman', 'info', '--format',
-                   '{{.Host.Security.Rootless}} {{.Host.CgroupVersion}} {{.Host.CgroupManager}}',
+                   '{{.Host.Security.Rootless}} {{.Host.CgroupManager}}',
                    diagnostic_bytes=COMMAND_DIAGNOSTIC_BYTES_MAX)
-    if info.stdout.strip() != 'true v2 systemd':
+    if info.stdout.strip() != 'true systemd':
         raise RuntimeError('requires rootless Podman with systemd/cgroup v2')
 
 
@@ -260,6 +263,24 @@ def live(path):
 
 
 class RecoveryReservationTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == 'posix', 'host preflight is POSIX-only')
+    def test_host_preflight_uses_supported_podman_template_fields(self):
+        module = sys.modules[__name__]
+        with tempfile.TemporaryDirectory() as temporary:
+            cgroup_root = Path(temporary)
+            (cgroup_root / 'cgroup.controllers').write_text('cpu memory\n')
+            with (mock.patch('platform.freedesktop_os_release', return_value={
+                      'ID': 'ubuntu', 'VERSION_ID': '24.04'}),
+                  mock.patch.object(os, 'geteuid', return_value=1000),
+                  mock.patch.object(module, 'CGROOT', cgroup_root),
+                  mock.patch.object(module, 'command', return_value=mock.Mock(
+                      stdout='true systemd\n')) as invoke):
+                require_host()
+        invoke.assert_called_once_with(
+            'podman', 'info', '--format',
+            '{{.Host.Security.Rootless}} {{.Host.CgroupManager}}',
+            diagnostic_bytes=COMMAND_DIAGNOSTIC_BYTES_MAX)
+
     def test_host_preflight_diagnostic_is_bounded_and_redacts_user_path(self):
         if str(ROOT / 'src') not in sys.path:
             sys.path.insert(0, str(ROOT / 'src'))
