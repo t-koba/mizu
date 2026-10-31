@@ -189,7 +189,7 @@ def _collect_cache_affinity(candidates, policy: Usage) -> dict:
     """Recent shadow view over dispatch-attempts.json; read-only, bounded."""
     cap = _dispatch_max_bytes()
     rows: list = []
-    skipped = 0
+    skipped = total = 0
     run_window = candidates[:min(policy.runs_scanned, policy.cache_affinity_runs)]
     for run_dir in run_window:
         target = run_dir / "dispatch-attempts.json"
@@ -215,11 +215,12 @@ def _collect_cache_affinity(candidates, policy: Usage) -> dict:
                 index = attempt.get("execution_attempt")
                 if type(index) is not int or index < 0:
                     continue
-                rows.append(_affinity_row(run_dir.name, attempt))
+                total += 1
+                if len(rows) < policy.cache_affinity_rows:
+                    rows.append(_affinity_row(run_dir.name, attempt))
         except (OSError, ValueError, TypeError, AttributeError, MizuError):
             skipped += 1
-    total = len(rows)
-    return {"attempts": rows[:policy.cache_affinity_rows], "total": total,
+    return {"attempts": rows, "total": total,
             "truncated": total > policy.cache_affinity_rows, "skipped_records": skipped,
             "runs_scanned": len(run_window), "runs_truncated": len(candidates) > len(run_window)}
 

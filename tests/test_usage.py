@@ -2,10 +2,12 @@ import dataclasses
 import hashlib
 import json
 from pathlib import Path
+from unittest.mock import patch
 from support import Fixture
 from mizu.cli import execute, parser
 from mizu.config import Usage, load
 from mizu.fs import mkdir, write_json
+from mizu import usage
 from mizu.usage import attempt_usage, normalize, summarize
 
 
@@ -49,6 +51,25 @@ class UsageTests(Fixture):
         self.assertEqual(exact["groups"][0]["unrecognized_keys"], [])
         self.assertEqual(exact["totals"], default["totals"])
         self.assertEqual(exact["unknown_shapes"], default["unknown_shapes"])
+
+    def test_run_detail_window_can_exceed_old_default(self):
+        self.project.config = dataclasses.replace(self.config, usage=Usage(
+            runs_scanned=5001, cache_affinity_runs=0))
+        # Virtual empty runs exercise directory selection and detail probes without
+        # creating thousands of directories or parsing thousands of report files.
+        candidates = [self.project.root / "runs" / f"virtual-{n:05d}" for n in range(5002)]
+        with patch.object(Path, "glob", return_value=iter(candidates)), \
+                patch.object(Path, "is_dir", return_value=True), \
+                patch.object(Path, "is_symlink", return_value=False), \
+                patch.object(Path, "is_file", autospec=True, return_value=False) as details, \
+                patch("mizu.usage._mtime", return_value=0) as mtime:
+            facts = summarize(self.project)
+        self.assertEqual(mtime.call_count, 5002)  # Selection enumerates all runs.
+        probed = [call.args[0] for call in details.call_args_list]
+        self.assertEqual(probed, [run / name for run in reversed(candidates[1:])
+                                  for name in ("result.json", "consultation.json", "error.json")])
+        self.assertTrue(facts["truncated"])
+        self.assertEqual(facts["scanned_records"], 0)  # No detail files exist.
 
     def test_unknown_key_helper_defaults_and_zero(self):
         entry = {"input_tokens": 1, **{f"key-{n:02d}": n for n in range(25)}}
@@ -384,25 +405,29 @@ class CacheAffinityTests(Fixture):
 
     def test_bounded_truncated_most_recent_first(self):
         import os
-        base = 1000.0
         for n in range(3):
-            name = f"run-{n:032d}"
-            run_dir = self.write_usage_run(name)
+            run_dir = self.write_usage_run(f"run-{n}")
             attempts = [self.attempt(i, input_tokens=10, cache_read=1) for i in range(100)]
-            write_json(run_dir / "dispatch-attempts.json",
-                       {"schema": 1, "dropped_attempts": 0, "attempts": attempts})
-            stamp = base + n
-            os.utime(run_dir, (stamp, stamp))
-            os.utime(run_dir / "dispatch-attempts.json", (stamp, stamp))
-        facts = summarize(self.project)
-        affinity = facts["cache_affinity"]
-        self.assertEqual(affinity["total"], 300)
-        self.assertTrue(affinity["truncated"])
-        self.assertEqual(len(affinity["attempts"]), 200)
-        self.assertEqual(affinity["attempts"][0]["run"], "run-00000000000000000000000000000002")
-        self.assertEqual(affinity["attempts"][0]["execution_attempt"], 99)
-        self.assertEqual(affinity["runs_scanned"], 3)
-        self.assertFalse(affinity["runs_truncated"])
+            attempts.extend([None, {}, {"execution_attempt": True}, {"execution_attempt": -1}])
+            write_json(run_dir / "dispatch-attempts.json", {"attempts": attempts})
+            os.utime(run_dir, (1000 + n, 1000 + n))
+        broken = self.write_usage_run("broken")
+        (broken / "dispatch-attempts.json").write_text("{broken")
+        os.utime(broken, (1003, 1003))
+        expected = [(f"run-{n}", i) for n in reversed(range(3)) for i in reversed(range(100))]
+        for limit in (0, 2, 200, 300, 301):
+            with self.subTest(limit=limit):
+                self.project.config = dataclasses.replace(self.config, usage=Usage(cache_affinity_rows=limit))
+                with patch("mizu.usage._affinity_row", wraps=usage._affinity_row) as convert:
+                    affinity = summarize(self.project)["cache_affinity"]
+                self.assertEqual(affinity["total"], 300)
+                self.assertEqual(affinity["truncated"], limit < 300)
+                self.assertEqual(convert.call_count, min(limit, 300))
+                self.assertEqual([(row["run"], row["execution_attempt"]) for row in affinity["attempts"]],
+                                 expected[:limit])
+                self.assertEqual(affinity["skipped_records"], 1)
+                self.assertEqual(affinity["runs_scanned"], 4)
+                self.assertFalse(affinity["runs_truncated"])
 
     def test_run_window_is_bounded_and_marked(self):
         import os

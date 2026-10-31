@@ -12,6 +12,18 @@ timezone = "UTC"
 consult_role = "consult"
 exclude = [".git", ".pi", ".env", ".env.*", ".venv", "node_modules", "__pycache__", "*.pyc", "*.pyo", ".pytest_cache"]
 
+# Read-only report detail/sample budgets; defaults shown, not hard maxima.
+# Strict integers up to the TOML/Python collection-index range (not resource budgets).
+# runs_scanned leaves one index for its truncation-detection candidate.
+# runs_scanned limits detail reads, not enumeration of all run directories/mtimes.
+# These settings do not impose a whole-report byte cap.
+# [usage]
+# runs_scanned = 5000        # Minimum 1; newest-first physical-run detail window.
+# recent_entries = 200      # Minimum 1; retained summary entries.
+# cache_affinity_runs = 200 # Minimum 0; also limited by runs_scanned; zero disables scan.
+# cache_affinity_rows = 200 # Minimum 0; retained rows; zero still counts exact total.
+# unknown_keys = 20         # Minimum 0; zero hides key samples, not unknown-shape counts.
+
 # Optional regenerable workspace caches only. Empty roots disable cleanup.
 # Relative literal directory roots must be untracked and snapshot-excluded;
 # private/host state, links, and overlapping roots are refused.

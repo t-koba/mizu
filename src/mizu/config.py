@@ -5,6 +5,7 @@ import dataclasses
 import datetime as dt
 import os
 import re
+import sys
 import tomllib
 import unicodedata
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -26,6 +27,12 @@ ENGINES = ("pi", "pi-durable", "codex", "claude")
 #: `submit_insight` fixes source to the role name, so these are refused
 #: at config load to keep the operator channel unforgeable.
 RESERVED_ROLE_NAMES = frozenset({"operator", "vcs", "editor"})
+#: TOML signed-64-bit integer representation ceiling, not a resource budget.
+TOML_INTEGER_MAX = (1 << 63) - 1
+#: Usage counts flow through Python collection indexes; reserve one index for
+#: the extra candidate used to detect a truncated run window.
+MAX_USAGE_POLICY_COUNT = min(TOML_INTEGER_MAX, sys.maxsize)
+MAX_USAGE_RUNS_SCANNED = MAX_USAGE_POLICY_COUNT - 1
 MAX_RESOURCES = 64
 #: Fixed bound for explicitly added CI wake branches beyond `ci_branch`.
 MAX_CI_WAKE_EXTRA_BRANCHES = 64
@@ -881,7 +888,6 @@ def role_policy_bytes(role: "Role") -> bytes:
 
 @dataclasses.dataclass(frozen=True)
 class Usage:
-    # These defaults are also the current maxima; configuration may only lower them.
     runs_scanned: int = 5000
     recent_entries: int = 200
     cache_affinity_runs: int = 200
@@ -893,9 +899,10 @@ def usage_policy(raw: dict) -> Usage:
     fields = dataclasses.fields(Usage)
     keys(raw, {field.name for field in fields}, "usage")
     return Usage(**{
-        field.name: number(raw.get(field.name, field.default), f"usage.{field.name}",
-                           1 if field.name in ("runs_scanned", "recent_entries") else 0,
-                           field.default)
+        field.name: number(
+            raw.get(field.name, field.default), f"usage.{field.name}",
+            1 if field.name in ("runs_scanned", "recent_entries") else 0,
+            MAX_USAGE_RUNS_SCANNED if field.name == "runs_scanned" else MAX_USAGE_POLICY_COUNT)
         for field in fields
     })
 
