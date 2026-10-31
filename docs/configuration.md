@@ -1801,6 +1801,18 @@ exact `code_digest`, `branch` or `published_sha` filters and returns one bounded
 `external-untrusted`. Run-local `vcs-read/` and `vcs-publish/` evidence paths
 are named in tool responses.
 
+Log reads require `branch` and preserve the existing optional `sha` behavior.
+When `check` is supplied, the request also requires an exact 40/64-hex commit
+SHA and selects one exact CI check name:
+1–256 characters, with the same C0/DEL/C1/bidi control rejection as status
+check names. It is accepted only for `log`, passed unchanged to the trusted
+adapter, and rejected on every other operation. Omitting `check` preserves
+the prior full-log request shape, with or without the optional SHA. Both forms
+retain the adapter's log response
+shape with `trust: external-untrusted`, the same timeout/output budgets, and
+read-only grants; invalid arguments fail before invocation. This adds no CI
+dispatch or retry behavior and no new authority to adapter observations.
+
 The `vcs_publish` tool input remains `{"op", "branch"}`. After checking the
 recorded human approval against the captured `code_digest`, Mizu reads the
 source commit from the local workspace's Git `HEAD` (not a branch-status

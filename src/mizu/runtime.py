@@ -1301,6 +1301,8 @@ class Context:
         # The publications op lists the project's recorded receipts from
         # local durable evidence and
         # contacts no provider.
+        if "check" in args and args["op"] != "log":
+            raise Denied("check is only valid for log reads")
         if args["op"] == "publications":
             # Local evidence listing: no adapter, no network, no workspace.
             return self._op_vcs_read_publications(args)
@@ -1339,6 +1341,8 @@ class Context:
             params["scope"] = args["scope"]
         if "base_sha" in args:
             params["base_sha"] = args["base_sha"]
+        if "check" in args:
+            params["check"] = args["check"]
         if "artifact" in args:
             params["artifact"] = args["artifact"]
         if args["op"] == "artifact":

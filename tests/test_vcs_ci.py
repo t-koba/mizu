@@ -3,6 +3,7 @@ import dataclasses
 import json
 import sys
 import unittest
+from unittest.mock import patch
 
 from support import Fixture
 from mizu import vcs
@@ -21,6 +22,91 @@ def adapter_settings(code, timeout=5, maximum=524288):
 def status_code(payload):
     return ("import sys,json; req=json.load(sys.stdin); "
             "print(json.dumps(%s))" % json.dumps(payload))
+
+
+class CiLogSelectorTests(Fixture):
+    def setUp(self):
+        super().setUp()
+        # Synthetic request capture, not a provider/CI integration test.
+        code = ("import sys,json; req=json.load(sys.stdin); "
+                "print(json.dumps({'request': req, 'log': 'bounded log', "
+                "'trust': 'adapter-supplied'}))")
+        role = self.config.roles["worker"]
+        role = dataclasses.replace(role, capabilities=(*role.capabilities, "vcs_read"))
+        self.config = dataclasses.replace(
+            self.config, vcs=adapter_settings(code),
+            roles={**self.config.roles, "worker": role})
+        self.ctx = self.context()
+
+    def test_exact_selector_and_omission_preserve_request_and_response(self):
+        for sha in (SHA_A, "b" * 64):
+            for selector in ({}, {"check": "x"}, {"check": "é" * 256},
+                             {"check": "Offline checks / core (macos-latest, 3.13)"}):
+                args = {"op": "log", "branch": "main", "sha": sha, **selector}
+                with self.subTest(args=args):
+                    out = self.ctx.handle("vcs_read", args)
+                    self.assertEqual(out["result"], {
+                        "request": args, "log": "bounded log",
+                        "trust": "external-untrusted"})
+
+    def test_invalid_selector_matches_status_name_validation_without_invocation(self):
+        invalid = (None, False, 1, [], {}, "", "x" * 257, "ci\r", "ci\n",
+                   "ci\x00", "ci\t", "ci\x1b[2K", "ci\x7f", "ci\x85",
+                   "ci\u202e", "ci\u200b")
+        with patch("mizu.vcs.invoke") as invoke:
+            for check in invalid:
+                with self.subTest(check=check):
+                    args = {"op": "log", "branch": "main", "sha": SHA_A, "check": check}
+                    with self.assertRaises(Denied):
+                        self.ctx.handle("vcs_read", args)
+                    with self.assertRaises(Denied):
+                        vcs.read_via(self.config.vcs, "log", args)
+                    with self.assertRaises(Denied):
+                        vcs.parse_status_checks({"checks": [
+                            {"check": check, "state": "success", "sha": SHA_A}]})
+            invoke.assert_not_called()
+
+    def test_selector_rejected_on_every_other_read_op(self):
+        from mizu.protocol import DEFINITIONS
+        ops = DEFINITIONS["vcs_read"][1]["properties"]["op"]["enum"]
+        with patch("mizu.vcs.invoke") as invoke:
+            for op in ops:
+                if op == "log":
+                    continue
+                with self.subTest(op=op):
+                    args = {"op": op, "branch": "main", "sha": SHA_A, "check": "unit"}
+                    with self.assertRaisesRegex(Denied, "check is only valid for log"):
+                        self.ctx.handle("vcs_read", args)
+                    with self.assertRaises(Denied):
+                        vcs.read_via(self.config.vcs, op, args)
+            invoke.assert_not_called()
+
+    def test_log_preserves_optional_sha_but_selector_requires_exact_sha(self):
+        invalid_branches = [{"sha": SHA_A}, {"branch": "../main", "sha": SHA_A},
+                            {"branch": "", "sha": SHA_A}]
+        invalid_shas = ("", "HEAD", "a" * 39, "a" * 41, "z" * 40, 1)
+        with patch("mizu.vcs.invoke") as invoke:
+            for params in invalid_branches:
+                for selector in ({}, {"check": "unit"}):
+                    args = {"op": "log", **params, **selector}
+                    with self.subTest(args=args), self.assertRaises(Denied):
+                        self.ctx.handle("vcs_read", args)
+                    with self.assertRaises(Denied):
+                        vcs.read_via(self.config.vcs, "log", args)
+            for sha in invalid_shas:
+                args = {"op": "log", "branch": "main", "sha": sha}
+                with self.subTest(args=args), self.assertRaises(Denied):
+                    self.ctx.handle("vcs_read", args)
+                with self.assertRaises(Denied):
+                    vcs.read_via(self.config.vcs, "log", args)
+            with self.assertRaises(Denied):
+                self.ctx.handle("vcs_read", {"op": "log", "branch": "main", "check": "unit"})
+            with self.assertRaises(Denied):
+                vcs.read_via(self.config.vcs, "log", {"branch": "main", "check": "unit"})
+            invoke.assert_not_called()
+        args = {"op": "log", "branch": "main"}
+        self.assertEqual(self.ctx.handle("vcs_read", args)["result"], {
+            "request": args, "log": "bounded log", "trust": "external-untrusted"})
 
 
 class CiStatusTests(Fixture):

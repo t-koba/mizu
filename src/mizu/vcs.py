@@ -753,6 +753,14 @@ def parse_acquired(data: dict, *, scope: str, base_sha=None) -> dict:
             "digest": content_digest, "content": content}
 
 
+def check_ci_name(check) -> str:
+    """Validate a CI check name: 1-256 characters without terminal controls."""
+    if not isinstance(check, str) or not check or len(check) > 256:
+        raise Denied("Invalid CI check name")
+    _reject_terminal_controls(check, "Invalid CI check name")
+    return check
+
+
 def read_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
              preserve_status_rows: bool = False) -> dict:
     """Invoke a read-only adapter operation (``status``/``log``/``comments``/``acquire``/``artifacts``/``artifact``).
@@ -760,7 +768,10 @@ def read_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
     Schema: ``params`` must include ``branch`` for addressed reads
     (``status``/``log``/``comments``/``artifacts``/``artifact``);
     optional ``sha`` passes through when given, and status rows for other
-    SHAs are filtered out by default. Host-only ``preserve_status_rows`` keeps
+    SHAs are filtered out by default. Log reads retain their existing optional
+    SHA; an exact ``check`` selector per ``check_ci_name`` requires that SHA.
+    Omitting ``check`` retains the existing full-log request and response.
+    Host-only ``preserve_status_rows`` keeps
     mismatched rows for strict declared-set wait evaluation (not a tool argument).
     ``proposals`` enumerates
     with an optional ``branch`` filter. ``acquire`` takes ``id``
@@ -787,6 +798,8 @@ def read_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
         raise Denied("vcs_read cannot publish; unknown or mutating operation")
     if not isinstance(params, dict):
         raise Denied("Invalid VCS read parameters")
+    if "check" in params and op != "log":
+        raise Denied("check is only valid for log reads")
     if op == "acquire":
         # Exact-revision acquisition: the adapter materializes the
         # (id, sha, scope) content named here and echoes the bound
@@ -886,6 +899,10 @@ def read_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
         if not isinstance(sha, str) or not _SHA.fullmatch(sha):
             raise Denied("Invalid VCS sha filter")
         request["sha"] = sha
+    if op == "log" and "check" in params:
+        if sha is None:
+            raise Denied("Log check selection needs an exact VCS sha")
+        request["check"] = check_ci_name(params["check"])
     expected = None
     if op == "status" and "publication_id" in params:
         # This is a host-only signal to validate an optional lineage response;
@@ -998,13 +1015,10 @@ def parse_status_checks(data: dict) -> list:
                                                        "started_at", "completed_at", "job_seconds",
                                                        "workflow_run_id", "job_id", "run_attempt", "repository"}:
             raise Denied("Invalid VCS status check entry")
-        check = entry.get("check")
+        check = check_ci_name(entry.get("check"))
         state = entry.get("state")
         sha = entry.get("sha")
         url = entry.get("url", "")
-        if (not isinstance(check, str) or not check or len(check) > 256):
-            raise Denied("Invalid CI check name")
-        _reject_terminal_controls(check, "Invalid CI check name")
         if (not isinstance(state, str) or not state or len(state) > 64):
             raise Denied("Invalid CI check state")
         _reject_terminal_controls(state, "Invalid CI check state")
