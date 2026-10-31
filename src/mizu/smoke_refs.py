@@ -2,9 +2,12 @@
 
 Record writes acquire the shared lock before the project lock: even unpinned
 inbox writes create temporaries that the strict retention scan must not see.
-Read-only unresolved-count and pending-insight scans use the project lock alone.
-IDs are scoped by their containing project/owner record; Insight entries also
-store the exact revision. History keeps IDs, but only current live owners pin.
+The smoke publisher also moves a whole project root while holding the shared
+lock; the project lock lives inside that movable root and cannot replace the
+shared boundary safely. Read-only unresolved-count and pending-insight scans
+use the project lock alone. IDs are scoped by their containing project/owner
+record; Insight entries also store the exact revision. History keeps IDs, but
+only current live owners pin.
 """
 from __future__ import annotations
 
