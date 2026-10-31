@@ -124,6 +124,14 @@ class InstallCITests(Fixture):
         with self.assertRaises(Denied):
             self.stage()
 
+    @unittest.skipUnless(os.name == 'posix', 'requires POSIX symlink support')
+    def test_existing_release_verification_allows_symlinked_prefix_ancestor(self):
+        release = self.stage()
+        alias = self.root / 'prefix-alias'
+        alias.symlink_to(release.parent.parent, target_is_directory=True)
+        via_alias = alias / release.parent.name / release.name
+        INSTALLER.verify_release(via_alias)
+
     def test_existing_release_source_tampering_is_rejected_before_ci_reuse(self):
         release = self.stage()
         probe = release / 'src/probe.py'
