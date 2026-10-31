@@ -147,7 +147,7 @@ class ChildAuthorityTests(Fixture):
         self.assertNotEqual(baseline, self.identity(config=dataclasses.replace(self.config, exclude=('ignored',))))
         for field, value in (('data', self.root / 'other-data'),
                              ('file', self.root / 'other-config.toml'),
-                             ('timezone', 'Asia/Tokyo')):
+                             ('timezone', 'local')):
             self.assertNotEqual(baseline, self.identity(config=dataclasses.replace(self.config, **{field: value})))
         cache = dataclasses.replace(self.config.workspace_cache, roots=('build',))
         self.assertNotEqual(baseline, self.identity(config=dataclasses.replace(self.config, workspace_cache=cache)))
