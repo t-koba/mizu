@@ -11,12 +11,14 @@ import datetime as dt
 import heapq
 import re
 
-from .config import Usage
+from .config import DispatchEvidence, Usage
 from .errors import MizuError
 from .fs import read_json
 
 _SESSION_KEY_RE = re.compile(r"[0-9a-f]{64}\Z")
 _CACHE_STATUSES = ("known", "partial", "unknown")
+#: Fixed safety ceiling for stored runtime usage-key labels; not a sample count.
+MAX_ATTEMPT_USAGE_KEY_CHARS = 256
 _FIELDS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "other_tokens")
 _KEYS = {
     "pi": {"input": "input_tokens", "output": "output_tokens", "cacheRead": "cache_read_tokens", "cacheWrite": "cache_write_tokens"},
@@ -52,7 +54,7 @@ def normalize(entry, engine: str = "unknown", *,
 
 
 def attempt_usage(observations: list, engine: str | None, *,
-                  unknown_keys: int = Usage.unknown_keys) -> dict:
+                  unknown_keys: int = DispatchEvidence.unknown_keys) -> dict:
     """Strict attempt-only totals: omitted/invalid fields stay null, not zero.
 
     Unlike historical dashboard normalization, a total is known only when
@@ -79,7 +81,8 @@ def attempt_usage(observations: list, engine: str | None, *,
                 totals[field] = total
     for entry in observations:
         if isinstance(entry, dict):
-            unknown.update(key[:256] for key in entry if key not in fields and key not in _METADATA)
+            unknown.update(key[:MAX_ATTEMPT_USAGE_KEY_CHARS] for key in entry
+                           if key not in fields and key not in _METADATA)
             unknown = set(sorted(unknown)[:unknown_keys])
     known = sum(value is not None for value in totals.values())
     return {**totals, "observations": len(observations),
@@ -118,16 +121,6 @@ def cache_read_share(prompt_input, cache_read_tokens):
     if prompt_input <= 0 or cache_read_tokens < 0 or cache_read_tokens > prompt_input:
         return None
     return cache_read_tokens / prompt_input
-
-
-def _dispatch_max_bytes() -> int:
-    try:
-        from .dispatch_evidence import MAX_BYTES as cap
-        if type(cap) is int and cap > 0:
-            return cap
-    except Exception:
-        pass
-    return 256 * 1024
 
 
 def _affinity_row(run_id: str, attempt: dict):
@@ -185,9 +178,9 @@ def _affinity_row(run_id: str, attempt: dict):
             "cache_read_share_of_input": cache_read_share(prompt_input, cache_read)}
 
 
-def _collect_cache_affinity(candidates, policy: Usage) -> dict:
+def _collect_cache_affinity(candidates, policy: Usage, dispatch: DispatchEvidence) -> dict:
     """Recent shadow view over dispatch-attempts.json; read-only, bounded."""
-    cap = _dispatch_max_bytes()
+    attempt_truncated = False
     rows: list = []
     skipped = total = 0
     run_window = candidates[:min(policy.runs_scanned, policy.cache_affinity_runs)]
@@ -199,7 +192,7 @@ def _collect_cache_affinity(candidates, policy: Usage) -> dict:
                 continue
             if not target.is_file():
                 continue
-            record = read_json(target, max_bytes=cap)
+            record = read_json(target, max_bytes=dispatch.max_bytes)
             if not isinstance(record, dict):
                 skipped += 1
                 continue
@@ -209,7 +202,8 @@ def _collect_cache_affinity(candidates, policy: Usage) -> dict:
                 continue
             # File order is oldest-first; newest attempt first preserves
             # most-recent-first ordering without extra timestamp reads.
-            for attempt in reversed(attempts):
+            attempt_truncated |= len(attempts) > dispatch.max_attempts
+            for attempt in reversed(attempts[-dispatch.max_attempts:]):
                 if not isinstance(attempt, dict):
                     continue
                 index = attempt.get("execution_attempt")
@@ -221,7 +215,8 @@ def _collect_cache_affinity(candidates, policy: Usage) -> dict:
         except (OSError, ValueError, TypeError, AttributeError, MizuError):
             skipped += 1
     return {"attempts": rows, "total": total,
-            "truncated": total > policy.cache_affinity_rows, "skipped_records": skipped,
+            "truncated": attempt_truncated or total > policy.cache_affinity_rows,
+            "skipped_records": skipped,
             "runs_scanned": len(run_window), "runs_truncated": len(candidates) > len(run_window)}
 
 def record_time(value) -> float:
@@ -382,7 +377,7 @@ def summarize(project) -> dict:
     ordered = sorted(groups.values(), key=lambda g: (g["day"], g["provider"], g["model"]))
     totals = {field: sum(g[field] for g in ordered) for field in ("runs", "requests", *_FIELDS, "unknown_usage_runs", "unknown_request_runs")}
     totals.update(runs=run_count, unknown_usage_runs=unknown_usage_runs, unknown_request_runs=unknown_request_runs)
-    affinity = _collect_cache_affinity(candidates, policy)
+    affinity = _collect_cache_affinity(candidates, policy, project.config.dispatch_evidence)
     return {"project": project.name, "groups": ordered, "totals": totals,
             "recent_entries": recent, "entries_truncated": entry_count > policy.recent_entries,
             "scanned_records": scanned, "skipped_records": skipped, "unknown_shapes": unknown_shapes,

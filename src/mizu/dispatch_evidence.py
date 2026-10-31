@@ -6,9 +6,7 @@ import time
 from .fs import canonical, now, write_json
 from .usage import attempt_usage
 
-MAX_ATTEMPTS = 64
-MAX_BYTES = 256 * 1024
-MAX_MODELS = 16
+#: Fixed safety ceiling for persisted text labels; not a retention budget.
 MAX_TEXT = 256
 
 
@@ -25,7 +23,7 @@ def _save(context):
     state = context._dispatch_evidence
     # Strict JSON validation before the atomic, fsynced replacement. Retain a
     # tail, not an unbounded journal; an interrupted write leaves the old file.
-    while len(canonical(state)) > MAX_BYTES:
+    while len(canonical(state)) > context.config.dispatch_evidence.max_bytes:
         state["attempts"].pop(0)
         state["dropped_attempts"] += 1
     write_json(context.run_dir / "dispatch-attempts.json", state)
@@ -83,6 +81,7 @@ def selected_session(context, profile, settings, path):
 
 
 def _facts(context, record):
+    policy = context.config.dispatch_evidence
     attempt = record["execution_attempt"]
     # Context.handle records usage/models under this same lock. Snapshot both
     # maps together so a late bridge event cannot mutate a dict during projection.
@@ -91,7 +90,7 @@ def _facts(context, record):
         models_for_attempt = [(dict(value) if isinstance(value, dict) else {})
                               for (index, _), value in context.runtime_models.items()
                               if index == attempt]
-    record["usage"] = attempt_usage(usages, record["engine"])
+    record["usage"] = attempt_usage(usages, record["engine"], unknown_keys=policy.unknown_keys)
     models = set()
     unknown = False
     model_observations = len(models_for_attempt)
@@ -100,8 +99,8 @@ def _facts(context, record):
         unknown |= provider is None or model is None
         models.add((provider, model))
     ordered = sorted(models, key=lambda pair: (pair[0] or "", pair[1] or ""))
-    record["models"] = [{"provider": p, "model": m} for p, m in ordered[:MAX_MODELS]]
-    record["models_truncated"] = len(ordered) > MAX_MODELS
+    record["models"] = [{"provider": p, "model": m} for p, m in ordered[:policy.max_models]]
+    record["models_truncated"] = len(ordered) > policy.max_models
     record["models_unknown"] = unknown or not models or model_observations < len(usages)
 
 
@@ -139,7 +138,7 @@ def execute(context, driver, prompt, **kwargs):
             context._dispatch_evidence = {"schema": 1, "dropped_attempts": 0, "attempts": []}
         state = context._dispatch_evidence
         state["attempts"].append(record)
-        if len(state["attempts"]) > MAX_ATTEMPTS:
+        while len(state["attempts"]) > context.config.dispatch_evidence.max_attempts:
             state["attempts"].pop(0)
             state["dropped_attempts"] += 1
         context._active_dispatch_evidence = record

@@ -21,8 +21,18 @@ exclude = [".git", ".pi", ".env", ".env.*", ".venv", "node_modules", "__pycache_
 # runs_scanned = 5000        # Minimum 1; newest-first physical-run detail window.
 # recent_entries = 200      # Minimum 1; retained summary entries.
 # cache_affinity_runs = 200 # Minimum 0; also limited by runs_scanned; zero disables scan.
-# cache_affinity_rows = 200 # Minimum 0; retained rows; zero still counts exact total.
+# cache_affinity_rows = 200 # Minimum 0; retained rows; total within dispatch record caps.
 # unknown_keys = 20         # Minimum 0; zero hides key samples, not unknown-shape counts.
+
+# Per-run dispatch record retention/samples, shared with both read-only consumers.
+# Counts <= min(9223372036854775807, sys.maxsize); bytes <=
+# min(9223372036854775807, sys.maxsize - 1), representation bounds, not budgets.
+# [dispatch_evidence]
+# max_attempts = 64    # Minimum 1; retain newest attempts.
+# max_bytes = 262144   # Minimum 66; includes JSON envelope/newline; may retain no attempts.
+# max_models = 16      # Minimum 0; omitted pairs mark models_truncated.
+# unknown_keys = 20    # Minimum 0; independent of [usage].unknown_keys.
+# Text labels keep a fixed 256-character safety ceiling, not a configuration knob.
 
 # Host-only usage --cache-evidence diagnostic budgets, independent of [usage].
 # Strict positive integers; counts <= min(9223372036854775807, sys.maxsize),

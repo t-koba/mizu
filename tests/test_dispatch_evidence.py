@@ -4,11 +4,12 @@ from unittest.mock import patch
 
 from support import Fixture, ScriptDriver
 from mizu import dispatch_evidence as evidence
+from mizu.config import DispatchEvidence, MIN_DISPATCH_EVIDENCE_BYTES, Usage
 from mizu.engine_config import effective, session_record, session_generation
 from mizu.errors import DeadlineWrapUp, ModelFailure
 from mizu.fs import read_json, write_json
 from mizu.runtime import Engine
-from mizu.usage import attempt_usage
+from mizu.usage import MAX_ATTEMPT_USAGE_KEY_CHARS, attempt_usage, normalize
 
 
 class DispatchEvidenceTests(Fixture):
@@ -138,23 +139,75 @@ class DispatchEvidenceTests(Fixture):
                 self.assertEqual(session["unknown_reason"], "prompt_profile_mismatch" if mismatch == "profile"
                                  else "prompt_session_mismatch")
 
-    def test_fixed_record_and_byte_bounds(self):
-        ctx = self.context()
+    def test_configured_record_and_byte_bounds(self):
         class Driver:
             def execute(self, *_):
                 return {}
-        for attempt in range(evidence.MAX_ATTEMPTS + 2):
-            ctx.execution_attempt = attempt
-            evidence.execute(ctx, Driver(), "work")
-        state = read_json(ctx.run_dir / "dispatch-attempts.json")
-        self.assertEqual(len(state["attempts"]), evidence.MAX_ATTEMPTS)
-        self.assertEqual(state["dropped_attempts"], 2)
-        self.assertEqual(state["attempts"][0]["execution_attempt"], 2)
-        with patch.object(evidence, "MAX_BYTES", 4096):
+        for count in (64, 2, 66):
+            ctx = self.context()
+            ctx.config = dataclasses.replace(ctx.config, dispatch_evidence=DispatchEvidence(max_attempts=count))
+            for attempt in range(count + 2):
+                ctx.execution_attempt = attempt
+                evidence.execute(ctx, Driver(), "work")
+            target = ctx.run_dir / "dispatch-attempts.json"
+            state = read_json(target)
+            self.assertEqual(len(state["attempts"]), count)
+            self.assertEqual(state["dropped_attempts"], 2)
+            self.assertEqual(state["attempts"][0]["execution_attempt"], 2)
+            ctx.config = dataclasses.replace(ctx.config, dispatch_evidence=DispatchEvidence(
+                max_attempts=count, max_bytes=4096))
             ctx.execution_attempt += 1
             evidence.execute(ctx, Driver(), "work")
-            self.assertLessEqual((ctx.run_dir / "dispatch-attempts.json").stat().st_size, 4096)
-        self.assertEqual(self.records(ctx)[-1]["execution_attempt"], ctx.execution_attempt)
+            state = read_json(target)
+            self.assertLessEqual(target.stat().st_size, 4096)
+            if count > 2:
+                self.assertLess(len(state["attempts"]), count)
+            self.assertEqual(state["attempts"][-1]["execution_attempt"], ctx.execution_attempt)
+            self.assertEqual(len(state["attempts"]) + state["dropped_attempts"], count + 3)
+            # A budget too small for even one attempt still writes a valid envelope.
+            ctx.config = dataclasses.replace(ctx.config, dispatch_evidence=DispatchEvidence(
+                max_bytes=MIN_DISPATCH_EVIDENCE_BYTES))
+            evidence.execute(ctx, Driver(), "work")
+            state = read_json(target)
+            self.assertEqual(state["attempts"], [])
+            self.assertLessEqual(target.stat().st_size, MIN_DISPATCH_EVIDENCE_BYTES)
+            self.assertEqual(state["dropped_attempts"], count + 4)
+
+    def test_model_and_unknown_key_samples_are_dispatch_owned(self):
+        class Driver:
+            def execute(self, *_):
+                return {}
+        for models, keys in ((0, 0), (1, 2), (16, 20), (18, 22)):
+            ctx = self.context()
+            ctx.config = dataclasses.replace(ctx.config, usage=Usage(unknown_keys=1),
+                dispatch_evidence=DispatchEvidence(max_models=models, unknown_keys=keys))
+            ctx.runtime_usage[(0, 0)] = {"input": 5, **{f"key{i:02}": i for i in range(24)}}
+            for i in range(20):
+                ctx.runtime_models[(0, i)] = {"provider": "acme", "model": f"m{i:02}"}
+            evidence.execute(ctx, Driver(), "work")
+            record = self.records(ctx)[0]
+            self.assertEqual(len(record["models"]), models)
+            self.assertEqual(record["models_truncated"], models < 20)
+            self.assertEqual(record["usage"]["unrecognized_keys"], [f"key{i:02}" for i in range(keys)])
+            self.assertEqual(record["usage"]["input_tokens"], 5)
+            self.assertEqual(normalize(ctx.runtime_usage[(0, 0)], "pi",
+                                      unknown_keys=ctx.config.usage.unknown_keys)["unrecognized_keys"], ["key00"])
+        self.assertEqual(evidence.MAX_TEXT, 256)
+        self.assertEqual(evidence._text("m" * 256), "m" * 256)
+        self.assertIsNone(evidence._text("m" * 257))
+
+    def test_unknown_usage_key_text_has_a_fixed_safety_ceiling(self):
+        ctx = self.context()
+        ctx.runtime_usage[(0, 0)] = {"input": 1, "k" * 300: 2}
+
+        class Driver:
+            def execute(self, *_):
+                return {}
+
+        evidence.execute(ctx, Driver(), "work")
+        keys = self.records(ctx)[0]["usage"]["unrecognized_keys"]
+        self.assertEqual(MAX_ATTEMPT_USAGE_KEY_CHARS, 256)
+        self.assertEqual(keys, ["k" * MAX_ATTEMPT_USAGE_KEY_CHARS])
 
     def test_unknown_profile_and_nonfinite_usage_are_safe(self):
         ctx = self.context()

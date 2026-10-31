@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 from support import Fixture
 from mizu.cli import execute, parser
-from mizu.config import Usage, load
+from mizu.config import DispatchEvidence, Usage, load
 from mizu.fs import mkdir, write_json
 from mizu import usage
 from mizu.usage import attempt_usage, normalize, summarize
@@ -403,6 +403,27 @@ class CacheAffinityTests(Fixture):
                     self.assertEqual(affinity["attempts"][0]["run"], "affinity-2")
                     self.assertEqual(affinity["attempts"][0]["execution_attempt"], 1)
 
+    def test_dispatch_policy_controls_affinity_record_bounds(self):
+        run_dir = self.write_usage_run("dispatch-policy")
+        target = run_dir / "dispatch-attempts.json"
+        attempts = [self.attempt(i) for i in range(66)]
+        attempts[0]["ignored_payload"] = "x" * 262144
+        write_json(target, {"schema": 1, "dropped_attempts": 0, "attempts": attempts})
+        size = target.stat().st_size
+        self.assertEqual(summarize(self.project)["cache_affinity"]["skipped_records"], 1)
+        for count in (2, 66):
+            self.project.config = dataclasses.replace(self.config, dispatch_evidence=DispatchEvidence(
+                max_attempts=count, max_bytes=size))
+            affinity = summarize(self.project)["cache_affinity"]
+            self.assertEqual(affinity["total"], count)
+            self.assertEqual([row["execution_attempt"] for row in affinity["attempts"]],
+                             list(reversed(range(66 - count, 66))))
+            self.assertEqual(affinity["truncated"], count < 66)
+            self.assertEqual(affinity["runs_scanned"], 1)
+            self.project.config = dataclasses.replace(self.project.config,
+                dispatch_evidence=DispatchEvidence(max_attempts=count, max_bytes=size - 1))
+            self.assertEqual(summarize(self.project)["cache_affinity"]["skipped_records"], 1)
+
     def test_bounded_truncated_most_recent_first(self):
         import os
         for n in range(3):
@@ -417,7 +438,8 @@ class CacheAffinityTests(Fixture):
         expected = [(f"run-{n}", i) for n in reversed(range(3)) for i in reversed(range(100))]
         for limit in (0, 2, 200, 300, 301):
             with self.subTest(limit=limit):
-                self.project.config = dataclasses.replace(self.config, usage=Usage(cache_affinity_rows=limit))
+                self.project.config = dataclasses.replace(self.config, usage=Usage(cache_affinity_rows=limit),
+                    dispatch_evidence=DispatchEvidence(max_attempts=104))
                 with patch("mizu.usage._affinity_row", wraps=usage._affinity_row) as convert:
                     affinity = summarize(self.project)["cache_affinity"]
                 self.assertEqual(affinity["total"], 300)

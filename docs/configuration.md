@@ -755,20 +755,63 @@ unknown_keys = 20
 | `runs_scanned` | 5000 | 1–`MAX_USAGE_RUNS_SCANNED` | Maximum physical runs whose report records are read after selecting newest-first by mtime/name; selecting still enumerates eligible run directories, and one extra candidate detects `truncated` |
 | `recent_entries` | 200 | 1–`MAX_USAGE_POLICY_COUNT` | Recent summary entries retained by finish time/run identity; `entries_truncated` compares the full selected-entry count |
 | `cache_affinity_runs` | 200 | 0–`MAX_USAGE_POLICY_COUNT` | Dispatch-evidence run window, also bounded by `runs_scanned`; `runs_truncated` compares the candidate list with this window |
-| `cache_affinity_rows` | 200 | 0–`MAX_USAGE_POLICY_COUNT` | Maximum converted/retained newest-first attempt rows; all selected records are still scanned for an exact eligible-attempt `total`, and `truncated` compares that total with this budget |
+| `cache_affinity_rows` | 200 | 0–`MAX_USAGE_POLICY_COUNT` | Maximum converted/retained newest-first attempt rows; selected records are scanned within `[dispatch_evidence].max_attempts` for eligible-attempt `total`; `truncated` marks omitted rows or attempts |
 | `unknown_keys` | 20 | 0–`MAX_USAGE_POLICY_COUNT` | Sorted unique unrecognized-key sample per normalization/group in the summary; zero hides key names without changing token totals or unknown-shape accounting |
 
 The detail-read window does not bound directory enumeration: selection examines
 all eligible run directories and their mtimes, retaining at most `runs_scanned + 1`
-candidates. Per-record read bounds remain unchanged; group totals and the whole
-report have no byte cap from `[usage]`.
+candidates. Dispatch-record byte/attempt bounds come from `[dispatch_evidence]`;
+group totals and the whole report have no byte cap from `[usage]`.
 
 Zero affinity runs disables that history scan; zero affinity rows hides rows but
 still counts attempts in the selected window. Zero does not erase truncation:
 nonempty omitted candidates/rows still set the corresponding flag. These report
 settings do not rewrite evidence or change run retirement or scheduler-evidence
-budgets. Standalone normalization and attempt-evidence helpers retain the usage
-default for unknown keys unless their caller supplies an explicit sample size.
+scan windows. `[usage].unknown_keys` controls summary samples only; the dispatch
+writer passes its own sample size to the attempt-evidence helper. Standalone
+normalization helpers retain the default unless given an explicit sample size.
+
+## Dispatch evidence
+
+The optional top-level `[dispatch_evidence]` owns per-run retention and samples
+in schema-1 `dispatch-attempts.json`. Omitted fields preserve these defaults;
+unknown keys, non-tables and non-integer values (including booleans) are refused.
+
+```toml
+[dispatch_evidence]
+max_attempts = 64
+max_bytes = 262144
+max_models = 16
+unknown_keys = 20
+```
+
+| Key | Default | Range | Meaning |
+|---|---|---|---|
+| `max_attempts` | 64 | 1–`MAX_DISPATCH_EVIDENCE_COUNT` | Retained attempts per physical run; oldest removed first |
+| `max_bytes` | 262144 | 66–`MAX_DISPATCH_EVIDENCE_BYTES` | Canonical JSON bytes per run, including newline; oldest attempts removed until it fits, even if none remain |
+| `max_models` | 16 | 0–`MAX_DISPATCH_EVIDENCE_COUNT` | Sorted unique provider/model pairs per attempt; omitted pairs set `models_truncated` |
+| `unknown_keys` | 20 | 0–`MAX_DISPATCH_EVIDENCE_COUNT` | Sorted unique unknown usage-key sample per attempt; zero hides names, not usage totals/status |
+
+`MAX_DISPATCH_EVIDENCE_COUNT = min(9223372036854775807, sys.maxsize)` reflects
+TOML integers and Python collection indexes. `MAX_DISPATCH_EVIDENCE_BYTES` is
+`min(9223372036854775807, sys.maxsize - 1)`: the safe reader reserves one byte to
+detect file growth. These are representation bounds, not resource budgets.
+The 66-byte minimum fits an empty schema-1 envelope with a signed-64-bit drop
+count. Larger budgets can increase memory, read/write work and retained data.
+
+Both read-only consumers use the project's current byte/attempt caps, including
+for older records: usage/cache-affinity scans the newest bounded tail and marks
+`truncated` when attempts are omitted; scheduler-evidence scans a bounded prefix
+and marks coverage incomplete if the record exceeds the attempt cap. Oversized
+files are skipped/reported, never partially parsed. Their scan windows still
+belong to `[usage]` and `[scheduler_evidence]`; summary unknown-key sampling
+still belongs to `[usage].unknown_keys`. Label length remains a fixed safety
+ceiling of 256 characters (`dispatch_evidence.MAX_TEXT`), not a policy knob:
+invalid/oversized identity labels stay unknown instead of being truncated into
+false matches. Unknown usage-key names use the fixed
+`MAX_ATTEMPT_USAGE_KEY_CHARS = 256` safety ceiling in `usage.py`. This changes no scheduling, admission, schema or retention-day policy.
+Writes remain best-effort, atomic and local; see [operations](operations.md#local-driver-dispatch-measurements)
+for measurement trust and failure semantics.
 
 ## Scheduler evidence diagnostic
 
@@ -794,9 +837,9 @@ scan_seconds = 2
 The maxima are TOML/Python representation bounds as defined above, not resource
 budgets. Raising these values can increase diagnostic work and memory. Reported
 `limits` reflect the configured budgets, with `seconds` still a JSON number
-(default `2.0`). The dispatch-record bounds remain 256 KiB and 64 attempts per
-file; sparse bins still mean fewer than five observations. No retries, telemetry
-writes, scheduling changes or historical-completeness claims result from these
+(default `2.0`). Dispatch-record byte/attempt bounds come from
+`[dispatch_evidence]` (defaults 256 KiB/64); sparse bins still mean fewer than
+five observations. No retries, telemetry writes, scheduling changes or historical-completeness claims result from these
 settings. See [operations](operations.md#bounded-scheduler-cache-evidence-host-only)
 for privacy, coverage and timeout semantics.
 

@@ -18,7 +18,6 @@ import time
 from collections import Counter, defaultdict
 
 from . import platform
-from .dispatch_evidence import MAX_ATTEMPTS, MAX_BYTES
 from .errors import LimitExceeded, MizuError
 from .fs import loads_finite, safe_read
 from .usage import cache_read_share, prompt_input_tokens
@@ -126,6 +125,7 @@ def summarize(project):
     be preempted. Reaching a limit conservatively marks coverage unknown.
     """
     policy = project.config.scheduler_evidence
+    dispatch = project.config.dispatch_evidence
     seconds = float(policy.scan_seconds)
     deadline = time.monotonic() + seconds
     coverage = dict(candidate_entries=0, run_directories=0, files_attempted=0, files_read=0,
@@ -167,7 +167,7 @@ def summarize(project):
             break
         coverage["files_attempted"] += 1
         try:
-            raw = safe_read(project.root, f"runs/{name}/dispatch-attempts.json", MAX_BYTES)
+            raw = safe_read(project.root, f"runs/{name}/dispatch-attempts.json", dispatch.max_bytes)
             if expired():
                 break
             record = loads_finite(raw, object_pairs_hook=_unique_object)
@@ -179,11 +179,11 @@ def summarize(project):
             coverage["files_read"] += 1
             coverage["dropped_attempts"] += record["dropped_attempts"]
             attempts = record["attempts"]
-            if len(attempts) > MAX_ATTEMPTS:
+            if len(attempts) > dispatch.max_attempts:
                 coverage["attempt_limit_files"] += 1
-            if record["dropped_attempts"] or len(attempts) > MAX_ATTEMPTS:
+            if record["dropped_attempts"] or len(attempts) > dispatch.max_attempts:
                 unsafe_files.add(index)
-            for raw_attempt in attempts[:MAX_ATTEMPTS]:
+            for raw_attempt in attempts[:dispatch.max_attempts]:
                 if expired():
                     unsafe_files.add(index)
                     break
@@ -254,7 +254,7 @@ def summarize(project):
                           else "observed_window_only" if rows else "empty_unknown")
     result = {"schema": 1, "coverage": coverage,
             "limits": {"candidate_entries": policy.candidate_entries, "files": policy.files,
-                       "bytes_per_file": MAX_BYTES, "attempts_per_file": MAX_ATTEMPTS, "seconds": seconds},
+                       "bytes_per_file": dispatch.max_bytes, "attempts_per_file": dispatch.max_attempts, "seconds": seconds},
             "period_utc": {"first": min(timestamps).isoformat() if timestamps else None,
                            "last": max(timestamps).isoformat() if timestamps else None},
             "attempts": {"observed": len(rows), "eligible": len(shares), "excluded": dict(excluded)},

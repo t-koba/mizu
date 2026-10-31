@@ -843,10 +843,16 @@ prompts use mode `continuation` and do not repeat an earlier rotation reason.
 These are local selections, **not proof of provider conversation/cache residency,
 a cache hit, or a TTL guarantee**. Native provider state can still change.
 
-Retention is a tail of at most 64 attempts and 256 KiB of strict finite JSON per
-run; oldest records are removed to satisfy either bound and `dropped_attempts`
-reports the loss. Model pairs are capped at 16, provider/model text at 256
-characters, unknown usage keys at 20 (256 characters each). This per-run
+Retention and sampling belong to
+[`[dispatch_evidence]`](configuration.md#dispatch-evidence): defaults retain a
+tail of 64 attempts and 256 KiB of strict finite JSON per run, sample 16 model
+pairs and 20 unknown usage keys per attempt. Oldest records are removed to
+satisfy either retention bound and `dropped_attempts` reports the loss; a tiny
+byte budget can leave an empty attempt list. The fixed 256-character safety
+ceiling (`MAX_TEXT` for identity labels) keeps oversized labels unknown rather
+than truncating them into false identities; unknown usage keys use the fixed
+`MAX_ATTEMPT_USAGE_KEY_CHARS = 256` safety ceiling in `usage.py`. `[usage].unknown_keys` independently controls
+summary sampling, not these stored samples. This per-run
 measurement log is compressed/dropped by `mizu prune` according to
 `event_log_compress_days` and `event_log_retention_days` (defaults 7/31 days;
 0 disables each stage). Atomic fsynced
@@ -861,10 +867,11 @@ FIFO with unchanged slot/role/workspace locking, provider TTL and session policy
 `mizu usage` also exposes a read-only shadow view `cache_affinity` built only from
 those same `dispatch-attempts.json` files: at most the 200 most recently modified
 run directories are scanned (`runs_scanned`, with `runs_truncated` marking a
-larger candidate set), and each file is capped at the dispatch-evidence byte
-bound. Symlinks are refused; malformed or unreadable files are counted as
+larger candidate set). Each file uses the current `[dispatch_evidence]` byte
+cap and only its newest `max_attempts` attempts are scanned, even for older
+records; attempt-cap omissions set `truncated`. Symlinks are refused; malformed or unreadable files are counted as
 `cache_affinity.skipped_records` without failing the command. `total` counts
-eligible attempt rows in this scanned window; at most 200 are returned, with
+eligible attempt rows within these caps; at most 200 are returned by default, with
 `truncated` marking omitted rows. Each row keeps only
 run id, role, execution-attempt index, start/end timestamps, engine, the dispatch
 `profile` (a nonempty string of at most 256 characters, otherwise null), a single
@@ -1323,7 +1330,10 @@ mtime/name within those candidates, and `scan_seconds = 2` sets a cooperative
 monotonic deadline checked around bounded operations and through analysis.
 These are defaults, not hard maxima; increasing them can increase work and
 memory. The result's `limits` reports the configured budgets (`seconds` defaults
-to `2.0`). Dispatch-record limits stay 256 KiB and 64 attempts per file.
+to `2.0`). Per-file byte/attempt caps come from `[dispatch_evidence]`
+(defaults 256 KiB/64), separately from this scan window. A lowered byte cap can
+exclude older files; a lowered attempt cap scans only a prefix and marks
+coverage incomplete, not complete history.
 Enumeration uses no-follow directory handling; source reads use private-root
 `safe_read` (refusing links/hardlinks/specials; portable platforms check reparse
 points and identity without claiming POSIX path-component pinning). A single

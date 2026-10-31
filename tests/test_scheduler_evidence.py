@@ -9,7 +9,7 @@ from unittest.mock import patch
 from support import Fixture
 from mizu import scheduler_evidence as evidence
 from mizu.cli import execute, main, parser
-from mizu.config import MAX_USAGE_POLICY_COUNT, TOML_INTEGER_MAX, SchedulerEvidence
+from mizu.config import MAX_USAGE_POLICY_COUNT, TOML_INTEGER_MAX, DispatchEvidence, SchedulerEvidence
 from mizu.errors import ConfigError, Denied
 from mizu.fs import mkdir, write_json
 
@@ -70,6 +70,25 @@ class SchedulerEvidenceTests(Fixture):
             failed = self.view()
         self.assertNotIn("SENTINEL", json.dumps(failed))
         self.assertEqual(failed["coverage"]["unavailable_files"], 1)
+
+    def test_dispatch_policy_controls_reader_not_scan_windows(self):
+        rows = [attempt(i) for i in range(66)]
+        rows[0]["ignored_payload"] = "x" * 262144
+        target = self.write(rows)
+        size = target.stat().st_size
+        self.assertEqual(self.view()["coverage"]["oversized_files"], 1)
+        for count in (2, 66):
+            self.project.config = dataclasses.replace(self.config, dispatch_evidence=DispatchEvidence(
+                max_attempts=count, max_bytes=size))
+            view = self.view()
+            self.assertEqual(view["attempts"]["observed"], count)
+            self.assertEqual(view["coverage"]["attempt_limit_files"], int(count < 66))
+            self.assertEqual(view["limits"]["attempts_per_file"], count)
+            self.assertEqual(view["limits"]["bytes_per_file"], size)
+            self.assertEqual(view["limits"]["files"], self.config.scheduler_evidence.files)
+            self.project.config = dataclasses.replace(self.project.config,
+                dispatch_evidence=DispatchEvidence(max_attempts=count, max_bytes=size - 1))
+            self.assertEqual(self.view()["coverage"]["oversized_files"], 1)
 
     def test_engine_denominators_unknown_and_invalid_usage(self):
         rows = [attempt(i) for i in range(8)]
@@ -224,13 +243,13 @@ class SchedulerEvidenceTests(Fixture):
             self.assertEqual(self.view()["coverage"]["malformed_files"], 1)
 
     def test_attempt_byte_and_output_limits(self):
-        self.write([attempt(i) for i in range(evidence.MAX_ATTEMPTS + 1)])
+        self.write([attempt(i) for i in range(self.config.dispatch_evidence.max_attempts + 1)])
         view = self.view()
-        self.assertEqual(view["attempts"]["observed"], evidence.MAX_ATTEMPTS)
+        self.assertEqual(view["attempts"]["observed"], self.config.dispatch_evidence.max_attempts)
         self.assertEqual(view["coverage"]["attempt_limit_files"], 1)
         self.assertEqual(view["pairs"]["valid"], 0)
         oversized = self.write([], name="oversized")
-        oversized.write_bytes(b" " * (evidence.MAX_BYTES + 1))
+        oversized.write_bytes(b" " * (self.config.dispatch_evidence.max_bytes + 1))
         self.assertEqual(self.view()["coverage"]["oversized_files"], 1)
         self.assertLess(len(json.dumps(view)), 8192)
 

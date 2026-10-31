@@ -13,7 +13,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .errors import ConfigError, Denied
-from .fs import ID, relative_parts
+from .fs import ID, canonical, relative_parts
 from .process import ADAPTER_DIAGNOSTIC_BYTES_DEFAULT, ADAPTER_DIAGNOSTIC_BYTES_MAX
 CAPABILITIES = frozenset({"diff", "files", "read", "exec", "experiment", "verify", "check_job", "fetch", "probe",
                           "search", "insights", "decide", "submit_insight", "revise_insight", "withdraw_insight", "withdraw_decided", "attach_evidence", "consult", "delegate",
@@ -286,7 +286,7 @@ def _load_merged(top: Path) -> dict:
         allowed = {"data_dir", "engines", "timezone", "limits", "sandbox", "profiles",
                    "roles", "consult_role", "delegate_role", "web", "vcs", "materialize",
                    "exclude", "selectors", "include", "insight_decisions", "workspace_cache",
-                   "operator_records", "usage", "scheduler_evidence"}
+                   "operator_records", "usage", "scheduler_evidence", "dispatch_evidence"}
         unknown = set(data) - allowed
         if unknown:
             raise ConfigError(f"Unknown keys in {resolved}: {', '.join(sorted(unknown))}")
@@ -907,6 +907,36 @@ def usage_policy(raw: dict) -> Usage:
     })
 
 
+#: Collection indexes and TOML integers, not resource budgets.
+MAX_DISPATCH_EVIDENCE_COUNT = min(TOML_INTEGER_MAX, sys.maxsize)
+#: safe_read reserves one byte to detect growth beyond the file budget.
+MAX_DISPATCH_EVIDENCE_BYTES = min(TOML_INTEGER_MAX, sys.maxsize - 1)
+#: Enough to persist an empty schema-1 envelope with a representable drop count.
+MIN_DISPATCH_EVIDENCE_BYTES = len(canonical({
+    "schema": 1, "dropped_attempts": TOML_INTEGER_MAX, "attempts": []}))
+
+
+@dataclasses.dataclass(frozen=True)
+class DispatchEvidence:
+    max_attempts: int = 64
+    max_bytes: int = 262144
+    max_models: int = 16
+    unknown_keys: int = 20
+
+
+def dispatch_evidence_policy(raw: dict) -> DispatchEvidence:
+    fields = dataclasses.fields(DispatchEvidence)
+    keys(raw, {field.name for field in fields}, "dispatch_evidence")
+    return DispatchEvidence(**{
+        field.name: number(
+            raw.get(field.name, field.default), f"dispatch_evidence.{field.name}",
+            MIN_DISPATCH_EVIDENCE_BYTES if field.name == "max_bytes" else
+            1 if field.name == "max_attempts" else 0,
+            MAX_DISPATCH_EVIDENCE_BYTES if field.name == "max_bytes" else MAX_DISPATCH_EVIDENCE_COUNT)
+        for field in fields
+    })
+
+
 @dataclasses.dataclass(frozen=True)
 class SchedulerEvidence:
     candidate_entries: int = 5000
@@ -1000,6 +1030,7 @@ class Config:
 
     operator_records: dict = dataclasses.field(default_factory=dict)
     usage: Usage = dataclasses.field(default_factory=Usage)
+    dispatch_evidence: DispatchEvidence = dataclasses.field(default_factory=DispatchEvidence)
     scheduler_evidence: SchedulerEvidence = dataclasses.field(default_factory=SchedulerEvidence)
 
     def __post_init__(self):
@@ -1043,7 +1074,7 @@ def load(file: Path) -> Config:
     keys(data, {"data_dir", "engines", "timezone", "limits", "sandbox", "profiles",
                 "roles", "consult_role", "delegate_role", "web", "vcs", "materialize",
                 "exclude", "selectors", "include", "insight_decisions", "workspace_cache",
-                "operator_records", "usage", "scheduler_evidence"}, "root")
+                "operator_records", "usage", "scheduler_evidence", "dispatch_evidence"}, "root")
     data.pop("include", None)
     from .operator_records import configuration as record_configuration
     records = record_configuration(data.get("operator_records", {}))
@@ -1581,4 +1612,5 @@ def load(file: Path) -> Config:
                                                 "node_modules", "__pycache__", "*.pyc", "*.pyo", ".pytest_cache"]), "exclude"), selectors, insight_decisions=decisions,
                   workspace_cache=workspace_cache_policy(data.get("workspace_cache", {})), operator_records=records,
                   usage=usage_policy(data.get("usage", {})),
+                  dispatch_evidence=dispatch_evidence_policy(data.get("dispatch_evidence", {})),
                   scheduler_evidence=scheduler_evidence_policy(data.get("scheduler_evidence", {})))
