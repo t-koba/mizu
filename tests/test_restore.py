@@ -92,7 +92,15 @@ class RestoreTests(Fixture):
         archive = self.root / 'saved.tar.gz'
         backup(self.project, archive)
         staging = self.config.data / 'staging/projects'
+        destination = self.config.data / 'projects/restored'
         original_stat, original_audit = Path.lstat, storage.acceptance.audit
+        original_rename = storage.os.rename
+        project_publications = []
+
+        def observe_rename(source, target):
+            if Path(target) == destination:
+                project_publications.append((Path(source), Path(target)))
+            return original_rename(source, target)
         for late in (False, True):
             mismatch = not late
 
@@ -110,11 +118,11 @@ class RestoreTests(Fixture):
             with self.subTest(late=late), patch.object(Path, 'lstat', device), \
                  patch.object(storage.acceptance, 'audit', side_effect=audit), \
                  patch.object(storage.tempfile, 'mkdtemp', wraps=storage.tempfile.mkdtemp) as create, \
-                 patch.object(storage.os, 'rename') as rename:
+                 patch.object(storage.os, 'rename', side_effect=observe_rename):
                 with self.assertRaisesRegex(Denied, 'share a filesystem|identity changed'):
                     restore(self.config, 'restored', archive)
                 self.assertEqual(create.call_count, int(late))
-                rename.assert_not_called()
+                self.assertEqual(project_publications, [])
             self.assertEqual(len(list(staging.iterdir())), int(late))
             for leftover in staging.iterdir():
                 shutil.rmtree(leftover)
