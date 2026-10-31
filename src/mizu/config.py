@@ -441,6 +441,56 @@ class Limits:
     session_max_age_seconds: int = 0
 
 
+# Meta-bounds on policy values so a config cannot request unbounded
+# memory/files/prompts. Every numeric Limits field has an explicit range
+# here except session_max_cost_usd, which uses the finite-cost validator.
+# daily_requests 0 disables (fail-closed); max_failures 0 disables the
+# auto-pause brake only (budgets/deadlines still bound spend and time).
+_LIMIT_RANGES = {"open_work_items": (0, 1073741824),
+                 "producer_inputs_per_source": (0, 1073741824),
+                 "parallel_checks": (1, 64), "check_pending": (1, 1024), "history_index": (8, 1000000), "prompt_snapshots": (1, 64),
+                 "delegate_wrap_up_requests": (0, 2),
+                 "delegate_wrap_up_tools": (0, 4),
+                 "insight_cursor_ttl_seconds": (60, 604800),
+                 "retention_days": (0, 3650), "run_retention_days": (0, 3650), "snapshot_retention_days": (0, 3650), "automatic_prune_interval_seconds": (0, 2678400), "automatic_smoke_retention_interval_seconds": (0, 2678400), "pending_insights": (1, 1000),
+                 "work_items_prompt": (1, 100), "work_items_doing": (1, 100),
+                 "work_items_stale_seconds": (1, 31536000), "decision_events_limit": (1, 100),
+                 "work_item_events_limit": (1, 100),
+                 "event_log_compress_days": (0, 3650), "event_log_retention_days": (0, 3650),
+                 "event_stream_bytes": (1048576, 268435456),
+                 "role_state_bytes": (1024, 65536),
+                 "role_state_prompt_bytes": (1, 65536),
+                 "session_max_tokens": (0, 1073741824), "session_max_age_seconds": (0, 31536000),
+                 "default_wait_seconds": (1, MAX_WAIT_SECONDS),
+                 "maximum_wait_seconds": (1, MAX_WAIT_SECONDS),
+                 "daily_requests": (0, 100000), "shared_daily_requests": (0, 100000), "max_failures": (0, 1073741824),
+                 "busy_retry_seconds": (0, 86400),
+                 "admission_wait_seconds": (0, 86400),
+                 "no_progress_continuations": (0, 100),
+                 "no_progress_recovery_after": (1, 100),
+                 "no_progress_backoff_seconds": (0, 86400),
+                 "missing_finish_followups": (0, 3),
+                 "safe_point_yield_quantum": (0, 1000),
+                 "missing_finish_recovery_after": (1, 100),
+                 "free_disk_mb": (0, 1073741824),
+                 "requests_per_run": (1, 1073741824),
+                 "tools_per_run": (1, 1073741824),
+                 "wrap_up_requests": (1, 1073741824),
+                 "wrap_up_tools": (1, 1073741824),
+                 "run_seconds": (1, 1073741824),
+                 "model_request_seconds": (1, 1073741824),
+                 "command_seconds": (1, 1073741824),
+                 "idle_seconds": (1, 1073741824),
+                 "cooldown_seconds": (1, 1073741824),
+                 "parallel_runs": (1, 1073741824),
+                 "admission_queue_capacity": (1, 1073741824),
+                 "parallel_consults": (1, 1073741824),
+                 "output_bytes": (1, 1073741824),
+                 "file_bytes": (1, 1073741824),
+                 "snapshot_bytes": (1, 1073741824),
+                 "snapshot_files": (1, 1073741824)}
+
+
 @dataclasses.dataclass(frozen=True)
 class Sandbox:
     executable: str = "podman"
@@ -949,37 +999,6 @@ def load(file: Path) -> Config:
                               "directory": path_value(string(settings.get("directory", name), "directory"), file.parent)}
     lim = data.get("limits", {})
     keys(lim, {f.name for f in dataclasses.fields(Limits)}, "limits")
-    # Meta-bounds on policy values so a config cannot request unbounded
-    # memory/files/prompts. Defaults are TOML-overridable fallbacks.
-    # daily_requests 0 disables (fail-closed); max_failures 0 disables the
-    # auto-pause brake only (budgets/deadlines still bound spend and time).
-    _LIMIT_RANGES = {"open_work_items": (0, 1073741824),
-                     "producer_inputs_per_source": (0, 1073741824),
-                     "parallel_checks": (1, 64), "check_pending": (1, 1024), "history_index": (8, 1000000), "prompt_snapshots": (1, 64),
-                     "delegate_wrap_up_requests": (0, 2),
-                     "delegate_wrap_up_tools": (0, 4),
-                     "insight_cursor_ttl_seconds": (60, 604800),
-                     "retention_days": (0, 3650), "run_retention_days": (0, 3650), "snapshot_retention_days": (0, 3650), "automatic_prune_interval_seconds": (0, 2678400), "automatic_smoke_retention_interval_seconds": (0, 2678400), "pending_insights": (1, 1000),
-                     "work_items_prompt": (1, 100), "work_items_doing": (1, 100),
-                     "work_items_stale_seconds": (1, 31536000), "decision_events_limit": (1, 100),
-                     "work_item_events_limit": (1, 100),
-                     "event_log_compress_days": (0, 3650), "event_log_retention_days": (0, 3650),
-                     "event_stream_bytes": (1048576, 268435456),
-                     "role_state_bytes": (1024, 65536),
-                     "role_state_prompt_bytes": (1, 65536),
-                     "session_max_tokens": (0, 1073741824), "session_max_age_seconds": (0, 31536000),
-                     "default_wait_seconds": (1, MAX_WAIT_SECONDS),
-                     "maximum_wait_seconds": (1, MAX_WAIT_SECONDS),
-                     "daily_requests": (0, 100000), "shared_daily_requests": (0, 100000), "max_failures": (0, 1073741824),
-                     "busy_retry_seconds": (0, 86400),
-                     "admission_wait_seconds": (0, 86400),
-                     "no_progress_continuations": (0, 100),
-                     "no_progress_recovery_after": (1, 100),
-                     "no_progress_backoff_seconds": (0, 86400),
-                     "missing_finish_followups": (0, 3),
-                     "safe_point_yield_quantum": (0, 1000),
-                     "missing_finish_recovery_after": (1, 100),
-                     "free_disk_mb": (0, 1073741824)}
     allowed_progress_signals = ALLOWED_PROGRESS_SIGNALS
     for k, v in lim.items():
         if k == "progress_signals":
@@ -997,7 +1016,7 @@ def load(file: Path) -> Config:
                     or not 0 <= float(v) <= 1000000:
                 raise ConfigError("limits.session_max_cost_usd must be a number in [0, 1000000]")
             continue
-        low, high = _LIMIT_RANGES.get(k, (1, 1073741824))
+        low, high = _LIMIT_RANGES[k]
         number(v, f"limits.{k}", low, high)
     limits = Limits(**lim)
     if limits.default_wait_seconds > limits.maximum_wait_seconds:
