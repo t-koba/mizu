@@ -351,6 +351,7 @@ durable stores (see `docs/operations.md` and `docs/scheduling.md`).
 
 | Key | Scope and description |
 |---|---|
+| `lock_diagnostics` | Boolean, default `false`. Opt-in run-local record-lock diagnostics on Engine/CLI stderr (journal for scheduled units); no collection or extra output when disabled. See the fixed diagnostic format below. |
 | `daily_requests` | Per-project provider admissions per day in the configured `timezone` (UTC default; 0 disables, max 100,000). Day-files older than `retention_days` are reaped. Pi counts logical model requests, Codex counts turns, Claude counts queries |
 | `shared_daily_requests` | Optional shared total across all projects sharing `data_dir` per day in the configured `timezone` (UTC default; 0 disables the shared cap, max 100,000). Per-project admissions also count toward this total; the tighter bound refuses first |
 | `requests_per_run`, `tools_per_run` | Per-work-unit request and tool bounds (project default; a role may override with `roles.<name>.requests_per_run` / `tools_per_run`, same range, unset keeps the project value); child consultations consume shared daily budget. Hitting a per-run bound grants the configured total wrap-up allowance (`wrap_up_requests` requests, `wrap_up_tools` wrap-up tool calls limited to `finish`, `research`, `submit_insight`, `attach_evidence`, `decide`) so the unit can seal a clean `bounded` end that runs again like `continue` without counting toward `max_failures`; When an ordinary provider request hits the cap, Pi and non-Pi paths yield to Engine's reduced-grant follow-up before spending that request reserve; an already-armed one-shot checkpoint seal may spend its reserved request directly. If that request wrap-up returns unsealed or exhausts its requests, the unit records `status="bounded", bound="requests", publication="not_published"`, preserves workspace changes, and does not increase failure counters. It does not publish an unfinished snapshot. Host admission exceptions retain their type across adapter error events: exhausted deadline/drain/request/tool wrap-up records the corresponding bounded outcome, while daily quota refusals remain infrastructure deferrals and invalid admissions remain faults. An exhausted tool reserve also records the corresponding non-failing bounded outcome on a normal unsealed Pi settlement, without publication or missing-finish follow-ups. The first ordinary tool-cap refusal still permits the existing reduced-grant follow-up. The host cause is run-local, cleared by a successful admission or a new physical dispatch; pending tool-refusal evidence also clears after a successful tool operation. Provider message text cannot forge it. Provider errors, cancellation and evidence-storage failures retain their failure paths |
@@ -407,6 +408,43 @@ durable stores (see `docs/operations.md` and `docs/scheduling.md`).
 | `session_max_age_seconds` | Wall-clock conversation lifetime (stable creation time surviving same-id saves; legacy files fall back to mtime) at which a resumed persistent session restarts (0 disables; 0–31,536,000s; default 0) |
 | `free_disk_mb` | Minimum free disk space required to start a work unit |
 
+When `limits.lock_diagnostics = true`, each Engine run emits one compact JSON
+line on success or error: `{"lock_diagnostics":{"version":1,"observations":[],"omitted":0}}`.
+This is observational, not a retry or replay-safety signal; Busy still maps to
+code 75, and timeouts, admission, systemd and retry behavior are unchanged.
+Each observation has exactly `lock`, `phase`, `operation`, `stage`, `outcome`,
+`local_ms`, `kernel_ms`, and `hold_ms`:
+
+- `lock`: `shared-smoke` or `project-record`, selected only for the fixed
+  `smoke-retention.lock` / `insights.lock` names; paths are never exported.
+- `phase`: `pre-admission-startup`, `editor-ingestion`,
+  `pre-admission-dispatch`, `admission`, or `post-admission`. The latter starts
+  once execution admission owns the dispatch locks, before later guards, run
+  creation and execution work.
+- `operation`: `read`, `list`, `page`, or `write` where the call site declares
+  that class; otherwise `record`. These are fixed source labels, not derived
+  from lock contents or inferred from untrusted input.
+- `stage`: `local-acquire`, `open`, `kernel-acquire`, or `body`, indicating
+  the last stage entered. `outcome`: `success`, `busy`, `blocking-io-error`
+  (before the existing conversion to Busy), or `error`. A body-stage failure
+  can follow durable effects and is **not** a pre-run deferral. An outer shared
+  holder may report body Busy while its nested project lock failed acquisition.
+- Durations are nonnegative integer milliseconds: local guard acquisition,
+  kernel acquisition, and hold through release, respectively; unentered stages
+  are `null`. Sub-millisecond durations round down. Open time is not kernel wait.
+
+`MAX_LOCK_DIAGNOSTIC_ROWS = 32` is a mechanism-format bound, not a scheduling
+policy: only the last 32 completed observations appear (release order), with
+older rows counted in `omitted`. `MAX_LOCK_DIAGNOSTIC_VALUE = 2147483647` bounds
+all duration and omission fields by saturation, keeping the fixed schema below
+16 KiB per line. Collection follows the Engine run and its Context tool calls
+(including bridge threads), not unrelated background threads or other processes;
+it cannot identify another process's holder.
+No project names, record/event identities or contents, exception text/notes, or
+subprocess data enter this line. Existing CLI errors remain separate and
+unchanged. A failed stderr write is best-effort and cannot replace the run's
+exception. No diagnostic is retained as durable evidence or used for replay.
+
 Successful work-unit artifacts record `started.json.admission_elapsed_seconds`: elapsed monotonic time from FIFO admission entry through post-acquisition revalidation, including queue/lock and guard overhead but excluding selection and model execution. It can be joined by run ID with `prompt_projection.json`'s hashed `session_key` and `result.json` usage for shadow cache-affinity analysis; the key is a grouping proxy, not proof of provider cache identity or residency. Only runs that produce `started.json` are represented, so rejected/cancelled admission attempts and pre-run skips are absent.
 
 A role wall of `0` is not an infinite model request: all four managed engines
@@ -435,7 +473,7 @@ failure behavior. A valid finish seal remains separate from adapter settlement
 and all final integrity/verification/publication checks still apply.
 
 
-All limits are positive integers except `open_work_items`, `producer_inputs_per_source`, `delegate_wrap_up_requests`, `delegate_wrap_up_tools`, `daily_requests`, `shared_daily_requests`, `max_failures`, `busy_retry_seconds`, `admission_wait_seconds`, `no_progress_continuations`, `no_progress_backoff_seconds`, `missing_finish_followups`, `safe_point_yield_quantum`, `free_disk_mb`, `retention_days`, `run_retention_days`, `snapshot_retention_days`, `automatic_prune_interval_seconds`, `automatic_smoke_retention_interval_seconds`, `event_log_compress_days`, `event_log_retention_days`, `session_max_tokens`, `session_max_age_seconds`, and adapter `diagnostic_bytes`, which may be zero. `missing_finish_counts_as_failure` and `drain_yield` are booleans. `session_max_cost_usd` is a number (integer or float) which may be zero.
+All limits are positive integers except `open_work_items`, `producer_inputs_per_source`, `delegate_wrap_up_requests`, `delegate_wrap_up_tools`, `daily_requests`, `shared_daily_requests`, `max_failures`, `busy_retry_seconds`, `admission_wait_seconds`, `no_progress_continuations`, `no_progress_backoff_seconds`, `missing_finish_followups`, `safe_point_yield_quantum`, `free_disk_mb`, `retention_days`, `run_retention_days`, `snapshot_retention_days`, `automatic_prune_interval_seconds`, `automatic_smoke_retention_interval_seconds`, `event_log_compress_days`, `event_log_retention_days`, `session_max_tokens`, `session_max_age_seconds`, and adapter `diagnostic_bytes`, which may be zero. `missing_finish_counts_as_failure`, `drain_yield`, and `lock_diagnostics` are booleans. `session_max_cost_usd` is a number (integer or float) which may be zero.
 
 ### Operator-invoked run retention
 

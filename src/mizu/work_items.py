@@ -23,6 +23,7 @@ import stat
 from pathlib import Path
 
 from .smoke_refs import record_lock, validate_refs, require_pairs
+from . import lock_diagnostics
 from . import insight_archive, work_item_retirement
 from .work_item_waits import stored_wait, liveness
 from .errors import Denied, LimitExceeded, OpenWorkItemsFull
@@ -404,7 +405,7 @@ class WorkItems:
         """
         item_id = self._create_id(actor, idempotency_key)
         validate_origin(origin)
-        with record_lock(self.root):
+        with lock_diagnostics.operation("write"), record_lock(self.root):
             directory = self.root / "work-items" / item_id
             existing = None
             if _directory(directory.parent) and _directory(directory):
@@ -639,7 +640,7 @@ class WorkItems:
                 or (outcome == "drop" and title is not None)):
             raise Denied("Invalid legacy reconciliation request")
         identifier(actor)
-        with record_lock(self.root):
+        with lock_diagnostics.operation("write"), record_lock(self.root):
             self._recover_decision_history_temporaries(self.root / "decision-history")
             event = self._read(f"decision-history/{event_id}.json")
             if (event.get("action") != expected_action or "work_item" in event

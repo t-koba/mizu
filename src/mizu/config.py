@@ -300,6 +300,7 @@ def trusted_command(data: dict, key: str, default: str) -> tuple[str, ...]:
 
 @dataclasses.dataclass(frozen=True)
 class Limits:
+    lock_diagnostics: bool = False
     # Provisional project-wide bound on newly seeded nonterminal work; 0 disables.
     open_work_items: int = 100
     # Provisional per-source bound on unresolved live producer inputs; 0 disables.
@@ -987,7 +988,7 @@ def load(file: Path) -> Config:
                 raise ConfigError("limits.progress_signals must contain unique supported signal names")
             lim[k] = values
             continue
-        if k in ("missing_finish_counts_as_failure", "drain_yield"):
+        if k in ("missing_finish_counts_as_failure", "drain_yield", "lock_diagnostics"):
             boolean(v, f"limits.{k}")
             continue
         if k == "session_max_cost_usd":

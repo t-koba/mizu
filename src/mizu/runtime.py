@@ -22,7 +22,7 @@ from .delegation_jobs import DelegationJobs
 from . import decision_delivery, delegation_gates, lineage, operator_records
 from . import platform as _platform
 from . import run_activity as _run_activity
-from . import evidence_records, workspace_reads
+from . import evidence_records, workspace_reads, lock_diagnostics
 from .admission import admission, has_live_demand, role_exclusion
 from . import check_jobs
 from . import wait_events as structured_wait_events
@@ -313,6 +313,7 @@ class Context:
                  consult=None, delegate=None, goal: str | None = None,
                  reservation_view=None):
         # Trusted host injection only; never populated from model arguments.
+        self._lock_diagnostics = lock_diagnostics.capture()
         self._reservation_view = reservation_view
         self.config, self.project, self.role = config, project, role
         self.run_dir, self.snapshot, self.workspace = run_dir, snapshot, workspace
@@ -793,7 +794,7 @@ class Context:
     def _handle(self, operation: str, arguments: dict) -> dict:
         if not isinstance(operation, str) or not isinstance(arguments, dict):
             raise Denied("Invalid operation")
-        with self.mutex:
+        with self.mutex, lock_diagnostics.bind(self._lock_diagnostics):
             delegation_gates.check_access(self._reservation_view, self.role.name,
                                           self.snapshot, operation, arguments)
             checkpoint_protocol = self.checkpoint_seal_only and operation in ("_model_usage", "_request_done")
@@ -2414,6 +2415,7 @@ class Engine:
             admission_kwargs["observation_sink"] = observe
         elapsed = stack.enter_context(admission(self.config, resources, wait=wait, enqueue=enqueue,
                                                 **admission_kwargs))
+        lock_diagnostics.phase("post-admission")
         # Trusted starts hold workspace.lock too. Recheck after admission has
         # acquired it, before safe-point inspection or any live-tree work.
         DelegationJobs.guard(project.root)
@@ -2585,6 +2587,13 @@ class Engine:
 
     def run(self, project: Project, role_name: str, *, attributes=None, retry_busy: bool = False,
                 enqueue_busy: bool = False, event_trigger: bool = False, probes_serviced: bool = False) -> dict:
+        with lock_diagnostics.collect(self.config.limits.lock_diagnostics):
+            return self._run(project, role_name, attributes=attributes, retry_busy=retry_busy,
+                             enqueue_busy=enqueue_busy, event_trigger=event_trigger,
+                             probes_serviced=probes_serviced)
+
+    def _run(self, project: Project, role_name: str, *, attributes=None, retry_busy: bool = False,
+                enqueue_busy: bool = False, event_trigger: bool = False, probes_serviced: bool = False) -> dict:
         if role_name not in project.roles:
             raise Denied("Role is not enabled for this project")
         role = self.config.roles[role_name]
@@ -2620,7 +2629,9 @@ class Engine:
             from . import continuations
             intent = (continuations.ready(project.snapshots, role_name)
                       if role.workspace == "write" else None)
+            lock_diagnostics.phase("editor-ingestion")
             project.insights.ingest_editor(keep_days=project.config.limits.retention_days)
+            lock_diagnostics.phase("pre-admission-dispatch")
             if (event_trigger or role.on_change) and not (
                     role.workspace == "write" and safe_point.pending_hint(project.snapshots)):
                 dispatch_state = self._dispatch_state(project, role_name, role, event_trigger=event_trigger,
@@ -2659,6 +2670,7 @@ class Engine:
                     started["queue_observations"] = queue_observations
                     write_json(run_dir / "started.json", started)
             continuation = None
+            lock_diagnostics.phase("admission")
             if intent is not None:
                 continuation = stack.enter_context(continuations.reservation(
                     self, project, role_name, wait=retry_busy, enqueue=enqueue_busy,

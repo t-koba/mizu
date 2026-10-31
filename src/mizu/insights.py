@@ -55,7 +55,7 @@ import os
 from pathlib import Path
 
 from .smoke_refs import record_lock, project_record_lock, validate_refs, require_pairs
-from . import insight_archive, wait_events
+from . import insight_archive, wait_events, lock_diagnostics
 from .work_item_waits import WAIT_KINDS, normalize_wait
 from .errors import Busy, Denied, LimitExceeded
 from .shared_records import Delivery, KindPolicy, RECEIPT_BYTES, RECORD_BYTES, SharedRecords
@@ -495,7 +495,7 @@ class Insights:
         if len(canonical(probe)) > self.maximum:
             raise Denied("Insight exceeds byte limit")
         # Even unpinned writes create inbox temporaries that retention must not scan.
-        with record_lock(self.root):
+        with lock_diagnostics.operation("write"), record_lock(self.root):
             if not explicit:
                 best = None
                 best_key = None
@@ -615,7 +615,7 @@ replacement insight without implying rejected substance.
         specified = insight_metadata({k: v for k, v in
                                       (("kind", kind), ("addressee", addressee), ("urgency", urgency))
                                       if v is not _UNSPECIFIED})
-        with record_lock(self.root):
+        with lock_diagnostics.operation("write"), record_lock(self.root):
             path = self.root / "inbox" / f"{insight_id}.json"
             old = read_json(path)
             if old is None:
@@ -737,7 +737,7 @@ replacement insight without implying rejected substance.
         if isinstance(expected_rev, bool) or not isinstance(expected_rev, int) or expected_rev < 1:
             raise Denied("Evidence revision must be a positive revision number")
         # All appends create inbox temporaries, including omitted/empty references.
-        with record_lock(self.root):
+        with lock_diagnostics.operation("write"), record_lock(self.root):
             current = self.read(insight_id)
             rev = _rev_of(current)
             if expected_rev != rev:
@@ -835,7 +835,7 @@ replacement insight without implying rejected substance.
         stamp = int(time.time())
         state = self._page_cursor(cursor, scope, project, stamp) if cursor is not None else None
         expires = state["expires"] if state else stamp + self.cursor_ttl_seconds
-        with lock(self.root / "locks" / "insights.lock"):
+        with lock_diagnostics.operation("page"), lock(self.root / "locks" / "insights.lock"):
             if scope == "live":
                 entries = sorted(self._live_entries(), key=lambda entry: entry[0])
                 generation = digest(canonical([[key, record, raw] for key, record, raw in entries]))
@@ -986,7 +986,7 @@ replacement insight without implying rejected substance.
             identifier(name)
         wanted = set(names)
         counts = {name: 0 for name in wanted}
-        with project_record_lock(self.root):
+        with lock_diagnostics.operation("read"), project_record_lock(self.root):
             inbox = self.root / "inbox"
             if not insight_archive._directory(inbox):
                 return counts
@@ -1087,7 +1087,7 @@ replacement insight without implying rejected substance.
         if isinstance(expected_rev, bool) or not isinstance(expected_rev, int) or expected_rev < 1:
             raise Denied("Decision revision must be a positive revision number")
         registered = self._normalize_wait(wait, action)
-        with record_lock(self.root):
+        with lock_diagnostics.operation("write"), record_lock(self.root):
             store = self._work_item_store()
             store.prepare_decision_write(need_wait=False)
             current = self.read(insight_id)
@@ -1453,7 +1453,7 @@ replacement insight without implying rejected substance.
 
     def consume_waits(self, role_name: str, events) -> int:
         """Release consumed wait pins under global-before-record coordination."""
-        with record_lock(self.root):
+        with lock_diagnostics.operation("write"), record_lock(self.root):
             return self._consume_waits(role_name, events)
 
     def _consume_waits(self, role_name: str, events) -> int:
@@ -1522,7 +1522,7 @@ replacement insight without implying rejected substance.
             raise Denied("expected_rev must be a positive integer")
         if type(allow_decided) is not bool:
             raise Denied("allow_decided must be a boolean permission")
-        with record_lock(self.root):
+        with lock_diagnostics.operation("write"), record_lock(self.root):
             current = self.read(insight_id)
             if current.get("source") != source and source != "operator":
                 raise Denied("Only the submitter or operator may withdraw this insight")
@@ -1728,7 +1728,7 @@ replacement insight without implying rejected substance.
         """
         if type(limit) is not int or not 1 <= limit <= 512:
             raise Denied("Decision projection limit must be an integer in [1, 512]")
-        with record_lock(self.root):
+        with lock_diagnostics.operation("write"), record_lock(self.root):
             return {record_id: computed for record_id, (_, computed) in
                     self._project_decision_records_locked(limit=limit).items()}
 
@@ -1840,7 +1840,7 @@ replacement insight without implying rejected substance.
         identifier(role_name)
         if type(limit) is not int or not 1 <= limit <= 100:
             raise Denied("Pending insight event limit must be in [1, 100]")
-        with project_record_lock(self.root):
+        with lock_diagnostics.operation("list"), project_record_lock(self.root):
             diagnostics = []
 
             def eligible():
@@ -1902,7 +1902,7 @@ replacement insight without implying rejected substance.
             if size(empty) > max_bytes:
                 raise LimitExceeded("Decision page metadata exceeds byte bound")
             return empty, ()
-        with record_lock(self.root):
+        with lock_diagnostics.operation("page"), record_lock(self.root):
             projected = self._project_decision_records_locked(limit=512)
             store = SharedRecords(self.root, INSIGHT_DELIVERY_POLICIES)
             if configured_roles is not None:
@@ -2186,7 +2186,7 @@ replacement insight without implying rejected substance.
             return 0
         removed = 0
         cutoff = time.time() - keep_days * 86400
-        with record_lock(self.root, blocking=blocking):
+        with lock_diagnostics.operation("write"), record_lock(self.root, blocking=blocking):
             for path in sorted((self.root / "inbox").glob("*.json")):
                 if path.is_symlink():
                     continue

@@ -16,6 +16,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, BinaryIO, Iterator
 
 from . import platform as _platform
+from . import lock_diagnostics
 from .errors import Busy, Denied, LimitExceeded
 
 ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,62}\Z")
@@ -443,11 +444,34 @@ def lock(path: Path, *, blocking: bool = True) -> Iterator[None]:
     acquire at most ``platform.LOCK_TIMEOUT``. Contention fails as Busy
     instead of hanging the caller (ADR-026).
     """
-    mkdir(path.parent)
+    observation = lock_diagnostics.begin(path.name)
     try:
-        local = _acquire_local(_local_key(path), blocking=blocking)
+        with _lock(path, blocking=blocking, observation=observation):
+            yield
+    except BaseException as exc:
+        if observation is not None and observation.row["outcome"] == "success":
+            observation.row["outcome"] = "busy" if isinstance(exc, Busy) else "error"
+        raise
+    finally:
+        if observation is not None:
+            observation.finish()
+
+
+@contextlib.contextmanager
+def _lock(path: Path, *, blocking: bool, observation) -> Iterator[None]:
+    mkdir(path.parent)
+    key = _local_key(path)
+    if observation is not None:
+        observation.advance("local-acquire")
+    try:
+        local = _acquire_local(key, blocking=blocking)
     except BlockingIOError:
+        if observation is not None:
+            observation.stop()
+            observation.row["outcome"] = "blocking-io-error"
         raise Busy(f"Already running: {path.stem}") from None
+    if observation is not None:
+        observation.advance("open")
     flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
@@ -457,14 +481,23 @@ def lock(path: Path, *, blocking: bool = True) -> Iterator[None]:
         local.release()
         raise
     try:
+        if observation is not None:
+            observation.advance("kernel-acquire")
         try:
             _platform.lock_fd(fd, blocking=blocking)
         except BlockingIOError:
+            if observation is not None:
+                observation.stop()
+                observation.row["outcome"] = "blocking-io-error"
             raise Busy(f"Already running: {path.stem}") from None
+        if observation is not None:
+            observation.advance("body")
         yield
     except Busy:
         raise
     except BlockingIOError:
+        if observation is not None:
+            observation.row["outcome"] = "blocking-io-error"
         raise Busy(f"Already running: {path.stem}") from None
     finally:
         with contextlib.suppress(Exception):
@@ -472,6 +505,8 @@ def lock(path: Path, *, blocking: bool = True) -> Iterator[None]:
         with contextlib.suppress(Exception):
             os.close(fd)
         local.release()
+        if observation is not None:
+            observation.stop()
 
 
 def held(path: Path) -> bool:
