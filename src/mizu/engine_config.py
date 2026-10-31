@@ -1,4 +1,5 @@
-"""Current engine configuration and content-bound session identity."""
+"""Current engine configuration, authority digest and session identity."""
+from dataclasses import asdict
 from pathlib import Path
 
 from .errors import ConfigError
@@ -106,6 +107,78 @@ def effective(config, role, profile):
     return {**config.model(profile), 'engine': raw['engine'], 'session': raw['session'],
             'options': options, 'resources': resources, 'mcp_servers': dict(raw['mcp_servers']),
             'engine_tools': list(role.engine_tools), 'native_content': native_content}
+
+
+def child_authority_digest(config, role, *, spend_role, settings, policy,
+                           goal_digest, workspace, adapter_identity, local_settings):
+    """Pure configuration binding for a future child, never a launch grant.
+
+    Inputs are trusted, already resolved: the post-delegation Role (inherited
+    workspace and filtered grants), actual spend Role, full ``effective()``
+    settings (NOT conversation_settings), composed role_policy_text, pinned
+    goal SHA-256, actual workspace path, adapter_digest, and
+    local_settings_digest. Reads no files/environment and writes/logs nothing.
+    The caller must resolve content before calling and use the same inputs at
+    launch. It must not include credential files or runtime bridge tokens.
+
+    All role/limit/sandbox fields and tool-policy tables are bound, including
+    live Pi options/grants and configured option/MCP/sandbox environment values.
+    Only the final 64-hex SHA-256 may be retained, never the projection. This is
+    not a secret store or a keyed credential verifier. It does not bind mutable
+    executable/SDK/image/mount bytes or ambient auth/remote permissions; those
+    remain launch-integration gaps, not authority certified by this helper.
+
+    Bounds: at most 1 MiB canonical input; output is always 64 hex characters.
+    Failure: ConfigError without input values for incomplete/unserializable
+    inputs, unknown effective-setting fields, or mismatched engine tools.
+    No retry/cancellation or durable state: this helper is deliberately unwired.
+    """
+    from .config import (ENGINES, role_requests_per_run, role_tools_per_run,
+                         role_wrap_up_requests, role_wrap_up_tools, role_run_seconds)
+    try:
+        expected = {'provider', 'model', 'engine', 'session', 'options',
+                    'resources', 'mcp_servers', 'engine_tools', 'native_content'}
+        if (set(settings) != expected or settings['engine'] not in ENGINES
+                or settings['engine_tools'] != list(role.engine_tools)
+                or not isinstance(policy, str) or not policy
+                or not isinstance(workspace, (str, Path)) or not str(workspace)
+                or not isinstance(local_settings, dict)
+                or any(not isinstance(value, str) or len(value) != 64
+                       or any(c not in '0123456789abcdef' for c in value)
+                       for value in (goal_digest, adapter_identity))):
+            raise ValueError
+        allowances = {
+            'spend_role': spend_role.name,
+            'requests': role_requests_per_run(config, spend_role),
+            'tools': role_tools_per_run(config, spend_role),
+            'wrap_up_requests': role_wrap_up_requests(config, spend_role),
+            'wrap_up_tools': role_wrap_up_tools(config, spend_role),
+            'run_seconds': role_run_seconds(config, role),
+        }
+        role_fields = asdict(role)
+        role_fields['policy'] = [str(path) for path in role.policy]
+        identity = {
+            'contract': 'mizu-child-authority-v1',
+            'config_origin': str(config.file), 'data_directory': str(config.data),
+            'timezone': config.timezone, 'resolved_timezone': str(config.tzinfo),
+            'role': role_fields, 'policy': policy, 'goal': goal_digest,
+            'workspace': str(workspace), 'settings': settings,
+            'command': config.command(settings['engine']),
+            'agent_directory': str(config.agent_dir(settings['engine'])),
+            'adapter': adapter_identity, 'local_settings': local_settings,
+            'allowances': allowances, 'limits': asdict(config.limits),
+            'sandbox': asdict(config.sandbox),
+            'tool_policy': {key: getattr(config, key) for key in
+                            ('web', 'vcs', 'materialize', 'exclude',
+                             'insight_decisions', 'operator_records')},
+            'workspace_cache': asdict(config.workspace_cache),
+        }
+        encoded = canonical(identity)
+        if len(encoded) > 1048576:
+            raise ValueError
+        return digest(encoded)
+    except (AttributeError, KeyError, TypeError, ValueError, RecursionError):
+        raise ConfigError('Invalid or incomplete child authority inputs') from None
 
 
 def adapter_root(root=None):
