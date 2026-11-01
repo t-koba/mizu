@@ -8,7 +8,8 @@ local arithmetic or other modules. Expand coverage as the behavior-based
 inventory reaches other owners. The configured slice checks Usage, SchedulerEvidence, CiRequestEvidence,
 PublicationPolicy, PublicationEvidence and WorkspaceCache field defaults in
 config.py, the retained-check Limits field and ceiling, plus the explicitly
-listed raw web setting; validation is covered
+listed raw web setting; the decision-history recovery ceiling is checked alone,
+not as a full work_items.py inventory. Validation is covered
 by focused config tests. Classification records current ownership, not
 approval to leave policy in code; safety ceilings here are defensive read
 bounds, not intrinsic format limits.
@@ -110,6 +111,13 @@ CONFIGURED = {
 CHECK_RETENTION = {
     'check_retained': ('1024', 'configured policy', 'Limits / per-project retained check records including subscriptions'),
     'MAX_CHECK_RETAINED': ('1024', 'safety', 'config / existing defensive linear metadata-scan and identity-search envelope'),
+}
+
+
+# This recovery ceiling is name-scoped, not a WorkItems numeric inventory.
+HISTORY_RECOVERY = {
+    'MAX_HISTORY_TEMPORARIES': (
+        '64', 'safety', 'work_items / bounds temporary/alias metadata in crash recovery'),
 }
 
 
@@ -239,6 +247,13 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
         self.assertEqual(inventory(tree)['MAX_CHECK_RETAINED'], CHECK_RETENTION['MAX_CHECK_RETAINED'][0])
         self.assertEqual([entry[1] for entry in CHECK_RETENTION.values()], ['configured policy', 'safety'])
         self.assertTrue(all(entry[2].strip() for entry in CHECK_RETENTION.values()))
+
+    def test_decision_history_recovery_safety_declaration(self):
+        tree = ast.parse((ROOT / 'work_items.py').read_text(encoding='utf-8'))
+        expression, category, rationale = HISTORY_RECOVERY['MAX_HISTORY_TEMPORARIES']
+        self.assertEqual(inventory(tree)['MAX_HISTORY_TEMPORARIES'], expression)
+        self.assertEqual(category, 'safety')
+        self.assertTrue(rationale.strip())
 
     def test_configured_raw_settings_declarations(self):
         tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))

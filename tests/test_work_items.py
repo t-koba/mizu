@@ -1093,6 +1093,25 @@ class WorkItemTests(Fixture):
         self.assertEqual(page["unseeded_decisions"], 1)
         self.assertFalse(page["coverage_complete"])
 
+    def test_page_open_decision_history_temporary_safety_ceiling(self):
+        history = self.project.root / "decision-history"
+        committed = {path.name: path.read_bytes() for path in history.iterdir()}
+        expected_page = self.store.page_open()
+        for count in (64, 65):
+            with self.subTest(temporaries=count):
+                temporaries = {f".new-{index:08d}": b"uncommitted" for index in range(count)}
+                for name, content in temporaries.items():
+                    (history / name).write_bytes(content)
+                if count == 64:
+                    self.assertEqual(self.store.page_open(), expected_page)
+                    self.assertEqual({path.name: path.read_bytes() for path in history.iterdir()},
+                                     committed)
+                else:
+                    with self.assertRaisesRegex(Denied, "^Too many decision-history temporaries$"):
+                        self.store.page_open()
+                    self.assertEqual({path.name: path.read_bytes() for path in history.iterdir()},
+                                     {**committed, **temporaries})
+
     def test_page_open_recovers_post_link_decision_history_temporary(self):
         history = self.project.root / "decision-history"
         temporary = history / ".new-alias123"

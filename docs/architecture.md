@@ -957,8 +957,12 @@ inventory. Rows include current origin staleness/redecision, a structured wait
 for blocked items, and an optional reason preview of at most 1024 UTF-8 bytes. Limits are 1–100 rows,
 8192 canonical bytes per row, and 1 MiB for the complete response; selection
 uses O(limit) row memory plus bounded temporary/alias metadata (at most 64 of
-each). A bounded temporary-name pass precedes the O(decision-history) enumeration
-under the shared lock, and stats only recognized temporary files. Event inode
+each). `MAX_HISTORY_TEMPORARIES = 64` is a fixed recovery safety ceiling on
+untrusted crash-leftover temporary/alias metadata, separate from configurable
+history scan and retention policy. It bounds neither the full `os.scandir` name
+enumeration nor normal decision-history length. The temporary-name pass precedes
+the O(decision-history) enumeration under the shared lock, and stats only
+recognized temporary files. Event inode
 matching is done only when a post-link alias is found, before any origin
 projection is read. No list index is maintained.
 Unsafe or malformed committed history, seeds, or state fail closed. Recognized
