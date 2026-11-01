@@ -238,6 +238,66 @@ class WorkItemTests(Fixture):
         self.assertEqual(second["history"][1]["snapshot_id"], snapshot["id"])
         self.assertEqual(second["history"][1]["verification"], snapshot["verification"])
 
+    def test_explain_validates_current_and_selected_snapshot_evidence_only(self):
+        self.change("doing")
+        snapshots = []
+        for index in range(3):
+            snapshot = self.snapshot("valid")
+            self.bind(snapshot, expected_rev=2 + index)
+            snapshots.append(snapshot)
+        current = self.store.get(self.item_id)
+        while current["rev"] < 17:
+            current = self.change("open" if current["status"] == "doing" else "doing",
+                                  expected_rev=current["rev"])
+
+        with patch.object(self.store.snapshots, "get", wraps=self.store.snapshots.get) as get, \
+                patch.object(self.store, "_validate_transition", wraps=self.store._validate_transition) as validate:
+            first = self.store.explain(self.item_id, after_rev=0, limit=1)
+            self.assertEqual([row["rev"] for row in first["history"]], [1])
+            get.assert_called_once_with(snapshots[2]["id"])
+            self.assertEqual(validate.call_count, 16)
+
+        with patch.object(self.store.snapshots, "get", wraps=self.store.snapshots.get) as get:
+            selected = self.store.explain(self.item_id, after_rev=2, limit=2)
+            self.assertEqual([row["rev"] for row in selected["history"]], [3, 4])
+            self.assertEqual(get.call_count, 3)
+            self.assertEqual({call.args[0] for call in get.call_args_list},
+                             {snapshot["id"] for snapshot in snapshots})
+
+        with patch.object(self.store.snapshots, "get", wraps=self.store.snapshots.get) as get:
+            repeated = self.store.explain(self.item_id, after_rev=4, limit=3)
+            self.assertEqual([row["rev"] for row in repeated["history"]], [5, 6, 7])
+            get.assert_called_once_with(snapshots[2]["id"])
+
+        # A corrupt snapshot outside the returned history page is skipped;
+        # selecting its delivery makes the same file fail closed.
+        old_snapshot_path = (self.project.root / "snapshots"
+                             / f"{snapshots[0]['id']}.json")
+        old_snapshot = json.loads(old_snapshot_path.read_text())
+        corrupt_snapshot = dict(old_snapshot, summary="tampered")
+        write_json(old_snapshot_path, corrupt_snapshot)
+        with patch.object(self.store.snapshots, "get", wraps=self.store.snapshots.get) as get:
+            page = self.store.explain(self.item_id, after_rev=3, limit=1)
+            self.assertEqual([row["rev"] for row in page["history"]], [4])
+            self.assertNotIn(snapshots[0]["id"], {call.args[0] for call in get.call_args_list})
+        with self.assertRaises(Denied):
+            self.store.explain(self.item_id, after_rev=2, limit=1)
+        write_json(old_snapshot_path, old_snapshot)
+
+        # A valid-format mismatch in an unselected historical binding does not
+        # poison a page that returns later evidence, but is rejected if selected.
+        old_path = self.directory / "3.json"
+        old = json.loads(old_path.read_text())
+        old["delivery"]["code_digest"] = "0" * 64
+        write_json(old_path, old)
+        with patch.object(self.store.snapshots, "get", wraps=self.store.snapshots.get) as get:
+            page = self.store.explain(self.item_id, after_rev=3, limit=1)
+            self.assertEqual([row["rev"] for row in page["history"]], [4])
+            self.assertEqual({call.args[0] for call in get.call_args_list},
+                             {snapshots[1]["id"], snapshots[2]["id"]})
+        with self.assertRaisesRegex(Denied, "Delivery does not match its immutable snapshot"):
+            self.store.explain(self.item_id, after_rev=2, limit=1)
+
     def test_explain_preserves_structured_wait_record(self):
         self.change("blocked", wait={"kind": "insight_decided", "insight": self.proposal["id"]})
         view = self.store.explain(self.item_id)

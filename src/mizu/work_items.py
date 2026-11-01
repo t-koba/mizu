@@ -1414,7 +1414,9 @@ class WorkItems:
 
         ``after_rev`` is an exclusive revision cursor (0..MAX_REVISIONS); the
         immutable seed is revision 1. The full chain is replayed and validated
-        even after the page fills or its response byte budget is reached.
+        even after the page fills or its response byte budget is reached. Snapshot
+        manifests are checked only for current returned evidence and selected
+        history rows.
         """
         if not isinstance(item_id, str) or ITEM_ID.fullmatch(item_id) is None:
             raise Denied("Invalid work-item ID")
@@ -1433,8 +1435,14 @@ class WorkItems:
             row_budget = MAX_HISTORY_PAGE_BYTES - MAX_PROJECTION_BYTES - PREVIEW_BYTES - 1024
             current = None
             since = None
+            previous = None
+            last_transition = None
             retirement = {}
-            for record in self._iter_chain(item_id, history_revisions=history_revisions, retirement=retirement):
+            for record in self._iter_chain(item_id, history_revisions=history_revisions,
+                                          retirement=retirement, verify_snapshots=False):
+                if previous is not None:
+                    last_transition = (previous, record)
+                previous = record
                 current = record
                 since = (since or record["updated_at"]) if record["status"] == "doing" else None
                 revision = record["rev"]
@@ -1453,6 +1461,30 @@ class WorkItems:
             if after_rev > current["rev"]:
                 raise Denied("Work-item history cursor is ahead of current revision")
             terminal = retirement["record"]
+            verified_snapshots = {}
+            current_delivery = current.get("delivery")
+            if current_delivery is not None:
+                if current["status"] == "done":
+                    # The full-chain validator checked the current completion.
+                    snapshot_id = current_delivery["snapshot_id"]
+                    verified_snapshots[snapshot_id] = current_delivery["code_digest"]
+                else:
+                    if last_transition is None:
+                        raise Denied("Current delivery lacks a validated transition")
+                    _, snapshot = self._validate_delivery(*last_transition, verify_snapshots=True)
+                    verified_snapshots[current_delivery["snapshot_id"]] = snapshot["code_digest"]
+            for record in history:
+                delivery = record.get("delivery")
+                if delivery is None:
+                    continue
+                snapshot_id = delivery["snapshot_id"]
+                if snapshot_id not in verified_snapshots:
+                    snapshot = self.snapshots.get(snapshot_id)
+                    if snapshot.get("id") != snapshot_id:
+                        raise Denied("Delivery does not match its immutable snapshot")
+                    verified_snapshots[snapshot_id] = snapshot.get("code_digest")
+                if verified_snapshots[snapshot_id] != delivery["code_digest"]:
+                    raise Denied("Delivery does not match its immutable snapshot")
             current = work_item_retirement.project(current, terminal)
             if terminal:
                 since = None
